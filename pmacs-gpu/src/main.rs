@@ -665,6 +665,29 @@ const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
 const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
+/// E3.1 — the vertical scrollbar's painted track width, in logical
+/// pixels.
+///
+/// # Why this fits inside the existing gutter
+///
+/// `SCROLLBAR_WIDTH + SCROLLBAR_RIGHT` is less than [`MINIMAP_RIGHT`],
+/// which was already dead margin between the minimap's right edge and
+/// the surface's. Painting inside it means the scrollbar moves **no**
+/// other geometry: [`minimap_left`], [`Self::text_bounds_right`], the
+/// line-number gutter and every hit test are unchanged, so this row
+/// adds a control without reflowing the document. Reserving a fresh
+/// strip would have been the alternative, and it would have made the
+/// text width depend on whether the document currently overflows —
+/// which is a reflow every time a file grows past one screen.
+const SCROLLBAR_WIDTH: f32 = 6.0;
+/// Gap between the painted track and the surface's right edge.
+const SCROLLBAR_RIGHT: f32 = 3.0;
+/// The thumb never shrinks below this, so a very long document still
+/// leaves something grabbable — [`MINIMAP_MIN_THUMB_HEIGHT`]'s rule,
+/// with a larger floor because this target is a sixth of the width.
+const SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 24.0;
+const SCROLLBAR_TRACK_BG: [f32; 4] = [0.10, 0.10, 0.14, 0.55];
+const SCROLLBAR_THUMB_FILL: [f32; 4] = [0.72, 0.72, 0.84, 0.42];
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -2260,6 +2283,15 @@ struct State {
     /// selection, until release. Never sends `Pointer` events —
     /// the viewport is frontend-owned.
     minimap_scrub_active: bool,
+    /// E3.1 — a press landed on the scrollbar's thumb and the button
+    /// is still down. The payload is the grab offset: how far below
+    /// the thumb's own top the press landed, so motion moves the thumb
+    /// with the pointer instead of snapping its top under it.
+    ///
+    /// `Option<f32>` rather than a `bool` beside a separate offset,
+    /// because the two are only ever meaningful together and a live
+    /// drag with a stale offset is the bug this shape cannot express.
+    scrollbar_drag: Option<f32>,
     /// The icon last written to the window, so a per-motion call is a
     /// comparison rather than a platform round-trip.
     last_cursor_icon: Option<winit::window::CursorIcon>,
@@ -3638,6 +3670,20 @@ impl App {
             }
             return;
         }
+        if state.scrollbar_drag.is_some() {
+            // E3.1 — the press began on the thumb; motion moves the
+            // viewport with it, even once the pointer wanders off the
+            // track sideways, which is what every scrollbar does and
+            // what the minimap's scrub already establishes here.
+            let vp = state.scrollbar_drag_to(y);
+            if let Some(vp) = vp
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: scrollbar drag send_viewport failed: {e}");
+            }
+            return;
+        }
         if state.minimap_scrub_active {
             // Scrubbing (Q#M6): the press began on the
             // minimap; motion keeps jumping, even if the
@@ -3799,6 +3845,26 @@ impl App {
         }
         match button_state {
             ElementState::Pressed => {
+                // E3.1 — before the minimap, because the scrollbar's
+                // hit region starts where the minimap's ends. A hidden
+                // scrollbar returns `None` and changes nothing here.
+                if let Some(press) = state.scrollbar_press_target(x, y) {
+                    let vp = match press {
+                        ScrollbarPress::Thumb { grab } => {
+                            state.scrollbar_drag = Some(grab);
+                            None
+                        }
+                        ScrollbarPress::Page { lines } => state.scrollbar_page(lines),
+                    };
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: scrollbar page send_viewport failed: {e}");
+                    }
+                    return;
+                }
                 if state.in_minimap_band(x, y) {
                     // Q#M6 — consumed before text hit-testing;
                     // never a Pointer event.
@@ -3828,6 +3894,11 @@ impl App {
                 }
             }
             ElementState::Released => {
+                // E3.1 — a thumb drag ends here and sends nothing: the
+                // viewport already followed the pointer on each motion.
+                if state.scrollbar_drag.take().is_some() {
+                    return;
+                }
                 if state.minimap_scrub_active {
                     state.minimap_scrub_active = false;
                     return;
@@ -7102,9 +7173,14 @@ fn optimistic_insert_text(key: ProtocolKey, mods: Modifiers, chbuf: &mut [u8; 4]
 /// data fits, reallocated (with slack) when it grows. `render()`
 /// previously allocated fresh wgpu buffers for the background / caret
 /// / minimap quads on every frame.
-/// `(summary generation, surface width, surface height, scroll_top)`
-/// — everything the minimap quads depend on.
-type MinimapCacheKey = (u64, u32, u32, usize);
+/// `(summary generation, surface width, surface height, scroll_top,
+/// document line count, panel band inset bits)` — everything the right
+/// gutter's quads depend on.
+///
+/// The last two arrived with E3.1's scrollbar, which shares this cache
+/// and, unlike the minimap, has no `FileStyleSummary` whose generation
+/// would stand in for the document changing under it.
+type MinimapCacheKey = (u64, u32, u32, usize, usize, u32);
 
 struct ReusableVertexBuffer {
     buffer: Option<wgpu::Buffer>,
@@ -7660,6 +7736,7 @@ impl State {
             last_pointer_sent_byte: None,
             last_pointer_down: None,
             minimap_scrub_active: false,
+            scrollbar_drag: None,
             last_cursor_icon: None,
             #[cfg(test)]
             test_selections: HashMap::new(),
@@ -10897,6 +10974,114 @@ impl State {
             .and_then(|bid| self.viewport_send_if_changed(bid))
     }
 
+    /// E3.1 — this state's scrollbar track, or `None` when the surface
+    /// cannot spare it.
+    fn scrollbar_track(&self) -> Option<ScrollbarTrack> {
+        scrollbar_track(
+            self.layout.width,
+            self.layout.height,
+            self.fm,
+            self.band_inset(),
+        )
+    }
+
+    /// The visible-line estimate the scrollbar is derived from. Named
+    /// once so the painter, the thumb and the page step cannot each
+    /// pick a different notion of "a screenful".
+    fn scrollbar_visible_lines(&self) -> usize {
+        estimated_visible_lines(self.layout.height, self.fm, self.band_inset())
+    }
+
+    /// The thumb's `(top, height)` right now, or `None` when the
+    /// document fits and the scrollbar is hidden.
+    fn scrollbar_thumb_now(&self) -> Option<(ScrollbarTrack, f32, f32)> {
+        let track = self.scrollbar_track()?;
+        let (top, height) = scrollbar_thumb(
+            track,
+            self.current_line_starts.len(),
+            self.scroll_top,
+            self.scrollbar_visible_lines(),
+        )?;
+        Some((track, top, height))
+    }
+
+    /// What a press at `(x, y)` means to the scrollbar, or `None` when
+    /// the scrollbar does not want it.
+    ///
+    /// **A hidden scrollbar wants nothing**, which is why the `None`
+    /// from [`Self::scrollbar_thumb_now`] propagates: when the document
+    /// fits, a press in this strip must behave exactly as it did before
+    /// this row, including selecting text there on a surface with no
+    /// minimap. "Hidden" that still swallowed presses would be a
+    /// control pretending to be absent.
+    fn scrollbar_press_target(&self, x: f64, y: f64) -> Option<ScrollbarPress> {
+        let (track, thumb_top, thumb_h) = self.scrollbar_thumb_now()?;
+        if !track.contains(x as f32, y as f32, self.layout.width) {
+            return None;
+        }
+        let y = y as f32;
+        if y >= thumb_top && y < thumb_top + thumb_h {
+            Some(ScrollbarPress::Thumb {
+                grab: y - thumb_top,
+            })
+        } else if y < thumb_top {
+            Some(ScrollbarPress::Page { lines: -1 })
+        } else {
+            Some(ScrollbarPress::Page { lines: 1 })
+        }
+    }
+
+    /// Page the viewport by one screenful in `direction` (`-1` up,
+    /// `+1` down) — the click-to-page half of E3.1. Reuses
+    /// [`Self::scroll_by_lines`] for the clamp, rebuild and
+    /// viewport-send plumbing, exactly as the minimap jump does.
+    fn scrollbar_page(&mut self, direction: i64) -> Option<ViewportSend> {
+        let step = i64::try_from(self.scrollbar_visible_lines()).unwrap_or(i64::MAX);
+        self.scroll_by_lines(direction.signum() * step.max(1))
+    }
+
+    /// Advance a live thumb drag to pointer `y`. `None` when no drag is
+    /// active or the viewport did not move.
+    fn scrollbar_drag_to(&mut self, y: f64) -> Option<ViewportSend> {
+        let grab = self.scrollbar_drag?;
+        let track = self.scrollbar_track()?;
+        let target = scrollbar_y_to_scroll_top(
+            y as f32,
+            grab,
+            track,
+            self.current_line_starts.len(),
+            self.scrollbar_visible_lines(),
+        )?;
+        let delta = i64::try_from(target).unwrap_or(i64::MAX)
+            - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
+        self.scroll_by_lines(delta)
+    }
+
+    /// The scrollbar's quads. Empty when the document fits, which is
+    /// the same `None` the hit-test reads, so a painted track can never
+    /// be one the pointer is not allowed to use.
+    fn scrollbar_rects(&self) -> Vec<MinimapRect> {
+        let Some((track, thumb_top, thumb_h)) = self.scrollbar_thumb_now() else {
+            return Vec::new();
+        };
+        vec![
+            MinimapRect {
+                x: track.x,
+                y: track.top,
+                w: SCROLLBAR_WIDTH,
+                h: track.height,
+                color: SCROLLBAR_TRACK_BG,
+            },
+            MinimapRect {
+                x: track.x,
+                y: thumb_top,
+                w: SCROLLBAR_WIDTH,
+                h: thumb_h,
+                color: SCROLLBAR_THUMB_FILL,
+            },
+        ]
+    }
+
     /// True when the pixel position lies inside the minimap band
     /// (Q#M6). Presses here are consumed locally and never become
     /// `Pointer` events.
@@ -13093,13 +13278,24 @@ impl State {
             self.layout.width,
             self.layout.height,
             self.scroll_top,
+            // E3.1 — the scrollbar shares this cache and depends on two
+            // facts the minimap's own key never carried. The line count
+            // decides whether there is a thumb at all, and a buffer with
+            // no summary can change it without touching `generation`.
+            // The panel band moves the track's bottom, and opening a
+            // panel reaches neither of the explicit `minimap_cache =
+            // None` sites — so the minimap's thumb was already stale
+            // across a panel toggle, and widening the key here fixes
+            // that too rather than reproducing it in a second control.
+            self.current_line_starts.len(),
+            self.band_inset().px().to_bits(),
         );
         if self
             .minimap_cache
             .as_ref()
             .is_none_or(|(key, _)| *key != minimap_key)
         {
-            self.minimap_cache = Some((minimap_key, self.minimap_vertex_bytes()));
+            self.minimap_cache = Some((minimap_key, self.right_gutter_vertex_bytes()));
         }
         let empty_minimap: Vec<u8> = Vec::new();
         let minimap_vertices = if terminal_mode {
@@ -13684,6 +13880,26 @@ impl State {
             .as_ref()
             .is_some_and(|summary| !summary.lines.is_empty())
             && minimap_left(self.layout.width).is_some()
+    }
+
+    /// Every quad the right gutter owns: the E3.1 scrollbar, which
+    /// needs no `FileStyleSummary`, followed by the minimap, which does.
+    ///
+    /// Concatenated rather than uploaded separately because both feed
+    /// the same quad pipeline and one cache entry covers them; kept as
+    /// two functions because only one of them depends on the summary,
+    /// and folding the scrollbar into `minimap_vertex_bytes` would have
+    /// put it behind that function's `else { return }` — which is
+    /// precisely the audit's F3, a control that appears only when an
+    /// unrelated payload happens to exist.
+    fn right_gutter_vertex_bytes(&self) -> Vec<u8> {
+        let mut bytes = rects_to_vertex_bytes(
+            &self.scrollbar_rects(),
+            self.layout.width,
+            self.layout.height,
+        );
+        bytes.extend_from_slice(&self.minimap_vertex_bytes());
+        bytes
     }
 
     fn minimap_vertex_bytes(&self) -> Vec<u8> {
@@ -14852,6 +15068,166 @@ fn minimap_y_to_line(
     }
     let frac = ((y - MINIMAP_TOP) / height).clamp(0.0, 1.0);
     Some(((frac * total_lines as f32) as usize).min(total_lines - 1))
+}
+
+/// E3.1 — the vertical scrollbar's track, in logical pixels.
+///
+/// One value rather than three loose floats because the painter, the
+/// press hit-test, the drag and the click-to-page all have to agree
+/// about the same rectangle; the minimap's first session shipped a
+/// thumb whose paint geometry and scroll geometry had drifted apart
+/// (the hardcoded `0` at the call site), and that is the shape of
+/// defect a shared value forecloses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarTrack {
+    /// Left edge of the painted track.
+    x: f32,
+    /// Top of the track.
+    top: f32,
+    /// Track height. Always positive when a track exists at all.
+    height: f32,
+}
+
+impl ScrollbarTrack {
+    /// The **hit** region is wider than the paint: it claims the whole
+    /// [`MINIMAP_RIGHT`] margin out to the surface's edge, so a 6 px
+    /// stripe is not a 6 px target. The left bound is the minimap's
+    /// own right bound (`minimap_band_contains` requires
+    /// `x < surface_width - MINIMAP_RIGHT`), which is what keeps the
+    /// two hit-tests from overlapping by construction rather than by
+    /// ordering.
+    fn contains(&self, x: f32, y: f32, surface_width: u32) -> bool {
+        x >= surface_width as f32 - MINIMAP_RIGHT
+            && x < surface_width as f32
+            && y >= self.top
+            && y < self.top + self.height
+    }
+}
+
+/// What a press on the scrollbar means (E3.1). Returned by a pure
+/// hit-test so the decision is testable without a surface, and so the
+/// two gestures the row asks for — drag and click-to-page — are
+/// alternatives by construction rather than by two adjacent `if`s.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScrollbarPress {
+    /// The press landed on the thumb; `grab` is its offset below the
+    /// thumb's top.
+    Thumb { grab: f32 },
+    /// The press landed on bare track: page one screenful toward it.
+    /// `lines` is a direction, `-1` or `+1`, not a distance.
+    Page { lines: i64 },
+}
+
+/// The scrollbar's track, or `None` when the surface cannot spare it.
+///
+/// Shares [`MINIMAP_TOP`] and [`minimap_height`] deliberately, so the
+/// track and the minimap are vertically flush when both are painted
+/// and the gutter reads as one column rather than two.
+fn scrollbar_track(
+    surface_width: u32,
+    surface_height: u32,
+    fm: FontMetrics,
+    band: PanelBandInset,
+) -> Option<ScrollbarTrack> {
+    if surface_width < MINIMAP_MIN_SURFACE_WIDTH {
+        return None;
+    }
+    let height = minimap_height(surface_height, fm, band);
+    if height <= 0.0 {
+        return None;
+    }
+    let x = surface_width as f32 - SCROLLBAR_RIGHT - SCROLLBAR_WIDTH;
+    (x > TEXT_LEFT).then_some(ScrollbarTrack {
+        x,
+        top: MINIMAP_TOP,
+        height,
+    })
+}
+
+/// The largest `scroll_top` the document can reach, which is
+/// `line_count - 1` and **not** `line_count - visible_lines`.
+///
+/// This mirrors [`State::scroll_by_lines`]'s own clamp rather than the
+/// textbook one on purpose: the thumb must reach the bottom of its
+/// track at exactly the scroll position the wheel can reach, and the
+/// GPU deliberately lets a document scroll until one line remains. A
+/// thumb derived from the textbook maximum would strand a gap at the
+/// bottom that no input could close.
+fn scrollbar_max_scroll_top(line_count: usize) -> usize {
+    line_count.saturating_sub(1)
+}
+
+/// The thumb's height, or **`None` when the whole document fits** —
+/// which is this row's "hidden when the document fits", decided in one
+/// place so the painter, the hit-test and the drag cannot disagree
+/// about whether there is a thumb at all.
+///
+/// Separate from [`scrollbar_thumb`] because the height does not depend
+/// on the scroll position, and the drag needs the height without
+/// pretending to know a position.
+fn scrollbar_thumb_height(
+    track: ScrollbarTrack,
+    line_count: usize,
+    visible_lines: usize,
+) -> Option<f32> {
+    if line_count == 0 || visible_lines >= line_count {
+        return None;
+    }
+    let proportional = track.height * visible_lines as f32 / line_count as f32;
+    Some(
+        proportional
+            .max(SCROLLBAR_MIN_THUMB_HEIGHT)
+            .min(track.height),
+    )
+}
+
+/// The thumb's `(top, height)` inside `track`, or `None` when the
+/// document fits (see [`scrollbar_thumb_height`]).
+fn scrollbar_thumb(
+    track: ScrollbarTrack,
+    line_count: usize,
+    first_visible_line: usize,
+    visible_lines: usize,
+) -> Option<(f32, f32)> {
+    let height = scrollbar_thumb_height(track, line_count, visible_lines)?;
+    // The travel is what is left of the track once the thumb is on it.
+    // Interpolating the thumb's TOP over the travel (rather than
+    // scaling the document fraction directly) is what makes the
+    // minimum-height clamp above harmless: a floored thumb still ends
+    // flush with the track's bottom at maximum scroll.
+    let travel = (track.height - height).max(0.0);
+    let span = scrollbar_max_scroll_top(line_count);
+    let frac = if span == 0 {
+        0.0
+    } else {
+        (first_visible_line.min(span) as f32 / span as f32).clamp(0.0, 1.0)
+    };
+    Some((track.top + frac * travel, height))
+}
+
+/// The `scroll_top` a pointer at `y` means while dragging a thumb that
+/// was grabbed `grab` pixels below its own top — the inverse of
+/// [`scrollbar_thumb`]'s interpolation.
+///
+/// Carrying `grab` is what stops the thumb teleporting so its top
+/// lands under the pointer on the first motion of every drag; the
+/// minimap's scrub has no such offset because a scrub centers the
+/// viewport by design and a drag does not.
+fn scrollbar_y_to_scroll_top(
+    y: f32,
+    grab: f32,
+    track: ScrollbarTrack,
+    line_count: usize,
+    visible_lines: usize,
+) -> Option<usize> {
+    let height = scrollbar_thumb_height(track, line_count, visible_lines)?;
+    let travel = (track.height - height).max(0.0);
+    let span = scrollbar_max_scroll_top(line_count);
+    if travel <= 0.0 || span == 0 {
+        return Some(0);
+    }
+    let frac = ((y - grab - track.top) / travel).clamp(0.0, 1.0);
+    Some(((frac * span as f32).round() as usize).min(span))
 }
 
 #[allow(
@@ -19117,6 +19493,298 @@ mod tests {
         );
     }
 
+    /// E3.1's geometry, on the 800×600 surface the minimap table above
+    /// uses so the two can be compared line for line.
+    ///
+    /// Track height is the minimap's (550), track x is
+    /// `800 - 3 - 6 = 791`, and the hit region starts at
+    /// `800 - MINIMAP_RIGHT = 788` — the minimap band's own exclusive
+    /// right bound, which is what makes the two hit-tests disjoint
+    /// without either knowing about the other.
+    ///
+    /// *Mutation: widen `ScrollbarTrack::contains`'s left bound to
+    /// `track.x` and the disjointness row still passes while the
+    /// wider-than-paint target claim stops being true; narrow it to
+    /// `surface_width - MINIMAP_RIGHT + 1` and the far-left row fails.*
+    #[test]
+    fn e3_1_the_scrollbar_track_sits_in_the_dead_margin_beside_the_minimap() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("an 800px surface has room for a scrollbar");
+        assert!(
+            (track.x - 791.0).abs() < 0.001,
+            "the painted track is SCROLLBAR_RIGHT + SCROLLBAR_WIDTH in \
+             from the edge; got {}",
+            track.x
+        );
+        assert!(
+            (track.top - MINIMAP_TOP).abs() < 0.001 && (track.height - 550.0).abs() < 0.001,
+            "track and minimap are vertically flush: {track:?}"
+        );
+        // The whole strip is grabbable, not just the six painted pixels.
+        assert!(track.contains(788.0, 300.0, 800), "the strip's left edge");
+        assert!(track.contains(799.0, 300.0, 800), "the surface's edge");
+        assert!(
+            !track.contains(787.0, 300.0, 800),
+            "one pixel left of the strip belongs to the minimap band, \
+             which claims x < 800 - MINIMAP_RIGHT"
+        );
+        // Disjoint from the minimap by construction, not by ordering.
+        for x in [740.0_f32, 760.0, 787.0] {
+            assert!(
+                minimap_band_contains(
+                    x,
+                    300.0,
+                    800,
+                    600,
+                    FontMetrics::default(),
+                    PanelBandInset::ABSENT
+                ),
+                "setup: {x} is inside the minimap band"
+            );
+            assert!(
+                !track.contains(x, 300.0, 800),
+                "no x may be claimed by both hit-tests; {x} is"
+            );
+        }
+        // Vertically bounded by the track, so a press in the status
+        // band is not a scrollbar press.
+        assert!(!track.contains(795.0, 5.0, 800), "above the track");
+        assert!(!track.contains(795.0, 599.0, 800), "below the track");
+        assert!(
+            scrollbar_track(150, 600, FontMetrics::default(), PanelBandInset::ABSENT).is_none(),
+            "a surface too narrow for a minimap is too narrow for this too"
+        );
+    }
+
+    /// E3.1's "hidden when the document fits", and its consequence for
+    /// input: a hidden scrollbar has no thumb, paints nothing, and
+    /// **claims no press**, so behavior in that strip is exactly what it
+    /// was before this row.
+    ///
+    /// *Mutation: drop the `visible_lines >= line_count` guard in
+    /// `scrollbar_thumb_height` and every assertion here fails.*
+    #[test]
+    fn e3_1_a_document_that_fits_has_no_thumb_and_claims_no_press() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("track");
+        assert_eq!(
+            scrollbar_thumb(track, 10, 0, 25),
+            None,
+            "25 visible lines over a 10-line file is the fits case"
+        );
+        assert_eq!(
+            scrollbar_thumb(track, 25, 0, 25),
+            None,
+            "exactly one screenful still fits: the boundary is >=, not >"
+        );
+        assert_eq!(scrollbar_thumb(track, 0, 0, 25), None, "an empty file");
+        assert!(
+            scrollbar_thumb(track, 26, 0, 25).is_some(),
+            "one line past a screenful is the first overflowing case"
+        );
+    }
+
+    /// The thumb tracks `scroll_top` and reaches **both** ends of the
+    /// track, which is the row's "from `scroll_top` and
+    /// `current_line_starts.len()`".
+    ///
+    /// The bottom end is the load-bearing half. `scroll_by_lines`
+    /// clamps at `line_count - 1`, not at `line_count - visible_lines`,
+    /// so a thumb interpolated over the textbook maximum would strand a
+    /// gap below it that no input could ever close.
+    ///
+    /// *Mutation: return `line_count - visible_lines` from
+    /// `scrollbar_max_scroll_top` → the bottom-flush row fails while
+    /// every other row here still passes.*
+    #[test]
+    fn e3_1_the_thumb_reaches_both_ends_of_its_track() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("track");
+        let (lines, visible) = (1000usize, 25usize);
+
+        let (top, height) = scrollbar_thumb(track, lines, 0, visible).expect("a thumb");
+        assert!(
+            (top - track.top).abs() < 0.001,
+            "at scroll_top 0 the thumb is flush with the track's top"
+        );
+        assert!(
+            (height - SCROLLBAR_MIN_THUMB_HEIGHT).abs() < 0.001,
+            "550 * 25/1000 is under the floor, so the floor applies: {height}"
+        );
+
+        let max = scrollbar_max_scroll_top(lines);
+        assert_eq!(max, 999, "the clamp scroll_by_lines actually uses");
+        let (top, height) = scrollbar_thumb(track, lines, max, visible).expect("a thumb");
+        assert!(
+            ((top + height) - (track.top + track.height)).abs() < 0.001,
+            "at maximum scroll the thumb's BOTTOM is flush with the \
+             track's bottom: {top} + {height} vs {}",
+            track.top + track.height
+        );
+
+        // Monotonic in between, and never off the track.
+        let mut previous = track.top - 1.0;
+        for scroll_top in [0usize, 1, 100, 500, 900, 999] {
+            let (top, height) =
+                scrollbar_thumb(track, lines, scroll_top, visible).expect("a thumb");
+            assert!(
+                top >= previous,
+                "the thumb only moves down as scroll_top grows"
+            );
+            assert!(
+                top >= track.top && top + height <= track.top + track.height + 0.001,
+                "the thumb stays on the track at scroll_top {scroll_top}"
+            );
+            previous = top;
+        }
+        // A scroll_top past the clamp cannot push the thumb off.
+        let (top, height) = scrollbar_thumb(track, lines, 99_999, visible).expect("a thumb");
+        assert!(
+            ((top + height) - (track.top + track.height)).abs() < 0.001,
+            "an out-of-range scroll_top clamps rather than overshooting"
+        );
+    }
+
+    /// Dragging is the inverse of the thumb's interpolation, and it
+    /// carries the grab offset so the thumb does not teleport its top
+    /// under the pointer on the first motion of every drag.
+    ///
+    /// *Mutation: drop `- grab` from `scrollbar_y_to_scroll_top` and the
+    /// no-motion row fails, which is the exact symptom a user sees.*
+    #[test]
+    fn e3_1_a_thumb_drag_is_the_inverse_of_the_thumb_and_keeps_its_grab() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("track");
+        let (lines, visible) = (1000usize, 25usize);
+        let at =
+            |scroll_top: usize| scrollbar_thumb(track, lines, scroll_top, visible).expect("thumb");
+
+        // Press in the MIDDLE of a thumb parked at scroll_top 400 and
+        // release without moving: the viewport must not shift at all.
+        let (top, height) = at(400);
+        let press_y = top + height / 2.0;
+        let grab = press_y - top;
+        assert_eq!(
+            scrollbar_y_to_scroll_top(press_y, grab, track, lines, visible),
+            Some(400),
+            "a press-and-hold with no motion is not a scroll"
+        );
+
+        // Dragging to the track's top and bottom saturates, not wraps.
+        assert_eq!(
+            scrollbar_y_to_scroll_top(track.top, grab, track, lines, visible),
+            Some(0),
+            "dragging above the track pins to the top of the file"
+        );
+        assert_eq!(
+            scrollbar_y_to_scroll_top(9999.0, grab, track, lines, visible),
+            Some(scrollbar_max_scroll_top(lines)),
+            "dragging past the bottom pins to the clamp, not past it"
+        );
+
+        // And a real drag round-trips: move the thumb to where 700
+        // would put it, and the inverse says 700.
+        let (top_700, _) = at(700);
+        assert_eq!(
+            scrollbar_y_to_scroll_top(top_700 + grab, grab, track, lines, visible),
+            Some(700),
+            "thumb → y → thumb is the identity on the drag path"
+        );
+    }
+
+    /// A press on bare track pages one screenful toward the press —
+    /// the row's "click-to-page" — and a press on the thumb does not.
+    ///
+    /// *Mutation: swap the two `Page` directions → both rows fail.*
+    #[test]
+    fn e3_1_a_press_on_bare_track_pages_and_a_press_on_the_thumb_drags() {
+        let Some(mut state) = headless_or_skip(800, 600, &"line\n".repeat(400)) else {
+            return;
+        };
+        let lines = state.current_line_starts.len();
+        let visible = state.scrollbar_visible_lines();
+        assert!(
+            lines > visible,
+            "setup: a 400-line document must overflow a 600px surface \
+             ({lines} lines, {visible} visible), or there is no thumb to press"
+        );
+        // Park mid-document so both directions have room.
+        state.scroll_top = 200;
+        let (track, thumb_top, thumb_h) =
+            state.scrollbar_thumb_now().expect("a thumb mid-document");
+
+        let x = f64::from(track.x) + 1.0;
+        // The grab compares with a tolerance: the press y round-trips
+        // through `f64` (winit reports physical pixels as `f64`) and
+        // comes back a few ULPs off the `f32` the thumb was computed in.
+        match state.scrollbar_press_target(x, f64::from(thumb_top + thumb_h / 2.0)) {
+            Some(ScrollbarPress::Thumb { grab }) => assert!(
+                (grab - thumb_h / 2.0).abs() < 0.01,
+                "the thumb's middle is a drag with a half-height grab; \
+                 got {grab} against {}",
+                thumb_h / 2.0
+            ),
+            other => panic!("the thumb's middle must be a drag, got {other:?}"),
+        }
+        assert_eq!(
+            state.scrollbar_press_target(x, f64::from(track.top + 1.0)),
+            Some(ScrollbarPress::Page { lines: -1 }),
+            "bare track above the thumb pages up"
+        );
+        assert_eq!(
+            state.scrollbar_press_target(x, f64::from(track.top + track.height - 1.0)),
+            Some(ScrollbarPress::Page { lines: 1 }),
+            "bare track below the thumb pages down"
+        );
+
+        // And the page actually moves the viewport by a screenful.
+        state.scrollbar_page(-1);
+        assert_eq!(
+            state.scroll_top,
+            200 - visible,
+            "paging up moves exactly one screenful"
+        );
+        state.scrollbar_page(1);
+        assert_eq!(state.scroll_top, 200, "and paging back returns");
+    }
+
+    /// The audit's F3, closed: **the scrollbar does not need a
+    /// `FileStyleSummary`.** A state with no summary paints no minimap
+    /// and still paints a scrollbar, which is the whole finding — the
+    /// thumb used to appear only when an unrelated payload happened to
+    /// exist.
+    ///
+    /// *Mutation: move the scrollbar's rects inside
+    /// `minimap_vertex_bytes`, behind its `let Some(summary) … else
+    /// { return Vec::new() }` → this row fails and no other does.*
+    #[test]
+    fn e3_1_the_scrollbar_paints_without_a_file_style_summary() {
+        let Some(mut state) = headless_or_skip(800, 600, &"line\n".repeat(400)) else {
+            return;
+        };
+        state.current_summary = None;
+        assert!(
+            state.minimap_vertex_bytes().is_empty(),
+            "setup: with no summary there is no minimap to paint"
+        );
+        assert!(
+            !state.right_gutter_vertex_bytes().is_empty(),
+            "F3: the scrollbar paints anyway"
+        );
+        // Two quads, track and thumb, six vertices each.
+        assert_eq!(state.scrollbar_rects().len(), 2, "a track and a thumb");
+
+        // And it disappears with the overflow rather than with the
+        // summary.
+        let short = headless_or_skip(800, 600, "one\ntwo\n");
+        if let Some(short) = short {
+            assert!(
+                short.scrollbar_rects().is_empty(),
+                "a document that fits paints no scrollbar"
+            );
+        }
+    }
+
     #[test]
     fn edge_scroll_direction_bands() {
         // 600px surface: up-band y < 16 + 24 = 40; the text area
@@ -23091,7 +23759,7 @@ mod tests {
         let Some(mut state) = headless_or_skip(320, 240, "aX") else {
             return;
         };
-        state.minimap_cache = Some(((0, 0, 0, 0), vec![1]));
+        state.minimap_cache = Some(((0, 0, 0, 0, 0, 0), vec![1]));
         let edits = state
             .apply_loro_text_delta_batches(&[vec![
                 loro::TextDelta::Retain {
