@@ -697,7 +697,7 @@ fn connect_stream_with_sink(
     // lock before* the blocking writes so the UI thread can keep
     // enqueueing (and coalescing) meanwhile.
     let writer_outbox = Arc::clone(&outbox);
-    thread::Builder::new()
+    let writer = thread::Builder::new()
         .name("pmacs-gpu attach writer".into())
         .spawn(move || {
             let mut write_stream = write_stream;
@@ -735,6 +735,7 @@ fn connect_stream_with_sink(
         session_protocol_version,
         baseline_protocol_version: hello.protocol_version,
         initial_message,
+        writer: Some(writer),
     })
 }
 
@@ -935,6 +936,10 @@ pub struct AttachClient {
     baseline_protocol_version: u32,
     /// Target snapshot retained across the pre-window readiness barrier.
     initial_message: Option<InstanceMessage>,
+    /// The writer thread (E2.3), joined by [`Self::detach`] so a native
+    /// close puts `Detach` on the socket before the process goes. `None`
+    /// for the harness client built over an already-connected stream.
+    writer: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AttachClient {
@@ -946,6 +951,43 @@ impl AttachClient {
     /// Take the target snapshot that must be applied before first redraw.
     pub fn take_initial_message(&mut self) -> Option<InstanceMessage> {
         self.initial_message.take()
+    }
+
+    /// Send `FocusGained` or `FocusLost` (E2.3), the window's keyboard
+    /// focus as winit reports it. The daemon dispatches them to
+    /// `dispatch_focus` for the frontend they name.
+    pub fn send_focus(&self, gained: bool) -> Result<(), TransportError> {
+        let event = if gained {
+            FrontendEvent::FocusGained(self.frontend_id)
+        } else {
+            FrontendEvent::FocusLost(self.frontend_id)
+        };
+        self.send_event(event)
+    }
+
+    /// Detach cleanly (E2.3, Q#S1-1): enqueue `Detach`, close the outbox
+    /// so the writer drains what it holds and exits, and join it, so the
+    /// frame is on the socket before the caller exits the process. The
+    /// daemon answers a `Detach` with no `Goodbye` and releases the slot
+    /// when the socket closes, which the process exit does.
+    ///
+    /// The join is unbounded and that is deliberate: the writer blocks
+    /// only if the kernel's socket buffer is full, which for a frame of a
+    /// few bytes means the session was already wedged and F-008's
+    /// overflow policy would have closed the outbox first. A daemon that
+    /// is gone makes the write fail, and the writer returns on that too.
+    pub fn detach(mut self) {
+        // A refused enqueue means the outbox is already closed: the
+        // session tore down earlier and there is nothing left to say.
+        let _ = self.send_event(FrontendEvent::Detach(self.frontend_id));
+        {
+            let (lock, cvar) = &*self.outbox;
+            lock.lock().expect("outbox lock").closed = true;
+            cvar.notify_one();
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
     }
 
     /// Send a `FrontendEvent::Viewport` to the daemon. The daemon's
@@ -1726,6 +1768,7 @@ mod tests {
             session_protocol_version: PROTOCOL_VERSION,
             baseline_protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
             initial_message: None,
+            writer: None,
         };
         // A send against the closed outbox fails *and* shuts the socket
         // down (F-008 fail-fast is now a real teardown, not just a flag).

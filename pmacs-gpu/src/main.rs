@@ -391,6 +391,12 @@ fn probe_mono_advance(font_system: &mut FontSystem, family: &str, metrics: Metri
     (total_width > 0.0 && cells > 0.0).then_some(total_width / cells)
 }
 
+/// A bell is a whole-client flash for this long (E2.3): visible, and
+/// over before the next keystroke.
+const BELL_FLASH: std::time::Duration = std::time::Duration::from_millis(120);
+/// The flash color, over everything: a light wash, not a white-out.
+const BELL_FLASH_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
+
 /// How long a geometry change waits before it is written, so a resize
 /// drag is one write rather than one per event. The exit path writes
 /// unconditionally, so this only bounds what a crash can lose.
@@ -2089,6 +2095,8 @@ struct State {
     bg_vertex_buffer: ReusableVertexBuffer,
     squiggle_vertex_buffer: ReusableVertexBuffer,
     caret_vertex_buffer: ReusableVertexBuffer,
+    /// The bell flash's one quad (E2.3).
+    bell_vertex_buffer: ReusableVertexBuffer,
     minimap_vertex_buffer: ReusableVertexBuffer,
     /// Q#S2/Q#SL10 — the status band's shaped right rich text.
     status_buffer: Buffer,
@@ -2103,6 +2111,19 @@ struct State {
     statusline_segments: Option<StatuslineSegmentsLocal>,
     /// Q#S1 — the wire-authoritative status facts (protocol v8).
     status_facts: Option<StatusFactsLocal>,
+    /// Whether the window has keyboard focus (E2.3): `true` at creation
+    /// and headless, then whatever `Focused` last reported. Sent to the
+    /// daemon as `FocusGained`/`FocusLost`; E2.6 dims the caret on it.
+    focused: bool,
+    /// The instant a bell flash ends (E2.3), or `None`. The deadline
+    /// pump repaints when it passes.
+    bell_flash_until: Option<std::time::Instant>,
+    /// The daemon's post-handshake `Goodbye`, when one arrived before
+    /// the socket closed (E2.3); the disconnect notice names it.
+    goodbye: Option<pmacs_protocol::GoodbyeReason>,
+    /// The title last pushed to the window (E2.3), so an unchanged
+    /// title is not re-set on every `StatusFacts`.
+    last_title: Option<String>,
     /// Q#SR5 — the live incremental-search prompt (protocol v9), or
     /// `None` when no search is running. While `Some`, the status
     /// band's left side shows `I-search: <query> (n/m)` in place of
@@ -3145,7 +3166,10 @@ impl App {
             }
             AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
                 eprintln!("pmacs-gpu: daemon disconnected ({reason})");
-                state.on_daemon_disconnected("(daemon disconnected)");
+                // E2.3 — a Goodbye that preceded the close keeps its
+                // reason; a close without one is classified locally.
+                let notice = disconnect_notice(state.goodbye.as_ref(), Some(&reason));
+                state.on_daemon_disconnected(&notice);
             }
         }
     }
@@ -3181,6 +3205,20 @@ impl App {
         }
         self.geometry = self.geometry.sanitized();
         self.geometry_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Perform [`LifecycleRoute::Focus`] (E2.3): remember it for the
+    /// caret and tell the daemon, which routes it to `dispatch_focus`.
+    fn apply_focus(&mut self, gained: bool) {
+        if let Some(state) = self.state.as_mut() {
+            state.focused = gained;
+            state.request_redraw();
+        }
+        if let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_focus(gained)
+        {
+            eprintln!("pmacs-gpu: send focus failed: {e}");
+        }
     }
 
     /// Perform [`LifecycleRoute::ScaleFactor`] (E2.2). The logical extent
@@ -3859,6 +3897,11 @@ impl App {
                 // E2.1 — the exit path writes unconditionally, so the
                 // geometry the user leaves with is the one they get back.
                 self.save_geometry();
+                // E2.3 (Q#S1-1) — a native close detaches this frontend,
+                // and the Detach is on the socket before the loop exits.
+                if let Some(client) = self.attach_client.take() {
+                    client.detach();
+                }
                 return EventOutcome::Exit;
             }
             Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
@@ -3872,6 +3915,7 @@ impl App {
             Route::Lifecycle(LifecycleRoute::ScaleFactor(scale)) => {
                 self.apply_scale_factor(scale);
             }
+            Route::Lifecycle(LifecycleRoute::Focus(gained)) => self.apply_focus(gained),
             Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
             Route::Keyboard {
                 action: KeyAction::Press,
@@ -4240,6 +4284,10 @@ enum LifecycleRoute {
     /// `Moved` — the window's new outer position in physical pixels
     /// (E2.1). Local only: it feeds the persisted geometry.
     Moved { x: i32, y: i32 },
+    /// `Focused` — the window gained or lost keyboard focus (E2.3). Sent
+    /// to the daemon as `FocusGained`/`FocusLost`, and kept locally for
+    /// the caret.
+    Focus(bool),
     /// `ScaleFactorChanged` — the window's new scale factor (E2.2). The
     /// arm is unwitnessable like `KeyboardInput`'s: winit's
     /// `InnerSizeWriter` cannot be constructed outside winit, so the
@@ -4293,6 +4341,7 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
         WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
             Some(LifecycleRoute::ScaleFactor(*scale_factor))
         }
+        WindowEvent::Focused(gained) => Some(LifecycleRoute::Focus(*gained)),
         _ => None,
     }
 }
@@ -4620,10 +4669,37 @@ impl EffectHarness {
         let outcome = self.app.dispatch_window_event(event);
         let after = self.snapshot();
 
+        // E2.3 — an exit consumes the client to flush its Detach, so no
+        // sentinel can follow it; what the step sent is whatever is on
+        // the socket, read until it goes quiet.
+        let outbound = if outcome == EventOutcome::Exit {
+            self.drain_after_exit()
+        } else {
+            self.read_until_sentinel()
+        };
         Step {
             local: Self::diff(&before, &after, outcome),
-            outbound: self.read_until_sentinel(),
+            outbound,
         }
+    }
+
+    /// Everything on the socket after an exit step (E2.3). The writer
+    /// was joined by `detach`, so the frames are already in the kernel
+    /// buffer; the read stops at the first quiet second.
+    fn drain_after_exit(&mut self) -> Vec<pmacs_protocol::FrontendEvent> {
+        self.daemon
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("read timeout");
+        let mut seen = Vec::new();
+        while let Ok(event) =
+            pmacs_protocol::read_message::<pmacs_protocol::FrontendEvent>(&mut self.daemon)
+        {
+            seen.push(event);
+        }
+        self.daemon
+            .set_read_timeout(Some(Self::READ_CEILING))
+            .expect("read timeout");
+        seen
     }
 
     /// The local effects between two snapshots. Shared by every entry
@@ -4876,6 +4952,19 @@ mod input_routing_tests {
         assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Redraw));
     }
 
+    /// P1 — `Focused` (E2.3) carries the focus state through.
+    #[test]
+    fn focused_routes_the_focus_state() {
+        assert_eq!(
+            route_one(&WindowEvent::Focused(true)),
+            Route::Lifecycle(LifecycleRoute::Focus(true))
+        );
+        assert_eq!(
+            route_one(&WindowEvent::Focused(false)),
+            Route::Lifecycle(LifecycleRoute::Focus(false))
+        );
+    }
+
     /// P1 — `Moved` (E2.1) carries the physical outer position through;
     /// the logical conversion is the body's, because it needs the
     /// window's scale factor.
@@ -5046,14 +5135,45 @@ mod input_routing_tests {
         );
     }
 
-    /// P2 — `CloseRequested` is the other silent arm: one local effect,
-    /// no traffic.
+    /// P2, E2.3 — `CloseRequested` exits locally and sends exactly one
+    /// thing, the `Detach` naming this frontend (Q#S1-1), flushed to the
+    /// socket before the exit is returned. Until E2.3 this arm sent
+    /// nothing and the daemon learned of the close from the socket.
     #[test]
-    fn a_close_request_exits_locally_and_sends_nothing() {
+    fn a_close_request_detaches_and_exits() {
         let mut h = EffectHarness::new();
+        let fid = h.app.attach_client.as_ref().expect("client").frontend_id();
         let step = h.feed(&WindowEvent::CloseRequested);
         assert_eq!(step.local, vec![LocalEffect::Exit]);
-        assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+        assert_eq!(
+            step.outbound,
+            vec![pmacs_protocol::FrontendEvent::Detach(fid)],
+            "the close sends the Detach and nothing else"
+        );
+        assert!(
+            h.app.attach_client.is_none(),
+            "the client is consumed by the detach"
+        );
+    }
+
+    /// E2.3 — a focus change is one event to the daemon, the one that
+    /// names the new state, and the local flag follows it.
+    #[test]
+    fn a_focus_change_sends_the_matching_event() {
+        let mut h = EffectHarness::new();
+        let fid = h.app.attach_client.as_ref().expect("client").frontend_id();
+        let lost = h.feed(&WindowEvent::Focused(false));
+        assert_eq!(
+            lost.outbound,
+            vec![pmacs_protocol::FrontendEvent::FocusLost(fid)]
+        );
+        assert!(!h.app.state.as_ref().expect("state").focused);
+        let gained = h.feed(&WindowEvent::Focused(true));
+        assert_eq!(
+            gained.outbound,
+            vec![pmacs_protocol::FrontendEvent::FocusGained(fid)]
+        );
+        assert!(h.app.state.as_ref().expect("state").focused);
     }
 
     /// E2.1 — a resize re-reads the remembered geometry. Headless there
@@ -6331,6 +6451,16 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
+        // E2.3 — the bell flash ends on its own deadline.
+        if let Some(until) = state.bell_flash_until {
+            if now >= until {
+                state.bell_flash_until = None;
+                state.request_redraw();
+            } else {
+                next_wake = Some(next_wake.map_or(until, |w| w.min(until)));
+            }
+        }
+
         // Q#M7 — edge auto-scroll.
         let mut drag_resend: Option<(BufferId, u64)> = None;
         if state.pointer_drag_active
@@ -6751,7 +6881,7 @@ impl State {
         // which is what makes a size saved on a 2× monitor open at the
         // same apparent size on a 1× one.
         let mut attributes = Window::default_attributes()
-            .with_title("pmacs-gpu")
+            .with_title("pmacs")
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(geometry.width),
                 f64::from(geometry.height),
@@ -7143,6 +7273,7 @@ impl State {
             bg_vertex_buffer: ReusableVertexBuffer::new(),
             squiggle_vertex_buffer: ReusableVertexBuffer::new(),
             caret_vertex_buffer: ReusableVertexBuffer::new(),
+            bell_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_vertex_buffer: ReusableVertexBuffer::new(),
             status_buffer,
             status_runs: None,
@@ -7150,6 +7281,10 @@ impl State {
             status_left_runs: None,
             statusline_segments: None,
             status_facts: None,
+            focused: true,
+            bell_flash_until: None,
+            goodbye: None,
+            last_title: None,
             search_prompt: None,
             minibuffer: None,
             menu: None,
@@ -8008,6 +8143,7 @@ impl State {
                     diag_warnings,
                     message,
                 });
+                self.sync_window_title();
                 self.request_redraw();
                 None
             }
@@ -8181,6 +8317,21 @@ impl State {
             }
             InstanceMessage::DispatchIdle { idle } => {
                 self.dispatch_idle = idle;
+                None
+            }
+            // E2.3 — a bell is a 120 ms whole-client flash.
+            InstanceMessage::Signal(InstanceSignal::Bell) => {
+                self.ring_bell();
+                None
+            }
+            // E2.3 — a post-handshake Goodbye names its reason. The socket
+            // closes next and `Disconnected` follows; the notice set here
+            // is what that arm keeps, so the reason is not lost to a
+            // generic "(daemon disconnected)".
+            InstanceMessage::Goodbye(reason) => {
+                let notice = disconnect_notice(Some(&reason), None);
+                self.goodbye = Some(reason);
+                self.on_daemon_disconnected(&notice);
                 None
             }
             // Q#CM6 — a daemon copy/cut published the region; write it to
@@ -8429,6 +8580,54 @@ impl State {
                 (WINDOW_BG_RGBA[2] * 255.0) as u8,
             ],
         }
+    }
+
+    /// The window title (E2.3): `<buffer> — pmacs`, or `pmacs` before the
+    /// first `StatusFacts`.
+    fn window_title(&self) -> String {
+        match self.status_facts.as_ref() {
+            Some(facts) => format!("{} — pmacs", facts.name),
+            None => "pmacs".to_owned(),
+        }
+    }
+
+    /// Push the title to the window when it changed (E2.3).
+    fn sync_window_title(&mut self) {
+        let title = self.window_title();
+        if self.last_title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.set_title(&title);
+        }
+        self.last_title = Some(title);
+    }
+
+    /// Start the bell flash (E2.3).
+    fn ring_bell(&mut self) {
+        self.bell_flash_until = Some(std::time::Instant::now() + BELL_FLASH);
+        self.request_redraw();
+    }
+
+    /// Whether the bell flash is still on at `now` (E2.3).
+    fn bell_flash_active(&self, now: std::time::Instant) -> bool {
+        self.bell_flash_until.is_some_and(|until| now < until)
+    }
+
+    /// The flash quad over the whole surface while the bell is on (E2.3),
+    /// or nothing.
+    fn bell_flash_vertex_bytes(&self) -> Vec<u8> {
+        if !self.bell_flash_active(std::time::Instant::now()) {
+            return Vec::new();
+        }
+        let rect = MinimapRect {
+            x: 0.0,
+            y: 0.0,
+            w: self.layout.width as f32,
+            h: self.layout.height as f32,
+            color: BELL_FLASH_RGBA,
+        };
+        rects_to_vertex_bytes(&[rect], self.layout.width, self.layout.height)
     }
 
     /// Show a disconnect notice, leaving terminal mode first.
@@ -12389,6 +12588,18 @@ impl State {
                 &caret_vertices,
             )
             .cloned();
+        // E2.3 — the bell flash, drawn over everything else.
+        let flash_vertices = self.bell_flash_vertex_bytes();
+        let flash_vertex_count = (flash_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let flash_buffer = self
+            .bell_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu bell flash",
+                &flash_vertices,
+            )
+            .cloned();
         let after_bg = debug_frame().then(std::time::Instant::now);
         // Minimap quads depend only on (summary, size, scroll); cache
         // the vertex bytes instead of rescanning every line shape per
@@ -12949,6 +13160,11 @@ impl State {
             self.menu_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("menu text_renderer render");
+            // E2.3 — the bell flash washes over everything, menu included.
+            if let Some(vertex_buffer) = flash_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, flash_vertex_count);
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         self.atlas.trim();
@@ -14479,6 +14695,44 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
         InstanceMessage::PanelFrame(_) => "PanelFrame",
+    }
+}
+
+/// The reason a daemon gave in its `Goodbye`, in words (E2.3).
+fn describe_goodbye(reason: &pmacs_protocol::GoodbyeReason) -> String {
+    use pmacs_protocol::GoodbyeReason;
+    match reason {
+        GoodbyeReason::ShuttingDown => "it is shutting down".to_owned(),
+        GoodbyeReason::VersionMismatch { server, client } => format!(
+            "protocol version mismatch, the daemon speaks v{server} and this frontend offered v{client}"
+        ),
+        GoodbyeReason::AlreadyAttached => "another frontend holds this session".to_owned(),
+        GoodbyeReason::ProtocolError => {
+            "it rejected this frontend's traffic as a protocol error".to_owned()
+        }
+        GoodbyeReason::CapabilityMismatch { missing } => {
+            format!("capabilities missing: {}", missing.join(", "))
+        }
+    }
+}
+
+/// The disconnect notice (E2.3). A post-handshake `Goodbye` names its
+/// reason whatever the socket then did; without one, the transport's
+/// own EOF is a close the daemon did not announce, and any other
+/// transport error is reported as the loss it is.
+fn disconnect_notice(
+    goodbye: Option<&pmacs_protocol::GoodbyeReason>,
+    transport: Option<&str>,
+) -> String {
+    if let Some(reason) = goodbye {
+        return format!("(daemon said goodbye: {})", describe_goodbye(reason));
+    }
+    match transport {
+        Some(error) if error == pmacs_protocol::TransportError::Eof.to_string() => {
+            "(daemon closed the connection without a Goodbye)".to_owned()
+        }
+        Some(error) => format!("(daemon connection lost: {error})"),
+        None => "(daemon disconnected)".to_owned(),
     }
 }
 
@@ -18817,6 +19071,92 @@ mod tests {
             estimated_visible_lines(scaled.layout.height, scaled.fm, scaled.band_inset()),
             estimated_visible_lines(base.layout.height, base.fm, base.band_inset()),
         );
+    }
+
+    /// E2.3 — the title is `<buffer> — pmacs` once facts arrive, and
+    /// `pmacs` before.
+    #[test]
+    fn status_facts_set_the_window_title() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        assert_eq!(state.window_title(), "pmacs");
+        let _ = state.apply_attach_message(InstanceMessage::StatusFacts {
+            buffer_id: BufferId::from_raw(1),
+            name: "notes.md".to_owned(),
+            modified: true,
+            diag_errors: 0,
+            diag_warnings: 0,
+            message: None,
+        });
+        assert_eq!(state.window_title(), "notes.md — pmacs");
+        assert_eq!(state.last_title.as_deref(), Some("notes.md — pmacs"));
+    }
+
+    /// E2.3 — a bell flashes the whole client for `BELL_FLASH` and then
+    /// stops: one quad over the surface while it is on, nothing after.
+    #[test]
+    fn a_bell_flashes_the_whole_client_and_then_stops() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        assert!(
+            state.bell_flash_vertex_bytes().is_empty(),
+            "quiet before the bell"
+        );
+        let _ = state.apply_attach_message(InstanceMessage::Signal(InstanceSignal::Bell));
+        let now = std::time::Instant::now();
+        assert!(state.bell_flash_active(now));
+        let bytes = state.bell_flash_vertex_bytes();
+        assert_eq!(
+            bytes.len(),
+            6 * QUAD_VERTEX_STRIDE as usize,
+            "one quad over the surface"
+        );
+        assert!(
+            !state.bell_flash_active(now + BELL_FLASH + std::time::Duration::from_millis(1)),
+            "over after {BELL_FLASH:?}"
+        );
+    }
+
+    /// E2.3 — a post-handshake Goodbye is surfaced with its reason, and a
+    /// close without one is classified locally from the transport's EOF.
+    #[test]
+    fn a_goodbye_names_its_reason_and_an_eof_is_classified() {
+        use pmacs_protocol::{GoodbyeReason, TransportError};
+        assert_eq!(
+            disconnect_notice(Some(&GoodbyeReason::AlreadyAttached), Some("anything")),
+            "(daemon said goodbye: another frontend holds this session)"
+        );
+        assert_eq!(
+            disconnect_notice(
+                Some(&GoodbyeReason::VersionMismatch {
+                    server: 25,
+                    client: 26
+                }),
+                None
+            ),
+            "(daemon said goodbye: protocol version mismatch, the daemon speaks v25 and this frontend offered v26)"
+        );
+        assert_eq!(
+            disconnect_notice(None, Some(&TransportError::Eof.to_string())),
+            "(daemon closed the connection without a Goodbye)"
+        );
+        assert_eq!(
+            disconnect_notice(None, Some("Io(Os { code: 104 })")),
+            "(daemon connection lost: Io(Os { code: 104 }))"
+        );
+        assert_eq!(disconnect_notice(None, None), "(daemon disconnected)");
+
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let _ = state.apply_attach_message(InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown));
+        assert_eq!(
+            state.current_text,
+            "(daemon said goodbye: it is shutting down)"
+        );
+        assert_eq!(state.goodbye, Some(GoodbyeReason::ShuttingDown));
     }
 
     /// E2.2 — the logical extent rounds per axis and never collapses to
