@@ -472,6 +472,34 @@ impl std::fmt::Display for GpuInitError {
     }
 }
 
+/// The caret's blink half-period (E2.6): on for this long, off for this
+/// long, while the window is focused and a caret is painted. A
+/// frontend constant, not a registered knob: a GPU preference reaches
+/// this crate only through a typed wire variant (`FontFacts`,
+/// `LineWrapFacts`), each of which took a wire phase, and E2 is not
+/// one. The `ui.caret` face is the registered half: its fg is the
+/// caret's color, relayed through `ThemeFacts`.
+const CARET_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// The caret's alpha while the window is unfocused (E2.6): steady and
+/// dimmed, so a background window shows where its point is without
+/// claiming the keyboard.
+const CARET_DIM_ALPHA: f32 = 0.35;
+
+/// The blink phase at `now` (E2.6): even phases paint the caret, odd
+/// ones hide it. Phase 0 starts at `epoch`, which every caret move
+/// resets, so a moving caret is always visible.
+fn blink_phase(
+    epoch: std::time::Instant,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> u64 {
+    let elapsed = now.saturating_duration_since(epoch);
+    if interval.is_zero() {
+        return 0;
+    }
+    (elapsed.as_nanos() / interval.as_nanos()) as u64
+}
+
 /// A bell is a whole-client flash for this long (E2.3): visible, and
 /// over before the next keystroke.
 const BELL_FLASH: std::time::Duration = std::time::Duration::from_millis(120);
@@ -2213,6 +2241,15 @@ struct State {
     /// The title last pushed to the window (E2.3), so an unchanged
     /// title is not re-set on every `StatusFacts`.
     last_title: Option<String>,
+    /// When the caret last moved (E2.6): the blink's phase 0.
+    caret_blink_epoch: std::time::Instant,
+    /// What the caret was keyed on at the last paint (E2.6): the own
+    /// cursor's byte and the minibuffer's input cursor. A change resets
+    /// the epoch, so typing or moving never lands on a hidden caret.
+    caret_blink_key: (Option<u64>, Option<u64>),
+    /// The phase the last paint used (E2.6); the deadline pump repaints
+    /// when the live phase differs.
+    caret_phase_painted: u64,
     /// Q#SR5 — the live incremental-search prompt (protocol v9), or
     /// `None` when no search is running. While `Some`, the status
     /// band's left side shows `I-search: <query> (n/m)` in place of
@@ -6561,6 +6598,16 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
+        // E2.6 — the caret blinks while focused: repaint when the phase
+        // has moved on from the one painted, and wake for the next.
+        if let Some(due) = state.next_caret_blink(now) {
+            let phase = blink_phase(state.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
+            if phase != state.caret_phase_painted {
+                state.request_redraw();
+            }
+            next_wake = Some(next_wake.map_or(due, |w| w.min(due)));
+        }
+
         // Q#M7 — edge auto-scroll.
         let mut drag_resend: Option<(BufferId, u64)> = None;
         if state.pointer_drag_active
@@ -7389,6 +7436,9 @@ impl State {
             bell_flash_until: None,
             goodbye: None,
             last_title: None,
+            caret_blink_epoch: std::time::Instant::now(),
+            caret_blink_key: (None, None),
+            caret_phase_painted: 0,
             search_prompt: None,
             minibuffer: None,
             menu: None,
@@ -8684,6 +8734,64 @@ impl State {
                 (WINDOW_BG_RGBA[2] * 255.0) as u8,
             ],
         }
+    }
+
+    /// The caret's color (E2.6): the `ui.caret` face's fg when the theme
+    /// sets one, else the built-in; dimmed while unfocused.
+    fn caret_color(&self) -> [f32; 4] {
+        let base = match self
+            .faces
+            .get("ui.caret")
+            .and_then(|face| cell_color_to_glyphon(face.fg))
+        {
+            Some(color) => glyphon_to_rgba(color, CARET_COLOR[3]),
+            None => CARET_COLOR,
+        };
+        if self.focused {
+            base
+        } else {
+            [base[0], base[1], base[2], CARET_DIM_ALPHA]
+        }
+    }
+
+    /// What the blink is keyed on (E2.6): see `caret_blink_key`.
+    fn caret_blink_key_now(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.own_cursor.map(|cursor| cursor.byte),
+            self.minibuffer.as_ref().map(|mb| u64::from(mb.cursor)),
+        )
+    }
+
+    /// Whether the caret is painted at `now` (E2.6). A moved caret
+    /// restarts the blink at "on"; an unfocused window paints it steady
+    /// and dimmed; a focused one alternates every
+    /// [`CARET_BLINK_INTERVAL`].
+    fn caret_visible_at(&mut self, now: std::time::Instant) -> bool {
+        let key = self.caret_blink_key_now();
+        if key != self.caret_blink_key {
+            self.caret_blink_key = key;
+            self.caret_blink_epoch = now;
+        }
+        if !self.focused {
+            return true;
+        }
+        let phase = blink_phase(self.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
+        self.caret_phase_painted = phase;
+        phase.is_multiple_of(2)
+    }
+
+    /// When the blink next changes phase (E2.6), or `None` when nothing
+    /// blinks: unfocused, in terminal mode, or with no caret to paint.
+    fn next_caret_blink(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        if !self.focused
+            || self.terminal.is_some()
+            || (self.own_cursor.is_none() && self.minibuffer.is_none())
+        {
+            return None;
+        }
+        let phase = blink_phase(self.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
+        let next = u32::try_from(phase + 1).unwrap_or(u32::MAX);
+        Some(self.caret_blink_epoch + CARET_BLINK_INTERVAL * next)
     }
 
     /// The window title (E2.3): `<buffer> — pmacs`, or `pmacs` before the
@@ -13613,6 +13721,10 @@ impl State {
     }
 
     fn caret_vertex_bytes(&mut self) -> Vec<u8> {
+        // E2.6 — the odd blink phase paints no caret at all.
+        if !self.caret_visible_at(std::time::Instant::now()) {
+            return Vec::new();
+        }
         // Q#MB1 — while the minibuffer is open the caret lives in the
         // band at the input cursor, not in the buffer.
         if self.minibuffer.is_some() {
@@ -13653,7 +13765,7 @@ impl State {
             y: status_top,
             w: CARET_WIDTH,
             h: self.fm.status_line_height(),
-            color: CARET_COLOR,
+            color: self.caret_color(),
         })
     }
 
@@ -13792,7 +13904,7 @@ impl State {
             y: TEXT_TOP + top,
             w: CARET_WIDTH,
             h: line_height,
-            color: CARET_COLOR,
+            color: self.caret_color(),
         })
     }
 
@@ -19221,6 +19333,104 @@ mod tests {
             !state.bell_flash_active(now + BELL_FLASH + std::time::Duration::from_millis(1)),
             "over after {BELL_FLASH:?}"
         );
+    }
+
+    /// E2.6 — the blink alternates every interval from the epoch.
+    #[test]
+    fn blink_phase_alternates_every_interval_from_the_epoch() {
+        let epoch = std::time::Instant::now();
+        let i = CARET_BLINK_INTERVAL;
+        assert_eq!(blink_phase(epoch, epoch, i), 0);
+        assert_eq!(blink_phase(epoch, epoch + i / 2, i), 0);
+        assert_eq!(blink_phase(epoch, epoch + i, i), 1);
+        assert_eq!(blink_phase(epoch, epoch + i * 2, i), 2);
+        assert_eq!(blink_phase(epoch, epoch + i * 3, i), 3);
+        assert_eq!(
+            blink_phase(epoch + i, epoch, i),
+            0,
+            "a clock before the epoch is phase 0, never a wrap"
+        );
+    }
+
+    /// E2.6 — the caret honors the `ui.caret` face's fg once `ThemeFacts`
+    /// carries it, keeps the built-in color otherwise, and dims while
+    /// the window is unfocused.
+    #[test]
+    fn the_caret_honors_ui_caret_and_dims_on_focus_loss() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        assert!(
+            close(state.caret_color(), CARET_COLOR),
+            "built-in until the theme says: {:?}",
+            state.caret_color()
+        );
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts {
+            faces: vec![theme_face(
+                "ui.caret",
+                CellStyle {
+                    fg: CellColor::Rgb(255, 0, 0),
+                    ..CellStyle::default()
+                },
+            )],
+        });
+        assert!(
+            close(state.caret_color(), [1.0, 0.0, 0.0, CARET_COLOR[3]]),
+            "{:?}",
+            state.caret_color()
+        );
+        state.focused = false;
+        assert!(
+            close(state.caret_color(), [1.0, 0.0, 0.0, CARET_DIM_ALPHA]),
+            "dimmed while unfocused: {:?}",
+            state.caret_color()
+        );
+        let now = std::time::Instant::now();
+        assert!(
+            state.caret_visible_at(now + CARET_BLINK_INTERVAL),
+            "an unfocused caret is steady, not blinking"
+        );
+    }
+
+    /// E2.6 — a focused caret is painted in the even phase and not in
+    /// the odd one, a caret move restarts the blink at "on", and the
+    /// deadline pump is told when the next phase is due.
+    #[test]
+    fn a_focused_caret_blinks_and_a_move_restarts_it() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let now = std::time::Instant::now();
+        assert!(state.caret_visible_at(now), "phase 0 paints");
+        let epoch = state.caret_blink_epoch;
+        assert!(
+            !state.caret_visible_at(epoch + CARET_BLINK_INTERVAL),
+            "phase 1 hides"
+        );
+        assert_eq!(state.caret_phase_painted, 1);
+        assert_eq!(
+            state.next_caret_blink(epoch + CARET_BLINK_INTERVAL),
+            Some(epoch + CARET_BLINK_INTERVAL * 2),
+            "the pump wakes at the next phase"
+        );
+        // The caret moves: the blink restarts at "on" from the new epoch.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        let later = epoch + CARET_BLINK_INTERVAL;
+        assert!(state.caret_visible_at(later), "a moved caret is visible");
+        assert_eq!(state.caret_blink_epoch, later, "and its epoch is now");
+        // Nothing blinks without a caret, or in terminal mode.
+        state.own_cursor = None;
+        assert_eq!(state.next_caret_blink(later), None);
     }
 
     /// E2.4 — each surface-creation failure is one line naming what
