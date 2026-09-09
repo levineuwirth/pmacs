@@ -567,6 +567,7 @@ struct SummaryCache {
 /// lookup on the shipped table, no walk (Q#TH7). Kept sorted; the
 /// wire table's deterministic ordering rides on it.
 const UI_FACES: &[&str] = &[
+    "ui.caret",
     "ui.diag.error",
     "ui.diag.hint",
     "ui.diag.info",
@@ -4037,6 +4038,34 @@ mod tests {
             None,
             "and suppresses again once shipped"
         );
+    }
+
+    /// E2.6 --- `ui.caret` is a stage-1 face: set, it ships with the
+    /// rest and the GPU frontend paints its caret in that fg. Unset it
+    /// resolves through `ui` like every other face, which is why the
+    /// frontend keeps its own default for a missing entry.
+    #[test]
+    fn ui_caret_ships_as_a_stage_one_face() {
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+
+        merge_face(
+            &state,
+            "ui.caret",
+            Style {
+                fg: crate::cell::Color::Rgb(255, 128, 0),
+                ..Style::default()
+            },
+        );
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("emits");
+        let caret = facts
+            .iter()
+            .find(|f| f.name == "ui.caret")
+            .expect("ui.caret ships once set");
+        assert_eq!(caret.style.fg, crate::cell::Color::Rgb(255, 128, 0));
     }
 
     #[test]

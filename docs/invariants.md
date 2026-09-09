@@ -187,6 +187,14 @@ unclaimed crash data; adopting clears the old owner's skip cache.
 - A daemon-side change is not deployed until the daemon restarts from a
   binary that contains it; `pmacs --gpu` attaches to whatever owns the
   socket.
+- The GPU frontend lays out in logical pixels and meets the physical
+  surface exactly once. `State::layout` is the surface over
+  `State::scale`; every hit test, wrap, cell-grid declaration and quad
+  reads it, and never `State::config`. Text crosses the boundary in
+  `scale_text_area` at each `prepare`, pointer input is divided by the
+  scale on intake, and clip space is computed from the logical extent,
+  which is what makes it scale-invariant. A layout site that reads the
+  physical surface is a DPI defect, not a style choice.
 
 ## Lua runtime
 

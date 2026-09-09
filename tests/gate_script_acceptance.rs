@@ -1644,11 +1644,23 @@ fn the_default_plan_is_the_six_named_stages_in_order() {
     );
 }
 
-/// `--protocol` adds exactly one stage, the same sweep under
-/// `--no-default-features --features luajit`, immediately after the
-/// default sweep, and changes nothing else.
+/// `--protocol` adds exactly two stages under `--no-default-features
+/// --features luajit` --- a clippy immediately after `clippy` and the
+/// same sweep immediately after `sweep` --- and changes nothing else.
+///
+/// **The lint half is the one this file could not have caught before.**
+/// Until 2026-09-09 `--protocol` added the sweep alone, and no plan this
+/// script prints denied warnings outside the default feature set:
+/// `clippy` runs under default features and `sweep-luajit` passes no
+/// `RUSTFLAGS`, so a warning reachable only without `crdt` was invisible
+/// to every local plan. E2 shipped exactly that --- a helper at module
+/// scope in `tests/gui_desktop_basics_acceptance.rs` whose only caller
+/// was `#[cfg(feature = "crdt")]` --- and two `-D warnings` CI legs went
+/// red on it while `cargo test --no-default-features --features luajit
+/// --no-run` finished green. The stage is CI's `Lint (luajit)` second
+/// step verbatim, so the two are one predicate.
 #[test]
-fn protocol_adds_exactly_the_luajit_sweep_after_the_sweep() {
+fn protocol_adds_the_luajit_clippy_and_the_luajit_sweep_and_nothing_else() {
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -1665,21 +1677,103 @@ fn protocol_adds_exactly_the_luajit_sweep_after_the_sweep() {
     let proto_lines: Vec<&str> = proto_plan.lines().collect();
     assert_eq!(
         proto_lines.len(),
-        default_lines.len() + 1,
-        "--protocol adds one stage; plans were:\n{default_plan}\n---\n{proto_plan}"
+        default_lines.len() + 2,
+        "--protocol adds two stages; plans were:\n{default_plan}\n---\n{proto_plan}"
     );
+
+    let clippy = default_lines
+        .iter()
+        .position(|l| l.starts_with("clippy\t"))
+        .expect("the default plan has a clippy");
     let sweep = default_lines
         .iter()
         .position(|l| l.starts_with("sweep\t"))
         .expect("the default plan has a sweep");
-    assert_eq!(&proto_lines[..=sweep], &default_lines[..=sweep]);
+
+    // Everything up to and including `clippy` is untouched.
+    assert_eq!(&proto_lines[..=clippy], &default_lines[..=clippy]);
+    // Then the lint under the opt-out feature set, with `-D warnings` in
+    // the command itself so a plan reader sees the denial.
     assert_eq!(
-        proto_lines[sweep + 1],
+        proto_lines[clippy + 1],
+        "clippy-luajit\tcargo clippy --workspace --all-targets --no-default-features \
+         --features luajit -- -D warnings",
+        "plan was:\n{proto_plan}"
+    );
+    // The middle of the plan --- doc, build, sweep --- is untouched,
+    // shifted by the one added line.
+    assert_eq!(
+        &proto_lines[clippy + 2..=sweep + 1],
+        &default_lines[clippy + 1..=sweep]
+    );
+    assert_eq!(
+        proto_lines[sweep + 2],
         "sweep-luajit\tPMACS_REQUIRE_GPU=1 cargo test --workspace --no-default-features \
          --features luajit --no-fail-fast -- --skip basedpyright",
         "plan was:\n{proto_plan}"
     );
-    assert_eq!(&proto_lines[sweep + 2..], &default_lines[sweep + 1..]);
+    assert_eq!(&proto_lines[sweep + 3..], &default_lines[sweep + 1..]);
+}
+
+/// **Every feature set the plan builds is linted with `-D warnings`.**
+///
+/// Stated as a property over the plan rather than as a list of stages,
+/// so a later feature set added to `--protocol` cannot arrive without
+/// its lint: for each distinct `--no-default-features --features …`
+/// spelling any `cargo test` stage uses, some clippy stage must use the
+/// same spelling and deny warnings. The default sweep's (absent) feature
+/// flags pair with the default `clippy` the same way.
+///
+/// This is the assertion that would have failed before 2026-09-09: the
+/// `--protocol` plan then had a `luajit` sweep and no `luajit` lint.
+#[test]
+fn every_feature_set_the_plan_sweeps_is_also_linted_with_denied_warnings() {
+    /// A command's feature configuration, canonicalized so a clippy line
+    /// and a sweep line that build the same code compare equal. Token
+    /// based rather than substring based: the two commands differ in
+    /// every other flag, and `--no-fail-fast` sits between `--features`
+    /// and the `--` in one of them but not the other.
+    ///
+    /// Declared before the first statement, which
+    /// `clippy::items_after_statements` requires and which is the same
+    /// placement rule the gated-test helpers in `tests/` follow.
+    fn feature_set(line: &str) -> String {
+        let mut toks = line.split_whitespace();
+        let mut no_default = false;
+        let mut features = String::new();
+        while let Some(t) = toks.next() {
+            match t {
+                "--no-default-features" => no_default = true,
+                "--features" => features = toks.next().unwrap_or_default().to_owned(),
+                _ => {}
+            }
+        }
+        format!("no_default={no_default} features={features}")
+    }
+
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+
+    for flags in [vec!["--print-plan"], vec!["--protocol", "--print-plan"]] {
+        let (plan, err, ok) = run(root.path(), &flags);
+        assert!(ok, "{flags:?} must succeed; stderr:\n{err}");
+        let lints: Vec<String> = plan
+            .lines()
+            .filter(|l| l.contains("cargo clippy") && l.contains("-D warnings"))
+            .map(feature_set)
+            .collect();
+        for sweep in plan.lines().filter(|l| l.contains("cargo test")) {
+            let set = feature_set(sweep);
+            assert!(
+                lints.contains(&set),
+                "the plan sweeps the feature set {set:?} but no clippy stage denies \
+                 warnings under it, so a warning only that build shows cannot fail \
+                 this plan. Lints cover {lints:?}; plan was:\n{plan}"
+            );
+        }
+    }
 }
 
 /// Each test selector appears in one `cargo test` invocation per run.
@@ -2112,7 +2206,7 @@ fn docs_refuses_the_full_plan_modifiers_rather_than_discarding_them() {
         );
     }
 
-    // And the three plans that remain legal are untouched: the refusal
+    // And the four plans that remain legal are untouched: the refusal
     // must not be a blanket rejection of the modifiers.
     for args in [
         vec!["--docs", "--print-plan-named"],
@@ -2124,6 +2218,56 @@ fn docs_refuses_the_full_plan_modifiers_rather_than_discarding_them() {
         assert_eq!(code, Some(0), "{args:?} must still succeed; stderr:\n{err}");
         assert!(!plan.is_empty(), "{args:?} must still print its plan");
     }
+}
+
+/// A run writes the invocation it was asked for into its log directory,
+/// one argument per line with the script first, so a recorded green can
+/// be audited afterwards for WHICH plan it validated. `plan.txt` says
+/// what ran; before this nothing said what was asked, and the two
+/// differed silently: `--docs` and the once-accepted `--protocol --docs`
+/// produced byte-identical four-line plans, so a green recorded against
+/// the wrong spelling could not be told from one recorded against the
+/// right one.
+#[test]
+fn the_log_directory_records_the_invocation_verbatim() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (_out, err, _ok) = run(root.path(), &["--self-test"]);
+    let logdir = Path::new(
+        err.lines()
+            .find_map(|l| l.split_once("log: ").map(|(_, p)| p.trim()))
+            .unwrap_or_else(|| panic!("expected a log path; stderr:\n{err}")),
+    )
+    .parent()
+    .expect("log directory")
+    .to_path_buf();
+    let argv = std::fs::read_to_string(logdir.join("argv.txt")).unwrap_or_else(|e| {
+        panic!(
+            "argv.txt must be written beside plan.txt in {}: {e}",
+            logdir.display()
+        )
+    });
+    let lines: Vec<&str> = argv.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "one line per argument with the script first; was:\n{argv}"
+    );
+    assert!(
+        lines[0].ends_with("scripts/gate"),
+        "the first line names the script as invoked; was {}",
+        lines[0]
+    );
+    assert_eq!(
+        lines[1], "--self-test",
+        "the argument as given; was:\n{argv}"
+    );
+    assert!(
+        logdir.join("plan.txt").is_file(),
+        "and plan.txt sits beside it, so what ran and what was asked can be compared"
+    );
 }
 
 // --- Derivation, marker, canonical paths --------------------------------

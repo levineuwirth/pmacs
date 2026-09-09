@@ -158,7 +158,21 @@ pub enum ManagedAttachError {
         daemon_status: Option<String>,
         /// Startup deadline used for this attempt.
         timeout: Duration,
+        /// Where the spawned daemon's stderr was captured (E2.4), so a
+        /// daemon that printed why it could not start can be read.
+        stderr_log: Option<PathBuf>,
     },
+}
+
+/// Where a daemon this frontend spawns writes its stderr (E2.4): beside
+/// the socket, so it lives in the runtime directory the socket already
+/// proved writable and dies with it. Before this the stream went to
+/// `/dev/null`, and a daemon-side attach failure was undiagnosable from
+/// `pmacs --gpu`.
+pub fn daemon_stderr_path(socket_path: &Path) -> PathBuf {
+    let mut name = socket_path.as_os_str().to_os_string();
+    name.push(".stderr");
+    PathBuf::from(name)
 }
 
 impl std::fmt::Display for ManagedAttachError {
@@ -185,6 +199,7 @@ impl std::fmt::Display for ManagedAttachError {
                 connect,
                 daemon_status,
                 timeout,
+                stderr_log,
             } => {
                 write!(
                     f,
@@ -193,6 +208,9 @@ impl std::fmt::Display for ManagedAttachError {
                 )?;
                 if let Some(status) = daemon_status {
                     write!(f, " (spawned daemon {status})")?;
+                }
+                if let Some(log) = stderr_log {
+                    write!(f, "; the daemon's stderr is in {}", log.display())?;
                 }
                 Ok(())
             }
@@ -697,7 +715,7 @@ fn connect_stream_with_sink(
     // lock before* the blocking writes so the UI thread can keep
     // enqueueing (and coalescing) meanwhile.
     let writer_outbox = Arc::clone(&outbox);
-    thread::Builder::new()
+    let writer = thread::Builder::new()
         .name("pmacs-gpu attach writer".into())
         .spawn(move || {
             let mut write_stream = write_stream;
@@ -735,6 +753,7 @@ fn connect_stream_with_sink(
         session_protocol_version,
         baseline_protocol_version: hello.protocol_version,
         initial_message,
+        writer: Some(writer),
     })
 }
 
@@ -777,13 +796,20 @@ pub fn connect_managed_with_target_and_sink(
 
 fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Child> {
     let mut command = Command::new(daemon_executable);
+    // E2.4 — stderr goes to a file the failure message names. A file
+    // that cannot be created falls back to the null device rather than
+    // refusing the spawn: the daemon matters more than its log.
+    let stderr = match fs::File::create(daemon_stderr_path(socket_path)) {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    };
     command
         .arg("--daemon")
         .arg("--socket")
         .arg(socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     command.process_group(0);
     command.spawn()
 }
@@ -889,6 +915,7 @@ where
                         connect: error,
                         daemon_status,
                         timeout,
+                        stderr_log: Some(daemon_stderr_path(socket_path)),
                     });
                 }
                 thread::sleep(
@@ -935,6 +962,10 @@ pub struct AttachClient {
     baseline_protocol_version: u32,
     /// Target snapshot retained across the pre-window readiness barrier.
     initial_message: Option<InstanceMessage>,
+    /// The writer thread (E2.3), joined by [`Self::detach`] so a native
+    /// close puts `Detach` on the socket before the process goes. `None`
+    /// for the harness client built over an already-connected stream.
+    writer: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AttachClient {
@@ -946,6 +977,43 @@ impl AttachClient {
     /// Take the target snapshot that must be applied before first redraw.
     pub fn take_initial_message(&mut self) -> Option<InstanceMessage> {
         self.initial_message.take()
+    }
+
+    /// Send `FocusGained` or `FocusLost` (E2.3), the window's keyboard
+    /// focus as winit reports it. The daemon dispatches them to
+    /// `dispatch_focus` for the frontend they name.
+    pub fn send_focus(&self, gained: bool) -> Result<(), TransportError> {
+        let event = if gained {
+            FrontendEvent::FocusGained(self.frontend_id)
+        } else {
+            FrontendEvent::FocusLost(self.frontend_id)
+        };
+        self.send_event(event)
+    }
+
+    /// Detach cleanly (E2.3, Q#S1-1): enqueue `Detach`, close the outbox
+    /// so the writer drains what it holds and exits, and join it, so the
+    /// frame is on the socket before the caller exits the process. The
+    /// daemon answers a `Detach` with no `Goodbye` and releases the slot
+    /// when the socket closes, which the process exit does.
+    ///
+    /// The join is unbounded and that is deliberate: the writer blocks
+    /// only if the kernel's socket buffer is full, which for a frame of a
+    /// few bytes means the session was already wedged and F-008's
+    /// overflow policy would have closed the outbox first. A daemon that
+    /// is gone makes the write fail, and the writer returns on that too.
+    pub fn detach(mut self) {
+        // A refused enqueue means the outbox is already closed: the
+        // session tore down earlier and there is nothing left to say.
+        let _ = self.send_event(FrontendEvent::Detach(self.frontend_id));
+        {
+            let (lock, cvar) = &*self.outbox;
+            lock.lock().expect("outbox lock").closed = true;
+            cvar.notify_one();
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
     }
 
     /// Send a `FrontendEvent::Viewport` to the daemon. The daemon's
@@ -1726,6 +1794,7 @@ mod tests {
             session_protocol_version: PROTOCOL_VERSION,
             baseline_protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
             initial_message: None,
+            writer: None,
         };
         // A send against the closed outbox fails *and* shuts the socket
         // down (F-008 fail-fast is now a real teardown, not just a flag).
@@ -1909,6 +1978,7 @@ mod tests {
             connect: io::Error::new(io::ErrorKind::NotFound, "still absent"),
             daemon_status: Some("exit status: 17".to_owned()),
             timeout: Duration::from_millis(1),
+            stderr_log: Some(PathBuf::from("/tmp/unused.sock.stderr")),
         };
         let message = error.to_string();
         assert!(
@@ -1916,5 +1986,56 @@ mod tests {
             "unexpected timeout message: {message}"
         );
         assert!(!message.contains("5 seconds"));
+        // E2.4 — the message names the captured stderr.
+        assert!(
+            message.ends_with("; the daemon's stderr is in /tmp/unused.sock.stderr"),
+            "the failure must name the daemon's stderr file: {message}"
+        );
+    }
+
+    /// E2.4 — a spawned daemon's stderr is captured beside the socket,
+    /// and a startup failure's message names the file, so what the
+    /// daemon printed before dying can be read. The "daemon" here is a
+    /// shell that prints one line and exits, which is exactly the shape
+    /// a real daemon refusing its socket has.
+    #[test]
+    fn a_spawned_daemons_stderr_is_captured_beside_the_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("d.sock");
+        let executable = dir.path().join("fake-daemon");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\necho 'fake daemon: refusing to start' >&2\nexit 7\n",
+        )
+        .expect("write fake daemon");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod");
+        let error = connect_managed_inner(
+            &socket,
+            &executable,
+            |path| UnixStream::connect(path),
+            spawn_daemon,
+            Duration::from_millis(300),
+            Duration::from_millis(20),
+            None,
+            |_| true,
+        )
+        .err()
+        .expect("no daemon listens, so the attach times out");
+        let log = daemon_stderr_path(&socket);
+        let message = error.to_string();
+        assert!(
+            message.contains(&log.display().to_string()),
+            "the failure names the stderr file: {message}"
+        );
+        let captured = std::fs::read_to_string(&log).expect("the stderr file exists");
+        assert_eq!(captured, "fake daemon: refusing to start\n");
+        assert!(
+            matches!(error, ManagedAttachError::StartupTimeout { .. }),
+            "{error:?}"
+        );
     }
 }

@@ -404,11 +404,33 @@ never shut.
 | field | value |
 |---|---|
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
-| job | GitHub Actions, the serialized crdt sweep (`--test-threads=1`) |
+| job | GitHub Actions: first the serialized crdt sweep (`--test-threads=1`), since then `Test (macos-latest / luajit)` twice and `Test (ubuntu-latest / luajit)` once, all three under cargo's default parallelism. The job is not a discriminator for this row and a match needs the selector and the fragment on any CI test leg |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so is its third, 34253949749 at the head `b2094ac`. Two green runs are two samples: non-reproduction and nothing more |
+| occurrences | four: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`; and `main` at `dbe40a1`, run 34349759554 (E1's post-merge run), job `Test (macos-latest / luajit)` (102459915513), `tests/m8_1_acceptance.rs:278:5`, `assertion left == right failed: first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed`, the job's only failure against 119 `test result: ok`. The second, third and fourth run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so are its third, fourth and fifth. Green runs are samples: non-reproduction and nothing more. The fourth occurrence is on `main` after two merges that did not touch `src/dispatch` or `tests/m8_1_acceptance.rs`, which is an argument from untouched files and not a measurement; it is the row's third occurrence on `main` and the second on this leg |
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
+
+### U19 — a terminal bell not observed within a 5 s poll
+
+**Reopened 2026-09-09 as NEVER CLOSED**, on R5's ground and not on a
+recurrence. U19 was closed 2026-09-05 with "readiness migration; the
+wait reports the last frame seen". Its selector is an in-crate unit
+test, and `tests/common/ready.rs` compiles into the integration targets
+only, so the migration could not reach the site; and the site is
+unchanged --- `src/daemon.rs:5294-5298` is the loop the row was filed
+on, untouched since `dc92257`, asserting `Instant::now() < deadline`
+with the message `initial terminal bell timed out` and reporting no
+elapsed time, no poll count and no last-observed value. The closer
+names a report that does not exist.
+
+| field | value |
+|---|---|
+| selector | `--lib daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once` |
+| job | local (Linux), the workspace sweep of `scripts/gate` (step `07-sweep` of the eight-stage gate of the time) |
+| required fragments | `initial terminal bell timed out` |
+| occurrences | one: 2026-08-31, gate log `20260831T174104Z-3438184`, `src/daemon.rs:5296`, `1988 passed; 2 failed` --- the same run as U16's second occurrence, recorded separately because the selectors and fragments differ. It passed in all three stages of the next gate run, at `ea786a2` (log `20260831T174716Z-3535694`): non-reproduction and nothing more |
+| candidate mechanism | a 5-second poll over `bell_count(buffer_id) != Some(1)` with `tick_processes()` and a 10 ms sleep per turn. Whether the bell never arrived or arrived late the loop cannot tell apart, and the panic carries no elapsed value, so this occurrence's margin is unrecoverable. Unresolved |
+| retirement | diagnosis. The loop reporting its elapsed time, poll count and last-observed count would be a step toward it and is not a closer --- R5's lesson and U8's. Never a green rerun |
 
 ## Closed rows
 
@@ -422,12 +444,15 @@ explained, which is the only retirement the rerun rule allows.
 
 - **VOID** --- the closure was not a closure when it was written. Either
   it named no mechanism at all and rested on a count of green runs
-  (U4, U5), or it named one that never reached the failing site (R5).
+  (U4, U5), or it named one that never reached the failing site (R5,
+  U19).
   A void row was never retired; it was only stopped being looked at,
   and it is live again above.
 - **INCOMPLETE** --- the closure named a real mechanism that did reach
   the failing site, but that mechanism did not remove the cause. U8 is
-  the one, and it is falsified rather than suspected.
+  one, falsified rather than suspected; R6 is the other, ruled by the
+  form of its closer, and its case is worse: the closer made the row
+  unmatchable at its own site.
 - **DISCARDED** --- there was never evidence to retire. The fragments
   were lost or never captured, so the row could not match anything.
   This is an admission about the record, not a finding about the code,
@@ -437,15 +462,16 @@ explained, which is the only retirement the rerun rule allows.
   in a GitHub issue.
 
 Twenty-eight rows are listed on twenty-seven lines (A1 and A2 share
-one). Nineteen lines are causal closures and stand: a wall-clock
+one). Seventeen lines are causal closures and stand: a wall-clock
 assertion made `#[ignore]`, a duplicated test execution removed by the
 one-sweep gate, a fixture race fixed with a readiness gate, a
 hermeticity fault fixed, and U16's process-global cwd mutation deleted.
-The eight that are not now say which word they are. **Recount these
+The ten that are not now say which word they are. **Recount these
 against the table below rather than trusting them**: they were written
 as twenty-seven, twenty-six, eighteen and eight one commit before U16
-closed and moved into it, and were wrong until this line was rewritten
-by counting again.
+closed and moved into it, then as nineteen and eight while R6 and U19
+stood "on notice" with bare dates, and each time were wrong until this
+line was rewritten by counting again.
 
 | row | what it was | disposition | grounds |
 |---|---|---|---|
@@ -453,7 +479,7 @@ by counting again.
 | R2 | `SIGUSR1` delivered before the trap was installed | 2026-08-05 | test race fixed with a readiness gate and an `exec` |
 | R4 | readiness predicate satisfied by an empty file | 2026-08-05 | `wait_for_file` waits for the expected bytes, with three witness tests |
 | R5 | `async pump deadline exceeded` in the supersede close path, macOS | 2026-09-05, **VOID** | the closure named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test and so never applied to the failing site. R5 is live again above, as never-closed |
-| R6 | readiness file never published in the panel terminal fixture, macOS | 2026-09-05 | same migration; the wait now reports what the child last wrote |
+| R6 | readiness file never published in the panel terminal fixture, macOS | 2026-09-05, **INCOMPLETE** | U8's migration and U8's class, on the same test: it reached the site (`tests/bottom_panel_stage1_acceptance.rs:2446` is `ready::expect`) and changed what the wait reports, not what it waits for, and that test has failed three times since as #259. Worse, the migration replaced `timed out waiting for`, one of this row's two required fragments, so the row cannot match at its own site and its "not recurred" was earned by construction. Ruled at C1's close by the form of the closer; see the note below |
 | R8 | LSP listview row rendered relative to a stray ancestor marker | 2026-08-08 | test hermeticity fixed |
 | A1, A2 | historical claims with no linked occurrence | 2026-09-05, **DISCARDED** | nothing was ever measured, so there was nothing to retire. Discarded for want of evidence; not a causal closure and not a claim about the code |
 | U1 | an unclassifiable local red, fragments not captured | 2026-09-05, **DISCARDED** | the fragments were destroyed by a rerun before anyone read them, so the row could never match anything. Discarded for want of evidence; not a causal closure |
@@ -473,7 +499,7 @@ by counting again.
 | U15 | a rotated multi-red cluster with a load reading | 2026-09-05 | all budgets, now `#[ignore]` |
 | U16 | a `git` child inheriting a working directory another test deleted | 2026-09-08 | the process-global `set_current_dir` was removed: `bare_filename_saves_in_cwd` now makes the cwd move in a subprocess (`ee28bf8`), and `set_current_dir` no longer occurs anywhere in the workspace. Causal, and demonstrated in both directions --- see below |
 | U18 | a Go checksum-database fetch failed before anything was built | 2026-09-05, **REFERRED** | not a test and so out of this file's scope; the question lives in issue #249 |
-| U19 | a terminal bell not observed within a 5 s poll | 2026-09-05 | readiness migration; the wait reports the last frame seen |
+| U19 | a terminal bell not observed within a 5 s poll | 2026-09-05, **VOID** | the closer named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test --- R5's ground exactly --- and the loop at `src/daemon.rs:5294-5298` is unchanged since `dc92257` and reports nothing. Ruled at C1's close. U19 is live again above, as never-closed |
 | U20 | `composition_overhead` red alone | 2026-09-05 | a budget, now `#[ignore]` |
 | U21 | `m6_1_pty_canonical_mode_keeps_kernel_echo` red alone in `lib` | 2026-09-05 | U2's mechanism; the gate runs each test once |
 
@@ -603,10 +629,20 @@ written as a retirement; a closer of the form "the wait now waits for
 the record it asserts on" is causal, because the fixed drain that ended
 early is gone. R6 (`the wait now reports what the child last wrote`)
 and U19 (`the wait reports the last frame seen`) carry the reporting
-shape and nothing has falsified either, so they stand as written --- on
-notice, not reclassified. U2 (`the PTY read now waits for the record it
-asserts on`) and R4 (`wait_for_file waits for the expected bytes`) are
-the causal form and are not in question.
+shape, and at C1's close the rule was applied to them by the form of
+the closer rather than by waiting for a red, because U8 is the proof
+that a recurrence only makes the incompleteness visible. Checked
+against each failing site: R6's site is migrated, so the closer reached
+it and removed no cause --- INCOMPLETE, U8's class on U8's own test ---
+and the migration replaced the string one of R6's required fragments
+names, so the row could never fire again while the failure it was filed
+for went on happening under #259's fragments. U19's selector is an
+in-crate `--lib` test the migration cannot reach, and its loop reports
+nothing --- VOID, R5's ground. U2 (`the PTY read now waits for the
+record it asserts on`) and R4 (`wait_for_file waits for the expected
+bytes`) are the causal form and are not in question. U14's fourth
+closer has the reporting shape too and stays unclassified: its selector
+is not recoverable from the row, so its site cannot be read.
 
 ### U4's question is open again, on Linux
 
@@ -640,16 +676,30 @@ that names a total has to be found and rewritten, and twice it was not.
 
 | run | sha | created | completed | verdict |
 |---|---|---|---|---|
-| 34220035122 | `8f6784f` | 2026-09-08T11:18:55Z | 11:38:36Z | 12 green, 3 red |
-| 34222042303 | `e78d184` | 11:41:44Z | 12:01:39Z | 13 green, 2 red |
-| 34253949749 | `b2094ac` | 16:54:59Z | 17:09:27Z | 16 green, 1 red |
-| 34269795016 | `04263c6` | 19:35:31Z | 19:59:11Z | 16 green, 1 red |
+| 34220035122 | `8f6784f` | 2026-09-08T11:18:55Z | 11:38:36Z | 14 green, 3 red, 1 skipped |
+| 34222042303 | `e78d184` | 11:41:44Z | 12:01:39Z | 15 green, 2 red, 1 skipped |
+| 34253949749 | `b2094ac` | 16:54:59Z | 17:09:27Z | 16 green, 1 red, 1 skipped |
+| 34269795016 | `04263c6` | 19:35:31Z | 19:59:11Z | 16 green, 1 red, 1 skipped |
+| 34272480226 | `d7fd465` | 20:02:42Z | 20:21:44Z | 16 green, 1 red, 1 skipped |
 
-All four are `pull_request` events with conclusion **failure**, and
-`Docs consistency` is skipped in all four, correctly: the PR's changed
-paths include code. The first two ran trees differing by one markdown
-file; the third ran fix round 1's seven commits; the fourth ran fix
-round 2's ten.
+Every verdict is counted from the jobs endpoint,
+`repos/levineuwirth/pmacs/actions/runs/<id>/jobs?per_page=100`: each
+run has **18 jobs on one attempt**, one of them `Docs consistency`,
+skipped correctly because the PR's changed paths include code. **The
+first two verdicts are corrected.** Every C1 record until the closing
+round stated them as 12 green and 13 green, this table included, and
+the wrong pair reached nine artifacts, both review passes among them.
+The endpoint gives `{failure: 3, skipped: 1, success: 14}` and
+`{failure: 2, skipped: 1, success: 15}`, and no counting convention
+yields 12 and 13 here and 16 for the other three. The pushed records
+that carry 12 and 13 are not rewritten; this is the correction, in the
+form `e78d184`'s commit message is corrected below.
+
+All five are `pull_request` events with conclusion **failure**. The
+first two ran trees differing by one markdown file; the third ran fix
+round 1's seven commits; the fourth ran fix round 2's first ten; the
+fifth, at the head the branch merged from, ran the eleventh, which is
+the commit that recorded the fourth.
 
 **This table holds the runs someone has read, and it can never hold the
 last one.** Every push starts a run at the new head, and a record
@@ -669,12 +719,18 @@ next push, with no verdict and no logs worth reading. A cancelled run
 is not a green one and not a red one --- it is no evidence at all, and
 must never be counted as a run in this table.
 
-The consequence for a merge decision is worth stating plainly: **this
-branch has exactly one readable CI run at any moment**, the one at its
-current head, and every earlier one was either completed before the
-next push or cancelled by it. Four completed runs are tabulated above.
-The run at whatever head this text is read from is not, by
-construction --- including the one this very commit's push starts.
+The consequence for a merge decision is worth stating plainly: **only
+the newest completed run describes the current head.** Every completed
+run stays readable --- five are tabulated above --- and each is
+evidence about the tree it ran and about nothing pushed after it. An
+earlier version of this paragraph said the branch had "exactly one
+readable CI run at any moment", four lines under a table of four
+readable runs; what it meant is the sentence before this one. What
+stays true by construction is the other half: the run at whatever
+head this text is read from is not tabulated, because the push that
+commits the text is what starts it. The branch stopped moving at
+`d7fd465` and merged, so its fifth run could at last be read and
+tabulated here, from `main`, by the next phase's first commit.
 
 Every C1 record before 2026-09-08 described only the first run, by name
 and as "the first run". Fix round 1 named the first two and was written
@@ -787,10 +843,13 @@ cluster this branch has produced, and the first on this leg.
   matching rule --- #258's selector is
   `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` in
   `statusline_segments_acceptance`, and none of these is that test. Its
-  occurrence count stays at **one**. The last of them is the second
-  occurrence of the `theme_faces` incident already recorded there. All
-  four are a comment on #258, which is the issue for that failing
-  expression, with the difference stated.
+  occurrence count was one when this was written and is **two** since
+  the next run, below; the earlier wording, "stays at one", is
+  corrected here rather than rewritten in the pushed commit that
+  carries it. The last of them is the second occurrence of the
+  `theme_faces` incident already recorded there. All four are a comment
+  on #258, which is the issue for that failing expression, with the
+  difference stated.
 - The `wdired` failure is a **new signature** with no row and no issue:
   filed as **#261**.
 
@@ -807,8 +866,201 @@ is a measurement of how long `Hello` actually took against each
 fixture's budget, which nothing has done. It is recorded because it is
 the first evidence that bears on the question at all.
 
-**None of this was re-run.** The job is the head's own run and it stands
-as read.
+**None of this was re-run.** The job stands as read.
+
+#### Run 34272480226, at the head `d7fd465`
+
+Sixteen jobs green, one red: `Test (macos-latest / luajit)`, job
+**102217330515**, one failing target against 119 `test result: ok`:
+
+```
+---- a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join stdout ----
+thread 'a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join' (114814) panicked at tests/statusline_segments_acceptance.rs:996:54:
+called `Result::unwrap()` on an `Err` value: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s
+```
+
+Selector, job and all three required fragments are **#258's**, at the
+same site and with the same result line as its first occurrence in run
+34220035122: **#258's second occurrence**, commented there on
+2026-09-09. Not a rerun --- a different tree twenty-nine commits later
+--- and under the rerun rule a second occurrence is a second
+occurrence. This head is the one the branch merged from, so this run
+is the first on the branch that could be read after the branch stopped
+moving, and the first that a record could hold without being one run
+behind.
+
+**The `read Hello` family is at seven occurrences**, across four
+suites and five selectors, twice under #258's own selector. Counted
+from every macOS job log of every completed run on the branch and at
+the base, by the failing expression's `WouldBlock` and not by the
+literal string `read Hello`, which the two a16_26 occurrences do not
+carry (their panic is the bare `Result::unwrap()`; a grep for the
+string gives five and a grep for `WouldBlock` gives seven):
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1 | 34220035122 | `8f6784f` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 2 | 34222042303 | `e78d184` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 3 | 34269795016 | `04263c6` | `gpu_font_acceptance` | `v16_peer_never_receives_font_facts_and_v17_does` |
+| 4 | 34269795016 | `04263c6` | `m5_5_acceptance` | `m10_10_non_replica_frontend_does_not_receive_cursor_byte` |
+| 5 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 6 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 7 | 34272480226 | `d7fd465` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+
+**Zero at the merge base**, where all four of those selectors ran and
+passed on both macOS legs of run 34205653191. The comment on #258 of
+2026-09-09 says six; it is one short of its own list, and this is the
+correction of record.
+
+**SUPERSEDED: the family is at nine.** Run 34358682895 at `65648ec`
+added two more, one of them a new suite and selector. The table above is
+what was true at `d7fd465` and is not rewritten; the nine-row
+enumeration is in *PR #262's CI run at the head* below.
+
+**What #258's mechanism has that no other live row has is a
+measurement**, taken by C1's end-to-end round and re-checked at its
+close: on Linux, on one machine, bounding a ratio. `run_daemon` binds
+the listener (`src/daemon.rs:470`) before it constructs `EditorState`
+(`:479`), and `wait_for_daemon` in `tests/common/ready.rs` declares
+readiness on a successful `connect` while discarding its own 500 ms
+`Hello` read, so a fixture's budget covers only the residual boot and
+the failure needs bind-to-serving above roughly 700 ms. Over 1,500
+interleaved boots at `d97e137` and `d7fd465` the probe's
+connect-to-`Hello` is p50 50.14 ms and 50.13 ms with none of 600 idle
+probes over 100 ms, and the boot the branch's 407 added Lua lines
+lengthen moves p50 13.93 to 14.28 ms, paired mean +0.401 ms;
+`src/daemon.rs` is byte-identical between the shas and
+`ACCEPT_POLL_INTERVAL` is 50 ms at both, so the probe pays one whole
+accept quantum and a16_26's real headroom is 150 ms, not 200. That is
+why D30 calls #258 a fixture/daemon contract defect that predates the
+branch. The limit in the same breath: it bounds what the branch added,
+and it is not the interval on a macOS runner, which at C1's close no
+record had measured. #258 carries anything measured since.
+
+#### The macOS interval was measured on 2026-09-09, and it falsifies the excursion argument on the failing platform
+
+This section is the correction the paragraph above deferred to. It was
+owed at `f6f36bb`, which landed at 12:42:26Z --- seven minutes before
+the measurement existed --- and none of the six commits after it came
+back.
+
+Run **34351035133**, one `workflow_dispatch` on the throwaway branch
+`measure/hello-macos` at `50da74e` (`main` plus an instrument, left on
+the remote so its sha resolves, never to merge; its `Format` and `Lint`
+jobs are red on the instrument and mean nothing). The instrument times
+the `Hello` read `tests/common/ready.rs::wait_for_daemon` normally
+discards --- first accepted `connect` to first `Hello` --- with the cap
+raised from 500 ms to 20 s, and dumps a report from a last-sorted suite.
+
+**One quantile convention for the whole table: the instrument's own
+report, read from the job logs.** Every figure below is a column of the
+`site budget n p50 p90 max over_budget not_ok` line that suite printed;
+nothing here is recomputed. This is stated because the published `594`
+was not that: it is the rank-44 lower middle of the 88 raw samples,
+while the same row's `881` was taken from the report, so one row carried
+two provenances. Recomputing the row nearest-rank instead gives p50
+**594.07** and p90 **888.57** --- a 0.6% difference that moves no
+decision, which is why the fix is to name a convention rather than to
+argue for one.
+
+Boot to first `Hello`, one row per leg, all four from the same
+instrument and therefore comparable to each other:
+
+| leg | budget | n | p50 | p90 | max | over budget |
+|---|---|---|---|---|---|---|
+| `Test (macos-latest / luajit)` | 500 | 88 | **597.50** | **881.21** | **1114.80** | **71** |
+| `Test (macos-latest / lua54)` | 500 | 88 | 61.15 | 153.45 | 177.96 | 0 |
+| `Test (ubuntu-latest / lua54)` | 500 | 88 | 8.88 | 10.09 | 14.29 | 0 |
+| `Test (crdt)` | 500 | 88 | 4.69 | 5.79 | **63.70** | 0 |
+
+`a16_26`'s probe against a daemon already booted, same report:
+
+| leg | budget | n | p50 | p90 | max | over budget |
+|---|---|---|---|---|---|---|
+| `Test (macos-latest / luajit)` | 200 | 1 | 202.84 | 202.84 | 202.84 | 1 |
+| `Test (macos-latest / lua54)` | 200 | 3 | 148.39 | 196.76 | 196.76 | 0 |
+| `Test (ubuntu-latest / lua54)` | 200 | 3 | 48.56 | 49.90 | 49.90 | 0 |
+| `Test (crdt)` | 200 | 3 | 48.92 | 49.67 | 49.67 | 0 |
+
+`Test (ubuntu-latest / luajit)` produced no samples: it failed on the
+gopls fetch before any test ran, U18/#249's mechanism, exactly as it did
+in run 34358682895.
+
+**"On Linux under 15 ms" is false for one of the two Linux legs.**
+`Test (crdt)`'s max is 63.70 ms. Its p50 is 4.69 and `Test
+(ubuntu-latest / lua54)`'s max is 14.29, so the summary held for three
+of the four figures it covered and not the fourth.
+
+**The consequence for D30, stated plainly.** D30 justifies E1's merge
+with an excursion argument: readiness is a successful `connect`, the
+daemon binds before it can serve, so *"failure needs bind-to-serving
+above ~700 ms against a measured ~14 ms"* --- roughly fiftyfold, and
+therefore safe. On the leg that actually fails, bind-to-serving is p50
+**597.50 ms**, p90 **881.21 ms**, max **1114.80 ms**, and **71 of 88**
+boots already outrun the 500 ms after which the production readiness
+wait declares readiness anyway. The ~700 ms threshold is not a
+fiftyfold excursion there; it sits inside the observed distribution.
+D30's second bolded clause --- that the job-wide macOS question is
+UNTAKEN and that "macOS is two to five times over its budgets" is from
+the CI logs rather than a measurement on the platform --- is false as
+of 12:49:57Z on 2026-09-09.
+
+**What the measurement does not establish**, in its own terms: it is one
+`workflow_dispatch` run, one tree, one arm --- a distribution, not the
+paired two-sha comparison C1 ran on Linux, and not a rate over time. The
+cross-*leg* rows are four different jobs on four different runners, so
+the tenfold macOS luajit/lua54 gap is not attributable to the Lua flavor
+or to the runner and is not attributed here. `~14 ms` in D30 is *bind to
+`daemon listening`* on a laptop, a different endpoint from this table's
+*first connect to first `Hello`*; the comparable Linux figures are this
+table's own 8.88 and 4.69. Nothing was fixed from any of it.
+
+**Where this correction has and has not landed.** It is in the comment
+on #258 of 2026-09-09T12:49:57Z with these limits, in E2's handoff and
+fixes passes, in PR #262's body, in PR #257's body, in the roadmap's C2
+entry and in D30's own row, which now carries the original wording
+quoted beside it. It is **uncorrectable in `dbe40a1`**, the merge commit
+on `main`, whose message reads *"failure needs bind-to-serving above
+~700 ms against ~14 ms observed"*; that sentence is wrong for the
+platform the accepted red is on and it is in `main`'s permanent history.
+
+### `main` after E1: run 34349759554 at `dbe40a1`
+
+E1 merged as `dbe40a1` (squash of `d7fd465`, PR #257) on 2026-09-09, and
+its post-merge `push` run is **34349759554**: 18 jobs on one attempt,
+**16 green, 1 red, 1 skipped** (`Docs consistency`, correctly). A
+`push` run is keyed by sha in `ci.yml`'s concurrency group, so nothing
+cancelled it and it stands as read. The red is `Test (macos-latest /
+luajit)`, job 102459915513, with one failing target:
+
+```
+---- read_dir_supersede_cancels_in_flight_predecessor stdout ----
+thread 'read_dir_supersede_cancels_in_flight_predecessor' (96993) panicked at tests/m8_1_acceptance.rs:278:5:
+assertion `left == right` failed: first read_dir must be superseded; got ok
+  left: "ok"
+ right: "cancelled"
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+```
+
+That is **U17's selector and required fragment**, its fourth
+occurrence and its third on `main`, recorded on the row above. E0's
+post-merge run produced this row's second occurrence on the same leg,
+so E1's merge is the second consecutive merge whose post-merge run is
+red on U17 alone.
+
+**D30's revocation condition is not met.** D30 revokes E1's merge
+disposition if #258's selector recurs on `main` after the merge or a
+diagnosis shows a product defect. The job's log carries **zero**
+`WouldBlock`, so neither #258's selector nor any member of the `read
+Hello` family appeared, and no other selector this file or the
+`intermittent-red` issues name appeared either: `a16_26_…`, `acc28_…`,
+`v15_peer_…`, `ctrl_c_during_reconnect_sleep_…`,
+`stream_supersede_delivers_cancelled_to_on_close` and
+`wdired_external_same_size_same_second_rewrite_aborts` all ran on this
+leg and passed. One run, non-reproduction and nothing more; what it
+establishes is that the condition D30 named did not fire on the one
+run that could have fired it.
 
 ### The macOS reds have a merge-base control, and it excludes nothing
 
@@ -854,3 +1106,198 @@ expression, not a measurement" qualifier that the passes, the PR body
 and the four issues all carry. That claim is superseded by the control
 above. The commit is pushed and is not rewritten; this is the
 correction.
+
+### PR #262's CI run at the head `65648ec`
+
+Run **34358682895**, `pull_request`, head `65648ec`, one attempt, 18
+jobs, created 2026-09-09T13:41:21Z, completed 14:02:36Z, conclusion
+`failure`: **13 green, 4 red, 1 skipped** (`Docs consistency`, skipped
+correctly --- the changed paths include code). Counted from the jobs
+endpoint. Nothing was re-run.
+
+| job | id | verdict | disposition |
+|---|---|---|---|
+| `Lint (luajit)` | 102489798981 | RED | a **product defect of this branch**, not a signature |
+| `Test (ubuntu-latest / luajit, no crdt)` | 102489852744 | RED | the same defect |
+| `Test (ubuntu-latest / luajit)` | 102489852728 | RED | **U18 / #249**, the gopls fetch, before any test ran |
+| `Test (macos-latest / luajit)` | 102489852994 | RED | the `read Hello` family, **two members**, one of them new |
+
+**The two ubuntu reds were one line of this branch's own test code and
+are fixed, not dispositioned.** `tests/gui_desktop_basics_acceptance.rs`
+declared `fn gpu_binary` at module scope while its only caller is
+`#[cfg(feature = "crdt")]`, so the opt-out build saw dead code and both
+legs that set `-D warnings` failed to compile the test target:
+
+```
+error: function `gpu_binary` is never used
+  --> tests/gui_desktop_basics_acceptance.rs:10:4
+   = note: `-D dead-code` implied by `-D warnings`
+error: could not compile `pmacs` (test "gui_desktop_basics_acceptance") due to 1 previous error
+```
+
+Deterministic, reproducible on any machine with one command, and so
+outside this file's scope as a *signature*; it is recorded here only
+because two of the four reds in this run are it, and a later reader
+counting reds against rows would otherwise find two with no row. Fixed
+in `0c4eab2`. **No plan `scripts/gate` could print would have caught
+it** --- `-D warnings` was set in one stage that ran under default
+features, and `sweep-luajit` passes no `RUSTFLAGS`, so `cargo test
+--workspace --no-default-features --features luajit --no-run` finished
+with it as a warning. `16fddd4` adds `clippy-luajit` to the `--protocol`
+plan, which is CI's own `Lint (luajit)` second step verbatim.
+
+**`Test (ubuntu-latest / luajit)` is U18 / #249 again**, and it produced
+no test evidence at all: **zero** `test result:` lines in the whole job.
+It failed at *Install external tools* on
+
+```
+go: golang.org/x/tools/gopls@v0.16.2: loading deprecation for
+golang.org/x/tools/gopls: module golang.org/x/tools/gopls: read
+"https://proxy.golang.org/golang.org/x/tools/gopls/@v/list": stream
+error: stream ID 33; INTERNAL_ERROR; received from peer
+```
+
+exit 1. Not a test, so REFERRED as the row says; recorded because a leg
+that runs nothing is not a leg that passed.
+
+#### The `read Hello` family is at nine, across five suites and six selectors
+
+`Test (macos-latest / luajit)`, job 102489852994, carries exactly two
+`WouldBlock` occurrences, verbatim:
+
+```
+---- daemon_routes_semantic_family_to_semantic_session_only stdout ----
+thread 'daemon_routes_semantic_family_to_semantic_session_only' (84016) panicked at tests/m11_5_semantic_acceptance.rs:260:47:
+semantic read Hello: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+```
+
+```
+---- daemon_reships_the_summary_after_a_real_buffer_round_trip stdout ----
+thread 'daemon_reships_the_summary_after_a_real_buffer_round_trip' (123219) panicked at tests/theme_faces_acceptance.rs:1034:50:
+read Hello: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.10s
+```
+
+The first is a **new suite and a new selector** for this family, and its
+message carries a `semantic ` prefix the other members do not. The
+second is the third occurrence of member 5.
+
+**The count is nine, recomputed from the enumeration below and not
+incremented from seven.** The enumeration is the seven rows recorded at
+`d7fd465` plus these two; each is a distinct (run, selector) pair read
+from a macOS job log, counted by the failing expression's `WouldBlock`
+rather than by the literal string `read Hello`, which the two `a16_26`
+occurrences do not carry:
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1 | 34220035122 | `8f6784f` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 2 | 34222042303 | `e78d184` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 3 | 34269795016 | `04263c6` | `gpu_font_acceptance` | `v16_peer_never_receives_font_facts_and_v17_does` |
+| 4 | 34269795016 | `04263c6` | `m5_5_acceptance` | `m10_10_non_replica_frontend_does_not_receive_cursor_byte` |
+| 5 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 6 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 7 | 34272480226 | `d7fd465` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 8 | 34358682895 | `65648ec` | `m11_5_semantic_acceptance` | `daemon_routes_semantic_family_to_semantic_session_only` |
+| 9 | 34358682895 | `65648ec` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+
+Nine rows; five distinct suites (`statusline_segments_acceptance`,
+`theme_faces_acceptance`, `gpu_font_acceptance`, `m5_5_acceptance`,
+`m11_5_semantic_acceptance`); six distinct selectors (`a16_26_…`,
+`v15_peer_…`, `v16_peer_…`, `m10_10_…`, `daemon_reships_…`,
+`daemon_routes_…`). The seven-row table under run 34272480226 above is
+what was true at `d7fd465` and is left as it stands; this is the
+correction of record, in the file's own form.
+
+**#258's own selector did not fire in this run and U17 did not recur.**
+The base's post-merge job 102459915513 has zero `WouldBlock` and zero
+`read Hello`, so `65648ec` is a **candidate** for members 8 and 9 rather
+than excluded from them --- one green run at the base is
+non-reproduction and nothing more, and `tests/theme_faces_acceptance.rs`
+is a file this branch edits, while `tests/m11_5_semantic_acceptance.rs`
+is not. Both are a comment on #258 with the matching-rule difference
+stated, as the rule above requires: neither is #258's selector.
+
+### PR #262's CI run at the fix-round head `e5417f6`
+
+Run **34369540895**, `pull_request`, head `e5417f6`, one attempt, 18
+jobs, created 2026-09-09T15:19:58Z, completed 15:40:22Z, conclusion
+`failure`: **16 green, 1 red, 1 skipped** (`Docs consistency`, skipped
+correctly). Counted from the jobs endpoint. Nothing was re-run.
+
+**The build break is gone from CI, on both legs that carried it.**
+`Lint (luajit)` (102526900610) and `Test (ubuntu-latest / luajit, no
+crdt)` (102526964980) are **green**, against red at `65648ec` on the
+same two. `0c4eab2` fixed the defect and `16fddd4` made it a local red
+rather than a remote one. **U18/#249 did not recur either**: `Test
+(ubuntu-latest / luajit)` (102526965020) is green, so the leg that
+produced zero test evidence in the previous run produced a full job
+here.
+
+**The one red is `Test (macos-latest / luajit)`, job 102526965146, with
+two failing targets — and one of them is #258's own selector.**
+
+```
+---- a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join stdout ----
+thread 'a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join' (120331) panicked at tests/statusline_segments_acceptance.rs:996:54:
+called `Result::unwrap()` on an `Err` value: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.83s
+```
+
+Selector, job leg, site and all three required fragments are **#258's**,
+identical to its first occurrence in run 34220035122 and its second in
+run 34272480226, down to the `10 passed; 1 failed` result line. **This
+is #258's third occurrence, and its first on this branch** --- both
+earlier ones are PR #257's. Not a rerun: a different tree.
+
+```
+---- daemon_reships_the_summary_after_a_real_buffer_round_trip stdout ----
+thread 'daemon_reships_the_summary_after_a_real_buffer_round_trip' (122161) panicked at tests/theme_faces_acceptance.rs:1034:50:
+read Hello: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.42s
+```
+
+That is family member 5's **fourth** occurrence, and its second in
+consecutive runs on this branch.
+
+**The family is at eleven**, recomputed from the enumeration in the
+section above plus these two. Still **five suites and six selectors** ---
+both selectors are already in the list, so the count moves and the
+spread does not:
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1–7 | (PR #257) | `8f6784f` … `d7fd465` | four suites | five selectors; enumerated above |
+| 8 | 34358682895 | `65648ec` | `m11_5_semantic_acceptance` | `daemon_routes_semantic_family_to_semantic_session_only` |
+| 9 | 34358682895 | `65648ec` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| **10** | **34369540895** | **`e5417f6`** | **`statusline_segments_acceptance`** | **`a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`** |
+| **11** | **34369540895** | **`e5417f6`** | **`theme_faces_acceptance`** | **`daemon_reships_the_summary_after_a_real_buffer_round_trip`** |
+
+**What this bears on, stated rather than decided here.**
+
+- **#258 has now fired on `e2/gui-desktop-basics` under its own
+  selector**, which no earlier run on this branch did. D30's revocation
+  condition is written for `main` --- "if #258's selector recurs on
+  `main` after the merge" --- and this is a `pull_request` run on a
+  branch, so **the condition as written is not met by this**. Whether a
+  recurrence on the *next* phase's head should carry the same weight is
+  the owner's, and it is raised here because the disposition that
+  accepted #258 rested on a Linux measurement whose macOS half is now
+  taken and adverse.
+- **This branch is a candidate for none of it and excluded from none of
+  it.** `tests/theme_faces_acceptance.rs` is a file it edits;
+  `tests/statusline_segments_acceptance.rs` is not, and nothing in E2 or
+  in fix round 1 touches the daemon's boot path --- `src/daemon.rs` has
+  no diff in `dbe40a1..e5417f6` at all. Fix round 1's own six commits
+  are a moved test helper, a harness stage and its witness, two markdown
+  files and one doc comment; none of them can reach a `Hello` read.
+- **The measurement is the reading that fits.** On this leg boot to
+  first `Hello` is p50 597.50 ms with 71 of 88 boots past the readiness
+  wait's 500 ms, so a fixture whose budget starts at "connected" is
+  racing a daemon that is not yet serving. Two fixtures losing that race
+  in one job is what the measurement predicts, and it is what this job
+  shows.
+
+Both are a comment on #258 with the matching-rule difference stated:
+target 1 **is** #258, target 2 is the family and not #258.

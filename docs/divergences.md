@@ -32,7 +32,8 @@ whole. Under one cap a growing register squeezes the rules.
   not yet reachable in the GPU frontend. Removed when a word-wrap mode
   ships on both frontends with the difference in breaking rules stated,
   and horizontal reach of truncated text exists on the GPU.
-- **Zoom chords on a grid frontend (D22).** `C-+` and `C-=` zoom in,
+- **Zoom chords, Ctrl+wheel and the macOS Cmd chords (D22).** `C-+`
+  and `C-=` zoom in,
   `C--` out and `C-0` resets, as **global** bindings, so a grid frontend
   reaches them too and the terminal's own zoom chords are shadowed while
   pmacs runs. The keymap cannot express "GPU frontends only":
@@ -51,8 +52,20 @@ whole. Under one cap a growing register squeezes the rules.
   frontend-kind fact is reachable from Lua (`pmacs.frontend.id()`
   returns an id and nothing else), and adding an accessor was rejected
   as core surface E1 does not authorize. A grid user is therefore told
-  which sessions the change applies to, never when it took effect. `Q#Z3` (ship no bindings) and `Q#GA8` are
+  which sessions the change applies to, never when it took effect.
+  Two GPU-only islands ride the same entry. Ctrl+wheel in the GPU
+  frontend sends the zoom chords, one per whole notch, and scrolls
+  nothing; the grid frontend has no wheel modifier to give. On macOS
+  the GPU frontend translates the six standard Cmd chords --- Cmd-C,
+  -V, -X, -Z, -S and -A --- to their Ctrl equivalents before the
+  keymap sees them, so they do whatever `C-c`, `C-v`, `C-x`, `C-z`,
+  `C-s` and `C-a` do in pmacs (`C-c` and `C-x` are prefix keys, `C-v`
+  is the OS paste), and every other Super chord stays withheld from the
+  daemon; a terminal on macOS never sees Cmd at all, so the grid
+  frontend cannot match it. `Q#Z3` (ship no bindings), `Q#GA8` (no
+  frontend-only bindings) and `Q#S1-7` (Super chords withheld) are
   recorded as overruled for this entry's duration. Removed when
-  capability-aware keymap resolution lands, at which point the chords
-  bind on GPU frontends only and the grid frontend keeps its terminal's
-  zoom.
+  capability-aware keymap resolution lands, at which point the zoom
+  chords bind on GPU frontends only, the grid frontend keeps its
+  terminal's zoom, and the Cmd table becomes a frontend-scoped binding
+  the keymap can see and `describe-key` can name.

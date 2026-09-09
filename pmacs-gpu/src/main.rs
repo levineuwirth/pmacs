@@ -23,6 +23,7 @@
 //! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
 
 mod attach;
+mod geometry;
 mod math_layout;
 mod math_parse;
 mod terminal;
@@ -110,6 +111,51 @@ const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
 /// selected/default NORMAL-face advance ratio (the fixed-ASCII
 /// probe): the empty-document gutter fallback and the menu hit
 /// width follow the resolved family without JetBrains-only drift.
+/// The logical extent of the surface (E2.2). See `State::layout`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LogicalExtent {
+    width: u32,
+    height: u32,
+}
+
+impl LogicalExtent {
+    /// The physical surface over the scale factor, rounded per axis and
+    /// clamped away from zero as the surface itself is. At an integer
+    /// scale the division is exact; at a fractional one the logical
+    /// extent is within half a logical pixel of the surface's edge.
+    fn of(config: &wgpu::SurfaceConfiguration, scale: f32) -> Self {
+        let logical = |px: u32| ((px as f32 / scale).round() as u32).max(1);
+        Self {
+            width: logical(config.width),
+            height: logical(config.height),
+        }
+    }
+}
+
+/// Map a logical text area onto the physical surface (E2.2). glyphon's
+/// `left`, `top` and `bounds` are physical pixels and its `scale`
+/// multiplies the buffer's logical glyph positions, so a logical area
+/// crosses the boundary here, exactly once, at every `prepare` call.
+/// The `scale: 1.0` each area is built with is the logical value this
+/// replaces.
+fn scale_text_area<'a>(area: &TextArea<'a>, scale: f32) -> TextArea<'a> {
+    let px = |v: i32| (v as f32 * scale).round() as i32;
+    TextArea {
+        buffer: area.buffer,
+        left: area.left * scale,
+        top: area.top * scale,
+        scale,
+        bounds: TextBounds {
+            left: px(area.bounds.left),
+            top: px(area.bounds.top),
+            right: px(area.bounds.right),
+            bottom: px(area.bounds.bottom),
+        },
+        default_color: area.default_color,
+        custom_glyphs: area.custom_glyphs,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct FontMetrics {
     scale: f32,
@@ -345,9 +391,200 @@ fn probe_mono_advance(font_system: &mut FontSystem, family: &str, metrics: Metri
     (total_width > 0.0 && cells > 0.0).then_some(total_width / cells)
 }
 
-/// Initial window size in logical pixels.
-const INITIAL_WIDTH: u32 = 800;
-const INITIAL_HEIGHT: u32 = 200;
+/// What can fail between "the event loop is up" and "there is a
+/// surface to draw on" (E2.4). Each was a panic; each is now one
+/// actionable line on stderr and a non-zero exit, because a missing
+/// adapter on a headless box or a broken driver is a condition the
+/// user can act on and a backtrace is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuInitStage {
+    /// The windowing system refused a window.
+    Window,
+    /// wgpu could not wrap the window in a surface.
+    Surface,
+    /// No adapter accepted the surface.
+    Adapter,
+    /// The adapter refused a device.
+    Device,
+}
+
+impl GpuInitStage {
+    /// What failed, as the line's subject.
+    fn what(self) -> &'static str {
+        match self {
+            Self::Window => "could not create a window",
+            Self::Surface => "could not create a rendering surface for the window",
+            Self::Adapter => "no GPU adapter accepted the window's surface",
+            Self::Device => "the GPU adapter refused a device",
+        }
+    }
+
+    /// What to try, as the line's tail.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Window => "is a display (Wayland or X11) available to this process?",
+            Self::Surface => {
+                "the windowing system and the GPU backend disagree; try WGPU_BACKEND=gl or WGPU_BACKEND=vulkan"
+            }
+            Self::Adapter => {
+                "pmacs-gpu needs Vulkan, Metal or GL; `pmacs` without --gpu is the terminal frontend"
+            }
+            Self::Device => {
+                "the driver may be broken or out of memory; try another adapter with WGPU_ADAPTER_NAME"
+            }
+        }
+    }
+}
+
+/// A surface-creation failure (E2.4): the stage and the underlying
+/// error's own text. The typed errors are not kept because none of
+/// them is constructible outside its crate, and a line is what the
+/// user gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GpuInitError {
+    stage: GpuInitStage,
+    detail: String,
+}
+
+impl GpuInitError {
+    /// The process exit status for this failure: distinct from the
+    /// headless probe's `3` for "no adapter" so the two are never
+    /// confused in a log, and from `1`, which managed attach uses.
+    const EXIT_CODE: i32 = 4;
+
+    fn at(stage: GpuInitStage, error: &dyn std::fmt::Display) -> Self {
+        Self {
+            stage,
+            detail: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for GpuInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {}; {}",
+            self.stage.what(),
+            self.detail.replace('\n', " "),
+            self.stage.hint()
+        )
+    }
+}
+
+/// The caret's blink half-period (E2.6): on for this long, off for this
+/// long, while the window is focused and a caret is painted. A
+/// frontend constant, not a registered knob: a GPU preference reaches
+/// this crate only through a typed wire variant (`FontFacts`,
+/// `LineWrapFacts`), each of which took a wire phase, and E2 is not
+/// one. The `ui.caret` face is the registered half: its fg is the
+/// caret's color, relayed through `ThemeFacts`.
+///
+/// **"Only through a typed wire variant" overstates it, and this phase
+/// built two channels that physically could carry one, so both are
+/// named here and rejected rather than omitted.**
+///
+/// The first is the config directory. E2.1 gave this crate its own
+/// route there: `pmacs-gpu/src/geometry.rs` duplicates the core's
+/// `resolve_config_dir` and reads and writes a file beside it. A blink
+/// interval could travel that way. It must not --- an unversioned side
+/// file is a second configuration path for a knob `pmacs.config`
+/// already owns, it is read once at startup so a session runs stale,
+/// and it is exactly the off-path hardcode the roadmap's "no new
+/// dispatch shadow" rule points away from.
+///
+/// The second is argv and the environment, which E2.7 demonstrated in
+/// this same crate with `PMACS_GPU_PROBE_ZOOM_WHEEL` (`:1054`). That
+/// one is rejected *harder*, and for a different kind of reason: the
+/// probe variable selects a test mode and is not a preference, whereas
+/// a blink interval read from the environment would be a user-visible
+/// knob that does not register through `pmacs.config` --- a direct
+/// violation of a stated invariant, not a design objection to be
+/// weighed.
+///
+/// The accurate claim is therefore that no *supported* channel exists
+/// for a GPU preference outside a typed wire variant, and E2 is not a
+/// wire phase. Owed to the next phase that carries GPU preferences
+/// over the wire.
+const CARET_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// The caret's alpha while the window is unfocused (E2.6): steady and
+/// dimmed, so a background window shows where its point is without
+/// claiming the keyboard.
+const CARET_DIM_ALPHA: f32 = 0.35;
+
+/// The blink phase at `now` (E2.6): even phases paint the caret, odd
+/// ones hide it. Phase 0 starts at `epoch`, which every caret move
+/// resets, so a moving caret is always visible.
+fn blink_phase(
+    epoch: std::time::Instant,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> u64 {
+    let elapsed = now.saturating_duration_since(epoch);
+    if interval.is_zero() {
+        return 0;
+    }
+    (elapsed.as_nanos() / interval.as_nanos()) as u64
+}
+
+/// The platform whose keyboard conventions the frontend honors (E2.7,
+/// D22). A value rather than a `cfg!` at the use site so the macOS arm
+/// is drivable from a test on the Linux host that runs this crate's
+/// tests --- no CI leg runs them anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    /// Cmd is the command modifier and the six standard chords exist.
+    MacOs,
+    /// Everything else: Super chords belong to the desktop.
+    Other,
+}
+
+impl Platform {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// The macOS Cmd chords that become their Ctrl equivalents (E2.7, D22):
+/// Cmd-C, -V, -X, -Z, -S and -A, the six every macOS user has in their
+/// hands. On the wire they are `C-c`, `C-v`, `C-x`, `C-z`, `C-s` and
+/// `C-a`, which do whatever those chords do in pmacs --- `C-c` and `C-x`
+/// are prefix keys and `C-v` is the OS paste --- and every other Super
+/// chord stays withheld, as before. The translation is exact on the
+/// modifier: Cmd with Shift or Option is not one of the six.
+const MACOS_CMD_CHORDS: [char; 6] = ['c', 'v', 'x', 'z', 's', 'a'];
+
+/// Apply the macOS Cmd table (E2.7). A no-op on every other platform.
+fn translate_cmd_chord(
+    key: ProtocolKey,
+    mods: Modifiers,
+    platform: Platform,
+) -> (ProtocolKey, Modifiers) {
+    if platform != Platform::MacOs || mods != Modifiers::META {
+        return (key, mods);
+    }
+    match key {
+        ProtocolKey::Char(c) if MACOS_CMD_CHORDS.contains(&c.to_ascii_lowercase()) => {
+            (ProtocolKey::Char(c.to_ascii_lowercase()), Modifiers::CTRL)
+        }
+        _ => (key, mods),
+    }
+}
+
+/// A bell is a whole-client flash for this long (E2.3): visible, and
+/// over before the next keystroke.
+const BELL_FLASH: std::time::Duration = std::time::Duration::from_millis(120);
+/// The flash color, over everything: a light wash, not a white-out.
+const BELL_FLASH_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
+
+/// How long a geometry change waits before it is written, so a resize
+/// drag is one write rather than one per event. The exit path writes
+/// unconditionally, so this only bounds what a crash can lose.
+const GEOMETRY_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Color the surface clears to before text renders.
 const BG: wgpu::Color = wgpu::Color {
@@ -720,6 +957,14 @@ fn main() {
     } else {
         (None, Vec::new())
     };
+    // E2.1 — restore the last window geometry, or open at the default.
+    // A missing or unparseable file is the default, never an error: the
+    // window must open whatever the file holds.
+    let geometry_path = geometry::user_geometry_path();
+    let geometry = geometry_path
+        .as_deref()
+        .and_then(geometry::WindowGeometry::load)
+        .unwrap_or_default();
     let mut app = App {
         mode,
         proxy: Some(proxy),
@@ -729,10 +974,18 @@ fn main() {
         attach_client,
         pending_events,
         modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry,
+        geometry_path,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
     };
     event_loop
         .run_app(&mut app)
         .expect("winit event loop run_app");
+    if app.exit_code != 0 {
+        std::process::exit(app.exit_code);
+    }
 }
 
 /// Drive a real attach session headlessly and write a probe report.
@@ -806,6 +1059,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let zoom_key = std::env::var_os("PMACS_GPU_PROBE_ZOOM_KEY")
         .and_then(|value| value.into_string().ok())
         .and_then(|value| value.chars().next());
+    // E2.7 wheel mode: `PMACS_GPU_PROBE_ZOOM_WHEEL=in|out` banks one
+    // Ctrl+wheel notch through the production `zoom_wheel_chords` and
+    // sends what falls out, so the acceptance drives the same function
+    // `apply_wheel` does against a real daemon and reads the font that
+    // came back.
+    let zoom_wheel = std::env::var_os("PMACS_GPU_PROBE_ZOOM_WHEEL")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| match value.as_str() {
+            "in" => Some(-1.0_f32),
+            "out" => Some(1.0_f32),
+            _ => None,
+        });
     facts.code_font_centi_before = centi_px(state.fm.code_font_size());
     facts.code_font_centi_after = facts.code_font_centi_before;
     let mut sent_zoom = false;
@@ -1029,10 +1294,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
-                if let Some(chord) = zoom_key {
+                if zoom_key.is_some() || zoom_wheel.is_some() {
                     if !quiet && !sent_zoom && facts.frames + u32::from(is_snapshot) >= 1 {
                         sent_zoom = true;
-                        let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL);
+                        let chords = match (zoom_key, zoom_wheel) {
+                            (Some(chord), _) => vec![chord],
+                            (None, Some(notches)) => state.zoom_wheel_chords(notches),
+                            (None, None) => Vec::new(),
+                        };
+                        facts.zoom_chords_sent = chords.iter().collect();
+                        for chord in chords {
+                            let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL);
+                        }
                     }
                     if facts.font_facts_observed
                         && facts.code_font_centi_after != facts.code_font_centi_before
@@ -1124,6 +1397,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         facts.code_font_centi_before
     );
     let _ = writeln!(out, "code_font_centi_after={}", facts.code_font_centi_after);
+    let _ = writeln!(out, "zoom_chords_sent={}", facts.zoom_chords_sent);
     let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
@@ -1463,6 +1737,8 @@ struct ProbeFacts {
     /// frontend rejected as out of range cannot read as a zoom.
     code_font_centi_before: u32,
     code_font_centi_after: u32,
+    /// E2.7 — the zoom chords the probe sent, in order (`=` in, `-` out).
+    zoom_chords_sent: String,
     disconnect: Option<String>,
 }
 
@@ -1677,6 +1953,23 @@ struct App {
     /// delivers modifiers separately from key presses, so we track the
     /// current set and apply it when a key is sent (session B1).
     modifiers: winit::keyboard::ModifiersState,
+    /// The window's last known logical geometry (E2.1): what the window
+    /// was created with, then whatever `Resized` and `Moved` reported,
+    /// in logical pixels through the window's scale factor.
+    geometry: geometry::WindowGeometry,
+    /// Where the geometry is persisted, or `None` when no config
+    /// directory resolves — then nothing is written and nothing read.
+    geometry_path: Option<PathBuf>,
+    /// When the geometry last changed without having been written since;
+    /// the deadline pump writes it [`GEOMETRY_SAVE_DELAY`] later.
+    geometry_dirty_since: Option<std::time::Instant>,
+    /// The keyboard conventions in force (E2.7). `Platform::current()`
+    /// in production; a test sets the macOS arm on a Linux host.
+    platform: Platform,
+    /// The status `main` exits with after the loop ends (E2.4): zero
+    /// unless surface creation failed, in which case the failure was
+    /// printed and the loop was asked to exit.
+    exit_code: i32,
 }
 
 fn defer_app_event(
@@ -1718,6 +2011,19 @@ struct State {
     queue: wgpu::Queue,
     surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
+    /// The window's scale factor (E2.2): physical pixels per logical
+    /// pixel, `1.0` headless. Every layout quantity in this struct is
+    /// LOGICAL and meets the physical surface exactly once: the text
+    /// renderer's areas and bounds go through [`scale_text_area`], and
+    /// quads reach clip space through a logical extent, which makes the
+    /// conversion scale-invariant. Pointer input is divided by it on
+    /// intake, so hit tests never see a physical pixel.
+    scale: f32,
+    /// The surface extent in logical pixels (E2.2): `config` over
+    /// `scale`, rounded, recomputed on every resize and scale change.
+    /// Layout reads this and never `config`, so wrapping, hit tests
+    /// and the declared cell grid are the same at every scale.
+    layout: LogicalExtent,
     font_system: FontSystem,
     /// What sanitized assembly retained (Q#F6): the default family
     /// and the bundled face ID — the total-fallback anchors for
@@ -2008,6 +2314,8 @@ struct State {
     bg_vertex_buffer: ReusableVertexBuffer,
     squiggle_vertex_buffer: ReusableVertexBuffer,
     caret_vertex_buffer: ReusableVertexBuffer,
+    /// The bell flash's one quad (E2.3).
+    bell_vertex_buffer: ReusableVertexBuffer,
     minimap_vertex_buffer: ReusableVertexBuffer,
     /// Q#S2/Q#SL10 — the status band's shaped right rich text.
     status_buffer: Buffer,
@@ -2022,6 +2330,32 @@ struct State {
     statusline_segments: Option<StatuslineSegmentsLocal>,
     /// Q#S1 — the wire-authoritative status facts (protocol v8).
     status_facts: Option<StatusFactsLocal>,
+    /// Whether the window has keyboard focus (E2.3): `true` at creation
+    /// and headless, then whatever `Focused` last reported. Sent to the
+    /// daemon as `FocusGained`/`FocusLost`; E2.6 dims the caret on it.
+    focused: bool,
+    /// The instant a bell flash ends (E2.3), or `None`. The deadline
+    /// pump repaints when it passes.
+    bell_flash_until: Option<std::time::Instant>,
+    /// The daemon's post-handshake `Goodbye`, when one arrived before
+    /// the socket closed (E2.3); the disconnect notice names it.
+    goodbye: Option<pmacs_protocol::GoodbyeReason>,
+    /// The title last pushed to the window (E2.3), so an unchanged
+    /// title is not re-set on every `StatusFacts`.
+    last_title: Option<String>,
+    /// Banked Ctrl+wheel motion in notches (E2.7): a chord goes out per
+    /// whole notch, so a fine-grained trackpad zooms at the same rate
+    /// as a click wheel instead of one chord per pixel event.
+    zoom_wheel_residual: f32,
+    /// When the caret last moved (E2.6): the blink's phase 0.
+    caret_blink_epoch: std::time::Instant,
+    /// What the caret was keyed on at the last paint (E2.6): the own
+    /// cursor's byte and the minibuffer's input cursor. A change resets
+    /// the epoch, so typing or moving never lands on a hidden caret.
+    caret_blink_key: (Option<u64>, Option<u64>),
+    /// The phase the last paint used (E2.6); the deadline pump repaints
+    /// when the live phase differs.
+    caret_phase_painted: u64,
     /// Q#SR5 — the live incremental-search prompt (protocol v9), or
     /// `None` when no search is running. While `Some`, the status
     /// band's left side shows `I-search: <query> (n/m)` in place of
@@ -3064,8 +3398,99 @@ impl App {
             }
             AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
                 eprintln!("pmacs-gpu: daemon disconnected ({reason})");
-                state.on_daemon_disconnected("(daemon disconnected)");
+                // E2.3 — a Goodbye that preceded the close keeps its
+                // reason; a close without one is classified locally.
+                let notice = disconnect_notice(state.goodbye.as_ref(), Some(&reason));
+                state.on_daemon_disconnected(&notice);
             }
+        }
+    }
+
+    /// The scale factor the state is laid out at (E2.1, E2.2): what
+    /// converts the physical extents winit reports into the logical ones
+    /// the geometry file holds. `State::scale` is set from the window at
+    /// creation and on every `ScaleFactorChanged`, so it is the one
+    /// source, headless included.
+    fn window_scale_factor(&self) -> f64 {
+        self.state
+            .as_ref()
+            .map_or(1.0, |state| f64::from(state.scale))
+    }
+
+    /// Re-read the geometry after a resize (E2.1): the surface extent is
+    /// physical, so it is divided by the scale factor; the position is
+    /// read from the window when the platform reports one.
+    fn note_geometry_changed(&mut self) {
+        let scale = self.window_scale_factor();
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let logical = |px: u32| (f64::from(px) / scale).round() as u32;
+        self.geometry.width = logical(state.config.width);
+        self.geometry.height = logical(state.config.height);
+        if let Some(window) = state.window.as_ref()
+            && let Ok(position) = window.outer_position()
+        {
+            let logical_pos = position.to_logical::<f64>(scale);
+            self.geometry.position =
+                Some((logical_pos.x.round() as i32, logical_pos.y.round() as i32));
+        }
+        self.geometry = self.geometry.sanitized();
+        self.geometry_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Perform [`LifecycleRoute::Focus`] (E2.3): remember it for the
+    /// caret and tell the daemon, which routes it to `dispatch_focus`.
+    fn apply_focus(&mut self, gained: bool) {
+        if let Some(state) = self.state.as_mut() {
+            state.focused = gained;
+            state.request_redraw();
+        }
+        if let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_focus(gained)
+        {
+            eprintln!("pmacs-gpu: send focus failed: {e}");
+        }
+    }
+
+    /// Perform [`LifecycleRoute::ScaleFactor`] (E2.2). The logical extent
+    /// changes under an unchanged surface, so everything a resize
+    /// declares to the daemon — the viewport, the terminal grid, the
+    /// panel's cell capacity — is re-derived and re-declared at the new
+    /// scale, and the remembered geometry is re-read in logical units.
+    fn apply_scale_factor(&mut self, scale: f64) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let (width, height) = (state.config.width, state.config.height);
+        state.set_scale_factor(scale as f32);
+        self.apply_resize(width, height);
+        self.note_geometry_changed();
+    }
+
+    /// Perform [`LifecycleRoute::Moved`] (E2.1): record the new outer
+    /// position, converted to logical pixels.
+    fn note_moved(&mut self, x: i32, y: i32) {
+        let scale = self.window_scale_factor();
+        let logical = winit::dpi::PhysicalPosition::new(x, y).to_logical::<f64>(scale);
+        self.geometry.position = Some((logical.x.round() as i32, logical.y.round() as i32));
+        self.geometry = self.geometry.sanitized();
+        self.geometry_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Write the geometry if a path resolved (E2.1). A write failure is
+    /// reported once on stderr and does not disturb the session: losing
+    /// a remembered size is not worth an exit.
+    fn save_geometry(&mut self) {
+        self.geometry_dirty_since = None;
+        let Some(path) = self.geometry_path.as_deref() else {
+            return;
+        };
+        if let Err(error) = self.geometry.save(path) {
+            eprintln!(
+                "pmacs-gpu: could not save the window geometry to {}: {error}",
+                path.display()
+            );
         }
     }
 
@@ -3094,12 +3519,15 @@ impl App {
     }
 
     /// Perform [`PointerRoute::Moved`]. `x`/`y` are the physical
-    /// pointer position winit reported.
+    /// pointer position winit reported; they are divided by the scale
+    /// factor here (E2.2), so every hit test below and every stored
+    /// pointer position is logical.
     #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
     fn apply_cursor_moved(&mut self, x: f64, y: f64) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        let (x, y) = (x / f64::from(state.scale), y / f64::from(state.scale));
         state.pointer_pos = Some((x, y));
         // Q#CM1 — while the menu is open, motion only moves the
         // highlight; send a hover when the item under the pointer
@@ -3587,16 +4015,47 @@ impl App {
         // negation.
         let notch_px_y = state.fm.code_line_height() * WHEEL_LINES_PER_TICK;
         let notch_px_x = state.mono_advance() * WHEEL_COLUMNS_PER_TICK;
+        // E2.7 (D22) — Ctrl+wheel zooms and scrolls nothing. Each whole
+        // notch is the zoom chord the global keymap binds (`C-=` in,
+        // `C--` out), sent as the key it is, so the daemon runs the same
+        // `gpu.zoom-*` command a keyboard would and the font follows
+        // through FontFacts. Nothing here knows the font size.
+        if translate_mods(self.modifiers).contains(Modifiers::CTRL) {
+            let notches = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => -y,
+                winit::event::MouseScrollDelta::PixelDelta(p) => {
+                    if notch_px_y > 0.0 {
+                        -(p.y as f32) / state.scale / notch_px_y
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            let chords = self
+                .state
+                .as_mut()
+                .map(|state| state.zoom_wheel_chords(notches))
+                .unwrap_or_default();
+            if let Some(client) = self.attach_client.as_ref() {
+                for chord in chords {
+                    if let Err(e) = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL) {
+                        eprintln!("pmacs-gpu: zoom wheel send_key failed: {e}");
+                    }
+                }
+            }
+            return;
+        }
         let (dx, dy) = match delta {
             winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
+            // A pixel delta is physical (E2.2); the notch is logical.
             winit::event::MouseScrollDelta::PixelDelta(p) => (
                 if notch_px_x > 0.0 {
-                    p.x as f32 / notch_px_x
+                    p.x as f32 / state.scale / notch_px_x
                 } else {
                     0.0
                 },
                 if notch_px_y > 0.0 {
-                    -(p.y as f32) / notch_px_y
+                    -(p.y as f32) / state.scale / notch_px_y
                 } else {
                     0.0
                 },
@@ -3696,11 +4155,29 @@ impl App {
     /// single `if`.
     fn dispatch_window_event(&mut self, event: &WindowEvent) -> EventOutcome {
         match route_event(event) {
-            Route::Lifecycle(LifecycleRoute::Exit) => return EventOutcome::Exit,
+            Route::Lifecycle(LifecycleRoute::Exit) => {
+                // E2.1 — the exit path writes unconditionally, so the
+                // geometry the user leaves with is the one they get back.
+                self.save_geometry();
+                // E2.3 (Q#S1-1) — a native close detaches this frontend,
+                // and the Detach is on the socket before the loop exits.
+                if let Some(client) = self.attach_client.take() {
+                    client.detach();
+                }
+                return EventOutcome::Exit;
+            }
             Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
             Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
                 self.apply_resize(width, height);
+                self.note_geometry_changed();
             }
+            Route::Lifecycle(LifecycleRoute::Moved { x, y }) => {
+                self.note_moved(x, y);
+            }
+            Route::Lifecycle(LifecycleRoute::ScaleFactor(scale)) => {
+                self.apply_scale_factor(scale);
+            }
+            Route::Lifecycle(LifecycleRoute::Focus(gained)) => self.apply_focus(gained),
             Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
             Route::Keyboard {
                 action: KeyAction::Press,
@@ -3818,6 +4295,12 @@ impl App {
                 Modifiers::NONE
             };
         }
+
+        // E2.7 (D22) — on macOS the six standard Cmd chords become their
+        // Ctrl equivalents here, before the paste and chord paths below
+        // see them, so Cmd-V is the OS paste and Cmd-S reaches the
+        // keymap as C-s. Every other Super chord is still withheld.
+        let (pkey, pmods) = translate_cmd_chord(pkey, pmods, self.platform);
 
         // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
         // locally via arboard and ship it as a `Paste` event; the
@@ -4048,7 +4531,7 @@ enum EventOutcome {
 /// document. `ModifiersChanged` is grouped here as the one exception,
 /// and it is named as one: it is a bare state mutation with no gesture
 /// of its own and no body to extract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum LifecycleRoute {
     /// `CloseRequested` — leave the event loop. Q#S1-1: a native close
     /// detaches this frontend, it does not shut the daemon down.
@@ -4066,6 +4549,18 @@ enum LifecycleRoute {
     /// which is why the harness records local effects rather than
     /// outbound traffic.
     Redraw,
+    /// `Moved` — the window's new outer position in physical pixels
+    /// (E2.1). Local only: it feeds the persisted geometry.
+    Moved { x: i32, y: i32 },
+    /// `Focused` — the window gained or lost keyboard focus (E2.3). Sent
+    /// to the daemon as `FocusGained`/`FocusLost`, and kept locally for
+    /// the caret.
+    Focus(bool),
+    /// `ScaleFactorChanged` — the window's new scale factor (E2.2). The
+    /// arm is unwitnessable like `KeyboardInput`'s: winit's
+    /// `InnerSizeWriter` cannot be constructed outside winit, so the
+    /// decision is tested through `App::apply_scale_factor` directly.
+    ScaleFactor(f64),
 }
 
 /// The keyboard family's whole decision. `Release` is a route rather
@@ -4107,6 +4602,14 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
             height: size.height.max(1),
         }),
         WindowEvent::RedrawRequested => Some(LifecycleRoute::Redraw),
+        WindowEvent::Moved(position) => Some(LifecycleRoute::Moved {
+            x: position.x,
+            y: position.y,
+        }),
+        WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            Some(LifecycleRoute::ScaleFactor(*scale_factor))
+        }
+        WindowEvent::Focused(gained) => Some(LifecycleRoute::Focus(*gained)),
         _ => None,
     }
 }
@@ -4375,6 +4878,11 @@ impl EffectHarness {
                 pending_events: Vec::new(),
                 attach_client: Some(client),
                 modifiers: winit::keyboard::ModifiersState::empty(),
+                geometry: geometry::WindowGeometry::default(),
+                geometry_path: None,
+                geometry_dirty_since: None,
+                platform: Platform::Other,
+                exit_code: 0,
             },
             daemon,
             sentinel_seq: 0,
@@ -4431,10 +4939,37 @@ impl EffectHarness {
         let outcome = self.app.dispatch_window_event(event);
         let after = self.snapshot();
 
+        // E2.3 — an exit consumes the client to flush its Detach, so no
+        // sentinel can follow it; what the step sent is whatever is on
+        // the socket, read until it goes quiet.
+        let outbound = if outcome == EventOutcome::Exit {
+            self.drain_after_exit()
+        } else {
+            self.read_until_sentinel()
+        };
         Step {
             local: Self::diff(&before, &after, outcome),
-            outbound: self.read_until_sentinel(),
+            outbound,
         }
+    }
+
+    /// Everything on the socket after an exit step (E2.3). The writer
+    /// was joined by `detach`, so the frames are already in the kernel
+    /// buffer; the read stops at the first quiet second.
+    fn drain_after_exit(&mut self) -> Vec<pmacs_protocol::FrontendEvent> {
+        self.daemon
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("read timeout");
+        let mut seen = Vec::new();
+        while let Ok(event) =
+            pmacs_protocol::read_message::<pmacs_protocol::FrontendEvent>(&mut self.daemon)
+        {
+            seen.push(event);
+        }
+        self.daemon
+            .set_read_timeout(Some(Self::READ_CEILING))
+            .expect("read timeout");
+        seen
     }
 
     /// The local effects between two snapshots. Shared by every entry
@@ -4687,6 +5222,31 @@ mod input_routing_tests {
         assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Redraw));
     }
 
+    /// P1 — `Focused` (E2.3) carries the focus state through.
+    #[test]
+    fn focused_routes_the_focus_state() {
+        assert_eq!(
+            route_one(&WindowEvent::Focused(true)),
+            Route::Lifecycle(LifecycleRoute::Focus(true))
+        );
+        assert_eq!(
+            route_one(&WindowEvent::Focused(false)),
+            Route::Lifecycle(LifecycleRoute::Focus(false))
+        );
+    }
+
+    /// P1 — `Moved` (E2.1) carries the physical outer position through;
+    /// the logical conversion is the body's, because it needs the
+    /// window's scale factor.
+    #[test]
+    fn moved_routes_the_new_position() {
+        let event = WindowEvent::Moved(PhysicalPosition::new(30, -40));
+        assert_eq!(
+            route_one(&event),
+            Route::Lifecycle(LifecycleRoute::Moved { x: 30, y: -40 })
+        );
+    }
+
     /// P1, keyboard — the family's whole decision.
     ///
     /// It is driven through [`route_key_action`] rather than the
@@ -4845,14 +5405,284 @@ mod input_routing_tests {
         );
     }
 
-    /// P2 — `CloseRequested` is the other silent arm: one local effect,
-    /// no traffic.
+    /// P2, E2.3 — `CloseRequested` exits locally and sends exactly one
+    /// thing, the `Detach` naming this frontend (Q#S1-1), flushed to the
+    /// socket before the exit is returned. Until E2.3 this arm sent
+    /// nothing and the daemon learned of the close from the socket.
     #[test]
-    fn a_close_request_exits_locally_and_sends_nothing() {
+    fn a_close_request_detaches_and_exits() {
         let mut h = EffectHarness::new();
+        let fid = h.app.attach_client.as_ref().expect("client").frontend_id();
         let step = h.feed(&WindowEvent::CloseRequested);
         assert_eq!(step.local, vec![LocalEffect::Exit]);
+        assert_eq!(
+            step.outbound,
+            vec![pmacs_protocol::FrontendEvent::Detach(fid)],
+            "the close sends the Detach and nothing else"
+        );
+        assert!(
+            h.app.attach_client.is_none(),
+            "the client is consumed by the detach"
+        );
+    }
+
+    /// E2.3 — a focus change is one event to the daemon, the one that
+    /// names the new state, and the local flag follows it.
+    #[test]
+    fn a_focus_change_sends_the_matching_event() {
+        let mut h = EffectHarness::new();
+        let fid = h.app.attach_client.as_ref().expect("client").frontend_id();
+        let lost = h.feed(&WindowEvent::Focused(false));
+        assert_eq!(
+            lost.outbound,
+            vec![pmacs_protocol::FrontendEvent::FocusLost(fid)]
+        );
+        assert!(!h.app.state.as_ref().expect("state").focused);
+        let gained = h.feed(&WindowEvent::Focused(true));
+        assert_eq!(
+            gained.outbound,
+            vec![pmacs_protocol::FrontendEvent::FocusGained(fid)]
+        );
+        assert!(h.app.state.as_ref().expect("state").focused);
+    }
+
+    /// E2.1 — a resize re-reads the remembered geometry. Headless there
+    /// is no window, so the scale factor is 1 and the logical extent is
+    /// the surface extent; the change is marked for the debounced write.
+    #[test]
+    fn a_resize_updates_the_remembered_geometry() {
+        let mut h = EffectHarness::new();
+        assert_eq!(h.app.geometry, geometry::WindowGeometry::default());
+        assert!(h.app.geometry_dirty_since.is_none());
+        h.feed(&WindowEvent::Resized(PhysicalSize::new(700, 500)));
+        assert_eq!((h.app.geometry.width, h.app.geometry.height), (700, 500));
+        assert!(
+            h.app.geometry_dirty_since.is_some(),
+            "a changed geometry is queued for the debounced write"
+        );
+    }
+
+    /// E2.1 — a move records the outer position and sends nothing.
+    #[test]
+    fn a_move_updates_the_remembered_position_and_sends_nothing() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::Moved(PhysicalPosition::new(30, 40)));
+        assert!(step.local.is_empty(), "{:?}", step.local);
         assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+        assert_eq!(h.app.geometry.position, Some((30, 40)));
+    }
+
+    /// E2.1 — a native close writes the geometry the user leaves with,
+    /// unconditionally, to the resolved path, and the next launch would
+    /// read it back through the same parser.
+    #[test]
+    fn a_native_close_writes_the_geometry_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg").join(geometry::FILE_NAME);
+        let mut h = EffectHarness::new();
+        h.app.geometry_path = Some(path.clone());
+        h.feed(&WindowEvent::Resized(PhysicalSize::new(700, 500)));
+        h.feed(&WindowEvent::Moved(PhysicalPosition::new(30, 40)));
+        let step = h.feed(&WindowEvent::CloseRequested);
+        assert!(step.local.contains(&LocalEffect::Exit));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the close wrote the geometry file"),
+            "700 500 30 40\n"
+        );
+        assert_eq!(
+            geometry::WindowGeometry::load(&path),
+            Some(geometry::WindowGeometry {
+                width: 700,
+                height: 500,
+                position: Some((30, 40)),
+            })
+        );
+        assert!(
+            h.app.geometry_dirty_since.is_none(),
+            "the write clears the pending debounce"
+        );
+    }
+
+    /// E2.2 — a physical pointer position is divided by the scale on
+    /// intake, so hit testing and the stored position are logical.
+    #[test]
+    fn pointer_intake_divides_the_physical_position_by_the_scale() {
+        let mut h = EffectHarness::new();
+        h.app
+            .state
+            .as_mut()
+            .expect("harness state")
+            .set_scale_factor(2.0);
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(200.0, 100.0),
+        });
+        assert_eq!(
+            h.app.state.as_ref().expect("harness state").pointer_pos,
+            Some((100.0, 50.0))
+        );
+    }
+
+    /// E2.2 — a scale change under an unchanged surface halves the
+    /// logical extent, and the daemon is told the new cell grid: the
+    /// declaration is re-derived and re-sent, with about half the
+    /// columns and rows the unscaled surface declared.
+    #[test]
+    fn a_scale_change_redeclares_the_cell_grid_in_logical_units() {
+        let mut h = EffectHarness::new();
+        let before = h.feed(&WindowEvent::Resized(PhysicalSize::new(1280, 960)));
+        let cols_before = before
+            .outbound
+            .iter()
+            .find_map(|e| match e {
+                pmacs_protocol::FrontendEvent::FrontendCellGeometry { total, .. } => Some(*total),
+                _ => None,
+            })
+            .expect("a resize declares the cell grid");
+        h.app.apply_scale_factor(2.0);
+        let outbound = h.read_until_sentinel();
+        let after = outbound
+            .iter()
+            .find_map(|e| match e {
+                pmacs_protocol::FrontendEvent::FrontendCellGeometry { total, .. } => Some(*total),
+                _ => None,
+            })
+            .expect("a scale change re-declares the cell grid; outbound was {outbound:?}");
+        let state = h.app.state.as_ref().expect("harness state");
+        assert_eq!(
+            (state.config.width, state.config.height),
+            (1280, 960),
+            "the surface is unchanged"
+        );
+        assert_eq!(
+            state.layout,
+            LogicalExtent {
+                width: 640,
+                height: 480
+            }
+        );
+        assert!(
+            after.cols < cols_before.cols && after.cols >= cols_before.cols / 2 - 1,
+            "columns halve: {cols_before:?} -> {after:?}"
+        );
+        assert!(
+            after.rows < cols_before.rows && after.rows >= cols_before.rows / 2 - 1,
+            "rows halve: {cols_before:?} -> {after:?}"
+        );
+        assert_eq!(
+            (h.app.geometry.width, h.app.geometry.height),
+            (640, 480),
+            "the remembered geometry is logical"
+        );
+    }
+
+    /// E2.7 (D22), the macOS arm — each of the six Cmd chords reaches
+    /// the wire as its Ctrl equivalent, and Cmd-V is the OS paste.
+    #[test]
+    fn on_macos_the_six_cmd_chords_become_their_ctrl_equivalents() {
+        let mut h = EffectHarness::new();
+        // Idle dispatch: before a DispatchIdle every key round-trips as
+        // intercepted, which is not the path the six chords are about.
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.platform = Platform::MacOs;
+        h.app.modifiers = ModifiersState::SUPER;
+        for chord in ['c', 'x', 'z', 's', 'a'] {
+            let step = h.feed_keyboard(&Key::Character(chord.to_string().into()), None);
+            assert_eq!(step.outbound.len(), 1, "Cmd-{chord}: {:?}", step.outbound);
+            assert!(
+                matches!(&step.outbound[0], pmacs_protocol::FrontendEvent::Key(k)
+                    if k.key == ProtocolKey::Char(chord) && k.mods == Modifiers::CTRL),
+                "Cmd-{chord} must arrive as C-{chord}: {:?}",
+                step.outbound
+            );
+        }
+        h.app
+            .state
+            .as_mut()
+            .expect("state")
+            .set_test_selection(PasteSource::Clipboard, b"pasted");
+        let step = h.feed_keyboard(&Key::Character("v".into()), None);
+        assert!(
+            matches!(
+                step.outbound.as_slice(),
+                [pmacs_protocol::FrontendEvent::Paste { data, .. }] if data == b"pasted"
+            ),
+            "Cmd-V is the OS paste, as C-v is: {:?}",
+            step.outbound
+        );
+    }
+
+    /// E2.7 — outside the six, a Super chord stays withheld on macOS,
+    /// and on every other platform even the six are withheld: the desktop
+    /// owns Super there.
+    #[test]
+    fn other_super_chords_and_other_platforms_stay_withheld() {
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.platform = Platform::MacOs;
+        h.app.modifiers = ModifiersState::SUPER;
+        let step = h.feed_keyboard(&Key::Character("q".into()), None);
+        assert!(step.outbound.is_empty(), "Cmd-Q: {:?}", step.outbound);
+        h.app.modifiers = ModifiersState::SUPER | ModifiersState::SHIFT;
+        let step = h.feed_keyboard(&Key::Character("Z".into()), None);
+        assert!(step.outbound.is_empty(), "Cmd-Shift-Z: {:?}", step.outbound);
+        h.app.platform = Platform::Other;
+        h.app.modifiers = ModifiersState::SUPER;
+        let step = h.feed_keyboard(&Key::Character("s".into()), None);
+        assert!(
+            step.outbound.is_empty(),
+            "Super-S off macOS: {:?}",
+            step.outbound
+        );
+    }
+
+    /// E2.7 (D22) — Ctrl+wheel sends the zoom chord per whole notch and
+    /// scrolls nothing: no viewport goes out and the document does not
+    /// move. The font change itself is the daemon's, witnessed against a
+    /// real daemon by `ctrl_wheel_in_a_headless_gpu_changes_the_font_size`
+    /// in `tests/gui_desktop_basics_acceptance.rs`.
+    #[test]
+    fn ctrl_wheel_sends_the_zoom_chord_and_scrolls_nothing() {
+        let mut h = EffectHarness::new();
+        h.feed(&modifiers_changed(ModifiersState::CONTROL));
+        let wheel = |y: f32| WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, y),
+            phase: TouchPhase::Moved,
+        };
+        let up = h.feed(&wheel(1.0));
+        assert!(
+            matches!(up.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == ProtocolKey::Char('=') && k.mods == Modifiers::CTRL),
+            "one notch up is one C-=: {:?}",
+            up.outbound
+        );
+        assert!(
+            !up.local
+                .iter()
+                .any(|e| matches!(e, LocalEffect::Scroll { .. })),
+            "nothing scrolled: {:?}",
+            up.local
+        );
+        let down = h.feed(&wheel(-1.0));
+        assert!(
+            matches!(down.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == ProtocolKey::Char('-') && k.mods == Modifiers::CTRL),
+            "one notch down is one C--: {:?}",
+            down.outbound
+        );
+        let half = h.feed(&wheel(0.5));
+        assert!(
+            half.outbound.is_empty(),
+            "half a notch banks: {:?}",
+            half.outbound
+        );
+        let rest = h.feed(&wheel(0.5));
+        assert_eq!(
+            rest.outbound.len(),
+            1,
+            "the second half completes one notch"
+        );
     }
 
     /// P2 — a modifier change mutates `App` and sends nothing. The
@@ -5915,7 +6745,17 @@ impl ApplicationHandler<AppEvent> for App {
         if self.state.is_some() {
             return;
         }
-        self.state = Some(State::new(event_loop, CONNECTING_TEXT));
+        // E2.4 — a surface that cannot be made is one line and an exit,
+        // not a panic: the line says what failed and what to try.
+        match State::new(event_loop, CONNECTING_TEXT, self.geometry) {
+            Ok(state) => self.state = Some(state),
+            Err(error) => {
+                eprintln!("pmacs-gpu: {error}");
+                self.exit_code = GpuInitError::EXIT_CODE;
+                event_loop.exit();
+                return;
+            }
+        }
         if let Some(client) = self.attach_client.as_ref()
             && let Some(state) = self.state.as_mut()
         {
@@ -6000,6 +6840,26 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
+        // E2.3 — the bell flash ends on its own deadline.
+        if let Some(until) = state.bell_flash_until {
+            if now >= until {
+                state.bell_flash_until = None;
+                state.request_redraw();
+            } else {
+                next_wake = Some(next_wake.map_or(until, |w| w.min(until)));
+            }
+        }
+
+        // E2.6 — the caret blinks while focused: repaint when the phase
+        // has moved on from the one painted, and wake for the next.
+        if let Some(due) = state.next_caret_blink(now) {
+            let phase = blink_phase(state.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
+            if phase != state.caret_phase_painted {
+                state.request_redraw();
+            }
+            next_wake = Some(next_wake.map_or(due, |w| w.min(due)));
+        }
+
         // Q#M7 — edge auto-scroll.
         let mut drag_resend: Option<(BufferId, u64)> = None;
         if state.pointer_drag_active
@@ -6040,6 +6900,17 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some((buffer_id, byte)) = drag_resend {
             let mods = translate_mods(self.modifiers);
             self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+        }
+
+        // E2.1 — a changed geometry is written once it has been still
+        // for GEOMETRY_SAVE_DELAY; a resize drag collapses to one write.
+        if let Some(since) = self.geometry_dirty_since {
+            let due = since + GEOMETRY_SAVE_DELAY;
+            if now >= due {
+                self.save_geometry();
+            } else {
+                next_wake = Some(next_wake.map_or(due, |w| w.min(due)));
+            }
         }
 
         event_loop.set_control_flow(match next_wake {
@@ -6399,37 +7270,48 @@ impl SquiggleRenderer {
 
 impl State {
     #[allow(clippy::too_many_lines)] // linear GPU/font/surface setup; splitting would obscure ordering.
-    fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
+    fn new(
+        event_loop: &ActiveEventLoop,
+        initial_text: &str,
+        geometry: geometry::WindowGeometry,
+    ) -> Result<Self, GpuInitError> {
+        // E2.1 — the stored geometry is LOGICAL, and winit converts it at
+        // creation with the scale of the display the window lands on,
+        // which is what makes a size saved on a 2× monitor open at the
+        // same apparent size on a 1× one.
+        let mut attributes = Window::default_attributes()
+            .with_title("pmacs")
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                f64::from(geometry.width),
+                f64::from(geometry.height),
+            ));
+        if let Some((x, y)) = geometry.position {
+            attributes = attributes
+                .with_position(winit::dpi::LogicalPosition::new(f64::from(x), f64::from(y)));
+        }
         let window = Arc::new(
             event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("pmacs-gpu")
-                        .with_inner_size(winit::dpi::LogicalSize::new(
-                            f64::from(INITIAL_WIDTH),
-                            f64::from(INITIAL_HEIGHT),
-                        )),
-                )
-                .expect("create window"),
+                .create_window(attributes)
+                .map_err(|e| GpuInitError::at(GpuInitStage::Window, &e))?,
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
-            .expect("create surface");
+            .map_err(|e| GpuInitError::at(GpuInitStage::Surface, &e))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
-        .expect("request_adapter");
+        .map_err(|e| GpuInitError::at(GpuInitStage::Adapter, &e))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("pmacs-gpu device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             ..wgpu::DeviceDescriptor::default()
         }))
-        .expect("request_device");
+        .map_err(|e| GpuInitError::at(GpuInitStage::Device, &e))?;
 
         let inner_size = window.inner_size();
         let surface_caps = surface.get_capabilities(&adapter);
@@ -6450,7 +7332,10 @@ impl State {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        Self::assemble(
+        // E2.2 — the scale the window landed on. The surface above is
+        // physical; the layout is logical from the first frame.
+        let scale = window.scale_factor() as f32;
+        let mut state = Self::assemble(
             Some(window),
             Some(surface),
             device,
@@ -6458,7 +7343,9 @@ impl State {
             config,
             initial_text,
             &[],
-        )
+        );
+        state.set_scale_factor(scale);
+        Ok(state)
     }
 
     /// Build a windowless `State` that renders to an offscreen texture, for
@@ -6503,6 +7390,39 @@ impl State {
             // attach probe runs on the bundled face alone.
             headless_extra_font_sources(),
         ))
+    }
+
+    /// [`Self::new_headless`] at a scale factor other than 1 (E2.2): the
+    /// physical surface is `width`×`height` and the logical extent is
+    /// that over `scale`, exactly as a window on a 2× display reports.
+    #[cfg(test)]
+    fn new_headless_scaled(
+        width: u32,
+        height: u32,
+        scale: f32,
+        initial_text: &str,
+    ) -> Option<Self> {
+        let mut state = Self::new_headless(width, height, initial_text)?;
+        state.set_scale_factor(scale);
+        Some(state)
+    }
+
+    /// Adopt a new scale factor (E2.2). The physical surface is unchanged
+    /// and the logical extent is not, so everything a resize re-derives
+    /// — buffer sizes, the slice, the caret's follow — is re-derived
+    /// through [`Self::resize`] with the surface's own extent. A
+    /// non-finite or non-positive scale is treated as 1.
+    fn set_scale_factor(&mut self, scale: f32) -> Option<ViewportSend> {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        if (self.scale - scale).abs() <= f32::EPSILON {
+            return None;
+        }
+        self.scale = scale;
+        self.resize(self.config.width, self.config.height)
     }
 
     /// Build the window-agnostic half of a `State` — font system, glyph
@@ -6691,6 +7611,8 @@ impl State {
             device,
             queue,
             surface,
+            scale: 1.0,
+            layout: LogicalExtent::of(&config, 1.0),
             config,
             font_system,
             font_defaults,
@@ -6754,6 +7676,7 @@ impl State {
             bg_vertex_buffer: ReusableVertexBuffer::new(),
             squiggle_vertex_buffer: ReusableVertexBuffer::new(),
             caret_vertex_buffer: ReusableVertexBuffer::new(),
+            bell_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_vertex_buffer: ReusableVertexBuffer::new(),
             status_buffer,
             status_runs: None,
@@ -6761,6 +7684,14 @@ impl State {
             status_left_runs: None,
             statusline_segments: None,
             status_facts: None,
+            focused: true,
+            bell_flash_until: None,
+            goodbye: None,
+            last_title: None,
+            zoom_wheel_residual: 0.0,
+            caret_blink_epoch: std::time::Instant::now(),
+            caret_blink_key: (None, None),
+            caret_phase_painted: 0,
             search_prompt: None,
             minibuffer: None,
             menu: None,
@@ -7619,6 +8550,7 @@ impl State {
                     diag_warnings,
                     message,
                 });
+                self.sync_window_title();
                 self.request_redraw();
                 None
             }
@@ -7792,6 +8724,21 @@ impl State {
             }
             InstanceMessage::DispatchIdle { idle } => {
                 self.dispatch_idle = idle;
+                None
+            }
+            // E2.3 — a bell is a 120 ms whole-client flash.
+            InstanceMessage::Signal(InstanceSignal::Bell) => {
+                self.ring_bell();
+                None
+            }
+            // E2.3 — a post-handshake Goodbye names its reason. The socket
+            // closes next and `Disconnected` follows; the notice set here
+            // is what that arm keeps, so the reason is not lost to a
+            // generic "(daemon disconnected)".
+            InstanceMessage::Goodbye(reason) => {
+                let notice = disconnect_notice(Some(&reason), None);
+                self.goodbye = Some(reason);
+                self.on_daemon_disconnected(&notice);
                 None
             }
             // Q#CM6 — a daemon copy/cut published the region; write it to
@@ -8042,6 +8989,131 @@ impl State {
         }
     }
 
+    /// The caret's color (E2.6): the `ui.caret` face's fg when the theme
+    /// sets one, else the built-in; dimmed while unfocused.
+    fn caret_color(&self) -> [f32; 4] {
+        let base = match self
+            .faces
+            .get("ui.caret")
+            .and_then(|face| cell_color_to_glyphon(face.fg))
+        {
+            Some(color) => glyphon_to_rgba(color, CARET_COLOR[3]),
+            None => CARET_COLOR,
+        };
+        if self.focused {
+            base
+        } else {
+            [base[0], base[1], base[2], CARET_DIM_ALPHA]
+        }
+    }
+
+    /// What the blink is keyed on (E2.6): see `caret_blink_key`.
+    fn caret_blink_key_now(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.own_cursor.map(|cursor| cursor.byte),
+            self.minibuffer.as_ref().map(|mb| u64::from(mb.cursor)),
+        )
+    }
+
+    /// Whether the caret is painted at `now` (E2.6). A moved caret
+    /// restarts the blink at "on"; an unfocused window paints it steady
+    /// and dimmed; a focused one alternates every
+    /// [`CARET_BLINK_INTERVAL`].
+    fn caret_visible_at(&mut self, now: std::time::Instant) -> bool {
+        let key = self.caret_blink_key_now();
+        if key != self.caret_blink_key {
+            self.caret_blink_key = key;
+            self.caret_blink_epoch = now;
+        }
+        if !self.focused {
+            return true;
+        }
+        let phase = blink_phase(self.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
+        self.caret_phase_painted = phase;
+        phase.is_multiple_of(2)
+    }
+
+    /// When the blink next changes phase (E2.6), or `None` when nothing
+    /// blinks: unfocused, in terminal mode, or with no caret to paint.
+    fn next_caret_blink(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        if !self.focused
+            || self.terminal.is_some()
+            || (self.own_cursor.is_none() && self.minibuffer.is_none())
+        {
+            return None;
+        }
+        let phase = blink_phase(self.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
+        let next = u32::try_from(phase + 1).unwrap_or(u32::MAX);
+        Some(self.caret_blink_epoch + CARET_BLINK_INTERVAL * next)
+    }
+
+    /// Bank `notches` of Ctrl+wheel motion (E2.7) and return the zoom
+    /// chords that fall out: `=` per whole notch toward the user (in),
+    /// `-` per whole notch away (out). Positive winit `y` is "up",
+    /// which the caller has already negated, so a negative notch here
+    /// is wheel-up and zooms in, the convention every browser has.
+    fn zoom_wheel_chords(&mut self, notches: f32) -> Vec<char> {
+        self.zoom_wheel_residual += notches;
+        let mut chords = Vec::new();
+        while self.zoom_wheel_residual <= -1.0 {
+            self.zoom_wheel_residual += 1.0;
+            chords.push('=');
+        }
+        while self.zoom_wheel_residual >= 1.0 {
+            self.zoom_wheel_residual -= 1.0;
+            chords.push('-');
+        }
+        chords
+    }
+
+    /// The window title (E2.3): `<buffer> — pmacs`, or `pmacs` before the
+    /// first `StatusFacts`.
+    fn window_title(&self) -> String {
+        match self.status_facts.as_ref() {
+            Some(facts) => format!("{} — pmacs", facts.name),
+            None => "pmacs".to_owned(),
+        }
+    }
+
+    /// Push the title to the window when it changed (E2.3).
+    fn sync_window_title(&mut self) {
+        let title = self.window_title();
+        if self.last_title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.set_title(&title);
+        }
+        self.last_title = Some(title);
+    }
+
+    /// Start the bell flash (E2.3).
+    fn ring_bell(&mut self) {
+        self.bell_flash_until = Some(std::time::Instant::now() + BELL_FLASH);
+        self.request_redraw();
+    }
+
+    /// Whether the bell flash is still on at `now` (E2.3).
+    fn bell_flash_active(&self, now: std::time::Instant) -> bool {
+        self.bell_flash_until.is_some_and(|until| now < until)
+    }
+
+    /// The flash quad over the whole surface while the bell is on (E2.3),
+    /// or nothing.
+    fn bell_flash_vertex_bytes(&self) -> Vec<u8> {
+        if !self.bell_flash_active(std::time::Instant::now()) {
+            return Vec::new();
+        }
+        let rect = MinimapRect {
+            x: 0.0,
+            y: 0.0,
+            w: self.layout.width as f32,
+            h: self.layout.height as f32,
+            color: BELL_FLASH_RGBA,
+        };
+        rects_to_vertex_bytes(&[rect], self.layout.width, self.layout.height)
+    }
+
     /// Show a disconnect notice, leaving terminal mode first.
     ///
     /// Terminal mode prepares NO document code layer, and the terminal
@@ -8176,9 +9248,9 @@ impl State {
     /// when it cannot fit one whole cell.
     fn terminal_cell_viewport(&self) -> Option<CellSize> {
         let (origin_x, origin_y) = Self::terminal_origin();
-        let width = self.config.width as f32 - origin_x;
+        let width = self.layout.width as f32 - origin_x;
         let height =
-            document_text_bottom(self.config.height, self.fm, self.band_inset()) - origin_y;
+            document_text_bottom(self.layout.height, self.fm, self.band_inset()) - origin_y;
         crate::terminal::cell_viewport(
             width,
             height,
@@ -8238,12 +9310,12 @@ impl State {
             return None;
         }
         let top =
-            document_text_bottom(self.config.height, self.fm, band) + self.fm.divider_height();
+            document_text_bottom(self.layout.height, self.fm, band) + self.fm.divider_height();
         // Origin x = 0 and the FULL surface width, matching the declaration.
         // Any fractional right-edge remainder past the last whole column is
         // band background: it maps to no cell and emits no `PanelPointer`,
         // which `hit_test_cell`'s column bound already enforces.
-        Some((0.0, top, self.config.width as f32, cells_px))
+        Some((0.0, top, self.layout.width as f32, cells_px))
     }
 
     /// The divider strip: paint geometry AND hit geometry, one rect.
@@ -8257,8 +9329,8 @@ impl State {
         let band = PanelBandInset::installed(frame.size.rows, self.fm);
         Some((
             0.0,
-            document_text_bottom(self.config.height, self.fm, band),
-            self.config.width as f32,
+            document_text_bottom(self.layout.height, self.fm, band),
+            self.layout.width as f32,
             self.fm.divider_height(),
         ))
     }
@@ -8292,7 +9364,7 @@ impl State {
         let Some(advance) = self.panel_probe_advance() else {
             return (CellSize::new(0, 0), None);
         };
-        let height = (geometry_capacity_bottom(self.config.height, self.fm) - TEXT_TOP).max(0.0);
+        let height = (geometry_capacity_bottom(self.layout.height, self.fm) - TEXT_TOP).max(0.0);
         // **Full surface width from x = 0.** The panel grid is not inset by
         // the document's `TEXT_LEFT` or gutter — those are document padding,
         // and the band is a separate surface spanning the frame (parent
@@ -8300,7 +9372,7 @@ impl State {
         // beginning at x=0; document `TEXT_LEFT`/gutter padding is
         // unrelated"). Deducting `TEXT_LEFT` here under-declares columns and
         // leaves a strip the daemon never fills.
-        let width = self.config.width as f32;
+        let width = self.layout.width as f32;
         let total = crate::terminal::panel_cell_capacity(
             width,
             height,
@@ -8757,7 +9829,7 @@ impl State {
         if rects.is_empty() {
             return Vec::new();
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Curly underlines inside the band, on the squiggle pipeline — the same
@@ -8785,7 +9857,7 @@ impl State {
                 })
             })
             .collect();
-        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        squiggles_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Which panel cell a surface pixel is over, if any (Q#BP16).
@@ -9049,7 +10121,7 @@ impl State {
         ) {
             return false;
         }
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         x >= self.text_left() && x < self.text_bounds_right() as f32 && y >= TEXT_TOP && y < bottom
     }
 
@@ -9189,7 +10261,7 @@ impl State {
                 color: selection_color,
             });
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Curly terminal underlines through the existing squiggle pipeline.
@@ -9213,7 +10285,7 @@ impl State {
                 }
             })
             .collect();
-        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        squiggles_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// The child cursor's quad, painted through the caret primitive so
@@ -9234,8 +10306,8 @@ impl State {
                 h,
                 color: TERMINAL_CURSOR_RGBA,
             }],
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
         )
     }
 
@@ -9349,7 +10421,7 @@ impl State {
             .partition_point(|&s| s <= cursor)
             .saturating_sub(1);
         let visible =
-            estimated_visible_lines(self.config.height, self.fm, self.band_inset()).max(1);
+            estimated_visible_lines(self.layout.height, self.fm, self.band_inset()).max(1);
         let old = self.scroll_top;
         if cursor_line < self.scroll_top {
             self.scroll_top = cursor_line;
@@ -9832,8 +10904,8 @@ impl State {
         minimap_band_contains(
             x as f32,
             y as f32,
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
             self.fm,
             self.band_inset(),
         )
@@ -9876,13 +10948,13 @@ impl State {
     fn minimap_jump_to(&mut self, y: f64) -> Option<ViewportSend> {
         let target = minimap_y_to_line(
             y as f32,
-            self.config.height,
+            self.layout.height,
             self.current_line_starts.len(),
             self.fm,
             self.band_inset(),
         )?;
         let centered = target.saturating_sub(
-            estimated_visible_lines(self.config.height, self.fm, self.band_inset()) / 2,
+            estimated_visible_lines(self.layout.height, self.fm, self.band_inset()) / 2,
         );
         let delta = i64::try_from(centered).unwrap_or(i64::MAX)
             - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
@@ -10475,7 +11547,7 @@ impl State {
         if self.buffer.wrap() == Wrap::None {
             readout.push_str(&format_scroll_indicator(
                 self.scroll_top,
-                estimated_visible_lines(self.config.height, self.fm, self.band_inset()),
+                estimated_visible_lines(self.layout.height, self.fm, self.band_inset()),
                 self.current_line_starts.len(),
                 cursor_row,
             ));
@@ -10658,12 +11730,12 @@ impl State {
             .map_or(STATUS_BAND_BG, |(quad, _)| quad);
         let rect = MinimapRect {
             x: 0.0,
-            y: status_band_top(self.config.height, self.fm),
-            w: self.config.width as f32,
+            y: status_band_top(self.layout.height, self.fm),
+            w: self.layout.width as f32,
             h: self.fm.status_band_height(),
             color,
         };
-        rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+        rects_to_vertex_bytes(&[rect], self.layout.width, self.layout.height)
     }
 
     /// Re-shape the menu label text from `self.menu` (Q#CM1), one line
@@ -10725,7 +11797,7 @@ impl State {
                 });
             }
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Re-shape the minibuffer dropdown candidates (Q#MB1), one line per
@@ -10764,7 +11836,7 @@ impl State {
     /// candidate-free, or too short for a row. See [`mb_dropdown_window`].
     fn mb_visible_window(&self) -> Option<(usize, usize)> {
         let mb = self.minibuffer.as_ref()?;
-        let band_top = status_band_top(self.config.height, self.fm);
+        let band_top = status_band_top(self.layout.height, self.fm);
         mb_dropdown_window(
             mb.rows.len(),
             mb.selected.map_or(0, |s| s as usize),
@@ -10788,7 +11860,7 @@ impl State {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
-        let band_top = status_band_top(self.config.height, self.fm);
+        let band_top = status_band_top(self.layout.height, self.fm);
         let top_y = band_top - count as f32 * self.fm.mb_drop_row_height();
         Some((STATUS_TEXT_PAD, top_y, width))
     }
@@ -10826,7 +11898,7 @@ impl State {
                 color: MENU_SELECTED_BG,
             });
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Re-shape the completion dropdown rows (Arc 1a Q#C5), one line
@@ -10879,7 +11951,7 @@ impl State {
         // caret-follow residual) counts as scrolled out.
         let (x, top, line_height) = self.code_byte_px(anchor)?;
         let y = TEXT_TOP + top;
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         if y >= bottom || y + line_height <= TEXT_TOP {
             return None;
         }
@@ -10930,7 +12002,7 @@ impl State {
         }
         let sel = comp.selected.map_or(0, |s| s as usize);
         let (ax, line_top, line_h) = self.completion_anchor_px()?;
-        let band_top = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let band_top = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         let below_px = band_top - (line_top + line_h);
         let above_px = line_top - TEXT_TOP;
         let max_below = (below_px / self.fm.mb_drop_row_height()).floor() as usize;
@@ -10970,7 +12042,7 @@ impl State {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
-        let left = ax.min((self.config.width as f32 - width).max(0.0));
+        let left = ax.min((self.layout.width as f32 - width).max(0.0));
         Some((left, top_y, width))
     }
 
@@ -11005,7 +12077,7 @@ impl State {
                 color: MENU_SELECTED_BG,
             });
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
@@ -11249,7 +12321,7 @@ impl State {
         let line_starts = &self.current_line_starts;
         let n = line_starts.len();
         let top = self.scroll_top.min(n.saturating_sub(1));
-        let span = estimated_visible_lines(self.config.height, self.fm, self.band_inset()).max(1)
+        let span = estimated_visible_lines(self.layout.height, self.fm, self.band_inset()).max(1)
             + SCROLL_OVERSCAN;
         let vstart = line_starts[top];
         let bottom = top.saturating_add(span).min(n);
@@ -11464,12 +12536,12 @@ impl State {
     /// reshaping before its next frame.
     fn sync_buffer_dimensions(&mut self) -> bool {
         let fm = self.fm;
-        let width = self.config.width as f32;
-        let height = self.config.height as f32;
+        let width = self.layout.width as f32;
+        let height = self.layout.height as f32;
         let code_metrics = Metrics::new(fm.code_font_size(), fm.code_line_height());
         let code_width = (self.text_bounds_right() as f32 - self.text_left()).max(0.0);
         let code_height =
-            (document_text_bottom(self.config.height, fm, self.band_inset()) - TEXT_TOP).max(0.0);
+            (document_text_bottom(self.layout.height, fm, self.band_inset()) - TEXT_TOP).max(0.0);
         let code_layout_changed = self.buffer.metrics() != code_metrics
             || self.buffer.size() != (Some(code_width), Some(code_height));
         self.buffer.set_metrics_and_size(
@@ -11714,6 +12786,7 @@ impl State {
         let caret_was_painted = self.caret_painted_in_code_clip();
         self.config.width = width;
         self.config.height = height;
+        self.layout = LogicalExtent::of(&self.config, self.scale);
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
         }
@@ -11863,6 +12936,8 @@ impl State {
     /// (`render_offscreen`, F-014). No surface acquire, no `present`.
     #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
     fn render_to_view(&mut self, view: &wgpu::TextureView) {
+        // E2.2 — the one place logical text geometry becomes physical.
+        let scale = self.scale;
         let frame_start = debug_frame().then(std::time::Instant::now);
         self.refresh_status_line();
         self.refresh_menu_buffer();
@@ -11939,8 +13014,8 @@ impl State {
         };
         bg_vertices.extend(rects_to_vertex_bytes(
             &math_rules,
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
         ));
         bg_vertices.extend(self.status_band_vertex_bytes());
         // Bottom panel Stage 2B-3 — the divider strip, the band's cell
@@ -11997,14 +13072,26 @@ impl State {
                 &caret_vertices,
             )
             .cloned();
+        // E2.3 — the bell flash, drawn over everything else.
+        let flash_vertices = self.bell_flash_vertex_bytes();
+        let flash_vertex_count = (flash_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let flash_buffer = self
+            .bell_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu bell flash",
+                &flash_vertices,
+            )
+            .cloned();
         let after_bg = debug_frame().then(std::time::Instant::now);
         // Minimap quads depend only on (summary, size, scroll); cache
         // the vertex bytes instead of rescanning every line shape per
         // frame.
         let minimap_key = (
             self.current_summary.as_ref().map_or(0, |s| s.generation),
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
             self.scroll_top,
         );
         if self
@@ -12041,8 +13128,8 @@ impl State {
             .layout_runs()
             .map(|run| run.line_w)
             .fold(0.0_f32, f32::max);
-        let status_left = self.config.width as f32 - STATUS_TEXT_PAD - status_width;
-        let status_top = status_band_top(self.config.height, self.fm)
+        let status_left = self.layout.width as f32 - STATUS_TEXT_PAD - status_width;
+        let status_top = status_band_top(self.layout.height, self.fm)
             + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         // UX gutter: the code's left origin (past the gutter) and the
         // main-text clip-left. Computed here as locals — calling `self.*`
@@ -12086,7 +13173,7 @@ impl State {
                     // Clip at the status band (Q#S3): a final
                     // partially-visible line must not bleed
                     // into the band.
-                    bottom: document_text_bottom(self.config.height, self.fm, self.band_inset())
+                    bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
                 default_color: Color::rgb(230, 230, 235),
@@ -12100,44 +13187,47 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                code_areas.into_iter().chain([
-                    TextArea {
-                        buffer: &self.status_buffer,
-                        left: status_left,
-                        top: status_top,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: status_band_top(self.config.height, self.fm).round() as i32,
-                            right: self.config.width.cast_signed(),
-                            bottom: self.config.height.cast_signed(),
+                code_areas
+                    .into_iter()
+                    .chain([
+                        TextArea {
+                            buffer: &self.status_buffer,
+                            left: status_left,
+                            top: status_top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: status_band_top(self.layout.height, self.fm).round() as i32,
+                                right: self.layout.width.cast_signed(),
+                                bottom: self.layout.height.cast_signed(),
+                            },
+                            // Themes Q#TH5: a set ui.modeline face colors
+                            // the readout too (its fg after the reverse
+                            // swap); unset keeps the dimmer gray.
+                            default_color: readout_color,
+                            custom_glyphs: &[],
                         },
-                        // Themes Q#TH5: a set ui.modeline face colors
-                        // the readout too (its fg after the reverse
-                        // swap); unset keeps the dimmer gray.
-                        default_color: readout_color,
-                        custom_glyphs: &[],
-                    },
-                    TextArea {
-                        buffer: &self.status_left_buffer,
-                        left: STATUS_TEXT_PAD,
-                        top: status_top,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: status_band_top(self.config.height, self.fm).round() as i32,
-                            // Stop at the right group's actual origin.
-                            right: status_left.max(0.0).round() as i32,
-                            bottom: self.config.height.cast_signed(),
+                        TextArea {
+                            buffer: &self.status_left_buffer,
+                            left: STATUS_TEXT_PAD,
+                            top: status_top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: status_band_top(self.layout.height, self.fm).round() as i32,
+                                // Stop at the right group's actual origin.
+                                right: status_left.max(0.0).round() as i32,
+                                bottom: self.layout.height.cast_signed(),
+                            },
+                            // Themes Q#TH3: the left segment's face follows
+                            // its CONTENT class (minibuffer/isearch →
+                            // ui.minibuffer; message → ui.statusline; name
+                            // → ui.modeline).
+                            default_color: left_color,
+                            custom_glyphs: &[],
                         },
-                        // Themes Q#TH3: the left segment's face follows
-                        // its CONTENT class (minibuffer/isearch →
-                        // ui.minibuffer; message → ui.statusline; name
-                        // → ui.modeline).
-                        default_color: left_color,
-                        custom_glyphs: &[],
-                    },
-                ]),
+                    ])
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("text_renderer prepare");
@@ -12155,7 +13245,7 @@ impl State {
                     left: gutter_clip_left,
                     top: 0,
                     right: text_bounds_right,
-                    bottom: document_text_bottom(self.config.height, self.fm, self.band_inset())
+                    bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
                 default_color: MATH_INK_COLOR,
@@ -12169,7 +13259,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                math_areas,
+                math_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("math text_renderer prepare");
@@ -12187,7 +13279,7 @@ impl State {
                     left: 0,
                     top: 0,
                     right: gutter_clip_left,
-                    bottom: document_text_bottom(self.config.height, self.fm, self.band_inset())
+                    bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
                 // Themes Q#TH5: ui.gutter's {fg} mask colors the digits.
@@ -12204,7 +13296,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                gutter_areas,
+                gutter_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("gutter_text_renderer prepare");
@@ -12242,7 +13336,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                menu_areas,
+                menu_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("menu text_renderer prepare");
@@ -12266,7 +13362,7 @@ impl State {
                     left: x as i32,
                     top: top_y as i32,
                     right: (x + width).round() as i32,
-                    bottom: status_band_top(self.config.height, self.fm).round() as i32,
+                    bottom: status_band_top(self.layout.height, self.fm).round() as i32,
                 },
                 // Themes Q#TH5 (round 3 finding 1): the candidate
                 // glyph layer is ui.minibuffer.candidate's GPU site;
@@ -12283,7 +13379,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                mb_areas,
+                mb_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("minibuffer text_renderer prepare");
@@ -12320,7 +13418,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                completion_areas,
+                completion_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("completion text_renderer prepare");
@@ -12332,7 +13432,7 @@ impl State {
         // Hoisted out of the closure below: the band inset borrows `self`
         // immutably, and the closure already holds one.
         let document_clip_bottom =
-            document_text_bottom(self.config.height, self.fm, self.band_inset()).round() as i32;
+            document_text_bottom(self.layout.height, self.fm, self.band_inset()).round() as i32;
         let terminal_areas: Vec<TextArea> = self
             .terminal
             .as_ref()
@@ -12341,7 +13441,7 @@ impl State {
                 let advance = mono_advance;
                 let line = self.fm.code_line_height();
                 let clip_bottom = document_clip_bottom;
-                let clip_right = self.config.width.cast_signed();
+                let clip_right = self.layout.width.cast_signed();
                 terminal
                     .plan
                     .runs
@@ -12376,7 +13476,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                terminal_areas,
+                terminal_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("terminal text_renderer prepare");
@@ -12436,7 +13538,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                panel_areas,
+                panel_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("panel text_renderer prepare");
@@ -12540,6 +13644,11 @@ impl State {
             self.menu_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("menu text_renderer render");
+            // E2.3 — the bell flash washes over everything, menu included.
+            if let Some(vertex_buffer) = flash_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, flash_vertex_count);
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         self.atlas.trim();
@@ -12562,11 +13671,11 @@ impl State {
 
     fn text_bounds_right(&self) -> i32 {
         if self.has_minimap() {
-            minimap_left(self.config.width).map_or(self.config.width.cast_signed(), |left| {
+            minimap_left(self.layout.width).map_or(self.layout.width.cast_signed(), |left| {
                 (left - TEXT_RIGHT_GAP).max(TEXT_LEFT + 1.0).round() as i32
             })
         } else {
-            self.config.width.cast_signed()
+            self.layout.width.cast_signed()
         }
     }
 
@@ -12574,19 +13683,19 @@ impl State {
         self.current_summary
             .as_ref()
             .is_some_and(|summary| !summary.lines.is_empty())
-            && minimap_left(self.config.width).is_some()
+            && minimap_left(self.layout.width).is_some()
     }
 
     fn minimap_vertex_bytes(&self) -> Vec<u8> {
         let Some(summary) = self.current_summary.as_ref() else {
             return Vec::new();
         };
-        let visible_lines = estimated_visible_lines(self.config.height, self.fm, self.band_inset());
+        let visible_lines = estimated_visible_lines(self.layout.height, self.fm, self.band_inset());
         let rects = minimap_rects(
             &summary.lines,
             &self.current_line_shapes,
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
             // The thumb tracks the live scroll position. (It was
             // hardcoded to 0 from the minimap's first session —
             // surfaced by Q#M6 validation, where jumping finally
@@ -12596,7 +13705,7 @@ impl State {
             self.fm,
             self.band_inset(),
         );
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Vertex bytes for quad-pipeline background washes (drawn *under*
@@ -12625,7 +13734,7 @@ impl State {
         self.collect_own_decoration_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_peer_rects(buffer_id, &line_offsets, vstart, vend, &mut rects);
         self.collect_gutter_sign_rects(&mut rects, &line_offsets, vstart, vend);
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Per-visible-line diagnostic sign bars in the gutter (UX gutter
@@ -12747,7 +13856,7 @@ impl State {
                 );
             }
         }
-        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        squiggles_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Peer cursor-line + selection washes from `PresenceUpdate`
@@ -12884,18 +13993,22 @@ impl State {
     }
 
     fn caret_vertex_bytes(&mut self) -> Vec<u8> {
+        // E2.6 — the odd blink phase paints no caret at all.
+        if !self.caret_visible_at(std::time::Instant::now()) {
+            return Vec::new();
+        }
         // Q#MB1 — while the minibuffer is open the caret lives in the
         // band at the input cursor, not in the buffer.
         if self.minibuffer.is_some() {
             return self
                 .minibuffer_caret_rect()
-                .map(|r| rects_to_vertex_bytes(&[r], self.config.width, self.config.height))
+                .map(|r| rects_to_vertex_bytes(&[r], self.layout.width, self.layout.height))
                 .unwrap_or_default();
         }
         let Some(rect) = self.code_caret_rect_in_clip() else {
             return Vec::new();
         };
-        rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+        rects_to_vertex_bytes(&[rect], self.layout.width, self.layout.height)
     }
 
     /// The caret rectangle for an open minibuffer (Q#MB1): a thin bar in
@@ -12917,14 +14030,14 @@ impl State {
             0.0
         };
         let cursor_chars = mb.prompt.chars().count() as f32 + mb.cursor as f32;
-        let status_top = status_band_top(self.config.height, self.fm)
+        let status_top = status_band_top(self.layout.height, self.fm)
             + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         Some(MinimapRect {
             x: STATUS_TEXT_PAD + advance * cursor_chars,
             y: status_top,
             w: CARET_WIDTH,
             h: self.fm.status_line_height(),
-            color: CARET_COLOR,
+            color: self.caret_color(),
         })
     }
 
@@ -13063,7 +14176,7 @@ impl State {
             y: TEXT_TOP + top,
             w: CARET_WIDTH,
             h: line_height,
-            color: CARET_COLOR,
+            color: self.caret_color(),
         })
     }
 
@@ -13079,7 +14192,7 @@ impl State {
     /// is rewritten rather than merely joined by a new condition.
     fn code_caret_rect_in_clip(&mut self) -> Option<MinimapRect> {
         let rect = self.caret_rect()?;
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         let right = self.text_bounds_right() as f32;
         (rect.y < bottom
             && rect.y + rect.h > TEXT_TOP
@@ -13135,7 +14248,7 @@ impl State {
             return false;
         };
         let y = TEXT_TOP + top;
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         // Partial overlap counts as painted, the same rule the caret
         // clip uses. A first row half-scrolled under the top edge is
         // still legible, and a stricter test here would disagree with
@@ -14070,6 +15183,44 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
         InstanceMessage::PanelFrame(_) => "PanelFrame",
+    }
+}
+
+/// The reason a daemon gave in its `Goodbye`, in words (E2.3).
+fn describe_goodbye(reason: &pmacs_protocol::GoodbyeReason) -> String {
+    use pmacs_protocol::GoodbyeReason;
+    match reason {
+        GoodbyeReason::ShuttingDown => "it is shutting down".to_owned(),
+        GoodbyeReason::VersionMismatch { server, client } => format!(
+            "protocol version mismatch, the daemon speaks v{server} and this frontend offered v{client}"
+        ),
+        GoodbyeReason::AlreadyAttached => "another frontend holds this session".to_owned(),
+        GoodbyeReason::ProtocolError => {
+            "it rejected this frontend's traffic as a protocol error".to_owned()
+        }
+        GoodbyeReason::CapabilityMismatch { missing } => {
+            format!("capabilities missing: {}", missing.join(", "))
+        }
+    }
+}
+
+/// The disconnect notice (E2.3). A post-handshake `Goodbye` names its
+/// reason whatever the socket then did; without one, the transport's
+/// own EOF is a close the daemon did not announce, and any other
+/// transport error is reported as the loss it is.
+fn disconnect_notice(
+    goodbye: Option<&pmacs_protocol::GoodbyeReason>,
+    transport: Option<&str>,
+) -> String {
+    if let Some(reason) = goodbye {
+        return format!("(daemon said goodbye: {})", describe_goodbye(reason));
+    }
+    match transport {
+        Some(error) if error == pmacs_protocol::TransportError::Eof.to_string() => {
+            "(daemon closed the connection without a Goodbye)".to_owned()
+        }
+        Some(error) => format!("(daemon connection lost: {error})"),
+        None => "(daemon disconnected)".to_owned(),
     }
 }
 
@@ -18344,6 +19495,324 @@ mod tests {
             eprintln!("skipping headless render test: no wgpu adapter available");
         }
         state
+    }
+
+    /// E2.2 (the Stage 1 framing's C5a/C5b rows): at scale 2 with the
+    /// same LOGICAL size, the layout is stable while the pixels double.
+    /// The same document wraps into the same visual runs, the same
+    /// logical pointer position hits the same byte, the daemon is told
+    /// the same cell grid, and a quad reaches the same clip-space
+    /// position --- against a surface twice as wide and twice as tall.
+    #[test]
+    fn at_scale_two_the_logical_layout_is_stable_while_pixels_double() {
+        let long = "x".repeat(400);
+        let doc = format!("{long}\n{}", "line\n".repeat(60));
+        let Some(mut base) = headless_or_skip(900, 600, &doc) else {
+            return;
+        };
+        let mut scaled = State::new_headless_scaled(1800, 1200, 2.0, &doc)
+            .expect("an adapter exists: the unscaled state was built");
+
+        assert_eq!(
+            (scaled.config.width, scaled.config.height),
+            (2 * base.config.width, 2 * base.config.height),
+            "the physical surface doubles"
+        );
+        assert_eq!(scaled.layout, base.layout, "the logical extent is the same");
+        assert!((scaled.scale - 2.0).abs() < f32::EPSILON);
+
+        // The shaped buffer holds the visible slice, so the witness is
+        // the first source line's visual runs, not the document's.
+        let runs = |state: &State| state.buffer.layout_runs().count();
+        let first_line_runs =
+            |state: &State| state.buffer.layout_runs().filter(|r| r.line_i == 0).count();
+        assert!(
+            first_line_runs(&base) > 1,
+            "setup: the 400-column line must wrap at 900 logical px; runs = {}",
+            first_line_runs(&base)
+        );
+        assert_eq!(
+            first_line_runs(&scaled),
+            first_line_runs(&base),
+            "wrapping is decided in logical pixels"
+        );
+        assert_eq!(runs(&scaled), runs(&base), "and so is the visible slice");
+
+        for (x, y) in [(40.0, 30.0), (300.0, 30.0), (60.0, 200.0), (500.0, 400.0)] {
+            assert_eq!(
+                scaled.hit_test_source_byte(x, y),
+                base.hit_test_source_byte(x, y),
+                "the same logical point hits the same byte at ({x}, {y})"
+            );
+        }
+        assert_eq!(
+            scaled.declared_cell_total(),
+            base.declared_cell_total(),
+            "the daemon is told the same cell grid at every scale"
+        );
+        assert_eq!(
+            scaled.status_band_vertex_bytes(),
+            base.status_band_vertex_bytes(),
+            "a logical quad lands at the same clip-space position"
+        );
+        assert_eq!(
+            estimated_visible_lines(scaled.layout.height, scaled.fm, scaled.band_inset()),
+            estimated_visible_lines(base.layout.height, base.fm, base.band_inset()),
+        );
+    }
+
+    /// E2.3 — the title is `<buffer> — pmacs` once facts arrive, and
+    /// `pmacs` before.
+    #[test]
+    fn status_facts_set_the_window_title() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        assert_eq!(state.window_title(), "pmacs");
+        let _ = state.apply_attach_message(InstanceMessage::StatusFacts {
+            buffer_id: BufferId::from_raw(1),
+            name: "notes.md".to_owned(),
+            modified: true,
+            diag_errors: 0,
+            diag_warnings: 0,
+            message: None,
+        });
+        assert_eq!(state.window_title(), "notes.md — pmacs");
+        assert_eq!(state.last_title.as_deref(), Some("notes.md — pmacs"));
+    }
+
+    /// E2.3 — a bell flashes the whole client for `BELL_FLASH` and then
+    /// stops: one quad over the surface while it is on, nothing after.
+    #[test]
+    fn a_bell_flashes_the_whole_client_and_then_stops() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        assert!(
+            state.bell_flash_vertex_bytes().is_empty(),
+            "quiet before the bell"
+        );
+        let _ = state.apply_attach_message(InstanceMessage::Signal(InstanceSignal::Bell));
+        let now = std::time::Instant::now();
+        assert!(state.bell_flash_active(now));
+        let bytes = state.bell_flash_vertex_bytes();
+        assert_eq!(
+            bytes.len(),
+            6 * QUAD_VERTEX_STRIDE as usize,
+            "one quad over the surface"
+        );
+        assert!(
+            !state.bell_flash_active(now + BELL_FLASH + std::time::Duration::from_millis(1)),
+            "over after {BELL_FLASH:?}"
+        );
+    }
+
+    /// E2.6 — the blink alternates every interval from the epoch.
+    #[test]
+    fn blink_phase_alternates_every_interval_from_the_epoch() {
+        let epoch = std::time::Instant::now();
+        let i = CARET_BLINK_INTERVAL;
+        assert_eq!(blink_phase(epoch, epoch, i), 0);
+        assert_eq!(blink_phase(epoch, epoch + i / 2, i), 0);
+        assert_eq!(blink_phase(epoch, epoch + i, i), 1);
+        assert_eq!(blink_phase(epoch, epoch + i * 2, i), 2);
+        assert_eq!(blink_phase(epoch, epoch + i * 3, i), 3);
+        assert_eq!(
+            blink_phase(epoch + i, epoch, i),
+            0,
+            "a clock before the epoch is phase 0, never a wrap"
+        );
+    }
+
+    /// E2.6 — the caret honors the `ui.caret` face's fg once `ThemeFacts`
+    /// carries it, keeps the built-in color otherwise, and dims while
+    /// the window is unfocused.
+    #[test]
+    fn the_caret_honors_ui_caret_and_dims_on_focus_loss() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        assert!(
+            close(state.caret_color(), CARET_COLOR),
+            "built-in until the theme says: {:?}",
+            state.caret_color()
+        );
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts {
+            faces: vec![theme_face(
+                "ui.caret",
+                CellStyle {
+                    fg: CellColor::Rgb(255, 0, 0),
+                    ..CellStyle::default()
+                },
+            )],
+        });
+        assert!(
+            close(state.caret_color(), [1.0, 0.0, 0.0, CARET_COLOR[3]]),
+            "{:?}",
+            state.caret_color()
+        );
+        state.focused = false;
+        assert!(
+            close(state.caret_color(), [1.0, 0.0, 0.0, CARET_DIM_ALPHA]),
+            "dimmed while unfocused: {:?}",
+            state.caret_color()
+        );
+        let now = std::time::Instant::now();
+        assert!(
+            state.caret_visible_at(now + CARET_BLINK_INTERVAL),
+            "an unfocused caret is steady, not blinking"
+        );
+    }
+
+    /// E2.6 — a focused caret is painted in the even phase and not in
+    /// the odd one, a caret move restarts the blink at "on", and the
+    /// deadline pump is told when the next phase is due.
+    #[test]
+    fn a_focused_caret_blinks_and_a_move_restarts_it() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let now = std::time::Instant::now();
+        assert!(state.caret_visible_at(now), "phase 0 paints");
+        let epoch = state.caret_blink_epoch;
+        assert!(
+            !state.caret_visible_at(epoch + CARET_BLINK_INTERVAL),
+            "phase 1 hides"
+        );
+        assert_eq!(state.caret_phase_painted, 1);
+        assert_eq!(
+            state.next_caret_blink(epoch + CARET_BLINK_INTERVAL),
+            Some(epoch + CARET_BLINK_INTERVAL * 2),
+            "the pump wakes at the next phase"
+        );
+        // The caret moves: the blink restarts at "on" from the new epoch.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        let later = epoch + CARET_BLINK_INTERVAL;
+        assert!(state.caret_visible_at(later), "a moved caret is visible");
+        assert_eq!(state.caret_blink_epoch, later, "and its epoch is now");
+        // Nothing blinks without a caret, or in terminal mode.
+        state.own_cursor = None;
+        assert_eq!(state.next_caret_blink(later), None);
+    }
+
+    /// E2.4 — each surface-creation failure is one line naming what
+    /// failed, the driver's own words, and what to try; the exit status
+    /// is its own number.
+    #[test]
+    fn a_surface_failure_is_one_actionable_line() {
+        for stage in [
+            GpuInitStage::Window,
+            GpuInitStage::Surface,
+            GpuInitStage::Adapter,
+            GpuInitStage::Device,
+        ] {
+            let error = GpuInitError::at(stage, &"driver said\nno");
+            let line = error.to_string();
+            assert!(line.starts_with(stage.what()), "{line}");
+            assert!(
+                line.contains("driver said no"),
+                "the detail is folded to one line: {line}"
+            );
+            assert!(line.ends_with(stage.hint()), "{line}");
+            assert!(!line.contains('\n'), "one line: {line:?}");
+        }
+        assert!(
+            GpuInitStage::Adapter.hint().contains("terminal frontend"),
+            "the adapter line points at the frontend that needs no GPU"
+        );
+        assert_eq!(GpuInitError::EXIT_CODE, 4);
+        assert_ne!(
+            GpuInitError::EXIT_CODE,
+            3,
+            "the headless probe's no-adapter status"
+        );
+    }
+
+    /// E2.3 — a post-handshake Goodbye is surfaced with its reason, and a
+    /// close without one is classified locally from the transport's EOF.
+    #[test]
+    fn a_goodbye_names_its_reason_and_an_eof_is_classified() {
+        use pmacs_protocol::{GoodbyeReason, TransportError};
+        assert_eq!(
+            disconnect_notice(Some(&GoodbyeReason::AlreadyAttached), Some("anything")),
+            "(daemon said goodbye: another frontend holds this session)"
+        );
+        assert_eq!(
+            disconnect_notice(
+                Some(&GoodbyeReason::VersionMismatch {
+                    server: 25,
+                    client: 26
+                }),
+                None
+            ),
+            "(daemon said goodbye: protocol version mismatch, the daemon speaks v25 and this frontend offered v26)"
+        );
+        assert_eq!(
+            disconnect_notice(None, Some(&TransportError::Eof.to_string())),
+            "(daemon closed the connection without a Goodbye)"
+        );
+        assert_eq!(
+            disconnect_notice(None, Some("Io(Os { code: 104 })")),
+            "(daemon connection lost: Io(Os { code: 104 }))"
+        );
+        assert_eq!(disconnect_notice(None, None), "(daemon disconnected)");
+
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let _ = state.apply_attach_message(InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown));
+        assert_eq!(
+            state.current_text,
+            "(daemon said goodbye: it is shutting down)"
+        );
+        assert_eq!(state.goodbye, Some(GoodbyeReason::ShuttingDown));
+    }
+
+    /// E2.2 — the logical extent rounds per axis and never collapses to
+    /// zero; at an integer scale it is exact.
+    #[test]
+    fn the_logical_extent_rounds_per_axis_and_stays_positive() {
+        let config = |width, height| wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        assert_eq!(
+            LogicalExtent::of(&config(1800, 1200), 2.0),
+            LogicalExtent {
+                width: 900,
+                height: 600
+            }
+        );
+        assert_eq!(
+            LogicalExtent::of(&config(1201, 801), 1.5),
+            LogicalExtent {
+                width: 801,
+                height: 534
+            }
+        );
+        assert_eq!(
+            LogicalExtent::of(&config(1, 1), 3.0),
+            LogicalExtent {
+                width: 1,
+                height: 1
+            }
+        );
     }
 
     #[test]
