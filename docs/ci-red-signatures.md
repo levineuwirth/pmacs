@@ -690,6 +690,11 @@ passed on both macOS legs of run 34205653191. The comment on #258 of
 2026-09-09 says six; it is one short of its own list, and this is the
 correction of record.
 
+**SUPERSEDED: the family is at nine.** Run 34358682895 at `65648ec`
+added two more, one of them a new suite and selector. The table above is
+what was true at `d7fd465` and is not rewritten; the nine-row
+enumeration is in *PR #262's CI run at the head* below.
+
 **What #258's mechanism has that no other live row has is a
 measurement**, taken by C1's end-to-end round and re-checked at its
 close: on Linux, on one machine, bounding a ratio. `run_daemon` binds
@@ -791,3 +796,115 @@ expression, not a measurement" qualifier that the passes, the PR body
 and the four issues all carry. That claim is superseded by the control
 above. The commit is pushed and is not rewritten; this is the
 correction.
+
+### PR #262's CI run at the head `65648ec`
+
+Run **34358682895**, `pull_request`, head `65648ec`, one attempt, 18
+jobs, created 2026-09-09T13:41:21Z, completed 14:02:36Z, conclusion
+`failure`: **13 green, 4 red, 1 skipped** (`Docs consistency`, skipped
+correctly --- the changed paths include code). Counted from the jobs
+endpoint. Nothing was re-run.
+
+| job | id | verdict | disposition |
+|---|---|---|---|
+| `Lint (luajit)` | 102489798981 | RED | a **product defect of this branch**, not a signature |
+| `Test (ubuntu-latest / luajit, no crdt)` | 102489852744 | RED | the same defect |
+| `Test (ubuntu-latest / luajit)` | 102489852728 | RED | **U18 / #249**, the gopls fetch, before any test ran |
+| `Test (macos-latest / luajit)` | 102489852994 | RED | the `read Hello` family, **two members**, one of them new |
+
+**The two ubuntu reds were one line of this branch's own test code and
+are fixed, not dispositioned.** `tests/gui_desktop_basics_acceptance.rs`
+declared `fn gpu_binary` at module scope while its only caller is
+`#[cfg(feature = "crdt")]`, so the opt-out build saw dead code and both
+legs that set `-D warnings` failed to compile the test target:
+
+```
+error: function `gpu_binary` is never used
+  --> tests/gui_desktop_basics_acceptance.rs:10:4
+   = note: `-D dead-code` implied by `-D warnings`
+error: could not compile `pmacs` (test "gui_desktop_basics_acceptance") due to 1 previous error
+```
+
+Deterministic, reproducible on any machine with one command, and so
+outside this file's scope as a *signature*; it is recorded here only
+because two of the four reds in this run are it, and a later reader
+counting reds against rows would otherwise find two with no row. Fixed
+in `0c4eab2`. **No plan `scripts/gate` could print would have caught
+it** --- `-D warnings` was set in one stage that ran under default
+features, and `sweep-luajit` passes no `RUSTFLAGS`, so `cargo test
+--workspace --no-default-features --features luajit --no-run` finished
+with it as a warning. `16fddd4` adds `clippy-luajit` to the `--protocol`
+plan, which is CI's own `Lint (luajit)` second step verbatim.
+
+**`Test (ubuntu-latest / luajit)` is U18 / #249 again**, and it produced
+no test evidence at all: **zero** `test result:` lines in the whole job.
+It failed at *Install external tools* on
+
+```
+go: golang.org/x/tools/gopls@v0.16.2: loading deprecation for
+golang.org/x/tools/gopls: module golang.org/x/tools/gopls: read
+"https://proxy.golang.org/golang.org/x/tools/gopls/@v/list": stream
+error: stream ID 33; INTERNAL_ERROR; received from peer
+```
+
+exit 1. Not a test, so REFERRED as the row says; recorded because a leg
+that runs nothing is not a leg that passed.
+
+#### The `read Hello` family is at nine, across five suites and six selectors
+
+`Test (macos-latest / luajit)`, job 102489852994, carries exactly two
+`WouldBlock` occurrences, verbatim:
+
+```
+---- daemon_routes_semantic_family_to_semantic_session_only stdout ----
+thread 'daemon_routes_semantic_family_to_semantic_session_only' (84016) panicked at tests/m11_5_semantic_acceptance.rs:260:47:
+semantic read Hello: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+```
+
+```
+---- daemon_reships_the_summary_after_a_real_buffer_round_trip stdout ----
+thread 'daemon_reships_the_summary_after_a_real_buffer_round_trip' (123219) panicked at tests/theme_faces_acceptance.rs:1034:50:
+read Hello: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.10s
+```
+
+The first is a **new suite and a new selector** for this family, and its
+message carries a `semantic ` prefix the other members do not. The
+second is the third occurrence of member 5.
+
+**The count is nine, recomputed from the enumeration below and not
+incremented from seven.** The enumeration is the seven rows recorded at
+`d7fd465` plus these two; each is a distinct (run, selector) pair read
+from a macOS job log, counted by the failing expression's `WouldBlock`
+rather than by the literal string `read Hello`, which the two `a16_26`
+occurrences do not carry:
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1 | 34220035122 | `8f6784f` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 2 | 34222042303 | `e78d184` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 3 | 34269795016 | `04263c6` | `gpu_font_acceptance` | `v16_peer_never_receives_font_facts_and_v17_does` |
+| 4 | 34269795016 | `04263c6` | `m5_5_acceptance` | `m10_10_non_replica_frontend_does_not_receive_cursor_byte` |
+| 5 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 6 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 7 | 34272480226 | `d7fd465` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 8 | 34358682895 | `65648ec` | `m11_5_semantic_acceptance` | `daemon_routes_semantic_family_to_semantic_session_only` |
+| 9 | 34358682895 | `65648ec` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+
+Nine rows; five distinct suites (`statusline_segments_acceptance`,
+`theme_faces_acceptance`, `gpu_font_acceptance`, `m5_5_acceptance`,
+`m11_5_semantic_acceptance`); six distinct selectors (`a16_26_…`,
+`v15_peer_…`, `v16_peer_…`, `m10_10_…`, `daemon_reships_…`,
+`daemon_routes_…`). The seven-row table under run 34272480226 above is
+what was true at `d7fd465` and is left as it stands; this is the
+correction of record, in the file's own form.
+
+**#258's own selector did not fire in this run and U17 did not recur.**
+The base's post-merge job 102459915513 has zero `WouldBlock` and zero
+`read Hello`, so `65648ec` is a **candidate** for members 8 and 9 rather
+than excluded from them --- one green run at the base is
+non-reproduction and nothing more, and `tests/theme_faces_acceptance.rs`
+is a file this branch edits, while `tests/m11_5_semantic_acceptance.rs`
+is not. Both are a comment on #258 with the matching-rule difference
+stated, as the rule above requires: neither is #258's selector.
