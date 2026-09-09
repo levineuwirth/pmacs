@@ -23,6 +23,7 @@
 //! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
 
 mod attach;
+mod geometry;
 mod math_layout;
 mod math_parse;
 mod terminal;
@@ -345,9 +346,10 @@ fn probe_mono_advance(font_system: &mut FontSystem, family: &str, metrics: Metri
     (total_width > 0.0 && cells > 0.0).then_some(total_width / cells)
 }
 
-/// Initial window size in logical pixels.
-const INITIAL_WIDTH: u32 = 800;
-const INITIAL_HEIGHT: u32 = 200;
+/// How long a geometry change waits before it is written, so a resize
+/// drag is one write rather than one per event. The exit path writes
+/// unconditionally, so this only bounds what a crash can lose.
+const GEOMETRY_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Color the surface clears to before text renders.
 const BG: wgpu::Color = wgpu::Color {
@@ -720,6 +722,14 @@ fn main() {
     } else {
         (None, Vec::new())
     };
+    // E2.1 — restore the last window geometry, or open at the default.
+    // A missing or unparseable file is the default, never an error: the
+    // window must open whatever the file holds.
+    let geometry_path = geometry::user_geometry_path();
+    let geometry = geometry_path
+        .as_deref()
+        .and_then(geometry::WindowGeometry::load)
+        .unwrap_or_default();
     let mut app = App {
         mode,
         proxy: Some(proxy),
@@ -729,6 +739,9 @@ fn main() {
         attach_client,
         pending_events,
         modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry,
+        geometry_path,
+        geometry_dirty_since: None,
     };
     event_loop
         .run_app(&mut app)
@@ -1677,6 +1690,16 @@ struct App {
     /// delivers modifiers separately from key presses, so we track the
     /// current set and apply it when a key is sent (session B1).
     modifiers: winit::keyboard::ModifiersState,
+    /// The window's last known logical geometry (E2.1): what the window
+    /// was created with, then whatever `Resized` and `Moved` reported,
+    /// in logical pixels through the window's scale factor.
+    geometry: geometry::WindowGeometry,
+    /// Where the geometry is persisted, or `None` when no config
+    /// directory resolves — then nothing is written and nothing read.
+    geometry_path: Option<PathBuf>,
+    /// When the geometry last changed without having been written since;
+    /// the deadline pump writes it [`GEOMETRY_SAVE_DELAY`] later.
+    geometry_dirty_since: Option<std::time::Instant>,
 }
 
 fn defer_app_event(
@@ -3069,6 +3092,64 @@ impl App {
         }
     }
 
+    /// The window's scale factor, or 1.0 headless (E2.1): what converts
+    /// the physical extents winit reports into the logical ones the
+    /// geometry file holds.
+    fn window_scale_factor(&self) -> f64 {
+        self.state
+            .as_ref()
+            .and_then(|state| state.window.as_ref())
+            .map_or(1.0, |window| window.scale_factor())
+    }
+
+    /// Re-read the geometry after a resize (E2.1): the surface extent is
+    /// physical, so it is divided by the scale factor; the position is
+    /// read from the window when the platform reports one.
+    fn note_geometry_changed(&mut self) {
+        let scale = self.window_scale_factor();
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let logical = |px: u32| (f64::from(px) / scale).round() as u32;
+        self.geometry.width = logical(state.config.width);
+        self.geometry.height = logical(state.config.height);
+        if let Some(window) = state.window.as_ref()
+            && let Ok(position) = window.outer_position()
+        {
+            let logical_pos = position.to_logical::<f64>(scale);
+            self.geometry.position =
+                Some((logical_pos.x.round() as i32, logical_pos.y.round() as i32));
+        }
+        self.geometry = self.geometry.sanitized();
+        self.geometry_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Perform [`LifecycleRoute::Moved`] (E2.1): record the new outer
+    /// position, converted to logical pixels.
+    fn note_moved(&mut self, x: i32, y: i32) {
+        let scale = self.window_scale_factor();
+        let logical = winit::dpi::PhysicalPosition::new(x, y).to_logical::<f64>(scale);
+        self.geometry.position = Some((logical.x.round() as i32, logical.y.round() as i32));
+        self.geometry = self.geometry.sanitized();
+        self.geometry_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Write the geometry if a path resolved (E2.1). A write failure is
+    /// reported once on stderr and does not disturb the session: losing
+    /// a remembered size is not worth an exit.
+    fn save_geometry(&mut self) {
+        self.geometry_dirty_since = None;
+        let Some(path) = self.geometry_path.as_deref() else {
+            return;
+        };
+        if let Err(error) = self.geometry.save(path) {
+            eprintln!(
+                "pmacs-gpu: could not save the window geometry to {}: {error}",
+                path.display()
+            );
+        }
+    }
+
     /// Perform [`LifecycleRoute::Resize`]. `width`/`height` arrive
     /// already clamped away from zero by the router.
     fn apply_resize(&mut self, width: u32, height: u32) {
@@ -3696,10 +3777,19 @@ impl App {
     /// single `if`.
     fn dispatch_window_event(&mut self, event: &WindowEvent) -> EventOutcome {
         match route_event(event) {
-            Route::Lifecycle(LifecycleRoute::Exit) => return EventOutcome::Exit,
+            Route::Lifecycle(LifecycleRoute::Exit) => {
+                // E2.1 — the exit path writes unconditionally, so the
+                // geometry the user leaves with is the one they get back.
+                self.save_geometry();
+                return EventOutcome::Exit;
+            }
             Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
             Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
                 self.apply_resize(width, height);
+                self.note_geometry_changed();
+            }
+            Route::Lifecycle(LifecycleRoute::Moved { x, y }) => {
+                self.note_moved(x, y);
             }
             Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
             Route::Keyboard {
@@ -4066,6 +4156,9 @@ enum LifecycleRoute {
     /// which is why the harness records local effects rather than
     /// outbound traffic.
     Redraw,
+    /// `Moved` — the window's new outer position in physical pixels
+    /// (E2.1). Local only: it feeds the persisted geometry.
+    Moved { x: i32, y: i32 },
 }
 
 /// The keyboard family's whole decision. `Release` is a route rather
@@ -4107,6 +4200,10 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
             height: size.height.max(1),
         }),
         WindowEvent::RedrawRequested => Some(LifecycleRoute::Redraw),
+        WindowEvent::Moved(position) => Some(LifecycleRoute::Moved {
+            x: position.x,
+            y: position.y,
+        }),
         _ => None,
     }
 }
@@ -4375,6 +4472,9 @@ impl EffectHarness {
                 pending_events: Vec::new(),
                 attach_client: Some(client),
                 modifiers: winit::keyboard::ModifiersState::empty(),
+                geometry: geometry::WindowGeometry::default(),
+                geometry_path: None,
+                geometry_dirty_since: None,
             },
             daemon,
             sentinel_seq: 0,
@@ -4687,6 +4787,18 @@ mod input_routing_tests {
         assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Redraw));
     }
 
+    /// P1 — `Moved` (E2.1) carries the physical outer position through;
+    /// the logical conversion is the body's, because it needs the
+    /// window's scale factor.
+    #[test]
+    fn moved_routes_the_new_position() {
+        let event = WindowEvent::Moved(PhysicalPosition::new(30, -40));
+        assert_eq!(
+            route_one(&event),
+            Route::Lifecycle(LifecycleRoute::Moved { x: 30, y: -40 })
+        );
+    }
+
     /// P1, keyboard — the family's whole decision.
     ///
     /// It is driven through [`route_key_action`] rather than the
@@ -4853,6 +4965,63 @@ mod input_routing_tests {
         let step = h.feed(&WindowEvent::CloseRequested);
         assert_eq!(step.local, vec![LocalEffect::Exit]);
         assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+    }
+
+    /// E2.1 — a resize re-reads the remembered geometry. Headless there
+    /// is no window, so the scale factor is 1 and the logical extent is
+    /// the surface extent; the change is marked for the debounced write.
+    #[test]
+    fn a_resize_updates_the_remembered_geometry() {
+        let mut h = EffectHarness::new();
+        assert_eq!(h.app.geometry, geometry::WindowGeometry::default());
+        assert!(h.app.geometry_dirty_since.is_none());
+        h.feed(&WindowEvent::Resized(PhysicalSize::new(700, 500)));
+        assert_eq!((h.app.geometry.width, h.app.geometry.height), (700, 500));
+        assert!(
+            h.app.geometry_dirty_since.is_some(),
+            "a changed geometry is queued for the debounced write"
+        );
+    }
+
+    /// E2.1 — a move records the outer position and sends nothing.
+    #[test]
+    fn a_move_updates_the_remembered_position_and_sends_nothing() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::Moved(PhysicalPosition::new(30, 40)));
+        assert!(step.local.is_empty(), "{:?}", step.local);
+        assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+        assert_eq!(h.app.geometry.position, Some((30, 40)));
+    }
+
+    /// E2.1 — a native close writes the geometry the user leaves with,
+    /// unconditionally, to the resolved path, and the next launch would
+    /// read it back through the same parser.
+    #[test]
+    fn a_native_close_writes_the_geometry_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg").join(geometry::FILE_NAME);
+        let mut h = EffectHarness::new();
+        h.app.geometry_path = Some(path.clone());
+        h.feed(&WindowEvent::Resized(PhysicalSize::new(700, 500)));
+        h.feed(&WindowEvent::Moved(PhysicalPosition::new(30, 40)));
+        let step = h.feed(&WindowEvent::CloseRequested);
+        assert!(step.local.contains(&LocalEffect::Exit));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the close wrote the geometry file"),
+            "700 500 30 40\n"
+        );
+        assert_eq!(
+            geometry::WindowGeometry::load(&path),
+            Some(geometry::WindowGeometry {
+                width: 700,
+                height: 500,
+                position: Some((30, 40)),
+            })
+        );
+        assert!(
+            h.app.geometry_dirty_since.is_none(),
+            "the write clears the pending debounce"
+        );
     }
 
     /// P2 — a modifier change mutates `App` and sends nothing. The
@@ -5915,7 +6084,7 @@ impl ApplicationHandler<AppEvent> for App {
         if self.state.is_some() {
             return;
         }
-        self.state = Some(State::new(event_loop, CONNECTING_TEXT));
+        self.state = Some(State::new(event_loop, CONNECTING_TEXT, self.geometry));
         if let Some(client) = self.attach_client.as_ref()
             && let Some(state) = self.state.as_mut()
         {
@@ -6040,6 +6209,17 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some((buffer_id, byte)) = drag_resend {
             let mods = translate_mods(self.modifiers);
             self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+        }
+
+        // E2.1 — a changed geometry is written once it has been still
+        // for GEOMETRY_SAVE_DELAY; a resize drag collapses to one write.
+        if let Some(since) = self.geometry_dirty_since {
+            let due = since + GEOMETRY_SAVE_DELAY;
+            if now >= due {
+                self.save_geometry();
+            } else {
+                next_wake = Some(next_wake.map_or(due, |w| w.min(due)));
+            }
         }
 
         event_loop.set_control_flow(match next_wake {
@@ -6399,19 +6579,26 @@ impl SquiggleRenderer {
 
 impl State {
     #[allow(clippy::too_many_lines)] // linear GPU/font/surface setup; splitting would obscure ordering.
-    fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("pmacs-gpu")
-                        .with_inner_size(winit::dpi::LogicalSize::new(
-                            f64::from(INITIAL_WIDTH),
-                            f64::from(INITIAL_HEIGHT),
-                        )),
-                )
-                .expect("create window"),
-        );
+    fn new(
+        event_loop: &ActiveEventLoop,
+        initial_text: &str,
+        geometry: geometry::WindowGeometry,
+    ) -> Self {
+        // E2.1 — the stored geometry is LOGICAL, and winit converts it at
+        // creation with the scale of the display the window lands on,
+        // which is what makes a size saved on a 2× monitor open at the
+        // same apparent size on a 1× one.
+        let mut attributes = Window::default_attributes()
+            .with_title("pmacs-gpu")
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                f64::from(geometry.width),
+                f64::from(geometry.height),
+            ));
+        if let Some((x, y)) = geometry.position {
+            attributes = attributes
+                .with_position(winit::dpi::LogicalPosition::new(f64::from(x), f64::from(y)));
+        }
+        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
