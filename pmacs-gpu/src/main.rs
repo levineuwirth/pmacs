@@ -500,6 +500,54 @@ fn blink_phase(
     (elapsed.as_nanos() / interval.as_nanos()) as u64
 }
 
+/// The platform whose keyboard conventions the frontend honors (E2.7,
+/// D22). A value rather than a `cfg!` at the use site so the macOS arm
+/// is drivable from a test on the Linux host that runs this crate's
+/// tests --- no CI leg runs them anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    /// Cmd is the command modifier and the six standard chords exist.
+    MacOs,
+    /// Everything else: Super chords belong to the desktop.
+    Other,
+}
+
+impl Platform {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// The macOS Cmd chords that become their Ctrl equivalents (E2.7, D22):
+/// Cmd-C, -V, -X, -Z, -S and -A, the six every macOS user has in their
+/// hands. On the wire they are `C-c`, `C-v`, `C-x`, `C-z`, `C-s` and
+/// `C-a`, which do whatever those chords do in pmacs --- `C-c` and `C-x`
+/// are prefix keys and `C-v` is the OS paste --- and every other Super
+/// chord stays withheld, as before. The translation is exact on the
+/// modifier: Cmd with Shift or Option is not one of the six.
+const MACOS_CMD_CHORDS: [char; 6] = ['c', 'v', 'x', 'z', 's', 'a'];
+
+/// Apply the macOS Cmd table (E2.7). A no-op on every other platform.
+fn translate_cmd_chord(
+    key: ProtocolKey,
+    mods: Modifiers,
+    platform: Platform,
+) -> (ProtocolKey, Modifiers) {
+    if platform != Platform::MacOs || mods != Modifiers::META {
+        return (key, mods);
+    }
+    match key {
+        ProtocolKey::Char(c) if MACOS_CMD_CHORDS.contains(&c.to_ascii_lowercase()) => {
+            (ProtocolKey::Char(c.to_ascii_lowercase()), Modifiers::CTRL)
+        }
+        _ => (key, mods),
+    }
+}
+
 /// A bell is a whole-client flash for this long (E2.3): visible, and
 /// over before the next keystroke.
 const BELL_FLASH: std::time::Duration = std::time::Duration::from_millis(120);
@@ -902,6 +950,7 @@ fn main() {
         geometry,
         geometry_path,
         geometry_dirty_since: None,
+        platform: Platform::current(),
         exit_code: 0,
     };
     event_loop
@@ -983,6 +1032,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let zoom_key = std::env::var_os("PMACS_GPU_PROBE_ZOOM_KEY")
         .and_then(|value| value.into_string().ok())
         .and_then(|value| value.chars().next());
+    // E2.7 wheel mode: `PMACS_GPU_PROBE_ZOOM_WHEEL=in|out` banks one
+    // Ctrl+wheel notch through the production `zoom_wheel_chords` and
+    // sends what falls out, so the acceptance drives the same function
+    // `apply_wheel` does against a real daemon and reads the font that
+    // came back.
+    let zoom_wheel = std::env::var_os("PMACS_GPU_PROBE_ZOOM_WHEEL")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| match value.as_str() {
+            "in" => Some(-1.0_f32),
+            "out" => Some(1.0_f32),
+            _ => None,
+        });
     facts.code_font_centi_before = centi_px(state.fm.code_font_size());
     facts.code_font_centi_after = facts.code_font_centi_before;
     let mut sent_zoom = false;
@@ -1206,10 +1267,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
-                if let Some(chord) = zoom_key {
+                if zoom_key.is_some() || zoom_wheel.is_some() {
                     if !quiet && !sent_zoom && facts.frames + u32::from(is_snapshot) >= 1 {
                         sent_zoom = true;
-                        let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL);
+                        let chords = match (zoom_key, zoom_wheel) {
+                            (Some(chord), _) => vec![chord],
+                            (None, Some(notches)) => state.zoom_wheel_chords(notches),
+                            (None, None) => Vec::new(),
+                        };
+                        facts.zoom_chords_sent = chords.iter().collect();
+                        for chord in chords {
+                            let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL);
+                        }
                     }
                     if facts.font_facts_observed
                         && facts.code_font_centi_after != facts.code_font_centi_before
@@ -1301,6 +1370,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         facts.code_font_centi_before
     );
     let _ = writeln!(out, "code_font_centi_after={}", facts.code_font_centi_after);
+    let _ = writeln!(out, "zoom_chords_sent={}", facts.zoom_chords_sent);
     let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
@@ -1640,6 +1710,8 @@ struct ProbeFacts {
     /// frontend rejected as out of range cannot read as a zoom.
     code_font_centi_before: u32,
     code_font_centi_after: u32,
+    /// E2.7 — the zoom chords the probe sent, in order (`=` in, `-` out).
+    zoom_chords_sent: String,
     disconnect: Option<String>,
 }
 
@@ -1864,6 +1936,9 @@ struct App {
     /// When the geometry last changed without having been written since;
     /// the deadline pump writes it [`GEOMETRY_SAVE_DELAY`] later.
     geometry_dirty_since: Option<std::time::Instant>,
+    /// The keyboard conventions in force (E2.7). `Platform::current()`
+    /// in production; a test sets the macOS arm on a Linux host.
+    platform: Platform,
     /// The status `main` exits with after the loop ends (E2.4): zero
     /// unless surface creation failed, in which case the failure was
     /// printed and the loop was asked to exit.
@@ -2241,6 +2316,10 @@ struct State {
     /// The title last pushed to the window (E2.3), so an unchanged
     /// title is not re-set on every `StatusFacts`.
     last_title: Option<String>,
+    /// Banked Ctrl+wheel motion in notches (E2.7): a chord goes out per
+    /// whole notch, so a fine-grained trackpad zooms at the same rate
+    /// as a click wheel instead of one chord per pixel event.
+    zoom_wheel_residual: f32,
     /// When the caret last moved (E2.6): the blink's phase 0.
     caret_blink_epoch: std::time::Instant,
     /// What the caret was keyed on at the last paint (E2.6): the own
@@ -3909,6 +3988,36 @@ impl App {
         // negation.
         let notch_px_y = state.fm.code_line_height() * WHEEL_LINES_PER_TICK;
         let notch_px_x = state.mono_advance() * WHEEL_COLUMNS_PER_TICK;
+        // E2.7 (D22) — Ctrl+wheel zooms and scrolls nothing. Each whole
+        // notch is the zoom chord the global keymap binds (`C-=` in,
+        // `C--` out), sent as the key it is, so the daemon runs the same
+        // `gpu.zoom-*` command a keyboard would and the font follows
+        // through FontFacts. Nothing here knows the font size.
+        if translate_mods(self.modifiers).contains(Modifiers::CTRL) {
+            let notches = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => -y,
+                winit::event::MouseScrollDelta::PixelDelta(p) => {
+                    if notch_px_y > 0.0 {
+                        -(p.y as f32) / state.scale / notch_px_y
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            let chords = self
+                .state
+                .as_mut()
+                .map(|state| state.zoom_wheel_chords(notches))
+                .unwrap_or_default();
+            if let Some(client) = self.attach_client.as_ref() {
+                for chord in chords {
+                    if let Err(e) = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL) {
+                        eprintln!("pmacs-gpu: zoom wheel send_key failed: {e}");
+                    }
+                }
+            }
+            return;
+        }
         let (dx, dy) = match delta {
             winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
             // A pixel delta is physical (E2.2); the notch is logical.
@@ -4159,6 +4268,12 @@ impl App {
                 Modifiers::NONE
             };
         }
+
+        // E2.7 (D22) — on macOS the six standard Cmd chords become their
+        // Ctrl equivalents here, before the paste and chord paths below
+        // see them, so Cmd-V is the OS paste and Cmd-S reaches the
+        // keymap as C-s. Every other Super chord is still withheld.
+        let (pkey, pmods) = translate_cmd_chord(pkey, pmods, self.platform);
 
         // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
         // locally via arboard and ship it as a `Paste` event; the
@@ -4739,6 +4854,7 @@ impl EffectHarness {
                 geometry: geometry::WindowGeometry::default(),
                 geometry_path: None,
                 geometry_dirty_since: None,
+                platform: Platform::Other,
                 exit_code: 0,
             },
             daemon,
@@ -5430,6 +5546,115 @@ mod input_routing_tests {
             (h.app.geometry.width, h.app.geometry.height),
             (640, 480),
             "the remembered geometry is logical"
+        );
+    }
+
+    /// E2.7 (D22), the macOS arm — each of the six Cmd chords reaches
+    /// the wire as its Ctrl equivalent, and Cmd-V is the OS paste.
+    #[test]
+    fn on_macos_the_six_cmd_chords_become_their_ctrl_equivalents() {
+        let mut h = EffectHarness::new();
+        // Idle dispatch: before a DispatchIdle every key round-trips as
+        // intercepted, which is not the path the six chords are about.
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.platform = Platform::MacOs;
+        h.app.modifiers = ModifiersState::SUPER;
+        for chord in ['c', 'x', 'z', 's', 'a'] {
+            let step = h.feed_keyboard(&Key::Character(chord.to_string().into()), None);
+            assert_eq!(step.outbound.len(), 1, "Cmd-{chord}: {:?}", step.outbound);
+            assert!(
+                matches!(&step.outbound[0], pmacs_protocol::FrontendEvent::Key(k)
+                    if k.key == ProtocolKey::Char(chord) && k.mods == Modifiers::CTRL),
+                "Cmd-{chord} must arrive as C-{chord}: {:?}",
+                step.outbound
+            );
+        }
+        h.app
+            .state
+            .as_mut()
+            .expect("state")
+            .set_test_selection(PasteSource::Clipboard, b"pasted");
+        let step = h.feed_keyboard(&Key::Character("v".into()), None);
+        assert!(
+            matches!(
+                step.outbound.as_slice(),
+                [pmacs_protocol::FrontendEvent::Paste { data, .. }] if data == b"pasted"
+            ),
+            "Cmd-V is the OS paste, as C-v is: {:?}",
+            step.outbound
+        );
+    }
+
+    /// E2.7 — outside the six, a Super chord stays withheld on macOS,
+    /// and on every other platform even the six are withheld: the desktop
+    /// owns Super there.
+    #[test]
+    fn other_super_chords_and_other_platforms_stay_withheld() {
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.platform = Platform::MacOs;
+        h.app.modifiers = ModifiersState::SUPER;
+        let step = h.feed_keyboard(&Key::Character("q".into()), None);
+        assert!(step.outbound.is_empty(), "Cmd-Q: {:?}", step.outbound);
+        h.app.modifiers = ModifiersState::SUPER | ModifiersState::SHIFT;
+        let step = h.feed_keyboard(&Key::Character("Z".into()), None);
+        assert!(step.outbound.is_empty(), "Cmd-Shift-Z: {:?}", step.outbound);
+        h.app.platform = Platform::Other;
+        h.app.modifiers = ModifiersState::SUPER;
+        let step = h.feed_keyboard(&Key::Character("s".into()), None);
+        assert!(
+            step.outbound.is_empty(),
+            "Super-S off macOS: {:?}",
+            step.outbound
+        );
+    }
+
+    /// E2.7 (D22) — Ctrl+wheel sends the zoom chord per whole notch and
+    /// scrolls nothing: no viewport goes out and the document does not
+    /// move. The font change itself is the daemon's, witnessed against a
+    /// real daemon by `ctrl_wheel_in_a_headless_gpu_changes_the_font_size`
+    /// in `tests/gui_desktop_basics_acceptance.rs`.
+    #[test]
+    fn ctrl_wheel_sends_the_zoom_chord_and_scrolls_nothing() {
+        let mut h = EffectHarness::new();
+        h.feed(&modifiers_changed(ModifiersState::CONTROL));
+        let wheel = |y: f32| WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, y),
+            phase: TouchPhase::Moved,
+        };
+        let up = h.feed(&wheel(1.0));
+        assert!(
+            matches!(up.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == ProtocolKey::Char('=') && k.mods == Modifiers::CTRL),
+            "one notch up is one C-=: {:?}",
+            up.outbound
+        );
+        assert!(
+            !up.local
+                .iter()
+                .any(|e| matches!(e, LocalEffect::Scroll { .. })),
+            "nothing scrolled: {:?}",
+            up.local
+        );
+        let down = h.feed(&wheel(-1.0));
+        assert!(
+            matches!(down.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == ProtocolKey::Char('-') && k.mods == Modifiers::CTRL),
+            "one notch down is one C--: {:?}",
+            down.outbound
+        );
+        let half = h.feed(&wheel(0.5));
+        assert!(
+            half.outbound.is_empty(),
+            "half a notch banks: {:?}",
+            half.outbound
+        );
+        let rest = h.feed(&wheel(0.5));
+        assert_eq!(
+            rest.outbound.len(),
+            1,
+            "the second half completes one notch"
         );
     }
 
@@ -7436,6 +7661,7 @@ impl State {
             bell_flash_until: None,
             goodbye: None,
             last_title: None,
+            zoom_wheel_residual: 0.0,
             caret_blink_epoch: std::time::Instant::now(),
             caret_blink_key: (None, None),
             caret_phase_painted: 0,
@@ -8792,6 +9018,25 @@ impl State {
         let phase = blink_phase(self.caret_blink_epoch, now, CARET_BLINK_INTERVAL);
         let next = u32::try_from(phase + 1).unwrap_or(u32::MAX);
         Some(self.caret_blink_epoch + CARET_BLINK_INTERVAL * next)
+    }
+
+    /// Bank `notches` of Ctrl+wheel motion (E2.7) and return the zoom
+    /// chords that fall out: `=` per whole notch toward the user (in),
+    /// `-` per whole notch away (out). Positive winit `y` is "up",
+    /// which the caller has already negated, so a negative notch here
+    /// is wheel-up and zooms in, the convention every browser has.
+    fn zoom_wheel_chords(&mut self, notches: f32) -> Vec<char> {
+        self.zoom_wheel_residual += notches;
+        let mut chords = Vec::new();
+        while self.zoom_wheel_residual <= -1.0 {
+            self.zoom_wheel_residual += 1.0;
+            chords.push('=');
+        }
+        while self.zoom_wheel_residual >= 1.0 {
+            self.zoom_wheel_residual -= 1.0;
+            chords.push('-');
+        }
+        chords
     }
 
     /// The window title (E2.3): `<buffer> — pmacs`, or `pmacs` before the
