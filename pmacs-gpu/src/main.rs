@@ -111,6 +111,51 @@ const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
 /// selected/default NORMAL-face advance ratio (the fixed-ASCII
 /// probe): the empty-document gutter fallback and the menu hit
 /// width follow the resolved family without JetBrains-only drift.
+/// The logical extent of the surface (E2.2). See `State::layout`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LogicalExtent {
+    width: u32,
+    height: u32,
+}
+
+impl LogicalExtent {
+    /// The physical surface over the scale factor, rounded per axis and
+    /// clamped away from zero as the surface itself is. At an integer
+    /// scale the division is exact; at a fractional one the logical
+    /// extent is within half a logical pixel of the surface's edge.
+    fn of(config: &wgpu::SurfaceConfiguration, scale: f32) -> Self {
+        let logical = |px: u32| ((px as f32 / scale).round() as u32).max(1);
+        Self {
+            width: logical(config.width),
+            height: logical(config.height),
+        }
+    }
+}
+
+/// Map a logical text area onto the physical surface (E2.2). glyphon's
+/// `left`, `top` and `bounds` are physical pixels and its `scale`
+/// multiplies the buffer's logical glyph positions, so a logical area
+/// crosses the boundary here, exactly once, at every `prepare` call.
+/// The `scale: 1.0` each area is built with is the logical value this
+/// replaces.
+fn scale_text_area<'a>(area: &TextArea<'a>, scale: f32) -> TextArea<'a> {
+    let px = |v: i32| (v as f32 * scale).round() as i32;
+    TextArea {
+        buffer: area.buffer,
+        left: area.left * scale,
+        top: area.top * scale,
+        scale,
+        bounds: TextBounds {
+            left: px(area.bounds.left),
+            top: px(area.bounds.top),
+            right: px(area.bounds.right),
+            bottom: px(area.bounds.bottom),
+        },
+        default_color: area.default_color,
+        custom_glyphs: area.custom_glyphs,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct FontMetrics {
     scale: f32,
@@ -1741,6 +1786,19 @@ struct State {
     queue: wgpu::Queue,
     surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
+    /// The window's scale factor (E2.2): physical pixels per logical
+    /// pixel, `1.0` headless. Every layout quantity in this struct is
+    /// LOGICAL and meets the physical surface exactly once: the text
+    /// renderer's areas and bounds go through [`scale_text_area`], and
+    /// quads reach clip space through a logical extent, which makes the
+    /// conversion scale-invariant. Pointer input is divided by it on
+    /// intake, so hit tests never see a physical pixel.
+    scale: f32,
+    /// The surface extent in logical pixels (E2.2): `config` over
+    /// `scale`, rounded, recomputed on every resize and scale change.
+    /// Layout reads this and never `config`, so wrapping, hit tests
+    /// and the declared cell grid are the same at every scale.
+    layout: LogicalExtent,
     font_system: FontSystem,
     /// What sanitized assembly retained (Q#F6): the default family
     /// and the bundled face ID — the total-fallback anchors for
@@ -3092,14 +3150,15 @@ impl App {
         }
     }
 
-    /// The window's scale factor, or 1.0 headless (E2.1): what converts
-    /// the physical extents winit reports into the logical ones the
-    /// geometry file holds.
+    /// The scale factor the state is laid out at (E2.1, E2.2): what
+    /// converts the physical extents winit reports into the logical ones
+    /// the geometry file holds. `State::scale` is set from the window at
+    /// creation and on every `ScaleFactorChanged`, so it is the one
+    /// source, headless included.
     fn window_scale_factor(&self) -> f64 {
         self.state
             .as_ref()
-            .and_then(|state| state.window.as_ref())
-            .map_or(1.0, |window| window.scale_factor())
+            .map_or(1.0, |state| f64::from(state.scale))
     }
 
     /// Re-read the geometry after a resize (E2.1): the surface extent is
@@ -3122,6 +3181,21 @@ impl App {
         }
         self.geometry = self.geometry.sanitized();
         self.geometry_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Perform [`LifecycleRoute::ScaleFactor`] (E2.2). The logical extent
+    /// changes under an unchanged surface, so everything a resize
+    /// declares to the daemon — the viewport, the terminal grid, the
+    /// panel's cell capacity — is re-derived and re-declared at the new
+    /// scale, and the remembered geometry is re-read in logical units.
+    fn apply_scale_factor(&mut self, scale: f64) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let (width, height) = (state.config.width, state.config.height);
+        state.set_scale_factor(scale as f32);
+        self.apply_resize(width, height);
+        self.note_geometry_changed();
     }
 
     /// Perform [`LifecycleRoute::Moved`] (E2.1): record the new outer
@@ -3175,12 +3249,15 @@ impl App {
     }
 
     /// Perform [`PointerRoute::Moved`]. `x`/`y` are the physical
-    /// pointer position winit reported.
+    /// pointer position winit reported; they are divided by the scale
+    /// factor here (E2.2), so every hit test below and every stored
+    /// pointer position is logical.
     #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
     fn apply_cursor_moved(&mut self, x: f64, y: f64) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        let (x, y) = (x / f64::from(state.scale), y / f64::from(state.scale));
         state.pointer_pos = Some((x, y));
         // Q#CM1 — while the menu is open, motion only moves the
         // highlight; send a hover when the item under the pointer
@@ -3670,14 +3747,15 @@ impl App {
         let notch_px_x = state.mono_advance() * WHEEL_COLUMNS_PER_TICK;
         let (dx, dy) = match delta {
             winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
+            // A pixel delta is physical (E2.2); the notch is logical.
             winit::event::MouseScrollDelta::PixelDelta(p) => (
                 if notch_px_x > 0.0 {
-                    p.x as f32 / notch_px_x
+                    p.x as f32 / state.scale / notch_px_x
                 } else {
                     0.0
                 },
                 if notch_px_y > 0.0 {
-                    -(p.y as f32) / notch_px_y
+                    -(p.y as f32) / state.scale / notch_px_y
                 } else {
                     0.0
                 },
@@ -3790,6 +3868,9 @@ impl App {
             }
             Route::Lifecycle(LifecycleRoute::Moved { x, y }) => {
                 self.note_moved(x, y);
+            }
+            Route::Lifecycle(LifecycleRoute::ScaleFactor(scale)) => {
+                self.apply_scale_factor(scale);
             }
             Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
             Route::Keyboard {
@@ -4138,7 +4219,7 @@ enum EventOutcome {
 /// document. `ModifiersChanged` is grouped here as the one exception,
 /// and it is named as one: it is a bare state mutation with no gesture
 /// of its own and no body to extract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum LifecycleRoute {
     /// `CloseRequested` — leave the event loop. Q#S1-1: a native close
     /// detaches this frontend, it does not shut the daemon down.
@@ -4159,6 +4240,11 @@ enum LifecycleRoute {
     /// `Moved` — the window's new outer position in physical pixels
     /// (E2.1). Local only: it feeds the persisted geometry.
     Moved { x: i32, y: i32 },
+    /// `ScaleFactorChanged` — the window's new scale factor (E2.2). The
+    /// arm is unwitnessable like `KeyboardInput`'s: winit's
+    /// `InnerSizeWriter` cannot be constructed outside winit, so the
+    /// decision is tested through `App::apply_scale_factor` directly.
+    ScaleFactor(f64),
 }
 
 /// The keyboard family's whole decision. `Release` is a route rather
@@ -4204,6 +4290,9 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
             x: position.x,
             y: position.y,
         }),
+        WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            Some(LifecycleRoute::ScaleFactor(*scale_factor))
+        }
         _ => None,
     }
 }
@@ -5021,6 +5110,79 @@ mod input_routing_tests {
         assert!(
             h.app.geometry_dirty_since.is_none(),
             "the write clears the pending debounce"
+        );
+    }
+
+    /// E2.2 — a physical pointer position is divided by the scale on
+    /// intake, so hit testing and the stored position are logical.
+    #[test]
+    fn pointer_intake_divides_the_physical_position_by_the_scale() {
+        let mut h = EffectHarness::new();
+        h.app
+            .state
+            .as_mut()
+            .expect("harness state")
+            .set_scale_factor(2.0);
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(200.0, 100.0),
+        });
+        assert_eq!(
+            h.app.state.as_ref().expect("harness state").pointer_pos,
+            Some((100.0, 50.0))
+        );
+    }
+
+    /// E2.2 — a scale change under an unchanged surface halves the
+    /// logical extent, and the daemon is told the new cell grid: the
+    /// declaration is re-derived and re-sent, with about half the
+    /// columns and rows the unscaled surface declared.
+    #[test]
+    fn a_scale_change_redeclares_the_cell_grid_in_logical_units() {
+        let mut h = EffectHarness::new();
+        let before = h.feed(&WindowEvent::Resized(PhysicalSize::new(1280, 960)));
+        let cols_before = before
+            .outbound
+            .iter()
+            .find_map(|e| match e {
+                pmacs_protocol::FrontendEvent::FrontendCellGeometry { total, .. } => Some(*total),
+                _ => None,
+            })
+            .expect("a resize declares the cell grid");
+        h.app.apply_scale_factor(2.0);
+        let outbound = h.read_until_sentinel();
+        let after = outbound
+            .iter()
+            .find_map(|e| match e {
+                pmacs_protocol::FrontendEvent::FrontendCellGeometry { total, .. } => Some(*total),
+                _ => None,
+            })
+            .expect("a scale change re-declares the cell grid; outbound was {outbound:?}");
+        let state = h.app.state.as_ref().expect("harness state");
+        assert_eq!(
+            (state.config.width, state.config.height),
+            (1280, 960),
+            "the surface is unchanged"
+        );
+        assert_eq!(
+            state.layout,
+            LogicalExtent {
+                width: 640,
+                height: 480
+            }
+        );
+        assert!(
+            after.cols < cols_before.cols && after.cols >= cols_before.cols / 2 - 1,
+            "columns halve: {cols_before:?} -> {after:?}"
+        );
+        assert!(
+            after.rows < cols_before.rows && after.rows >= cols_before.rows / 2 - 1,
+            "rows halve: {cols_before:?} -> {after:?}"
+        );
+        assert_eq!(
+            (h.app.geometry.width, h.app.geometry.height),
+            (640, 480),
+            "the remembered geometry is logical"
         );
     }
 
@@ -6637,7 +6799,10 @@ impl State {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        Self::assemble(
+        // E2.2 — the scale the window landed on. The surface above is
+        // physical; the layout is logical from the first frame.
+        let scale = window.scale_factor() as f32;
+        let mut state = Self::assemble(
             Some(window),
             Some(surface),
             device,
@@ -6645,7 +6810,9 @@ impl State {
             config,
             initial_text,
             &[],
-        )
+        );
+        state.set_scale_factor(scale);
+        state
     }
 
     /// Build a windowless `State` that renders to an offscreen texture, for
@@ -6690,6 +6857,39 @@ impl State {
             // attach probe runs on the bundled face alone.
             headless_extra_font_sources(),
         ))
+    }
+
+    /// [`Self::new_headless`] at a scale factor other than 1 (E2.2): the
+    /// physical surface is `width`×`height` and the logical extent is
+    /// that over `scale`, exactly as a window on a 2× display reports.
+    #[cfg(test)]
+    fn new_headless_scaled(
+        width: u32,
+        height: u32,
+        scale: f32,
+        initial_text: &str,
+    ) -> Option<Self> {
+        let mut state = Self::new_headless(width, height, initial_text)?;
+        state.set_scale_factor(scale);
+        Some(state)
+    }
+
+    /// Adopt a new scale factor (E2.2). The physical surface is unchanged
+    /// and the logical extent is not, so everything a resize re-derives
+    /// — buffer sizes, the slice, the caret's follow — is re-derived
+    /// through [`Self::resize`] with the surface's own extent. A
+    /// non-finite or non-positive scale is treated as 1.
+    fn set_scale_factor(&mut self, scale: f32) -> Option<ViewportSend> {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        if (self.scale - scale).abs() <= f32::EPSILON {
+            return None;
+        }
+        self.scale = scale;
+        self.resize(self.config.width, self.config.height)
     }
 
     /// Build the window-agnostic half of a `State` — font system, glyph
@@ -6878,6 +7078,8 @@ impl State {
             device,
             queue,
             surface,
+            scale: 1.0,
+            layout: LogicalExtent::of(&config, 1.0),
             config,
             font_system,
             font_defaults,
@@ -8363,9 +8565,9 @@ impl State {
     /// when it cannot fit one whole cell.
     fn terminal_cell_viewport(&self) -> Option<CellSize> {
         let (origin_x, origin_y) = Self::terminal_origin();
-        let width = self.config.width as f32 - origin_x;
+        let width = self.layout.width as f32 - origin_x;
         let height =
-            document_text_bottom(self.config.height, self.fm, self.band_inset()) - origin_y;
+            document_text_bottom(self.layout.height, self.fm, self.band_inset()) - origin_y;
         crate::terminal::cell_viewport(
             width,
             height,
@@ -8425,12 +8627,12 @@ impl State {
             return None;
         }
         let top =
-            document_text_bottom(self.config.height, self.fm, band) + self.fm.divider_height();
+            document_text_bottom(self.layout.height, self.fm, band) + self.fm.divider_height();
         // Origin x = 0 and the FULL surface width, matching the declaration.
         // Any fractional right-edge remainder past the last whole column is
         // band background: it maps to no cell and emits no `PanelPointer`,
         // which `hit_test_cell`'s column bound already enforces.
-        Some((0.0, top, self.config.width as f32, cells_px))
+        Some((0.0, top, self.layout.width as f32, cells_px))
     }
 
     /// The divider strip: paint geometry AND hit geometry, one rect.
@@ -8444,8 +8646,8 @@ impl State {
         let band = PanelBandInset::installed(frame.size.rows, self.fm);
         Some((
             0.0,
-            document_text_bottom(self.config.height, self.fm, band),
-            self.config.width as f32,
+            document_text_bottom(self.layout.height, self.fm, band),
+            self.layout.width as f32,
             self.fm.divider_height(),
         ))
     }
@@ -8479,7 +8681,7 @@ impl State {
         let Some(advance) = self.panel_probe_advance() else {
             return (CellSize::new(0, 0), None);
         };
-        let height = (geometry_capacity_bottom(self.config.height, self.fm) - TEXT_TOP).max(0.0);
+        let height = (geometry_capacity_bottom(self.layout.height, self.fm) - TEXT_TOP).max(0.0);
         // **Full surface width from x = 0.** The panel grid is not inset by
         // the document's `TEXT_LEFT` or gutter — those are document padding,
         // and the band is a separate surface spanning the frame (parent
@@ -8487,7 +8689,7 @@ impl State {
         // beginning at x=0; document `TEXT_LEFT`/gutter padding is
         // unrelated"). Deducting `TEXT_LEFT` here under-declares columns and
         // leaves a strip the daemon never fills.
-        let width = self.config.width as f32;
+        let width = self.layout.width as f32;
         let total = crate::terminal::panel_cell_capacity(
             width,
             height,
@@ -8944,7 +9146,7 @@ impl State {
         if rects.is_empty() {
             return Vec::new();
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Curly underlines inside the band, on the squiggle pipeline — the same
@@ -8972,7 +9174,7 @@ impl State {
                 })
             })
             .collect();
-        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        squiggles_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Which panel cell a surface pixel is over, if any (Q#BP16).
@@ -9236,7 +9438,7 @@ impl State {
         ) {
             return false;
         }
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         x >= self.text_left() && x < self.text_bounds_right() as f32 && y >= TEXT_TOP && y < bottom
     }
 
@@ -9376,7 +9578,7 @@ impl State {
                 color: selection_color,
             });
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Curly terminal underlines through the existing squiggle pipeline.
@@ -9400,7 +9602,7 @@ impl State {
                 }
             })
             .collect();
-        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        squiggles_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// The child cursor's quad, painted through the caret primitive so
@@ -9421,8 +9623,8 @@ impl State {
                 h,
                 color: TERMINAL_CURSOR_RGBA,
             }],
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
         )
     }
 
@@ -9536,7 +9738,7 @@ impl State {
             .partition_point(|&s| s <= cursor)
             .saturating_sub(1);
         let visible =
-            estimated_visible_lines(self.config.height, self.fm, self.band_inset()).max(1);
+            estimated_visible_lines(self.layout.height, self.fm, self.band_inset()).max(1);
         let old = self.scroll_top;
         if cursor_line < self.scroll_top {
             self.scroll_top = cursor_line;
@@ -10019,8 +10221,8 @@ impl State {
         minimap_band_contains(
             x as f32,
             y as f32,
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
             self.fm,
             self.band_inset(),
         )
@@ -10063,13 +10265,13 @@ impl State {
     fn minimap_jump_to(&mut self, y: f64) -> Option<ViewportSend> {
         let target = minimap_y_to_line(
             y as f32,
-            self.config.height,
+            self.layout.height,
             self.current_line_starts.len(),
             self.fm,
             self.band_inset(),
         )?;
         let centered = target.saturating_sub(
-            estimated_visible_lines(self.config.height, self.fm, self.band_inset()) / 2,
+            estimated_visible_lines(self.layout.height, self.fm, self.band_inset()) / 2,
         );
         let delta = i64::try_from(centered).unwrap_or(i64::MAX)
             - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
@@ -10662,7 +10864,7 @@ impl State {
         if self.buffer.wrap() == Wrap::None {
             readout.push_str(&format_scroll_indicator(
                 self.scroll_top,
-                estimated_visible_lines(self.config.height, self.fm, self.band_inset()),
+                estimated_visible_lines(self.layout.height, self.fm, self.band_inset()),
                 self.current_line_starts.len(),
                 cursor_row,
             ));
@@ -10845,12 +11047,12 @@ impl State {
             .map_or(STATUS_BAND_BG, |(quad, _)| quad);
         let rect = MinimapRect {
             x: 0.0,
-            y: status_band_top(self.config.height, self.fm),
-            w: self.config.width as f32,
+            y: status_band_top(self.layout.height, self.fm),
+            w: self.layout.width as f32,
             h: self.fm.status_band_height(),
             color,
         };
-        rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+        rects_to_vertex_bytes(&[rect], self.layout.width, self.layout.height)
     }
 
     /// Re-shape the menu label text from `self.menu` (Q#CM1), one line
@@ -10912,7 +11114,7 @@ impl State {
                 });
             }
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Re-shape the minibuffer dropdown candidates (Q#MB1), one line per
@@ -10951,7 +11153,7 @@ impl State {
     /// candidate-free, or too short for a row. See [`mb_dropdown_window`].
     fn mb_visible_window(&self) -> Option<(usize, usize)> {
         let mb = self.minibuffer.as_ref()?;
-        let band_top = status_band_top(self.config.height, self.fm);
+        let band_top = status_band_top(self.layout.height, self.fm);
         mb_dropdown_window(
             mb.rows.len(),
             mb.selected.map_or(0, |s| s as usize),
@@ -10975,7 +11177,7 @@ impl State {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
-        let band_top = status_band_top(self.config.height, self.fm);
+        let band_top = status_band_top(self.layout.height, self.fm);
         let top_y = band_top - count as f32 * self.fm.mb_drop_row_height();
         Some((STATUS_TEXT_PAD, top_y, width))
     }
@@ -11013,7 +11215,7 @@ impl State {
                 color: MENU_SELECTED_BG,
             });
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Re-shape the completion dropdown rows (Arc 1a Q#C5), one line
@@ -11066,7 +11268,7 @@ impl State {
         // caret-follow residual) counts as scrolled out.
         let (x, top, line_height) = self.code_byte_px(anchor)?;
         let y = TEXT_TOP + top;
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         if y >= bottom || y + line_height <= TEXT_TOP {
             return None;
         }
@@ -11117,7 +11319,7 @@ impl State {
         }
         let sel = comp.selected.map_or(0, |s| s as usize);
         let (ax, line_top, line_h) = self.completion_anchor_px()?;
-        let band_top = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let band_top = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         let below_px = band_top - (line_top + line_h);
         let above_px = line_top - TEXT_TOP;
         let max_below = (below_px / self.fm.mb_drop_row_height()).floor() as usize;
@@ -11157,7 +11359,7 @@ impl State {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
-        let left = ax.min((self.config.width as f32 - width).max(0.0));
+        let left = ax.min((self.layout.width as f32 - width).max(0.0));
         Some((left, top_y, width))
     }
 
@@ -11192,7 +11394,7 @@ impl State {
                 color: MENU_SELECTED_BG,
             });
         }
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
@@ -11436,7 +11638,7 @@ impl State {
         let line_starts = &self.current_line_starts;
         let n = line_starts.len();
         let top = self.scroll_top.min(n.saturating_sub(1));
-        let span = estimated_visible_lines(self.config.height, self.fm, self.band_inset()).max(1)
+        let span = estimated_visible_lines(self.layout.height, self.fm, self.band_inset()).max(1)
             + SCROLL_OVERSCAN;
         let vstart = line_starts[top];
         let bottom = top.saturating_add(span).min(n);
@@ -11651,12 +11853,12 @@ impl State {
     /// reshaping before its next frame.
     fn sync_buffer_dimensions(&mut self) -> bool {
         let fm = self.fm;
-        let width = self.config.width as f32;
-        let height = self.config.height as f32;
+        let width = self.layout.width as f32;
+        let height = self.layout.height as f32;
         let code_metrics = Metrics::new(fm.code_font_size(), fm.code_line_height());
         let code_width = (self.text_bounds_right() as f32 - self.text_left()).max(0.0);
         let code_height =
-            (document_text_bottom(self.config.height, fm, self.band_inset()) - TEXT_TOP).max(0.0);
+            (document_text_bottom(self.layout.height, fm, self.band_inset()) - TEXT_TOP).max(0.0);
         let code_layout_changed = self.buffer.metrics() != code_metrics
             || self.buffer.size() != (Some(code_width), Some(code_height));
         self.buffer.set_metrics_and_size(
@@ -11901,6 +12103,7 @@ impl State {
         let caret_was_painted = self.caret_painted_in_code_clip();
         self.config.width = width;
         self.config.height = height;
+        self.layout = LogicalExtent::of(&self.config, self.scale);
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
         }
@@ -12050,6 +12253,8 @@ impl State {
     /// (`render_offscreen`, F-014). No surface acquire, no `present`.
     #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
     fn render_to_view(&mut self, view: &wgpu::TextureView) {
+        // E2.2 — the one place logical text geometry becomes physical.
+        let scale = self.scale;
         let frame_start = debug_frame().then(std::time::Instant::now);
         self.refresh_status_line();
         self.refresh_menu_buffer();
@@ -12126,8 +12331,8 @@ impl State {
         };
         bg_vertices.extend(rects_to_vertex_bytes(
             &math_rules,
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
         ));
         bg_vertices.extend(self.status_band_vertex_bytes());
         // Bottom panel Stage 2B-3 — the divider strip, the band's cell
@@ -12190,8 +12395,8 @@ impl State {
         // frame.
         let minimap_key = (
             self.current_summary.as_ref().map_or(0, |s| s.generation),
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
             self.scroll_top,
         );
         if self
@@ -12228,8 +12433,8 @@ impl State {
             .layout_runs()
             .map(|run| run.line_w)
             .fold(0.0_f32, f32::max);
-        let status_left = self.config.width as f32 - STATUS_TEXT_PAD - status_width;
-        let status_top = status_band_top(self.config.height, self.fm)
+        let status_left = self.layout.width as f32 - STATUS_TEXT_PAD - status_width;
+        let status_top = status_band_top(self.layout.height, self.fm)
             + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         // UX gutter: the code's left origin (past the gutter) and the
         // main-text clip-left. Computed here as locals — calling `self.*`
@@ -12273,7 +12478,7 @@ impl State {
                     // Clip at the status band (Q#S3): a final
                     // partially-visible line must not bleed
                     // into the band.
-                    bottom: document_text_bottom(self.config.height, self.fm, self.band_inset())
+                    bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
                 default_color: Color::rgb(230, 230, 235),
@@ -12287,44 +12492,47 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                code_areas.into_iter().chain([
-                    TextArea {
-                        buffer: &self.status_buffer,
-                        left: status_left,
-                        top: status_top,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: status_band_top(self.config.height, self.fm).round() as i32,
-                            right: self.config.width.cast_signed(),
-                            bottom: self.config.height.cast_signed(),
+                code_areas
+                    .into_iter()
+                    .chain([
+                        TextArea {
+                            buffer: &self.status_buffer,
+                            left: status_left,
+                            top: status_top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: status_band_top(self.layout.height, self.fm).round() as i32,
+                                right: self.layout.width.cast_signed(),
+                                bottom: self.layout.height.cast_signed(),
+                            },
+                            // Themes Q#TH5: a set ui.modeline face colors
+                            // the readout too (its fg after the reverse
+                            // swap); unset keeps the dimmer gray.
+                            default_color: readout_color,
+                            custom_glyphs: &[],
                         },
-                        // Themes Q#TH5: a set ui.modeline face colors
-                        // the readout too (its fg after the reverse
-                        // swap); unset keeps the dimmer gray.
-                        default_color: readout_color,
-                        custom_glyphs: &[],
-                    },
-                    TextArea {
-                        buffer: &self.status_left_buffer,
-                        left: STATUS_TEXT_PAD,
-                        top: status_top,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: status_band_top(self.config.height, self.fm).round() as i32,
-                            // Stop at the right group's actual origin.
-                            right: status_left.max(0.0).round() as i32,
-                            bottom: self.config.height.cast_signed(),
+                        TextArea {
+                            buffer: &self.status_left_buffer,
+                            left: STATUS_TEXT_PAD,
+                            top: status_top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: status_band_top(self.layout.height, self.fm).round() as i32,
+                                // Stop at the right group's actual origin.
+                                right: status_left.max(0.0).round() as i32,
+                                bottom: self.layout.height.cast_signed(),
+                            },
+                            // Themes Q#TH3: the left segment's face follows
+                            // its CONTENT class (minibuffer/isearch →
+                            // ui.minibuffer; message → ui.statusline; name
+                            // → ui.modeline).
+                            default_color: left_color,
+                            custom_glyphs: &[],
                         },
-                        // Themes Q#TH3: the left segment's face follows
-                        // its CONTENT class (minibuffer/isearch →
-                        // ui.minibuffer; message → ui.statusline; name
-                        // → ui.modeline).
-                        default_color: left_color,
-                        custom_glyphs: &[],
-                    },
-                ]),
+                    ])
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("text_renderer prepare");
@@ -12342,7 +12550,7 @@ impl State {
                     left: gutter_clip_left,
                     top: 0,
                     right: text_bounds_right,
-                    bottom: document_text_bottom(self.config.height, self.fm, self.band_inset())
+                    bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
                 default_color: MATH_INK_COLOR,
@@ -12356,7 +12564,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                math_areas,
+                math_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("math text_renderer prepare");
@@ -12374,7 +12584,7 @@ impl State {
                     left: 0,
                     top: 0,
                     right: gutter_clip_left,
-                    bottom: document_text_bottom(self.config.height, self.fm, self.band_inset())
+                    bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
                 // Themes Q#TH5: ui.gutter's {fg} mask colors the digits.
@@ -12391,7 +12601,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                gutter_areas,
+                gutter_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("gutter_text_renderer prepare");
@@ -12429,7 +12641,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                menu_areas,
+                menu_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("menu text_renderer prepare");
@@ -12453,7 +12667,7 @@ impl State {
                     left: x as i32,
                     top: top_y as i32,
                     right: (x + width).round() as i32,
-                    bottom: status_band_top(self.config.height, self.fm).round() as i32,
+                    bottom: status_band_top(self.layout.height, self.fm).round() as i32,
                 },
                 // Themes Q#TH5 (round 3 finding 1): the candidate
                 // glyph layer is ui.minibuffer.candidate's GPU site;
@@ -12470,7 +12684,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                mb_areas,
+                mb_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("minibuffer text_renderer prepare");
@@ -12507,7 +12723,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                completion_areas,
+                completion_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("completion text_renderer prepare");
@@ -12519,7 +12737,7 @@ impl State {
         // Hoisted out of the closure below: the band inset borrows `self`
         // immutably, and the closure already holds one.
         let document_clip_bottom =
-            document_text_bottom(self.config.height, self.fm, self.band_inset()).round() as i32;
+            document_text_bottom(self.layout.height, self.fm, self.band_inset()).round() as i32;
         let terminal_areas: Vec<TextArea> = self
             .terminal
             .as_ref()
@@ -12528,7 +12746,7 @@ impl State {
                 let advance = mono_advance;
                 let line = self.fm.code_line_height();
                 let clip_bottom = document_clip_bottom;
-                let clip_right = self.config.width.cast_signed();
+                let clip_right = self.layout.width.cast_signed();
                 terminal
                     .plan
                     .runs
@@ -12563,7 +12781,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                terminal_areas,
+                terminal_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("terminal text_renderer prepare");
@@ -12623,7 +12843,9 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                panel_areas,
+                panel_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
                 &mut self.swash_cache,
             )
             .expect("panel text_renderer prepare");
@@ -12749,11 +12971,11 @@ impl State {
 
     fn text_bounds_right(&self) -> i32 {
         if self.has_minimap() {
-            minimap_left(self.config.width).map_or(self.config.width.cast_signed(), |left| {
+            minimap_left(self.layout.width).map_or(self.layout.width.cast_signed(), |left| {
                 (left - TEXT_RIGHT_GAP).max(TEXT_LEFT + 1.0).round() as i32
             })
         } else {
-            self.config.width.cast_signed()
+            self.layout.width.cast_signed()
         }
     }
 
@@ -12761,19 +12983,19 @@ impl State {
         self.current_summary
             .as_ref()
             .is_some_and(|summary| !summary.lines.is_empty())
-            && minimap_left(self.config.width).is_some()
+            && minimap_left(self.layout.width).is_some()
     }
 
     fn minimap_vertex_bytes(&self) -> Vec<u8> {
         let Some(summary) = self.current_summary.as_ref() else {
             return Vec::new();
         };
-        let visible_lines = estimated_visible_lines(self.config.height, self.fm, self.band_inset());
+        let visible_lines = estimated_visible_lines(self.layout.height, self.fm, self.band_inset());
         let rects = minimap_rects(
             &summary.lines,
             &self.current_line_shapes,
-            self.config.width,
-            self.config.height,
+            self.layout.width,
+            self.layout.height,
             // The thumb tracks the live scroll position. (It was
             // hardcoded to 0 from the minimap's first session —
             // surfaced by Q#M6 validation, where jumping finally
@@ -12783,7 +13005,7 @@ impl State {
             self.fm,
             self.band_inset(),
         );
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Vertex bytes for quad-pipeline background washes (drawn *under*
@@ -12812,7 +13034,7 @@ impl State {
         self.collect_own_decoration_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_peer_rects(buffer_id, &line_offsets, vstart, vend, &mut rects);
         self.collect_gutter_sign_rects(&mut rects, &line_offsets, vstart, vend);
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Per-visible-line diagnostic sign bars in the gutter (UX gutter
@@ -12934,7 +13156,7 @@ impl State {
                 );
             }
         }
-        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+        squiggles_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
 
     /// Peer cursor-line + selection washes from `PresenceUpdate`
@@ -13076,13 +13298,13 @@ impl State {
         if self.minibuffer.is_some() {
             return self
                 .minibuffer_caret_rect()
-                .map(|r| rects_to_vertex_bytes(&[r], self.config.width, self.config.height))
+                .map(|r| rects_to_vertex_bytes(&[r], self.layout.width, self.layout.height))
                 .unwrap_or_default();
         }
         let Some(rect) = self.code_caret_rect_in_clip() else {
             return Vec::new();
         };
-        rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+        rects_to_vertex_bytes(&[rect], self.layout.width, self.layout.height)
     }
 
     /// The caret rectangle for an open minibuffer (Q#MB1): a thin bar in
@@ -13104,7 +13326,7 @@ impl State {
             0.0
         };
         let cursor_chars = mb.prompt.chars().count() as f32 + mb.cursor as f32;
-        let status_top = status_band_top(self.config.height, self.fm)
+        let status_top = status_band_top(self.layout.height, self.fm)
             + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         Some(MinimapRect {
             x: STATUS_TEXT_PAD + advance * cursor_chars,
@@ -13266,7 +13488,7 @@ impl State {
     /// is rewritten rather than merely joined by a new condition.
     fn code_caret_rect_in_clip(&mut self) -> Option<MinimapRect> {
         let rect = self.caret_rect()?;
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         let right = self.text_bounds_right() as f32;
         (rect.y < bottom
             && rect.y + rect.h > TEXT_TOP
@@ -13322,7 +13544,7 @@ impl State {
             return false;
         };
         let y = TEXT_TOP + top;
-        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        let bottom = document_text_bottom(self.layout.height, self.fm, self.band_inset());
         // Partial overlap counts as painted, the same rule the caret
         // clip uses. A first row half-scrolled under the top edge is
         // still legible, and a stricter test here would disagree with
@@ -18531,6 +18753,107 @@ mod tests {
             eprintln!("skipping headless render test: no wgpu adapter available");
         }
         state
+    }
+
+    /// E2.2 (the Stage 1 framing's C5a/C5b rows): at scale 2 with the
+    /// same LOGICAL size, the layout is stable while the pixels double.
+    /// The same document wraps into the same visual runs, the same
+    /// logical pointer position hits the same byte, the daemon is told
+    /// the same cell grid, and a quad reaches the same clip-space
+    /// position --- against a surface twice as wide and twice as tall.
+    #[test]
+    fn at_scale_two_the_logical_layout_is_stable_while_pixels_double() {
+        let long = "x".repeat(400);
+        let doc = format!("{long}\n{}", "line\n".repeat(60));
+        let Some(mut base) = headless_or_skip(900, 600, &doc) else {
+            return;
+        };
+        let mut scaled = State::new_headless_scaled(1800, 1200, 2.0, &doc)
+            .expect("an adapter exists: the unscaled state was built");
+
+        assert_eq!(
+            (scaled.config.width, scaled.config.height),
+            (2 * base.config.width, 2 * base.config.height),
+            "the physical surface doubles"
+        );
+        assert_eq!(scaled.layout, base.layout, "the logical extent is the same");
+        assert!((scaled.scale - 2.0).abs() < f32::EPSILON);
+
+        // The shaped buffer holds the visible slice, so the witness is
+        // the first source line's visual runs, not the document's.
+        let runs = |state: &State| state.buffer.layout_runs().count();
+        let first_line_runs =
+            |state: &State| state.buffer.layout_runs().filter(|r| r.line_i == 0).count();
+        assert!(
+            first_line_runs(&base) > 1,
+            "setup: the 400-column line must wrap at 900 logical px; runs = {}",
+            first_line_runs(&base)
+        );
+        assert_eq!(
+            first_line_runs(&scaled),
+            first_line_runs(&base),
+            "wrapping is decided in logical pixels"
+        );
+        assert_eq!(runs(&scaled), runs(&base), "and so is the visible slice");
+
+        for (x, y) in [(40.0, 30.0), (300.0, 30.0), (60.0, 200.0), (500.0, 400.0)] {
+            assert_eq!(
+                scaled.hit_test_source_byte(x, y),
+                base.hit_test_source_byte(x, y),
+                "the same logical point hits the same byte at ({x}, {y})"
+            );
+        }
+        assert_eq!(
+            scaled.declared_cell_total(),
+            base.declared_cell_total(),
+            "the daemon is told the same cell grid at every scale"
+        );
+        assert_eq!(
+            scaled.status_band_vertex_bytes(),
+            base.status_band_vertex_bytes(),
+            "a logical quad lands at the same clip-space position"
+        );
+        assert_eq!(
+            estimated_visible_lines(scaled.layout.height, scaled.fm, scaled.band_inset()),
+            estimated_visible_lines(base.layout.height, base.fm, base.band_inset()),
+        );
+    }
+
+    /// E2.2 — the logical extent rounds per axis and never collapses to
+    /// zero; at an integer scale it is exact.
+    #[test]
+    fn the_logical_extent_rounds_per_axis_and_stays_positive() {
+        let config = |width, height| wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        assert_eq!(
+            LogicalExtent::of(&config(1800, 1200), 2.0),
+            LogicalExtent {
+                width: 900,
+                height: 600
+            }
+        );
+        assert_eq!(
+            LogicalExtent::of(&config(1201, 801), 1.5),
+            LogicalExtent {
+                width: 801,
+                height: 534
+            }
+        );
+        assert_eq!(
+            LogicalExtent::of(&config(1, 1), 3.0),
+            LogicalExtent {
+                width: 1,
+                height: 1
+            }
+        );
     }
 
     #[test]
