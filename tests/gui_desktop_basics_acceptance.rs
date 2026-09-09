@@ -3,16 +3,7 @@
 //! One path exercises a real daemon and real wgpu rendering together:
 //! `pmacs-gpu --headless-probe`, driven here in its Ctrl+wheel mode.
 
-use std::path::{Path, PathBuf};
-
 mod common;
-
-fn gpu_binary() -> PathBuf {
-    Path::new(env!("CARGO_BIN_EXE_pmacs"))
-        .parent()
-        .expect("test binary directory")
-        .join("pmacs-gpu")
-}
 
 /// E2.7 (D22) --- one Ctrl+wheel notch toward the user, banked through
 /// the production `zoom_wheel_chords` and sent to a real daemon, makes
@@ -21,9 +12,28 @@ fn gpu_binary() -> PathBuf {
 /// the probe reports the size it applied. `crdt`-gated like the E1.7
 /// zoom probe: a daemon built without it refuses the attach for a
 /// reason that has nothing to do with the wheel.
+///
+/// **`gpu_binary` lives INSIDE the gate, not beside it**, which is the
+/// whole of the idiom `tests/first_ten_minutes_acceptance.rs:984` and
+/// `tests/bottom_panel_stage2b_gpu_acceptance.rs:542` already use. A
+/// helper at module scope whose only caller is gated is DEAD CODE in
+/// the opt-out build, and both CI legs that see that build treat
+/// warnings as errors --- which is exactly how this file shipped red
+/// at `65648ec`. `scripts/gate --protocol` now runs CI's own
+/// `--no-default-features --features luajit` clippy, so the same
+/// mistake is a local red rather than a remote one.
 #[cfg(feature = "crdt")]
 #[test]
 fn ctrl_wheel_in_a_headless_gpu_changes_the_font_size() {
+    use std::path::{Path, PathBuf};
+
+    fn gpu_binary() -> PathBuf {
+        Path::new(env!("CARGO_BIN_EXE_pmacs"))
+            .parent()
+            .expect("test binary directory")
+            .join("pmacs-gpu")
+    }
+
     let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
     let binary = gpu_binary();
     if !binary.exists() {
