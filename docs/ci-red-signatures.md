@@ -715,6 +715,93 @@ branch. The limit in the same breath: it bounds what the branch added,
 and it is not the interval on a macOS runner, which at C1's close no
 record had measured. #258 carries anything measured since.
 
+#### The macOS interval was measured on 2026-09-09, and it falsifies the excursion argument on the failing platform
+
+This section is the correction the paragraph above deferred to. It was
+owed at `f6f36bb`, which landed at 12:42:26Z --- seven minutes before
+the measurement existed --- and none of the six commits after it came
+back.
+
+Run **34351035133**, one `workflow_dispatch` on the throwaway branch
+`measure/hello-macos` at `50da74e` (`main` plus an instrument, left on
+the remote so its sha resolves, never to merge; its `Format` and `Lint`
+jobs are red on the instrument and mean nothing). The instrument times
+the `Hello` read `tests/common/ready.rs::wait_for_daemon` normally
+discards --- first accepted `connect` to first `Hello` --- with the cap
+raised from 500 ms to 20 s, and dumps a report from a last-sorted suite.
+
+**One quantile convention for the whole table: the instrument's own
+report, read from the job logs.** Every figure below is a column of the
+`site budget n p50 p90 max over_budget not_ok` line that suite printed;
+nothing here is recomputed. This is stated because the published `594`
+was not that: it is the rank-44 lower middle of the 88 raw samples,
+while the same row's `881` was taken from the report, so one row carried
+two provenances. Recomputing the row nearest-rank instead gives p50
+**594.07** and p90 **888.57** --- a 0.6% difference that moves no
+decision, which is why the fix is to name a convention rather than to
+argue for one.
+
+Boot to first `Hello`, one row per leg, all four from the same
+instrument and therefore comparable to each other:
+
+| leg | budget | n | p50 | p90 | max | over budget |
+|---|---|---|---|---|---|---|
+| `Test (macos-latest / luajit)` | 500 | 88 | **597.50** | **881.21** | **1114.80** | **71** |
+| `Test (macos-latest / lua54)` | 500 | 88 | 61.15 | 153.45 | 177.96 | 0 |
+| `Test (ubuntu-latest / lua54)` | 500 | 88 | 8.88 | 10.09 | 14.29 | 0 |
+| `Test (crdt)` | 500 | 88 | 4.69 | 5.79 | **63.70** | 0 |
+
+`a16_26`'s probe against a daemon already booted, same report:
+
+| leg | budget | n | p50 | p90 | max | over budget |
+|---|---|---|---|---|---|---|
+| `Test (macos-latest / luajit)` | 200 | 1 | 202.84 | 202.84 | 202.84 | 1 |
+| `Test (macos-latest / lua54)` | 200 | 3 | 148.39 | 196.76 | 196.76 | 0 |
+| `Test (ubuntu-latest / lua54)` | 200 | 3 | 48.56 | 49.90 | 49.90 | 0 |
+| `Test (crdt)` | 200 | 3 | 48.92 | 49.67 | 49.67 | 0 |
+
+`Test (ubuntu-latest / luajit)` produced no samples: it failed on the
+gopls fetch before any test ran, U18/#249's mechanism, exactly as it did
+in run 34358682895.
+
+**"On Linux under 15 ms" is false for one of the two Linux legs.**
+`Test (crdt)`'s max is 63.70 ms. Its p50 is 4.69 and `Test
+(ubuntu-latest / lua54)`'s max is 14.29, so the summary held for three
+of the four figures it covered and not the fourth.
+
+**The consequence for D30, stated plainly.** D30 justifies E1's merge
+with an excursion argument: readiness is a successful `connect`, the
+daemon binds before it can serve, so *"failure needs bind-to-serving
+above ~700 ms against a measured ~14 ms"* --- roughly fiftyfold, and
+therefore safe. On the leg that actually fails, bind-to-serving is p50
+**597.50 ms**, p90 **881.21 ms**, max **1114.80 ms**, and **71 of 88**
+boots already outrun the 500 ms after which the production readiness
+wait declares readiness anyway. The ~700 ms threshold is not a
+fiftyfold excursion there; it sits inside the observed distribution.
+D30's second bolded clause --- that the job-wide macOS question is
+UNTAKEN and that "macOS is two to five times over its budgets" is from
+the CI logs rather than a measurement on the platform --- is false as
+of 12:49:57Z on 2026-09-09.
+
+**What the measurement does not establish**, in its own terms: it is one
+`workflow_dispatch` run, one tree, one arm --- a distribution, not the
+paired two-sha comparison C1 ran on Linux, and not a rate over time. The
+cross-*leg* rows are four different jobs on four different runners, so
+the tenfold macOS luajit/lua54 gap is not attributable to the Lua flavor
+or to the runner and is not attributed here. `~14 ms` in D30 is *bind to
+`daemon listening`* on a laptop, a different endpoint from this table's
+*first connect to first `Hello`*; the comparable Linux figures are this
+table's own 8.88 and 4.69. Nothing was fixed from any of it.
+
+**Where this correction has and has not landed.** It is in the comment
+on #258 of 2026-09-09T12:49:57Z with these limits, in E2's handoff and
+fixes passes, in PR #262's body, in PR #257's body, in the roadmap's C2
+entry and in D30's own row, which now carries the original wording
+quoted beside it. It is **uncorrectable in `dbe40a1`**, the merge commit
+on `main`, whose message reads *"failure needs bind-to-serving above
+~700 ms against ~14 ms observed"*; that sentence is wrong for the
+platform the accepted red is on and it is in `main`'s permanent history.
+
 ### `main` after E1: run 34349759554 at `dbe40a1`
 
 E1 merged as `dbe40a1` (squash of `d7fd465`, PR #257) on 2026-09-09, and
