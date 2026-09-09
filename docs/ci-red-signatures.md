@@ -181,9 +181,9 @@ never shut.
 | field | value |
 |---|---|
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
-| job | GitHub Actions, the serialized crdt sweep (`--test-threads=1`) |
+| job | GitHub Actions: first the serialized crdt sweep (`--test-threads=1`), since then `Test (macos-latest / luajit)` twice and `Test (ubuntu-latest / luajit)` once, all three under cargo's default parallelism. The job is not a discriminator for this row and a match needs the selector and the fragment on any CI test leg |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so is its third, 34253949749 at the head `b2094ac`. Two green runs are two samples: non-reproduction and nothing more |
+| occurrences | four: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`; and `main` at `dbe40a1`, run 34349759554 (E1's post-merge run), job `Test (macos-latest / luajit)` (102459915513), `tests/m8_1_acceptance.rs:278:5`, `assertion left == right failed: first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed`, the job's only failure against 119 `test result: ok`. The second, third and fourth run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so are its third, fourth and fifth. Green runs are samples: non-reproduction and nothing more. The fourth occurrence is on `main` after two merges that did not touch `src/dispatch` or `tests/m8_1_acceptance.rs`, which is an argument from untouched files and not a measurement; it is the row's third occurrence on `main` and the second on this leg |
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
@@ -709,6 +709,43 @@ why D30 calls #258 a fixture/daemon contract defect that predates the
 branch. The limit in the same breath: it bounds what the branch added,
 and it is not the interval on a macOS runner, which at C1's close no
 record had measured. #258 carries anything measured since.
+
+### `main` after E1: run 34349759554 at `dbe40a1`
+
+E1 merged as `dbe40a1` (squash of `d7fd465`, PR #257) on 2026-09-09, and
+its post-merge `push` run is **34349759554**: 18 jobs on one attempt,
+**16 green, 1 red, 1 skipped** (`Docs consistency`, correctly). A
+`push` run is keyed by sha in `ci.yml`'s concurrency group, so nothing
+cancelled it and it stands as read. The red is `Test (macos-latest /
+luajit)`, job 102459915513, with one failing target:
+
+```
+---- read_dir_supersede_cancels_in_flight_predecessor stdout ----
+thread 'read_dir_supersede_cancels_in_flight_predecessor' (96993) panicked at tests/m8_1_acceptance.rs:278:5:
+assertion `left == right` failed: first read_dir must be superseded; got ok
+  left: "ok"
+ right: "cancelled"
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+```
+
+That is **U17's selector and required fragment**, its fourth
+occurrence and its third on `main`, recorded on the row above. E0's
+post-merge run produced this row's second occurrence on the same leg,
+so E1's merge is the second consecutive merge whose post-merge run is
+red on U17 alone.
+
+**D30's revocation condition is not met.** D30 revokes E1's merge
+disposition if #258's selector recurs on `main` after the merge or a
+diagnosis shows a product defect. The job's log carries **zero**
+`WouldBlock`, so neither #258's selector nor any member of the `read
+Hello` family appeared, and no other selector this file or the
+`intermittent-red` issues name appeared either: `a16_26_…`, `acc28_…`,
+`v15_peer_…`, `ctrl_c_during_reconnect_sleep_…`,
+`stream_supersede_delivers_cancelled_to_on_close` and
+`wdired_external_same_size_same_second_rewrite_aborts` all ran on this
+leg and passed. One run, non-reproduction and nothing more; what it
+establishes is that the condition D30 named did not fire on the one
+run that could have fired it.
 
 ### The macOS reds have a merge-base control, and it excludes nothing
 
