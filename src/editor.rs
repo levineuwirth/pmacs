@@ -9644,8 +9644,9 @@ mod tests {
             .invoke_command("editor.list-buffers", mlua::MultiValue::new())
             .unwrap();
         // After list-buffers, the cursor sits on data line 1 (the
-        // first registered buffer, i.e. *scratch*). Walk down until we
-        // land on `target.txt`.
+        // first registered buffer, i.e. *scratch*). Walk down until the
+        // listview's item under the cursor is `target.txt` (E5.5: the
+        // listing is a listview panel, so the row's buffer is its item).
         let mut hops = 0;
         loop {
             let line: i64 = s
@@ -9655,9 +9656,15 @@ mod tests {
                 .eval()
                 .unwrap();
             assert!(line >= 1, "cursor should be on a data line");
-            let name_at_cursor = s.lua_host.lua()
-                .load("local i = pmacs.editor.cursor_line(); local ids = pmacs.buffer.list(); local nth = 1; for _, id in ipairs(ids) do if pmacs.describe.buffer(id).name == '*buffer-list*' then else if nth == i then return pmacs.describe.buffer(id).name end; nth = nth + 1 end end")
-                .eval::<Option<String>>().unwrap();
+            let name_at_cursor = s
+                .lua_host
+                .lua()
+                .load(
+                    "local id = pmacs.listview.current_item(); \
+                     return id and pmacs.describe.buffer(id).name or nil",
+                )
+                .eval::<Option<String>>()
+                .unwrap();
             if name_at_cursor.as_deref() == Some("target.txt") {
                 break;
             }
@@ -9668,7 +9675,7 @@ mod tests {
             assert!(hops < 32, "couldn't find target.txt in buffer list");
         }
         s.lua_host
-            .invoke_command("editor.buffer-list-visit", mlua::MultiValue::new())
+            .invoke_command("listview.visit", mlua::MultiValue::new())
             .unwrap();
         assert_eq!(s.core.borrow().active_buffer_name(), "target.txt");
     }

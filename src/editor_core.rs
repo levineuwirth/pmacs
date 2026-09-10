@@ -2020,8 +2020,8 @@ impl EditorCore {
     /// Notify every window displaying `buffer_id` that the buffer was
     /// just edited externally — used by code paths that mutate a buffer
     /// without going through [`Self::apply_active_edit`] (the most
-    /// notable one being [`crate::lua::LuaHost::append_to_errors_buffer`],
-    /// which writes to `*errors*` from inside Lua callbacks).
+    /// notable one being [`crate::lua::report_error`], which writes to
+    /// `*errors*` from inside Lua callbacks).
     ///
     /// Without this notification, any window currently displaying the
     /// edited buffer would keep a stale [`crate::text_view::TextView`]
