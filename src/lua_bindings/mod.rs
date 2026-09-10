@@ -14247,6 +14247,7 @@ fn install_minibuffer_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table
     install_minibuffer_read(&mb, lua, core)?;
     install_minibuffer_query(&mb, lua, core)?;
     install_minibuffer_motion(&mb, lua, core)?;
+    install_minibuffer_sources(&mb, lua, core)?;
     install_minibuffer_lifecycle(&mb, lua, core)?;
     Ok(mb)
 }
@@ -14266,6 +14267,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                         | "history"
                         | "source"
                         | "source_root"
+                        | "ranked"
                         | "on_accept"
                         | "on_cancel"
                 ) {
@@ -14285,11 +14287,33 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
             })?;
             let on_cancel: Option<Function> = spec.get("on_cancel")?;
             let source = parse_completion_source(&spec)?;
+            // E4.1: `ranked = true` declares that the source filters and
+            // orders against the needle it is handed, so the session
+            // applies only the cap. Refused for the builtin sources,
+            // whose pools carry no order worth keeping --- a caller
+            // asking for it there has misread the contract.
+            let ranked = match spec.get::<Value>("ranked")? {
+                Value::Nil => false,
+                Value::Boolean(b) => b,
+                _ => {
+                    return Err(mlua::Error::external(BindingError::SpecFieldType {
+                        field: "ranked",
+                        expected: "boolean",
+                    }));
+                }
+            };
+            if ranked && !matches!(source, crate::minibuffer::CompletionSource::Custom(_)) {
+                return Err(mlua::Error::runtime(
+                    "pmacs.minibuffer.read: ranked = true needs a function source; \
+                     the builtin sources have no order to keep",
+                ));
+            }
             let session = crate::minibuffer::MinibufferSession {
                 prompt: prompt.unwrap_or_default(),
                 initial: initial.unwrap_or_default(),
                 history_bucket: history.unwrap_or_default(),
                 source,
+                ranked,
                 on_accept,
                 on_cancel,
                 candidates: Vec::new(),
@@ -14446,6 +14470,66 @@ fn install_minibuffer_motion(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::
             Ok(())
         })?,
     )
+}
+
+/// The E4.1 surface for a function source that ranks for itself:
+/// `refresh` and `rank`. Its own installer because the motion one is at
+/// clippy's line ceiling.
+fn install_minibuffer_sources(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
+    {
+        // E4.1: recompute the candidate list against the live source
+        // without touching the typed text. For a source whose pool
+        // arrives asynchronously (the project file finder's walk lands
+        // after the prompt opened): the keyboard path recomputes only
+        // on input, so without this a list that filled in behind a
+        // silent user stayed empty until the next keystroke. A no-op
+        // when no session is live.
+        let cc = core.clone();
+        let lua_for_app = lua.clone();
+        mb.set(
+            "refresh",
+            lua.create_function(move |_, ()| {
+                if !cc.borrow().minibuffer.is_active() {
+                    return Ok(());
+                }
+                let cmds_app = lua_for_app
+                    .app_data_ref::<SharedCommandRegistry>()
+                    .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+                let reg_app = lua_for_app
+                    .app_data_ref::<SharedRegistry>()
+                    .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+                let cmds = cmds_app.borrow();
+                let reg = reg_app.borrow();
+                cc.borrow_mut()
+                    .minibuffer
+                    .recompute_candidates(&cmds, &reg)?;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // E4.1: `rank(needle, list [, limit])` --- the session's own
+        // scorer, filter then sort then take, for a ranked source that
+        // wants `fuzzy_score`'s order over part of its pool before it
+        // decides the rest (recent files first, then everything else).
+        // Scoring in Rust is what keeps a 20k-entry list a per-keystroke
+        // operation rather than a per-keystroke Lua loop.
+        mb.set(
+            "rank",
+            lua.create_function(
+                |lua, (needle, list, limit): (String, Table, Option<usize>)| {
+                    let pool: Vec<String> = list.sequence_values::<String>().flatten().collect();
+                    let ranked = crate::minibuffer::rank_candidates(&needle, &pool, limit);
+                    let out = lua.create_table_with_capacity(ranked.len(), 0)?;
+                    for (i, s) in ranked.into_iter().enumerate() {
+                        out.set(i + 1, s)?;
+                    }
+                    Ok(out)
+                },
+            )?,
+        )?;
+    }
+    Ok(())
 }
 
 fn install_minibuffer_lifecycle(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {

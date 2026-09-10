@@ -1181,18 +1181,23 @@ local function search_move_cursor_to(line, col)
   end
 end
 
+-- Worker match paths are relative to the search root, not the cwd ---
+-- resolve against the root this search ran with.
+local function match_path(m)
+  local path = m.file
+  if path:sub(1, 1) ~= "/" then
+    local root = (search_panel and search_panel.root) or "."
+    if root:sub(-1) ~= "/" then root = root .. "/" end
+    path = root .. path
+  end
+  return path
+end
+
 local function visit_match(idx)
   local p = search_panel
   local m = p and p.matches[idx]
   if not m then return end
-  -- Worker match paths are relative to the search root, not the
-  -- cwd — resolve against the root this search ran with.
-  local path = m.file
-  if path:sub(1, 1) ~= "/" then
-    local root = p.root or "."
-    if root:sub(-1) ~= "/" then root = root .. "/" end
-    path = root .. path
-  end
+  local path = match_path(m)
   pmacs.editor.push_jump()
   local ok, err = pcall(pmacs.buffer.find_or_open, path)
   if not ok then
@@ -1342,6 +1347,45 @@ cmd { name = "project-search.visit",
         visit_match(idx)
       end }
 
+-- E4.4: `n` / `p` preview the match in the OTHER window while focus
+-- stays on the results --- Emacs's next-error-no-select. The other
+-- window is the first non-side window that is not the results window,
+-- split off the results window when there is none; the file is
+-- displayed there with the match line under its cursor, and the
+-- results window is then reselected, so from the user's side focus
+-- never left the panel and RET (`project-search.visit`) still visits in
+-- place. The GPU frontend shows one window until E11's window tree
+-- reaches the wire, so there the preview is invisible --- recorded in
+-- docs/divergences.md.
+local function other_document_window(results_win)
+  for _, id in ipairs(pmacs.window.list()) do
+    if id ~= results_win then
+      local ok, params = pcall(pmacs.window.params, id)
+      if ok and params and params.side == nil then return id end
+    end
+  end
+  local ok, new_id = pcall(pmacs.window.split_horizontal)
+  if ok and new_id then return new_id end
+  return nil
+end
+
+local function preview_match(idx)
+  local p = search_panel
+  local m = p and p.matches[idx]
+  if not m then return end
+  local results_win = pmacs.window.current()
+  local other = other_document_window(results_win)
+  if not other then return end
+  local path = match_path(m)
+  local ok, err = pcall(pmacs.window.display_file, path, { window = other, select = true })
+  if ok then
+    search_move_cursor_to(m.line, m.col)
+  else
+    pmacs.editor.set_status("search: failed to open " .. path .. ": " .. tostring(err))
+  end
+  pcall(pmacs.window.display, p.buf, { window = results_win, select = true })
+end
+
 local function search_step_line(direction)
   if not active_is_search_panel() then return end
   if not search_panel_check_rev() then return end
@@ -1370,6 +1414,8 @@ local function search_step_line(direction)
     cur = cur - 1
   end
   pmacs.editor.move_line_start()
+  local idx = match_on_row(best)
+  if idx then preview_match(idx) end
 end
 
 cmd { name = "project-search.next-line",

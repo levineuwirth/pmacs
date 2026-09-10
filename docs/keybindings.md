@@ -138,6 +138,9 @@ are not in the keymap at all.
 | `C-x k` | `buffer.kill` |
 | `C-x l` | `window.toggle-line-numbers` |
 | `C-x o` | `window.focus-next` |
+| `C-x p f` | `project.find-file` |
+| `C-x p g` | `project.search` |
+| `C-x p s` | `lsp.workspace-symbols` |
 | `C-x r` | `buffer.redo` |
 | `C-x t` | `ui.toggle-line-wrap` |
 | `C-x u` | `buffer.undo` |

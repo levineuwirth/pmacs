@@ -11870,3 +11870,106 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
 mod iso;
 #[path = "common/ready.rs"]
 mod ready;
+
+/// E4.3 --- `*workspace-symbols*` end-to-end against the fake server's
+/// flat `SymbolInformation` response (`WsThing`, a function in container
+/// `modw` at `file:///ws.rs` line 7): the chord opens the query prompt,
+/// RET on the typed query lists the symbol with its kind tag, container
+/// and location, RET on the row visits it through the jump ring, and
+/// `M-,` returns to the panel.
+#[test]
+fn workspace_symbols_prompt_lists_and_visits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"l0\nl1\n").expect("write a");
+
+    let mut state = open_against_fake(&a_path);
+
+    // The chord opens the query prompt.
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    for c in ['p', 's'] {
+        state.dispatch_key(
+            FrontendId::LOCAL,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    let prompt: Option<String> = state
+        .lua_host
+        .lua()
+        .load("return pmacs.minibuffer.prompt()")
+        .eval()
+        .expect("prompt probe");
+    assert_eq!(
+        prompt.as_deref(),
+        Some("Workspace symbol: "),
+        "C-x p s opens the workspace-symbol prompt"
+    );
+    for c in ['W', 's'] {
+        state.dispatch_key(
+            FrontendId::LOCAL,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "pmacs.describe.buffer(pmacs.window.buffer()).name == '*workspace-symbols*'",
+            5,
+        ),
+        "the workspace-symbols panel never opened"
+    );
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .expect("panel text");
+    assert!(
+        text.contains("1 symbol for 'Ws'"),
+        "the header names the count and the query; got {text:?}"
+    );
+    assert!(
+        text.contains("WsThing  [function]  modw  "),
+        "the row carries name, kind tag and container; got {text:?}"
+    );
+    assert!(
+        text.contains("ws.rs:8"),
+        "the row carries the location, one-based; got {text:?}"
+    );
+
+    // RET visits the symbol's location through the jump ring.
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    let name: String = state
+        .lua_host
+        .lua()
+        .load("return pmacs.describe.buffer(pmacs.window.buffer()).name")
+        .eval()
+        .expect("post-visit probe");
+    assert!(
+        name.ends_with("ws.rs"),
+        "RET visits the symbol's file; active buffer {name:?}"
+    );
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.editor.jump_back()")
+        .exec()
+        .expect("jump back");
+    let name: String = state
+        .lua_host
+        .lua()
+        .load("return pmacs.describe.buffer(pmacs.window.buffer()).name")
+        .eval()
+        .expect("post-jump-back probe");
+    assert_eq!(name, "*workspace-symbols*", "M-, returns to the panel");
+}

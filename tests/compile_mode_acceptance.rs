@@ -3039,3 +3039,90 @@ fn j1b1_context_reports_the_cwd_a_run_would_use() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+
+// ---------------------------------------------------------------------------
+// E4.4: the grep chord, and n/p previewing in the other window
+// ---------------------------------------------------------------------------
+
+/// The buffer name and cursor line of the one window that is not the
+/// active one, read by selecting it and selecting back, so the probe
+/// needs no knowledge of a window's internals. Two windows exactly.
+fn other_window_name_and_line(s: &EditorState) -> (String, i64) {
+    eval(
+        s,
+        r#"
+        local wins = pmacs.window.list()
+        assert(#wins == 2, "two windows expected, got " .. #wins)
+        pmacs.window.focus_next()
+        local name = pmacs.describe.buffer(pmacs.window.buffer()).name
+        local line = pmacs.editor.cursor_line()
+        pmacs.window.focus_next()
+        return name, line
+        "#,
+    )
+}
+
+fn window_count(s: &EditorState) -> i64 {
+    eval(s, "return #pmacs.window.list()")
+}
+
+/// `n` and `p` show the match under the cursor in the other window,
+/// splitting one off the results when there is none, and leave the
+/// results window focused.
+#[test]
+fn acc36_n_and_p_preview_the_match_in_the_other_window() {
+    let dir = tempfile::tempdir().unwrap();
+    grep_fixture(dir.path());
+    let mut s = editor();
+    search(&s, "zqxvbn_needle_77", dir.path());
+    assert!(pump_until(&mut s, 10_000, search_done), "search completes");
+    assert_eq!(window_count(&s), 1, "one window before the first preview");
+
+    press(&mut s, KeyCode::Char('n'));
+    assert_eq!(
+        active_buffer_name(&s),
+        "*search-results*",
+        "focus stays on the results"
+    );
+    assert_eq!(
+        window_count(&s),
+        2,
+        "a second window is split off for the preview"
+    );
+    let (name, line) = other_window_name_and_line(&s);
+    assert!(
+        name.ends_with("f.txt"),
+        "the other window shows the file; got {name:?}"
+    );
+    assert_eq!(line, 1, "the first match is on the file's second line");
+
+    press(&mut s, KeyCode::Char('n'));
+    assert_eq!(active_buffer_name(&s), "*search-results*");
+    assert_eq!(window_count(&s), 2, "the preview reuses the window it made");
+    let (_, line) = other_window_name_and_line(&s);
+    assert_eq!(line, 2, "the second match is on the file's third line");
+
+    press(&mut s, KeyCode::Char('p'));
+    assert_eq!(active_buffer_name(&s), "*search-results*");
+    let (_, line) = other_window_name_and_line(&s);
+    assert_eq!(line, 1, "p previews the previous match");
+
+    // RET still visits in place, unchanged.
+    press(&mut s, KeyCode::Enter);
+    assert!(active_buffer_name(&s).ends_with("f.txt"));
+}
+
+/// `C-x p g` opens the search prompt.
+#[test]
+fn acc37_the_project_prefix_reaches_the_search_prompt() {
+    let mut s = editor();
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('p'));
+    press(&mut s, KeyCode::Char('g'));
+    let prompt: Option<String> = eval(&s, "return pmacs.minibuffer.prompt()");
+    assert_eq!(
+        prompt.as_deref(),
+        Some("Search: "),
+        "C-x p g opens the project search prompt"
+    );
+}

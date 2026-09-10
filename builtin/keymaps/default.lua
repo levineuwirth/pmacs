@@ -197,6 +197,19 @@ bind("C-x w", "editor.list-workers")
 bind("C-x t", "ui.toggle-line-wrap")
 bind("C-c l", "lsp.status")
 
+-- Project (E4) ---------------------------------------------------------------
+--
+-- `C-x p` is the project prefix, as in Emacs's project.el: `f` finds a
+-- file anywhere under the project root by fuzzy name with the recent
+-- files first (the Ctrl-P reflex, E4.2). The prefix was free.
+bind("C-x p f", "project.find-file")
+-- `s` asks the active buffer's language server for symbols across the
+-- whole workspace by name and lists them (E4.3).
+bind("C-x p s", "lsp.workspace-symbols")
+-- `g` is the project grep (E4.4), as project.el's find-regexp; the
+-- streaming `*search-results*` buffer had no chord at all before this.
+bind("C-x p g", "project.search")
+
 -- Zoom (D22) -----------------------------------------------------------------
 --
 -- Bound on EVERY platform, overruling `runtime/zoom.lua`'s original
