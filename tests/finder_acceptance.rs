@@ -373,7 +373,7 @@ fn cancel_stops_the_listing_and_a_new_prompt_supersedes_it() {
 /// a pass/fail. Prints the time from the chord to the first populated
 /// candidate list, once by the walk and once by git.
 #[test]
-#[ignore = "measurement, run by scripts/perf-budgets"]
+#[ignore = "wall-clock budget: a measurement under D12, run by scripts/perf-budgets"]
 fn finder_lists_a_20k_file_tree_measured() {
     fn build_tree(dir: &Path) {
         for d in 0..200 {
