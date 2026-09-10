@@ -308,6 +308,52 @@ Tally (259-red-polls): 53–58 over 53, 54, 58, 58.
 
 Tally (259-red-elapsed): 5.01–5.04 s over 5.04, 5.03, 5.03, 5.01.
 
+### PR #267's head run 34490620616 at `8e4ed3a`: `M5 Perf Gates` at its 25-minute ceiling, then green on the authorized rerun
+
+Recorded from `main` on 2026-09-10 in E4's fix round 1, after both
+attempts had completed; the branch could not record it. Read from the
+jobs endpoint, the job logs and the check-run annotations, not from the
+verdict line.
+
+| field | value |
+|---|---|
+| run | 34490620616, `pull_request`, **two attempts** |
+| head | `8e4ed3a`, C4's tip (E4, base `8e4ab78`) |
+| attempt 1 | created 14:40:38Z, closed 15:10:57Z; 19 jobs: **17 success, 1 skipped, 1 cancelled** |
+| the cancel | `M5 Perf Gates` (a required check), job 102916181524, 14:40:56Z – 15:10:56Z, `cancelled`; step 5 left `in_progress`, steps 9 and 10 `pending`, **no log ever uploaded** (`BlobNotFound`) --- it produced nothing. **Filed as #268**, a first occurrence |
+| the ceiling | the job's own `timeout-minutes: 25` (`ci.yml:582`): the check-run annotation reads `The job has exceeded the maximum execution time of 25m0s`. The thirty minutes is 25 + 5 --- the deadline fell at 15:05:56Z and the record closed at 15:10:56Z, GitHub's force-termination window for a runner that does not acknowledge a cancel. No second run existed in the PR's `concurrency` group, and the cache key attempt 2 restored full-match carries no attempt id and predates attempt 1, so cold cache is excluded |
+| attempt 2 | the authorized rerun of that job alone, 15:28:51Z – 15:31:28Z: job 102934171842, **success in 2 m 29 s** --- release build 2 m 05 s, `running 1 test`, `p50 127.429 µs / p90 164.688 µs / p99 295.954 µs / max 792.185 µs` against a 10 ms threshold, `1 passed`. The run now reads `conclusion: success` at `run_attempt: 2`; attempt 1's record survives at `/attempts/1` |
+| the six `Test` legs | all green, read from the logs: zero `WouldBlock`, zero `test result: FAILED`, zero panics, 125–127 `test result: ok` per leg; **no registry selector fired**; all nineteen rows E4 added printed `... ok` on every leg, the two macOS legs included |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (268): 1 item in the list below.
+
+- run 34490620616 attempt 1, job 102916181524, `cancelled` at the
+  25-minute ceiling with no log
+
+Under the rerun rule attempt 2 establishes that the ceiling was not hit
+that time and nothing more; #268 stays at one. What #268 also says
+since this round: `tests/m5_perf_acceptance.rs` bounds every operation
+and nothing in aggregate (1100 iterations at up to `PER_KEY_TIMEOUT`
+admit ninety-one minutes with nothing printed) and `drain_pending` at
+`:153` is the file's one unbounded wait, so a slow attach and a hung
+attach are the same object to that witness --- a test that cannot bound
+itself cannot tell you which happened. Not fixed here; the owner's
+sweep.
+
+**The stale sentence, so the next phase reads it here.** PR #267's body
+said, after attempt 1, that the head was not green on a required check
+and that a rerun was the owner's; the rerun was taken in the same
+review round and the sentence was still there when the round read the
+body. The owner counts that as the **fifth stale CI sentence in five
+phases' merge artifacts**; the passes name E1's three (review 1's High,
+review 2's High 1, the end-to-end round's High 1, each a run or a
+refresh behind), E2 review 2's resume table one commit behind, and this
+one. The body is mutable and moves no tip, so the correction is free
+and the rule is now in the resume: the CI paragraph of the merge
+artifact is re-read against the API at the close of every round, after
+any rerun, and states every attempt.
+
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
 The run the branch could not record. Read from the jobs endpoint and
