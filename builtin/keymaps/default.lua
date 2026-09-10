@@ -206,6 +206,9 @@ bind("C-x p f", "project.find-file")
 -- `s` asks the active buffer's language server for symbols across the
 -- whole workspace by name and lists them (E4.3).
 bind("C-x p s", "lsp.workspace-symbols")
+-- `g` is the project grep (E4.4), as project.el's find-regexp; the
+-- streaming `*search-results*` buffer had no chord at all before this.
+bind("C-x p g", "project.search")
 
 -- Zoom (D22) -----------------------------------------------------------------
 --

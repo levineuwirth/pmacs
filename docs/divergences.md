@@ -110,3 +110,23 @@ whole. Under one cap a growing register squeezes the rules.
   answered. Removed when the grid frontend paints the same wash from
   the same face, which needs no wire work — only a decoration the grid
   renderer synthesizes locally, as this one is.
+- **Search-results preview (E4.4).** In `*search-results*`, `n` and
+  `p` show the match under the cursor in the *other* document window
+  --- split off the results when there is none --- and hand focus
+  straight back to the results, Emacs's next-error-no-select. The
+  daemon does this for both frontends identically; what differs is
+  what each can show. The grid frontend paints every window in the
+  layout, so the preview is visible beside the results. The GPU
+  frontend paints one document window and the bottom panel (audit
+  §3.1's blocker 9: `State.buffer` is single and the panel band is the
+  only second region), so there the other window exists in the
+  daemon's layout and is never drawn: `n` and `p` move the match under
+  an invisible cursor, focus returns to the results, and the user sees
+  the results alone until RET visits in place. It is the same
+  invisibility `C-x 2` already has on the GPU (audit §6.1: "`C-x 2`
+  already splits the GPU's view invisibly"), reached by a new route;
+  nothing here makes it worse, and the preview asks for no chord the
+  grid does not also have. Removed when E11 puts `WindowTree` and
+  `WindowFacts` on the wire and the GPU paints more than one document
+  window, at which point the preview is visible on both and this entry
+  becomes a statement that the two frontends agree.
