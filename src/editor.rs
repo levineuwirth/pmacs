@@ -7687,6 +7687,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            ranked: false,
         });
         assert!(
             !s.dispatch_idle(),
@@ -9219,6 +9220,7 @@ mod tests {
                 selected: None,
                 history_index: None,
                 typed_before_history_nav: None,
+                ranked: false,
             });
             for c in entry.chars() {
                 mb1.insert_char(c);
@@ -9243,6 +9245,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            ranked: false,
         });
         let h: &History = mb2.history.get("test").expect("history loaded");
         let entries: Vec<_> = h.entries.iter().cloned().collect();

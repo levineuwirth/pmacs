@@ -45,9 +45,15 @@ use crate::view::View;
 /// deque cannot grow unboundedly across a long session.
 pub const HISTORY_MAX: usize = 500;
 
-/// Hard cap on how many candidates we display / iterate against.
-/// Most prompts have far fewer; the cap protects against pathological
-/// custom sources that return millions of strings.
+/// Hard cap on how many candidates a session holds after filtering
+/// and sorting. Most prompts have far fewer; the cap bounds what the
+/// band paints and what accept resolves against. It is applied AFTER
+/// [`filter_and_sort`] has scored and ordered the whole pool (E4.1):
+/// until then it truncated a custom source's pool at 1024 entries
+/// BEFORE the needle was applied, so a match past the 1024th entry of
+/// a 20k-file listing was unreachable by typing, and `filter_and_sort`
+/// took its first 1024 survivors before sorting them, so the best
+/// match could be dropped in favor of a worse one that came earlier.
 pub const CANDIDATE_LIMIT: usize = 1024;
 
 /// Canonical name of the minibuffer's backing buffer.
@@ -367,8 +373,14 @@ impl Minibuffer {
             return Ok(());
         };
         let needle = self_contents(&self.buffer);
-        let pool = collect_pool(&s.source, commands, registry)?;
-        let candidates = filter_and_sort(&needle, &pool);
+        let pool = collect_pool(&s.source, &needle, commands, registry)?;
+        let candidates = if s.ranked {
+            // The source already filtered and ordered against the
+            // needle it was handed; only the cap applies.
+            pool.into_iter().take(CANDIDATE_LIMIT).collect()
+        } else {
+            filter_and_sort(&needle, &pool)
+        };
         s.candidates = candidates;
         s.selected = if s.candidates.is_empty() {
             None
@@ -399,6 +411,13 @@ pub struct MinibufferSession {
     pub history_bucket: String,
     /// Where candidates come from.
     pub source: CompletionSource,
+    /// When set, the source's returned order IS the candidate order:
+    /// the session neither filters nor re-sorts, and applies only
+    /// [`CANDIDATE_LIMIT`]. For a [`CompletionSource::Custom`] source
+    /// that receives the needle and ranks for itself (the project file
+    /// finder puts recent files first, which no score can express);
+    /// meaningless for the builtin sources, whose pools are unranked.
+    pub ranked: bool,
     /// Lua callback invoked with the accepted contents.
     pub on_accept: Function,
     /// Optional Lua callback invoked on cancel (no args).
@@ -575,6 +594,7 @@ fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
 
 fn collect_pool(
     source: &CompletionSource,
+    needle: &str,
     commands: &CommandRegistry,
     registry: &BufferRegistry,
 ) -> mlua::Result<Vec<String>> {
@@ -588,17 +608,15 @@ fn collect_pool(
             .collect()),
         CompletionSource::Files { root } => Ok(list_directory(root)),
         CompletionSource::Custom(f) => {
-            let table: mlua::Table = f.call(())?;
-            let mut out = Vec::new();
-            for (i, item) in table.sequence_values::<String>().enumerate() {
-                if i >= CANDIDATE_LIMIT {
-                    break;
-                }
-                if let Ok(s) = item {
-                    out.push(s);
-                }
-            }
-            Ok(out)
+            // The typed text is the source's one argument (E4.1). A
+            // source that ignores it behaves exactly as before; one
+            // that reads it can narrow or rank its own pool, which is
+            // what lets a 20k-entry listing stay a Lua table rather
+            // than 20k strings crossing the boundary per keystroke.
+            // The whole sequence is collected: the cap is applied by
+            // the caller after filtering, never here before it.
+            let table: mlua::Table = f.call(needle)?;
+            Ok(table.sequence_values::<String>().flatten().collect())
         }
     }
 }
@@ -670,13 +688,28 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
 }
 
 fn filter_and_sort(needle: &str, pool: &[String]) -> Vec<String> {
+    rank_candidates(needle, pool, Some(CANDIDATE_LIMIT))
+}
+
+/// Filter `pool` to the strings [`fuzzy_score`] accepts for `needle`,
+/// sort them best first (ties lexically), and THEN take at most
+/// `limit`. The order of those three steps is the contract: taking
+/// before sorting kept whichever survivors came first in the pool and
+/// could drop the best match (E4.1). Exposed to Lua as
+/// `pmacs.minibuffer.rank` so a ranked source scores with the same
+/// function the session would have used.
+#[must_use]
+pub fn rank_candidates(needle: &str, pool: &[String], limit: Option<usize>) -> Vec<String> {
     let mut scored: Vec<(i32, &str)> = pool
         .iter()
         .filter_map(|s| fuzzy_score(needle, s).map(|sc| (sc, s.as_str())))
-        .take(CANDIDATE_LIMIT)
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-    scored.into_iter().map(|(_, s)| s.to_owned()).collect()
+    scored
+        .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|(_, s)| s.to_owned())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +885,7 @@ mod tests {
             initial: String::new(),
             history_bucket: bucket.into(),
             source,
+            ranked: false,
             on_accept: dummy_accept(lua),
             on_cancel: None,
             candidates: Vec::new(),
@@ -1144,6 +1178,98 @@ mod tests {
         mb.recompute_candidates(&commands, &registry).unwrap();
         mb.complete();
         assert_eq!(mb.contents(), "buffer.save");
+    }
+
+    /// E4.1: the typed text reaches a custom source as its argument.
+    #[test]
+    fn custom_source_receives_the_typed_needle() {
+        let lua = Lua::new();
+        let commands = CommandRegistry::new();
+        let registry = BufferRegistry::new();
+        let seen = lua.create_table().unwrap();
+        lua.globals().set("seen", seen.clone()).unwrap();
+        let f: Function = lua
+            .load("return function(needle) seen[#seen + 1] = needle return { 'x' } end")
+            .eval()
+            .unwrap();
+        let mut mb = Minibuffer::new();
+        open(&mut mb, &lua, CompletionSource::Custom(f), "");
+        for c in "ab".chars() {
+            mb.insert_char(c);
+        }
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        let last: String = seen.get(seen.len().unwrap()).unwrap();
+        assert_eq!(last, "ab", "the source must be called with the needle");
+    }
+
+    /// E4.1: a custom source's pool is filtered whole; the cap applies
+    /// after the needle, not before it.
+    #[test]
+    fn custom_source_pool_is_not_truncated_before_filtering() {
+        let lua = Lua::new();
+        let commands = CommandRegistry::new();
+        let registry = BufferRegistry::new();
+        let f: Function = lua
+            .load(
+                "return function()\n\
+                   local t = {}\n\
+                   for i = 1, 3000 do t[i] = string.format('entry%04d', i) end\n\
+                   t[#t + 1] = 'needle-match'\n\
+                   return t\n\
+                 end",
+            )
+            .eval()
+            .unwrap();
+        let mut mb = Minibuffer::new();
+        open(&mut mb, &lua, CompletionSource::Custom(f), "");
+        for c in "needle".chars() {
+            mb.insert_char(c);
+        }
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        let cands = &mb.session.as_ref().unwrap().candidates;
+        assert_eq!(
+            cands.as_slice(),
+            ["needle-match".to_owned()],
+            "the 3001st entry must be reachable by typing"
+        );
+    }
+
+    /// E4.1: `filter_and_sort` sorts before it takes, so the best match
+    /// survives even when it is the last of more than the cap's worth
+    /// of survivors.
+    #[test]
+    fn filter_and_sort_sorts_before_it_takes() {
+        let mut pool: Vec<String> = (0..1500).map(|i| format!("zzab{i}")).collect();
+        pool.push("ab".to_owned());
+        let out = filter_and_sort("ab", &pool);
+        assert_eq!(out.len(), CANDIDATE_LIMIT);
+        assert_eq!(out[0], "ab", "the best-scoring entry must lead");
+    }
+
+    /// E4.1: a ranked session keeps the source's order and filters
+    /// nothing away itself.
+    #[test]
+    fn ranked_session_keeps_the_source_order() {
+        let lua = Lua::new();
+        let commands = CommandRegistry::new();
+        let registry = BufferRegistry::new();
+        let f: Function = lua
+            .load("return function() return { 'b', 'a', 'c' } end")
+            .eval()
+            .unwrap();
+        let mut mb = Minibuffer::new();
+        open(&mut mb, &lua, CompletionSource::Custom(f), "");
+        mb.session.as_mut().unwrap().ranked = true;
+        for c in "zzz".chars() {
+            mb.insert_char(c);
+        }
+        mb.recompute_candidates(&commands, &registry).unwrap();
+        let cands = &mb.session.as_ref().unwrap().candidates;
+        assert_eq!(
+            cands.as_slice(),
+            ["b".to_owned(), "a".to_owned(), "c".to_owned()],
+            "a ranked source's order is the candidate order"
+        );
     }
 
     #[test]
