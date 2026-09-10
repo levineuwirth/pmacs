@@ -6557,13 +6557,28 @@ fn install_hook_module(lua: &Lua, hooks: &SharedHookRegistry) -> mlua::Result<Ta
         hook.set(
             "add",
             lua.create_function(
-                move |lua, (name, body): (String, Function)| -> mlua::Result<()> {
-                    hks.borrow_mut()
+                move |lua, (name, body): (String, Function)| -> mlua::Result<u64> {
+                    let token = hks
+                        .borrow_mut()
                         .add(&name, body, caller_source(lua, 2))
                         .map_err(mlua::Error::external)?;
-                    Ok(())
+                    Ok(token)
                 },
             )?,
+        )?;
+    }
+
+    {
+        // E5.2: `pmacs.hook.remove(token)` detaches what `add` attached.
+        // `true` if it was still attached, `false` if already gone; a
+        // stale token is not an error, so a package's teardown may run
+        // twice. A run in progress keeps its snapshot.
+        let hks = hooks.clone();
+        hook.set(
+            "remove",
+            lua.create_function(move |_, token: u64| -> mlua::Result<bool> {
+                Ok(hks.borrow_mut().remove(token))
+            })?,
         )?;
     }
 
