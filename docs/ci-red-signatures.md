@@ -89,7 +89,101 @@ that run has completed.
 
 Three phases in a row shipped this debt into the next phase's first
 commit (E0's rode E1's as `559e8bf`, E1's rode E2's as `f6f36bb`).
-E2's does not.
+E2's does not. E3's three PR runs and `main`'s run after its merge are
+recorded below by E4's opening registry commit, on `main`, before E4's
+first push.
+
+### `main` after E3: run 34483416251 at `2ca2094`, red on the family's first trunk sample
+
+| field | value |
+|---|---|
+| run | 34483416251, `push`, one attempt |
+| head | `2ca2094`, E3's squash merge (PR #265 at `049d81b`, `--match-head-commit`) |
+| window | started 2026-09-10T13:33:48Z, completed 13:56:01Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the failure | `Test (macos-latest / luajit)`, job 102891626286 |
+| failing target | `daemon_reships_the_summary_after_a_real_buffer_round_trip`, `tests/theme_faces_acceptance.rs:1039:50`, `read Hello: Io(Os { code: 35, kind: WouldBlock, … })`, `test result: FAILED. 26 passed; 1 failed` |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+`WouldBlock` appears **exactly once** in the job, against 122 `test
+result: ok`. This is the **`read Hello` family's fourteenth** occurrence
+and its **first on `main`**: the two earlier post-merge runs read for it
+(34205653191 at `d97e137`, 34396945488 at `ea8c93a`) carried zero
+`WouldBlock`. Under "What one control run establishes" above, one
+positive sample settles existence: the signature is on the trunk. It is
+**not #258's own selector** — `a16_26_…` ran on the leg and passed — so
+**#258 stays at four and D33's revocation condition is not met.**
+Recorded on #258 on 2026-09-10; not re-run.
+
+### E3's PR runs, which E3 did not record here
+
+| run | sha | verdict | what |
+|---|---|---|---|
+| 34404999196 | `34c208f` (C3) | 17 success, 1 skipped, 0 failures | no registry selector fired |
+| 34452014666 | `450ef26` (fix round 1) | 16 success, 1 skipped, 2 failures | the family's **thirteenth** (`daemon_reships_…`, `theme_faces_acceptance.rs:1039:50`, macOS luajit) and **#266's second** (`Test (ubuntu-latest / luajit, no crdt)`, `67.007468 ms`, `1 polls`) |
+| 34474086323 | `049d81b` (C3 closed) | 17 success, 1 skipped, 1 failure | **#259's fourth** (macOS lua54, `5.007875083s, 58 polls`) |
+
+Each is on its issue with the log link. **#266 is fixed at `f457328`**
+(the assertion is `>= 1` and was bitten by deleting the increment) and
+its fix was confirmed green on the leg it failed on in 34474086323; two
+occurrences, closed by mechanism removal, not by a green count.
+
+### #256 at TWO, with no row until the owner rules on the archived rate
+
+`process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`,
+`live runtime probe`, both local Linux under full-sweep load: gate log
+`20260908T104328Z-2589144` (`05-sweep`) and gate log
+`20260910T115801Z-321737` (`06-sweep`, passed in the same run's
+`sweep-luajit`). The project's own archive
+(`docs/archive/framings/ci-crdt-coverage-framing.md:622-629`) parked
+this expression at "~1 in 5 under parallel full-suite load" with the
+discriminator — a serial full-suite bite — never run, and as a product
+defect hypothesis. Whether that archived rate counts toward a total is
+the owner's call; until it is taken this file carries the two
+occurrences it can vouch for and no rate.
+
+### E4's opening gate at `bbc4dca`: #264's second
+
+`scripts/gate` log `20260910T135544Z-49662`: `clippy` red on E4's own
+defect (fixed at `45d1f9d`), and `05-sweep` red on
+`daemon_attach::tests::ensure_running_invokes_spawner_then_waits_for_socket_to_appear`
+with both of #264's fragments (`expected Ok, got Err(AutoStartTimeout`,
+`src/daemon_attach.rs:849:9`), `2205 passed; 1 failed` in the `--lib`
+target at 21.78 s. `src/daemon_attach.rs` has no diff on the branch.
+**#264 is at two**; on the issue, not re-run.
+
+### The poll cadence on the hosted macOS runners, measured (E4's opening, run 34484377105)
+
+`measure/poll-cadence` at `b059c13` (`main` at `2ca2094` plus an
+instrument in `tests/common/ready.rs` and a report step; never to
+merge), one `workflow_dispatch`, both macOS legs run twice — at cargo's
+default parallelism and under `--test-threads=1`. Every wait through
+`wait_with` and `tick_until` records its step, probe and sleep time.
+The distributions, per leg, for `wait_with` at the 20 ms poll:
+
+| leg | waits (>= 2 polls) | ms/iteration p50 / p90 / max | one `sleep(20 ms)` returned after, p50 / p90 | probe p50 / p90 | waits over 2x the poll | `tick_until`: `sleep(2 ms)` returned after, p50 | #259's wait: polls, ms/iteration, elapsed |
+|---|---|---|---|---|---|---|---|
+| macOS luajit, parallel | 225 | 86.2 / 306.2 / 334.7 | 98.0 / 158.2 ms | 0.34 / 251.2 ms | 206 of 225 | 12.5 ms | 38, 92.2 ms, 3.51 s |
+| macOS luajit, `--test-threads=1` | 224 | 94.1 / 275.7 / 334.8 | 114.2 / 159.2 ms | 0.22 / 232.7 ms | 208 of 224 | 16.5 ms | 16, 86.3 ms, 1.38 s |
+| macOS lua54, parallel | 223 | 75.2 / 112.5 / 154.2 | 102.8 / 159.0 ms | 0.28 / 57.8 ms | 207 of 223 | 13.3 ms | 47, 90.2 ms, 4.24 s |
+| macOS lua54, `--test-threads=1` | 224 | 77.2 / 112.3 / 163.6 | 106.2 / 161.7 ms | 0.10 / 65.7 ms | 188 of 224 | 17.5 ms | 35, 98.0 ms, 3.43 s |
+| ubuntu luajit | 224 | 13.4 / 16.1 / 45.0 | 20.1 / 20.1 ms | 0.04 / 2.5 ms | 1 of 224 | 2.1 ms | 4, 15.1 ms, 0.06 s |
+| ubuntu lua54 | 224 | 13.4 / 16.1 / 81.0 | 20.1 / 20.1 ms | 0.02 / 2.2 ms | 2 of 224 | 2.1 ms | 8, 17.6 ms, 0.14 s |
+| ubuntu luajit, no crdt | 90 | 13.4 / 15.0 / 35.1 | 20.1 / 20.1 ms | 0.00 / 0.6 ms | 0 of 90 | 2.1 ms | 6, 16.8 ms, 0.10 s |
+
+**`--test-threads=1` changes nothing**: serial and parallel legs of one
+flavor agree to within a few milliseconds at every quantile. **The time
+is in the sleep**: a `thread::sleep(20 ms)` on these runners returns
+after about 100 ms at the median, 160 ms at p90, and a 2 ms sleep after
+12–17 ms, while the three Linux legs return in 20.07 and 2.06 ms. So a
+deadline written as milliseconds buys about one fifth of the probes its
+author counted on macOS, which bears on #259 (its own wait succeeded at
+35–47 polls, 3.4–4.2 s of its 5 s, in the green runs: the child is
+spawned and slow), on `pump_until`'s fixed 2 s and on #264's 500 ms
+window (a prediction there: it has only fired on Linux). On #266's
+shape, a one-poll 60 ms window is routine on macOS whenever the probe
+is a socket read and did not occur on Linux in this run. Full report and
+limits on #259, 2026-09-10. Nothing was fixed from it.
 
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
@@ -146,12 +240,15 @@ twelve**, and both remain floors. A load-dependent failure is green
 most of the time over a live defect, which is exactly why this section
 records the green as a sample and not as a closure.
 
-### The `read Hello` family is at TWELVE
+### The `read Hello` family is at FOURTEEN
 
-Twelve occurrences across **five suites** and **six selectors**,
-counted by fetching the failing job of every run on PR #257 and PR
-#262, grepping `WouldBlock`, and extracting the panicking thread and
-site of each hit. Per-job counts: 1, 1, 4, 1, 2, 2, 1.
+Fourteen occurrences across **five suites** and **six selectors**,
+counted by fetching the failing job of every run on PR #257, PR #262
+and PR #265 and `main`'s post-merge runs, grepping `WouldBlock`, and
+extracting the panicking thread and site of each hit. Per-job counts:
+1, 1, 4, 1, 2, 2, 1, 1, 1. (Twelve when this section was first written,
+2026-09-09; thirteen and fourteen added 2026-09-10 from E3's fix-round
+head and from `main` after E3's merge.)
 
 | # | run | sha | suite | selector |
 |---|---|---|---|---|
@@ -167,10 +264,13 @@ site of each hit. Per-job counts: 1, 1, 4, 1, 2, 2, 1.
 | 10 | 34369540895 | `e5417f6` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
 | 11 | 34369540895 | `e5417f6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
 | 12 | 34373256548 | `7b6c519` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 13 | 34452014666 | `450ef26` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 14 | 34483416251 (`main`) | `2ca2094` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
 
 The six selectors are `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`
 (four), `daemon_reships_the_summary_after_a_real_buffer_round_trip`
-(three), `v15_peer_never_receives_theme_facts_and_v16_does` (two), and
+(**five**, the family's most frequent on its own since the fourteenth),
+`v15_peer_never_receives_theme_facts_and_v16_does` (two), and
 `v16_peer_never_receives_font_facts_and_v17_does`,
 `m10_10_non_replica_frontend_does_not_receive_cursor_byte` and
 `daemon_routes_semantic_family_to_semantic_session_only` (one each).
