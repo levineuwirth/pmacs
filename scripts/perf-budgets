@@ -45,6 +45,7 @@ budgets() {
 --test m4_acceptance	m4_6_diagnostics_arrive_within_500ms m4_10_search_under_one_second_for_100k_files m4_1_dispatch_parse_via_runtime_stays_under_the_parse_budget
 --test m7_9_acceptance	lint_completes_in_under_one_second_on_thousand_line_package
 --test injection_acceptance	many_paragraph_settle_under_budget_with_tail_covered
+--test finder_acceptance	finder_lists_a_20k_file_tree_measured
 EOF
 }
 

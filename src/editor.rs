@@ -916,6 +916,14 @@ impl EditorState {
                 include_str!("../builtin/runtime/recentf.lua"),
             )
             .expect("load recentf builtin chunk");
+        // E4.2: the project file finder reads `pmacs.recentf.list` and
+        // `pmacs.fs.walk_tree`, so it loads after both.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/finder.lua"),
+                include_str!("../builtin/runtime/finder.lua"),
+            )
+            .expect("load finder builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/desktop.lua"),

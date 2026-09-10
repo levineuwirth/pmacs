@@ -197,6 +197,13 @@ bind("C-x w", "editor.list-workers")
 bind("C-x t", "ui.toggle-line-wrap")
 bind("C-c l", "lsp.status")
 
+-- Project (E4) ---------------------------------------------------------------
+--
+-- `C-x p` is the project prefix, as in Emacs's project.el: `f` finds a
+-- file anywhere under the project root by fuzzy name with the recent
+-- files first (the Ctrl-P reflex, E4.2). The prefix was free.
+bind("C-x p f", "project.find-file")
+
 -- Zoom (D22) -----------------------------------------------------------------
 --
 -- Bound on EVERY platform, overruling `runtime/zoom.lua`'s original
