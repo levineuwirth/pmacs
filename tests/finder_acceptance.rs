@@ -86,9 +86,15 @@ fn active_path(s: &EditorState) -> Option<String> {
 /// marker walk clamped to `dir` so the finder's root is `dir` when it
 /// holds a `.git` and `dir` (the file's directory) when it does not.
 fn editor_in(dir: &Path) -> EditorState {
+    editor_in_with_roots(dir, &iso::roots())
+}
+
+/// [`editor_in`] over explicit bootstrap roots, for a row that needs a
+/// private state root.
+fn editor_in_with_roots(dir: &Path, roots: &pmacs::bootstrap::BootstrapRoots) -> EditorState {
     let anchor = dir.join("anchor.txt");
     std::fs::write(&anchor, b"anchor\n").expect("write anchor");
-    let state = EditorState::new_with_roots(&iso::roots());
+    let state = EditorState::new_with_roots(roots);
     state.lua_host.reopen_init_phase_for_testing();
     exec(
         &state,
@@ -309,6 +315,103 @@ fn recent_files_sit_at_the_top_and_are_not_duplicated() {
     assert!(
         !cands.iter().any(|c| c == "zz.txt"),
         "a recent that misses the needle is filtered; got {cands:?}"
+    );
+}
+
+/// Text of the buffer named `name`, or empty when absent.
+fn named_text(s: &EditorState, name: &str) -> String {
+    let b: mlua::String = eval(
+        s,
+        &format!(
+            r#"
+            for _, id in ipairs(pmacs.buffer.list()) do
+                if pmacs.describe.buffer(id).name == {name:?} then
+                    return id:slice(0, id:len())
+                end
+            end
+            return ""
+            "#
+        ),
+    );
+    String::from_utf8_lossy(&b.as_bytes()).into_owned()
+}
+
+/// E4.4 feeds E4.2: previewing a grep hit with `n` shows the file in
+/// the other window, `buffer.after-switch` fires there, recentf records
+/// the file, and the finder's next prompt offers it first. It is the one
+/// cross-row interaction the phase introduced, and it matches Emacs,
+/// where a `next-error` visit enters `recentf`. Witnessed with a REAL
+/// recentf over a private state root, so this row also exercises the
+/// recording the row above stubs.
+#[test]
+fn previewing_a_search_hit_puts_the_file_at_the_top_of_the_finder() {
+    let td = tempfile::tempdir().expect("tempdir");
+    for name in ["aa.txt", "ab.txt"] {
+        std::fs::write(td.path().join(name), b"nothing here\n").expect("write");
+    }
+    let hit = td.path().join("zz-hit.txt");
+    std::fs::write(&hit, b"top\nzqxvbn_needle_77 here\n").expect("write hit");
+    let roots = iso::roots().with_state_root(td.path().join("state"));
+    let mut s = editor_in_with_roots(td.path(), &roots);
+    // recentf is inert until the state directory is installed, which
+    // the real entry points do after construction and tests must do
+    // themselves; a private root keeps this run's list out of every
+    // other test's.
+    s.install_state_dirs();
+    assert!(
+        eval::<bool>(&s, "return pmacs.state.available()"),
+        "the private state root must make recentf live"
+    );
+    // The preview splits a window, and a grid frontend's frame size is
+    // its declaration.
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(24, 80));
+
+    exec(
+        &s,
+        &format!(
+            "pmacs.project.search('zqxvbn_needle_77', {{ root = {:?} }})",
+            td.path().display().to_string()
+        ),
+    );
+    ready::tick_until(&mut s, "the project search", ready::DEADLINE, |s| {
+        if named_text(s, "*search-results*").contains("-- search ") {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending("no summary line yet".to_owned())
+        }
+    });
+
+    press(&mut s, KeyCode::Char('n'));
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).name"
+        ),
+        "*search-results*",
+        "focus stays on the results after the preview"
+    );
+    let recent: Vec<String> = eval(&s, "return pmacs.recentf.list()");
+    assert_eq!(
+        recent.first().map(String::as_str),
+        Some(hit.display().to_string().as_str()),
+        "the previewed file is recentf's most recent entry; got {recent:?}"
+    );
+
+    // The finder roots itself from the active buffer's file, and the
+    // results buffer has none; step into the preview window, which is
+    // where a user who wants to go on from the hit is standing.
+    exec(&s, "pmacs.window.focus_next()");
+    open_finder(&mut s);
+    wait_listed(&mut s);
+    let cands = candidates(&s);
+    assert_eq!(
+        cands.first().map(String::as_str),
+        Some("zz-hit.txt"),
+        "the previewed file leads the finder; got {cands:?}"
+    );
+    assert!(
+        cands.iter().any(|c| c == "aa.txt"),
+        "the listing is the fixture's, not the working directory's; got {cands:?}"
     );
 }
 
