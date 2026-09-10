@@ -349,6 +349,55 @@ jobs:
       # that spawn `pmacs-gpu` as a process, and a root-only build leaves
       # that binary absent. No `cargo test` invocation produces it.
       - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
+      # THE macOS ADAPTER QUESTION, asked here because nothing else in
+      # this file asks it. `cargo test -p pmacs-gpu` runs on exactly one
+      # job of nineteen (`GPU Render (headless)`, ubuntu + lavapipe), so
+      # ten E3 geometry unit tests execute on no macOS machine anywhere
+      # in this project's evidence chain. Whether that gap can be closed
+      # by widening the matrix, or is a fact of the runner, turns on one
+      # measurement: does a hosted macOS runner present an adapter to
+      # wgpu at all?
+      #
+      # `headless_or_skip` is the project's own adapter gate: without
+      # PMACS_REQUIRE_GPU a missing adapter is a silent `ok`, and with it
+      # the absence is a named assertion. So this step's CONCLUSION is
+      # the answer, and `--nocapture` puts the reason in the log. The
+      # selected row asserts two window-title strings and nothing
+      # platform-dependent, so a red here is about the adapter.
+      #
+      # `continue-on-error`, because this is a measurement and not a
+      # gate: a runner that presents no adapter must not redden a leg
+      # branch protection requires by name. The bin's unit-test target is
+      # already built by the step above, so this costs a run, not a
+      # compile.
+      - name: Does a macOS runner present a wgpu adapter?
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        env:
+          PMACS_REQUIRE_GPU: "1"
+        run: |
+          # `+e` deliberately: the default shell is `bash -e`, under which
+          # a failing cargo aborts the script before the verdict below is
+          # printed --- and the verdict is the whole point of the step.
+          set +e -o pipefail
+          cargo test -p pmacs-gpu --no-default-features \
+            --features ${{ matrix.lua }}${{ matrix.crdt }} --bin pmacs-gpu -- \
+            tests::status_facts_set_the_window_title --exact --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/adapter-probe.log"
+          status=$?
+          # A libtest filter that matches nothing reports `ok`, so read the
+          # `running N tests` line and not the verdict --- otherwise a
+          # renamed row would answer this question with a vacuum.
+          if ! grep -q 'running 1 test' "$RUNNER_TEMP/adapter-probe.log"; then
+            echo "ADAPTER VERDICT: UNDECIDED --- the filter matched no test"
+            exit 2
+          fi
+          if [ "$status" -eq 0 ]; then
+            echo "ADAPTER VERDICT: PRESENT --- wgpu built a device on this runner"
+          else
+            echo "ADAPTER VERDICT: ABSENT --- the assertion above names it"
+          fi
+          exit "$status"
       # Several acceptance binaries spawn real daemon / PTY child
       # processes, and the Linux legs stay serial for them.
       #
