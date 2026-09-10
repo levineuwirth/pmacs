@@ -620,6 +620,22 @@ function pmacs.listview.rerender(name)
   return true
 end
 
+-- The item under the cursor in the active panel, or nil (no panel is
+-- active, or the line carries no item). For a consumer's own `keys`
+-- commands, which must ask the same question `listview.visit` asks
+-- without duplicating the panel record lookup (E5.5).
+function pmacs.listview.current_item()
+  local p = active_panel()
+  if not p then return nil end
+  return p.line_to_item[pmacs.editor.cursor_line()]
+end
+
+-- The requested name of the panel the active window shows, or nil.
+function pmacs.listview.current_panel_name()
+  local p = active_panel()
+  return p and p.requested_name or nil
+end
+
 pmacs.command.define {
   name = "listview.visit",
   description = "Visit the list-panel item under the cursor.",
