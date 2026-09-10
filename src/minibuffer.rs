@@ -1140,7 +1140,6 @@ mod tests {
                     description: "x".into(),
                     source: crate::command::SourceLocation::default(),
                     body: lua.create_function(|_, ()| Ok(())).unwrap(),
-                    predicate: None,
                 })
                 .unwrap();
         }
@@ -1166,7 +1165,6 @@ mod tests {
                 description: "x".into(),
                 source: crate::command::SourceLocation::default(),
                 body: lua.create_function(|_, ()| Ok(())).unwrap(),
-                predicate: None,
             })
             .unwrap();
         let registry = BufferRegistry::new();

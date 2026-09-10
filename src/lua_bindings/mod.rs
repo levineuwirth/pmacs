@@ -14747,7 +14747,10 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
                 }));
             }
         };
-        if !matches!(key.as_str(), "name" | "description" | "fn" | "predicate") {
+        // D19 / E5.7: `predicate` is not a key. It was parsed, shown by
+        // `describe.command` and never evaluated; a definition passing
+        // it is refused by name here like any other unknown field.
+        if !matches!(key.as_str(), "name" | "description" | "fn") {
             return Err(mlua::Error::external(CommandError::UnknownField {
                 field: key,
             }));
@@ -14764,8 +14767,6 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
     let body: Function = spec
         .get("fn")
         .map_err(|_| mlua::Error::external(CommandError::MissingFn { name: name.clone() }))?;
-    let predicate: Option<Function> = spec.get("predicate")?;
-
     let description = description
         .filter(|d| !d.trim().is_empty())
         .ok_or_else(|| {
@@ -14777,7 +14778,6 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
         description,
         source: caller_source(lua, 2),
         body,
-        predicate,
     })
 }
 
@@ -16562,26 +16562,34 @@ mod tests {
         assert!(matches!(v, Value::Nil), "expected nil, got {v:?}");
     }
 
+    /// D19 / E5.7: a definition passing `predicate` is refused by name,
+    /// and nothing is registered. Before this phase the field was
+    /// preserved and this test asserted it was callable.
     #[test]
-    fn predicate_is_preserved_and_callable() {
+    fn predicate_is_refused_by_name() {
         let (lua, _reg, cmds, _kms, _hks) = fresh();
-        lua.load(
-            r#"
-            pmacs.command.define {
-                name = "with.pred",
-                description = "Has a predicate.",
-                fn = function() return 7 end,
-                predicate = function() return true end,
-            }
-            "#,
-        )
-        .exec()
-        .unwrap();
-        let r = cmds.borrow();
-        let cmd = r.get("with.pred").expect("registered");
-        let pred = cmd.predicate.as_ref().expect("predicate present");
-        let ok: bool = pred.call::<bool>(()).unwrap();
-        assert!(ok);
+        let err = lua
+            .load(
+                r#"
+                pmacs.command.define {
+                    name = "with.pred",
+                    description = "Has a predicate.",
+                    fn = function() return 7 end,
+                    predicate = function() return true end,
+                }
+                "#,
+            )
+            .exec()
+            .expect_err("a predicate is an unknown field");
+        let text = err.to_string();
+        assert!(
+            text.contains("unknown field `predicate`"),
+            "refused by name: {text}"
+        );
+        assert!(
+            cmds.borrow().get("with.pred").is_none(),
+            "nothing registered"
+        );
     }
 
     #[test]
