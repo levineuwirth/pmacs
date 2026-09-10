@@ -1033,8 +1033,9 @@ fn daemon_reships_the_summary_after_a_real_buffer_round_trip() {
     );
 
     let mut stream = daemon.connect();
+    // `ready::DEADLINE`, not 250 ms: the `read Hello` family (E5.0).
     stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
+        .set_read_timeout(Some(common::ready::DEADLINE))
         .unwrap();
     let hello: Hello = read_message(&mut stream).expect("read Hello");
     let fid = hello.assigned_frontend_id;
@@ -1387,8 +1388,9 @@ fn v15_peer_never_receives_theme_facts_and_v16_does() {
     /// deadline.
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
+        // `ready::DEADLINE`, not 250 ms: the `read Hello` family (E5.0).
         stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
+            .set_read_timeout(Some(common::ready::DEADLINE))
             .unwrap();
         let hello: Hello = read_message(&mut stream).expect("read Hello");
         let fid = hello.assigned_frontend_id;

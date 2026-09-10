@@ -991,8 +991,14 @@ fn a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join() {
 
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
+        // `ready::DEADLINE` and not 200 ms (E5.0's second finding on the
+        // `read Hello` family, from this row's sixteenth occurrence at
+        // PR #269's head): with readiness a served `Hello`, a daemon
+        // that is up still answers a fresh connection only on its
+        // dispatcher's tick, and on a loaded macOS runner that is past
+        // 200 ms. A deadline asserts the `Hello` eventually arrives.
         stream
-            .set_read_timeout(Some(Duration::from_millis(200)))
+            .set_read_timeout(Some(common::ready::DEADLINE))
             .unwrap();
         let hello: Hello = read_message(&mut stream).unwrap();
         write_message(
