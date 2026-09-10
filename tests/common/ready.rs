@@ -279,7 +279,22 @@ mod tests {
         .expect_err("must time out");
         assert_eq!(err.what, "never");
         assert!(err.elapsed >= Duration::from_millis(60), "{err}");
-        assert!(err.polls >= 2, "{err}");
+        // `>= 1` and not `>= 2`, deliberately. The count is asserted for
+        // its *reporting* and not for its *rate*: a `wait` that timed out
+        // without ever probing is the only regression this line can be
+        // about, and `>= 1` still falsifies it, because `polls` is
+        // incremented before every probe. `>= 2` asserted instead that a
+        // 60 ms wall-clock window contains a second loop iteration, which
+        // is 60 ms against a 20 ms `POLL` with no margin for the loop's
+        // own overhead --- and nothing in the code guarantees it. It has
+        // failed twice on that margin (#266): 279.8 ms locally under a
+        // full sweep, and 67.0 ms with `1 polls` in CI, where the
+        // deadline had passed at the first check, before the first sleep,
+        // in an iteration that runs a no-op step and one allocation. D12
+        // puts wall-clock numbers under `--perf`; this module's own
+        // budget-free assertions belong in the default sweep, so the
+        // assertion is the one that changed.
+        assert!(err.polls >= 1, "{err}");
         assert_eq!(err.last, "still nothing");
         let text = err.to_string();
         assert!(

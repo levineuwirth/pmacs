@@ -568,6 +568,18 @@ struct SummaryCache {
 /// wire table's deterministic ordering rides on it.
 const UI_FACES: &[&str] = &[
     "ui.caret",
+    // E3.3 — the own-caret current-line wash. A face and not a
+    // `pmacs.config` knob, because the wash is synthesized
+    // frontend-locally (this projection deliberately emits no
+    // `CurrentLine` decoration, `scoped_decorations` below) and no
+    // channel carries a config value to a semantic frontend: every
+    // GPU preference on the wire is its own typed variant and each of
+    // those took a wire phase. A face needs none — it is one more
+    // entry in a `Vec<ThemeFace>` an existing variant already carries.
+    // Unset means the frontend's own default for the surface, which
+    // for this one is not painting, so the face is the on/off control
+    // and the color at once.
+    "ui.current-line",
     "ui.diag.error",
     "ui.diag.hint",
     "ui.diag.info",
@@ -4598,6 +4610,64 @@ mod tests {
         assert_eq!(decos[0].kind, DecorationKind::Selection);
         // region (2,5) clipped to viewport [3,64) → [3,5).
         assert_eq!(decos[0].range, ByteRange { start: 3, end: 5 });
+    }
+
+    /// E3.3 — **`ui.current-line` reaches a semantic frontend through
+    /// `ThemeFacts`, with no wire change at all.**
+    ///
+    /// This is the row's whole channel argument, checked rather than
+    /// asserted. The face is one more name in a `Vec<ThemeFace>` an
+    /// existing variant already carries, so nothing about the message
+    /// changes: no new variant, no version bump, no byte pin. That is
+    /// what separates this row from E3.2, whose third wrap state could
+    /// not be carried by `LineWrapFacts.wrap`, a `bool`, without one.
+    ///
+    /// The negative half matters as much: an unthemed session must
+    /// carry no such face, because absent is how the frontend is told
+    /// the wash is off.
+    ///
+    /// *Mutation: remove `"ui.current-line"` from `UI_FACES` → the
+    /// themed leg fails, and the GPU's wash becomes unreachable while
+    /// every one of its own tests still passes.*
+    #[test]
+    fn current_line_face_reaches_a_semantic_frontend_through_theme_facts() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+
+        let mut unthemed = local();
+        unthemed.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        assert!(
+            theme_facts_of(&unthemed.render_frame(&state))
+                .expect("a first frame ships the authoritative table")
+                .iter()
+                .all(|face| face.name != "ui.current-line"),
+            "unset is how the frontend is told the wash is off, so an \
+             unthemed session must carry no such face"
+        );
+
+        let wash = Style {
+            bg: crate::cell::Color::Indexed(4),
+            ..Style::default()
+        };
+        {
+            let theme = state.syntax_registry.theme();
+            let mut th = theme.lock().expect("theme mutex poisoned");
+            th.insert("ui.current-line", wash);
+            th.face_epoch += 1;
+        }
+
+        let mut themed = local();
+        themed.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let face = theme_facts_of(&themed.render_frame(&state))
+            .expect("ThemeFacts")
+            .into_iter()
+            .find(|face| face.name == "ui.current-line")
+            .expect("E3.3's face is in the inventory the producer ships");
+        assert_eq!(
+            face.style, wash,
+            "the daemon resolves the face and the frontend does an exact \
+             lookup; nothing about the message shape changed"
+        );
     }
 
     #[test]

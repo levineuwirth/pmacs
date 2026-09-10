@@ -665,6 +665,38 @@ const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
 const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
+/// E3.1 — the vertical scrollbar's painted track width, in logical
+/// pixels.
+///
+/// # Why this fits inside the existing gutter
+///
+/// `SCROLLBAR_WIDTH + SCROLLBAR_RIGHT` is less than [`MINIMAP_RIGHT`],
+/// which was already dead margin between the minimap's right edge and
+/// the surface's. Painting inside it means the scrollbar moves **no**
+/// other geometry: [`minimap_left`], [`State::text_bounds_right`], the
+/// line-number gutter and every hit test are unchanged, so this row
+/// adds a control without reflowing the document. Reserving a fresh
+/// strip would have been the alternative, and it would have made the
+/// text width depend on whether the document currently overflows —
+/// which is a reflow every time a file grows past one screen.
+const SCROLLBAR_WIDTH: f32 = 6.0;
+/// Gap between the painted track and the surface's right edge.
+const SCROLLBAR_RIGHT: f32 = 3.0;
+/// The thumb never shrinks below this, so a very long document still
+/// leaves something grabbable — [`MINIMAP_MIN_THUMB_HEIGHT`]'s rule,
+/// with a larger floor because this target is a sixth of the width.
+const SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 24.0;
+const SCROLLBAR_TRACK_BG: [f32; 4] = [0.10, 0.10, 0.14, 0.55];
+const SCROLLBAR_THUMB_FILL: [f32; 4] = [0.72, 0.72, 0.84, 0.42];
+/// E3.3 — how opaque the own-caret current-line wash is painted, given
+/// the `ui.current-line` face's background color.
+///
+/// The face carries a color and not an alpha (`cell::Style` has none),
+/// and a fully opaque whole-line band would hide the syntax coloring
+/// under it. This matches the alpha the peer-presence wash already uses
+/// for the same shape, so an own line and a peer's line read as the
+/// same kind of mark.
+const CURRENT_LINE_WASH_ALPHA: f32 = 0.22;
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -1071,9 +1103,25 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
             "out" => Some(1.0_f32),
             _ => None,
         });
+    // E3.1 pointer mode: `PMACS_GPU_PROBE_SCROLLBAR=page|drag` drives
+    // one scrollbar gesture through the PRODUCTION `App` dispatch once
+    // the attached document is tall enough to have a thumb, and reports
+    // the viewport it moved. The E2.7 wheel mode above is its
+    // precedent; the difference is that this one goes through `App`
+    // rather than calling a `State` method, because `App` is where
+    // E3.1's gesture lives and where review round 1 measured that
+    // nothing reached it.
+    let scrollbar_gesture = std::env::var_os("PMACS_GPU_PROBE_SCROLLBAR")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| match value.as_str() {
+            "page" => Some(ScrollbarGesture::Page),
+            "drag" => Some(ScrollbarGesture::Drag),
+            _ => None,
+        });
     facts.code_font_centi_before = centi_px(state.fm.code_font_size());
     facts.code_font_centi_after = facts.code_font_centi_before;
     let mut sent_zoom = false;
+    let mut sent_pointer = false;
 
     // Quiet-observation mode. `PMACS_GPU_PROBE_OBSERVE_MS` makes the probe
     // send NO input and request NO resize, and observe for exactly that long
@@ -1294,6 +1342,27 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
+                // E3.1 — the pointer gesture, once the document the
+                // daemon sent actually overflows the surface. Waiting on
+                // the thumb rather than on a frame count is what keeps
+                // this from pressing an absent control and reporting
+                // "nothing moved" as a defect in the dispatch.
+                if scrollbar_gesture.is_some() {
+                    if state.scrollbar_thumb_now().is_some() {
+                        facts.scrollbar_thumb_seen = true;
+                    }
+                    // The gesture itself runs BELOW the loop, on the
+                    // state the loop leaves: `App` owns the state and
+                    // the client outright, so driving it from inside an
+                    // iteration would move both out of the loop's own
+                    // bindings.
+                    if !quiet && facts.scrollbar_thumb_seen {
+                        sent_pointer = true;
+                        completion_observed = true;
+                        break;
+                    }
+                    continue;
+                }
                 if zoom_key.is_some() || zoom_wheel.is_some() {
                     if !quiet && !sent_zoom && facts.frames + u32::from(is_snapshot) >= 1 {
                         sent_zoom = true;
@@ -1340,6 +1409,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
             }
         }
     }
+
+    // E3.1 — the pointer gesture, driven on the state the observation
+    // loop left. Held to the end of the probe rather than dropped here:
+    // dropping the client detaches, and this session stays up until the
+    // report is on disk.
+    let _session = if let Some(gesture) = scrollbar_gesture
+        && sent_pointer
+    {
+        drive_scrollbar_gesture(socket, state, client, gesture, &mut facts)
+    } else {
+        (state, client)
+    };
 
     let mut out = String::new();
     let _ = writeln!(
@@ -1398,6 +1479,26 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     );
     let _ = writeln!(out, "code_font_centi_after={}", facts.code_font_centi_after);
     let _ = writeln!(out, "zoom_chords_sent={}", facts.zoom_chords_sent);
+    let _ = writeln!(out, "scrollbar_gesture={}", facts.scrollbar_gesture);
+    let _ = writeln!(out, "scrollbar_thumb_seen={}", facts.scrollbar_thumb_seen);
+    let _ = writeln!(out, "scrollbar_line_count={}", facts.scrollbar_line_count);
+    let _ = writeln!(
+        out,
+        "scrollbar_visible_lines={}",
+        facts.scrollbar_visible_lines
+    );
+    let _ = writeln!(
+        out,
+        "scrollbar_pressed_below_thumb={}",
+        facts.scrollbar_pressed_below_thumb
+    );
+    let _ = writeln!(out, "scrollbar_top_before={}", facts.scrollbar_top_before);
+    let _ = writeln!(out, "scrollbar_top_after={}", facts.scrollbar_top_after);
+    let _ = writeln!(
+        out,
+        "scrollbar_top_after_release={}",
+        facts.scrollbar_top_after_release
+    );
     let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
@@ -1408,6 +1509,128 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         return 5;
     }
     0
+}
+
+/// Which half of E3.1's gesture `PMACS_GPU_PROBE_SCROLLBAR` drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollbarGesture {
+    /// A press on bare track below the thumb: click-to-page.
+    Page,
+    /// A press on the thumb, a motion past the foot of the track, a
+    /// release, and one more motion afterwards.
+    Drag,
+}
+
+impl ScrollbarGesture {
+    /// The name the probe report carries, so an acceptance can say
+    /// which gesture the numbers below it belong to.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Drag => "drag",
+        }
+    }
+}
+
+/// This probe's viewport top line, or 0 when there is no state left.
+fn probe_scroll_top(app: &App) -> usize {
+    app.state.as_ref().map_or(0, |state| state.scroll_top)
+}
+
+/// E3.1 — drive one scrollbar gesture through the **production `App`
+/// dispatch** and record what it moved.
+///
+/// The state and the client are moved in and handed back rather than
+/// borrowed, because `App` owns both and going through `App` is the
+/// whole point of this route: `apply_left_button` is where the
+/// scrollbar is ordered ahead of the minimap, where a thumb press arms
+/// `scrollbar_drag`, and where a release `take()`s it; `apply_cursor_moved`
+/// is where a live drag is advanced. Review round 1 measured what a
+/// `State`-level row is worth here: with that arm neutered so
+/// `scrollbar_press_target`'s result can never be `Some`, the whole
+/// `pmacs-gpu` suite still reported `363 passed; 0 failed`.
+///
+/// Nothing is asserted here. The probe reports; the acceptance judges.
+fn drive_scrollbar_gesture(
+    socket: &Path,
+    state: State,
+    client: AttachClient,
+    gesture: ScrollbarGesture,
+    facts: &mut ProbeFacts,
+) -> (State, AttachClient) {
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        // No path, deliberately: nothing this probe does may write a
+        // geometry file into whatever config directory it inherits.
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+
+    let (track, thumb_top, thumb_h, scale) = {
+        let state = app.state.as_ref().expect("probe state");
+        let (track, top, height) = state
+            .scrollbar_thumb_now()
+            .expect("the caller waits for a thumb before calling this");
+        facts.scrollbar_line_count = state.current_line_starts.len();
+        facts.scrollbar_visible_lines = state.scrollbar_visible_lines();
+        facts.scrollbar_top_before = state.scroll_top;
+        (track, top, height, state.scale)
+    };
+    gesture.name().clone_into(&mut facts.scrollbar_gesture);
+    // `apply_cursor_moved` takes PHYSICAL pixels and divides by the
+    // scale factor, while the geometry above is logical, so it is
+    // scaled back up here rather than assuming the headless surface is
+    // 1:1.
+    let phys = |value: f32| f64::from(value) * f64::from(scale);
+    let x = phys(track.x + 1.0);
+    let below_thumb = thumb_top + thumb_h + 2.0;
+    facts.scrollbar_pressed_below_thumb = below_thumb < track.top + track.height;
+
+    match gesture {
+        ScrollbarGesture::Page => {
+            app.apply_cursor_moved(x, phys(below_thumb));
+            app.apply_left_button(ElementState::Pressed);
+            facts.scrollbar_top_after = probe_scroll_top(&app);
+            app.apply_left_button(ElementState::Released);
+            // A page arms no drag, so this motion must move nothing.
+            app.apply_cursor_moved(x, phys(track.top + 1.0));
+            facts.scrollbar_top_after_release = probe_scroll_top(&app);
+        }
+        ScrollbarGesture::Drag => {
+            app.apply_cursor_moved(x, phys(thumb_top + thumb_h / 2.0));
+            app.apply_left_button(ElementState::Pressed);
+            // Past the foot of the track deliberately: a drag that
+            // wanders off the control keeps it.
+            app.apply_cursor_moved(x, phys(track.top + track.height + 2.0));
+            facts.scrollbar_top_after = probe_scroll_top(&app);
+            app.apply_left_button(ElementState::Released);
+            // And if the release did NOT end the drag, this motion
+            // drags the viewport back toward the top of the file, so
+            // the two facts differ. That is the only way to observe the
+            // release half at all.
+            app.apply_cursor_moved(x, phys(track.top + 1.0));
+            facts.scrollbar_top_after_release = probe_scroll_top(&app);
+        }
+    }
+
+    let state = app.state.take().expect("probe state survives the gesture");
+    let client = app
+        .attach_client
+        .take()
+        .expect("probe client survives the gesture");
+    (state, client)
 }
 
 /// Exercise the real managed connector without creating a display.
@@ -1739,6 +1962,30 @@ struct ProbeFacts {
     code_font_centi_after: u32,
     /// E2.7 — the zoom chords the probe sent, in order (`=` in, `-` out).
     zoom_chords_sent: String,
+    /// E3.1 pointer mode: which half of the scrollbar gesture this
+    /// probe drove (`page`, `drag`, or empty when it drove neither).
+    scrollbar_gesture: String,
+    /// Whether the attached document ever overflowed the surface far
+    /// enough for a thumb to exist. Reported separately from the
+    /// viewport numbers so "there was no scrollbar to press" is
+    /// distinguishable from "it was pressed and nothing moved" — the
+    /// two are the same number and different defects.
+    scrollbar_thumb_seen: bool,
+    /// The setup the gesture was performed against: the document's line
+    /// count, the screenful the page step is derived from, and whether
+    /// the press pixel really was bare track below the thumb.
+    scrollbar_line_count: usize,
+    scrollbar_visible_lines: usize,
+    scrollbar_pressed_below_thumb: bool,
+    /// The viewport's top line before the gesture and after it.
+    scrollbar_top_before: usize,
+    scrollbar_top_after: usize,
+    /// The top line after the button came up AND the pointer moved
+    /// again. Equal to `scrollbar_top_after` unless the release failed
+    /// to end the drag, in which case the stray motion drags the
+    /// viewport somewhere new — which is the only way to observe that
+    /// half of the gesture at all.
+    scrollbar_top_after_release: usize,
     disconnect: Option<String>,
 }
 
@@ -2260,6 +2507,15 @@ struct State {
     /// selection, until release. Never sends `Pointer` events —
     /// the viewport is frontend-owned.
     minimap_scrub_active: bool,
+    /// E3.1 — a press landed on the scrollbar's thumb and the button
+    /// is still down. The payload is the grab offset: how far below
+    /// the thumb's own top the press landed, so motion moves the thumb
+    /// with the pointer instead of snapping its top under it.
+    ///
+    /// `Option<f32>` rather than a `bool` beside a separate offset,
+    /// because the two are only ever meaningful together and a live
+    /// drag with a stale offset is the bug this shape cannot express.
+    scrollbar_drag: Option<f32>,
     /// The icon last written to the window, so a per-motion call is a
     /// comparison rather than a platform round-trip.
     last_cursor_icon: Option<winit::window::CursorIcon>,
@@ -2595,6 +2851,49 @@ impl WheelTarget {
             Self::Minimap => Some(ResidualOwner::Minimap),
             Self::Document | Self::Chrome => Some(ResidualOwner::Document),
             Self::PanelChrome => None,
+        }
+    }
+
+    /// Whether **this frontend** applies the scroll, rather than the
+    /// daemon (E3.4).
+    ///
+    /// This is the one fact that decides the vertical bank's unit, and
+    /// it is a property of the target rather than of the gesture: a
+    /// locally scrolled target banks in lines, because the step is
+    /// applied here and a line is a unit a precise-pixel device can
+    /// deliver; a daemon-scrolled one banks in notches, because the
+    /// receiver applies its own `SCROLL_LINES` and banking lines here
+    /// would apply the step twice.
+    ///
+    /// `PanelChrome` never reaches this — it is consumed before the
+    /// bank — and answers `false` as the safe side of the split.
+    const fn scrolls_locally(self) -> bool {
+        matches!(self, Self::Minimap | Self::Document | Self::Chrome)
+    }
+}
+
+/// Vertical wheel motion in **lines** (E3.4).
+///
+/// A discrete notch is [`WHEEL_LINES_PER_TICK`] lines by definition, so
+/// a mouse wheel is unchanged by this conversion. A precise-pixel
+/// device contributes one line per `line_px` of *logical* travel, which
+/// is the whole of the row: measured in notches, its remainder could
+/// never be smaller than three lines, so the smallest scroll a trackpad
+/// could produce was a three-line jump after banking three lines' worth
+/// of pixels.
+///
+/// `line_px` is logical and the delta is physical (E2.2), hence the
+/// division by `scale`. A non-positive `line_px` yields zero rather
+/// than an infinity that would bank a nonsense tick.
+fn wheel_dy_lines(delta: MouseScrollDelta, scale: f32, line_px: f32) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => -y * WHEEL_LINES_PER_TICK,
+        MouseScrollDelta::PixelDelta(p) => {
+            if line_px > 0.0 && scale > 0.0 {
+                -(p.y as f32) / scale / line_px
+            } else {
+                0.0
+            }
         }
     }
 }
@@ -3638,6 +3937,20 @@ impl App {
             }
             return;
         }
+        if state.scrollbar_drag.is_some() {
+            // E3.1 — the press began on the thumb; motion moves the
+            // viewport with it, even once the pointer wanders off the
+            // track sideways, which is what every scrollbar does and
+            // what the minimap's scrub already establishes here.
+            let vp = state.scrollbar_drag_to(y);
+            if let Some(vp) = vp
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: scrollbar drag send_viewport failed: {e}");
+            }
+            return;
+        }
         if state.minimap_scrub_active {
             // Scrubbing (Q#M6): the press began on the
             // minimap; motion keeps jumping, even if the
@@ -3799,6 +4112,26 @@ impl App {
         }
         match button_state {
             ElementState::Pressed => {
+                // E3.1 — before the minimap, because the scrollbar's
+                // hit region starts where the minimap's ends. A hidden
+                // scrollbar returns `None` and changes nothing here.
+                if let Some(press) = state.scrollbar_press_target(x, y) {
+                    let vp = match press {
+                        ScrollbarPress::Thumb { grab } => {
+                            state.scrollbar_drag = Some(grab);
+                            None
+                        }
+                        ScrollbarPress::Page { lines } => state.scrollbar_page(lines),
+                    };
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: scrollbar page send_viewport failed: {e}");
+                    }
+                    return;
+                }
                 if state.in_minimap_band(x, y) {
                     // Q#M6 — consumed before text hit-testing;
                     // never a Pointer event.
@@ -3828,6 +4161,11 @@ impl App {
                 }
             }
             ElementState::Released => {
+                // E3.1 — a thumb drag ends here and sends nothing: the
+                // viewport already followed the pointer on each motion.
+                if state.scrollbar_drag.take().is_some() {
+                    return;
+                }
                 if state.minimap_scrub_active {
                     state.minimap_scrub_active = false;
                     return;
@@ -4045,7 +4383,7 @@ impl App {
             }
             return;
         }
-        let (dx, dy) = match delta {
+        let (dx, dy_notches) = match delta {
             winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
             // A pixel delta is physical (E2.2); the notch is logical.
             winit::event::MouseScrollDelta::PixelDelta(p) => (
@@ -4061,6 +4399,9 @@ impl App {
                 },
             ),
         };
+        // E3.4 — the same motion measured in LINES, for the targets
+        // this frontend scrolls itself.
+        let dy_lines = wheel_dy_lines(delta, state.scale, state.fm.code_line_height());
         // No pointer position yet — a wheel before the first cursor
         // motion. The document is the target, which is what this path
         // did before 1b; dropping the input instead would be a
@@ -4068,6 +4409,21 @@ impl App {
         let (target, x, y) = match state.pointer_pos {
             Some((x, y)) => (self.classify_wheel_target(x, y), x, y),
             None => (WheelTarget::Document, 0.0, 0.0),
+        };
+        // **The vertical unit is the target's, and this is where it is
+        // chosen (E3.4).** A panel or a terminal is scrolled by the
+        // *daemon*, which applies its own per-notch `SCROLL_LINES`, so
+        // those banks must stay in notches or the step is applied
+        // twice. The document, minimap and chrome are scrolled here, so
+        // their bank is in lines — and a line is a unit a precise-pixel
+        // device can actually deliver, where a three-line notch is not.
+        // Before this row every target banked notches, so a trackpad
+        // had to travel three lines' worth of pixels before the
+        // document moved at all, and then moved three lines at once.
+        let dy = if target.scrolls_locally() {
+            dy_lines
+        } else {
+            dy_notches
         };
 
         // The band owns the pixel: consume both axes and bank nothing.
@@ -4103,10 +4459,16 @@ impl App {
                 }
             }
             WheelTarget::Minimap | WheelTarget::Document | WheelTarget::Chrome => {
-                // The local step, applied exactly once: notches become
-                // lines here and nowhere else.
+                // E3.4 — `ticks_y` is ALREADY lines for these targets
+                // (see the unit choice above), so there is no step to
+                // apply here. The multiplication that used to live on
+                // this line moved into `wheel_dy_lines`, where a notch
+                // becomes three lines *before* banking rather than
+                // after — which is the whole of this row, because a
+                // remainder kept in notches can never be smaller than
+                // three lines.
                 if ticks_y != 0 {
-                    let lines = ticks_y * WHEEL_LINES_PER_TICK as i64;
+                    let lines = ticks_y;
                     let vp = self
                         .state
                         .as_mut()
@@ -5905,6 +6267,319 @@ mod input_routing_tests {
         );
     }
 
+    /// A precise-pixel wheel event: `PixelDelta`, the shape a trackpad
+    /// sends, in **physical** pixels. Positive `up_px` scrolls up, like
+    /// [`wheel`]'s argument.
+    fn pixel_wheel(up_px: f64) -> WindowEvent {
+        WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, up_px)),
+            phase: TouchPhase::Moved,
+        }
+    }
+
+    /// E3.4 — **a precise-pixel device scrolls by a line.**
+    ///
+    /// One line-height of trackpad travel moves the document one line.
+    /// Before this row the bank was in notches, so that same travel was
+    /// a third of a step and produced *nothing*; three line-heights
+    /// then produced a three-line jump. The row asserts both halves of
+    /// that: the single line fires, and the sub-line remainder banks
+    /// rather than being discarded or spent early.
+    ///
+    /// *Mutation: give `WheelTarget::Document` the notch unit by making
+    /// `scrolls_locally` return `false` for it → the one-line step
+    /// scrolls nothing and this row fails at its first assertion.*
+    #[test]
+    fn e3_4_a_precise_pixel_device_scrolls_by_a_single_line() {
+        let mut h = EffectHarness::new();
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+        let (line_px, scale) = {
+            let state = h.app.state.as_ref().expect("harness state");
+            (
+                f64::from(state.fm.code_line_height()),
+                f64::from(state.scale),
+            )
+        };
+
+        // Exactly one line of travel, downward.
+        let step = h.feed(&pixel_wheel(-line_px * scale));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll { top: 1 }],
+            "one line-height of trackpad travel is one line of scroll, \
+             where a notch-banked frontend would still be waiting"
+        );
+
+        // A third of a line banks and does nothing; three of them make
+        // the next line. Nothing is discarded and nothing is spent
+        // early.
+        let third = -line_px * scale / 3.0;
+        for i in 0..2 {
+            let step = h.feed(&pixel_wheel(third));
+            assert!(
+                step.local.is_empty(),
+                "a sub-line remainder banks rather than scrolling (feed {i}): {:?}",
+                step.local
+            );
+        }
+        let step = h.feed(&pixel_wheel(third));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll { top: 2 }],
+            "and the third completes the line the first two began"
+        );
+    }
+
+    /// E3.4 changes the **unit**, not the mouse wheel: one discrete
+    /// notch is still [`WHEEL_LINES_PER_TICK`] lines.
+    ///
+    /// The conversion moved from after the bank to before it, and this
+    /// row is what says the move was unit-preserving for the device
+    /// that reports in notches.
+    ///
+    /// *Mutation: drop the `* WHEEL_LINES_PER_TICK` from
+    /// `wheel_dy_lines`'s `LineDelta` arm → a notch scrolls one line
+    /// and this row fails.*
+    #[test]
+    fn e3_4_a_discrete_notch_still_scrolls_three_lines() {
+        let mut h = EffectHarness::new();
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        let step = h.feed(&wheel(0.0, 1.0));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "a whole notch is unchanged by E3.4"
+        );
+        assert!(
+            (wheel_dy_lines(
+                MouseScrollDelta::LineDelta(0.0, -1.0),
+                1.0,
+                BASE_CODE_LINE_HEIGHT
+            ) - WHEEL_LINES_PER_TICK)
+                .abs()
+                < f32::EPSILON,
+            "and the conversion says so directly"
+        );
+    }
+
+    /// The unit split itself, enumerated: **only the targets this
+    /// frontend scrolls bank in lines.**
+    ///
+    /// A panel or a terminal is scrolled by the daemon, which applies
+    /// its own `SCROLL_LINES` per notch, so banking lines for those
+    /// would apply the step twice — one notch would move a panel nine
+    /// lines. That failure is already caught end to end by the panel
+    /// wheel rows, which drive fractional input through to the panel's
+    /// own viewport; this row pins the decision those rows depend on,
+    /// so a reader can see the split without reconstructing it.
+    #[test]
+    fn e3_4_only_locally_scrolled_targets_bank_in_lines() {
+        let buffer = BufferId::next();
+        let coord = pmacs_protocol::cell::CellCoord { row: 0, col: 0 };
+        assert!(WheelTarget::Document.scrolls_locally());
+        assert!(WheelTarget::Minimap.scrolls_locally());
+        assert!(WheelTarget::Chrome.scrolls_locally());
+        assert!(
+            !WheelTarget::PanelCell { buffer, coord }.scrolls_locally(),
+            "the daemon scrolls a panel and applies its own per-notch step"
+        );
+        assert!(
+            !WheelTarget::Terminal { buffer, coord }.scrolls_locally(),
+            "and a terminal"
+        );
+        assert!(
+            !WheelTarget::PanelChrome.scrolls_locally(),
+            "panel chrome banks nothing at all; false is the safe side"
+        );
+    }
+
+    /// A left button event at the pointer's current position — the
+    /// shape winit delivers, so the row reaches `apply_left_button`
+    /// through `route_event` rather than beside it.
+    fn left_button(state: ElementState) -> WindowEvent {
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state,
+            button: MouseButton::Left,
+        }
+    }
+
+    fn cursor_moved(x: f64, y: f64) -> WindowEvent {
+        WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(x, y),
+        }
+    }
+
+    /// The fixture's scrollbar, read from the production geometry.
+    /// Asserted rather than assumed: a fixture that stopped overflowing
+    /// its surface has no thumb, and every row below would then pass on
+    /// an absent control.
+    fn scrollbar_probe(h: &EffectHarness) -> (ScrollbarTrack, f32, f32) {
+        let state = h.app.state.as_ref().expect("harness state");
+        state.scrollbar_thumb_now().expect(
+            "setup: the harness fixture must overflow its surface, or there \
+             is no thumb to press",
+        )
+    }
+
+    /// E3.1 — **click-to-page, driven through `App`.** A press on bare
+    /// track below the thumb pages the document one screenful down and
+    /// declares the new viewport to the daemon.
+    ///
+    /// This row and its sibling below exist because review round 1
+    /// measured the gap rather than inferring it: with the press
+    /// dispatch neutered so `scrollbar_press_target`'s result can never
+    /// be `Some`, the whole `pmacs-gpu` suite still reported `363
+    /// passed; 0 failed`. E3.1's hit-test, thumb interpolation, page
+    /// step and clamp were each pinned by a `State`-level row, and the
+    /// *gesture* — the only thing a user performs — was pinned by
+    /// nothing. Every function here is production: `route_event`
+    /// classifies the winit event, `apply_left_button` orders the
+    /// scrollbar ahead of the minimap, and `EffectHarness` reads the
+    /// outbound wire rather than a re-implementation of it.
+    ///
+    /// *Mutation: make the `scrollbar_press_target` arm at
+    /// `apply_left_button` unreachable → this row fails on its first
+    /// assertion, and so does the drag row.*
+    #[test]
+    fn e3_1_a_press_on_bare_track_pages_the_document_through_the_app() {
+        let mut h = EffectHarness::new();
+        let (track, thumb_top, thumb_h) = scrollbar_probe(&h);
+        let visible = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .scrollbar_visible_lines();
+        let x = f64::from(track.x) + 1.0;
+        let below = f64::from(thumb_top + thumb_h) + 2.0;
+        assert!(
+            below < f64::from(track.top + track.height),
+            "setup: the press pixel must be bare track BELOW the thumb; \
+             thumb ends at {}, track ends at {}",
+            thumb_top + thumb_h,
+            track.top + track.height
+        );
+
+        move_pointer(&mut h, (x, below));
+        let step = h.feed(&left_button(ElementState::Pressed));
+
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll { top: visible }],
+            "a press on bare track below the thumb pages exactly one \
+             screenful down"
+        );
+        // NOT `.all()` alone, which is vacuously true on an empty
+        // transcript — the trap M22 found in the wheel row.
+        assert!(
+            !step.outbound.is_empty(),
+            "and the paged viewport must reach the daemon"
+        );
+        assert!(
+            step.outbound
+                .iter()
+                .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "a scrollbar page declares viewports and nothing else, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// E3.1 — **the thumb drag, driven through `App`, both ends of it.**
+    /// A press on the thumb grabs without jumping; motion while the grab
+    /// is live moves the viewport even once the pointer leaves the
+    /// track; the release ends the drag, so the next motion moves
+    /// nothing.
+    ///
+    /// The release half is the one a reading cannot settle: `take()`
+    /// clearing the drag and `is_some()` merely reporting it look alike
+    /// on the page and differ only in what the *next* event does.
+    ///
+    /// *Mutation: `state.scrollbar_drag.take()` → `.is_some()` at the
+    /// release arm → the last assertion fails and nothing else does.*
+    #[test]
+    fn e3_1_a_thumb_drag_moves_the_viewport_and_the_release_ends_it() {
+        let mut h = EffectHarness::new();
+        let (track, thumb_top, thumb_h) = scrollbar_probe(&h);
+        let lines = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .current_line_starts
+            .len();
+        let x = f64::from(track.x) + 1.0;
+
+        move_pointer(&mut h, (x, f64::from(thumb_top + thumb_h / 2.0)));
+        let press = h.feed(&left_button(ElementState::Pressed));
+        assert!(
+            press.local.is_empty(),
+            "a press on the thumb is a grab, not a jump: {:?}",
+            press.local
+        );
+        assert!(
+            press.outbound.is_empty(),
+            "and it declares no viewport: {:?}",
+            press.outbound
+        );
+
+        // Past the foot of the track deliberately: a drag that wanders
+        // off the control keeps it, which is what every scrollbar does
+        // and what the minimap scrub already establishes here.
+        let past_foot = f64::from(track.top + track.height) + 2.0;
+        let drag = h.feed(&cursor_moved(x, past_foot));
+        assert_eq!(
+            drag.local,
+            vec![LocalEffect::Scroll {
+                top: scrollbar_max_scroll_top(lines)
+            }],
+            "dragging the thumb past the foot of the track scrolls to the \
+             clamp and no further"
+        );
+        assert!(
+            !drag.outbound.is_empty()
+                && drag
+                    .outbound
+                    .iter()
+                    .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "a live thumb drag declares viewports and nothing else, got {:?}",
+            drag.outbound
+        );
+
+        let release = h.feed(&left_button(ElementState::Released));
+        assert!(
+            release.local.is_empty() && release.outbound.is_empty(),
+            "the release ends the drag silently — the viewport already \
+             followed the pointer: {:?} / {:?}",
+            release.local,
+            release.outbound
+        );
+
+        let after = h.feed(&cursor_moved(x, f64::from(track.top) + 1.0));
+        assert!(
+            after.local.is_empty(),
+            "a motion after the release must not still be dragging; it \
+             scrolled {:?}",
+            after.local
+        );
+        assert!(
+            after.outbound.is_empty(),
+            "and it must declare nothing: {:?}",
+            after.outbound
+        );
+    }
+
     /// A pixel inside the minimap band, and one inside the document
     /// text. Both are asserted by their rows before use, so a fixture
     /// whose geometry drifts fails loudly instead of quietly measuring
@@ -5937,6 +6612,23 @@ mod input_routing_tests {
             phase: TouchPhase::Moved,
         }
     }
+
+    /// A vertical wheel delta that is **more than half and less than
+    /// all** of one local scroll step, for the banking rows below.
+    ///
+    /// `wheel`'s argument is notches, which is what a `LineDelta`
+    /// means. E3.4 made the locally scrolled targets — document,
+    /// minimap and chrome — bank in **lines**, so "not yet a step" is
+    /// now a fraction of one line rather than of a three-line notch,
+    /// and 0.6 of a line is 0.2 of a notch. Those rows are about
+    /// *banking* and are untouched by the unit; only the magnitude that
+    /// means "not yet" moved, and two of these still complete exactly
+    /// one step, which is what keeps each row's second half honest.
+    const PART_STEP: f32 = 0.6 / WHEEL_LINES_PER_TICK;
+
+    /// What one completed local step now scrolls: one line, where
+    /// before E3.4 the smallest possible scroll was a whole notch.
+    const ONE_STEP_LINES: usize = 1;
 
     /// B6 — a wheel over the **minimap** scrolls the **document
     /// viewport**, the same effect a wheel over the text has.
@@ -6143,17 +6835,17 @@ mod input_routing_tests {
             "setup: document text"
         );
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
-            "setup: 0.6 of a notch banks and does nothing yet: {:?}",
+            "setup: 0.6 of a line banks and does nothing yet: {:?}",
             step.local
         );
 
         replace_the_buffer(&mut h);
         move_pointer(&mut h, document);
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
             "the successor starts from zero: a notch begun in the \
@@ -6163,13 +6855,14 @@ mod input_routing_tests {
 
         // And the successor's own bank still works, so the row is not
         // passing by having broken accumulation outright.
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert_eq!(
             step.local,
             vec![LocalEffect::Scroll {
-                top: WHEEL_LINES_PER_TICK as usize
+                top: ONE_STEP_LINES
             }],
-            "0.6 + 0.6 within the successor is one notch"
+            "0.6 + 0.6 within the successor is one LINE, which is E3.4's \
+             smallest scroll; before it, the smallest was three"
         );
     }
 
@@ -6195,10 +6888,10 @@ mod input_routing_tests {
             "setup: the minimap band"
         );
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
-            "setup: 0.6 banks and does nothing yet: {:?}",
+            "setup: 0.6 of a line banks and does nothing yet: {:?}",
             step.local
         );
 
@@ -6211,7 +6904,7 @@ mod input_routing_tests {
             "setup: still the minimap after the replacement"
         );
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
             "the minimap's bank starts from zero in the successor too, \
@@ -6222,13 +6915,13 @@ mod input_routing_tests {
         // And the successor's minimap bank still accumulates, so this
         // row cannot pass by the accumulator simply being broken —
         // which every "nothing happened" assertion above would accept.
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert_eq!(
             step.local,
             vec![LocalEffect::Scroll {
-                top: WHEEL_LINES_PER_TICK as usize
+                top: ONE_STEP_LINES
             }],
-            "0.6 + 0.6 over the successor's minimap is one notch of \
+            "0.6 + 0.6 over the successor's minimap is one LINE of \
              DOCUMENT scroll, which is what a minimap wheel moves"
         );
     }
@@ -6261,10 +6954,10 @@ mod input_routing_tests {
             WheelTarget::Minimap,
             "setup: minimap pixel"
         );
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty() && step.outbound.is_empty(),
-            "0.6 of a notch is not a notch: {:?} {:?}",
+            "0.6 of a line is not a line: {:?} {:?}",
             step.local,
             step.outbound
         );
@@ -6275,21 +6968,21 @@ mod input_routing_tests {
             WheelTarget::Document,
             "setup: document pixel"
         );
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty() && step.outbound.is_empty(),
-            "the minimap's 0.6 must not have been waiting in the \
+            "the minimap's part-line must not have been waiting in the \
              document's bank: {:?} {:?}",
             step.local,
             step.outbound
         );
 
         // The document's own bank still works: 0.6 + 0.6 completes it.
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert_eq!(
             step.local,
             vec![LocalEffect::Scroll {
-                top: WHEEL_LINES_PER_TICK as usize
+                top: ONE_STEP_LINES
             }],
             "the document's accumulator must still accumulate, or the \
              step above proves nothing"
@@ -7102,9 +7795,14 @@ fn optimistic_insert_text(key: ProtocolKey, mods: Modifiers, chbuf: &mut [u8; 4]
 /// data fits, reallocated (with slack) when it grows. `render()`
 /// previously allocated fresh wgpu buffers for the background / caret
 /// / minimap quads on every frame.
-/// `(summary generation, surface width, surface height, scroll_top)`
-/// — everything the minimap quads depend on.
-type MinimapCacheKey = (u64, u32, u32, usize);
+/// `(summary generation, surface width, surface height, scroll_top,
+/// document line count, panel band inset bits)` — everything the right
+/// gutter's quads depend on.
+///
+/// The last two arrived with E3.1's scrollbar, which shares this cache
+/// and, unlike the minimap, has no `FileStyleSummary` whose generation
+/// would stand in for the document changing under it.
+type MinimapCacheKey = (u64, u32, u32, usize, usize, u32);
 
 struct ReusableVertexBuffer {
     buffer: Option<wgpu::Buffer>,
@@ -7660,6 +8358,7 @@ impl State {
             last_pointer_sent_byte: None,
             last_pointer_down: None,
             minimap_scrub_active: false,
+            scrollbar_drag: None,
             last_cursor_icon: None,
             #[cfg(test)]
             test_selections: HashMap::new(),
@@ -10897,6 +11596,114 @@ impl State {
             .and_then(|bid| self.viewport_send_if_changed(bid))
     }
 
+    /// E3.1 — this state's scrollbar track, or `None` when the surface
+    /// cannot spare it.
+    fn scrollbar_track(&self) -> Option<ScrollbarTrack> {
+        scrollbar_track(
+            self.layout.width,
+            self.layout.height,
+            self.fm,
+            self.band_inset(),
+        )
+    }
+
+    /// The visible-line estimate the scrollbar is derived from. Named
+    /// once so the painter, the thumb and the page step cannot each
+    /// pick a different notion of "a screenful".
+    fn scrollbar_visible_lines(&self) -> usize {
+        estimated_visible_lines(self.layout.height, self.fm, self.band_inset())
+    }
+
+    /// The thumb's `(top, height)` right now, or `None` when the
+    /// document fits and the scrollbar is hidden.
+    fn scrollbar_thumb_now(&self) -> Option<(ScrollbarTrack, f32, f32)> {
+        let track = self.scrollbar_track()?;
+        let (top, height) = scrollbar_thumb(
+            track,
+            self.current_line_starts.len(),
+            self.scroll_top,
+            self.scrollbar_visible_lines(),
+        )?;
+        Some((track, top, height))
+    }
+
+    /// What a press at `(x, y)` means to the scrollbar, or `None` when
+    /// the scrollbar does not want it.
+    ///
+    /// **A hidden scrollbar wants nothing**, which is why the `None`
+    /// from [`Self::scrollbar_thumb_now`] propagates: when the document
+    /// fits, a press in this strip must behave exactly as it did before
+    /// this row, including selecting text there on a surface with no
+    /// minimap. "Hidden" that still swallowed presses would be a
+    /// control pretending to be absent.
+    fn scrollbar_press_target(&self, x: f64, y: f64) -> Option<ScrollbarPress> {
+        let (track, thumb_top, thumb_h) = self.scrollbar_thumb_now()?;
+        if !track.contains(x as f32, y as f32, self.layout.width) {
+            return None;
+        }
+        let y = y as f32;
+        if y >= thumb_top && y < thumb_top + thumb_h {
+            Some(ScrollbarPress::Thumb {
+                grab: y - thumb_top,
+            })
+        } else if y < thumb_top {
+            Some(ScrollbarPress::Page { lines: -1 })
+        } else {
+            Some(ScrollbarPress::Page { lines: 1 })
+        }
+    }
+
+    /// Page the viewport by one screenful in `direction` (`-1` up,
+    /// `+1` down) — the click-to-page half of E3.1. Reuses
+    /// [`Self::scroll_by_lines`] for the clamp, rebuild and
+    /// viewport-send plumbing, exactly as the minimap jump does.
+    fn scrollbar_page(&mut self, direction: i64) -> Option<ViewportSend> {
+        let step = i64::try_from(self.scrollbar_visible_lines()).unwrap_or(i64::MAX);
+        self.scroll_by_lines(direction.signum() * step.max(1))
+    }
+
+    /// Advance a live thumb drag to pointer `y`. `None` when no drag is
+    /// active or the viewport did not move.
+    fn scrollbar_drag_to(&mut self, y: f64) -> Option<ViewportSend> {
+        let grab = self.scrollbar_drag?;
+        let track = self.scrollbar_track()?;
+        let target = scrollbar_y_to_scroll_top(
+            y as f32,
+            grab,
+            track,
+            self.current_line_starts.len(),
+            self.scrollbar_visible_lines(),
+        )?;
+        let delta = i64::try_from(target).unwrap_or(i64::MAX)
+            - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
+        self.scroll_by_lines(delta)
+    }
+
+    /// The scrollbar's quads. Empty when the document fits, which is
+    /// the same `None` the hit-test reads, so a painted track can never
+    /// be one the pointer is not allowed to use.
+    fn scrollbar_rects(&self) -> Vec<MinimapRect> {
+        let Some((track, thumb_top, thumb_h)) = self.scrollbar_thumb_now() else {
+            return Vec::new();
+        };
+        vec![
+            MinimapRect {
+                x: track.x,
+                y: track.top,
+                w: SCROLLBAR_WIDTH,
+                h: track.height,
+                color: SCROLLBAR_TRACK_BG,
+            },
+            MinimapRect {
+                x: track.x,
+                y: thumb_top,
+                w: SCROLLBAR_WIDTH,
+                h: thumb_h,
+                color: SCROLLBAR_THUMB_FILL,
+            },
+        ]
+    }
+
     /// True when the pixel position lies inside the minimap band
     /// (Q#M6). Presses here are consumed locally and never become
     /// `Pointer` events.
@@ -13093,13 +13900,24 @@ impl State {
             self.layout.width,
             self.layout.height,
             self.scroll_top,
+            // E3.1 — the scrollbar shares this cache and depends on two
+            // facts the minimap's own key never carried. The line count
+            // decides whether there is a thumb at all, and a buffer with
+            // no summary can change it without touching `generation`.
+            // The panel band moves the track's bottom, and opening a
+            // panel reaches neither of the explicit `minimap_cache =
+            // None` sites — so the minimap's thumb was already stale
+            // across a panel toggle, and widening the key here fixes
+            // that too rather than reproducing it in a second control.
+            self.current_line_starts.len(),
+            self.band_inset().px().to_bits(),
         );
         if self
             .minimap_cache
             .as_ref()
             .is_none_or(|(key, _)| *key != minimap_key)
         {
-            self.minimap_cache = Some((minimap_key, self.minimap_vertex_bytes()));
+            self.minimap_cache = Some((minimap_key, self.right_gutter_vertex_bytes()));
         }
         let empty_minimap: Vec<u8> = Vec::new();
         let minimap_vertices = if terminal_mode {
@@ -13686,6 +14504,26 @@ impl State {
             && minimap_left(self.layout.width).is_some()
     }
 
+    /// Every quad the right gutter owns: the E3.1 scrollbar, which
+    /// needs no `FileStyleSummary`, followed by the minimap, which does.
+    ///
+    /// Concatenated rather than uploaded separately because both feed
+    /// the same quad pipeline and one cache entry covers them; kept as
+    /// two functions because only one of them depends on the summary,
+    /// and folding the scrollbar into `minimap_vertex_bytes` would have
+    /// put it behind that function's `else { return }` — which is
+    /// precisely the audit's F3, a control that appears only when an
+    /// unrelated payload happens to exist.
+    fn right_gutter_vertex_bytes(&self) -> Vec<u8> {
+        let mut bytes = rects_to_vertex_bytes(
+            &self.scrollbar_rects(),
+            self.layout.width,
+            self.layout.height,
+        );
+        bytes.extend_from_slice(&self.minimap_vertex_bytes());
+        bytes
+    }
+
     fn minimap_vertex_bytes(&self) -> Vec<u8> {
         let Some(summary) = self.current_summary.as_ref() else {
             return Vec::new();
@@ -13731,6 +14569,7 @@ impl State {
         let slice = &self.current_text[vstart as usize..vend as usize];
         let line_offsets = line_byte_offsets(slice);
         let mut rects = Vec::new();
+        self.collect_own_current_line_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_own_decoration_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_peer_rects(buffer_id, &line_offsets, vstart, vend, &mut rects);
         self.collect_gutter_sign_rects(&mut rects, &line_offsets, vstart, vend);
@@ -13791,13 +14630,79 @@ impl State {
         }
     }
 
-    /// Own-window `Selection` washes from `current_decorations`. The
-    /// caret already marks the own cursor, so the own *`CurrentLine`*
-    /// wash is deliberately NOT rendered — a whole-line highlight on
-    /// every cursor line reads as a persistent selection, which is not
-    /// wanted as default editor behavior (revising Q#B4: the caret is
-    /// the own-cursor indicator; the line wash isn't). Peer presence
-    /// still shows other frontends' lines via `collect_peer_rects`.
+    /// E3.3 — the own-caret current-line wash, painted **only** when
+    /// the `ui.current-line` face resolves.
+    ///
+    /// # Why it is synthesized here rather than received
+    ///
+    /// The daemon deliberately emits no `CurrentLine` decoration to a
+    /// semantic frontend: deriving one would force a whole-buffer line
+    /// table on every frame, and this frontend already has `CursorByte`
+    /// and a local line table. So `current_decorations` never carries
+    /// one, and the wash has to be built from the own cursor — which is
+    /// exactly what `collect_peer_rects` already does for *other*
+    /// frontends' lines, using the same `source_line_range`.
+    ///
+    /// # Why a face and not a setting
+    ///
+    /// The gate has to be something the daemon can already tell this
+    /// crate. Every config-derived GPU preference on the wire is its
+    /// own typed variant — `StatusFacts`, `LineNumbers`, `ThemeFacts`,
+    /// `FontFacts`, `LineWrapFacts` — and each took a wire phase; a
+    /// `pmacs.config` Boolean would need a sixth and E3 is not a wire
+    /// phase. A face needs none: it is one more name in the
+    /// `Vec<ThemeFace>` `ThemeFacts` already carries.
+    ///
+    /// # Why absent means off
+    ///
+    /// `ThemeFacts`'s own contract is that a face absent from the table
+    /// is unset and the frontend uses its own default for that surface.
+    /// This surface's default is *not painting*, established when the
+    /// wash was dropped: a whole-line highlight under every caret reads
+    /// as a persistent selection, and the caret is already the
+    /// own-cursor indicator (revising Q#B4). So the face turns the wash
+    /// on and colors it in one act, and a user who sets no face sees
+    /// exactly what they saw before this row.
+    fn collect_own_current_line_rects(
+        &self,
+        rects: &mut Vec<MinimapRect>,
+        line_offsets: &[u64],
+        vstart: u64,
+        vend: u64,
+    ) {
+        let Some(style) = self.faces.get("ui.current-line") else {
+            return;
+        };
+        let Some(color) = cell_color_to_glyphon(style.bg) else {
+            return;
+        };
+        let Some(own) = self.own_cursor else {
+            return;
+        };
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return;
+        }
+        let (lo, hi) = source_line_range(&self.current_text, own.byte);
+        if let Some((lo, hi)) = clip_rebase_range(lo, hi, vstart, vend) {
+            self.push_glyph_extent_rects(
+                rects,
+                line_offsets,
+                lo,
+                hi,
+                glyphon_to_rgba(color, CURRENT_LINE_WASH_ALPHA),
+                None,
+            );
+        }
+    }
+
+    /// Own-window `Selection` washes from `current_decorations`.
+    ///
+    /// `CurrentLine` is skipped here and always has been: the daemon
+    /// sends none to a semantic frontend, so this loop could only ever
+    /// see one from a grid-shaped payload, and E3.3's own wash is
+    /// synthesized by [`Self::collect_own_current_line_rects`] instead.
+    /// Peer presence still shows other frontends' lines via
+    /// `collect_peer_rects`.
     fn collect_own_decoration_rects(
         &self,
         rects: &mut Vec<MinimapRect>,
@@ -14852,6 +15757,166 @@ fn minimap_y_to_line(
     }
     let frac = ((y - MINIMAP_TOP) / height).clamp(0.0, 1.0);
     Some(((frac * total_lines as f32) as usize).min(total_lines - 1))
+}
+
+/// E3.1 — the vertical scrollbar's track, in logical pixels.
+///
+/// One value rather than three loose floats because the painter, the
+/// press hit-test, the drag and the click-to-page all have to agree
+/// about the same rectangle; the minimap's first session shipped a
+/// thumb whose paint geometry and scroll geometry had drifted apart
+/// (the hardcoded `0` at the call site), and that is the shape of
+/// defect a shared value forecloses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarTrack {
+    /// Left edge of the painted track.
+    x: f32,
+    /// Top of the track.
+    top: f32,
+    /// Track height. Always positive when a track exists at all.
+    height: f32,
+}
+
+impl ScrollbarTrack {
+    /// The **hit** region is wider than the paint: it claims the whole
+    /// [`MINIMAP_RIGHT`] margin out to the surface's edge, so a 6 px
+    /// stripe is not a 6 px target. The left bound is the minimap's
+    /// own right bound (`minimap_band_contains` requires
+    /// `x < surface_width - MINIMAP_RIGHT`), which is what keeps the
+    /// two hit-tests from overlapping by construction rather than by
+    /// ordering.
+    fn contains(&self, x: f32, y: f32, surface_width: u32) -> bool {
+        x >= surface_width as f32 - MINIMAP_RIGHT
+            && x < surface_width as f32
+            && y >= self.top
+            && y < self.top + self.height
+    }
+}
+
+/// What a press on the scrollbar means (E3.1). Returned by a pure
+/// hit-test so the decision is testable without a surface, and so the
+/// two gestures the row asks for — drag and click-to-page — are
+/// alternatives by construction rather than by two adjacent `if`s.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScrollbarPress {
+    /// The press landed on the thumb; `grab` is its offset below the
+    /// thumb's top.
+    Thumb { grab: f32 },
+    /// The press landed on bare track: page one screenful toward it.
+    /// `lines` is a direction, `-1` or `+1`, not a distance.
+    Page { lines: i64 },
+}
+
+/// The scrollbar's track, or `None` when the surface cannot spare it.
+///
+/// Shares [`MINIMAP_TOP`] and [`minimap_height`] deliberately, so the
+/// track and the minimap are vertically flush when both are painted
+/// and the gutter reads as one column rather than two.
+fn scrollbar_track(
+    surface_width: u32,
+    surface_height: u32,
+    fm: FontMetrics,
+    band: PanelBandInset,
+) -> Option<ScrollbarTrack> {
+    if surface_width < MINIMAP_MIN_SURFACE_WIDTH {
+        return None;
+    }
+    let height = minimap_height(surface_height, fm, band);
+    if height <= 0.0 {
+        return None;
+    }
+    let x = surface_width as f32 - SCROLLBAR_RIGHT - SCROLLBAR_WIDTH;
+    (x > TEXT_LEFT).then_some(ScrollbarTrack {
+        x,
+        top: MINIMAP_TOP,
+        height,
+    })
+}
+
+/// The largest `scroll_top` the document can reach, which is
+/// `line_count - 1` and **not** `line_count - visible_lines`.
+///
+/// This mirrors [`State::scroll_by_lines`]'s own clamp rather than the
+/// textbook one on purpose: the thumb must reach the bottom of its
+/// track at exactly the scroll position the wheel can reach, and the
+/// GPU deliberately lets a document scroll until one line remains. A
+/// thumb derived from the textbook maximum would strand a gap at the
+/// bottom that no input could close.
+fn scrollbar_max_scroll_top(line_count: usize) -> usize {
+    line_count.saturating_sub(1)
+}
+
+/// The thumb's height, or **`None` when the whole document fits** —
+/// which is this row's "hidden when the document fits", decided in one
+/// place so the painter, the hit-test and the drag cannot disagree
+/// about whether there is a thumb at all.
+///
+/// Separate from [`scrollbar_thumb`] because the height does not depend
+/// on the scroll position, and the drag needs the height without
+/// pretending to know a position.
+fn scrollbar_thumb_height(
+    track: ScrollbarTrack,
+    line_count: usize,
+    visible_lines: usize,
+) -> Option<f32> {
+    if line_count == 0 || visible_lines >= line_count {
+        return None;
+    }
+    let proportional = track.height * visible_lines as f32 / line_count as f32;
+    Some(
+        proportional
+            .max(SCROLLBAR_MIN_THUMB_HEIGHT)
+            .min(track.height),
+    )
+}
+
+/// The thumb's `(top, height)` inside `track`, or `None` when the
+/// document fits (see [`scrollbar_thumb_height`]).
+fn scrollbar_thumb(
+    track: ScrollbarTrack,
+    line_count: usize,
+    first_visible_line: usize,
+    visible_lines: usize,
+) -> Option<(f32, f32)> {
+    let height = scrollbar_thumb_height(track, line_count, visible_lines)?;
+    // The travel is what is left of the track once the thumb is on it.
+    // Interpolating the thumb's TOP over the travel (rather than
+    // scaling the document fraction directly) is what makes the
+    // minimum-height clamp above harmless: a floored thumb still ends
+    // flush with the track's bottom at maximum scroll.
+    let travel = (track.height - height).max(0.0);
+    let span = scrollbar_max_scroll_top(line_count);
+    let frac = if span == 0 {
+        0.0
+    } else {
+        (first_visible_line.min(span) as f32 / span as f32).clamp(0.0, 1.0)
+    };
+    Some((track.top + frac * travel, height))
+}
+
+/// The `scroll_top` a pointer at `y` means while dragging a thumb that
+/// was grabbed `grab` pixels below its own top — the inverse of
+/// [`scrollbar_thumb`]'s interpolation.
+///
+/// Carrying `grab` is what stops the thumb teleporting so its top
+/// lands under the pointer on the first motion of every drag; the
+/// minimap's scrub has no such offset because a scrub centers the
+/// viewport by design and a drag does not.
+fn scrollbar_y_to_scroll_top(
+    y: f32,
+    grab: f32,
+    track: ScrollbarTrack,
+    line_count: usize,
+    visible_lines: usize,
+) -> Option<usize> {
+    let height = scrollbar_thumb_height(track, line_count, visible_lines)?;
+    let travel = (track.height - height).max(0.0);
+    let span = scrollbar_max_scroll_top(line_count);
+    if travel <= 0.0 || span == 0 {
+        return Some(0);
+    }
+    let frac = ((y - grab - track.top) / travel).clamp(0.0, 1.0);
+    Some(((frac * span as f32).round() as usize).min(span))
 }
 
 #[allow(
@@ -19117,6 +20182,298 @@ mod tests {
         );
     }
 
+    /// E3.1's geometry, on the 800×600 surface the minimap table above
+    /// uses so the two can be compared line for line.
+    ///
+    /// Track height is the minimap's (550), track x is
+    /// `800 - 3 - 6 = 791`, and the hit region starts at
+    /// `800 - MINIMAP_RIGHT = 788` — the minimap band's own exclusive
+    /// right bound, which is what makes the two hit-tests disjoint
+    /// without either knowing about the other.
+    ///
+    /// *Mutation: widen `ScrollbarTrack::contains`'s left bound to
+    /// `track.x` and the disjointness row still passes while the
+    /// wider-than-paint target claim stops being true; narrow it to
+    /// `surface_width - MINIMAP_RIGHT + 1` and the far-left row fails.*
+    #[test]
+    fn e3_1_the_scrollbar_track_sits_in_the_dead_margin_beside_the_minimap() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("an 800px surface has room for a scrollbar");
+        assert!(
+            (track.x - 791.0).abs() < 0.001,
+            "the painted track is SCROLLBAR_RIGHT + SCROLLBAR_WIDTH in \
+             from the edge; got {}",
+            track.x
+        );
+        assert!(
+            (track.top - MINIMAP_TOP).abs() < 0.001 && (track.height - 550.0).abs() < 0.001,
+            "track and minimap are vertically flush: {track:?}"
+        );
+        // The whole strip is grabbable, not just the six painted pixels.
+        assert!(track.contains(788.0, 300.0, 800), "the strip's left edge");
+        assert!(track.contains(799.0, 300.0, 800), "the surface's edge");
+        assert!(
+            !track.contains(787.0, 300.0, 800),
+            "one pixel left of the strip belongs to the minimap band, \
+             which claims x < 800 - MINIMAP_RIGHT"
+        );
+        // Disjoint from the minimap by construction, not by ordering.
+        for x in [740.0_f32, 760.0, 787.0] {
+            assert!(
+                minimap_band_contains(
+                    x,
+                    300.0,
+                    800,
+                    600,
+                    FontMetrics::default(),
+                    PanelBandInset::ABSENT
+                ),
+                "setup: {x} is inside the minimap band"
+            );
+            assert!(
+                !track.contains(x, 300.0, 800),
+                "no x may be claimed by both hit-tests; {x} is"
+            );
+        }
+        // Vertically bounded by the track, so a press in the status
+        // band is not a scrollbar press.
+        assert!(!track.contains(795.0, 5.0, 800), "above the track");
+        assert!(!track.contains(795.0, 599.0, 800), "below the track");
+        assert!(
+            scrollbar_track(150, 600, FontMetrics::default(), PanelBandInset::ABSENT).is_none(),
+            "a surface too narrow for a minimap is too narrow for this too"
+        );
+    }
+
+    /// E3.1's "hidden when the document fits", and its consequence for
+    /// input: a hidden scrollbar has no thumb, paints nothing, and
+    /// **claims no press**, so behavior in that strip is exactly what it
+    /// was before this row.
+    ///
+    /// *Mutation: drop the `visible_lines >= line_count` guard in
+    /// `scrollbar_thumb_height` and every assertion here fails.*
+    #[test]
+    fn e3_1_a_document_that_fits_has_no_thumb_and_claims_no_press() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("track");
+        assert_eq!(
+            scrollbar_thumb(track, 10, 0, 25),
+            None,
+            "25 visible lines over a 10-line file is the fits case"
+        );
+        assert_eq!(
+            scrollbar_thumb(track, 25, 0, 25),
+            None,
+            "exactly one screenful still fits: the boundary is >=, not >"
+        );
+        assert_eq!(scrollbar_thumb(track, 0, 0, 25), None, "an empty file");
+        assert!(
+            scrollbar_thumb(track, 26, 0, 25).is_some(),
+            "one line past a screenful is the first overflowing case"
+        );
+    }
+
+    /// The thumb tracks `scroll_top` and reaches **both** ends of the
+    /// track, which is the row's "from `scroll_top` and
+    /// `current_line_starts.len()`".
+    ///
+    /// The bottom end is the load-bearing half. `scroll_by_lines`
+    /// clamps at `line_count - 1`, not at `line_count - visible_lines`,
+    /// so a thumb interpolated over the textbook maximum would strand a
+    /// gap below it that no input could ever close.
+    ///
+    /// *Mutation: return `line_count - visible_lines` from
+    /// `scrollbar_max_scroll_top` → the bottom-flush row fails while
+    /// every other row here still passes.*
+    #[test]
+    fn e3_1_the_thumb_reaches_both_ends_of_its_track() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("track");
+        let (lines, visible) = (1000usize, 25usize);
+
+        let (top, height) = scrollbar_thumb(track, lines, 0, visible).expect("a thumb");
+        assert!(
+            (top - track.top).abs() < 0.001,
+            "at scroll_top 0 the thumb is flush with the track's top"
+        );
+        assert!(
+            (height - SCROLLBAR_MIN_THUMB_HEIGHT).abs() < 0.001,
+            "550 * 25/1000 is under the floor, so the floor applies: {height}"
+        );
+
+        let max = scrollbar_max_scroll_top(lines);
+        assert_eq!(max, 999, "the clamp scroll_by_lines actually uses");
+        let (top, height) = scrollbar_thumb(track, lines, max, visible).expect("a thumb");
+        assert!(
+            ((top + height) - (track.top + track.height)).abs() < 0.001,
+            "at maximum scroll the thumb's BOTTOM is flush with the \
+             track's bottom: {top} + {height} vs {}",
+            track.top + track.height
+        );
+
+        // Monotonic in between, and never off the track.
+        let mut previous = track.top - 1.0;
+        for scroll_top in [0usize, 1, 100, 500, 900, 999] {
+            let (top, height) =
+                scrollbar_thumb(track, lines, scroll_top, visible).expect("a thumb");
+            assert!(
+                top >= previous,
+                "the thumb only moves down as scroll_top grows"
+            );
+            assert!(
+                top >= track.top && top + height <= track.top + track.height + 0.001,
+                "the thumb stays on the track at scroll_top {scroll_top}"
+            );
+            previous = top;
+        }
+        // A scroll_top past the clamp cannot push the thumb off.
+        let (top, height) = scrollbar_thumb(track, lines, 99_999, visible).expect("a thumb");
+        assert!(
+            ((top + height) - (track.top + track.height)).abs() < 0.001,
+            "an out-of-range scroll_top clamps rather than overshooting"
+        );
+    }
+
+    /// Dragging is the inverse of the thumb's interpolation, and it
+    /// carries the grab offset so the thumb does not teleport its top
+    /// under the pointer on the first motion of every drag.
+    ///
+    /// *Mutation: drop `- grab` from `scrollbar_y_to_scroll_top` and the
+    /// no-motion row fails, which is the exact symptom a user sees.*
+    #[test]
+    fn e3_1_a_thumb_drag_is_the_inverse_of_the_thumb_and_keeps_its_grab() {
+        let track = scrollbar_track(800, 600, FontMetrics::default(), PanelBandInset::ABSENT)
+            .expect("track");
+        let (lines, visible) = (1000usize, 25usize);
+        let at =
+            |scroll_top: usize| scrollbar_thumb(track, lines, scroll_top, visible).expect("thumb");
+
+        // Press in the MIDDLE of a thumb parked at scroll_top 400 and
+        // release without moving: the viewport must not shift at all.
+        let (top, height) = at(400);
+        let press_y = top + height / 2.0;
+        let grab = press_y - top;
+        assert_eq!(
+            scrollbar_y_to_scroll_top(press_y, grab, track, lines, visible),
+            Some(400),
+            "a press-and-hold with no motion is not a scroll"
+        );
+
+        // Dragging to the track's top and bottom saturates, not wraps.
+        assert_eq!(
+            scrollbar_y_to_scroll_top(track.top, grab, track, lines, visible),
+            Some(0),
+            "dragging above the track pins to the top of the file"
+        );
+        assert_eq!(
+            scrollbar_y_to_scroll_top(9999.0, grab, track, lines, visible),
+            Some(scrollbar_max_scroll_top(lines)),
+            "dragging past the bottom pins to the clamp, not past it"
+        );
+
+        // And a real drag round-trips: move the thumb to where 700
+        // would put it, and the inverse says 700.
+        let (top_700, _) = at(700);
+        assert_eq!(
+            scrollbar_y_to_scroll_top(top_700 + grab, grab, track, lines, visible),
+            Some(700),
+            "thumb → y → thumb is the identity on the drag path"
+        );
+    }
+
+    /// A press on bare track pages one screenful toward the press —
+    /// the row's "click-to-page" — and a press on the thumb does not.
+    ///
+    /// *Mutation: swap the two `Page` directions → both rows fail.*
+    #[test]
+    fn e3_1_a_press_on_bare_track_pages_and_a_press_on_the_thumb_drags() {
+        let Some(mut state) = headless_or_skip(800, 600, &"line\n".repeat(400)) else {
+            return;
+        };
+        let lines = state.current_line_starts.len();
+        let visible = state.scrollbar_visible_lines();
+        assert!(
+            lines > visible,
+            "setup: a 400-line document must overflow a 600px surface \
+             ({lines} lines, {visible} visible), or there is no thumb to press"
+        );
+        // Park mid-document so both directions have room.
+        state.scroll_top = 200;
+        let (track, thumb_top, thumb_h) =
+            state.scrollbar_thumb_now().expect("a thumb mid-document");
+
+        let x = f64::from(track.x) + 1.0;
+        // The grab compares with a tolerance: the press y round-trips
+        // through `f64` (winit reports physical pixels as `f64`) and
+        // comes back a few ULPs off the `f32` the thumb was computed in.
+        match state.scrollbar_press_target(x, f64::from(thumb_top + thumb_h / 2.0)) {
+            Some(ScrollbarPress::Thumb { grab }) => assert!(
+                (grab - thumb_h / 2.0).abs() < 0.01,
+                "the thumb's middle is a drag with a half-height grab; \
+                 got {grab} against {}",
+                thumb_h / 2.0
+            ),
+            other => panic!("the thumb's middle must be a drag, got {other:?}"),
+        }
+        assert_eq!(
+            state.scrollbar_press_target(x, f64::from(track.top + 1.0)),
+            Some(ScrollbarPress::Page { lines: -1 }),
+            "bare track above the thumb pages up"
+        );
+        assert_eq!(
+            state.scrollbar_press_target(x, f64::from(track.top + track.height - 1.0)),
+            Some(ScrollbarPress::Page { lines: 1 }),
+            "bare track below the thumb pages down"
+        );
+
+        // And the page actually moves the viewport by a screenful.
+        state.scrollbar_page(-1);
+        assert_eq!(
+            state.scroll_top,
+            200 - visible,
+            "paging up moves exactly one screenful"
+        );
+        state.scrollbar_page(1);
+        assert_eq!(state.scroll_top, 200, "and paging back returns");
+    }
+
+    /// The audit's F3, closed: **the scrollbar does not need a
+    /// `FileStyleSummary`.** A state with no summary paints no minimap
+    /// and still paints a scrollbar, which is the whole finding — the
+    /// thumb used to appear only when an unrelated payload happened to
+    /// exist.
+    ///
+    /// *Mutation: move the scrollbar's rects inside
+    /// `minimap_vertex_bytes`, behind its `let Some(summary) … else
+    /// { return Vec::new() }` → this row fails and no other does.*
+    #[test]
+    fn e3_1_the_scrollbar_paints_without_a_file_style_summary() {
+        let Some(mut state) = headless_or_skip(800, 600, &"line\n".repeat(400)) else {
+            return;
+        };
+        state.current_summary = None;
+        assert!(
+            state.minimap_vertex_bytes().is_empty(),
+            "setup: with no summary there is no minimap to paint"
+        );
+        assert!(
+            !state.right_gutter_vertex_bytes().is_empty(),
+            "F3: the scrollbar paints anyway"
+        );
+        // Two quads, track and thumb, six vertices each.
+        assert_eq!(state.scrollbar_rects().len(), 2, "a track and a thumb");
+
+        // And it disappears with the overflow rather than with the
+        // summary.
+        let short = headless_or_skip(800, 600, "one\ntwo\n");
+        if let Some(short) = short {
+            assert!(
+                short.scrollbar_rects().is_empty(),
+                "a document that fits paints no scrollbar"
+            );
+        }
+    }
+
     #[test]
     fn edge_scroll_direction_bands() {
         // 600px surface: up-band y < 16 + 24 = 40; the text area
@@ -19703,6 +21060,94 @@ mod tests {
         // Nothing blinks without a caret, or in terminal mode.
         state.own_cursor = None;
         assert_eq!(state.next_caret_blink(later), None);
+    }
+
+    /// E3.3 — **the own-caret current-line wash appears only when the
+    /// `ui.current-line` face is set**, and it is on the caret's line.
+    ///
+    /// The two halves are one row on purpose. A wash that painted
+    /// unconditionally would be the behavior Q#B4 was revised to
+    /// remove, and a face that changed nothing would be a knob one
+    /// frontend ignores — which is the defect this row was
+    /// re-specified to avoid. Absent-means-off is `ThemeFacts`'s own
+    /// contract read at this surface: the frontend's default here is
+    /// not painting.
+    ///
+    /// *Mutation: delete the `self.faces.get("ui.current-line")?` guard
+    /// → the unthemed leg fails. Delete the `own.byte` line lookup and
+    /// wash the whole slice → the line-only leg fails.*
+    #[test]
+    fn e3_3_the_current_line_wash_is_off_until_the_face_is_set() {
+        let doc = "alpha\nbravo\ncharlie\ndelta\n";
+        let Some(mut state) = headless_or_skip(320, 240, doc) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        // The caret sits on "bravo", bytes [6, 12).
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 8,
+        });
+
+        let unthemed = state.decoration_background_vertex_bytes();
+        assert!(
+            unthemed.is_empty(),
+            "with no ui.current-line face this frontend paints exactly \
+             what it painted before E3.3: nothing"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts {
+            faces: vec![theme_face(
+                "ui.current-line",
+                CellStyle {
+                    bg: CellColor::Rgb(40, 60, 90),
+                    ..CellStyle::default()
+                },
+            )],
+        });
+        let themed = state.decoration_background_vertex_bytes();
+        assert!(
+            !themed.is_empty(),
+            "setting the face turns the wash on: it is the control, not \
+             only the color"
+        );
+
+        // On the caret's line and nowhere else: moving the caret to
+        // another line must change what is painted.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 20,
+        });
+        let moved = state.decoration_background_vertex_bytes();
+        assert!(
+            !moved.is_empty() && moved != themed,
+            "the wash follows the caret rather than washing the buffer"
+        );
+
+        // A cursor in another buffer washes nothing here.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: BufferId::next(),
+            byte: 8,
+        });
+        assert!(
+            state.decoration_background_vertex_bytes().is_empty(),
+            "a cursor in a buffer this window is not showing paints no \
+             wash in the one it is"
+        );
+
+        // And clearing the face turns it back off, so the control is
+        // live rather than latched at attach.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 8,
+        });
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts { faces: Vec::new() });
+        assert!(
+            state.decoration_background_vertex_bytes().is_empty(),
+            "an empty ThemeFacts table unsets the face and the wash goes \
+             with it"
+        );
     }
 
     /// E2.4 — each surface-creation failure is one line naming what
@@ -23091,7 +24536,7 @@ mod tests {
         let Some(mut state) = headless_or_skip(320, 240, "aX") else {
             return;
         };
-        state.minimap_cache = Some(((0, 0, 0, 0), vec![1]));
+        state.minimap_cache = Some(((0, 0, 0, 0, 0, 0), vec![1]));
         let edits = state
             .apply_loro_text_delta_batches(&[vec![
                 loro::TextDelta::Retain {

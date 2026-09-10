@@ -1,0 +1,162 @@
+#!/bin/sh
+# Is every commit in a range free of attribution trailers? (D9)
+#
+# WHY THIS EXISTS. D9 says nothing session- or assistant-related appears
+# in any commit message --- no `Co-Authored-By`, no `Claude-Session`, no
+# claude.ai URL, no assistant or vendor name. For four phases that rule
+# was enforced by attention alone, in a project that has otherwise
+# converted every rule it cares about into a pinned assertion. Review
+# round 1 of C3 grepped `scripts/`, `tests/` and `.github/` and found
+# nothing asserting anything about trailers, and the commit that carried
+# the round's one trailer defect had already cleared a green gate and a
+# green CI run.
+#
+# WHY CI AND NOT `scripts/gate`. The subject is a RANGE of commits, and
+# the range is `merge-base(base, head)..head`. CI knows the base branch;
+# a local gate run does not, and inventing one locally would either
+# re-check `main`'s whole history on every run or guess.
+#
+# WHAT IT ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. It asserts no
+# ATTRIBUTION trailer, not "no trailers at all". Those are different
+# rules and conflating them is what produced a defect report against
+# `a712720`, whose whole message obeys D9 and whose final `Validation:`
+# line git's trailer parser reads as a trailer. The format half of that
+# --- a validation line must not be the only line of its final paragraph
+# --- is a writing rule stated in CLAUDE.md, not a thing to fail a build
+# on: it has no user-visible consequence and a checker for it would
+# reject honest messages.
+#
+# THE EPOCH. `d97e137` is the E0 merge, the first commit under D9.
+# Before it the history carries `Co-Authored-By:` and `Claude-Session:`
+# on a long run of commits, and no phase has proposed rewriting them.
+# The scan therefore excludes everything reachable from the epoch, so
+# pre-D9 history reads as history rather than as a breach. D9's own
+# text says "anywhere"; its enforced reach starts here, and that
+# sentence belongs beside the rule.
+#
+# USAGE
+#   scripts/check-attribution <range>       e.g. origin/main..HEAD
+#   scripts/check-attribution <base> <head> the merge base is computed
+#   scripts/check-attribution --self-test   falsify the classifier
+#
+# EXIT
+#   0  every commit in scope is clean (or the scope is empty)
+#   1  at least one commit carries an attribution trailer
+#   2  usage or repository error
+set -eu
+
+EPOCH=d97e137
+
+usage() {
+	echo "usage: scripts/check-attribution <range> | <base> <head> | --self-test" >&2
+	exit 2
+}
+
+# The classifier, and the only place the rule is written. Reads a commit
+# message on stdin; prints the offending markers, one per line, and
+# nothing at all when the message is clean.
+#
+# `CLAUDE.md` is removed FIRST and by exact spelling. That filename is
+# in this repository and commits legitimately name it --- `dbe40a1`'s
+# message does --- so a bare case-insensitive search for the assistant's
+# name reports the tree's own instruction file as an attribution
+# breach. Removing the filename and then searching is the narrowest
+# exemption that keeps the name itself forbidden.
+markers() {
+	sed 's/CLAUDE\.md//g' \
+		| grep -o -i -E 'co-authored-by|claude-session|claude\.ai|generated with[^\n]{0,20}claude|anthropic|claude' \
+		| sort -u
+}
+
+self_test() {
+	work=$(mktemp -d)
+	trap 'rm -rf "$work"' EXIT
+	(
+		cd "$work"
+		git init -q .
+		git config user.email fixture@example.invalid
+		git config user.name Fixture
+		git config commit.gpgsign false
+	) >/dev/null 2>&1
+	fail=0
+	# Three messages: one clean, one naming this repository's own
+	# instruction file, one carrying the trailer the rule is about.
+	printf 'gpu: do a thing\n\nBody.\n\nValidation: cargo test, ok.\n' >"$work/clean"
+	printf 'docs: state the rule in CLAUDE.md\n\nBody naming CLAUDE.md again.\n' >"$work/filename"
+	printf 'gpu: do a thing\n\nBody.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n' >"$work/dirty"
+	for case in clean filename dirty; do
+		found=$(markers <"$work/$case" | tr '\n' ' ')
+		case "$case" in
+		clean | filename)
+			if [ -n "$found" ]; then
+				echo "self-test: $case must be clean, got: $found" >&2
+				fail=1
+			fi
+			;;
+		dirty)
+			if [ -z "$found" ]; then
+				echo "self-test: dirty must be rejected, got nothing" >&2
+				fail=1
+			fi
+			;;
+		esac
+	done
+	# And the epoch's own boundary: a712720's `Validation:` line is a
+	# git trailer and is NOT an attribution trailer, so this checker
+	# must pass it. Skipped when that commit is not present, so the
+	# self-test runs in a shallow clone rather than failing there.
+	if git cat-file -e a712720^{commit} 2>/dev/null; then
+		found=$(git log -1 --format=%B a712720 | markers | tr '\n' ' ')
+		if [ -n "$found" ]; then
+			echo "self-test: a712720 must pass under the restated rule, got: $found" >&2
+			fail=1
+		fi
+	fi
+	if [ "$fail" -eq 0 ]; then
+		echo "check-attribution: self-test ok"
+	fi
+	return "$fail"
+}
+
+case "${1-}" in
+--self-test) self_test; exit $? ;;
+'') usage ;;
+esac
+
+if [ "$#" -eq 2 ]; then
+	base=$(git merge-base "$1" "$2") || usage
+	range="$base..$2"
+elif [ "$#" -eq 1 ]; then
+	range="$1"
+else
+	usage
+fi
+
+if ! git cat-file -e "$EPOCH^{commit}" 2>/dev/null; then
+	echo "check-attribution: the D9 epoch $EPOCH is not in this clone;" >&2
+	echo "  fetch the full history (actions/checkout fetch-depth: 0)." >&2
+	exit 2
+fi
+
+commits=$(git rev-list "$range" "^$EPOCH")
+if [ -z "$commits" ]; then
+	echo "check-attribution: no commits in $range after $EPOCH; nothing to check"
+	exit 0
+fi
+
+status=0
+count=0
+for sha in $commits; do
+	count=$((count + 1))
+	found=$(git log -1 --format='%B%n%an%n%ae%n%cn%n%ce' "$sha" | markers | tr '\n' ' ')
+	if [ -n "$found" ]; then
+		status=1
+		echo "check-attribution: $sha carries attribution: $found" >&2
+		git log -1 --format='  %s' "$sha" >&2
+	fi
+done
+
+if [ "$status" -eq 0 ]; then
+	echo "check-attribution: $count commit(s) in $range after $EPOCH, none carrying attribution"
+fi
+exit "$status"

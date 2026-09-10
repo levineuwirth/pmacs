@@ -687,12 +687,17 @@ fn bare_ui_merge_ships_the_catch_all_without_touching_spans() {
     exec(&state, r"pmacs.theme.merge { ui = { fg = 3 } }");
     let next = sem.render_frame(&state);
     let facts = theme_facts_of(&next).expect("bare ui bumps face_epoch and emits");
-    // Thirteen since E2.6 added `ui.caret` to the stage-1 inventory.
-    assert_eq!(facts.len(), 13, "the catch-all resolves every stage-1 face");
-    assert!(
-        facts.iter().any(|f| f.name == "ui.caret"),
-        "ui.caret is the thirteenth stage-1 face"
-    );
+    // Fourteen: thirteen since E2.6 added `ui.caret`, and E3.3 added
+    // `ui.current-line`. The count is a literal on purpose — `UI_FACES`
+    // is private to `semantic_render` — so a face added without a
+    // thought about the catch-all fails here by name.
+    assert_eq!(facts.len(), 14, "the catch-all resolves every stage-1 face");
+    for expected in ["ui.caret", "ui.current-line"] {
+        assert!(
+            facts.iter().any(|f| f.name == expected),
+            "{expected} is in the stage-1 inventory the catch-all resolves"
+        );
+    }
     assert!(
         facts
             .iter()

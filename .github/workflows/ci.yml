@@ -133,6 +133,48 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # D9's mechanism. Until this job existed the rule --- nothing session-
+  # or assistant-related in any commit message --- was enforced by
+  # attention alone, in a project that has otherwise converted every
+  # rule it cares about into a pinned assertion. `a712720` cleared a
+  # green gate and a green CI run carrying a trailer defect, and review
+  # round 1 of C3 found that `scripts/`, `tests/` and `.github/`
+  # asserted nothing at all about trailers.
+  #
+  # HERE AND NOT IN `scripts/gate`, because the subject is a RANGE and
+  # the range is `merge-base(base, head)..head`. CI knows the base
+  # branch; a local gate run does not.
+  #
+  # `fetch-depth: 0` is required: the check excludes everything
+  # reachable from the D9 epoch, and the epoch has to be in the clone.
+  attribution:
+    name: Commit attribution (D9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No attribution trailers since the D9 epoch
+        shell: bash
+        run: |
+          # The classifier first, against its own fixtures: a job that
+          # can only report "clean" is not evidence of anything.
+          scripts/check-attribution --self-test
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            scripts/check-attribution \
+              "${{ github.event.pull_request.base.sha }}" \
+              "${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            scripts/check-attribution "${{ github.event.before }}..${{ github.sha }}"
+          else
+            # A first push, a force-push past the recorded `before`, or
+            # a manual dispatch: fall back to the whole post-epoch
+            # history of this ref rather than checking nothing.
+            scripts/check-attribution "d97e137..${{ github.sha }}"
+          fi
+
   clippy:
     name: Lint (${{ matrix.lua }})
     runs-on: ubuntu-latest
@@ -307,6 +349,55 @@ jobs:
       # that spawn `pmacs-gpu` as a process, and a root-only build leaves
       # that binary absent. No `cargo test` invocation produces it.
       - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
+      # THE macOS ADAPTER QUESTION, asked here because nothing else in
+      # this file asks it. `cargo test -p pmacs-gpu` runs on exactly one
+      # job of nineteen (`GPU Render (headless)`, ubuntu + lavapipe), so
+      # ten E3 geometry unit tests execute on no macOS machine anywhere
+      # in this project's evidence chain. Whether that gap can be closed
+      # by widening the matrix, or is a fact of the runner, turns on one
+      # measurement: does a hosted macOS runner present an adapter to
+      # wgpu at all?
+      #
+      # `headless_or_skip` is the project's own adapter gate: without
+      # PMACS_REQUIRE_GPU a missing adapter is a silent `ok`, and with it
+      # the absence is a named assertion. So this step's CONCLUSION is
+      # the answer, and `--nocapture` puts the reason in the log. The
+      # selected row asserts two window-title strings and nothing
+      # platform-dependent, so a red here is about the adapter.
+      #
+      # `continue-on-error`, because this is a measurement and not a
+      # gate: a runner that presents no adapter must not redden a leg
+      # branch protection requires by name. The bin's unit-test target is
+      # already built by the step above, so this costs a run, not a
+      # compile.
+      - name: Does a macOS runner present a wgpu adapter?
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        env:
+          PMACS_REQUIRE_GPU: "1"
+        run: |
+          # `+e` deliberately: the default shell is `bash -e`, under which
+          # a failing cargo aborts the script before the verdict below is
+          # printed --- and the verdict is the whole point of the step.
+          set +e -o pipefail
+          cargo test -p pmacs-gpu --no-default-features \
+            --features ${{ matrix.lua }}${{ matrix.crdt }} --bin pmacs-gpu -- \
+            tests::status_facts_set_the_window_title --exact --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/adapter-probe.log"
+          status=$?
+          # A libtest filter that matches nothing reports `ok`, so read the
+          # `running N tests` line and not the verdict --- otherwise a
+          # renamed row would answer this question with a vacuum.
+          if ! grep -q 'running 1 test' "$RUNNER_TEMP/adapter-probe.log"; then
+            echo "ADAPTER VERDICT: UNDECIDED --- the filter matched no test"
+            exit 2
+          fi
+          if [ "$status" -eq 0 ]; then
+            echo "ADAPTER VERDICT: PRESENT --- wgpu built a device on this runner"
+          else
+            echo "ADAPTER VERDICT: ABSENT --- the assertion above names it"
+          fi
+          exit "$status"
       # Several acceptance binaries spawn real daemon / PTY child
       # processes, and the Linux legs stay serial for them.
       #
