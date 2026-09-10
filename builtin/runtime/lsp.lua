@@ -3689,6 +3689,94 @@ pmacs.command.define {
   end,
 }
 
+-- E5.4: `*diagnostics*` --- a listview over `pmacs.diag` for the active
+-- buffer and then the rest of the project, RET visiting through the
+-- same jump-ring path the references panel uses, re-rendered on every
+-- `publishDiagnostics` while it is open.
+
+local DIAGNOSTICS_PANEL = "*diagnostics*"
+
+local function active_buffer_uri()
+  local rec = pmacs.lsp.active_attachment()
+  if rec and rec.uri then return rec.uri end
+  local buf = pmacs.window.buffer()
+  local ok, path = pcall(function() return buf and buf:path() end)
+  if ok and type(path) == "string" and path ~= "" then
+    return file_uri_for(path)
+  end
+  return nil
+end
+
+local function diagnostic_rows()
+  local rows = {}
+  local here_uri = active_buffer_uri()
+  local here = here_uri and pmacs.lsp.path_for_uri(here_uri) or nil
+  local function push_uri(uri)
+    local path = pmacs.lsp.path_for_uri(uri) or uri
+    local shown = here and display_path(path, here) or path
+    local diags = pmacs.diag.list(uri)
+    table.sort(diags, function(a, b)
+      if a.start_line ~= b.start_line then return a.start_line < b.start_line end
+      return a.start_col < b.start_col
+    end)
+    for _, d in ipairs(diags) do
+      rows[#rows + 1] = {
+        text = string.format("%s:%d:%d  %s  %s", shown, d.start_line + 1,
+          d.start_col + 1, d.severity, (d.message:gsub("\n.*$", ""))),
+        item = { uri = uri, line = d.start_line, col = d.start_col },
+      }
+    end
+    return #diags
+  end
+  local buffer_count = 0
+  if here_uri then
+    local at = #rows + 1
+    buffer_count = push_uri(here_uri)
+    table.insert(rows, at, { text = string.format("This buffer (%d):", buffer_count) })
+  else
+    rows[#rows + 1] = { text = "This buffer: no file" }
+  end
+  local others = {}
+  for _, uri in ipairs(pmacs.diag.uris()) do
+    if uri ~= here_uri and pmacs.diag.count(uri) > 0 then others[#others + 1] = uri end
+  end
+  table.sort(others)
+  rows[#rows + 1] = { text = "" }
+  local at = #rows + 1
+  local project_count = 0
+  for _, uri in ipairs(others) do project_count = project_count + push_uri(uri) end
+  table.insert(rows, at, { text = string.format("Project (%d):", project_count) })
+  return rows
+end
+
+function pmacs.lsp.diagnostics()
+  local rows = diagnostic_rows()
+  pmacs.listview.open {
+    name = DIAGNOSTICS_PANEL,
+    header = "Diagnostics   RET visit  n/p move  g refresh  q quit",
+    rows = rows,
+    on_visit = visit_location,
+    on_refresh = diagnostic_rows,
+  }
+  -- The panel opens seated on its first data line, the buffer's section
+  -- label, which visits nothing; when the buffer has a diagnostic, RET
+  -- should land on it at once.
+  if rows[2] and rows[2].item then pmacs.editor.move_down() end
+end
+
+pmacs.command.define {
+  name = "lsp.diagnostics",
+  description = "List the diagnostics for the active buffer and the project in *diagnostics*; RET visits.",
+  fn = pmacs.lsp.diagnostics,
+}
+
+-- Refresh on publish: a subscriber for every server, at module load, so
+-- the panel follows the store wherever the panel is shown. Cheap when
+-- the panel is not open: `rerender` finds no live panel and returns.
+pmacs.lsp.on_notification("textDocument/publishDiagnostics", function()
+  pcall(pmacs.listview.rerender, DIAGNOSTICS_PANEL)
+end)
+
 pmacs.command.define {
   name = "lsp.go-to-definition",
   description = "Jump to the definition of the symbol under the cursor (LSP).",

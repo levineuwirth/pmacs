@@ -601,6 +601,25 @@ function pmacs.listview.open(spec)
   seat_cursor(p, 1)
 end
 
+-- Re-run the data source of the panel opened under `name` and re-render
+-- it in place, whichever window shows it and whether or not it is the
+-- active one. For a consumer whose data changes under it (the
+-- diagnostics panel on a `publishDiagnostics`), where `listview.refresh`
+-- --- the `g` command, active-panel-only because it re-seats the cursor
+-- through the editor's motion primitives --- cannot reach. The cursor is
+-- left alone: `set_generated_contents` keeps every displaying window's
+-- view sane, and a row count that shrank clamps on the next motion.
+-- Returns false when no live panel carries that name or it has no
+-- `on_refresh`.
+function pmacs.listview.rerender(name)
+  local p = panel_for_requested_name(name)
+  if not (p and p.on_refresh) then return false end
+  local rows = check_ids(p.on_refresh() or {})
+  p.rows = rows
+  render(p, rows)
+  return true
+end
+
 pmacs.command.define {
   name = "listview.visit",
   description = "Visit the list-panel item under the cursor.",
