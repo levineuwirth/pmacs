@@ -276,7 +276,7 @@ jobs:
         run: cargo test -p pmacs-gpu -- --test-threads=1
 
   test:
-    name: Test (${{ matrix.os }} / ${{ matrix.lua }}${{ matrix.crdt == '' && ', no crdt' || '' }})
+    name: Test (${{ matrix.os }} / ${{ matrix.lua }}${{ matrix.crdt == '' && ', no crdt' || '' }}${{ matrix.threads == '--test-threads=1' && ', serial' || '' }})
     runs-on: ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -285,7 +285,10 @@ jobs:
     # past a 25-minute ceiling on all four legs at once, and the one
     # whose macOS legs now carry the crdt corpus. See the note above
     # `jobs:` for the measurements and the cold-cache diagnosis.
-    timeout-minutes: 45
+    # MEASUREMENT BRANCH: 80, because the serial macOS legs added below
+    # did not fit 35 (D23); the test step carries its own ceiling so the
+    # report step after it always runs.
+    timeout-minutes: 80
     strategy:
       fail-fast: false
       # `crdt` is a default feature, so the four platform legs test the
@@ -297,10 +300,24 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         lua: [luajit, lua54]
         crdt: [",crdt"]
+        threads: [" "]
         include:
           - os: ubuntu-latest
             lua: luajit
             crdt: ""
+            threads: " "
+          # MEASUREMENT BRANCH (#259, #266): the same two macOS legs once
+          # more under --test-threads=1, so the poll cadence with and
+          # without intra-binary parallelism is measured in one run on
+          # one tree.
+          - os: macos-latest
+            lua: luajit
+            crdt: ",crdt"
+            threads: "--test-threads=1"
+          - os: macos-latest
+            lua: lua54
+            crdt: ",crdt"
+            threads: "--test-threads=1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -458,13 +475,36 @@ jobs:
       # at all --- at the tip of this branch that was 51 of 122 targets
       # silently unrun under one flavor, on a red the owner had already
       # filed.
-      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} --no-fail-fast -- ${{ runner.os == 'macOS' && ' ' || '--test-threads=1' }}
+      # MEASUREMENT BRANCH: the macOS flag comes from the matrix (a
+      # space, the same truthy no-op as before, or --test-threads=1 on
+      # the two added legs); output is teed so the report step can count
+      # the targets that ran; the step has its own ceiling so the report
+      # runs even when a serial leg does not finish.
+      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} --no-fail-fast -- ${{ runner.os == 'macOS' && matrix.threads || '--test-threads=1' }} 2>&1 | tee "$RUNNER_TEMP/test.log"
+        shell: bash
+        timeout-minutes: 65
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SETSID: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_BASH: ${{ runner.os == 'Linux' && '1' || '' }}
+      - name: Poll cadence report (#259, #266)
+        if: always()
+        shell: bash
+        run: |
+          echo "threads flag: '${{ matrix.threads }}'  nproc: $(getconf _NPROCESSORS_ONLN)"
+          python3 scripts/poll-cadence-report poll-cadence.tsv "$RUNNER_TEMP/test.log"
+          wc -l poll-cadence.tsv || true
+      - name: Upload poll cadence samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poll-cadence-${{ matrix.os }}-${{ matrix.lua }}${{ matrix.crdt == '' && '-nocrdt' || '' }}${{ matrix.threads == '--test-threads=1' && '-serial' || '' }}
+          path: |
+            poll-cadence.tsv
+            ${{ runner.temp }}/test.log
+          if-no-files-found: warn
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the

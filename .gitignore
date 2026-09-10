@@ -38,3 +38,4 @@
 # v0.2 breadth work (V0.2-PREREQUISITES.md SP-5-adjacent / F8b n=1)
 # reuses these. Revisit relocating to a tracked tools/ dir at v0.2.
 /f8b-*.sh
+poll-cadence.tsv

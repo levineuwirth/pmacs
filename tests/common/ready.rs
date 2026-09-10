@@ -97,15 +97,36 @@ pub fn wait_with<T>(
 ) -> Result<T, Timeout> {
     let start = Instant::now();
     let mut polls = 0u32;
+    // MEASUREMENT INSTRUMENT (#259, #266): per-iteration timing of the
+    // step, the probe and the sleep, recorded once per wait. The wait's
+    // behavior is unchanged; only clocks are read around the calls.
+    let mut meter = cadence::Meter::default();
     loop {
+        let step_start = Instant::now();
         step();
+        meter.step(step_start.elapsed());
         polls += 1;
-        let last = match probe() {
-            Probe::Ready(value) => return Ok(value),
+        let probe_start = Instant::now();
+        let outcome = probe();
+        meter.probe(probe_start.elapsed());
+        let last = match outcome {
+            Probe::Ready(value) => {
+                meter.record(
+                    "wait_with",
+                    what,
+                    poll,
+                    deadline,
+                    polls,
+                    start.elapsed(),
+                    "ready",
+                );
+                return Ok(value);
+            }
             Probe::Pending(state) => state,
         };
         let elapsed = start.elapsed();
         if elapsed >= deadline {
+            meter.record("wait_with", what, poll, deadline, polls, elapsed, "timeout");
             return Err(Timeout {
                 what: what.to_owned(),
                 deadline,
@@ -114,7 +135,10 @@ pub fn wait_with<T>(
                 last,
             });
         }
-        std::thread::sleep(poll.min(deadline.saturating_sub(elapsed)));
+        let asked = poll.min(deadline.saturating_sub(elapsed));
+        let sleep_start = Instant::now();
+        std::thread::sleep(asked);
+        meter.sleep(asked, sleep_start.elapsed());
     }
 }
 
@@ -165,16 +189,45 @@ pub fn tick_until<T>(
 ) -> T {
     let start = Instant::now();
     let mut polls = 0u32;
+    // MEASUREMENT INSTRUMENT (#259, #266): see `wait_with`.
+    let mut meter = cadence::Meter::default();
     loop {
+        let step_start = Instant::now();
         state.tick_processes();
         state.tick_lsp();
         state.tick_async();
+        meter.step(step_start.elapsed());
         polls += 1;
-        let last = match probe(state) {
-            Probe::Ready(value) => return value,
+        let probe_start = Instant::now();
+        let outcome = probe(state);
+        meter.probe(probe_start.elapsed());
+        let last = match outcome {
+            Probe::Ready(value) => {
+                meter.record(
+                    "tick_until",
+                    what,
+                    TICK_POLL,
+                    deadline,
+                    polls,
+                    start.elapsed(),
+                    "ready",
+                );
+                return value;
+            }
             Probe::Pending(seen) => seen,
         };
         let elapsed = start.elapsed();
+        if elapsed >= deadline {
+            meter.record(
+                "tick_until",
+                what,
+                TICK_POLL,
+                deadline,
+                polls,
+                elapsed,
+                "timeout",
+            );
+        }
         assert!(
             elapsed < deadline,
             "{}",
@@ -186,7 +239,10 @@ pub fn tick_until<T>(
                 last,
             }
         );
-        std::thread::sleep(TICK_POLL.min(deadline.saturating_sub(elapsed)));
+        let asked = TICK_POLL.min(deadline.saturating_sub(elapsed));
+        let sleep_start = Instant::now();
+        std::thread::sleep(asked);
+        meter.sleep(asked, sleep_start.elapsed());
     }
 }
 
@@ -219,6 +275,93 @@ pub fn wait_for_daemon(
             },
         },
     )
+}
+
+/// MEASUREMENT INSTRUMENT (#259, #266), not for merge.
+///
+/// #259's four occurrences report 53--58 polls across ~5.03 s, a
+/// cadence of 86--95 ms per iteration of a loop that asks for a 20 ms
+/// sleep; #266 reported one poll inside a 60 ms window. Both numbers
+/// come out of this file's loops, and nothing has measured where the
+/// time goes: in the sleep (a descheduled thread, which parallel test
+/// threads would explain) or in the probe (an expensive syscall, which
+/// they would not). This module times the three parts of every
+/// iteration and appends one line per wait to a checkout-root file
+/// that a workflow step reports after the sweep.
+mod cadence {
+    use std::io::Write;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    pub struct Meter {
+        step_total: Duration,
+        probe_total: Duration,
+        probe_max: Duration,
+        probe_first: Option<Duration>,
+        sleep_asked: Duration,
+        sleep_got: Duration,
+        sleep_over_max: Duration,
+        sleeps: u32,
+    }
+
+    impl Meter {
+        pub fn step(&mut self, took: Duration) {
+            self.step_total += took;
+        }
+
+        pub fn probe(&mut self, took: Duration) {
+            self.probe_total += took;
+            self.probe_max = self.probe_max.max(took);
+            self.probe_first.get_or_insert(took);
+        }
+
+        pub fn sleep(&mut self, asked: Duration, got: Duration) {
+            self.sleeps += 1;
+            self.sleep_asked += asked;
+            self.sleep_got += got;
+            self.sleep_over_max = self.sleep_over_max.max(got.saturating_sub(asked));
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn record(
+            &self,
+            which: &str,
+            what: &str,
+            poll: Duration,
+            deadline: Duration,
+            polls: u32,
+            elapsed: Duration,
+            outcome: &str,
+        ) {
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            let what: String = what
+                .chars()
+                .map(|c| if c == '\t' || c == '\n' { ' ' } else { c })
+                .collect();
+            let line = format!(
+                "POLL-CADENCE\t{which}\t{what}\t{:.3}\t{:.1}\t{polls}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}\t{:.3}\t{:.3}\t{:.3}\t{outcome}\n",
+                ms(poll),
+                ms(deadline),
+                ms(elapsed),
+                ms(self.step_total),
+                ms(self.probe_total),
+                ms(self.probe_max),
+                ms(self.probe_first.unwrap_or_default()),
+                self.sleeps,
+                ms(self.sleep_asked),
+                ms(self.sleep_got),
+                ms(self.sleep_over_max),
+            );
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/poll-cadence.tsv");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+    }
 }
 
 /// The tick interval for [`tick_until`]: an in-process editor's frame
