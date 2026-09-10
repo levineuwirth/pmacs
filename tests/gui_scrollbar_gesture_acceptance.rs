@@ -50,6 +50,11 @@ const FIXTURE_LINES: usize = 400;
 /// opt-out build and both CI legs that see that build deny warnings.
 #[cfg(feature = "crdt")]
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real-daemon/real-document/real-dispatch scenario driven twice; \
+              splitting it would give each gesture its own daemon for no gain"
+)]
 fn e3_1_a_scrollbar_press_and_a_thumb_drag_move_a_real_document() {
     use std::path::{Path, PathBuf};
 
@@ -82,7 +87,8 @@ fn e3_1_a_scrollbar_press_and_a_thumb_drag_move_a_real_document() {
     let fixture = fixture_dir.path().join("tall.txt");
     let mut body = String::new();
     for line in 0..FIXTURE_LINES {
-        body.push_str(&format!("scrollbar fixture line {line}\n"));
+        use std::fmt::Write as _;
+        let _ = writeln!(body, "scrollbar fixture line {line}");
     }
     std::fs::write(&fixture, &body).expect("write the fixture document");
 
