@@ -1103,9 +1103,25 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
             "out" => Some(1.0_f32),
             _ => None,
         });
+    // E3.1 pointer mode: `PMACS_GPU_PROBE_SCROLLBAR=page|drag` drives
+    // one scrollbar gesture through the PRODUCTION `App` dispatch once
+    // the attached document is tall enough to have a thumb, and reports
+    // the viewport it moved. The E2.7 wheel mode above is its
+    // precedent; the difference is that this one goes through `App`
+    // rather than calling a `State` method, because `App` is where
+    // E3.1's gesture lives and where review round 1 measured that
+    // nothing reached it.
+    let scrollbar_gesture = std::env::var_os("PMACS_GPU_PROBE_SCROLLBAR")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| match value.as_str() {
+            "page" => Some(ScrollbarGesture::Page),
+            "drag" => Some(ScrollbarGesture::Drag),
+            _ => None,
+        });
     facts.code_font_centi_before = centi_px(state.fm.code_font_size());
     facts.code_font_centi_after = facts.code_font_centi_before;
     let mut sent_zoom = false;
+    let mut sent_pointer = false;
 
     // Quiet-observation mode. `PMACS_GPU_PROBE_OBSERVE_MS` makes the probe
     // send NO input and request NO resize, and observe for exactly that long
@@ -1326,6 +1342,27 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
+                // E3.1 — the pointer gesture, once the document the
+                // daemon sent actually overflows the surface. Waiting on
+                // the thumb rather than on a frame count is what keeps
+                // this from pressing an absent control and reporting
+                // "nothing moved" as a defect in the dispatch.
+                if scrollbar_gesture.is_some() {
+                    if state.scrollbar_thumb_now().is_some() {
+                        facts.scrollbar_thumb_seen = true;
+                    }
+                    // The gesture itself runs BELOW the loop, on the
+                    // state the loop leaves: `App` owns the state and
+                    // the client outright, so driving it from inside an
+                    // iteration would move both out of the loop's own
+                    // bindings.
+                    if !quiet && facts.scrollbar_thumb_seen {
+                        sent_pointer = true;
+                        completion_observed = true;
+                        break;
+                    }
+                    continue;
+                }
                 if zoom_key.is_some() || zoom_wheel.is_some() {
                     if !quiet && !sent_zoom && facts.frames + u32::from(is_snapshot) >= 1 {
                         sent_zoom = true;
@@ -1372,6 +1409,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
             }
         }
     }
+
+    // E3.1 — the pointer gesture, driven on the state the observation
+    // loop left. Held to the end of the probe rather than dropped here:
+    // dropping the client detaches, and this session stays up until the
+    // report is on disk.
+    let _session = if let Some(gesture) = scrollbar_gesture
+        && sent_pointer
+    {
+        drive_scrollbar_gesture(socket, state, client, gesture, &mut facts)
+    } else {
+        (state, client)
+    };
 
     let mut out = String::new();
     let _ = writeln!(
@@ -1430,6 +1479,26 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     );
     let _ = writeln!(out, "code_font_centi_after={}", facts.code_font_centi_after);
     let _ = writeln!(out, "zoom_chords_sent={}", facts.zoom_chords_sent);
+    let _ = writeln!(out, "scrollbar_gesture={}", facts.scrollbar_gesture);
+    let _ = writeln!(out, "scrollbar_thumb_seen={}", facts.scrollbar_thumb_seen);
+    let _ = writeln!(out, "scrollbar_line_count={}", facts.scrollbar_line_count);
+    let _ = writeln!(
+        out,
+        "scrollbar_visible_lines={}",
+        facts.scrollbar_visible_lines
+    );
+    let _ = writeln!(
+        out,
+        "scrollbar_pressed_below_thumb={}",
+        facts.scrollbar_pressed_below_thumb
+    );
+    let _ = writeln!(out, "scrollbar_top_before={}", facts.scrollbar_top_before);
+    let _ = writeln!(out, "scrollbar_top_after={}", facts.scrollbar_top_after);
+    let _ = writeln!(
+        out,
+        "scrollbar_top_after_release={}",
+        facts.scrollbar_top_after_release
+    );
     let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
@@ -1440,6 +1509,128 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         return 5;
     }
     0
+}
+
+/// Which half of E3.1's gesture `PMACS_GPU_PROBE_SCROLLBAR` drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollbarGesture {
+    /// A press on bare track below the thumb: click-to-page.
+    Page,
+    /// A press on the thumb, a motion past the foot of the track, a
+    /// release, and one more motion afterwards.
+    Drag,
+}
+
+impl ScrollbarGesture {
+    /// The name the probe report carries, so an acceptance can say
+    /// which gesture the numbers below it belong to.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Drag => "drag",
+        }
+    }
+}
+
+/// This probe's viewport top line, or 0 when there is no state left.
+fn probe_scroll_top(app: &App) -> usize {
+    app.state.as_ref().map_or(0, |state| state.scroll_top)
+}
+
+/// E3.1 — drive one scrollbar gesture through the **production `App`
+/// dispatch** and record what it moved.
+///
+/// The state and the client are moved in and handed back rather than
+/// borrowed, because `App` owns both and going through `App` is the
+/// whole point of this route: `apply_left_button` is where the
+/// scrollbar is ordered ahead of the minimap, where a thumb press arms
+/// `scrollbar_drag`, and where a release `take()`s it; `apply_cursor_moved`
+/// is where a live drag is advanced. Review round 1 measured what a
+/// `State`-level row is worth here: with that arm neutered so
+/// `scrollbar_press_target`'s result can never be `Some`, the whole
+/// `pmacs-gpu` suite still reported `363 passed; 0 failed`.
+///
+/// Nothing is asserted here. The probe reports; the acceptance judges.
+fn drive_scrollbar_gesture(
+    socket: &Path,
+    state: State,
+    client: AttachClient,
+    gesture: ScrollbarGesture,
+    facts: &mut ProbeFacts,
+) -> (State, AttachClient) {
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        // No path, deliberately: nothing this probe does may write a
+        // geometry file into whatever config directory it inherits.
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+
+    let (track, thumb_top, thumb_h, scale) = {
+        let state = app.state.as_ref().expect("probe state");
+        let (track, top, height) = state
+            .scrollbar_thumb_now()
+            .expect("the caller waits for a thumb before calling this");
+        facts.scrollbar_line_count = state.current_line_starts.len();
+        facts.scrollbar_visible_lines = state.scrollbar_visible_lines();
+        facts.scrollbar_top_before = state.scroll_top;
+        (track, top, height, state.scale)
+    };
+    gesture.name().clone_into(&mut facts.scrollbar_gesture);
+    // `apply_cursor_moved` takes PHYSICAL pixels and divides by the
+    // scale factor, while the geometry above is logical, so it is
+    // scaled back up here rather than assuming the headless surface is
+    // 1:1.
+    let phys = |value: f32| f64::from(value) * f64::from(scale);
+    let x = phys(track.x + 1.0);
+    let below_thumb = thumb_top + thumb_h + 2.0;
+    facts.scrollbar_pressed_below_thumb = below_thumb < track.top + track.height;
+
+    match gesture {
+        ScrollbarGesture::Page => {
+            app.apply_cursor_moved(x, phys(below_thumb));
+            app.apply_left_button(ElementState::Pressed);
+            facts.scrollbar_top_after = probe_scroll_top(&app);
+            app.apply_left_button(ElementState::Released);
+            // A page arms no drag, so this motion must move nothing.
+            app.apply_cursor_moved(x, phys(track.top + 1.0));
+            facts.scrollbar_top_after_release = probe_scroll_top(&app);
+        }
+        ScrollbarGesture::Drag => {
+            app.apply_cursor_moved(x, phys(thumb_top + thumb_h / 2.0));
+            app.apply_left_button(ElementState::Pressed);
+            // Past the foot of the track deliberately: a drag that
+            // wanders off the control keeps it.
+            app.apply_cursor_moved(x, phys(track.top + track.height + 2.0));
+            facts.scrollbar_top_after = probe_scroll_top(&app);
+            app.apply_left_button(ElementState::Released);
+            // And if the release did NOT end the drag, this motion
+            // drags the viewport back toward the top of the file, so
+            // the two facts differ. That is the only way to observe the
+            // release half at all.
+            app.apply_cursor_moved(x, phys(track.top + 1.0));
+            facts.scrollbar_top_after_release = probe_scroll_top(&app);
+        }
+    }
+
+    let state = app.state.take().expect("probe state survives the gesture");
+    let client = app
+        .attach_client
+        .take()
+        .expect("probe client survives the gesture");
+    (state, client)
 }
 
 /// Exercise the real managed connector without creating a display.
@@ -1771,6 +1962,30 @@ struct ProbeFacts {
     code_font_centi_after: u32,
     /// E2.7 — the zoom chords the probe sent, in order (`=` in, `-` out).
     zoom_chords_sent: String,
+    /// E3.1 pointer mode: which half of the scrollbar gesture this
+    /// probe drove (`page`, `drag`, or empty when it drove neither).
+    scrollbar_gesture: String,
+    /// Whether the attached document ever overflowed the surface far
+    /// enough for a thumb to exist. Reported separately from the
+    /// viewport numbers so "there was no scrollbar to press" is
+    /// distinguishable from "it was pressed and nothing moved" — the
+    /// two are the same number and different defects.
+    scrollbar_thumb_seen: bool,
+    /// The setup the gesture was performed against: the document's line
+    /// count, the screenful the page step is derived from, and whether
+    /// the press pixel really was bare track below the thumb.
+    scrollbar_line_count: usize,
+    scrollbar_visible_lines: usize,
+    scrollbar_pressed_below_thumb: bool,
+    /// The viewport's top line before the gesture and after it.
+    scrollbar_top_before: usize,
+    scrollbar_top_after: usize,
+    /// The top line after the button came up AND the pointer moved
+    /// again. Equal to `scrollbar_top_after` unless the release failed
+    /// to end the drag, in which case the stray motion drags the
+    /// viewport somewhere new — which is the only way to observe that
+    /// half of the gesture at all.
+    scrollbar_top_after_release: usize,
     disconnect: Option<String>,
 }
 
@@ -6185,6 +6400,183 @@ mod input_routing_tests {
         assert!(
             !WheelTarget::PanelChrome.scrolls_locally(),
             "panel chrome banks nothing at all; false is the safe side"
+        );
+    }
+
+    /// A left button event at the pointer's current position — the
+    /// shape winit delivers, so the row reaches `apply_left_button`
+    /// through `route_event` rather than beside it.
+    fn left_button(state: ElementState) -> WindowEvent {
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state,
+            button: MouseButton::Left,
+        }
+    }
+
+    fn cursor_moved(x: f64, y: f64) -> WindowEvent {
+        WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(x, y),
+        }
+    }
+
+    /// The fixture's scrollbar, read from the production geometry.
+    /// Asserted rather than assumed: a fixture that stopped overflowing
+    /// its surface has no thumb, and every row below would then pass on
+    /// an absent control.
+    fn scrollbar_probe(h: &EffectHarness) -> (ScrollbarTrack, f32, f32) {
+        let state = h.app.state.as_ref().expect("harness state");
+        state.scrollbar_thumb_now().expect(
+            "setup: the harness fixture must overflow its surface, or there \
+             is no thumb to press",
+        )
+    }
+
+    /// E3.1 — **click-to-page, driven through `App`.** A press on bare
+    /// track below the thumb pages the document one screenful down and
+    /// declares the new viewport to the daemon.
+    ///
+    /// This row and its sibling below exist because review round 1
+    /// measured the gap rather than inferring it: with the press
+    /// dispatch neutered so `scrollbar_press_target`'s result can never
+    /// be `Some`, the whole `pmacs-gpu` suite still reported `363
+    /// passed; 0 failed`. E3.1's hit-test, thumb interpolation, page
+    /// step and clamp were each pinned by a `State`-level row, and the
+    /// *gesture* — the only thing a user performs — was pinned by
+    /// nothing. Every function here is production: `route_event`
+    /// classifies the winit event, `apply_left_button` orders the
+    /// scrollbar ahead of the minimap, and `EffectHarness` reads the
+    /// outbound wire rather than a re-implementation of it.
+    ///
+    /// *Mutation: make the `scrollbar_press_target` arm at
+    /// `apply_left_button` unreachable → this row fails on its first
+    /// assertion, and so does the drag row.*
+    #[test]
+    fn e3_1_a_press_on_bare_track_pages_the_document_through_the_app() {
+        let mut h = EffectHarness::new();
+        let (track, thumb_top, thumb_h) = scrollbar_probe(&h);
+        let visible = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .scrollbar_visible_lines();
+        let x = f64::from(track.x) + 1.0;
+        let below = f64::from(thumb_top + thumb_h) + 2.0;
+        assert!(
+            below < f64::from(track.top + track.height),
+            "setup: the press pixel must be bare track BELOW the thumb; \
+             thumb ends at {}, track ends at {}",
+            thumb_top + thumb_h,
+            track.top + track.height
+        );
+
+        move_pointer(&mut h, (x, below));
+        let step = h.feed(&left_button(ElementState::Pressed));
+
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll { top: visible }],
+            "a press on bare track below the thumb pages exactly one \
+             screenful down"
+        );
+        // NOT `.all()` alone, which is vacuously true on an empty
+        // transcript — the trap M22 found in the wheel row.
+        assert!(
+            !step.outbound.is_empty(),
+            "and the paged viewport must reach the daemon"
+        );
+        assert!(
+            step.outbound
+                .iter()
+                .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "a scrollbar page declares viewports and nothing else, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// E3.1 — **the thumb drag, driven through `App`, both ends of it.**
+    /// A press on the thumb grabs without jumping; motion while the grab
+    /// is live moves the viewport even once the pointer leaves the
+    /// track; the release ends the drag, so the next motion moves
+    /// nothing.
+    ///
+    /// The release half is the one a reading cannot settle: `take()`
+    /// clearing the drag and `is_some()` merely reporting it look alike
+    /// on the page and differ only in what the *next* event does.
+    ///
+    /// *Mutation: `state.scrollbar_drag.take()` → `.is_some()` at the
+    /// release arm → the last assertion fails and nothing else does.*
+    #[test]
+    fn e3_1_a_thumb_drag_moves_the_viewport_and_the_release_ends_it() {
+        let mut h = EffectHarness::new();
+        let (track, thumb_top, thumb_h) = scrollbar_probe(&h);
+        let lines = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .current_line_starts
+            .len();
+        let x = f64::from(track.x) + 1.0;
+
+        move_pointer(&mut h, (x, f64::from(thumb_top + thumb_h / 2.0)));
+        let press = h.feed(&left_button(ElementState::Pressed));
+        assert!(
+            press.local.is_empty(),
+            "a press on the thumb is a grab, not a jump: {:?}",
+            press.local
+        );
+        assert!(
+            press.outbound.is_empty(),
+            "and it declares no viewport: {:?}",
+            press.outbound
+        );
+
+        // Past the foot of the track deliberately: a drag that wanders
+        // off the control keeps it, which is what every scrollbar does
+        // and what the minimap scrub already establishes here.
+        let past_foot = f64::from(track.top + track.height) + 2.0;
+        let drag = h.feed(&cursor_moved(x, past_foot));
+        assert_eq!(
+            drag.local,
+            vec![LocalEffect::Scroll {
+                top: scrollbar_max_scroll_top(lines)
+            }],
+            "dragging the thumb past the foot of the track scrolls to the \
+             clamp and no further"
+        );
+        assert!(
+            !drag.outbound.is_empty()
+                && drag
+                    .outbound
+                    .iter()
+                    .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "a live thumb drag declares viewports and nothing else, got {:?}",
+            drag.outbound
+        );
+
+        let release = h.feed(&left_button(ElementState::Released));
+        assert!(
+            release.local.is_empty() && release.outbound.is_empty(),
+            "the release ends the drag silently — the viewport already \
+             followed the pointer: {:?} / {:?}",
+            release.local,
+            release.outbound
+        );
+
+        let after = h.feed(&cursor_moved(x, f64::from(track.top) + 1.0));
+        assert!(
+            after.local.is_empty(),
+            "a motion after the release must not still be dragging; it \
+             scrolled {:?}",
+            after.local
+        );
+        assert!(
+            after.outbound.is_empty(),
+            "and it must declare nothing: {:?}",
+            after.outbound
         );
     }
 
