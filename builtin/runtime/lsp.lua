@@ -530,6 +530,60 @@ pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
 -- equal as raw keys).
 local attachments = {}
 
+-- E5.3: servers that are gone underneath something that still refers
+-- to them. Keyed by `tostring(sid)`; each entry carries the label, the
+-- last kind seen (`crashed` or `stopped`), the reason, and the attempt
+-- it was reported for. `note_dead_server` reports through `pmacs.error`
+-- once per (sid, attempt, kind), so a crash-looping server under
+-- `OnCrash` reports each attempt and a stale attachment found on a
+-- later attach reports once rather than on every open. The table feeds
+-- the `*lsp*` panel's "Crashed" section and the modeline's `LSP:!`.
+local dead_servers = {}
+
+local function note_dead_server(sid, kind, reason)
+  if not sid then return end
+  local skey = tostring(sid)
+  local label, attempt = skey, 0
+  local ok, rows = pcall(pmacs.lsp.list)
+  if ok and rows then
+    for _, info in ipairs(rows) do
+      if tostring(info.id) == skey then
+        label = info.label or label
+        attempt = info.attempt or 0
+        if reason == nil and info.state and info.state.reason then
+          reason = info.state.reason
+        end
+      end
+    end
+  end
+  local prior = dead_servers[skey]
+  if prior and prior.kind == kind and prior.attempt == attempt then
+    return
+  end
+  dead_servers[skey] = {
+    label = label,
+    kind = kind,
+    reason = reason,
+    attempt = attempt,
+    at = pmacs.editor.monotonic_ms(),
+  }
+  local msg
+  if kind == "crashed" then
+    msg = string.format("LSP: %s crashed%s", label,
+      reason and (": " .. tostring(reason)) or "")
+  else
+    msg = string.format("LSP: %s stopped underneath an attached buffer", label)
+  end
+  pmacs.error(msg)
+end
+
+-- A server that came back (a restart under `OnCrash`, or a fresh spawn
+-- reusing nothing) leaves the dead list; the panel shows only what is
+-- gone now.
+local function clear_dead_server(sid)
+  if sid then dead_servers[tostring(sid)] = nil end
+end
+
 -- Minimal file:// percent-encoder. Matches src/lsp.rs's policy: ASCII
 -- alpha-num + a small set of path-safe punctuation pass through; every
 -- other byte goes through %XX. Iterates per-byte (`gmatch(".")` is
@@ -997,6 +1051,9 @@ local function ensure_server(language, path)
         clear_failure(affinity_key(language, key_uri))
         return info.id
       end
+      -- E5.3: a dead server for this key is reported, not skipped in
+      -- silence; a replacement is spawned below.
+      note_dead_server(info.id, kind)
     end
   end
   local ok, sid = pcall(pmacs.lsp.spawn, {
@@ -1005,6 +1062,9 @@ local function ensure_server(language, path)
     command = cfg.command,
     args = cfg.args or {},
     env = cfg.env,
+    -- E5.3: forwarded so a config may say `restart = "never"`; nil keeps
+    -- the spawner's default.
+    restart = cfg.restart,
     init_options = cfg.init_options,
     settings = cfg.settings,
     cwd = root,
@@ -1184,6 +1244,8 @@ local function attach_buffer(buf)
   if existing then
     local kind = server_state_kind(existing.server)
     if kind == "crashed" or kind == "stopped" then
+      -- E5.3: the buffer's server is gone; say so before rebuilding.
+      note_dead_server(existing.server, kind)
       -- A terminal OnCrash client may still have `next_restart_at`
       -- armed. Spawning beside it creates two same-root servers when
       -- the old id restarts. `forget` is the terminal-state operation:
@@ -1335,7 +1397,12 @@ pmacs.statusline.register {
   fn = function(ctx)
     local bkey = tostring(ctx.buffer)
     local rec = attachments[bkey]
-    if rec then return "LSP:" .. pmacs.lsp.modeline_label(rec.server) end
+    if rec then
+      -- E5.3: a crashed server is `LSP:!`, the same mark a server that
+      -- never started gets, rather than the state's own label.
+      if server_state_kind(rec.server) == "crashed" then return "LSP:!" end
+      return "LSP:" .. pmacs.lsp.modeline_label(rec.server)
+    end
     -- Journey Stage 1b-2. A plain map lookup, deliberately: deriving an
     -- affinity key here would run root resolvers and project detection
     -- once per window per paint.
@@ -2766,7 +2833,13 @@ local function handle_server_requests()
           dispatch_notification(sid, ev)
         elseif ev.kind == "response" then
           deliver_response(sid, ev)
+        elseif ev.kind == "crashed" then
+          -- E5.3: a crash was consumed silently here; it is reported
+          -- through `pmacs.error`, marks the modeline `LSP:!` for every
+          -- buffer attached to the server, and lists in `*lsp*`.
+          note_dead_server(sid, "crashed", ev.reason)
         elseif ev.kind == "initialized" then
+          clear_dead_server(sid)
           -- Buffers attach before the server finishes initializing, so
           -- the pulls in `attach_buffer` are no-ops for the FIRST file
           -- (their `server_is_initialized` guard is false). This is the
@@ -3562,6 +3635,21 @@ end
 -- without one, which would leave `g` bound and silently dead.
 local function lsp_status_rows()
   local rows = {}
+  -- E5.3: what is gone underneath an attachment, first.
+  local dead = {}
+  for skey, entry in pairs(dead_servers) do
+    dead[#dead + 1] = { key = skey, entry = entry }
+  end
+  table.sort(dead, function(a, b) return a.entry.at < b.entry.at end)
+  if #dead > 0 then
+    rows[#rows + 1] = { text = string.format("Crashed (%d):", #dead) }
+    for _, d in ipairs(dead) do
+      rows[#rows + 1] = { text = string.format("  %s (%s, attempt %d) — %s",
+        d.entry.label, d.entry.kind, d.entry.attempt,
+        d.entry.reason and tostring(d.entry.reason) or "no reason recorded") }
+    end
+    rows[#rows + 1] = { text = "" }
+  end
   local fails = pmacs.lsp.spawn_failures()
   if #fails > 0 then
     rows[#rows + 1] = { text = string.format("Failed to start (%d):", #fails) }
