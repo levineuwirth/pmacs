@@ -469,6 +469,73 @@ the code, and the trunk's macOS legs after the merge are the evidence
 --- a `read Hello` red there would now mean a second mechanism, and a
 #259 red at 10 s would carry its poll count.
 
+### PR #269's head run 34524799346 at `aa5177d`: the family's sixteenth and #258's fifth, on the branch that removed the boot mechanism
+
+Recorded from `main` on 2026-09-10 at C5's close. Read from the jobs
+endpoint and the failing job's log.
+
+| field | value |
+|---|---|
+| run | 34524799346, `pull_request`, one attempt |
+| head | `aa5177d`, E5's opening head (PR #269, base `b15d935`) |
+| window | created 2026-09-10T20:10:43Z, completed 20:33:08Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the failure | `Test (macos-latest / luajit)`, job 103031218766 |
+| failing target | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`, `tests/statusline_segments_acceptance.rs:997:54`, `Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })`, `test result: FAILED. 12 passed; 1 failed` |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+`WouldBlock` appears **exactly once** in the job against 129 `test
+result: ok`; `M5 Perf Gates` green at its new ceilings; every row E5
+added `... ok` on the leg. **The finding is where it happened.** At
+`aa5177d` the shared readiness wait already declared readiness on a
+served `Hello` (`ac4c706`), so this `Hello` was read from a daemon that
+had served one: the boot (the mechanism #258's measurement found and
+`ac4c706` removed) was one mechanism and not the only one. The second
+is a live daemon's per-connection `Hello`, written on its dispatcher's
+tick, past this row's 200 ms read timeout on a loaded runner. The
+sweep's rows had named the call-site fix as the alternative; E5 landed
+it at `66195b5` (`statusline_segments` 200 ms, `theme_faces` 250 ms
+twice, `vterm_stage3` 2 s, all now `common::ready::DEADLINE`). On #258,
+2026-09-10; not re-run.
+
+### PR #269's tip run 34528196810 at `66195b5`: green, which retires nothing
+
+| field | value |
+|---|---|
+| run | 34528196810, `pull_request`, one attempt |
+| head | `66195b5`, C5's tip (the call-site fix over `aa5177d`) |
+| window | created 2026-09-10T20:44:47Z, completed 21:07:34Z |
+| verdict | 19 jobs: **17 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Read from the `Test (macos-latest / luajit)` job log (103042232456)
+rather than the verdict line: `WouldBlock` **zero** times, `did not
+become ready` zero times, 132 `test result: ok`, zero `FAILED`;
+`a16_26_…` and #259's `acc28_…` both `... ok`; the served-Hello witness
+`... ok` in all 40 copies. Under the rerun rule that is non-reproduction
+and nothing more: #258 stays at five, the family at sixteen, #259 at
+seven. What changed under them is that both of the family's mechanisms
+are gone from the code, and the trunk's macOS legs after the merge are
+the evidence.
+
+### R7's seventeenth, local, on E5's tip
+
+`scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
+`05-sweep`: `attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`,
+`transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))` at
+`pmacs-gpu/src/attach.rs:1958` (the panic line has moved from `:1889`;
+not part of the signature), `test result: FAILED. 365 passed; 1 failed`
+on the `pmacs-gpu` unit target, under the default sweep's load. All
+three of R7's fragments; `pmacs-gpu/src/attach.rs` has no diff on the
+branch. The next run at the same tip (`20260910T204131Z-1922470`) was
+six of six, non-reproduction and nothing more. **R7 is at least
+seventeen.** The wait sweep (`docs/audits/2026-09-10-wait-sweep.md`,
+S3) found that R7's 1 s deadline is armed after the spawn and consulted
+only after two synthetic failures, while the `Hello` read and the
+`server.join()` that wait carry no bound --- so the row's next
+occurrence on a slower host can only be a hang and not a red.
+
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
 The run the branch could not record. Read from the jobs endpoint and
@@ -524,20 +591,22 @@ twelve**, and both remain floors. A load-dependent failure is green
 most of the time over a live defect, which is exactly why this section
 records the green as a sample and not as a closure.
 
-### The `read Hello` family is at FIFTEEN
+### The `read Hello` family is at SIXTEEN
 
-Fifteen occurrences across **five suites** and **six selectors**,
+Sixteen occurrences across **five suites** and **six selectors**,
 counted by fetching the failing job of every run on PR #257, PR #262,
 PR #265 and PR #267 and `main`'s post-merge runs, grepping
 `WouldBlock`, and extracting the panicking thread and site of each hit.
-Per-job counts: 1, 1, 4, 1, 2, 2, 1, 1, 1, 1. (Twelve when this section
-was first written, 2026-09-09; thirteen and fourteen added 2026-09-10
-from E3's fix-round head and from `main` after E3's merge; fifteen
-added 2026-09-10 from E4's fix-round head, below.)
+Per-job counts: 1, 1, 4, 1, 2, 2, 1, 1, 1, 1, 1. (Twelve when this
+section was first written, 2026-09-09; thirteen and fourteen added
+2026-09-10 from E3's fix-round head and from `main` after E3's merge;
+fifteen added 2026-09-10 from E4's fix-round head; **sixteen added
+2026-09-10 from E5's head at `aa5177d`, the run that falsified half of
+E5.0's reading of this family**, below.)
 
-Tally (read-hello-per-job): 15 = 1 + 1 + 4 + 1 + 2 + 2 + 1 + 1 + 1 + 1.
+Tally (read-hello-per-job): 16 = 1 + 1 + 4 + 1 + 2 + 2 + 1 + 1 + 1 + 1 + 1.
 
-Tally (read-hello-family): 15 rows in the table below.
+Tally (read-hello-family): 16 rows in the table below.
 
 | # | run | sha | suite | selector |
 |---|---|---|---|---|
@@ -556,10 +625,11 @@ Tally (read-hello-family): 15 rows in the table below.
 | 13 | 34452014666 | `450ef26` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
 | 14 | 34483416251 (`main`) | `2ca2094` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
 | 15 | 34502504655 | `352d32f` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 16 | 34524799346 | `aa5177d` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
 
 The six selectors are `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`
-(four), `daemon_reships_the_summary_after_a_real_buffer_round_trip`
-(**five**, the family's most frequent on its own since the fourteenth),
+(**five** since the sixteenth), `daemon_reships_the_summary_after_a_real_buffer_round_trip`
+(**five**, the family's most frequent on its own since the fourteenth, tied since the sixteenth),
 `v15_peer_never_receives_theme_facts_and_v16_does` (**three** since the fifteenth), and
 `v16_peer_never_receives_font_facts_and_v17_does`,
 `m10_10_non_replica_frontend_does_not_receive_cursor_byte` and
@@ -569,7 +639,7 @@ Tally (read-hello-suites): 5 distinct values of `suite` in the table above.
 
 Tally (read-hello-selectors): 6 distinct values of `selector` in the table above.
 
-Tally (read-hello-a16_26): 4 rows of the table above with `selector` = `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`.
+Tally (read-hello-a16_26): 5 rows of the table above with `selector` = `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`.
 
 Tally (read-hello-daemon_reships): 5 rows of the table above with `selector` = `daemon_reships_the_summary_after_a_real_buffer_round_trip`.
 
@@ -586,16 +656,17 @@ Zero `WouldBlock` in all three failing macOS **lua54** jobs
 base**. The count is a floor: nobody has counted runs, so an
 occurrence is recorded only when someone reads a log.
 
-### #258 is at FOUR occurrences
+### #258 is at FIVE occurrences
 
-Its own selector, job and all three required fragments, four times.
+Its own selector, job and all three required fragments, five times.
 
-Tally (258): 4 items in the list below.
+Tally (258): 5 items in the list below.
 
 - run 34220035122 at `8f6784f`
 - run 34272480226 at `d7fd465` (the occurrence D30 dispositioned)
 - run 34369540895 at `e5417f6`
 - run 34373256548 at `7b6c519`
+- run 34524799346 at `aa5177d` (PR #269's opening head; the section on it below)
 
 The last two are **consecutive runs on one
 branch whose shas differ by 83 lines of markdown**, which excludes the
@@ -770,7 +841,7 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least sixteen, 2026-08-07 to 2026-09-07, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The thirteenth and fourteenth: gate logs `20260905T202734Z-1751532` (step `07-sweep`, load average 14.2) and `20260905T205642Z-2051072` (step `05-sweep` of the six-stage gate). The fifteenth and sixteenth: gate logs `20260907T170429Z-45241` and `20260907T185321Z-604527`, both in step `06-sweep-luajit`, the LuaJIT-only sweep `--protocol` adds, each ending `test result: FAILED. 325 passed; 1 failed` on `-p pmacs-gpu --bin pmacs-gpu`. All four at `attach.rs:1889` with all three fragments. The first twelve are enumerated in this file's history before 2026-09-05; the four above are the enumeration held here. The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least seventeen, 2026-08-07 to 2026-09-10 (the seventeenth in E5's tip gate, `20260910T203556Z-1854124`, its own section above), all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The thirteenth and fourteenth: gate logs `20260905T202734Z-1751532` (step `07-sweep`, load average 14.2) and `20260905T205642Z-2051072` (step `05-sweep` of the six-stage gate). The fifteenth and sixteenth: gate logs `20260907T170429Z-45241` and `20260907T185321Z-604527`, both in step `06-sweep-luajit`, the LuaJIT-only sweep `--protocol` adds, each ending `test result: FAILED. 325 passed; 1 failed` on `-p pmacs-gpu --bin pmacs-gpu`. All four at `attach.rs:1889` with all three fragments. The first twelve are enumerated in this file's history before 2026-09-05; the four above are the enumeration held here. The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
