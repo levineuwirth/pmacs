@@ -304,16 +304,21 @@ Tally (259-green-elapsed): 1.38–4.24 s over 1.38, 3.51, 4.24, 3.43.
 
 Tally (259-green-share): 28–85 % over 28, 70, 85, 69.
 
-Tally (259-red-polls): 53–58 over 53, 54, 58, 58, 53.
+Tally (259-red-polls): 53–60 over 53, 54, 58, 58, 53, 60.
 
-Tally (259-red-elapsed): 5.01–5.07 s over 5.04, 5.03, 5.03, 5.01, 5.07.
+Tally (259-red-elapsed): 5.01–5.08 s over 5.04, 5.03, 5.03, 5.01, 5.07, 5.08.
 
 **#259's fifth occurrence, and its first on `main`**, arrived in the
 run this round's own registry push started (34501572442 at `c6afed8`,
 below): `5.066744875s, 53 polls`, over by **67 ms** at 95.6 ms per
 iteration --- still inside the distribution the four green samples
 bound, so the re-disposition stands and the tail is one sample wider.
-The two red tallies above carry five values since that run.
+The two red tallies above carry five values since that run --- and
+**six** since the run E4's fix-round push started twenty minutes later
+(34502504655 at `352d32f`, below): `5.079980541s, 60 polls`, over by
+80 ms at 84.7 ms per iteration, in the same job as the family's
+fifteenth. Two reds in two consecutive runs on two trees are two
+occurrences, not a rate.
 
 ### PR #267's head run 34490620616 at `8e4ed3a`: `M5 Perf Gates` at its 25-minute ceiling, then green on the authorized rerun
 
@@ -384,13 +389,42 @@ and `tests/common/ready.rs` are byte-identical to `2ca2094`. One
 positive sample settles existence: the signature is on the trunk. On
 the issue, 2026-09-10; not re-run.
 
-Tally (259): 5 items in the list below.
+Tally (259): 6 items in the list below.
 
 - run 34220035122 at `8f6784f` (PR #257), macOS lua54, `5.042660041s, 53 polls`
 - run 34222042303 at `e78d184` (PR #257), macOS lua54, `5.031151625s, 54 polls`
 - run 34269795016 at `04263c6` (PR #257), macOS luajit, `5.029068625s, 58 polls`
 - run 34474086323 at `049d81b` (PR #265), macOS lua54, `5.007875083s, 58 polls`
 - run 34501572442 at `c6afed8` (`main`), macOS luajit, `5.066744875s, 53 polls`
+- run 34502504655 at `352d32f` (PR #267), macOS luajit, `5.079980541s, 60 polls`
+
+### PR #267's fix-round head run 34502504655 at `352d32f`: #259's sixth and the family's fifteenth, in one job
+
+The run E4's fix round 1 push started. Read from the jobs endpoint and
+the failing job's log; recorded from `main` after the run completed.
+
+| field | value |
+|---|---|
+| run | 34502504655, `pull_request`, one attempt |
+| head | `352d32f`, fix round 1's tip (the six phase commits rebased onto `c6afed8`, plus `dce37f1` and `352d32f`) |
+| window | started 2026-09-10T16:30:18Z, completed 16:51:47Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the failure | `Test (macos-latest / luajit)`, job 102956523577, **two** failing targets |
+| target 1 | `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`, `tests/bottom_panel_stage1_acceptance.rs:2447:5`, `ready did not become ready within 5s (waited 5.079980541s, 60 polls)`, `No such file or directory`, `test result: FAILED. 49 passed; 1 failed` --- **#259's sixth** |
+| target 2 | `v15_peer_never_receives_theme_facts_and_v16_does`, `tests/theme_faces_acceptance.rs:1393:54`, `read Hello: Io(Os { code: 35, kind: WouldBlock, … })`, `test result: FAILED. 26 passed; 1 failed` --- the **`read Hello` family's fifteenth**, that selector's third; not #258's own selector, so **#258 stays at four** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+`WouldBlock` appears **exactly once** in the job against 123 `test
+result: ok`. The five other `Test` legs are green. Every row the round
+added printed `... ok` on this leg (the pin, the witness, the
+docs-consistency tally rows), as did every row the phase added. The
+branch's diff over `c6afed8` reaches no PTY fixture, no `Hello` read
+and no daemon code, which is an argument from untouched files and not a
+measurement; both signatures were on the trunk before this push (#259
+in the run above; the family since 34483416251). **Not re-run**: reruns
+of a red are the owner's, and under the rerun rule a green would
+establish non-reproduction and nothing more. On #259 and #258 as
+comments, 2026-09-10.
 
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
@@ -447,19 +481,20 @@ twelve**, and both remain floors. A load-dependent failure is green
 most of the time over a live defect, which is exactly why this section
 records the green as a sample and not as a closure.
 
-### The `read Hello` family is at FOURTEEN
+### The `read Hello` family is at FIFTEEN
 
-Fourteen occurrences across **five suites** and **six selectors**,
-counted by fetching the failing job of every run on PR #257, PR #262
-and PR #265 and `main`'s post-merge runs, grepping `WouldBlock`, and
-extracting the panicking thread and site of each hit. Per-job counts:
-1, 1, 4, 1, 2, 2, 1, 1, 1. (Twelve when this section was first written,
-2026-09-09; thirteen and fourteen added 2026-09-10 from E3's fix-round
-head and from `main` after E3's merge.)
+Fifteen occurrences across **five suites** and **six selectors**,
+counted by fetching the failing job of every run on PR #257, PR #262,
+PR #265 and PR #267 and `main`'s post-merge runs, grepping
+`WouldBlock`, and extracting the panicking thread and site of each hit.
+Per-job counts: 1, 1, 4, 1, 2, 2, 1, 1, 1, 1. (Twelve when this section
+was first written, 2026-09-09; thirteen and fourteen added 2026-09-10
+from E3's fix-round head and from `main` after E3's merge; fifteen
+added 2026-09-10 from E4's fix-round head, below.)
 
-Tally (read-hello-per-job): 14 = 1 + 1 + 4 + 1 + 2 + 2 + 1 + 1 + 1.
+Tally (read-hello-per-job): 15 = 1 + 1 + 4 + 1 + 2 + 2 + 1 + 1 + 1 + 1.
 
-Tally (read-hello-family): 14 rows in the table below.
+Tally (read-hello-family): 15 rows in the table below.
 
 | # | run | sha | suite | selector |
 |---|---|---|---|---|
@@ -477,11 +512,12 @@ Tally (read-hello-family): 14 rows in the table below.
 | 12 | 34373256548 | `7b6c519` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
 | 13 | 34452014666 | `450ef26` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
 | 14 | 34483416251 (`main`) | `2ca2094` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 15 | 34502504655 | `352d32f` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
 
 The six selectors are `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`
 (four), `daemon_reships_the_summary_after_a_real_buffer_round_trip`
 (**five**, the family's most frequent on its own since the fourteenth),
-`v15_peer_never_receives_theme_facts_and_v16_does` (two), and
+`v15_peer_never_receives_theme_facts_and_v16_does` (**three** since the fifteenth), and
 `v16_peer_never_receives_font_facts_and_v17_does`,
 `m10_10_non_replica_frontend_does_not_receive_cursor_byte` and
 `daemon_routes_semantic_family_to_semantic_session_only` (one each).
@@ -494,7 +530,7 @@ Tally (read-hello-a16_26): 4 rows of the table above with `selector` = `a16_26_r
 
 Tally (read-hello-daemon_reships): 5 rows of the table above with `selector` = `daemon_reships_the_summary_after_a_real_buffer_round_trip`.
 
-Tally (read-hello-v15_peer): 2 rows of the table above with `selector` = `v15_peer_never_receives_theme_facts_and_v16_does`.
+Tally (read-hello-v15_peer): 3 rows of the table above with `selector` = `v15_peer_never_receives_theme_facts_and_v16_does`.
 
 Tally (read-hello-v16_peer): 1 row of the table above with `selector` = `v16_peer_never_receives_font_facts_and_v17_does`.
 
