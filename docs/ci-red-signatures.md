@@ -178,12 +178,33 @@ after about 100 ms at the median, 160 ms at p90, and a 2 ms sleep after
 12–17 ms, while the three Linux legs return in 20.07 and 2.06 ms. So a
 deadline written as milliseconds buys about one fifth of the probes its
 author counted on macOS, which bears on #259 (its own wait succeeded at
-35–47 polls, 3.4–4.2 s of its 5 s, in the green runs: the child is
-spawned and slow), on `pump_until`'s fixed 2 s and on #264's 500 ms
-window (a prediction there: it has only fired on Linux). On #266's
-shape, a one-poll 60 ms window is routine on macOS whenever the probe
-is a socket read and did not occur on Linux in this run. Full report and
-limits on #259, 2026-09-10. Nothing was fixed from it.
+16, 38, 47 and 35 polls --- 1.38, 3.51, 4.24 and 3.43 s of its 5 s ---
+in the four green samples: the child is spawned and slow), on
+`pump_until`'s fixed 2 s and on #264's 500 ms window (a prediction
+there: it has only fired on Linux). On #266's shape, a one-poll 60 ms
+window is routine on macOS whenever the probe is a socket read and did
+not occur on Linux in this run. Full report and limits on #259,
+2026-09-10. Nothing was fixed from it.
+
+**#259's four green samples, and what they change (2026-09-10, E4 fix
+round 1).** This section first said "35–47 polls, 3.4–4.2 s", which
+drops the luajit serial leg's 16 polls at 86.31 ms; the four are **16,
+38, 47, 35 polls** and **1.38, 3.51, 4.24, 3.43 s**, read from the
+report's named-waits block, one observation per VM, and the spread
+across four VMs is a factor of three, not the tight band the first
+sentence implied. Against the 5 s budget that is **28 %, 70 %, 85 % and
+69 %** (each leg's polls times its ms/iteration, over 5000), and the
+four reds are 5.04, 5.03, 5.03 and 5.01 s at 53, 54, 58 and 58 polls
+--- over by 43, 31, 29 and 8 milliseconds, not by a second. Four
+unbiased samples whose maximum uses 85 % of the budget make #259 **a
+fixture budget calibrated inside the platform's own distribution**, not
+an intermittent of unknown mechanism: the readiness file arrives in
+every green sample, late, and what is slow is a `python3` interpreter
+start on a hosted macOS runner, upstream of anything the fixture polls.
+Its title said "never writes its readiness file", which the four
+samples contradict; it is retitled and re-disposed on the issue on
+2026-09-10. A budget change there is a choice about margin and not a
+fix, and it is the owner's.
 
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
