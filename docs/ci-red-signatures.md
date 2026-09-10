@@ -304,9 +304,16 @@ Tally (259-green-elapsed): 1.38–4.24 s over 1.38, 3.51, 4.24, 3.43.
 
 Tally (259-green-share): 28–85 % over 28, 70, 85, 69.
 
-Tally (259-red-polls): 53–58 over 53, 54, 58, 58.
+Tally (259-red-polls): 53–58 over 53, 54, 58, 58, 53.
 
-Tally (259-red-elapsed): 5.01–5.04 s over 5.04, 5.03, 5.03, 5.01.
+Tally (259-red-elapsed): 5.01–5.07 s over 5.04, 5.03, 5.03, 5.01, 5.07.
+
+**#259's fifth occurrence, and its first on `main`**, arrived in the
+run this round's own registry push started (34501572442 at `c6afed8`,
+below): `5.066744875s, 53 polls`, over by **67 ms** at 95.6 ms per
+iteration --- still inside the distribution the four green samples
+bound, so the re-disposition stands and the tail is one sample wider.
+The two red tallies above carry five values since that run.
 
 ### PR #267's head run 34490620616 at `8e4ed3a`: `M5 Perf Gates` at its 25-minute ceiling, then green on the authorized rerun
 
@@ -353,6 +360,37 @@ one. The body is mutable and moves no tip, so the correction is free
 and the rule is now in the resume: the CI paragraph of the merge
 artifact is re-read against the API at the close of every round, after
 any rerun, and states every attempt.
+
+### `main` at `c6afed8`: run 34501572442, red on #259's fifth, its first on the trunk
+
+The run E4's fix-round registry push started --- a full run, because
+`1f8ba11` reaches `tests/`. Read from the jobs endpoint and the failing
+job's log.
+
+| field | value |
+|---|---|
+| run | 34501572442, `push`, one attempt |
+| head | `c6afed8` (`main`: `8e4ab78` plus this round's four registry commits, touching `docs/ci-red-signatures.md` and `tests/docs_consistency.rs` only) |
+| window | started 2026-09-10T16:21:27Z, completed 16:41:07Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the failure | `Test (macos-latest / luajit)`, job 102953434516 |
+| failing target | `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`, `tests/bottom_panel_stage1_acceptance.rs:2447:5`, `ready did not become ready within 5s (waited 5.066744875s, 53 polls)`, `No such file or directory`, `test result: FAILED. 49 passed; 1 failed` |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Zero `WouldBlock` in the job against 122 `test result: ok`, so the
+family is unchanged at fourteen. **#259 is at FIVE**: selector, job
+flavor and all three fragments, on a tree whose fixture, panel child
+and `tests/common/ready.rs` are byte-identical to `2ca2094`. One
+positive sample settles existence: the signature is on the trunk. On
+the issue, 2026-09-10; not re-run.
+
+Tally (259): 5 items in the list below.
+
+- run 34220035122 at `8f6784f` (PR #257), macOS lua54, `5.042660041s, 53 polls`
+- run 34222042303 at `e78d184` (PR #257), macOS lua54, `5.031151625s, 54 polls`
+- run 34269795016 at `04263c6` (PR #257), macOS luajit, `5.029068625s, 58 polls`
+- run 34474086323 at `049d81b` (PR #265), macOS lua54, `5.007875083s, 58 polls`
+- run 34501572442 at `c6afed8` (`main`), macOS luajit, `5.066744875s, 53 polls`
 
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
