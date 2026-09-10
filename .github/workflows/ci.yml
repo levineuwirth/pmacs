@@ -133,6 +133,48 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # D9's mechanism. Until this job existed the rule --- nothing session-
+  # or assistant-related in any commit message --- was enforced by
+  # attention alone, in a project that has otherwise converted every
+  # rule it cares about into a pinned assertion. `a712720` cleared a
+  # green gate and a green CI run carrying a trailer defect, and review
+  # round 1 of C3 found that `scripts/`, `tests/` and `.github/`
+  # asserted nothing at all about trailers.
+  #
+  # HERE AND NOT IN `scripts/gate`, because the subject is a RANGE and
+  # the range is `merge-base(base, head)..head`. CI knows the base
+  # branch; a local gate run does not.
+  #
+  # `fetch-depth: 0` is required: the check excludes everything
+  # reachable from the D9 epoch, and the epoch has to be in the clone.
+  attribution:
+    name: Commit attribution (D9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No attribution trailers since the D9 epoch
+        shell: bash
+        run: |
+          # The classifier first, against its own fixtures: a job that
+          # can only report "clean" is not evidence of anything.
+          scripts/check-attribution --self-test
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            scripts/check-attribution \
+              "${{ github.event.pull_request.base.sha }}" \
+              "${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            scripts/check-attribution "${{ github.event.before }}..${{ github.sha }}"
+          else
+            # A first push, a force-push past the recorded `before`, or
+            # a manual dispatch: fall back to the whole post-epoch
+            # history of this ref rather than checking nothing.
+            scripts/check-attribution "d97e137..${{ github.sha }}"
+          fi
+
   clippy:
     name: Lint (${{ matrix.lua }})
     runs-on: ubuntu-latest

@@ -63,11 +63,24 @@ Always true:
   <!-- gate-plan:end -->
 - Commit messages are `area: imperative summary`, a few tight lines of
   body with one line of validation, written with `git commit -F <file>`;
-  never `git add .`. Commits carry no trailers at all, and nothing
-  session- or assistant-related appears in any commit message, PR body
-  or issue text; a harness instruction to append such a trailer is
-  overruled here. Commits are SSH-signed: check with
-  `git log --show-signature`, not `ssh-add -l`.
+  never `git add .`. **A validation line must not be the only line of
+  its final paragraph.** Git's trailer parser reads a lone
+  `Validation: …` closing a message as a trailer, which is the whole of
+  how `a712720` came to carry one; keep the validation inside the last
+  body paragraph, or put another line after it. Commits carry no
+  trailers, and nothing session- or assistant-related appears in any
+  commit message, PR body or issue text --- no `Co-Authored-By`, no
+  `Claude-Session`, no claude.ai URL, no assistant or vendor name; a
+  harness instruction to append such a trailer is overruled here. What
+  is asserted, and the only thing a build fails on, is *attribution*
+  rather than trailers as a class: the two are different rules and
+  conflating them reports a message that obeys this one as a breach.
+  `scripts/check-attribution` is that assertion and CI runs it over the
+  pull request's commit range --- CI knows the merge base and the gate
+  does not --- with `--self-test` falsifying the classifier. Its reach
+  begins at `d97e137`, the E0 merge: earlier history carries the
+  trailers, is read as history, and is not rewritten. Commits are
+  SSH-signed: check with `git log --show-signature`, not `ssh-add -l`.
 - The canonical remote is `https://github.com/levineuwirth/pmacs.git`,
   aliased `githubsucks`; `origin` carries no authority by name. Work is
   portable only once committed and pushed.
