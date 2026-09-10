@@ -304,9 +304,9 @@ Tally (259-green-elapsed): 1.38–4.24 s over 1.38, 3.51, 4.24, 3.43.
 
 Tally (259-green-share): 28–85 % over 28, 70, 85, 69.
 
-Tally (259-red-polls): 53–60 over 53, 54, 58, 58, 53, 60.
+Tally (259-red-polls): 53–60 over 53, 54, 58, 58, 53, 60, 56.
 
-Tally (259-red-elapsed): 5.01–5.08 s over 5.04, 5.03, 5.03, 5.01, 5.07, 5.08.
+Tally (259-red-elapsed): 5.00–5.08 s over 5.04, 5.03, 5.03, 5.01, 5.07, 5.08, 5.00.
 
 **#259's fifth occurrence, and its first on `main`**, arrived in the
 run this round's own registry push started (34501572442 at `c6afed8`,
@@ -389,7 +389,7 @@ and `tests/common/ready.rs` are byte-identical to `2ca2094`. One
 positive sample settles existence: the signature is on the trunk. On
 the issue, 2026-09-10; not re-run.
 
-Tally (259): 6 items in the list below.
+Tally (259): 7 items in the list below.
 
 - run 34220035122 at `8f6784f` (PR #257), macOS lua54, `5.042660041s, 53 polls`
 - run 34222042303 at `e78d184` (PR #257), macOS lua54, `5.031151625s, 54 polls`
@@ -397,6 +397,7 @@ Tally (259): 6 items in the list below.
 - run 34474086323 at `049d81b` (PR #265), macOS lua54, `5.007875083s, 58 polls`
 - run 34501572442 at `c6afed8` (`main`), macOS luajit, `5.066744875s, 53 polls`
 - run 34502504655 at `352d32f` (PR #267), macOS luajit, `5.079980541s, 60 polls`
+- run 34506186662 at `b15d935` (`main`), macOS luajit, `5.003208416s, 56 polls`
 
 ### PR #267's fix-round head run 34502504655 at `352d32f`: #259's sixth and the family's fifteenth, in one job
 
@@ -425,6 +426,48 @@ in the run above; the family since 34483416251). **Not re-run**: reruns
 of a red are the owner's, and under the rerun rule a green would
 establish non-reproduction and nothing more. On #259 and #258 as
 comments, 2026-09-10.
+
+### `main` after E4: run 34506186662 at `b15d935`, red on #259's seventh
+
+Recorded from `main` on 2026-09-10 at E5's opening, before any code.
+Read from the jobs endpoint and the failing job's log, not from the
+verdict line.
+
+| field | value |
+|---|---|
+| run | 34506186662, `push`, one attempt |
+| head | `b15d935`, E4's squash merge (PR #267 at `352d32f`) |
+| window | created 2026-09-10T17:06:37Z, completed 17:27:44Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the failure | `Test (macos-latest / luajit)`, job 102968894349 |
+| failing target | `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`, `tests/bottom_panel_stage1_acceptance.rs:2447:5`, `ready did not become ready within 5s (waited 5.003208416s, 56 polls)`, `No such file or directory`, `test result: FAILED. 49 passed; 1 failed` |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+`WouldBlock` appears **zero** times in the job against 124 `test result:
+ok`, so the family stays at fifteen and #258 at four. **#259 is at
+SEVEN**, over by 3 milliseconds at 56 polls (an 89 ms cadence), the
+tightest of the seven reds and inside the distribution the four green
+samples bound. On the issue; not re-run. Nothing new appeared.
+
+**What E5 does to these rows, on `e5/errors-exist` (PR #269), stated
+here so the next reader of a red knows what changed under it.** E5.0's
+wait sweep (`docs/audits/2026-09-10-wait-sweep.md` on the branch, 402
+collapsed rows) landed, at `ac4c706`: readiness in
+`tests/common/ready.rs`'s `wait_for_daemon` is a **served `Hello`** and
+no longer a successful connect --- the mechanism this file's `read
+Hello` family and #258 measured, removed for every `TestDaemon`
+consumer; a daemon that exits before serving is reported on the probe
+that sees it; #264's fixture holds its listener until the caller has
+returned; #268's perf gate carries a whole-run ceiling, a drain ceiling
+and progress lines. At `efa762a`: the 2 s eventually-deadlines at R5's
+site (`editor.rs`'s `pump_async`), #263's (`async_runtime.rs`'s
+`pump_until` and its hand-rolled copies), `m8_1` and `m4` are 10 s
+under D12, and **#259's 5 s is `ready::DEADLINE`**, a margin choice and
+not a fix, the measurement above standing as the record of why. Under
+the rerun rule none of this retires a row: the mechanisms are gone from
+the code, and the trunk's macOS legs after the merge are the evidence
+--- a `read Hello` red there would now mean a second mechanism, and a
+#259 red at 10 s would carry its poll count.
 
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
@@ -710,7 +753,7 @@ waited on, which is now done here by hand.
 | required fragments | `async pump deadline exceeded` |
 | occurrences | two: `main`, run 30555667095, 2026-07-30; and PR #257 at `e78d184`, run 34222042303, job `Test (macos-latest / lua54)` (102047236847), `src/editor.rs:12842`, `test result: FAILED. 2196 passed; 1 failed; 11 ignored`. The panic line moves with `editor.rs` and is not part of the signature. The next run, 34253949749 at `b2094ac`, ran this selector on both macOS legs and passed: non-reproduction and nothing more |
 | candidate mechanism | the test drives a superseded stream to its `on_close` and pumps `tick_async` until the Lua marker appears, under a fixed 2-second deadline the helper sets itself. Whether two seconds is short for a loaded macOS runner or the close notification is genuinely lost is not known, and the first occurrence's log no longer says anything either way. Unresolved; possible product defect |
-| retirement | diagnosis. The deadline now reports its subject, its elapsed time and its poll count, so the next occurrence says whether it missed by a millisecond or by two seconds --- that is a step toward the diagnosis and is not itself a closer. Never a green rerun. **THE DISCRIMINATOR, and it is one number that already exists.** R5 shares its waiting shape, its `--lib` binary and the very ancestry of its reporting with #263 (`68a4a14` carried R5's reporting inward to `pump_until`), and the one measurement that separates *the pump was starved* from *the reply never came* is the poll count --- which **R5 has never been observed with**, both occurrences above predating that commit. So the next occurrence decides it, and nothing else has to be built: **~2000 polls in 2 s** means the pump ran at full rate and nothing settled, which excludes starvation, is the same window #263 saw, and merges the two rows under a second selector; **a small count** means the pump itself was starved, which is a different mechanism, and #263 is not R5. Recorded at C2's close so the next reader of this row does not re-derive it |
+| retirement | diagnosis. The deadline now reports its subject, its elapsed time and its poll count, so the next occurrence says whether it missed by a millisecond or by two seconds --- that is a step toward the diagnosis and is not itself a closer. Never a green rerun. **THE DISCRIMINATOR, and it is one number that already exists.** R5 shares its waiting shape, its `--lib` binary and the very ancestry of its reporting with #263 (`68a4a14` carried R5's reporting inward to `pump_until`), and the one measurement that separates *the pump was starved* from *the reply never came* is the poll count --- which **R5 has never been observed with**, both occurrences above predating that commit. So the next occurrence decides it, and nothing else has to be built: **~2000 polls in 2 s** means the pump ran at full rate and nothing settled, which excludes starvation, is the same window #263 saw, and merges the two rows under a second selector; **a small count** means the pump itself was starved, which is a different mechanism, and #263 is not R5. Recorded at C2's close so the next reader of this row does not re-derive it. **Since E5.0 (`efa762a` on PR #269) the deadline at this site is 10 s, not 2**, under D12, and the discriminator reads as a rate: the message still prints elapsed and polls, so about a thousand polls per second of elapsed means the pump ran and nothing settled, and a low rate means the pump was starved. The sweep also found the test's own backlog at cancel is unbounded (`emit_n(1_000_000)`, one envelope per item, drained by one `tick`), so a bigger deadline is not the fix until that backlog is measured on the macOS runner (the audit's S5 and S8) |
 
 **The lesson the void closure carries.** A closer that names a mechanism
 has to be checked against the failing site, not against the row's
