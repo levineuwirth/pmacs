@@ -194,7 +194,7 @@ default parallelism and under `--test-threads=1`. Every wait through
 `wait_with` and `tick_until` records its step, probe and sleep time.
 The distributions, per leg, for `wait_with` at the 20 ms poll:
 
-| leg | waits (>= 2 polls) | ms/iteration p50 / p90 / max | one `sleep(20 ms)` returned after, p50 / p90 | probe p50 / p90 | waits over 2x the poll | `tick_until`: `sleep(2 ms)` returned after, p50 | #259's wait: polls, ms/iteration, elapsed |
+| leg | waits (>= 2 polls) | ms/iteration p50 / p90 / max | mean sleep per `sleep(20 ms)` call, quantiles over waits, p50 / p90 | probe p50 / p90 | waits over 2x the poll | `tick_until`: mean sleep per `sleep(2 ms)` call, p50 | #259's wait: polls, ms/iteration, elapsed |
 |---|---|---|---|---|---|---|---|
 | macOS luajit, parallel | 225 | 86.2 / 306.2 / 334.7 | 98.0 / 158.2 ms | 0.34 / 251.2 ms | 206 of 225 | 12.5 ms | 38, 92.2 ms, 3.51 s |
 | macOS luajit, `--test-threads=1` | 224 | 94.1 / 275.7 / 334.8 | 114.2 / 159.2 ms | 0.22 / 232.7 ms | 208 of 224 | 16.5 ms | 16, 86.3 ms, 1.38 s |
@@ -205,10 +205,59 @@ The distributions, per leg, for `wait_with` at the 20 ms poll:
 | ubuntu luajit, no crdt | 90 | 13.4 / 15.0 / 35.1 | 20.1 / 20.1 ms | 0.00 / 0.6 ms | 0 of 90 | 2.1 ms | 6, 16.8 ms, 0.10 s |
 
 **`--test-threads=1` changes nothing**: serial and parallel legs of one
-flavor agree to within a few milliseconds at every quantile. **The time
-is in the sleep**: a `thread::sleep(20 ms)` on these runners returns
-after about 100 ms at the median, 160 ms at p90, and a 2 ms sleep after
-12–17 ms, while the three Linux legs return in 20.07 and 2.06 ms. So a
+flavor agree to within a few milliseconds at every quantile. **The
+sleep column is a mean of means, and the pair that settles the timer
+reading is below it** (qualified 2026-09-10, E4 fix round 1; this
+paragraph first said "the time is in the sleep" flat). `cadence::Meter`
+accumulates `sleep_asked`, `sleep_got` and `sleeps` per wait and records
+**no individual sleep**, and `scripts/poll-cadence-report` prints
+`sleep_got / sleeps` under its own label "mean actual sleep per call",
+so a `thread::sleep(20 ms)` "returning after about 100 ms at the median,
+160 ms at p90" and a 2 ms sleep "after 12–17 ms" are quantiles over
+per-wait MEANS, against 20.07 and 2.06 ms on the three Linux legs. A
+median of means cannot by itself separate a uniformly slow timer from
+rare long deschedules; the report's mean against max sleep overshoot
+within a wait can, and at p50 it is:
+
+| leg | mean overshoot per call, p50 | max overshoot within a wait, p50 | ratio |
+|---|---|---|---|
+| macOS luajit, parallel | 78.0 ms | 106.0 ms | 1.36 |
+| macOS lua54, parallel | 82.8 ms | 104.9 ms | 1.27 |
+| macOS luajit, `--test-threads=1` | 94.2 ms | 116.9 ms | 1.24 |
+| macOS lua54, `--test-threads=1` | 86.2 ms | 104.9 ms | 1.22 |
+
+With four or five sleeps in a typical wait, one 400 ms outlier among
+20 ms siblings would put that ratio near 4; at 1.2–1.4 the overshoot is
+broadly uniform across a wait's sleeps, which **corroborates** the
+reading that it is a property of the runner's timer and not of load ---
+the inference E4's checkpoint drew from the serial/parallel agreement
+and the idle unit tests, now with the column that bears on it.
+
+**Where the time is, per leg --- and it is in the sleep on two legs of
+four, not on every macOS leg.** The report's share of elapsed for
+`wait_with` at the 20 ms poll:
+
+| leg | asked sleep | sleep overshoot | probe |
+|---|---|---|---|
+| macOS luajit, parallel | 10.9 % | 41.7 % | **47.4 %** |
+| macOS luajit, `--test-threads=1` | 10.9 % | 45.6 % | **43.4 %** |
+| macOS lua54, parallel | 17.7 % | 68.1 % | 14.2 % |
+| macOS lua54, `--test-threads=1` | 17.9 % | 67.3 % | 14.8 % |
+| ubuntu luajit | 95.8 % | 0.4 % | 3.7 % |
+
+On both luajit legs the probe is 43–47 % of all elapsed time in these
+waits, and the named-waits block says where: `wait_for_daemon`, n=90 of
+225 waits, cadence p50 289.4 ms, probe-max p50 **502.10 ms** --- the
+`set_read_timeout(500 ms)` followed by `let _ = read_message::<Hello>`
+at `tests/common/ready.rs:209-211`, a read whose result is **discarded**.
+Roughly one second in every two that a readiness wait spends on macOS
+luajit is a `Hello` read the wait throws away, inside this repository's
+own code and not in the runner's timer: the largest single controllable
+cost the measurement found. Whether the read stops being discarded is
+the owner's, beside `pump_until`'s 2 s and #264's 500 ms, as a fourth
+item of the same kind with a measured price on the platform that fails.
+At #259's own site the probe is 0.05–0.86 ms and the time is genuinely
+in the sleep. So a
 deadline written as milliseconds buys about one fifth of the probes its
 author counted on macOS, which bears on #259 (its own wait succeeded at
 16, 38, 47 and 35 polls --- 1.38, 3.51, 4.24 and 3.43 s of its 5 s ---
@@ -216,8 +265,18 @@ in the four green samples: the child is spawned and slow), on
 `pump_until`'s fixed 2 s and on #264's 500 ms window (a prediction
 there: it has only fired on Linux). On #266's shape, a one-poll 60 ms
 window is routine on macOS whenever the probe is a socket read and did
-not occur on Linux in this run. Full report and limits on #259,
-2026-09-10. Nothing was fixed from it.
+not occur on Linux in this run. Full report on #259, 2026-09-10.
+Nothing was fixed from it.
+
+**Limits, so the table is not read as a rate**: one dispatched run, one
+tree, one sample of each job's conditions; two macOS runners per flavor
+(four VMs), not one machine measured twice; the two modes of one flavor
+are one population (286 `wait_with` waits and 448 in total on every
+macOS leg, 287 and 449 on ubuntu luajit because Linux arms five
+`PMACS_REQUIRE_*` variables macOS does not); and #259's own wait is
+**n=1 per leg** in the named-waits block. The report's `Running` count
+failed on the colored log, so "122 result lines, 0 FAILED" per leg is
+the completeness statement.
 
 **#259's four green samples, and what they change (2026-09-10, E4 fix
 round 1).** This section first said "35–47 polls, 3.4–4.2 s", which
