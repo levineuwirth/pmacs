@@ -203,6 +203,9 @@ bind("C-c l", "lsp.status")
 -- file anywhere under the project root by fuzzy name with the recent
 -- files first (the Ctrl-P reflex, E4.2). The prefix was free.
 bind("C-x p f", "project.find-file")
+-- `s` asks the active buffer's language server for symbols across the
+-- whole workspace by name and lists them (E4.3).
+bind("C-x p s", "lsp.workspace-symbols")
 
 -- Zoom (D22) -----------------------------------------------------------------
 --

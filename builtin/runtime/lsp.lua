@@ -3053,6 +3053,72 @@ function pmacs.lsp.document_symbols()
   end)
 end
 
+-- E4.3 --- workspace symbols. A query prompt, then the server's answer
+-- as a `*workspace-symbols*` listview whose RET visits the symbol
+-- through the same jump-ring path the references and outline panels
+-- use. The server is the active buffer's, because that is the one whose
+-- workspace the user is in; a buffer with no server gets the same
+-- status every other LSP command gives. `pmacs.lsp.workspace_symbols(q)`
+-- skips the prompt, for scripts and tests.
+function pmacs.lsp.workspace_symbols(query)
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  if type(query) ~= "string" then
+    pmacs.minibuffer.read {
+      prompt = "Workspace symbol: ",
+      history = "workspace-symbols",
+      on_accept = function(q)
+        if q == nil then return end
+        pmacs.lsp.workspace_symbols(q)
+      end,
+    }
+    return
+  end
+  pmacs.workspace_symbol.clear(rec.server, query)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_workspace_symbol(rec.server, query):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local syms = pmacs.workspace_symbol.symbols(rec.server, query)
+    if not syms or #syms == 0 then
+      pmacs.editor.set_status("LSP: no workspace symbols for '" .. query .. "'")
+      return
+    end
+    local here = pmacs.lsp.path_for_uri(rec.uri)
+    local rows = {}
+    for _, sym in ipairs(syms) do
+      local tag = SYMBOL_KIND_TAGS[sym.kind] or "symbol"
+      local path = pmacs.lsp.path_for_uri(sym.uri) or sym.uri
+      local container = sym.container and (sym.container .. "  ") or ""
+      rows[#rows + 1] = {
+        text = string.format(
+          "%s  [%s]  %s%s:%d",
+          sym.name, tag, container, display_path(path, here), (sym.line or 0) + 1),
+        item = sym,
+      }
+    end
+    pmacs.listview.open {
+      name = "*workspace-symbols*",
+      header = string.format(
+        "%d symbol%s for '%s'   RET visit  n/p move  q quit",
+        #syms, (#syms == 1 and "" or "s"), query),
+      rows = rows,
+      on_visit = function(sym)
+        visit_location({ uri = sym.uri, line = sym.line, col = sym.col })
+      end,
+    }
+    pmacs.editor.set_status(string.format(
+      "LSP: %d workspace symbol%s", #syms, (#syms == 1 and "" or "s")))
+  end)
+end
+
 -- T M4.5 — inlay hints for the whole buffer. Requests over a range
 -- spanning the document, stores the parsed hints, and surfaces a
 -- modeline summary (count + first). Inline virtual-text rendering is
@@ -3576,6 +3642,12 @@ pmacs.command.define {
   name = "lsp.find-references",
   description = "Find references to the symbol under the cursor (LSP).",
   fn = pmacs.lsp.find_references,
+}
+
+pmacs.command.define {
+  name = "lsp.workspace-symbols",
+  description = "Search the workspace's symbols by name (LSP) and list them in *workspace-symbols*.",
+  fn = function() pmacs.lsp.workspace_symbols() end,
 }
 
 pmacs.command.define {
