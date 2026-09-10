@@ -83,15 +83,9 @@ pub struct LuaHost {
     /// Hook registry. Stub for T M2.11 introspection; T M2.6 will wire
     /// execution at the relevant call sites.
     hooks: SharedHookRegistry,
-    /// Optional handle to the editor core. Set by [`Self::attach_editor`].
-    /// Required to notify windows of edits that the host applies
-    /// directly (e.g. [`Self::append_to_errors_buffer`] writes to the
-    /// `*errors*` buffer without going through `editor_core`'s
-    /// [`crate::editor_core::EditorCore::apply_active_edit`], so any
-    /// window currently displaying that buffer would otherwise hold a
-    /// stale [`crate::text_view::TextView`] line cache).
-    core: Option<SharedCore>,
-    errors: Vec<LuaErrorRecord>,
+    /// The shared error log; see [`ErrorLog`]. Installed as app data by
+    /// `lua_bindings::install`, held here for the accessors.
+    error_log: SharedErrorLog,
     /// T M7.8 cancel token. Owns the [`AtomicBool`] the count hook
     /// polls. Hosts hand out [`crate::lua_isolation::CancelHandle`]
     /// clones for cross-thread C-g delivery.
@@ -108,6 +102,125 @@ pub struct LuaErrorRecord {
     pub source: Option<String>,
     /// The error's `Display` rendering. May be multi-line.
     pub message: String,
+}
+
+/// The error log every reporter writes to: the records in arrival
+/// order, and how many of them nobody has looked at yet.
+///
+/// Shared between [`LuaHost`] and the Lua-side reporters as app data
+/// (`SharedErrorLog`), so that a hook failure, a package-load failure,
+/// a config listener that raises, a statusline provider that raises,
+/// `pmacs.error` from Lua and a chunk error in `init.lua` all land in
+/// the same list --- the one [`LuaHost::last_error`] reads and the
+/// status line shows. Before E5.1 only `eval` and `run_hook` pushed
+/// here; the other five writers reached the `*errors*` buffer alone,
+/// so those failures had no status-line trace and no unread mark.
+#[derive(Default)]
+pub struct ErrorLog {
+    records: Vec<LuaErrorRecord>,
+    /// Records appended since the `*errors*` buffer was last shown.
+    unread: usize,
+}
+
+impl ErrorLog {
+    /// All captured errors, in arrival order.
+    pub fn records(&self) -> &[LuaErrorRecord] {
+        &self.records
+    }
+
+    /// Records appended since the `*errors*` buffer was last shown.
+    #[must_use]
+    pub fn unread(&self) -> usize {
+        self.unread
+    }
+
+    /// The `*errors*` buffer is on screen: nothing is unread.
+    pub fn mark_read(&mut self) {
+        self.unread = 0;
+    }
+}
+
+/// The app-data handle to the one [`ErrorLog`].
+pub type SharedErrorLog = Rc<RefCell<ErrorLog>>;
+
+/// Report an error on every channel the editor has for one: append
+/// `[label] message` to the `*errors*` buffer (creating it on first
+/// use), push the record onto the shared [`ErrorLog`] the status line
+/// reads, and count it unread for the mode line's mark.
+///
+/// **The one writer.** Every reporter in the tree calls this ---
+/// [`LuaHost::eval`], [`LuaHost::run_hook`], the hook, package-load,
+/// config-listener, statusline-provider and `buffer.on_removed`
+/// writers in `lua_bindings`, and `pmacs.error` from Lua --- so a new
+/// channel (a bell, a log file) is added here once. It takes `&Lua`
+/// rather than `&LuaHost` because five of the writers run inside a
+/// binding, where only the Lua state is in reach.
+///
+/// Errors during the append are themselves dropped: the error log is a
+/// best-effort surface, and a failure here would only happen if the
+/// buffer were concurrently held in a way the single-threaded contract
+/// rules out. A `Lua` without the bindings installed (no registry app
+/// data) gets the record and no buffer line.
+pub fn report_error(lua: &Lua, label: &str, message: &str) {
+    let record = LuaErrorRecord {
+        at: SystemTime::now(),
+        source: Some(label.to_owned()),
+        message: message.to_owned(),
+    };
+    append_to_errors_buffer(lua, &record);
+    if let Some(log) = lua.app_data_ref::<SharedErrorLog>() {
+        let mut log = log.borrow_mut();
+        log.records.push(record);
+        log.unread = log.unread.saturating_add(1);
+    }
+}
+
+/// Append `record` as one line to the buffer named `*errors*`.
+fn append_to_errors_buffer(lua: &Lua, record: &LuaErrorRecord) {
+    let line = format!(
+        "[{}] {}\n",
+        record.source.as_deref().unwrap_or("[chunk]"),
+        record.message
+    );
+    let (id, edit) = {
+        let Some(registry) = lua.app_data_ref::<SharedRegistry>() else {
+            return;
+        };
+        let mut reg = registry.borrow_mut();
+        let id = match reg.find_by_name(ERRORS_BUFFER_NAME) {
+            Some(id) => id,
+            None => reg.create(ERRORS_BUFFER_NAME),
+        };
+        let Ok(buf) = reg.get_mut(id) else {
+            return;
+        };
+        let pos = buf.len();
+        let Ok(edit) = buf.apply_edit(EditOp::Insert {
+            pos,
+            bytes: line.as_bytes(),
+        }) else {
+            return;
+        };
+        (id, edit)
+    };
+    // Window TextViews are not attached views on the buffer; they sit
+    // on EditorCore and miss the broadcast that `Buffer::apply_edit`
+    // performs on its own attached views. If a window is currently
+    // displaying `*errors*` (e.g. the user switched to it via C-x b),
+    // its line cache would otherwise go stale on every appended error
+    // and cursor motion would stop updating the screen.
+    //
+    // Post-audit-round-6 F32 — also queue the resulting CRDT op for
+    // broadcast if the buffer is CRDT-backed. `*errors*` gets upgraded
+    // to CRDT at every replica's attach via `send_buffer_snapshots`,
+    // so each append produces an `Edit::crdt_op` that must reach
+    // replica `BufferMirror`s — otherwise their mirrors permanently
+    // desync from daemon state for `*errors*`.
+    if let Some(core) = lua.app_data_ref::<SharedCore>() {
+        let mut core = core.borrow_mut();
+        core.notify_buffer_edit(id, &edit);
+        core.queue_daemon_origin_crdt_op(id, &edit);
+    }
 }
 
 impl LuaHost {
@@ -149,6 +262,10 @@ impl LuaHost {
         let menus: SharedMenuRegistry = Rc::new(RefCell::new(MenuRegistry::new()));
         let hooks: SharedHookRegistry = Rc::new(RefCell::new(HookRegistry::new()));
         lua_bindings::install(&lua, &registry, &commands, &keymaps, &menus, &hooks)?;
+        let error_log = lua
+            .app_data_ref::<SharedErrorLog>()
+            .map(|log| log.clone())
+            .expect("lua_bindings::install installs the error log");
         Ok(Self {
             lua,
             registry,
@@ -156,8 +273,7 @@ impl LuaHost {
             keymaps,
             menus,
             hooks,
-            core: None,
-            errors: Vec::new(),
+            error_log,
             cancel,
             _not_send: PhantomData,
         })
@@ -240,7 +356,6 @@ impl LuaHost {
     pub fn attach_editor(&mut self, core: &SharedCore) -> mlua::Result<()> {
         lua_bindings::install_editor(&self.lua, core)?;
         lua_bindings::install_completion_popup(&self.lua, core)?;
-        self.core = Some(core.clone());
         // Hooks first: command bodies in default.lua reference them.
         self.load_builtin(
             "@pmacs/builtin/hooks/default.lua",
@@ -289,13 +404,11 @@ impl LuaHost {
             if crate::lua_isolation::is_cancellation(&err.error) {
                 saw_cancel = true;
             }
-            let record = LuaErrorRecord {
-                at: SystemTime::now(),
-                source: Some(format!("hook:{name}")),
-                message: format!("callback at {} raised: {}", err.source.render(), err.error),
-            };
-            self.append_to_errors_buffer(&record);
-            self.errors.push(record);
+            report_error(
+                &self.lua,
+                &format!("hook:{name}"),
+                &format!("callback at {} raised: {}", err.source.render(), err.error),
+            );
         }
         if saw_cancel {
             self.cancel.reset();
@@ -380,67 +493,9 @@ impl LuaHost {
                 if crate::lua_isolation::is_cancellation(&e) {
                     self.cancel.reset();
                 }
-                let record = LuaErrorRecord {
-                    at: SystemTime::now(),
-                    source: source.map(str::to_owned),
-                    message: e.to_string(),
-                };
-                self.append_to_errors_buffer(&record);
-                self.errors.push(record);
+                report_error(&self.lua, source.unwrap_or("[chunk]"), &e.to_string());
                 Err(e)
             }
-        }
-    }
-
-    /// Append `record` to the buffer named `*errors*`, creating the
-    /// buffer on first use. Errors during the append are themselves
-    /// dropped --- the error log is a best-effort surface, and a
-    /// failure here would only happen if the buffer were itself
-    /// concurrently held in a way the single-threaded contract
-    /// rules out.
-    fn append_to_errors_buffer(&self, record: &LuaErrorRecord) {
-        let line = format!(
-            "[{}] {}\n",
-            record.source.as_deref().unwrap_or("[chunk]"),
-            record.message
-        );
-        let (id, edit) = {
-            let mut reg = self.registry.borrow_mut();
-            let id = match reg.find_by_name(ERRORS_BUFFER_NAME) {
-                Some(id) => id,
-                None => reg.create(ERRORS_BUFFER_NAME),
-            };
-            let Ok(buf) = reg.get_mut(id) else {
-                return;
-            };
-            let pos = buf.len();
-            let Ok(edit) = buf.apply_edit(EditOp::Insert {
-                pos,
-                bytes: line.as_bytes(),
-            }) else {
-                return;
-            };
-            (id, edit)
-        };
-        // Window TextViews are not attached views on the buffer; they
-        // sit on EditorCore and miss the broadcast that
-        // `Buffer::apply_edit` performs on its own attached views. If a
-        // window is currently displaying `*errors*` (e.g. the user
-        // switched to it via C-x b), its line cache would otherwise go
-        // stale on every appended error and cursor motion would stop
-        // updating the screen.
-        //
-        // Post-audit-round-6 F32 — also queue the resulting CRDT op
-        // for broadcast if the buffer is CRDT-backed. `*errors*`
-        // gets upgraded to CRDT at every replica's attach via
-        // `send_buffer_snapshots`, so each Lua-runtime-driven append
-        // produces an `Edit::crdt_op` that must reach replica
-        // `BufferMirror`s — otherwise their mirrors permanently
-        // desync from daemon state for `*errors*`.
-        if let Some(core) = self.core.as_ref() {
-            let mut core = core.borrow_mut();
-            core.notify_buffer_edit(id, &edit);
-            core.queue_daemon_origin_crdt_op(id, &edit);
         }
     }
 
@@ -479,22 +534,49 @@ impl LuaHost {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    /// All captured errors, in arrival order.
-    pub fn errors(&self) -> &[LuaErrorRecord] {
-        &self.errors
+    /// All captured errors, in arrival order. A snapshot: the log is
+    /// shared with the Lua-side reporters, so a borrow cannot be handed
+    /// out.
+    #[must_use]
+    pub fn errors(&self) -> Vec<LuaErrorRecord> {
+        self.error_log.borrow().records().to_vec()
     }
 
     /// Most recently captured error, if any.
-    pub fn last_error(&self) -> Option<&LuaErrorRecord> {
-        self.errors.last()
+    #[must_use]
+    pub fn last_error(&self) -> Option<LuaErrorRecord> {
+        self.error_log.borrow().records().last().cloned()
     }
 
-    /// Discard the captured error log.
-    ///
-    /// Useful once errors have been drained into the `*errors*` buffer
-    /// (T M2.8) so the in-memory log doesn't grow without bound.
+    /// Errors reported since the `*errors*` buffer was last on screen.
+    /// The status line shows the last error while this is non-zero and
+    /// the mode line carries the count; both clear when a window shows
+    /// the buffer ([`Self::mark_errors_read`]).
+    #[must_use]
+    pub fn unread_errors(&self) -> usize {
+        self.error_log.borrow().unread()
+    }
+
+    /// The `*errors*` buffer is on screen: clear the unread count. The
+    /// painters call this when a window displays the buffer; the
+    /// records stay.
+    pub fn mark_errors_read(&self) {
+        self.error_log.borrow_mut().mark_read();
+    }
+
+    /// Report an error on every channel: the `*errors*` buffer, the
+    /// error log, the status line and the mode line's unread mark. The
+    /// same writer Lua reaches as `pmacs.error`; see [`report_error`].
+    pub fn report_error(&self, label: &str, message: &str) {
+        report_error(&self.lua, label, message);
+    }
+
+    /// Discard the captured error log and its unread count. The
+    /// `*errors*` buffer keeps its text.
     pub fn clear_errors(&mut self) {
-        self.errors.clear();
+        let mut log = self.error_log.borrow_mut();
+        log.records.clear();
+        log.unread = 0;
     }
 
     /// Mark the init phase complete.

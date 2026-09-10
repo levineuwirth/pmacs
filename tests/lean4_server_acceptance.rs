@@ -809,11 +809,16 @@ fn acc36a_latch_leaves_a_status_line_trace() {
         status.contains("lean4") && status.contains("falling back"),
         "the fallback names the language and says it fell back; saw {status:?}"
     );
-    // The channel assertion is the point (COHERENCE §1.2): a report made
-    // only through `pmacs.error` — undefined in production — would leave
-    // this empty while the fallback itself still worked, so the user
-    // would silently be on a different server than they configured.
+    // The channel assertion is the point (COHERENCE §1.2): the status
+    // line is the channel a user sees first, so it must not be empty.
     assert!(!status.is_empty());
+    // E5.1: `pmacs.error` exists now, and the same report is durable in
+    // `*errors*` where the next status message cannot erase it.
+    let durable = state.lua_host.errors_buffer_text();
+    assert!(
+        durable.contains("lean4") && durable.contains("falling back"),
+        "the fallback report reaches *errors*; saw {durable:?}"
+    );
 }
 
 #[test]

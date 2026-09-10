@@ -675,6 +675,15 @@ impl EditorState {
         let async_runtime =
             crate::lua_bindings::make_async_runtime(lua_host.lua(), Some(lua_host.registry()))
                 .expect("install pmacs._async raw helpers");
+        // E5.1: the error channel's mode-line mark. First, because it
+        // registers only a statusline provider over `pmacs.error_log`
+        // (both Rust-installed) and every later chunk may report.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/errors.lua"),
+                include_str!("../builtin/runtime/errors.lua"),
+            )
+            .expect("load errors builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/async.lua"),
@@ -5726,6 +5735,29 @@ fn paint_window_content(
     );
 }
 
+/// E5.1: showing the `*errors*` buffer reads it. Called by both
+/// painters (the grid's [`paint_frame`] and the semantic
+/// `render_frame`) before the statusline fan-out, so the mode line's
+/// unread mark and the status line's last-error trace clear on the
+/// same frame the buffer appears in, on either frontend.
+pub fn mark_errors_read_if_shown(state: &EditorState) {
+    if state.lua_host.unread_errors() == 0 {
+        return;
+    }
+    let shown = {
+        let core = state.core.borrow();
+        let registry = core.registry.borrow();
+        core.windows.values().any(|window| {
+            registry
+                .get(window.buffer_id)
+                .is_ok_and(|buf| buf.name() == crate::lua::ERRORS_BUFFER_NAME)
+        })
+    };
+    if shown {
+        state.lua_host.mark_errors_read();
+    }
+}
+
 /// Paint one full frame into `grid` and return the desired terminal
 /// cursor position.
 ///
@@ -5759,6 +5791,7 @@ pub fn paint_frame(
     // geometry, and a panel the frame can no longer satisfy has already
     // surrendered focus and its terminal controller.
     state.sync_frame_geometry(frontend_id, term_size);
+    mark_errors_read_if_shown(state);
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow
     // below, then paint only the transactionally validated owned results.
@@ -6904,9 +6937,14 @@ fn build_status_line(
     let mut line = String::new();
     if !core.status.is_empty() {
         line.push_str(&sanitize_single_line(&core.status));
-    } else if let Some(err) = lua_host.last_error() {
-        use std::fmt::Write;
-        let _ = write!(line, "lua: {}", sanitize_single_line(&err.message));
+    } else if lua_host.unread_errors() > 0 {
+        // E5.1: the last error shows while it is unread, and stops once
+        // a window has shown `*errors*` --- a transient trace, where it
+        // used to nag on every idle frame until the next error.
+        if let Some(err) = lua_host.last_error() {
+            use std::fmt::Write;
+            let _ = write!(line, "lua: {}", sanitize_single_line(&err.message));
+        }
     }
     if !dispatcher.pending().is_empty() {
         use std::fmt::Write;

@@ -1248,17 +1248,9 @@ fn trim_on_save_unexpected_error_reports_and_still_saves() {
     std::fs::write(&path, "x  \n").unwrap();
     let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.editops.trim_on_save(true)");
-    // Capture the pmacs.error log (the m9_6 stub pattern — the
-    // `if pmacs.error` branch is a no-op without it).
-    exec(
-        &s,
-        r"
-        PMACS_ERROR_LOG = {}
-        pmacs.error = function(msg)
-            PMACS_ERROR_LOG[#PMACS_ERROR_LOG + 1] = msg
-        end
-        ",
-    );
+    // E5.1: `pmacs.error` is the real channel now; the report is read
+    // back from `*errors*` rather than from a stub the site used to
+    // need to fire at all.
     exec(
         &s,
         &format!(
@@ -1281,10 +1273,14 @@ fn trim_on_save_unexpected_error_reports_and_still_saves() {
         "x  \n",
         "the save proceeded (trim aborted before any edit)"
     );
-    let logged: String = eval(&s, "return PMACS_ERROR_LOG[1] or ''");
+    let logged = s.lua_host.errors_buffer_text();
     assert!(
         logged.contains("delete-trailing-whitespace (on save) failed:"),
-        "the unexpected error reached the pmacs.error log, got: {logged}"
+        "the unexpected error reached *errors* through pmacs.error, got: {logged}"
+    );
+    assert!(
+        s.lua_host.unread_errors() >= 1,
+        "and it counts as unread for the mode line's mark"
     );
     let _ = std::fs::remove_file(&path);
 }

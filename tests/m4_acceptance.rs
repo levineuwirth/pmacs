@@ -6627,6 +6627,32 @@ fn m4_24_d3_live_cancel_preserves_snapshot_and_cadence() {
 /// PRIOR snapshot must survive: recreating the directory yields both a
 /// DELETED for the old file and a CREATED for the new one, which is
 /// only possible off the retained pre-failure snapshot.
+/// E5.1: the scan-failure report reaches `*errors*` through the real
+/// `pmacs.error` (the sibling test below counts it through a stub, which
+/// replaces the channel; this one reads the channel).
+#[test]
+fn m4_24_d3_live_failure_reaches_the_errors_buffer() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatch", Some("watched"));
+    d3_install_scan_collector(&mut state);
+    std::fs::write(watch.join("foo.txt"), b"f\n").expect("write foo");
+    d3_wait_for_snapshot_containing(&mut state, "foo.txt");
+    std::fs::remove_dir_all(&watch).expect("remove watch base");
+    ready::tick_until(
+        &mut state,
+        "the file-watch scan failure in *errors*",
+        ready::DEADLINE,
+        |s| {
+            let text = s.lua_host.errors_buffer_text();
+            if text.contains("lsp: file watch scan failed for") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(text)
+            }
+        },
+    );
+    assert!(state.lua_host.unread_errors() >= 1);
+}
+
 #[test]
 fn m4_24_d3_live_failure_reports_once_and_preserves_snapshot() {
     let (_dir, mut state, watch) = d3_scaffold("filewatch", Some("watched"));

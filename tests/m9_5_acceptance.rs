@@ -618,6 +618,62 @@ fn m9_5_subscribed_resource_refreshes_on_update() {
     );
 }
 
+/// E5.1: a notification handler that raises is reported through
+/// `pmacs.error` (`mcp.lua`'s tick drain), not swallowed.
+#[test]
+fn a_raising_notification_handler_is_reported_in_errors() {
+    let (mut state, _cache, _user_root) = editor_with_resources();
+    spawn_initialized_server(&mut state);
+    state
+        .lua_host
+        .lua()
+        .load(
+            "
+            pmacs.mcp.on_notification('notifications/resources/updated',
+              function() error('handler boom') end)
+            _G._opened = false
+            pmacs.async(function()
+                _G.BUF = _G.RES.open(_G.SERVER, 'mcp://text/doc.txt')
+                _G._opened = true
+            end)
+            ",
+        )
+        .exec()
+        .expect("subscribe and open");
+    assert!(
+        pump_until_lua_pred(&mut state, "_G._opened", Duration::from_secs(5)),
+        "open did not complete"
+    );
+    state
+        .lua_host
+        .lua()
+        .load(
+            "
+            pmacs.async(function()
+                pmacs.mcp.invoke_tool(_G.SERVER, 'mcp_test/trigger_update', {
+                    uri = 'mcp://text/doc.txt',
+                    new_text = 'updated once more',
+                }):await()
+            end)
+            ",
+        )
+        .exec()
+        .expect("trigger update");
+    let reported = pump_until_lua_pred(
+        &mut state,
+        "(function() for _, r in ipairs(pmacs.error_log.list()) do if r.message:find('handler boom', 1, true) then return true end end return false end)()",
+        Duration::from_secs(5),
+    );
+    let text = state.lua_host.errors_buffer_text();
+    assert!(
+        reported
+            && text.contains(
+                "pmacs.mcp.on_notification(notifications/resources/updated) handler raised:"
+            ),
+        "the handler failure reaches *errors*; got {text:?}"
+    );
+}
+
 // ===========================================================================
 // Crash-during-subscription
 // ===========================================================================

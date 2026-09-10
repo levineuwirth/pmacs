@@ -241,6 +241,39 @@ fn acc29_notification_reaches_a_registered_subscriber() {
     );
 }
 
+/// E5.1: a subscriber that raises is reported through `pmacs.error`
+/// (`report_subscriber_error` in `lsp.lua`), not swallowed by the
+/// pcall around the fan-out.
+#[test]
+fn a_raising_notification_subscriber_is_reported_in_errors() {
+    let fx = Fixture::new();
+    let mut state = editor();
+    exec(
+        &state,
+        r#"
+        pmacs.lsp.on_notification("pmacs/echo", function() error("subscriber boom") end)
+        "#,
+    );
+    attached_rust(&mut state, &fx);
+    let text = wait_eval::<String>(
+        &mut state,
+        "the subscriber failure in *errors*",
+        "return pmacs.error_log.list()[#pmacs.error_log.list()] and pmacs.error_log.list()[#pmacs.error_log.list()].message or ''",
+        |m| m.contains("subscriber failed"),
+    );
+    assert!(
+        text.contains("notification pmacs/echo subscriber failed")
+            && text.contains("subscriber boom"),
+        "the report names the notification and the cause: {text:?}"
+    );
+    assert!(
+        state
+            .lua_host
+            .errors_buffer_text()
+            .contains("subscriber boom")
+    );
+}
+
 #[test]
 fn acc29_subscriber_for_an_unsent_method_does_not_fire() {
     let fx = Fixture::new();

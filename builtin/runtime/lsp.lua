@@ -760,19 +760,13 @@ local function resolve_root_fn(language, resolver, path)
   if failure then
     local msg = string.format(
       "LSP: %s root resolver for %s %s", language, dir, failure)
-    -- Report on the channel that EXISTS. `pmacs.error` is referenced by
-    -- fifteen guarded call sites across the runtime and is defined
-    -- nowhere in production (only by a test stub in `src/editor.rs`), so
-    -- `if pmacs.error then ...` alone would be a sixteenth report that
-    -- never fires — the unwired-guard shape, not a fix for it. The
-    -- status line is what lsp.lua already uses for every other LSP
-    -- error. The `pmacs.error` arm rides along so this upgrades for free
-    -- if that channel is ever built.
-    --
-    -- Both reports are pcall'd: a broken reporting channel must not turn
-    -- a declined root into a failed attach.
+    -- Both channels: the status line, which lsp.lua uses for every
+    -- other LSP error, and `pmacs.error` (E5.1), which keeps the trace
+    -- in `*errors*` after the next status message replaces this one.
+    -- The status report is pcall'd: a broken reporting channel must not
+    -- turn a declined root into a failed attach.
     pcall(pmacs.editor.set_status, msg)
-    if pmacs.error then pcall(pmacs.error, msg) end
+    pmacs.error(msg)
     resolved = nil
   end
   if type(resolved) ~= "string" then resolved = nil end
@@ -908,7 +902,7 @@ local function report_spawn_failure(language, key_uri, command, err)
     "pmacs.lsp.config.%s.command in init.lua. M-x lsp.status for detail.",
     tostring(command), language, tostring(err), language)
   pcall(pmacs.editor.set_status, msg)
-  if pmacs.error then pcall(pmacs.error, msg) end
+  pmacs.error(msg)
   return key
 end
 
@@ -2136,7 +2130,7 @@ local function finish_group_scan(group, gen, scan_members, ok, result)
       if group.failure_reported ~= msg then
         group.failure_reported = msg
         local report = "lsp: file watch scan failed for " .. group.base .. ": " .. msg
-        if pmacs.error then pcall(pmacs.error, report) end
+        pmacs.error(report)
         pcall(pmacs.editor.set_status, report)
       end
     end
@@ -2525,11 +2519,10 @@ local function report_subscriber_error(what, err)
   local msg = string.format("LSP: %s subscriber failed: %s", what,
     tostring(err))
   -- COHERENCE §1.2: a pcall around background wiring must report, not
-  -- discard. `pmacs.editor.set_status` is the channel that exists;
-  -- `pmacs.error` is referenced by fifteen call sites and defined
-  -- nowhere in production, so it rides along rather than standing alone.
+  -- discard. Both channels: the status line for the moment, and
+  -- `pmacs.error` (E5.1) for the durable trace in `*errors*`.
   pcall(pmacs.editor.set_status, msg)
-  if pmacs.error then pcall(pmacs.error, msg) end
+  pmacs.error(msg)
 end
 
 -- Current spawn attempt for `sid`, or nil if the manager has forgotten

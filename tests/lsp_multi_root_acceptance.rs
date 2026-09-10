@@ -744,6 +744,13 @@ fn a_throwing_root_resolver_leaves_an_attributed_trace() {
         msg.contains("root resolver"),
         "a raising resolver must leave an attributed trace; got: {msg:?}"
     );
+    // E5.1: the same report reaches `*errors*` through `pmacs.error`,
+    // so it survives the next status message.
+    let durable = state.lua_host.errors_buffer_text();
+    assert!(
+        durable.contains("root resolver") && durable.contains("resolver blew up"),
+        "the trace is durable in *errors*; got: {durable:?}"
+    );
     assert!(
         msg.contains("rust"),
         "the trace must name the language that owns it; got: {msg:?}"

@@ -1173,6 +1173,8 @@ impl SemanticRenderState {
     /// to say (no hints, no prior non-empty send).
     #[allow(clippy::too_many_lines)]
     pub fn render_frame(&mut self, state: &EditorState) -> Vec<InstanceMessage> {
+        // E5.1: a semantic frontend showing `*errors*` reads it too.
+        crate::editor::mark_errors_read_if_shown(state);
         // Vterm Stage 3: a terminal window suppresses the whole document
         // projection. It is checked FIRST because the terminal identity
         // buffer is a valid (empty) document — running the document path

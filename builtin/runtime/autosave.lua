@@ -112,7 +112,7 @@ local function sweep_reporting()
   -- Log once per distinct fault; the status line keeps nagging every sweep.
   if msg ~= last_error then
     last_error = msg
-    if pmacs.error then pcall(pmacs.error, msg) end
+    pmacs.error(msg)
   end
 end
 

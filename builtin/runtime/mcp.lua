@@ -221,7 +221,7 @@ function pmacs._async.tick()
       for _, entry in ipairs(entries) do
         for _, handler in ipairs(list) do
           local ok, err = pcall(handler.fn, entry.server, entry.params)
-          if not ok and pmacs.error then
+          if not ok then
             pmacs.error("pmacs.mcp.on_notification(" .. method ..
               ") handler raised: " .. tostring(err))
           end
