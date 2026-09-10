@@ -14247,6 +14247,7 @@ fn install_minibuffer_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table
     install_minibuffer_read(&mb, lua, core)?;
     install_minibuffer_query(&mb, lua, core)?;
     install_minibuffer_motion(&mb, lua, core)?;
+    install_minibuffer_sources(&mb, lua, core)?;
     install_minibuffer_lifecycle(&mb, lua, core)?;
     Ok(mb)
 }
@@ -14430,6 +14431,52 @@ fn install_minibuffer_motion(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::
         )?;
     }
     {
+        let cc = core.clone();
+        mb.set(
+            "scroll",
+            lua.create_function(move |_, delta: i64| {
+                let delta =
+                    i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
+                cc.borrow_mut().minibuffer.scroll_candidate(delta);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cc = core.clone();
+        mb.set(
+            "complete",
+            lua.create_function(move |_, ()| {
+                cc.borrow_mut().minibuffer.complete();
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cc = core.clone();
+        mb.set(
+            "history_prev",
+            lua.create_function(move |_, ()| {
+                cc.borrow_mut().minibuffer.history_prev();
+                Ok(())
+            })?,
+        )?;
+    }
+    let cc = core.clone();
+    mb.set(
+        "history_next",
+        lua.create_function(move |_, ()| {
+            cc.borrow_mut().minibuffer.history_next();
+            Ok(())
+        })?,
+    )
+}
+
+/// The E4.1 surface for a function source that ranks for itself:
+/// `refresh` and `rank`. Its own installer because the motion one is at
+/// clippy's line ceiling.
+fn install_minibuffer_sources(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
+    {
         // E4.1: recompute the candidate list against the live source
         // without touching the typed text. For a source whose pool
         // arrives asynchronously (the project file finder's walk lands
@@ -14482,46 +14529,7 @@ fn install_minibuffer_motion(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::
             )?,
         )?;
     }
-    {
-        let cc = core.clone();
-        mb.set(
-            "scroll",
-            lua.create_function(move |_, delta: i64| {
-                let delta =
-                    i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
-                cc.borrow_mut().minibuffer.scroll_candidate(delta);
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        let cc = core.clone();
-        mb.set(
-            "complete",
-            lua.create_function(move |_, ()| {
-                cc.borrow_mut().minibuffer.complete();
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        let cc = core.clone();
-        mb.set(
-            "history_prev",
-            lua.create_function(move |_, ()| {
-                cc.borrow_mut().minibuffer.history_prev();
-                Ok(())
-            })?,
-        )?;
-    }
-    let cc = core.clone();
-    mb.set(
-        "history_next",
-        lua.create_function(move |_, ()| {
-            cc.borrow_mut().minibuffer.history_next();
-            Ok(())
-        })?,
-    )
+    Ok(())
 }
 
 fn install_minibuffer_lifecycle(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
