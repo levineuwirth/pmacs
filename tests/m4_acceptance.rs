@@ -330,7 +330,7 @@ fn pump_async<F: Fn(&pmacs::editor::EditorState) -> bool>(
     state: &mut pmacs::editor::EditorState,
     predicate: F,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate(state) {
         assert!(Instant::now() < deadline, "async pump deadline exceeded");
         state.tick_async();

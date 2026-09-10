@@ -12884,7 +12884,14 @@ mod tests {
 
     /// Drive `tick_async` until `predicate` is true, sleeping briefly
     /// between ticks so workers have a chance to send replies. Panics
-    /// after a 2-second deadline so a stuck test doesn't hang CI.
+    /// after a 10-second deadline so a stuck test doesn't hang CI.
+    ///
+    /// Ten seconds and not two (E5.0): a deadline asserts that something
+    /// eventually happens, and two seconds was the window in which R5
+    /// and #263 fired under sweep load --- on the hosted macOS runners a
+    /// 2 ms sleep returns after 12--17 ms, so the old bound bought a
+    /// fifth of its nominal polls. The message still carries the elapsed
+    /// time and the poll count, so R5's discriminator reads as a rate.
     ///
     /// `what` names the condition being waited on, and the panic carries
     /// it with the deadline, the elapsed time and the number of times the
@@ -12894,7 +12901,7 @@ mod tests {
     /// inward by hand: that module is compiled into the integration
     /// targets and an in-crate unit test cannot reach it.
     fn pump_async<F: Fn(&EditorState) -> bool>(state: &mut EditorState, what: &str, predicate: F) {
-        const DEADLINE: Duration = Duration::from_secs(2);
+        const DEADLINE: Duration = Duration::from_secs(10);
         let start = std::time::Instant::now();
         let mut polls = 0u32;
         while !predicate(state) {
