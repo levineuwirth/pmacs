@@ -1246,6 +1246,41 @@ mod tests {
         assert_eq!(out[0], "ab", "the best-scoring entry must lead");
     }
 
+    /// The `Files` source's pool is cut at [`CANDIDATE_LIMIT`] entries in
+    /// `read_dir` order BEFORE the needle is applied, so in a directory
+    /// of more than 1024 entries a name past the cut cannot be completed
+    /// to by `find-file` or `write-file`, whatever is typed --- the same
+    /// reachability defect E4.1 removed from `Custom`. It stays, and the
+    /// reason is stronger than scope: `Custom`'s cut could go because a
+    /// custom source can rank for itself (the finder does, through
+    /// `pmacs.minibuffer.rank`, and returns at most the cap), while
+    /// `Files` has no counterpart, so deleting the `break` in
+    /// `list_directory` trades this defect for an unbounded `read_dir` in
+    /// a hostile directory, and what replaces the cap is a design
+    /// decision no row has authorized. Pinned here so the phase that
+    /// lifts it does so on purpose: when this fails because the pool is
+    /// whole, replace it with the reachability assertion `Custom` has.
+    #[test]
+    fn files_source_pool_is_still_cut_at_the_candidate_limit_before_filtering() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for i in 0..(CANDIDATE_LIMIT + 200) {
+            std::fs::write(dir.path().join(format!("entry{i:04}")), b"").unwrap();
+        }
+        let commands = CommandRegistry::new();
+        let registry = BufferRegistry::new();
+        let source = CompletionSource::Files {
+            root: dir.path().to_path_buf(),
+        };
+        let pool = collect_pool(&source, "", &commands, &registry).unwrap();
+        assert_eq!(
+            pool.len(),
+            CANDIDATE_LIMIT,
+            "the Files pool is cut at the cap before filtering; a whole pool \
+             means the cut was lifted --- replace this pin with the \
+             reachability assertion"
+        );
+    }
+
     /// E4.1: a ranked session keeps the source's order and filters
     /// nothing away itself.
     #[test]
