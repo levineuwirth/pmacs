@@ -450,6 +450,18 @@ end
 -- attach; the kill path clears the entry below if/when it lands.
 local highlighted_buffers = {}
 
+-- E5.6 (D20): one styling policy for both frontends. On, LSP semantic
+-- tokens merge over tree-sitter captures on the grid and on the wire
+-- alike; off, both are grammar-only. Read on every paint and every
+-- frame by `StylePolicy` in `src/highlight.rs`.
+pmacs.config.define {
+  name = "ui.semantic-styling",
+  description = "Merge language-server semantic tokens over tree-sitter highlighting, on both frontends. Off leaves the grammar's colors alone; a language with no bundled grammar is then uncolored.",
+  type = "boolean",
+  default = true,
+  mutability = "live",
+}
+
 -- Fresh language inference for a buffer, in precedence order: explicit
 -- modeline → grammar extension → LSP filetype map → filename → shebang.
 -- Path components intentionally come from `buf:name()` to preserve syntax's

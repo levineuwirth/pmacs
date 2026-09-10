@@ -616,6 +616,13 @@ struct StyleGate {
     generation: u64,
     /// Declared viewport.
     visible: ByteRange,
+    /// The semantic-token store's mutation counter (E5.6): the wire
+    /// merges LSP tokens over the grammar's captures, so a token
+    /// response changes the spans a parse bundle alone would key.
+    tokens_version: u64,
+    /// The config registry's value epoch (E5.6): `ui.semantic-styling`
+    /// changes the spans without touching parse, tokens or theme.
+    config_epoch: u64,
     /// The theme's syntax mutation counter (Q#TH6): spans are a pure
     /// function of the theme too, and before this half the gate a
     /// mid-session `pmacs.theme.set` shipped nothing until the next
@@ -629,6 +636,8 @@ impl StyleGate {
         self.generation == other.generation
             && self.visible == other.visible
             && self.syntax_epoch == other.syntax_epoch
+            && self.tokens_version == other.tokens_version
+            && self.config_epoch == other.config_epoch
             && match (&self.bundle, &other.bundle) {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -3206,11 +3215,18 @@ fn grammar_style_key(
     generation: u64,
 ) -> Option<StyleGate> {
     let handle = state.syntax_registry.view(vp.buffer_id)?;
+    let tokens_version = {
+        let store = state.lsp_manager.borrow().semantic_token_store();
+        let guard = store.lock().expect("semantic token store mutex poisoned");
+        guard.version()
+    };
     Some(StyleGate {
         bundle: handle.current(),
         generation,
         visible: vp.visible,
         syntax_epoch: theme_epochs(state).0,
+        tokens_version,
+        config_epoch: crate::lua_bindings::config_value_epoch(state.lua_host.lua()),
     })
 }
 
@@ -3224,21 +3240,102 @@ fn grammar_style_parse_not_ready(state: &EditorState, buffer_id: BufferId) -> bo
 }
 
 /// Compute the styled byte runs intersecting the declared viewport,
-/// mapped through the active theme. Spans are clipped to the viewport
-/// and to the parsed source length; runs that resolve to the default
-/// style are dropped (wire economy, and consistent with the grid
-/// path, which skips default-style merges).
+/// mapped through the active theme, under the one styling policy both
+/// frontends read (E5.6, D20, [`crate::highlight::StylePolicy`]): the
+/// grammar's captures first, and LSP semantic tokens merged over them
+/// through the same [`crate::overlay::merge_styles`] the grid's
+/// `LspStyleView` paints with, so the wire carries exactly the cell
+/// styles the grid shows. With `ui.semantic-styling` off both paths are
+/// grammar-only; a buffer with no bundled grammar is then unstyled,
+/// where before (policy A, "never both") it was styled by LSP tokens
+/// alone and a grammar-backed buffer never saw its tokens on the wire.
+///
+/// A grammar-backed buffer whose parse is not ready yet returns empty
+/// rather than briefly showing tokens alone: the frame loop holds the
+/// previous spans for it (`grammar_style_parse_not_ready`). Spans are
+/// clipped to the viewport and to the source length; runs that resolve
+/// to the default style are dropped (wire economy, and consistent with
+/// the grid path, which skips default-style merges).
 fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
-    // Policy A — per-language styling authority. A grammar-backed
-    // language (the registry hands out a view only for those) is
-    // styled *solely* by tree-sitter; a language with no bundled
-    // grammar (C/C++, …) is styled *solely* by LSP semantic tokens.
-    // Never both: this is why the no-view branch hands off to the LSP
-    // producer while a grammar-backed buffer whose parse isn't ready
-    // yet returns empty rather than briefly borrowing LSP styling
-    // (which would flicker two authorities on one buffer).
+    let policy = crate::highlight::StylePolicy::from_lua(state.lua_host.lua());
     let Some(handle) = state.syntax_registry.view(vp.buffer_id) else {
-        return lsp_scoped_style_spans(state, vp);
+        return if policy.semantic {
+            lsp_scoped_style_spans(state, vp)
+        } else {
+            Vec::new()
+        };
+    };
+    if handle.current().is_none() {
+        return Vec::new();
+    }
+    let grammar = grammar_scoped_style_spans(state, vp);
+    if !policy.semantic {
+        return grammar;
+    }
+    merge_style_span_lists(grammar, lsp_scoped_style_spans(state, vp))
+}
+
+/// Lay `over` on `base`, both sorted and disjoint, into one sorted,
+/// disjoint, coalesced list: where only one covers a byte its style
+/// stands, where both do the styles compose through
+/// [`crate::overlay::merge_styles`] (`over` wins the colors it sets,
+/// attributes union), exactly as the grid's second view composes over
+/// the first's cells. Default-style results are dropped.
+fn merge_style_span_lists(base: Vec<StyleSpan>, over: Vec<StyleSpan>) -> Vec<StyleSpan> {
+    if over.is_empty() {
+        return base;
+    }
+    if base.is_empty() {
+        return over;
+    }
+    let mut cuts: Vec<u64> = base
+        .iter()
+        .chain(over.iter())
+        .flat_map(|s| [s.range.start, s.range.end])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let covering = |spans: &[StyleSpan], at: u64| -> Option<Style> {
+        let i = spans.partition_point(|s| s.range.end <= at);
+        spans
+            .get(i)
+            .filter(|s| s.range.start <= at && at < s.range.end)
+            .map(|s| s.style)
+    };
+    let mut out: Vec<StyleSpan> = Vec::new();
+    for pair in cuts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let style = match (covering(&base, a), covering(&over, a)) {
+            (None, None) => continue,
+            (Some(g), None) => g,
+            (None, Some(l)) => l,
+            (Some(g), Some(l)) => crate::overlay::merge_styles(g, l),
+        };
+        if style == Style::default() {
+            continue;
+        }
+        if let Some(last) = out.last_mut()
+            && last.range.end == a
+            && last.style == style
+        {
+            last.range.end = b;
+            continue;
+        }
+        out.push(StyleSpan {
+            range: ByteRange { start: a, end: b },
+            style,
+        });
+    }
+    out
+}
+
+/// The grammar's own styled runs for the declared viewport: every
+/// injection layer's captures, flattened by priority and mapped through
+/// the theme. The half of [`scoped_style_spans`] that does not read the
+/// token store, and the whole of what [`scoped_file_summary`] reads.
+fn grammar_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
+    let Some(handle) = state.syntax_registry.view(vp.buffer_id) else {
+        return Vec::new();
     };
     let Some(bundle) = handle.current() else {
         return Vec::new();
@@ -3506,10 +3603,15 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 /// Compute the per-line dominant style summary for the whole buffer:
 /// one [`Style`] per source line, in line order. The "dominant" style
 /// for a line is the one covering the most bytes among the styled
-/// runs (`scoped_style_spans` for the full buffer); a line with no
-/// styled runs takes [`Style::default`]. Reuses [`scoped_style_spans`]
-/// so the policy-A authority choice (tree-sitter for grammar-backed
-/// languages, LSP semantic tokens otherwise) is inherited automatically.
+/// runs; a line with no styled runs takes [`Style::default`].
+///
+/// **Grammar-only, by D20's exception** (E5.6): the summary reads
+/// [`grammar_scoped_style_spans`] and never the token store, so the
+/// minimap's whole-file picture is tree-sitter's alone while the
+/// viewport's spans merge LSP tokens over it. A buffer with no bundled
+/// grammar therefore has an all-default summary (before E5.6, policy
+/// A's fallback fed it LSP tokens); its diagnostic marks are overlaid
+/// regardless.
 ///
 /// `O(spans × lines)` in the worst case; the caller short-circuits on
 /// unchanged CRDT generation so this only runs on first sight of a
@@ -3533,10 +3635,8 @@ fn scoped_file_summary(
     let line_count = line_starts.len();
     let mut out = vec![Style::default(); line_count];
 
-    // Reuse the existing producer with a whole-buffer "viewport". The
-    // clip is then a no-op and `scoped_style_spans` yields every
-    // styled run; policy A's authority pick (tree-sitter / LSP) is
-    // therefore identical to the per-frame styling.
+    // The grammar producer over a whole-buffer "viewport": the clip is
+    // then a no-op and every styled run of every layer is yielded.
     let vp_all = DeclaredViewport {
         buffer_id,
         visible: ByteRange {
@@ -3545,7 +3645,7 @@ fn scoped_file_summary(
         },
         frontend_generation: 0,
     };
-    let spans = scoped_style_spans(state, &vp_all);
+    let spans = grammar_scoped_style_spans(state, &vp_all);
     if spans.is_empty() {
         // No styled runs — but diagnostic marks are independent of
         // syntax styling (a plain-text buffer can still have lints).
@@ -4364,11 +4464,20 @@ mod tests {
             generation: 1,
             visible: ByteRange { start: 0, end: 10 },
             syntax_epoch: 0,
+            tokens_version: 0,
+            config_epoch: 0,
         };
         let mut g2 = g1.clone();
         assert!(g1.matches(&g2), "identical gates match");
         g2.syntax_epoch = 1;
         assert!(!g1.matches(&g2), "a theme mutation breaks the match");
+        // E5.6: the tokens and the knob are inputs too.
+        let mut g3 = g1.clone();
+        g3.tokens_version = 1;
+        assert!(!g1.matches(&g3), "a token response breaks the match");
+        let mut g4 = g1.clone();
+        g4.config_epoch = 1;
+        assert!(!g1.matches(&g4), "a setting change breaks the match");
     }
 
     /// All `InstanceMessage` variants the semantic projection may
@@ -6318,16 +6427,16 @@ mod tests {
         );
     }
 
+    /// D20 (E5.6): the whole-file summary is grammar-only. A `.cpp`
+    /// buffer has no bundled grammar, so its LSP tokens style the
+    /// viewport's spans (see `cpp_style_comes_from_lsp_when_no_tree_sitter_grammar`)
+    /// and never the summary. Before E5.6 this row asserted the
+    /// opposite: policy A's fallback fed the summary from the tokens.
     #[test]
-    fn file_style_summary_dominant_style_from_lsp_per_line() {
+    fn file_style_summary_is_grammar_only_so_lsp_tokens_do_not_reach_it() {
         let state = empty_state();
         let mut s = local();
         let bid = active_buffer(&state);
-        // `.cpp` buffer (no tree-sitter grammar) so styling comes from
-        // the LSP semantic-token authority (policy A). Three lines;
-        // line 0 has a token spanning bytes 0..3, line 2 has one
-        // spanning bytes 8..11. Line 1 has no tokens.
-        //
         // Buffer layout (newlines included):
         //   bytes 0..4  "abc\n"   line 0 = [0,3)  ← token [0,3)
         //   bytes 4..8  "def\n"   line 1 = [4,7)  ← no token
@@ -6344,14 +6453,186 @@ mod tests {
         let msgs = s.render_frame(&state);
         let (_, lines) = summary_of(&msgs).expect("summary emitted");
         assert_eq!(lines.len(), 4, "three lines + trailing empty");
-        let kw_style = crate::cell::Style {
-            bold: true,
-            ..crate::cell::Style::default()
+        assert!(
+            lines.iter().all(|l| *l == Style::default()),
+            "no grammar ⇒ every summary line is default, tokens or not: {lines:?}"
+        );
+        // While the viewport's spans, on the same frame, do carry the
+        // tokens: the exception is the summary's alone.
+        let spans = msgs
+            .iter()
+            .find_map(|m| match m {
+                InstanceMessage::StyleSpans { segments, .. } => Some(
+                    segments
+                        .iter()
+                        .flat_map(|seg| seg.spans.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("StyleSpans emitted");
+        assert_eq!(spans.len(), 2, "the two tokens style the viewport");
+    }
+
+    /// E5.6 (D20): one policy, both paths. A Rust buffer with its
+    /// grammar and a fake server's tokens produces IDENTICAL span sets
+    /// on the wire (`scoped_style_spans`) and on the grid
+    /// (`SyntaxHighlightView` then `LspStyleView` into cells), with the
+    /// tokens' refinement present in both; with `ui.semantic-styling`
+    /// off, both are the grammar's alone, in the same test.
+    ///
+    /// The token's face is one the grammar never sets (italic), so a
+    /// path that dropped the tokens would differ visibly, and a path
+    /// that dropped the grammar would lose the keyword's style.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario pins both paths on and off against one seeded buffer; splitting it would re-seed the grammar and the tokens per half"
+    )]
+    fn e5_6_wire_and_grid_agree_on_merged_spans_and_on_the_knob() {
+        use crate::cell::{Cell, CellCoord, CellGrid, CellSize};
+        use crate::view::{View, Viewport, WrapMode};
+
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        let text = b"fn main() {}\n";
+        let handle = seed_rust_parse_view(&state, bid, text);
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "e56refine",
+            Style {
+                italic: true,
+                ..Style::default()
+            },
+        );
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": { "tokenTypes": ["e56refine"], "tokenModifiers": [] }
+                    }
+                }),
+                crate::lsp::PositionEncoding::Utf16,
+            );
+        // "main" is bytes [3, 7) of line 0. Keyed to this buffer's own
+        // path (`set_tokens` keys to the `.cpp` fixture).
+        {
+            let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.rs"));
+            let store = state.lsp_manager.borrow().semantic_token_store();
+            store.lock().expect("sem token store").set(
+                crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
+                crate::semantic_tokens::SemanticTokensResponse {
+                    tokens: vec![tok(0, 3, 4)],
+                    result_id: None,
+                    raw: Vec::new(),
+                },
+            );
+        }
+
+        let content = u64::try_from(text.len() - 1).expect("small");
+        let vp = DeclaredViewport {
+            buffer_id: bid,
+            visible: ByteRange {
+                start: 0,
+                end: content,
+            },
+            frontend_generation: 0,
         };
-        assert_eq!(lines[0], kw_style, "line 0 dominated by the LSP token");
-        assert_eq!(lines[1], Style::default(), "line 1 has no token → default");
-        assert_eq!(lines[2], kw_style, "line 2 dominated by the LSP token");
-        assert_eq!(lines[3], Style::default(), "trailing empty line → default");
+        let wire = |state: &EditorState| -> Vec<(u64, u64, Style)> {
+            scoped_style_spans(state, &vp)
+                .into_iter()
+                .map(|s| (s.range.start, s.range.end, s.style))
+                .collect()
+        };
+        let grid = |state: &EditorState| -> Vec<(u64, u64, Style)> {
+            let cols = usize::try_from(content).expect("small");
+            let mut backing = vec![Cell::default(); cols];
+            let viewport = || Viewport {
+                buffer_start: 0,
+                buffer_end: u64::MAX,
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(1, u32::try_from(cols).expect("small")),
+                gutter_w: 0,
+                folds: None,
+                wrap: WrapMode::Truncate,
+                view_left: 0,
+            };
+            let registry = state.core.borrow().registry.clone();
+            let reg = registry.borrow();
+            let buf = reg.get(bid).expect("buffer");
+            let mut hv = crate::highlight::SyntaxHighlightView::new(
+                handle.clone(),
+                state.syntax_registry.theme(),
+            );
+            let mut lv = crate::highlight::LspStyleView::new(
+                state.lsp_manager.clone(),
+                state.syntax_registry.theme(),
+                state
+                    .lua_host
+                    .lua()
+                    .app_data_ref::<crate::lua_bindings::SharedConfigRegistry>()
+                    .map(|r| r.clone()),
+            );
+            {
+                let mut cells = CellGrid {
+                    cells: &mut backing,
+                    stride: u32::try_from(cols).expect("small"),
+                    size: CellSize::new(1, u32::try_from(cols).expect("small")),
+                };
+                hv.render(buf, viewport(), &mut cells);
+                lv.render(buf, viewport(), &mut cells);
+            }
+            let mut out: Vec<(u64, u64, Style)> = Vec::new();
+            for (col, cell) in backing.iter().enumerate() {
+                let style = cell.style;
+                if style == Style::default() {
+                    continue;
+                }
+                let col = col as u64;
+                match out.last_mut() {
+                    Some((_, end, last)) if *end == col && *last == style => *end += 1,
+                    _ => out.push((col, col + 1, style)),
+                }
+            }
+            out
+        };
+
+        let (w_on, g_on) = (wire(&state), grid(&state));
+        assert!(!w_on.is_empty(), "the grammar styles something");
+        assert_eq!(w_on, g_on, "on: the wire's spans are the grid's cells");
+        assert!(
+            w_on.iter()
+                .any(|(s, e, st)| *s == 3 && *e == 7 && st.italic),
+            "on: the token's refinement is in both: {w_on:?}"
+        );
+        let grammar_only: Vec<(u64, u64, Style)> = grammar_scoped_style_spans(&state, &vp)
+            .into_iter()
+            .map(|s| (s.range.start, s.range.end, s.style))
+            .collect();
+        assert_ne!(w_on, grammar_only, "on: the merge adds to the grammar");
+
+        // Off: both paths are the grammar's alone, in the same test.
+        let registry = state
+            .lua_host
+            .lua()
+            .app_data_ref::<crate::lua_bindings::SharedConfigRegistry>()
+            .expect("config registry")
+            .clone();
+        registry
+            .borrow_mut()
+            .set(
+                "ui.semantic-styling",
+                crate::config_registry::ConfigValue::Bool(false),
+            )
+            .expect("the knob is registered and live");
+        let (w_off, g_off) = (wire(&state), grid(&state));
+        assert_eq!(w_off, g_off, "off: the wire's spans are the grid's cells");
+        assert_eq!(w_off, grammar_only, "off: grammar-only on the wire");
+        assert!(
+            w_off.iter().all(|(_, _, st)| !st.italic),
+            "off: no refinement anywhere: {w_off:?}"
+        );
     }
 
     fn facts_of(msgs: &[InstanceMessage]) -> Option<(String, bool, u32, u32)> {

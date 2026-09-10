@@ -625,17 +625,61 @@ pub fn is_default_style(style: Style) -> bool {
 pub struct LspStyleView {
     lsp: SharedLspManager,
     theme: ThemeHandle,
+    /// The `pmacs.config` registry `ui.semantic-styling` is read from
+    /// on every render; `None` (a bare core) means the default, on.
+    config: Option<crate::lua_bindings::SharedConfigRegistry>,
 }
 
 impl LspStyleView {
     /// Construct a view that paints LSP semantic-token styling using
     /// `lsp` as the source of truth and `theme` as the capture-name →
     /// style map. The view shares both handles; updates from elsewhere
-    /// (a new LSP response, a theme edit) are observable on the next
-    /// render.
+    /// (a new LSP response, a theme edit, the styling knob) are
+    /// observable on the next render.
     #[must_use]
-    pub fn new(lsp: SharedLspManager, theme: ThemeHandle) -> Self {
-        Self { lsp, theme }
+    pub fn new(
+        lsp: SharedLspManager,
+        theme: ThemeHandle,
+        config: Option<crate::lua_bindings::SharedConfigRegistry>,
+    ) -> Self {
+        Self { lsp, theme, config }
+    }
+}
+
+/// One styling policy for both frontends (E5.6, D20): whether LSP
+/// semantic tokens merge over tree-sitter captures. Read from the
+/// registered `ui.semantic-styling` (Boolean, default on) by the grid's
+/// [`LspStyleView`] and by the wire's `scoped_style_spans`, so the two
+/// paths cannot answer differently. Policy A ("never both") on the wire
+/// is retired by this; the minimap's whole-file summary stays
+/// grammar-only and says so at its producer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StylePolicy {
+    /// LSP semantic tokens are merged over grammar captures.
+    pub semantic: bool,
+}
+
+impl StylePolicy {
+    /// The registered knob's name.
+    pub const SETTING: &'static str = "ui.semantic-styling";
+
+    /// Read the policy from the registry installed in `lua`; the
+    /// default when nothing is registered is on.
+    #[must_use]
+    pub fn from_lua(lua: &mlua::Lua) -> Self {
+        Self {
+            semantic: crate::lua_bindings::config_bool(lua, Self::SETTING, None, true),
+        }
+    }
+
+    /// Read the policy from a registry handle, or the default without one.
+    #[must_use]
+    pub fn from_registry(registry: Option<&crate::lua_bindings::SharedConfigRegistry>) -> Self {
+        Self {
+            semantic: registry.is_none_or(|registry| {
+                crate::lua_bindings::config_bool_in(registry, Self::SETTING, None, true)
+            }),
+        }
     }
 }
 
@@ -645,6 +689,9 @@ impl View for LspStyleView {
     }
 
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        if !StylePolicy::from_registry(self.config.as_ref()).semantic {
+            return; // E5.6: the knob is off; grammar captures alone paint.
+        }
         let Some(path) = buf.file_path() else {
             return; // No path ⇒ no URI ⇒ nothing to look up.
         };
@@ -1101,7 +1148,11 @@ mod tests {
             );
         }
         // Render into a small grid.
-        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut view = LspStyleView::new(
+            state.lsp_manager.clone(),
+            state.syntax_registry.theme(),
+            None,
+        );
         let mut backing: Vec<Cell> = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1201,7 +1252,11 @@ mod tests {
             guard.mark_stale(uri);
         }
 
-        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut view = LspStyleView::new(
+            state.lsp_manager.clone(),
+            state.syntax_registry.theme(),
+            None,
+        );
         let mut backing: Vec<Cell> = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1323,7 +1378,11 @@ mod tests {
                 },
             );
         }
-        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut view = LspStyleView::new(
+            state.lsp_manager.clone(),
+            state.syntax_registry.theme(),
+            None,
+        );
         let mut backing: Vec<Cell> = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,

@@ -129,6 +129,9 @@ pub type SharedMenuRegistry = Rc<RefCell<MenuRegistry>>;
 /// state mutated by `pmacs.editor.*` primitives invoked from inside
 /// command bodies.
 pub type SharedCore = Rc<RefCell<EditorCore>>;
+/// The `pmacs.config` registry handle, re-exported for consumers outside
+/// the bindings (the grid's `LspStyleView` reads the styling policy through it).
+pub use config::SharedConfigRegistry;
 
 /// Shared, single-threaded handle to the hook registry. Same
 /// rationale as the other `Rc<RefCell<...>>` aliases.
@@ -670,6 +673,41 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
         Ok(crate::config_registry::ConfigValue::Int(v)) => u32::try_from(*v).unwrap_or(fallback),
         _ => fallback,
     }
+}
+
+/// Resolve a Boolean setting out of the shared `pmacs.config` registry.
+/// `fallback` covers a bare core whose runtime never defined the
+/// setting, matching [`config_u32`].
+#[must_use]
+pub fn config_bool(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: bool) -> bool {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return fallback;
+    };
+    config_bool_in(&registry, name, buffer_id, fallback)
+}
+
+/// [`config_bool`] over a registry handle a consumer already holds
+/// (the grid's `LspStyleView`, which renders without a `Lua` in reach).
+#[must_use]
+pub fn config_bool_in(
+    registry: &config::SharedConfigRegistry,
+    name: &str,
+    buffer_id: Option<BufferId>,
+    fallback: bool,
+) -> bool {
+    let borrowed = registry.borrow();
+    match borrowed.get(name, buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Bool(v)) => *v,
+        _ => fallback,
+    }
+}
+
+/// The registry's value epoch, for a cache keyed on "some setting may
+/// have changed"; zero when no registry is installed.
+#[must_use]
+pub fn config_value_epoch(lua: &Lua) -> u64 {
+    lua.app_data_ref::<config::SharedConfigRegistry>()
+        .map_or(0, |registry| registry.borrow().value_epoch())
 }
 
 /// Resolve `ui.line-wrap` for `buffer_id`.
@@ -11173,7 +11211,10 @@ pub fn install_lsp(
                         id.0
                     )));
                 }
-                let overlay = crate::highlight::LspStyleView::new(m.clone(), theme);
+                let config = lua
+                    .app_data_ref::<config::SharedConfigRegistry>()
+                    .map(|registry| registry.clone());
+                let overlay = crate::highlight::LspStyleView::new(m.clone(), theme, config);
                 win.push_overlay(Box::new(overlay));
                 Ok(true)
             })?,

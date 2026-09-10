@@ -19355,6 +19355,60 @@ mod tests {
         );
     }
 
+    /// E5.6 (D20) --- the GPU renders the wire's merged refinement: a
+    /// `function` face over `main` and a `type` face over `Foo`, as
+    /// rust-analyzer's tokens merged over tree-sitter's captures reach
+    /// it in one `StyleSpans` frame, land in the shaped chunks with
+    /// their own colors while the unstyled text carries none. Headless:
+    /// it needs an adapter and skips without one, so it executes on the
+    /// headless-render CI leg (and wherever `PMACS_REQUIRE_GPU` arms it).
+    /// The daemon's merge itself is pinned in `semantic_render.rs`; this
+    /// row is the frontend half, a wire fixture standing in for the
+    /// server.
+    #[test]
+    fn e5_6_semantic_refinement_spans_reach_the_shaped_chunks() {
+        let Some(mut state) = State::new_headless(640, 480, "fn main() -> Foo {}\n") else {
+            return;
+        };
+        let function = style_with_fg(CellColor::Indexed(3));
+        let ty = style_with_fg(CellColor::Indexed(4));
+        state.replace_style_spans(vec![StyleSegment {
+            range: ByteRange { start: 0, end: 20 },
+            spans: vec![
+                StyleSpan {
+                    range: ByteRange { start: 3, end: 7 },
+                    style: function,
+                },
+                StyleSpan {
+                    range: ByteRange { start: 13, end: 16 },
+                    style: ty,
+                },
+            ],
+        }]);
+        let (chunks, _) = state.chunks_for_line(0, 19);
+        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+        let find = |needle: &str| {
+            chunks
+                .iter()
+                .find(|c| c.text == needle)
+                .unwrap_or_else(|| panic!("no chunk {needle:?} in {texts:?}"))
+        };
+        assert_eq!(
+            find("main").color,
+            cell_color_to_glyphon(CellColor::Indexed(3)),
+            "the function refinement colors `main`"
+        );
+        assert_eq!(
+            find("Foo").color,
+            cell_color_to_glyphon(CellColor::Indexed(4)),
+            "the type refinement colors `Foo`"
+        );
+        assert!(
+            chunks.iter().any(|c| c.color.is_none()),
+            "unstyled text carries no color of its own: {texts:?}"
+        );
+    }
+
     #[test]
     fn cached_style_ranges_translate_through_insertions() {
         let edit = TextProjectionEdit {

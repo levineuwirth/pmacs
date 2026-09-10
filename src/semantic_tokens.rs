@@ -223,6 +223,11 @@ pub struct SemanticTokenStore {
     /// because the document changed after the last full/delta token
     /// response was absorbed.
     stale_uris: HashSet<String>,
+    /// Bumped on every mutation. The semantic-render style gate keys
+    /// on it (E5.6): a grammar-backed buffer's wire spans merge LSP
+    /// tokens over tree-sitter captures, so a token response must flip
+    /// the gate the parse bundle alone used to key.
+    version: u64,
 }
 
 /// Key into [`SemanticTokenStore`].
@@ -256,6 +261,14 @@ impl SemanticTokenStore {
     pub fn set(&mut self, key: SemanticTokenKey, response: SemanticTokensResponse) {
         self.stale_uris.remove(&key.uri);
         self.by_key.insert(key, response);
+        self.version += 1;
+    }
+
+    /// A counter that changes on every `set`, `clear` and `mark_stale`,
+    /// so a consumer can key a cache on "the tokens might differ".
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Drop the entry at `key`. Also clears the stale flag for that
@@ -265,6 +278,7 @@ impl SemanticTokenStore {
         if !self.by_key.keys().any(|k| k.uri == key.uri) {
             self.stale_uris.remove(&key.uri);
         }
+        self.version += 1;
     }
 
     /// Mark all semantic-token entries for `uri` stale. Called when
@@ -272,6 +286,7 @@ impl SemanticTokenStore {
     /// byte ranges from a pre-edit token set.
     pub fn mark_stale(&mut self, uri: impl Into<String>) {
         self.stale_uris.insert(uri.into());
+        self.version += 1;
     }
 
     /// `true` iff `uri` has semantic-token data that should not be
