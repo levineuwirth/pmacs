@@ -1,5 +1,6 @@
-//! The five things the documentation is held to, and no more: D14's
-//! four, plus D27's split of the divergence register.
+//! The six things the documentation is held to, and no more: D14's
+//! four, D27's split of the divergence register, and the registry's
+//! counts of record beside their enumerations.
 //!
 //! 1. README's generated status block equals `scripts/anchor --print`
 //!    byte for byte, so a hand-edited version number or a stale feature
@@ -25,6 +26,12 @@
 //!    so under one cap the register squeezes the rules, and a rename
 //!    of either file would otherwise leave a dead route in the
 //!    instruction file no other rule here can see.
+//! 6. Every count of record in `docs/ci-red-signatures.md` is a
+//!    `Tally (<id>): …` line beside the enumeration it counts, and the
+//!    stated number equals what that enumeration holds. Four
+//!    consecutive phases shipped a count there that its own table or
+//!    list contradicted, each found by a reviewer recounting by hand;
+//!    the recount is now this file's.
 //!
 //! Each assertion prints the offending line, so a red names its cause.
 
@@ -263,6 +270,325 @@ fn divergences_md_exists_and_is_named_by_the_instruction_file() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Rule 6: a count of record sits beside its enumeration, and they agree
+// ---------------------------------------------------------------------------
+
+/// One markdown table: its header cells and its body rows, every cell
+/// trimmed with the backticks and bold markers stripped, so a value can
+/// be named in a tally the way the table shows it.
+struct Table {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+fn clean_cell(cell: &str) -> String {
+    cell.trim()
+        .trim_matches('*')
+        .trim_matches('`')
+        .trim()
+        .to_owned()
+}
+
+fn is_table_line(line: &str) -> bool {
+    line.trim_start().starts_with('|')
+}
+
+/// `|---|:---:|`: the row between a table's header and its body.
+fn is_separator_row(line: &str) -> bool {
+    let inner = line.trim().trim_matches('|');
+    !inner.is_empty() && inner.chars().all(|c| matches!(c, '-' | '|' | ':' | ' '))
+}
+
+fn table_cells(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(clean_cell)
+        .collect()
+}
+
+/// The table whose first line is `lines[start]`.
+fn parse_table(lines: &[&str], start: usize) -> Option<Table> {
+    if !is_table_line(lines[start]) {
+        return None;
+    }
+    let header = table_cells(lines[start]);
+    let mut i = start + 1;
+    if i < lines.len() && is_separator_row(lines[i]) {
+        i += 1;
+    }
+    let mut rows = Vec::new();
+    while i < lines.len() && is_table_line(lines[i]) {
+        rows.push(table_cells(lines[i]));
+        i += 1;
+    }
+    Some(Table { header, rows })
+}
+
+fn is_tally_line(line: &str) -> bool {
+    line.starts_with("Tally (")
+}
+
+/// The first line after `at` that is neither blank nor another tally,
+/// so several tallies can stand together above one enumeration.
+fn next_block_start(lines: &[&str], at: usize) -> usize {
+    let mut i = at + 1;
+    while i < lines.len() && (lines[i].trim().is_empty() || is_tally_line(lines[i])) {
+        i += 1;
+    }
+    i
+}
+
+fn table_below(lines: &[&str], at: usize) -> Result<Table, String> {
+    let i = next_block_start(lines, at);
+    if i >= lines.len() {
+        return Err("no table follows it".to_owned());
+    }
+    parse_table(lines, i).ok_or_else(|| format!("what follows it is not a table: {}", lines[i]))
+}
+
+/// The number of `- ` items in the list that follows `at`; the list ends
+/// at the first blank line, and a wrapped item's continuation lines are
+/// not items.
+fn list_below(lines: &[&str], at: usize) -> Result<usize, String> {
+    let mut i = next_block_start(lines, at);
+    if i >= lines.len() || !lines[i].starts_with("- ") {
+        return Err("no list follows it".to_owned());
+    }
+    let mut items = 0;
+    while i < lines.len() && !lines[i].trim().is_empty() {
+        if lines[i].starts_with("- ") {
+            items += 1;
+        }
+        i += 1;
+    }
+    Ok(items)
+}
+
+/// The nearest table that ends before `at`.
+fn table_above(lines: &[&str], at: usize) -> Result<Table, String> {
+    let mut end = at;
+    while end > 0 && !is_table_line(lines[end - 1]) {
+        end -= 1;
+    }
+    if end == 0 {
+        return Err("no table precedes it".to_owned());
+    }
+    let mut start = end - 1;
+    while start > 0 && is_table_line(lines[start - 1]) {
+        start -= 1;
+    }
+    parse_table(lines, start).ok_or_else(|| "no table precedes it".to_owned())
+}
+
+fn number(s: &str) -> Result<f64, String> {
+    let s = s.trim().trim_matches('*').trim();
+    s.parse::<f64>()
+        .map_err(|_| format!("`{s}` is not a number"))
+}
+
+fn count(s: &str) -> Result<usize, String> {
+    let s = s.trim().trim_matches('*').trim();
+    s.parse::<usize>()
+        .map_err(|_| format!("`{s}` is not a count"))
+}
+
+/// The text between the first pair of backticks in `s`, and what follows
+/// the closing one.
+fn backticked(s: &str) -> Result<(&str, &str), String> {
+    let start = s
+        .find('`')
+        .ok_or_else(|| format!("no backticked name in `{s}`"))?;
+    let rest = &s[start + 1..];
+    let end = rest
+        .find('`')
+        .ok_or_else(|| format!("unclosed backtick in `{s}`"))?;
+    Ok((&rest[..end], &rest[end + 1..]))
+}
+
+fn column_index(table: &Table, column: &str) -> Result<usize, String> {
+    table
+        .header
+        .iter()
+        .position(|h| h == column)
+        .ok_or_else(|| {
+            format!(
+                "the table has no `{column}` column; it has {:?}",
+                table.header
+            )
+        })
+}
+
+fn agree(stated: usize, found: usize, what: &str) -> Result<(), String> {
+    if stated == found {
+        Ok(())
+    } else {
+        Err(format!("states {stated} but {what} {found}"))
+    }
+}
+
+/// `<lo>–<hi>[ unit]`: the two ends of a stated range.
+fn split_range(lhs: &str) -> Result<(f64, f64), String> {
+    let token = lhs
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("no range in `{lhs}`"))?;
+    let (lo, hi) = token
+        .split_once('–')
+        .or_else(|| token.split_once("--"))
+        .or_else(|| token.split_once('-'))
+        .ok_or_else(|| format!("`{token}` is not a range"))?;
+    Ok((number(lo)?, number(hi)?))
+}
+
+/// The claim after `Tally (<id>):`, in one of six forms:
+///
+/// - `N rows in the table below`
+/// - `N items in the list below`
+/// - `N rows of the table above with <column> = <value>` (the column
+///   and the value each backticked)
+/// - `N distinct values of <column> in the table above` (backticked)
+/// - `N = a + b + …`
+/// - `lo–hi[ unit] over v1, v2, …`
+fn check_claim(lines: &[&str], at: usize, claim: &str) -> Result<(), String> {
+    if let Some((lhs, rhs)) = claim.split_once(" over ") {
+        let (lo, hi) = split_range(lhs)?;
+        let values = rhs
+            .split(',')
+            .map(number)
+            .collect::<Result<Vec<f64>, String>>()?;
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if (lo - min).abs() > 1e-9 || (hi - max).abs() > 1e-9 {
+            return Err(format!(
+                "states {lo}–{hi} but the {} enumerated values range {min}–{max}",
+                values.len()
+            ));
+        }
+        return Ok(());
+    }
+    if let Some((lhs, rhs)) = claim.split_once(" of the table above with ") {
+        let stated = count(lhs.split_whitespace().next().unwrap_or(""))?;
+        let (column, rest) = backticked(rhs)?;
+        let (value, _) = backticked(rest.trim().strip_prefix('=').unwrap_or(rest))?;
+        let table = table_above(lines, at)?;
+        let col = column_index(&table, column)?;
+        let found = table
+            .rows
+            .iter()
+            .filter(|r| r.get(col).is_some_and(|c| c == value))
+            .count();
+        return agree(
+            stated,
+            found,
+            &format!("the rows whose `{column}` is `{value}` number"),
+        );
+    }
+    if let Some((lhs, rhs)) = claim
+        .split_once(" distinct values of ")
+        .or_else(|| claim.split_once(" distinct value of "))
+    {
+        let stated = count(lhs)?;
+        let (column, _) = backticked(rhs)?;
+        let table = table_above(lines, at)?;
+        let col = column_index(&table, column)?;
+        let mut seen: Vec<&String> = table.rows.iter().filter_map(|r| r.get(col)).collect();
+        seen.sort();
+        seen.dedup();
+        return agree(
+            stated,
+            seen.len(),
+            &format!("the distinct `{column}` values number"),
+        );
+    }
+    if let Some(lhs) = claim
+        .strip_suffix(" rows in the table below")
+        .or_else(|| claim.strip_suffix(" row in the table below"))
+    {
+        let stated = count(lhs)?;
+        let table = table_below(lines, at)?;
+        return agree(stated, table.rows.len(), "the table below holds");
+    }
+    if let Some(lhs) = claim
+        .strip_suffix(" items in the list below")
+        .or_else(|| claim.strip_suffix(" item in the list below"))
+    {
+        let stated = count(lhs)?;
+        let found = list_below(lines, at)?;
+        return agree(stated, found, "the list below holds");
+    }
+    if let Some((lhs, rhs)) = claim.split_once(" = ") {
+        let stated = count(lhs)?;
+        let found = rhs
+            .split('+')
+            .map(count)
+            .collect::<Result<Vec<usize>, String>>()?
+            .iter()
+            .sum();
+        return agree(stated, found, "the addends sum to");
+    }
+    Err(format!("`{claim}` is none of the six tally forms"))
+}
+
+/// Every `Tally (<id>): …` line in `doc`, checked; the failures name
+/// the line, the id and the disagreement.
+struct TallyReport {
+    checked: usize,
+    failures: Vec<String>,
+}
+
+fn check_tallies(doc: &str) -> TallyReport {
+    let lines: Vec<&str> = doc.lines().collect();
+    let mut report = TallyReport {
+        checked: 0,
+        failures: Vec::new(),
+    };
+    for (n, line) in lines.iter().enumerate() {
+        let Some(rest) = line.strip_prefix("Tally (") else {
+            continue;
+        };
+        report.checked += 1;
+        let Some((id, claim)) = rest.split_once("):") else {
+            report
+                .failures
+                .push(format!("{}: a tally line without `):` --- {line}", n + 1));
+            continue;
+        };
+        let claim = claim.trim().trim_end_matches('.').trim();
+        if let Err(why) = check_claim(&lines, n, claim) {
+            report
+                .failures
+                .push(format!("{}: Tally ({id}) {why}\n    {line}", n + 1));
+        }
+    }
+    report
+}
+
+/// The registry's counts of record each sit beside the enumeration
+/// they count, as a `Tally (<id>): …` line, and the stated number
+/// equals what the enumeration holds. Four consecutive phases shipped a
+/// count in that file its own enumeration contradicted (E2's family
+/// at eleven over twelve rows; E3's `daemon_reships…` at three over
+/// four; E4's #259 at 35–47 polls over samples of 16, 38, 47 and 35),
+/// each caught by a reviewer recounting by hand; this makes the
+/// recount the test's.
+#[test]
+fn ci_red_registry_counts_equal_their_enumerations() {
+    let report = check_tallies(&read("docs/ci-red-signatures.md"));
+    assert!(
+        report.checked > 0,
+        "docs/ci-red-signatures.md carries no `Tally (<id>):` line; \
+         its counts of record are written as tallies beside their enumerations"
+    );
+    assert!(
+        report.failures.is_empty(),
+        "a count of record in docs/ci-red-signatures.md disagrees with its enumeration:\n{}",
+        report.failures.join("\n")
+    );
+}
+
 /// A tiny matcher for the two shapes this file needs, so the test does
 /// not pull the `regex` crate into every test binary's dependency graph
 /// for two patterns. `\b`, `\d`, `{m,n}`, `[\d,]*`, `\s+`, alternation
@@ -364,5 +690,76 @@ mod matcher {
         assert!(!count_in("glibc 2.35 or newer"));
         assert!(!count_in("Ubuntu 22.04"));
         assert!(!count_in("an 8-column tab projection"));
+    }
+
+    /// One of each tally form, every one agreeing with its enumeration.
+    const TALLIES: &str = "\
+Tally (rows): 2 rows in the table below.
+
+| run | who |
+|---|---|
+| 1 | `x` |
+| 2 | **y** |
+
+Tally (distinct): 2 distinct values of `who` in the table above.
+Tally (with): 1 row of the table above with `who` = `x`.
+
+Tally (items): 3 items in the list below.
+
+- one
+- two
+  wrapped onto a second line
+- three
+
+Tally (sum): 5 = 2 + 3.
+
+Tally (range): 1.5–4 s over 4, 1.5, 2.
+";
+
+    #[test]
+    fn every_tally_form_is_checked_and_agrees() {
+        let report = check_tallies(TALLIES);
+        assert_eq!(report.checked, 6);
+        assert!(report.failures.is_empty(), "{}", report.failures.join("\n"));
+    }
+
+    /// Each form, off by one, fails naming its id and nothing else.
+    #[test]
+    fn a_tally_that_disagrees_with_its_enumeration_fails_by_name() {
+        let cases = [
+            ("rows", "2 rows in", "3 rows in"),
+            ("distinct", "2 distinct", "1 distinct"),
+            ("with", "1 row of", "2 rows of"),
+            ("items", "3 items", "2 items"),
+            ("sum", "5 = 2 + 3", "6 = 2 + 3"),
+            ("range", "1.5–4 s", "2–4 s"),
+        ];
+        for (id, good, bad) in cases {
+            let doc = TALLIES.replacen(good, bad, 1);
+            assert_ne!(doc, TALLIES, "{id}: the mutation must apply");
+            let report = check_tallies(&doc);
+            assert_eq!(
+                report.failures.len(),
+                1,
+                "{id}: exactly one tally fails; got {:?}",
+                report.failures
+            );
+            assert!(
+                report.failures[0].contains(&format!("Tally ({id})")),
+                "{id}: the failure names its tally; got {}",
+                report.failures[0]
+            );
+        }
+    }
+
+    /// A tally with nothing under it, or in no known form, is itself a
+    /// failure rather than a silent pass.
+    #[test]
+    fn a_tally_without_an_enumeration_or_in_no_known_form_fails() {
+        let orphan = check_tallies("Tally (o): 2 rows in the table below.\n\nprose\n");
+        assert_eq!(orphan.failures.len(), 1, "{:?}", orphan.failures);
+        let unknown = check_tallies("Tally (u): two of them.\n");
+        assert_eq!(unknown.failures.len(), 1, "{:?}", unknown.failures);
+        assert!(unknown.failures[0].contains("none of the six tally forms"));
     }
 }

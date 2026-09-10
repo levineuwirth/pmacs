@@ -93,6 +93,20 @@ E2's does not. E3's three PR runs and `main`'s run after its merge are
 recorded below by E4's opening registry commit, on `main`, before E4's
 first push.
 
+**A count of record is written as a tally beside its enumeration**: one
+line beginning `Tally (<id>):`, and `tests/docs_consistency.rs` asserts
+every tally in this file against what it counts --- the rows of the
+table or the items of the list under it, the rows of the table above it
+carrying a named cell, the distinct values of a column, a sum of
+addends, or the range of an enumerated sample. The forms are the
+test's, and a count stated in this section without a tally is a defect
+of this file. Added 2026-09-10 in E4's fix round 1, because four
+consecutive phases shipped a count here that its own enumeration
+contradicted (E2: the family at eleven over twelve rows; E3:
+`daemon_reships…` at three over four; E4: #259 at 35–47 polls over
+samples of 16, 38, 47 and 35), each caught by a reviewer recounting by
+hand.
+
 ### `main` after E3: run 34483416251 at `2ca2094`, red on the family's first trunk sample
 
 | field | value |
@@ -128,13 +142,25 @@ Each is on its issue with the log link. **#266 is fixed at `f457328`**
 its fix was confirmed green on the leg it failed on in 34474086323; two
 occurrences, closed by mechanism removal, not by a green count.
 
+Tally (266): 2 items in the list below.
+
+- gate log `20260910T074133Z-120546`, `06-sweep`, at `450ef26` (filed
+  from E3's fix round 1)
+- run 34452014666 at `450ef26`, `Test (ubuntu-latest / luajit, no
+  crdt)`, `67.007468 ms`, `1 polls`
+
 ### #256 at TWO, with no row until the owner rules on the archived rate
 
 `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`,
-`live runtime probe`, both local Linux under full-sweep load: gate log
-`20260908T104328Z-2589144` (`05-sweep`) and gate log
-`20260910T115801Z-321737` (`06-sweep`, passed in the same run's
-`sweep-luajit`). The project's own archive
+`live runtime probe`, both local Linux under full-sweep load.
+
+Tally (256): 2 items in the list below.
+
+- gate log `20260908T104328Z-2589144`, `05-sweep`
+- gate log `20260910T115801Z-321737`, `06-sweep` (passed in the same
+  run's `sweep-luajit`)
+
+The project's own archive
 (`docs/archive/framings/ci-crdt-coverage-framing.md:622-629`) parked
 this expression at "~1 in 5 under parallel full-suite load" with the
 discriminator — a serial full-suite bite — never run, and as a product
@@ -151,6 +177,13 @@ with both of #264's fragments (`expected Ok, got Err(AutoStartTimeout`,
 `src/daemon_attach.rs:849:9`), `2205 passed; 1 failed` in the `--lib`
 target at 21.78 s. `src/daemon_attach.rs` has no diff on the branch.
 **#264 is at two**; on the issue, not re-run.
+
+Tally (264): 2 items in the list below.
+
+- gate log `20260909T204440Z-3628136`, `06-sweep`, `2201 passed; 1
+  failed` (E3's fix-round tree; filed as #264)
+- gate log `20260910T135544Z-49662`, `05-sweep`, `2205 passed; 1
+  failed`, at `bbc4dca`
 
 ### The poll cadence on the hosted macOS runners, measured (E4's opening, run 34484377105)
 
@@ -205,6 +238,16 @@ Its title said "never writes its readiness file", which the four
 samples contradict; it is retitled and re-disposed on the issue on
 2026-09-10. A budget change there is a choice about margin and not a
 fix, and it is the owner's.
+
+Tally (259-green-polls): 16–47 over 16, 38, 47, 35.
+
+Tally (259-green-elapsed): 1.38–4.24 s over 1.38, 3.51, 4.24, 3.43.
+
+Tally (259-green-share): 28–85 % over 28, 70, 85, 69.
+
+Tally (259-red-polls): 53–58 over 53, 54, 58, 58.
+
+Tally (259-red-elapsed): 5.01–5.04 s over 5.04, 5.03, 5.03, 5.01.
 
 ### Run 34373256548, PR #262 at the head `7b6c519`
 
@@ -271,6 +314,10 @@ extracting the panicking thread and site of each hit. Per-job counts:
 2026-09-09; thirteen and fourteen added 2026-09-10 from E3's fix-round
 head and from `main` after E3's merge.)
 
+Tally (read-hello-per-job): 14 = 1 + 1 + 4 + 1 + 2 + 2 + 1 + 1 + 1.
+
+Tally (read-hello-family): 14 rows in the table below.
+
 | # | run | sha | suite | selector |
 |---|---|---|---|---|
 | 1 | 34220035122 | `8f6784f` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
@@ -296,6 +343,22 @@ The six selectors are `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join
 `m10_10_non_replica_frontend_does_not_receive_cursor_byte` and
 `daemon_routes_semantic_family_to_semantic_session_only` (one each).
 
+Tally (read-hello-suites): 5 distinct values of `suite` in the table above.
+
+Tally (read-hello-selectors): 6 distinct values of `selector` in the table above.
+
+Tally (read-hello-a16_26): 4 rows of the table above with `selector` = `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`.
+
+Tally (read-hello-daemon_reships): 5 rows of the table above with `selector` = `daemon_reships_the_summary_after_a_real_buffer_round_trip`.
+
+Tally (read-hello-v15_peer): 2 rows of the table above with `selector` = `v15_peer_never_receives_theme_facts_and_v16_does`.
+
+Tally (read-hello-v16_peer): 1 row of the table above with `selector` = `v16_peer_never_receives_font_facts_and_v17_does`.
+
+Tally (read-hello-m10_10): 1 row of the table above with `selector` = `m10_10_non_replica_frontend_does_not_receive_cursor_byte`.
+
+Tally (read-hello-daemon_routes): 1 row of the table above with `selector` = `daemon_routes_semantic_family_to_semantic_session_only`.
+
 Zero `WouldBlock` in all three failing macOS **lua54** jobs
 (102040771394, 102047236847, 102154957233) and **zero at the merge
 base**. The count is a floor: nobody has counted runs, so an
@@ -303,10 +366,16 @@ occurrence is recorded only when someone reads a log.
 
 ### #258 is at FOUR occurrences
 
-Its own selector, job and all three required fragments, four times:
-run 34220035122 at `8f6784f`; run 34272480226 at `d7fd465` (the
-occurrence D30 dispositioned); run 34369540895 at `e5417f6`; and run
-34373256548 at `7b6c519`. The last two are **consecutive runs on one
+Its own selector, job and all three required fragments, four times.
+
+Tally (258): 4 items in the list below.
+
+- run 34220035122 at `8f6784f`
+- run 34272480226 at `d7fd465` (the occurrence D30 dispositioned)
+- run 34369540895 at `e5417f6`
+- run 34373256548 at `7b6c519`
+
+The last two are **consecutive runs on one
 branch whose shas differ by 83 lines of markdown**, which excludes the
 diff between them as the cause and establishes nothing whatever about
 frequency. Two consecutive runs are two occurrences, not a rate.
@@ -335,6 +404,16 @@ Not a CI red. Gate log `20260909T154216Z-2666527`, step
 `FAILED. 2001 passed; 7 failed; 11 ignored ... finished in 19.41s`.
 Seven `async_runtime::tests::` failures, filed as **#263** because the
 signature matched no row here.
+
+Tally (263): 7 items in the list below.
+
+- `dispatch_sleep_completes_with_unit`
+- `dispatch_sum_completes_with_correct_value`
+- `dispatch_parse_round_trips_a_rust_source_file`
+- `dispatch_cancel_1000_cycles_no_leak`
+- `cancel_in_flight_sleep_yields_cancelled_outcome`
+- `many_independent_jobs_complete_concurrently`
+- `keyless_dispatch_is_unaffected_by_supersede`
 
 **Required fragments**: (`runtime tick deadline exceeded` **or**
 `keyless job stalled`) **and** `did not settle within 2s`, with the
