@@ -190,35 +190,73 @@ pub fn tick_until<T>(
     }
 }
 
-/// Wait until a `pmacs --daemon` is listening on `socket`, or report
-/// why not: the child's exit status if it died first, else the last
-/// connect error. Probes by connecting, never by `exists()`: a stale
-/// socket file satisfies `exists` with nobody listening. The `Hello` is
-/// read so the daemon's first send succeeds and it logs no warning.
+/// How long one readiness probe waits for the daemon's `Hello` after
+/// its connect succeeded. The daemon binds its socket before it can
+/// serve (`run_daemon` binds, then constructs the editor), so a connect
+/// alone says nothing about readiness; on the hosted macOS runners the
+/// gap is p50 597 ms and up to 1.1 s (run 34351035133). A probe that
+/// connects and gets no `Hello` within this window reports `Pending`
+/// and the wait tries again, so the deadline bounds the whole boot.
+pub const HELLO_READ: Duration = Duration::from_millis(500);
+
+/// Wait until a `pmacs --daemon` on `socket` **serves** --- accepts a
+/// connection and answers it with a `Hello` --- or report why not.
+///
+/// Probes by connecting, never by `exists()`: a stale socket file
+/// satisfies `exists` with nobody listening. Readiness is the `Hello`
+/// and not the connect: before E5.0 the probe declared readiness on a
+/// successful connect and read the `Hello` under [`HELLO_READ`] only
+/// to keep the daemon's first send from logging, discarding the
+/// result --- so a test whose own `Hello` read then ran under a
+/// 200--250 ms timeout was bounded by the remainder of the daemon's
+/// boot, which is the `read Hello` family (fifteen CI occurrences,
+/// every one on a hosted macOS leg where bind-to-serving is p50 597
+/// ms). Now the probe that first sees a `Hello` is the one that
+/// returns, and every later connection finds a daemon that has already
+/// served one.
+///
+/// A daemon that exits before serving is reported at once, with its
+/// exit status, rather than after the whole deadline: the probe
+/// observes the child, and an exit is terminal.
 pub fn wait_for_daemon(
     socket: &std::path::Path,
     child: &mut std::process::Child,
     deadline: Duration,
 ) -> Result<(), Timeout> {
-    wait(
-        &format!("a daemon listening on {}", socket.display()),
-        deadline,
-        || match std::os::unix::net::UnixStream::connect(socket) {
+    let what = format!("a daemon serving on {}", socket.display());
+    let start = Instant::now();
+    let mut polls = 0u32;
+    let outcome = wait(&what, deadline, || {
+        polls += 1;
+        match std::os::unix::net::UnixStream::connect(socket) {
             Ok(mut stream) => {
-                stream
-                    .set_read_timeout(Some(Duration::from_millis(500)))
-                    .ok();
-                let _ = pmacs::transport::read_message::<pmacs::protocol::Hello>(&mut stream);
-                Probe::Ready(())
+                stream.set_read_timeout(Some(HELLO_READ)).ok();
+                match pmacs::transport::read_message::<pmacs::protocol::Hello>(&mut stream) {
+                    Ok(_) => Probe::Ready(Ok(())),
+                    Err(error) => Probe::Pending(format!(
+                        "connected, but no Hello within {HELLO_READ:?}: {error}"
+                    )),
+                }
             }
             Err(connect) => match child.try_wait() {
-                Ok(Some(status)) => {
-                    Probe::Pending(format!("the daemon exited with {status} before listening"))
-                }
+                Ok(Some(status)) => Probe::Ready(Err(format!(
+                    "the daemon exited with {status} before serving"
+                ))),
                 _ => Probe::Pending(format!("connect: {connect}")),
             },
-        },
-    )
+        }
+    });
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(last)) => Err(Timeout {
+            what,
+            deadline,
+            elapsed: start.elapsed(),
+            polls,
+            last,
+        }),
+        Err(timeout) => Err(timeout),
+    }
 }
 
 /// The tick interval for [`tick_until`]: an in-process editor's frame
@@ -302,5 +340,84 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("last observed: still nothing"), "{text}");
+    }
+
+    /// A daemon that dies before serving is reported on the probe that
+    /// sees its exit, not after the deadline. The child is already
+    /// reaped, so the first probe sees the exit; `polls == 1` is a count
+    /// and not a wall-clock claim.
+    #[test]
+    fn a_daemon_that_exits_before_serving_is_reported_at_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("never.sock");
+        let mut child = std::process::Command::new("false")
+            .spawn()
+            .expect("spawn false");
+        let _ = child.wait();
+        let err = wait_for_daemon(&socket, &mut child, Duration::from_secs(10))
+            .expect_err("no daemon serves");
+        assert_eq!(err.polls, 1, "{err}");
+        assert!(err.last.contains("exited with"), "{err}");
+        assert!(err.last.contains("before serving"), "{err}");
+    }
+
+    /// Readiness is a served `Hello`, not a successful connect: a
+    /// listener that accepts and closes without a `Hello` is not ready,
+    /// and the wait returns on the first connection that is answered.
+    #[test]
+    fn readiness_is_a_served_hello_not_a_connect() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("late.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = accepted.clone();
+        let server = std::thread::spawn(move || {
+            // Two connections are accepted and dropped unanswered (a
+            // bound socket whose daemon is still booting); the third is
+            // answered with a Hello.
+            for mut stream in listener.incoming().flatten() {
+                let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n >= 3 {
+                    let hello = pmacs::protocol::Hello {
+                        protocol_version: 1,
+                        assigned_frontend_id: pmacs::protocol::FrontendId(2),
+                        instance_identity: pmacs::protocol::InstanceIdentity {
+                            pmacs_version: "test".to_owned(),
+                            build_hash: None,
+                            instance_name: None,
+                            uptime_secs: 0,
+                            working_directory: "/".to_owned(),
+                        },
+                        instance_capabilities: pmacs::protocol::InstanceCapabilities::default(),
+                    };
+                    pmacs::transport::write_message(&mut stream, &hello).expect("write Hello");
+                    let _ = stream.flush();
+                    break;
+                }
+                drop(stream);
+            }
+        });
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let result = wait_for_daemon(&socket, &mut child, Duration::from_secs(10));
+        let _ = child.kill();
+        let _ = child.wait();
+        // A wait that returned early (on a connect, say) leaves the
+        // server blocked in `accept`; unblock it with connections of our
+        // own so the join below cannot hang, and read the count before
+        // they land.
+        let probed = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..3 {
+            let _ = std::os::unix::net::UnixStream::connect(&socket);
+        }
+        server.join().expect("server thread");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            probed >= 3,
+            "the wait must keep probing past the unanswered connections; it returned after {probed}"
+        );
     }
 }
