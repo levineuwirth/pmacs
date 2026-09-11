@@ -3844,6 +3844,10 @@ function pmacs.lsp.diagnostics()
   -- label, which visits nothing; when the buffer has a diagnostic, RET
   -- should land on it at once.
   if rows[2] and rows[2].item then pmacs.editor.move_down() end
+  -- The cursor moved after `open` seated it: retain the row it holds
+  -- so a background publication reseats this diagnostic, not the
+  -- section label.
+  pcall(pmacs.listview.retain_selection)
 end
 
 pmacs.command.define {

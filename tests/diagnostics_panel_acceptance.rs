@@ -466,6 +466,159 @@ fn review3_duplicate_republish_keeps_selection_on_the_same_row() {
 }
 
 #[test]
+fn review3_publish_inserting_a_row_preserves_the_selected_diagnostic() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 1);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    assert!(panel_text(&state).contains("This buffer (1):"));
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.listview.current_item().line"),
+        2
+    );
+    exec(
+        &state,
+        r"
+        REVIEW_PUBLISH = false
+        pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // insert\nlet x = 1;\nlet y = 2;\n')
+    ",
+    );
+    ready::tick_until(
+        &mut state,
+        "changed diagnostic publication",
+        ready::DEADLINE,
+        |s| {
+            if eval::<bool>(s, "return REVIEW_PUBLISH") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending("awaiting publish".to_owned())
+            }
+        },
+    );
+    assert!(panel_text(&state).contains("This buffer (2):"));
+    assert_eq!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()"),
+        "*diagnostics*"
+    );
+    press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
+    let (name, line): (String, i64) = eval(
+        &state,
+        "return pmacs.window.buffer():name(), pmacs.editor.cursor_line()",
+    );
+    assert!(name.ends_with("main.rs"));
+    assert_eq!(
+        line, 2,
+        "RET must still visit the selected diagnostic after an earlier row is inserted"
+    );
+}
+
+#[test]
+fn review3_publish_removing_the_selected_row_falls_back_to_its_line() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 1);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    assert!(panel_text(&state).contains("This buffer (1):"));
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.editor.cursor_line()"),
+        2
+    );
+    exec(
+        &state,
+        "pmacs.diag.clear(REVIEW_ATTACHMENT.uri); pmacs.listview.rerender('*diagnostics*')",
+    );
+    let (line, no_item): (i64, bool) = eval(
+        &state,
+        "return pmacs.editor.cursor_line(), pmacs.listview.current_item() == nil",
+    );
+    assert_eq!(
+        line, 2,
+        "a vanished diagnostic falls back to its numeric line, clamped"
+    );
+    assert!(
+        no_item,
+        "the fallback line carries no diagnostic to visit"
+    );
+    assert!(panel_text(&state).contains("This buffer (0):"));
+}
+
+#[test]
+fn review3_background_publish_keeps_the_panel_selection_and_leaves_the_document_cursor() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 1);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    assert!(panel_text(&state).contains("This buffer (1):"));
+    exec(&state, "REVIEW_PANEL = pmacs.window.buffer()");
+    exec(
+        &state,
+        &format!(
+            "pmacs.window.display_file({}, {{ select = true }})",
+            lua_str(&file)
+        ),
+    );
+    assert!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("main.rs")
+    );
+    let doc_line: i64 = eval(&state, "return pmacs.editor.cursor_line()");
+    exec(
+        &state,
+        r"
+        REVIEW_PUBLISH = false
+        pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // insert\nlet x = 1;\nlet y = 2;\n')
+    ",
+    );
+    ready::tick_until(
+        &mut state,
+        "background diagnostic publication",
+        ready::DEADLINE,
+        |s| {
+            if eval::<bool>(s, "return REVIEW_PUBLISH") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending("awaiting publish".to_owned())
+            }
+        },
+    );
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.editor.cursor_line()"),
+        doc_line,
+        "refreshing a background panel must not move the document window"
+    );
+    assert!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("main.rs"),
+        "the background refresh leaves the document focused"
+    );
+    // Focusing re-seats the cursor through the display transaction, so
+    // the background window's retained selection is read in place.
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.window._cursor_line_on_buffer(REVIEW_PANEL)"),
+        3,
+        "the background panel kept the selected diagnostic across the insertion"
+    );
+    exec(&state, "pmacs.window.display(REVIEW_PANEL, { select = true })");
+    assert!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()")
+            .ends_with("*diagnostics*"),
+        "switching back focuses the panel"
+    );
+}
+
+#[test]
 fn review_project_section_excludes_an_unrelated_root() {
     let fx = Fixture::new();
     fx.write("proj_a/Cargo.toml", "[package]\nname = \"a\"\n");
