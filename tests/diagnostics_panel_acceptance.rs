@@ -242,14 +242,20 @@ fn review_g_preserves_the_source_buffer_section_and_ret_target() {
     wait_diag_count(&mut state, &file, 2);
     m_x(&mut state, "lsp.diagnostics");
     assert!(panel_text(&state).contains("This buffer (2):"));
-    assert_eq!(eval::<String>(&state, "return pmacs.window.buffer():name()"), "*diagnostics*");
+    assert_eq!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()"),
+        "*diagnostics*"
+    );
     press(&mut state, KeyCode::Char('g'), KeyModifiers::NONE);
     let text = panel_text(&state);
     eprintln!("AFTER G: {text}");
     press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
     let destination: String = eval(&state, "return pmacs.window.buffer():name()");
     eprintln!("RET DESTINATION: {destination}");
-    assert!(text.contains("This buffer (2):"), "refresh lost the source buffer: {text}");
+    assert!(
+        text.contains("This buffer (2):"),
+        "refresh lost the source buffer: {text}"
+    );
     assert!(destination.ends_with("main.rs"));
 }
 
@@ -264,18 +270,30 @@ fn review_publish_preserves_the_source_while_panel_is_focused() {
     exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
     m_x(&mut state, "lsp.diagnostics");
     assert!(panel_text(&state).contains("This buffer (2):"));
-    exec(&state, r#"
+    exec(
+        &state,
+        r"
         REVIEW_PUBLISH = false
         pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
         pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {}\nlet x = 1;\nlet y = 2;\n')
-    "#);
+    ",
+    );
     ready::tick_until(&mut state, "republish", ready::DEADLINE, |s| {
-        if eval::<bool>(s, "return REVIEW_PUBLISH") { ready::Probe::Ready(()) }
-        else { ready::Probe::Pending("no publish yet".to_owned()) }
+        if eval::<bool>(s, "return REVIEW_PUBLISH") {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending("no publish yet".to_owned())
+        }
     });
-    assert_eq!(eval::<String>(&state, "return pmacs.window.buffer():name()"), "*diagnostics*");
-    let text=panel_text(&state);
-    assert!(text.contains("This buffer (2):"), "publish lost source: {text}");
+    assert_eq!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()"),
+        "*diagnostics*"
+    );
+    let text = panel_text(&state);
+    assert!(
+        text.contains("This buffer (2):"),
+        "publish lost source: {text}"
+    );
 }
 
 #[test]
@@ -283,15 +301,28 @@ fn review_project_section_excludes_an_unrelated_root() {
     let fx = Fixture::new();
     fx.write("proj_a/Cargo.toml", "[package]\nname = \"a\"\n");
     fx.write("proj_b/Cargo.toml", "[package]\nname = \"b\"\n");
-    let a=fx.write("proj_a/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
-    let b=fx.write("proj_b/src/unrelated.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
-    let mut state=editor(&fx);
-    open(&state,&b);
-    wait_diag_count(&mut state,&b,2);
-    open(&state,&a);
-    wait_diag_count(&mut state,&a,2);
-    assert_eq!(eval::<usize>(&state,"return #pmacs.lsp.list()"),2, "two roots have independent servers");
-    m_x(&mut state,"lsp.diagnostics");
-    let text=panel_text(&state);
-    assert!(!text.contains("unrelated.rs"), "other root leaked into Project: {text}");
+    let a = fx.write(
+        "proj_a/src/main.rs",
+        "fn main() {}\nlet x = 1;\nlet y = 2;\n",
+    );
+    let b = fx.write(
+        "proj_b/src/unrelated.rs",
+        "fn main() {}\nlet x = 1;\nlet y = 2;\n",
+    );
+    let mut state = editor(&fx);
+    open(&state, &b);
+    wait_diag_count(&mut state, &b, 2);
+    open(&state, &a);
+    wait_diag_count(&mut state, &a, 2);
+    assert_eq!(
+        eval::<usize>(&state, "return #pmacs.lsp.list()"),
+        2,
+        "two roots have independent servers"
+    );
+    m_x(&mut state, "lsp.diagnostics");
+    let text = panel_text(&state);
+    assert!(
+        !text.contains("unrelated.rs"),
+        "other root leaked into Project: {text}"
+    );
 }

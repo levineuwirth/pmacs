@@ -576,7 +576,10 @@ impl LuaHost {
             return None;
         }
         let err = self.last_error()?;
-        let first = err.message.split_once('\n').map_or(err.message.as_str(), |(head, _)| head);
+        let first = err
+            .message
+            .split_once('\n')
+            .map_or(err.message.as_str(), |(head, _)| head);
         let clean: String = first
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })

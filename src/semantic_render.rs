@@ -1260,13 +1260,10 @@ impl SemanticRenderState {
         // empty styling at once, without waiting for the next server
         // response. The TUI's policy check already takes effect
         // immediately; the wire must too.
-        let semantic_enabled = crate::highlight::StylePolicy::from_lua(
-            state.lua_host.lua(),
-            Some(vp.buffer_id),
-        )
-        .semantic;
-        let style_tokens_stale =
-            semantic_enabled && lsp_style_tokens_stale(state, vp.buffer_id);
+        let semantic_enabled =
+            crate::highlight::StylePolicy::from_lua(state.lua_host.lua(), Some(vp.buffer_id))
+                .semantic;
+        let style_tokens_stale = semantic_enabled && lsp_style_tokens_stale(state, vp.buffer_id);
         let style_hold = style_parse_not_ready || style_tokens_stale;
         let style_gate = (!style_hold).then(|| grammar_style_key(state, &vp, generation));
         let style_gate = style_gate.flatten();
@@ -3279,8 +3276,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     // override applies to the buffer it was set on. The emission gate
     // (`grammar_style_key`) already carries the config epoch, so a local
     // change flips the gate and recomputes.
-    let policy =
-        crate::highlight::StylePolicy::from_lua(state.lua_host.lua(), Some(vp.buffer_id));
+    let policy = crate::highlight::StylePolicy::from_lua(state.lua_host.lua(), Some(vp.buffer_id));
     let Some(handle) = state.syntax_registry.view(vp.buffer_id) else {
         return if policy.semantic {
             lsp_scoped_style_spans(state, vp)
@@ -3605,11 +3601,7 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
         }
         // One resolver on both paths (`SemanticTokensLegend::style_name_for`),
         // so a modifier-specific face agrees with the grid's `LspStyleView`.
-        let Some(lookup_name) = ctx
-            .legend
-            .as_ref()
-            .and_then(|lg| lg.style_name_for(t))
-        else {
+        let Some(lookup_name) = ctx.legend.as_ref().and_then(|lg| lg.style_name_for(t)) else {
             continue; // No legend / unknown type ⇒ cannot name a style.
         };
         let style = theme.lookup(&lookup_name);
@@ -6699,7 +6691,10 @@ mod tests {
             store.lock().expect("sem token store").set(
                 crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
                 crate::semantic_tokens::SemanticTokensResponse {
-                    tokens: vec![crate::semantic_tokens::SemanticToken { token_modifiers: 1, ..tok(0, 3, 4) }],
+                    tokens: vec![crate::semantic_tokens::SemanticToken {
+                        token_modifiers: 1,
+                        ..tok(0, 3, 4)
+                    }],
                     result_id: None,
                     raw: Vec::new(),
                 },
@@ -6718,10 +6713,18 @@ mod tests {
         let wire = |state: &EditorState| -> Vec<(u64, u64, Style)> {
             let mut render = SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
             render.set_viewport(bid, vp.visible, 0);
-            render.render_frame(state).into_iter().flat_map(|m| match m {
-                InstanceMessage::StyleSpans { segments, .. } => segments.into_iter().flat_map(|seg| seg.spans).collect::<Vec<_>>(),
-                _ => Vec::new(),
-            }).map(|s| (s.range.start, s.range.end, s.style)).collect()
+            render
+                .render_frame(state)
+                .into_iter()
+                .flat_map(|m| match m {
+                    InstanceMessage::StyleSpans { segments, .. } => segments
+                        .into_iter()
+                        .flat_map(|seg| seg.spans)
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .map(|s| (s.range.start, s.range.end, s.style))
+                .collect()
         };
         let grid = |state: &EditorState| -> Vec<(u64, u64, Style)> {
             let cols = usize::try_from(content).expect("small");
@@ -6869,10 +6872,18 @@ mod tests {
         let wire = |state: &EditorState| -> Vec<(u64, u64, Style)> {
             let mut render = SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
             render.set_viewport(bid, vp.visible, 0);
-            render.render_frame(state).into_iter().flat_map(|m| match m {
-                InstanceMessage::StyleSpans { segments, .. } => segments.into_iter().flat_map(|seg| seg.spans).collect::<Vec<_>>(),
-                _ => Vec::new(),
-            }).map(|s| (s.range.start, s.range.end, s.style)).collect()
+            render
+                .render_frame(state)
+                .into_iter()
+                .flat_map(|m| match m {
+                    InstanceMessage::StyleSpans { segments, .. } => segments
+                        .into_iter()
+                        .flat_map(|seg| seg.spans)
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .map(|s| (s.range.start, s.range.end, s.style))
+                .collect()
         };
         let grid = |state: &EditorState| -> Vec<(u64, u64, Style)> {
             let cols = usize::try_from(content).expect("small");
@@ -6981,10 +6992,18 @@ mod tests {
             )
             .expect("local on");
         let (w_local_on, g_local_on) = (wire(&state), grid(&state));
-        assert_eq!(w_local_on, g_local_on, "local-on: the wire's spans are the grid's cells");
-        assert_ne!(w_local_on, grammar_only, "local-on: the merge returns over global false");
+        assert_eq!(
+            w_local_on, g_local_on,
+            "local-on: the wire's spans are the grid's cells"
+        );
+        assert_ne!(
+            w_local_on, grammar_only,
+            "local-on: the merge returns over global false"
+        );
         assert!(
-            w_local_on.iter().any(|(s, e, st)| *s == 3 && *e == 7 && st.italic),
+            w_local_on
+                .iter()
+                .any(|(s, e, st)| *s == 3 && *e == 7 && st.italic),
             "local-on: the token's refinement is back in both: {w_local_on:?}"
         );
     }
@@ -6999,8 +7018,19 @@ mod tests {
         let first = renderer.render_frame(&state);
         assert!(first.iter().any(|m| matches!(m, InstanceMessage::StyleSpans { segments, .. } if segments.iter().any(|seg| !seg.spans.is_empty()))));
         let path = state.core.borrow().active_buffer_path().unwrap();
-        state.lsp_manager.borrow().semantic_token_store().lock().unwrap().mark_stale(crate::lsp::path_to_file_uri(&path));
-        state.lua_host.lua().load("pmacs.config.set('ui.semantic-styling', false)").exec().unwrap();
+        state
+            .lsp_manager
+            .borrow()
+            .semantic_token_store()
+            .lock()
+            .unwrap()
+            .mark_stale(crate::lsp::path_to_file_uri(&path));
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.config.set('ui.semantic-styling', false)")
+            .exec()
+            .unwrap();
         let frame = renderer.render_frame(&state);
         assert!(frame.iter().any(|m| matches!(m, InstanceMessage::StyleSpans { segments, .. } if segments.iter().all(|seg| seg.spans.is_empty()))), "off must clear the previous semantic styling without awaiting a server response: {frame:?}");
     }
