@@ -3707,9 +3707,32 @@ local function active_buffer_uri()
   return nil
 end
 
+-- The diagnostics source resolved separately from panel focus: opening
+-- `lsp.diagnostics` focuses `*diagnostics*`, which has no file, so a
+-- refresh that recomputes from the active window loses the document.
+-- The originating URI is retained on open (and whenever a document is
+-- active) and reused while the panel is focused, for both manual `g`
+-- and publish refresh.
+local diagnostics_source_uri = nil
+
+local function diagnostics_source()
+  local buf = pmacs.window.buffer()
+  local is_panel = false
+  if buf then
+    local ok, desc = pcall(pmacs.describe.buffer, buf)
+    if ok and desc and desc.name == DIAGNOSTICS_PANEL then is_panel = true end
+  end
+  if is_panel and diagnostics_source_uri then
+    return diagnostics_source_uri
+  end
+  local uri = active_buffer_uri()
+  if uri then diagnostics_source_uri = uri end
+  return uri
+end
+
 local function diagnostic_rows()
   local rows = {}
-  local here_uri = active_buffer_uri()
+  local here_uri = diagnostics_source()
   local here = here_uri and pmacs.lsp.path_for_uri(here_uri) or nil
   local function push_uri(uri)
     local path = pmacs.lsp.path_for_uri(uri) or uri
@@ -3724,6 +3747,7 @@ local function diagnostic_rows()
         text = string.format("%s:%d:%d  %s  %s", shown, d.start_line + 1,
           d.start_col + 1, d.severity, (d.message:gsub("\n.*$", ""))),
         item = { uri = uri, line = d.start_line, col = d.start_col },
+        id = string.format("%s:%d:%d", uri, d.start_line, d.start_col),
       }
     end
     return #diags
@@ -3750,6 +3774,10 @@ local function diagnostic_rows()
 end
 
 function pmacs.lsp.diagnostics()
+  -- Capture the source before the panel takes focus; `diagnostic_rows`
+  -- then retains it while the panel is focused.
+  local src = active_buffer_uri()
+  if src then diagnostics_source_uri = src end
   local rows = diagnostic_rows()
   pmacs.listview.open {
     name = DIAGNOSTICS_PANEL,
