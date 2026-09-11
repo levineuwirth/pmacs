@@ -818,16 +818,13 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                 move |lua, (buffer, line): (BufferIdLua, usize)| -> mlua::Result<bool> {
                     let fid = acting_frontend(lua, &cc);
                     let mut core = cc.borrow_mut();
-                    let win = core
-                        .views
-                        .get(&fid)
-                        .and_then(|view| {
-                            view.layout.iter_ids().into_iter().find(|id| {
-                                core.windows
-                                    .get(id)
-                                    .is_some_and(|w| w.buffer_id == buffer.0)
-                            })
-                        });
+                    let win = core.views.get(&fid).and_then(|view| {
+                        view.layout.iter_ids().into_iter().find(|id| {
+                            core.windows
+                                .get(id)
+                                .is_some_and(|w| w.buffer_id == buffer.0)
+                        })
+                    });
                     let Some(win) = win else {
                         return Ok(false);
                     };

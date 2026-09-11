@@ -444,18 +444,13 @@ fn review3_duplicate_republish_keeps_selection_on_the_same_row() {
         pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n')
     ",
     );
-    ready::tick_until(
-        &mut state,
-        "same-set republication",
-        ready::DEADLINE,
-        |s| {
-            if eval::<bool>(s, "return REVIEW_PUBLISH") {
-                ready::Probe::Ready(())
-            } else {
-                ready::Probe::Pending("awaiting publish".to_owned())
-            }
-        },
-    );
+    ready::tick_until(&mut state, "same-set republication", ready::DEADLINE, |s| {
+        if eval::<bool>(s, "return REVIEW_PUBLISH") {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending("awaiting publish".to_owned())
+        }
+    });
     let after: i64 = eval(&state, "return pmacs.editor.cursor_line()");
     let item_line: i64 = eval(&state, "return pmacs.listview.current_item().line");
     assert_eq!(
@@ -528,10 +523,7 @@ fn review3_publish_removing_the_selected_row_falls_back_to_its_line() {
     exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
     m_x(&mut state, "lsp.diagnostics");
     assert!(panel_text(&state).contains("This buffer (1):"));
-    assert_eq!(
-        eval::<i64>(&state, "return pmacs.editor.cursor_line()"),
-        2
-    );
+    assert_eq!(eval::<i64>(&state, "return pmacs.editor.cursor_line()"), 2);
     exec(
         &state,
         "pmacs.diag.clear(REVIEW_ATTACHMENT.uri); pmacs.listview.rerender('*diagnostics*')",
@@ -544,10 +536,7 @@ fn review3_publish_removing_the_selected_row_falls_back_to_its_line() {
         line, 2,
         "a vanished diagnostic falls back to its numeric line, clamped"
     );
-    assert!(
-        no_item,
-        "the fallback line carries no diagnostic to visit"
-    );
+    assert!(no_item, "the fallback line carries no diagnostic to visit");
     assert!(panel_text(&state).contains("This buffer (0):"));
 }
 
@@ -570,9 +559,7 @@ fn review3_background_publish_keeps_the_panel_selection_and_leaves_the_document_
             lua_str(&file)
         ),
     );
-    assert!(
-        eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("main.rs")
-    );
+    assert!(eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("main.rs"));
     let doc_line: i64 = eval(&state, "return pmacs.editor.cursor_line()");
     exec(
         &state,
@@ -606,14 +593,19 @@ fn review3_background_publish_keeps_the_panel_selection_and_leaves_the_document_
     // Focusing re-seats the cursor through the display transaction, so
     // the background window's retained selection is read in place.
     assert_eq!(
-        eval::<i64>(&state, "return pmacs.window._cursor_line_on_buffer(REVIEW_PANEL)"),
+        eval::<i64>(
+            &state,
+            "return pmacs.window._cursor_line_on_buffer(REVIEW_PANEL)"
+        ),
         3,
         "the background panel kept the selected diagnostic across the insertion"
     );
-    exec(&state, "pmacs.window.display(REVIEW_PANEL, { select = true })");
+    exec(
+        &state,
+        "pmacs.window.display(REVIEW_PANEL, { select = true })",
+    );
     assert!(
-        eval::<String>(&state, "return pmacs.window.buffer():name()")
-            .ends_with("*diagnostics*"),
+        eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("*diagnostics*"),
         "switching back focuses the panel"
     );
 }

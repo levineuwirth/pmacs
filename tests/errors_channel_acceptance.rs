@@ -676,7 +676,10 @@ fn review3_errors_shown_only_on_another_frontend_stay_unread_here() {
     exec(&state, "pmacs.lsp.config = {}");
     state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
     exec(&state, "pmacs.error('seen elsewhere, not here')");
-    let errors_id = state.lua_host.errors_buffer_id().expect("errors buffer exists");
+    let errors_id = state
+        .lua_host
+        .errors_buffer_id()
+        .expect("errors buffer exists");
     // An unrelated frontend whose own window presents the errors
     // buffer: its frames may acknowledge, but LOCAL's must not.
     {
@@ -686,7 +689,8 @@ fn review3_errors_shown_only_on_another_frontend_stay_unread_here() {
             TextView::new(reg.get(errors_id).expect("errors buffer"))
         };
         let id = WindowId::next();
-        core.windows.insert(id, Window::new(id, errors_id, text_view));
+        core.windows
+            .insert(id, Window::new(id, errors_id, text_view));
         core.register_frontend_view(
             other,
             FrontendView {
