@@ -570,7 +570,8 @@ the jobs endpoint and the six failing jobs' logs.
 | attempt 1 | created 08:54:33Z, completed 09:14:00Z; 19 jobs: **12 success, 1 skipped, 6 failure** |
 | the failures | all six test legs, each on exactly one target: `Test (crdt)` 103205922039, `Test (macos-latest / luajit)` 103205922042, `Test (ubuntu-latest / lua54)` 103205922043, `Test (ubuntu-latest / luajit, no crdt)` 103205922092, `Test (macos-latest / lua54)` 103205922107, `Test (ubuntu-latest / luajit)` 103205922143 |
 | failing target | `docs_consistency`'s `ci_red_registry_job_cells_sum` (new at `6b76bec`), `508: 19 jobs but the parts sum to 18`, `test result: FAILED. 17 passed; 1 failed` in every one; the macOS luajit leg otherwise 129 `test result: ok` with every `read Hello` selector `... ok` |
-| attempt 2 | the six failed jobs rerun by the fix session at 09:15:22Z, completed 09:34:16Z; 19 jobs: **12 success, 1 skipped, 6 failure** --- the same six legs (`Test (crdt)` 103211483869, `macos-latest / luajit` 103211483827, `ubuntu-latest / lua54` 103211483756, `ubuntu-latest / luajit, no crdt` 103211483804, `macos-latest / lua54` 103211483507, `ubuntu-latest / luajit` 103211483842), the same target, the same line |
+| attempt 2 | the six failed jobs rerun by the fix session at 09:15:22Z, completed 09:34:16Z; 19 jobs: **12 success, 1 skipped, 6 failure** |
+| attempt 2's failures | the same six legs, the same target, the same line: `Test (crdt)` 103211483869, `macos-latest / luajit` 103211483827, `ubuntu-latest / lua54` 103211483756, `ubuntu-latest / luajit, no crdt` 103211483804, `macos-latest / lua54` 103211483507, `ubuntu-latest / luajit` 103211483842 |
 | the skip | `Docs consistency`, correctly: the push changed code |
 
 Tally (run-34581501943-attempt1-jobs): 19 = 12 + 1 + 6.
