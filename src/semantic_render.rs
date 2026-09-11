@@ -1255,7 +1255,18 @@ impl SemanticRenderState {
         // `lsp_scoped_style_spans` would compute an empty set, and
         // shipping that clears the frontend's colors for the whole
         // stale window — the styling twin of the diagnostics blink.
-        let style_tokens_stale = lsp_style_tokens_stale(state, vp.buffer_id);
+        // The hold applies only while the semantic authority is enabled:
+        // disabling `ui.semantic-styling` must publish grammar-only or
+        // empty styling at once, without waiting for the next server
+        // response. The TUI's policy check already takes effect
+        // immediately; the wire must too.
+        let semantic_enabled = crate::highlight::StylePolicy::from_lua(
+            state.lua_host.lua(),
+            Some(vp.buffer_id),
+        )
+        .semantic;
+        let style_tokens_stale =
+            semantic_enabled && lsp_style_tokens_stale(state, vp.buffer_id);
         let style_hold = style_parse_not_ready || style_tokens_stale;
         let style_gate = (!style_hold).then(|| grammar_style_key(state, &vp, generation));
         let style_gate = style_gate.flatten();
@@ -6976,6 +6987,22 @@ mod tests {
             w_local_on.iter().any(|(s, e, st)| *s == 3 && *e == 7 && st.italic),
             "local-on: the token's refinement is back in both: {w_local_on:?}"
         );
+    }
+
+    #[test]
+    fn review_disabling_semantic_styling_clears_stale_lsp_spans() {
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        let _sid = seed_lsp_style(&state, bid, b"foo\n", vec![tok(0, 0, 3)]);
+        let mut renderer = local();
+        renderer.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+        let first = renderer.render_frame(&state);
+        assert!(first.iter().any(|m| matches!(m, InstanceMessage::StyleSpans { segments, .. } if segments.iter().any(|seg| !seg.spans.is_empty()))));
+        let path = state.core.borrow().active_buffer_path().unwrap();
+        state.lsp_manager.borrow().semantic_token_store().lock().unwrap().mark_stale(crate::lsp::path_to_file_uri(&path));
+        state.lua_host.lua().load("pmacs.config.set('ui.semantic-styling', false)").exec().unwrap();
+        let frame = renderer.render_frame(&state);
+        assert!(frame.iter().any(|m| matches!(m, InstanceMessage::StyleSpans { segments, .. } if segments.iter().all(|seg| seg.spans.is_empty()))), "off must clear the previous semantic styling without awaiting a server response: {frame:?}");
     }
 
     fn facts_of(msgs: &[InstanceMessage]) -> Option<(String, bool, u32, u32)> {
