@@ -36,7 +36,14 @@
 //!    must have a + b + c = N. The fifth phase wrote a green run as
 //!    `19 jobs: 17 success, 1 skipped, ZERO failures` by striking the
 //!    red's failure without incrementing its successes, and no tally
-//!    form stood beside a verdict cell to catch it.
+//!    form stood beside a verdict cell to catch it. The rule reads the
+//!    registry of the tree under test, and a `pull_request` run tests
+//!    the merge of the head into `main`: the rule's own first run
+//!    reddened all six test legs on `main`'s uncorrected cell, and a
+//!    rerun re-executed the same merge commit and reddened again, so a
+//!    registry correction on `main` reaches a PR only through a new
+//!    head. A count of record is fixed on `main` before the rule that
+//!    asserts it lands on a branch, or the branch carries the red.
 //!
 //! Each assertion prints the offending line, so a red names its cause.
 
