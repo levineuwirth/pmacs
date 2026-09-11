@@ -296,6 +296,175 @@ fn review_publish_preserves_the_source_while_panel_is_focused() {
     );
 }
 
+// Review-3 python fixture: exchanges real framed JSON-RPC through the
+// manager, so publications are synchronized by notification callback.
+// Its didOpen text selects the next diagnostic snapshot.
+const REVIEW3_LSP: &str = r"
+import json, sys
+
+def send(value):
+    body = json.dumps(dict(jsonrpc='2.0', **value)).encode()
+    sys.stdout.buffer.write(('Content-Length: %d\r\n\r\n' % len(body)).encode() + body)
+    sys.stdout.buffer.flush()
+
+def diag(line, col, message, severity=1):
+    return dict(range=dict(start=dict(line=line, character=col),
+                           end=dict(line=line, character=col+1)),
+                message=message, severity=severity, source='review-fixture', code=message)
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line: sys.exit(0)
+        if line in (b'\r\n', b'\n'): break
+        key, value = line.decode().split(':', 1)
+        headers[key.lower()] = value.strip()
+    msg = json.loads(sys.stdin.buffer.read(int(headers['content-length'])))
+    method = msg.get('method')
+    if method == 'initialize':
+        send(dict(id=msg['id'], result=dict(capabilities=dict(textDocumentSync=1))))
+    elif method == 'exit':
+        break
+    elif method == 'textDocument/didOpen':
+        doc = msg['params']['textDocument']
+        text = doc.get('text', '')
+        if 'duplicate' in text:
+            diagnostics = [diag(0,4,'first at shared position'), diag(0,4,'second at shared position',2)]
+        else:
+            diagnostics = [diag(2,0,'selected target')]
+            if 'insert' in text:
+                diagnostics.insert(0, diag(0,4,'new earlier diagnostic'))
+        send(dict(method='textDocument/publishDiagnostics', params=dict(uri=doc['uri'], diagnostics=diagnostics)))
+    elif 'id' in msg:
+        send(dict(id=msg['id'], result=None))
+";
+
+fn review3_editor(fx: &Fixture) -> EditorState {
+    let state = EditorState::new_with_roots(&iso::roots());
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    let server = fx.write("review_lsp.py", REVIEW3_LSP);
+    let script = lua_str(&server);
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config = {{ rust = {{ command = \"python3\", args = {{ {script} }} }} }}\n\
+             pmacs.project.set_search_boundary({})",
+            lua_str(&fx.root)
+        ),
+    );
+    state
+}
+
+#[test]
+fn review3_diagnostics_at_the_same_position_can_open() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write(
+        "proj/src/main.rs",
+        "fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n",
+    );
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 2);
+    m_x(&mut state, "lsp.diagnostics");
+    let text = panel_text(&state);
+    assert!(
+        text.contains("This buffer (2):")
+            && text.contains("first at shared position")
+            && text.contains("second at shared position"),
+        "both legitimate diagnostics must appear; panel={text:?}; errors={:?}; status={:?}",
+        state.lua_host.errors_buffer_text(),
+        state.core.borrow().status
+    );
+}
+
+#[test]
+fn review3_duplicate_positions_do_not_freeze_an_open_panel() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 1);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    assert!(panel_text(&state).contains("This buffer (1):"));
+    exec(
+        &state,
+        r"
+        REVIEW_PUBLISH = false
+        pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n')
+    ",
+    );
+    ready::tick_until(
+        &mut state,
+        "duplicate-position publication",
+        ready::DEADLINE,
+        |s| {
+            if eval::<bool>(s, "return REVIEW_PUBLISH") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending("awaiting publish".to_owned())
+            }
+        },
+    );
+    let text = panel_text(&state);
+    assert!(
+        text.contains("This buffer (2):")
+            && text.contains("first at shared position")
+            && text.contains("second at shared position"),
+        "an overlapping diagnostic publication must refresh the already-open panel: {text}"
+    );
+}
+
+#[test]
+fn review3_duplicate_republish_keeps_selection_on_the_same_row() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write(
+        "proj/src/main.rs",
+        "fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n",
+    );
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 2);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    assert!(panel_text(&state).contains("This buffer (2):"));
+    press(&mut state, KeyCode::Char('n'), KeyModifiers::NONE);
+    let seated: i64 = eval(&state, "return pmacs.editor.cursor_line()");
+    assert_eq!(seated, 3, "seated on the second colocated row");
+    exec(
+        &state,
+        r"
+        REVIEW_PUBLISH = false
+        pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n')
+    ",
+    );
+    ready::tick_until(
+        &mut state,
+        "same-set republication",
+        ready::DEADLINE,
+        |s| {
+            if eval::<bool>(s, "return REVIEW_PUBLISH") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending("awaiting publish".to_owned())
+            }
+        },
+    );
+    let after: i64 = eval(&state, "return pmacs.editor.cursor_line()");
+    let item_line: i64 = eval(&state, "return pmacs.listview.current_item().line");
+    assert_eq!(
+        after, 3,
+        "content-derived ids keep the same row selected across a republication"
+    );
+    assert_eq!(item_line, 0);
+}
+
 #[test]
 fn review_project_section_excludes_an_unrelated_root() {
     let fx = Fixture::new();

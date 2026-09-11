@@ -3770,14 +3770,29 @@ local function diagnostic_rows()
     local diags = pmacs.diag.list(uri)
     table.sort(diags, function(a, b)
       if a.start_line ~= b.start_line then return a.start_line < b.start_line end
-      return a.start_col < b.start_col
+      if a.start_col ~= b.start_col then return a.start_col < b.start_col end
+      if (a.end_line or 0) ~= (b.end_line or 0) then return (a.end_line or 0) < (b.end_line or 0) end
+      if (a.end_col or 0) ~= (b.end_col or 0) then return (a.end_col or 0) < (b.end_col or 0) end
+      if a.severity ~= b.severity then return a.severity < b.severity end
+      return (a.message or "") < (b.message or "")
     end)
+    -- A diagnostic's position is not its identity: distinct diagnostics
+    -- may share a start position, so the row id carries the end
+    -- position, severity, message, source and code too, with an
+    -- occurrence discriminator for exact duplicates. Content-derived
+    -- ids keep a selected row stable when a publication reorders the
+    -- same diagnostic set.
+    local seen = {}
     for _, d in ipairs(diags) do
+      local base = string.format("%s:%d:%d:%d:%d:%s:%s:%s:%s", uri, d.start_line, d.start_col,
+        d.end_line or 0, d.end_col or 0, tostring(d.severity),
+        tostring(d.message or ""), tostring(d.source or ""), tostring(d.code or ""))
+      seen[base] = (seen[base] or 0) + 1
       rows[#rows + 1] = {
         text = string.format("%s:%d:%d  %s  %s", shown, d.start_line + 1,
           d.start_col + 1, d.severity, (d.message:gsub("\n.*$", ""))),
         item = { uri = uri, line = d.start_line, col = d.start_col },
-        id = string.format("%s:%d:%d", uri, d.start_line, d.start_col),
+        id = base .. "#" .. seen[base],
       }
     end
     return #diags
