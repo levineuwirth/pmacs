@@ -224,7 +224,7 @@ fn a_stale_attachment_found_on_reattach_notes_it_once_and_replaces_the_server() 
         "the crashed server was forgotten and replaced: before {sid_before}, after {sid_after}"
     );
     // The replacement's own crash is drained on the next tick.
-    let text = ready::tick_until(
+    let _ = ready::tick_until(
         &mut state,
         "the replacement's crash report",
         ready::DEADLINE,
@@ -237,6 +237,15 @@ fn a_stale_attachment_found_on_reattach_notes_it_once_and_replaces_the_server() 
             }
         },
     );
+    // One further tick, asserted quiet. A count of two is also what the
+    // drain's line plus a duplicated note for the first server produce
+    // if the replacement's own line lags the listing change by a tick,
+    // so the count is taken again after one more drain and must still
+    // be two: with the latch gone it is three here.
+    state.tick_processes();
+    state.tick_lsp();
+    state.tick_async();
+    let text = state.lua_host.errors_buffer_text();
     assert_eq!(
         text.matches("LSP: default-rust crashed").count(),
         2,
