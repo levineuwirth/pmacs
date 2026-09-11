@@ -213,6 +213,26 @@ impl SemanticTokensLegend {
             .map(|i| self.token_modifiers[i].as_str())
             .collect()
     }
+
+    /// The one type/modifier style resolver both styling paths read:
+    /// `<type>.<first-modifier>` when modifiers are set, else `<type>`.
+    /// The theme's dotted-prefix `lookup` walks back to the base when no
+    /// refined entry exists, so the suffix is a strict refinement. `None`
+    /// when the type index is unknown. The grid's `LspStyleView` and the
+    /// wire's `lsp_scoped_style_spans` must agree here or a
+    /// modifier-specific face differs between frontends.
+    #[must_use]
+    pub fn style_name_for<'a>(
+        &'a self,
+        token: &SemanticToken,
+    ) -> Option<std::borrow::Cow<'a, str>> {
+        let name = self.type_name(token.token_type)?;
+        let mods = self.modifier_names(token.token_modifiers);
+        match mods.first() {
+            Some(m) => Some(std::borrow::Cow::Owned(format!("{name}.{m}"))),
+            None => Some(std::borrow::Cow::Borrowed(name)),
+        }
+    }
 }
 
 /// Per-server, per-uri semantic-token state.

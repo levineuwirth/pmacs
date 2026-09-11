@@ -772,21 +772,13 @@ impl View for LspStyleView {
                 let Some(legend) = ctx.legend.as_ref() else {
                     continue; // No legend ⇒ cannot name a style.
                 };
-                let Some(name) = legend.type_name(t.token_type) else {
+                // One resolver on both paths (`SemanticTokensLegend::style_name_for`):
+                // `<type>.<first-modifier>` when modifiers are set, else `<type>`.
+                // The theme's dotted-prefix `lookup` walks back to the base if a
+                // more specific entry isn't defined, so adding a modifier suffix
+                // is a strict refinement — never worse than the unmodified lookup.
+                let Some(lookup_name) = legend.style_name_for(t) else {
                     continue; // Unknown type index.
-                };
-                // Build the lookup name as `<type>.<first-modifier>`
-                // when modifiers are set, else just `<type>`. The
-                // theme's dotted-prefix `lookup` walks back to the
-                // base if a more specific entry isn't defined, so
-                // adding a modifier suffix is a strict refinement —
-                // never worse than the unmodified lookup. Allocation
-                // is skipped in the no-modifier case (the common one)
-                // via `Cow::Borrowed`.
-                let mods = legend.modifier_names(t.token_modifiers);
-                let lookup_name: std::borrow::Cow<'_, str> = match mods.first() {
-                    Some(m) => std::borrow::Cow::Owned(format!("{name}.{m}")),
-                    None => std::borrow::Cow::Borrowed(name),
                 };
                 let style = theme.lookup(&lookup_name);
                 if is_default_style(style) {

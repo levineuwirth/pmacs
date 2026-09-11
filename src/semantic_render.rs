@@ -3587,14 +3587,16 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
         if e <= s {
             continue; // Empty, or no overlap with the viewport.
         }
-        let Some(name) = ctx
+        // One resolver on both paths (`SemanticTokensLegend::style_name_for`),
+        // so a modifier-specific face agrees with the grid's `LspStyleView`.
+        let Some(lookup_name) = ctx
             .legend
             .as_ref()
-            .and_then(|lg| lg.type_name(t.token_type))
+            .and_then(|lg| lg.style_name_for(t))
         else {
             continue; // No legend / unknown type ⇒ cannot name a style.
         };
-        let style = theme.lookup(name);
+        let style = theme.lookup(&lookup_name);
         if style == Style::default() {
             continue; // Nothing to render — skip the wire byte (parity
             // with the tree-sitter path's default-style drop).
@@ -6551,6 +6553,159 @@ mod tests {
                 .into_iter()
                 .map(|s| (s.range.start, s.range.end, s.style))
                 .collect()
+        };
+        let grid = |state: &EditorState| -> Vec<(u64, u64, Style)> {
+            let cols = usize::try_from(content).expect("small");
+            let mut backing = vec![Cell::default(); cols];
+            let viewport = || Viewport {
+                buffer_start: 0,
+                buffer_end: u64::MAX,
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(1, u32::try_from(cols).expect("small")),
+                gutter_w: 0,
+                folds: None,
+                wrap: WrapMode::Truncate,
+                view_left: 0,
+            };
+            let registry = state.core.borrow().registry.clone();
+            let reg = registry.borrow();
+            let buf = reg.get(bid).expect("buffer");
+            let mut hv = crate::highlight::SyntaxHighlightView::new(
+                handle.clone(),
+                state.syntax_registry.theme(),
+            );
+            let mut lv = crate::highlight::LspStyleView::new(
+                state.lsp_manager.clone(),
+                state.syntax_registry.theme(),
+                state
+                    .lua_host
+                    .lua()
+                    .app_data_ref::<crate::lua_bindings::SharedConfigRegistry>()
+                    .map(|r| r.clone()),
+            );
+            {
+                let mut cells = CellGrid {
+                    cells: &mut backing,
+                    stride: u32::try_from(cols).expect("small"),
+                    size: CellSize::new(1, u32::try_from(cols).expect("small")),
+                };
+                hv.render(buf, viewport(), &mut cells);
+                lv.render(buf, viewport(), &mut cells);
+            }
+            let mut out: Vec<(u64, u64, Style)> = Vec::new();
+            for (col, cell) in backing.iter().enumerate() {
+                let style = cell.style;
+                if style == Style::default() {
+                    continue;
+                }
+                let col = col as u64;
+                match out.last_mut() {
+                    Some((_, end, last)) if *end == col && *last == style => *end += 1,
+                    _ => out.push((col, col + 1, style)),
+                }
+            }
+            out
+        };
+
+        let (w_on, g_on) = (wire(&state), grid(&state));
+        assert!(!w_on.is_empty(), "the grammar styles something");
+        assert_eq!(w_on, g_on, "on: the wire's spans are the grid's cells");
+        assert!(
+            w_on.iter()
+                .any(|(s, e, st)| *s == 3 && *e == 7 && st.italic),
+            "on: the token's refinement is in both: {w_on:?}"
+        );
+        let grammar_only: Vec<(u64, u64, Style)> = grammar_scoped_style_spans(&state, &vp)
+            .into_iter()
+            .map(|s| (s.range.start, s.range.end, s.style))
+            .collect();
+        assert_ne!(w_on, grammar_only, "on: the merge adds to the grammar");
+
+        // Off: both paths are the grammar's alone, in the same test.
+        let registry = state
+            .lua_host
+            .lua()
+            .app_data_ref::<crate::lua_bindings::SharedConfigRegistry>()
+            .expect("config registry")
+            .clone();
+        registry
+            .borrow_mut()
+            .set(
+                "ui.semantic-styling",
+                crate::config_registry::ConfigValue::Bool(false),
+            )
+            .expect("the knob is registered and live");
+        let (w_off, g_off) = (wire(&state), grid(&state));
+        assert_eq!(w_off, g_off, "off: the wire's spans are the grid's cells");
+        assert_eq!(w_off, grammar_only, "off: grammar-only on the wire");
+        assert!(
+            w_off.iter().all(|(_, _, st)| !st.italic),
+            "off: no refinement anywhere: {w_off:?}"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario pins both paths on and off against one seeded buffer; splitting it would re-seed the grammar and the tokens per half"
+    )]
+    fn review_modifiers_agree_through_render_frame() {
+        use crate::cell::{Cell, CellCoord, CellGrid, CellSize};
+        use crate::view::{View, Viewport, WrapMode};
+
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        let text = b"fn main() {}\n";
+        let handle = seed_rust_parse_view(&state, bid, text);
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "e56refine.declaration",
+            Style {
+                italic: true,
+                ..Style::default()
+            },
+        );
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": { "tokenTypes": ["e56refine"], "tokenModifiers": ["declaration"] }
+                    }
+                }),
+                crate::lsp::PositionEncoding::Utf16,
+            );
+        // "main" is bytes [3, 7) of line 0. Keyed to this buffer's own
+        // path (`set_tokens` keys to the `.cpp` fixture).
+        {
+            let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.rs"));
+            let store = state.lsp_manager.borrow().semantic_token_store();
+            store.lock().expect("sem token store").set(
+                crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
+                crate::semantic_tokens::SemanticTokensResponse {
+                    tokens: vec![crate::semantic_tokens::SemanticToken { token_modifiers: 1, ..tok(0, 3, 4) }],
+                    result_id: None,
+                    raw: Vec::new(),
+                },
+            );
+        }
+
+        let content = u64::try_from(text.len() - 1).expect("small");
+        let vp = DeclaredViewport {
+            buffer_id: bid,
+            visible: ByteRange {
+                start: 0,
+                end: content,
+            },
+            frontend_generation: 0,
+        };
+        let wire = |state: &EditorState| -> Vec<(u64, u64, Style)> {
+            let mut render = SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
+            render.set_viewport(bid, vp.visible, 0);
+            render.render_frame(state).into_iter().flat_map(|m| match m {
+                InstanceMessage::StyleSpans { segments, .. } => segments.into_iter().flat_map(|seg| seg.spans).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            }).map(|s| (s.range.start, s.range.end, s.style)).collect()
         };
         let grid = |state: &EditorState| -> Vec<(u64, u64, Style)> {
             let cols = usize::try_from(content).expect("small");
