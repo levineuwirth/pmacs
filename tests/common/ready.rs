@@ -391,7 +391,13 @@ mod tests {
                         },
                         instance_capabilities: pmacs::protocol::InstanceCapabilities::default(),
                     };
-                    pmacs::transport::write_message(&mut stream, &hello).expect("write Hello");
+                    // Not `expect`: under a wait that returned early
+                    // (on a bare connect, say) this third connection is
+                    // one of the unblocking connects below, already
+                    // dropped by its peer, and a `BrokenPipe` here would
+                    // surface as a panicked server thread at the join
+                    // instead of as the `probed` assertion's story.
+                    let _ = pmacs::transport::write_message(&mut stream, &hello);
                     let _ = stream.flush();
                     break;
                 }
