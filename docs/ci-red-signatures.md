@@ -881,9 +881,19 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least seventeen, 2026-08-07 to 2026-09-10 (the seventeenth in E5's tip gate, `20260910T203556Z-1854124`, its own section above), all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The thirteenth and fourteenth: gate logs `20260905T202734Z-1751532` (step `07-sweep`, load average 14.2) and `20260905T205642Z-2051072` (step `05-sweep` of the six-stage gate). The fifteenth and sixteenth: gate logs `20260907T170429Z-45241` and `20260907T185321Z-604527`, both in step `06-sweep-luajit`, the LuaJIT-only sweep `--protocol` adds, each ending `test result: FAILED. 325 passed; 1 failed` on `-p pmacs-gpu --bin pmacs-gpu`. All four at `attach.rs:1889` with all three fragments. The first twelve are enumerated in this file's history before 2026-09-05; the four above are the enumeration held here. The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least seventeen, 2026-08-07 to 2026-09-10, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the five since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
+
+Tally (R7): 17 = 12 + 5.
+
+Tally (R7-held): 5 items in the list below.
+
+- thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
+- fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
+- fifteenth: gate log `20260907T170429Z-45241`, step `06-sweep-luajit` (the LuaJIT-only sweep `--protocol` adds), `test result: FAILED. 325 passed; 1 failed` on `-p pmacs-gpu --bin pmacs-gpu`, `attach.rs:1889`
+- sixteenth: gate log `20260907T185321Z-604527`, step `06-sweep-luajit`, the same result line, `attach.rs:1889`
+- seventeenth: gate log `20260910T203556Z-1854124`, step `05-sweep` of E5's tip gate, `attach.rs:1958`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
