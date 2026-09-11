@@ -2293,12 +2293,19 @@ impl SemanticRenderState {
         buffer_id: BufferId,
     ) -> Option<InstanceMessage> {
         let (name, modified, message) = {
-            let core = state.core.borrow();
             // The transient status message (`pmacs.editor.set_status`
             // — LSP command summaries, error reports). The attached
             // TUI reads it off the rendered bottom row; a semantic
-            // frontend only sees this wire (v15).
-            let message = (!core.status.is_empty()).then(|| core.status.clone());
+            // frontend only sees this wire (v15). When no command text
+            // is set, the shared unread-error resolution supplies the
+            // same `lua: ...` trace the grid shows, clearing together
+            // with it when the log is read. No wire change.
+            let status = {
+                let core = state.core.borrow();
+                (!core.status.is_empty()).then(|| core.status.clone())
+            };
+            let message = status.or_else(|| state.lua_host.unread_error_status_message());
+            let core = state.core.borrow();
             let registry = core.registry.clone();
             let reg = registry.borrow();
             let buf = reg.get(buffer_id).ok()?;

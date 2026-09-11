@@ -564,6 +564,26 @@ impl LuaHost {
         self.error_log.borrow_mut().mark_read();
     }
 
+    /// The shared unread-error status resolution both frontends read:
+    /// the last error as `lua: <first line>` while it is unread, `None`
+    /// once the log has been read. The grid's fallback and the semantic
+    /// `StatusFacts` producer both call this, so the GPU receives the
+    /// same transient message the TUI shows; clearing is shared because
+    /// both painters call `mark_errors_read_if_shown` before reading.
+    #[must_use]
+    pub fn unread_error_status_message(&self) -> Option<String> {
+        if self.unread_errors() == 0 {
+            return None;
+        }
+        let err = self.last_error()?;
+        let first = err.message.split_once('\n').map_or(err.message.as_str(), |(head, _)| head);
+        let clean: String = first
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        Some(format!("lua: {clean}"))
+    }
+
     /// Report an error on every channel: the `*errors*` buffer, the
     /// error log, the status line and the mode line's unread mark. The
     /// same writer Lua reaches as `pmacs.error`; see [`report_error`].

@@ -565,3 +565,22 @@ fn fs_site_a_raising_watch_callback_is_reported() {
         },
     );
 }
+
+#[test]
+fn review_pmacs_error_emits_the_message_on_the_semantic_status_line() {
+    use pmacs::protocol::{ByteRange, InstanceMessage};
+    use pmacs::semantic_render::SemanticRenderState;
+    let state = EditorState::new_with_roots(&iso::roots());
+    state.lua_host.lua().load("pmacs.lsp.config = {}").exec().unwrap();
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    let bid = state.core.borrow().active_buffer_id();
+    let mut render = SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
+    render.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+    let _ = render.render_frame(&state);
+    state.lua_host.lua().load("pmacs.error('review background failure')").exec().unwrap();
+    assert_eq!(state.lua_host.unread_errors(), 1);
+    assert!(state.lua_host.errors_buffer_text().contains("review background failure"));
+    let frame = render.render_frame(&state);
+    eprintln!("FRAME: {frame:?}");
+    assert!(frame.iter().any(|m| matches!(m, InstanceMessage::StatusFacts{message:Some(s),..} if s.contains("review background failure"))), "GPU must receive the same error text as the TUI: {frame:?}");
+}

@@ -6937,14 +6937,14 @@ fn build_status_line(
     let mut line = String::new();
     if !core.status.is_empty() {
         line.push_str(&sanitize_single_line(&core.status));
-    } else if lua_host.unread_errors() > 0 {
+    } else if let Some(msg) = lua_host.unread_error_status_message() {
         // E5.1: the last error shows while it is unread, and stops once
         // a window has shown `*errors*` --- a transient trace, where it
-        // used to nag on every idle frame until the next error.
-        if let Some(err) = lua_host.last_error() {
-            use std::fmt::Write;
-            let _ = write!(line, "lua: {}", sanitize_single_line(&err.message));
-        }
+        // used to nag on every idle frame until the next error. Shared
+        // with the semantic `StatusFacts` producer through
+        // `LuaHost::unread_error_status_message`, so both frontends see
+        // the same text and clear together.
+        line.push_str(&msg);
     }
     if !dispatcher.pending().is_empty() {
         use std::fmt::Write;
