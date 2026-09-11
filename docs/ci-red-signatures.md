@@ -558,6 +558,74 @@ family's exposure is its readers' bounds --- four sub-second readers
 moved at this tip, four more at fix round 1, zero under 5 s after it.
 The trunk's macOS legs are samples, not a retirement.
 
+### PR #269's fix-round tip run 34581501943 at `427ae70`: two attempts, the first red on the instrument this round added
+
+Recorded from `main` on 2026-09-11 at fix round 1's close. Read from
+the jobs endpoint and the six failing jobs' logs.
+
+| field | value |
+|---|---|
+| run | 34581501943, `pull_request`, two attempts |
+| head | `427ae70`, fix round 1's tip (eight commits over `66195b5`); the run tests the merge of the head into `main` |
+| attempt 1 | created 08:54:33Z, completed 09:14:00Z; 19 jobs: **12 success, 1 skipped, 6 failure** |
+| the failures | all six test legs, each on exactly one target: `Test (crdt)` 103205922039, `Test (macos-latest / luajit)` 103205922042, `Test (ubuntu-latest / lua54)` 103205922043, `Test (ubuntu-latest / luajit, no crdt)` 103205922092, `Test (macos-latest / lua54)` 103205922107, `Test (ubuntu-latest / luajit)` 103205922143 |
+| failing target | `docs_consistency`'s `ci_red_registry_job_cells_sum` (new at `6b76bec`), `508: 19 jobs but the parts sum to 18`, `test result: FAILED. 17 passed; 1 failed` in every one; the macOS luajit leg otherwise 129 `test result: ok` with every `read Hello` selector `... ok` |
+| attempt 2 | the six failed jobs rerun by the fix session at 09:15:22Z, completed 09:34:16Z; 19 jobs: **12 success, 1 skipped, 6 failure** --- the same six legs (`Test (crdt)` 103211483869, `macos-latest / luajit` 103211483827, `ubuntu-latest / lua54` 103211483756, `ubuntu-latest / luajit, no crdt` 103211483804, `macos-latest / lua54` 103211483507, `ubuntu-latest / luajit` 103211483842), the same target, the same line |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-34581501943-attempt1-jobs): 19 = 12 + 1 + 6.
+
+Tally (run-34581501943-attempt2-jobs): 19 = 12 + 1 + 6.
+
+**What the red was.** A `pull_request` run checks out the merge of the
+head into `main` (`c4b4270`, "Merge 427ae70 into 2a7f656"), and `main`
+at `2a7f656` still carried the tip-run cell this file corrects above,
+`19 jobs: 17 success, 1 skipped, ZERO failures`. The rule `6b76bec` adds
+to the docs test --- every `N jobs:` cell must sum --- read that cell on
+every test leg and failed by its line. So the instrument built for
+review 1's Medium 1 bit in CI on the defect it was built for, on the
+merge ref, before the registry commit fixing the cell (`8e4fd7a`,
+pushed to `main` at 09:01:46Z inside `316b574`'s push, run 34582104756,
+docs-only, green) had reached it. **The rerun was the session's own
+wrong premise, stated as such**: it rerun the six failed jobs expecting
+the merge ref to be recomputed against `main` at `316b574`, and a rerun
+re-executes the run's original merge commit --- every attempt-2 log
+reads `HEAD is now at c4b4270`, the merge into `2a7f656` --- so attempt
+2 reproduced attempt 1 exactly, which is what a deterministic red does.
+A registry correction on `main` reaches a PR only through a new head:
+`95a6db4`, a ninth commit whose diff is the rule's module doc saying
+so, and its run is the next section. `WouldBlock` zero and `did not
+become ready` zero in all twelve logs: nothing here moves #258 (five),
+the family (sixteen) or #259 (seven).
+
+### PR #269's final fix-round tip run 34585031832 at `95a6db4`
+
+Recorded from `main` on 2026-09-11 at fix round 1's close. Read from
+the jobs endpoint and the macOS luajit job's log.
+
+| field | value |
+|---|---|
+| run | 34585031832, `pull_request`, one attempt |
+| head | `95a6db4`, fix round 1's final tip (the rule's module doc over `427ae70`); the merge commit `a458ce7`, "Merge 95a6db4 into 316b574" |
+| window | created 2026-09-11T09:36:04Z, completed 09:58:33Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-34585031832-jobs): 19 = 18 + 1 + 0.
+
+Read from the `Test (macos-latest / luajit)` job log (103217199976)
+rather than the verdict line: `WouldBlock` **zero**, `did not become
+ready` zero, 132 `test result: ok`, zero `FAILED`; every `read Hello`
+selector `... ok` (`a16_26`, `v16_peer`, `daemon_routes`, `m10_10`,
+`v15_peer`, `daemon_reships`), #259's `acc28` `... ok`, and both
+registry rules `... ok` against this file at `316b574`. One sample of a
+merge tree that differs from the two red attempts' by `main`'s three
+registry commits and one doc comment: it shows the corrected cell
+sums, which was never in doubt, and retires nothing. #258 stays at
+five, the family at sixteen, #259 at seven; the family's readers are
+all bounded above the accept quantum, and the trunk's macOS legs after
+the merge are samples of that.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
