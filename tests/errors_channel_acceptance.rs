@@ -599,3 +599,128 @@ fn review_pmacs_error_emits_the_message_on_the_semantic_status_line() {
     eprintln!("FRAME: {frame:?}");
     assert!(frame.iter().any(|m| matches!(m, InstanceMessage::StatusFacts{message:Some(s),..} if s.contains("review background failure"))), "GPU must receive the same error text as the TUI: {frame:?}");
 }
+
+fn review3_paint(state: &EditorState, rows: u32) {
+    use pmacs::cell::{CellGrid, CellSize};
+    let mut cells = vec![Cell::default(); usize::try_from(rows * 100).expect("small grid")];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: 100,
+        size: CellSize::new(rows, 100),
+    };
+    let _ = pmacs::editor::paint_frame(
+        state,
+        FrontendId::LOCAL,
+        &std::collections::HashMap::new(),
+        &mut grid,
+        CellSize::new(rows, 100),
+    );
+}
+
+fn review3_hidden_errors_panel() -> EditorState {
+    let state = EditorState::new_with_roots(&iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    exec(
+        &state,
+        r"
+        pmacs.error('seed read by the visible panel')
+        for _, b in ipairs(pmacs.buffer.list()) do
+            if b:name() == '*errors*' then
+                pmacs.window.display(b, { side = 'bottom', height = 8, select = false })
+            end
+        end
+    ",
+    );
+    review3_paint(&state, 40);
+    assert_eq!(state.lua_host.unread_errors(), 0);
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(4, 100));
+    assert!(state.core.borrow().panel_hidden_for(FrontendId::LOCAL));
+    exec(&state, "pmacs.error('new error nobody has seen')");
+    assert_eq!(state.lua_host.unread_errors(), 1);
+    state
+}
+
+#[test]
+fn review3_a_hidden_errors_panel_does_not_read_errors_on_the_grid() {
+    let state = review3_hidden_errors_panel();
+    review3_paint(&state, 4);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        1,
+        "a hidden panel cannot acknowledge a new error"
+    );
+}
+
+#[test]
+fn review3_a_hidden_errors_panel_does_not_read_errors_on_the_wire() {
+    let state = review3_hidden_errors_panel();
+    let bid = state.core.borrow().active_buffer_id();
+    let mut renderer = pmacs::semantic_render::SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
+    renderer.set_viewport(bid, pmacs::protocol::ByteRange { start: 0, end: 64 }, 0);
+    let frame = renderer.render_frame(&state);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        1,
+        "a hidden panel cannot acknowledge a new error; frame={frame:?}"
+    );
+}
+
+#[test]
+fn review3_errors_shown_only_on_another_frontend_stay_unread_here() {
+    use pmacs::protocol::FrontendId as Fid;
+    use pmacs::text_view::TextView;
+    use pmacs::window::{FrontendView, Layout, Window, WindowId};
+    let other = Fid(2);
+    let state = EditorState::new_with_roots(&iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    exec(&state, "pmacs.error('seen elsewhere, not here')");
+    let errors_id = state.lua_host.errors_buffer_id().expect("errors buffer exists");
+    // An unrelated frontend whose own window presents the errors
+    // buffer: its frames may acknowledge, but LOCAL's must not.
+    {
+        let mut core = state.core.borrow_mut();
+        let text_view = {
+            let reg = core.registry.borrow();
+            TextView::new(reg.get(errors_id).expect("errors buffer"))
+        };
+        let id = WindowId::next();
+        core.windows.insert(id, Window::new(id, errors_id, text_view));
+        core.register_frontend_view(
+            other,
+            FrontendView {
+                layout: Layout::single(id),
+                active: id,
+                fold_projection: true,
+                panel_capable: false,
+                frame_geometry: None,
+                panel_hidden: false,
+            },
+        );
+    }
+    review3_paint(&state, 40);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        1,
+        "a window outside this frontend's layout is not presentation here"
+    );
+    // And the other frontend's own frame does acknowledge.
+    {
+        use pmacs::cell::{CellGrid, CellSize};
+        let mut cells = vec![Cell::default(); 40 * 100];
+        let mut grid = CellGrid {
+            cells: &mut cells,
+            stride: 100,
+            size: CellSize::new(40, 100),
+        };
+        let _ = pmacs::editor::paint_frame(
+            &state,
+            other,
+            &std::collections::HashMap::new(),
+            &mut grid,
+            CellSize::new(40, 100),
+        );
+    }
+    assert_eq!(state.lua_host.unread_errors(), 0);
+}

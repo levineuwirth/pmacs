@@ -5740,20 +5740,40 @@ fn paint_window_content(
 /// `render_frame`) before the statusline fan-out, so the mode line's
 /// unread mark and the status line's last-error trace clear on the
 /// same frame the buffer appears in, on either frontend.
-pub fn mark_errors_read_if_shown(state: &EditorState) {
+///
+/// Only a buffer actually presented by the rendering frontend counts:
+/// the window must belong to that frontend's layout, and a side window
+/// must not be hidden (`panel_hidden`). A retained but hidden panel
+/// window is not evidence anyone saw the errors, so a shrunken frame
+/// keeps the unread mark and the transient message on both paths.
+/// Windows of any other frontend never count for this one.
+pub fn mark_errors_read_if_presented(state: &EditorState, frontend_id: FrontendId) {
     if state.lua_host.unread_errors() == 0 {
         return;
     }
-    let shown = {
+    let presented = {
         let core = state.core.borrow();
         let registry = core.registry.borrow();
-        core.windows.values().any(|window| {
-            registry
-                .get(window.buffer_id)
-                .is_ok_and(|buf| buf.name() == crate::lua::ERRORS_BUFFER_NAME)
+        let Some(view) = core.views.get(&frontend_id) else {
+            return;
+        };
+        view.layout.iter_ids().into_iter().any(|id| {
+            if view.panel_hidden
+                && core
+                    .windows
+                    .get(&id)
+                    .is_some_and(crate::window::Window::is_side)
+            {
+                return false;
+            }
+            core.windows.get(&id).is_some_and(|window| {
+                registry
+                    .get(window.buffer_id)
+                    .is_ok_and(|buf| buf.name() == crate::lua::ERRORS_BUFFER_NAME)
+            })
         })
     };
-    if shown {
+    if presented {
         state.lua_host.mark_errors_read();
     }
 }
@@ -5791,7 +5811,7 @@ pub fn paint_frame(
     // geometry, and a panel the frame can no longer satisfy has already
     // surrendered focus and its terminal controller.
     state.sync_frame_geometry(frontend_id, term_size);
-    mark_errors_read_if_shown(state);
+    mark_errors_read_if_presented(state, frontend_id);
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow
     // below, then paint only the transactionally validated owned results.

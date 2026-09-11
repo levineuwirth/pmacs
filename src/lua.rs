@@ -569,7 +569,7 @@ impl LuaHost {
     /// once the log has been read. The grid's fallback and the semantic
     /// `StatusFacts` producer both call this, so the GPU receives the
     /// same transient message the TUI shows; clearing is shared because
-    /// both painters call `mark_errors_read_if_shown` before reading.
+    /// both painters call `mark_errors_read_if_presented` before reading.
     #[must_use]
     pub fn unread_error_status_message(&self) -> Option<String> {
         if self.unread_errors() == 0 {
