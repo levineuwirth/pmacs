@@ -252,3 +252,23 @@ fn a_stale_attachment_found_on_reattach_notes_it_once_and_replaces_the_server() 
         "one line per server, the stale-attachment note deduplicated against the drain's: {text:?}"
     );
 }
+
+#[test]
+fn review_replacement_clears_the_current_crashed_section() {
+    let td = cargo_project();
+    let mut state = editor_for(td.path());
+    let file = write_rs(td.path(), "b.rs");
+    open(&state, &file);
+    wait_errors_contain(&mut state, "crashed");
+    exec(&state, "pmacs.lsp.config.rust.env = {}; pmacs.lsp._attach_buffer()");
+    ready::tick_until(&mut state,"replacement initialized",ready::DEADLINE,|s| {
+        let states: String = eval(s, "local out = {}; for _, i in ipairs(pmacs.lsp.list()) do out[#out+1] = i.state.kind end; return table.concat(out, ',')");
+        if states == "initialized" { ready::Probe::Ready(()) } else { ready::Probe::Pending(states) }
+    });
+    state.tick_async();
+    assert_eq!(eval::<usize>(&state,"return #pmacs.lsp.list()"),1);
+    assert_ne!(lsp_segment(&state).as_deref(),Some("LSP:!"));
+    exec(&state, "pmacs.command.invoke('lsp.status')");
+    let panel: String = eval(&state,r#"for _, id in ipairs(pmacs.buffer.list()) do if id:name() == '*lsp*' then return id:slice(0,id:len()) end end; return ''"#);
+    assert!(!panel.contains("Crashed ("), "only an initialized replacement exists, but status retains a current crash: {panel}");
+}

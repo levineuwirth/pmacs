@@ -1252,6 +1252,12 @@ local function attach_buffer(buf)
       -- it removes the client and cancels that pending restart before
       -- the replacement is created.
       pcall(pmacs.lsp.forget, existing.server)
+      -- The forgotten ID is replaced below: its crash is history kept
+      -- in the error log, not current state for `*lsp*`. Retire it now
+      -- so a successful replacement cannot leave a stale `Crashed`
+      -- entry beside a ready server. An actually dead server stays
+      -- listed until forgotten or restarted under the same ID.
+      clear_dead_server(existing.server)
     end
     attachments[key] = nil
     -- Unsent edits targeted the dead attachment; the did_open below
@@ -3635,10 +3641,23 @@ end
 -- without one, which would leave `g` bound and silently dead.
 local function lsp_status_rows()
   local rows = {}
-  -- E5.3: what is gone underneath an attachment, first.
+  -- E5.3: what is gone underneath an attachment, first. Reconciled
+  -- against the manager's current IDs: a forgotten ID is replaced, not
+  -- gone, so it never renders. Reporting for an actually dead server
+  -- (still listed as crashed/stopped) and clearing on same-ID restart
+  -- are preserved.
   local dead = {}
+  local live_ids = {}
+  local ok_list, listed = pcall(pmacs.lsp.list)
+  if ok_list and listed then
+    for _, info in ipairs(listed) do live_ids[tostring(info.id)] = true end
+  end
   for skey, entry in pairs(dead_servers) do
-    dead[#dead + 1] = { key = skey, entry = entry }
+    if not ok_list or live_ids[skey] then
+      dead[#dead + 1] = { key = skey, entry = entry }
+    else
+      dead_servers[skey] = nil
+    end
   end
   table.sort(dead, function(a, b) return a.entry.at < b.entry.at end)
   if #dead > 0 then
