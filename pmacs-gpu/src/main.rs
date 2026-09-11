@@ -19359,32 +19359,75 @@ mod tests {
     /// `function` face over `main` and a `type` face over `Foo`, as
     /// rust-analyzer's tokens merged over tree-sitter's captures reach
     /// it in one `StyleSpans` frame, land in the shaped chunks with
-    /// their own colors while the unstyled text carries none. Headless:
-    /// it needs an adapter and skips without one, so it executes on the
-    /// headless-render CI leg (and wherever `PMACS_REQUIRE_GPU` arms it).
-    /// The daemon's merge itself is pinned in `semantic_render.rs`; this
-    /// row is the frontend half, a wire fixture standing in for the
-    /// server.
+    /// their own colors while the unstyled text carries none.
+    ///
+    /// The seam, stated: the frame is a `StyleSpans` message encoded
+    /// and decoded through the wire codec (`transport::write_message`
+    /// into a buffer, `transport::read_message` back), applied through
+    /// `apply_attach_message` behind a `BufferSnapshot` for the same
+    /// buffer, exactly as the reader thread hands the main thread a
+    /// frame it read from the daemon. What is NOT driven here is the
+    /// handshake, the outbox and the `--headless-probe` against a live
+    /// daemon: a decoded-message fixture shows the frontend's parts
+    /// agree with the fixture (`docs/invariants.md`, Tests and
+    /// evidence), and the daemon's side of the merge is pinned in
+    /// `semantic_render.rs`. Headless: it needs an adapter and skips
+    /// without one, so it executes on the headless-render CI leg (and
+    /// wherever `PMACS_REQUIRE_GPU` arms it).
     #[test]
     fn e5_6_semantic_refinement_spans_reach_the_shaped_chunks() {
-        let Some(mut state) = State::new_headless(640, 480, "fn main() -> Foo {}\n") else {
+        let text = "fn main() -> Foo {}\n";
+        let Some(mut state) = State::new_headless(640, 480, text) else {
             return;
         };
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert_eq!(
+            state.current_buffer_id,
+            Some(bid),
+            "the snapshot made the buffer current"
+        );
+
         let function = style_with_fg(CellColor::Indexed(3));
         let ty = style_with_fg(CellColor::Indexed(4));
-        state.replace_style_spans(vec![StyleSegment {
-            range: ByteRange { start: 0, end: 20 },
-            spans: vec![
-                StyleSpan {
-                    range: ByteRange { start: 3, end: 7 },
-                    style: function,
-                },
-                StyleSpan {
-                    range: ByteRange { start: 13, end: 16 },
-                    style: ty,
-                },
-            ],
-        }]);
+        let frame = InstanceMessage::StyleSpans {
+            buffer_id: bid,
+            generation: 0,
+            full: true,
+            segments: vec![StyleSegment {
+                range: ByteRange { start: 0, end: 20 },
+                spans: vec![
+                    StyleSpan {
+                        range: ByteRange { start: 3, end: 7 },
+                        style: function,
+                    },
+                    StyleSpan {
+                        range: ByteRange { start: 13, end: 16 },
+                        style: ty,
+                    },
+                ],
+            }],
+        };
+        // Through the codec, so what the frontend applies is a frame
+        // decoded from wire bytes and not the value constructed above.
+        let mut wire = Vec::new();
+        pmacs_protocol::transport::write_message(&mut wire, &frame).expect("encode StyleSpans");
+        let decoded: InstanceMessage =
+            pmacs_protocol::transport::read_message(&mut wire.as_slice())
+                .expect("decode StyleSpans");
+        assert!(
+            matches!(decoded, InstanceMessage::StyleSpans { full: true, .. }),
+            "the codec round-trips the frame"
+        );
+        let _ = state.apply_attach_message(decoded);
+
         let (chunks, _) = state.chunks_for_line(0, 19);
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let find = |needle: &str| {
