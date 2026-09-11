@@ -991,12 +991,16 @@ fn a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join() {
 
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
-        // `ready::DEADLINE` and not 200 ms (E5.0's second finding on the
-        // `read Hello` family, from this row's sixteenth occurrence at
-        // PR #269's head): with readiness a served `Hello`, a daemon
-        // that is up still answers a fresh connection only on its
-        // dispatcher's tick, and on a loaded macOS runner that is past
-        // 200 ms. A deadline asserts the `Hello` eventually arrives.
+        // `ready::DEADLINE` and not 200 ms (the `read Hello` family's
+        // sixteenth occurrence, at PR #269's head, with readiness
+        // already a served `Hello`): a live daemon accepts a fresh
+        // connection on its accept loop's next poll --- `accept_loop`
+        // sleeps `ACCEPT_POLL_INTERVAL` (50 ms, `src/daemon.rs`) on
+        // every `WouldBlock` of its non-blocking listener, and the
+        // per-attach thread writes the `Hello` first; no dispatcher is
+        // in that path. The quantum is production and persists, and on
+        // a loaded macOS runner it lands past a sub-second read. A
+        // deadline asserts the `Hello` eventually arrives.
         stream
             .set_read_timeout(Some(common::ready::DEADLINE))
             .unwrap();

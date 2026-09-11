@@ -94,7 +94,25 @@ witness where a witness could be written without a slow platform:
   own discarded read, the largest controllable cost on the luajit
   legs (43--47 % of elapsed). Under the rerun rule nothing here
   retires a row; a mechanism is removed and the next trunk runs are
-  the evidence.
+  the evidence. CORRECTED at fix round 1 (2026-09-11): the boot was
+  one mechanism and not the only one. A live daemon accepts a fresh
+  connection on its accept loop's next poll --- `accept_loop` runs on
+  its own thread and sleeps `ACCEPT_POLL_INTERVAL` (50 ms,
+  `src/daemon.rs`) on every `WouldBlock` of its non-blocking listener,
+  and the per-attach thread it spawns writes the `Hello` first; no
+  dispatcher is in that path, and the registry had measured exactly
+  this at C1 (connect-to-`Hello` p50 50.14 ms on Linux, "one whole
+  accept quantum"). The quantum is production and persists, so the
+  family does not close on a mechanism's absence: it closes when every
+  reader of a fresh `Hello` has a bound the quantum's macOS tail cannot
+  exhaust. Eight readers had sub-second bounds --- `statusline_segments`
+  (200 ms), `theme_faces` (250 ms, twice), `vterm_stage3` (2 s), moved
+  at `66195b5`; `gpu_font:234` (250 ms), `m11_5:258` and `:307` (250
+  ms), `m5_5:2336` (500 ms), moved at fix round 1 --- and all eight now
+  read under `ready::DEADLINE`. Every other `Hello` read in the tree is
+  at 5 s or at `DEADLINE` (a grep over `: Hello = read_message` and
+  `read_message::<Hello>` with the read timeout in force, at fix round
+  1: zero under 5 s), and 5 s is two orders past the quantum.
 - **`src/daemon_attach.rs`, #264: the fixture holds its listener until
   the caller has returned**, through a channel, instead of for a fixed
   500 ms. The real window was `[100, 600)` ms after the spawn under a 2 s
@@ -253,7 +271,7 @@ measure.
 | #264 | a 500 ms fixture window under a 2 s deadline | the hold is a signal | mechanism removed; the local sweep is its only observer |
 | #266 | closed at E3 (`f457328`); `ready.rs`'s own rows carry no rate claim | nothing further | closed |
 | #268 | one unbounded drain and no aggregate bound (the second candidate mechanism) | both bounded, with progress | the second mechanism is removed; the first (a runner that stops reporting) is CI's |
-| the `read Hello` family, #258 | readiness declared on connect, the served `Hello` discarded | readiness is a served `Hello`, in the one helper every member spawns through | mechanism removed for every `TestDaemon` consumer; `m5_7`'s bridge reads (S3) are a different path; evidence is the trunk's macOS legs |
+| the `read Hello` family, #258 | readiness declared on connect, the served `Hello` discarded; and (found at PR #269's head, named right at fix round 1) the accept quantum a live daemon's fresh connection pays, `ACCEPT_POLL_INTERVAL` 50 ms, production and persisting | readiness is a served `Hello`, in the one helper every member spawns through; the eight sub-second `Hello` reads under `ready::DEADLINE` (four at `66195b5`, four at fix round 1) | the boot mechanism is removed for every `TestDaemon` consumer; the quantum is not removable here and the family closes on its readers instead --- every reader of a fresh `Hello` bounded above the quantum's macOS tail, which the eight moves complete (zero readers under 5 s by grep); `m5_7`'s bridge reads (S3) are a different path; the trunk's macOS legs are samples, not a retirement |
 | #256 | fixture order, not a bound (S5) | nothing, pending the owner's ruling on the archived rate | the probe taken before the drain |
 | R7 | its deadline never waits; the real waits are unbounded (S3) | nothing | a bound on the `Hello` read and the join, and the row's text corrected |
 | U19 | a 5 s bell poll reporting neither count nor elapsed (S2's shape) | nothing | reporting, as `pump_async` got |
