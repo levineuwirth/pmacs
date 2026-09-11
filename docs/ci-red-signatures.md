@@ -529,18 +529,34 @@ On #258, 2026-09-10 and 2026-09-11; not re-run.
 | run | 34528196810, `pull_request`, one attempt |
 | head | `66195b5`, C5's tip (the call-site fix over `aa5177d`) |
 | window | created 2026-09-10T20:44:47Z, completed 21:07:34Z |
-| verdict | 19 jobs: **17 success, 1 skipped, ZERO failures** |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
 | the skip | `Docs consistency`, correctly: the push changed code |
+
+CORRECTED at fix round 1 (2026-09-11, review 1's Medium 1): the verdict
+cell above was written `19 jobs: 17 success, 1 skipped, ZERO failures`
+at `2a7f656`, the red head's 17 carried forward with its failure struck,
+and did not sum; the jobs endpoint says 18. Every `N jobs:` cell in this
+file must now sum (`tests/docs_consistency.rs`, from `6b76bec`), and the
+two E5 runs carry the sum form beside their tables.
+
+Tally (run-34528196810-jobs): 19 = 18 + 1 + 0.
+
+Tally (run-34524799346-jobs): 19 = 17 + 1 + 1.
 
 Read from the `Test (macos-latest / luajit)` job log (103042232456)
 rather than the verdict line: `WouldBlock` **zero** times, `did not
 become ready` zero times, 132 `test result: ok`, zero `FAILED`;
 `a16_26_…` and #259's `acc28_…` both `... ok`; the served-Hello witness
-`... ok` in all 40 copies. Under the rerun rule that is non-reproduction
-and nothing more: #258 stays at five, the family at sixteen, #259 at
-seven. What changed under them is that both of the family's mechanisms
-are gone from the code, and the trunk's macOS legs after the merge are
-the evidence.
+`... ok` in all 40 copies. That is one sample of a tree that differs
+from the red's by three files, which is weaker than a rerun's
+non-reproduction (corrected at fix round 1, review 1's Low 6: it cannot
+even say the same tree does not reproduce): #258 stays at five, the
+family at sixteen, #259 at seven. What changed under them: the boot
+mechanism is gone from the helper, the accept quantum is production's
+and remains (the head-run section above, as corrected), and the
+family's exposure is its readers' bounds --- four sub-second readers
+moved at this tip, four more at fix round 1, zero under 5 s after it.
+The trunk's macOS legs are samples, not a retirement.
 
 ### R7's seventeenth, local, on E5's tip
 
