@@ -3734,6 +3734,17 @@ local function diagnostic_rows()
   local rows = {}
   local here_uri = diagnostics_source()
   local here = here_uri and pmacs.lsp.path_for_uri(here_uri) or nil
+  -- The originating project scope: only diagnostics from the same
+  -- project belong in `Project`. Resolved from the source document so
+  -- two unrelated roots do not list each other's errors, while a
+  -- same-project second file still appears.
+  local function project_root_of(path)
+    if not path then return nil end
+    local ok, proj = pcall(pmacs.project.detect, path)
+    if ok and proj and proj.root then return proj.root end
+    return nil
+  end
+  local here_root = here and project_root_of(here) or nil
   local function push_uri(uri)
     local path = pmacs.lsp.path_for_uri(uri) or uri
     local shown = here and display_path(path, here) or path
@@ -3762,7 +3773,16 @@ local function diagnostic_rows()
   end
   local others = {}
   for _, uri in ipairs(pmacs.diag.uris()) do
-    if uri ~= here_uri and pmacs.diag.count(uri) > 0 then others[#others + 1] = uri end
+    if uri ~= here_uri and pmacs.diag.count(uri) > 0 then
+      if here_root then
+        local other_path = pmacs.lsp.path_for_uri(uri)
+        if other_path and project_root_of(other_path) == here_root then
+          others[#others + 1] = uri
+        end
+      else
+        others[#others + 1] = uri
+      end
+    end
   end
   table.sort(others)
   rows[#rows + 1] = { text = "" }

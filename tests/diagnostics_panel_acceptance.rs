@@ -277,3 +277,21 @@ fn review_publish_preserves_the_source_while_panel_is_focused() {
     let text=panel_text(&state);
     assert!(text.contains("This buffer (2):"), "publish lost source: {text}");
 }
+
+#[test]
+fn review_project_section_excludes_an_unrelated_root() {
+    let fx = Fixture::new();
+    fx.write("proj_a/Cargo.toml", "[package]\nname = \"a\"\n");
+    fx.write("proj_b/Cargo.toml", "[package]\nname = \"b\"\n");
+    let a=fx.write("proj_a/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let b=fx.write("proj_b/src/unrelated.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let mut state=editor(&fx);
+    open(&state,&b);
+    wait_diag_count(&mut state,&b,2);
+    open(&state,&a);
+    wait_diag_count(&mut state,&a,2);
+    assert_eq!(eval::<usize>(&state,"return #pmacs.lsp.list()"),2, "two roots have independent servers");
+    m_x(&mut state,"lsp.diagnostics");
+    let text=panel_text(&state);
+    assert!(!text.contains("unrelated.rs"), "other root leaked into Project: {text}");
+}
