@@ -663,21 +663,28 @@ impl StylePolicy {
     /// The registered knob's name.
     pub const SETTING: &'static str = "ui.semantic-styling";
 
-    /// Read the policy from the registry installed in `lua`; the
-    /// default when nothing is registered is on.
+    /// Read the policy from the registry installed in `lua` for `buffer`;
+    /// the default when nothing is registered is on. The buffer matters
+    /// because `ConfigRegistry::get` resolves buffer-local overrides only
+    /// when given one: passing `None` makes a local false read back false
+    /// while changing nothing.
     #[must_use]
-    pub fn from_lua(lua: &mlua::Lua) -> Self {
+    pub fn from_lua(lua: &mlua::Lua, buffer: Option<crate::buffer::BufferId>) -> Self {
         Self {
-            semantic: crate::lua_bindings::config_bool(lua, Self::SETTING, None, true),
+            semantic: crate::lua_bindings::config_bool(lua, Self::SETTING, buffer, true),
         }
     }
 
-    /// Read the policy from a registry handle, or the default without one.
+    /// Read the policy from a registry handle for `buffer`, or the default
+    /// without one.
     #[must_use]
-    pub fn from_registry(registry: Option<&crate::lua_bindings::SharedConfigRegistry>) -> Self {
+    pub fn from_registry(
+        registry: Option<&crate::lua_bindings::SharedConfigRegistry>,
+        buffer: Option<crate::buffer::BufferId>,
+    ) -> Self {
         Self {
             semantic: registry.is_none_or(|registry| {
-                crate::lua_bindings::config_bool_in(registry, Self::SETTING, None, true)
+                crate::lua_bindings::config_bool_in(registry, Self::SETTING, buffer, true)
             }),
         }
     }
@@ -689,7 +696,7 @@ impl View for LspStyleView {
     }
 
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        if !StylePolicy::from_registry(self.config.as_ref()).semantic {
+        if !StylePolicy::from_registry(self.config.as_ref(), Some(buf.id())).semantic {
             return; // E5.6: the knob is off; grammar captures alone paint.
         }
         let Some(path) = buf.file_path() else {
