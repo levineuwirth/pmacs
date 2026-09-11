@@ -464,10 +464,14 @@ site (`editor.rs`'s `pump_async`), #263's (`async_runtime.rs`'s
 `pump_until` and its hand-rolled copies), `m8_1` and `m4` are 10 s
 under D12, and **#259's 5 s is `ready::DEADLINE`**, a margin choice and
 not a fix, the measurement above standing as the record of why. Under
-the rerun rule none of this retires a row: the mechanisms are gone from
-the code, and the trunk's macOS legs after the merge are the evidence
---- a `read Hello` red there would now mean a second mechanism, and a
-#259 red at 10 s would carry its poll count.
+the rerun rule none of this retires a row. CORRECTED at fix round
+1 (2026-09-11, review 1's High 2): the boot mechanism is gone from the
+helper, and the second mechanism the head's run exposed (the section
+below) is production's accept quantum and persists, so the family's
+closure is its readers' bounds and not a mechanism's absence --- a
+`read Hello` red on the trunk would now mean a reader at 5 s or more
+that the quantum's tail exhausted, which no measurement predicts --- and
+a #259 red at 10 s would carry its poll count.
 
 ### PR #269's head run 34524799346 at `aa5177d`: the family's sixteenth and #258's fifth, on the branch that removed the boot mechanism
 
@@ -490,13 +494,33 @@ added `... ok` on the leg. **The finding is where it happened.** At
 `aa5177d` the shared readiness wait already declared readiness on a
 served `Hello` (`ac4c706`), so this `Hello` was read from a daemon that
 had served one: the boot (the mechanism #258's measurement found and
-`ac4c706` removed) was one mechanism and not the only one. The second
-is a live daemon's per-connection `Hello`, written on its dispatcher's
-tick, past this row's 200 ms read timeout on a loaded runner. The
-sweep's rows had named the call-site fix as the alternative; E5 landed
-it at `66195b5` (`statusline_segments` 200 ms, `theme_faces` 250 ms
-twice, `vterm_stage3` 2 s, all now `common::ready::DEADLINE`). On #258,
-2026-09-10; not re-run.
+`ac4c706` removed) was one mechanism and not the only one. The second,
+NAMED WRONG when this section was written ("its dispatcher's tick") and
+corrected at fix round 1 (2026-09-11, review 1's High 2): no dispatcher
+is in a `Hello`'s path. `run_daemon` sets the listener non-blocking and
+spawns `accept_loop` on its own thread, which sleeps
+`ACCEPT_POLL_INTERVAL` (50 ms, `src/daemon.rs`) on every `WouldBlock`
+of `listener.accept()`, and the per-attach thread it spawns writes the
+`Hello` before anything reaches the dispatcher. So a fresh connection to
+a live daemon pays up to one accept quantum plus a thread spawn ---
+which is what the C1 paragraph below measured on Linux (connect-to-
+`Hello` p50 50.14 ms, "one whole accept quantum") --- and on a loaded
+hosted macOS runner, where a 20 ms sleep returns at 78--94 ms, that
+quantum lands past a 200 ms read. The quantum is production and
+persists; it is not instrument-class and nothing removed it. What
+closes the family is therefore its readers and not the mechanism:
+every reader of a fresh `Hello` bounded above the quantum's macOS
+tail. `66195b5` moved four of the eight sub-second readers
+(`statusline_segments` 200 ms, `theme_faces` 250 ms twice,
+`vterm_stage3` 2 s) and said "the four sites"; the four it left ---
+`gpu_font_acceptance.rs:234` (250 ms), `m11_5_semantic_acceptance.rs:258`
+and `:307` (250 ms), `m5_5_acceptance.rs:2336` (500 ms), three of them
+this family's own selectors (table rows 3, 4 and 8 below) --- read
+under `ready::DEADLINE` since `3dc975e` on PR #269's fix round 1, after
+which a grep over every `Hello` read with its read timeout in force
+finds zero under 5 s. Whether the 50 ms poll of a non-blocking listener
+is a product latency worth a row is the owner's (roadmap decide-list).
+On #258, 2026-09-10 and 2026-09-11; not re-run.
 
 ### PR #269's tip run 34528196810 at `66195b5`: green, which retires nothing
 
