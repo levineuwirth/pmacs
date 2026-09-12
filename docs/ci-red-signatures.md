@@ -650,6 +650,27 @@ with a rebuild between edit and run where the probe reaches a binary.
 U17 stays at five with the gate's non-CRDT occurrence above; #258 stays
 at five, the family at sixteen, #259 at seven.
 
+### PR #269's fix-round-3 tip run 34721284379 at `c629f8e`
+
+Recorded from `main` on 2026-09-12 at fix round 3's close. Read from
+the jobs endpoint.
+
+| field | value |
+|---|---|
+| run | 34721284379, `pull_request`, one attempt |
+| head | `c629f8e`, fix round 3's final tip (three product fixes over `b3660f2` plus the fmt normalization); the run tests the merge of the head into `main` |
+| window | created 2026-09-12T21:54:53Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-34721284379-jobs): 19 = 18 + 1 + 0.
+
+One sample of the twice-fixed tree's merge, and it retires nothing by
+itself: the five probes that reproduce review 3's three findings fail
+at `b3660f2` for the reasons the pass gives and pass at this head, each
+with a rebuild between edit and run where the probe reaches a binary.
+No new red appeared in the round's gate or in this run.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
