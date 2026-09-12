@@ -255,9 +255,17 @@ fn daemon_routes_semantic_family_to_semantic_session_only() {
 
     // --- Semantic session ---
     let mut sem = daemon.connect();
+    // Both `Hello` reads in this row are under `ready::DEADLINE`, not
+    // 250 ms: a live daemon accepts a fresh connection on its accept
+    // loop's next poll (`ACCEPT_POLL_INTERVAL`, 50 ms, production and
+    // persisting), and on a loaded macOS runner that quantum lands
+    // past a sub-second read timeout (the `read Hello` family; this
+    // row is its `daemon_routes` selector). `drain_kinds` keeps its
+    // 250 ms per read, which is the window it polls on.
+    sem.set_read_timeout(Some(common::ready::DEADLINE)).unwrap();
+    let hello: Hello = read_message(&mut sem).expect("semantic read Hello");
     sem.set_read_timeout(Some(Duration::from_millis(250)))
         .unwrap();
-    let hello: Hello = read_message(&mut sem).expect("semantic read Hello");
     let sem_fid = hello.assigned_frontend_id;
     write_message(
         &mut sem,
@@ -304,9 +312,11 @@ fn daemon_routes_semantic_family_to_semantic_session_only() {
 
     // --- Grid session (same daemon) ---
     let mut grid = daemon.connect();
-    grid.set_read_timeout(Some(Duration::from_millis(250)))
+    grid.set_read_timeout(Some(common::ready::DEADLINE))
         .unwrap();
     let ghello: Hello = read_message(&mut grid).expect("grid read Hello");
+    grid.set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
     write_message(
         &mut grid,
         &AttachRequest {

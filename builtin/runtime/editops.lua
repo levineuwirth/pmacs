@@ -890,7 +890,7 @@ pmacs.hook.add("buffer.before-save", function()
     local msg = "delete-trailing-whitespace (on save) failed: "
       .. tostring(err)
     pcall(ed.set_status, msg)
-    if pmacs.error then pcall(pmacs.error, msg) end
+    pmacs.error(msg)
   end
   -- nil return either way: never a veto.
 end)

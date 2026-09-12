@@ -800,6 +800,85 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
     }
 
     {
+        // Internal seam for `listview.rerender`: move the cursor of the
+        // window in the acting frontend's layout that shows `buffer` to
+        // the start of 0-based `line`, without changing focus and
+        // without touching any other window. An automatic refresh of a
+        // background panel must reseat the panel window's cursor while
+        // the user keeps working in the document window; the
+        // `pmacs.editor.*` motion primitives only reach the active
+        // window, so they cannot do this. Mirrors
+        // `EditorCore::move_to_line` (clamp to the last line, reset the
+        // goal column). Returns false when no live window shows the
+        // buffer.
+        let cc = core.clone();
+        win.set(
+            "_reseat_window_on_buffer",
+            lua.create_function(
+                move |lua, (buffer, line): (BufferIdLua, usize)| -> mlua::Result<bool> {
+                    let fid = acting_frontend(lua, &cc);
+                    let mut core = cc.borrow_mut();
+                    let win = core.views.get(&fid).and_then(|view| {
+                        view.layout.iter_ids().into_iter().find(|id| {
+                            core.windows
+                                .get(id)
+                                .is_some_and(|w| w.buffer_id == buffer.0)
+                        })
+                    });
+                    let Some(win) = win else {
+                        return Ok(false);
+                    };
+                    let offset = {
+                        let w = core.windows.get(&win).expect("window found above");
+                        let count = w.text_view.line_count().max(1);
+                        let target = line.min(count - 1);
+                        let len = core
+                            .registry
+                            .borrow()
+                            .get(w.buffer_id)
+                            .map_or(0, crate::buffer::Buffer::len);
+                        w.text_view.line_offset(target).unwrap_or(len).min(len)
+                    };
+                    let w = core.windows.get_mut(&win).expect("window found above");
+                    w.cursor = offset;
+                    w.goal_col = None;
+                    Ok(true)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        // Read half of the `listview.rerender` seam above: the 0-based
+        // line index holding the cursor of the window in the acting
+        // frontend's layout that shows `buffer`, or nil when no live
+        // window shows it. Lets a test observe a background panel's
+        // retained selection without focusing it (focusing re-seats
+        // the cursor through the display transaction).
+        let cc = core.clone();
+        win.set(
+            "_cursor_line_on_buffer",
+            lua.create_function(
+                move |lua, buffer: BufferIdLua| -> mlua::Result<Option<usize>> {
+                    let fid = acting_frontend(lua, &cc);
+                    let core = cc.borrow();
+                    let win = core.views.get(&fid).and_then(|view| {
+                        view.layout.iter_ids().into_iter().find(|id| {
+                            core.windows
+                                .get(id)
+                                .is_some_and(|w| w.buffer_id == buffer.0)
+                        })
+                    });
+                    Ok(win.and_then(|win| {
+                        let w = core.windows.get(&win)?;
+                        Some(w.text_view.line_at_offset(w.cursor))
+                    }))
+                },
+            )?,
+        )?;
+    }
+
+    {
         // Q#BP2c — `window.quit`. A window with no recorded action gets
         // a pointed error WITHOUT closing or switching anything.
         let cc = core.clone();

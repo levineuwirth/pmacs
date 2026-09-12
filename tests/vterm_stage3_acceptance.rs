@@ -844,8 +844,9 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
 
     fn attach(daemon: &common::daemon::TestDaemon, semantic: bool) -> (Hello, UnixStream) {
         let mut stream = daemon.connect();
+        // `ready::DEADLINE`, not 2 s: the `read Hello` family (E5.0).
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(common::ready::DEADLINE))
             .expect("read timeout");
         let hello: Hello = read_message(&mut stream).expect("read Hello");
         let req = AttachRequest {

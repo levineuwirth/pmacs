@@ -31,7 +31,19 @@
 //!    stated number equals what that enumeration holds. Four
 //!    consecutive phases shipped a count there that its own table or
 //!    list contradicted, each found by a reviewer recounting by hand;
-//!    the recount is now this file's.
+//!    the recount is now this file's. A run's verdict cell is the same
+//!    rule in its own shape: `N jobs: a success, b skipped, c failure`
+//!    must have a + b + c = N. The fifth phase wrote a green run as
+//!    `19 jobs: 17 success, 1 skipped, ZERO failures` by striking the
+//!    red's failure without incrementing its successes, and no tally
+//!    form stood beside a verdict cell to catch it. The rule reads the
+//!    registry of the tree under test, and a `pull_request` run tests
+//!    the merge of the head into `main`: the rule's own first run
+//!    reddened all six test legs on `main`'s uncorrected cell, and a
+//!    rerun re-executed the same merge commit and reddened again, so a
+//!    registry correction on `main` reaches a PR only through a new
+//!    head. A count of record is fixed on `main` before the rule that
+//!    asserts it lands on a branch, or the branch carries the red.
 //!
 //! Each assertion prints the offending line, so a red names its cause.
 
@@ -566,6 +578,74 @@ fn check_tallies(doc: &str) -> TallyReport {
     report
 }
 
+/// A job-count word: digits, or the spelled-out small counts the
+/// registry writes in capitals for emphasis (`ZERO failures`).
+fn job_count(s: &str) -> Result<usize, String> {
+    let s = s.trim().trim_matches('*').trim();
+    match s.to_ascii_lowercase().as_str() {
+        "zero" | "no" => Ok(0),
+        "one" => Ok(1),
+        "two" => Ok(2),
+        "three" => Ok(3),
+        _ => count(s),
+    }
+}
+
+/// Every `N jobs: a <label>, b <label>, …` phrase in `doc` — a run's
+/// verdict cell, or an attempt row's — checked: the parts must sum to
+/// `N`. The phrase ends at the cell's closing `|`, a `;`, or the end of
+/// the line; bold markers are ignored. A phrase whose parts do not
+/// parse as `<count> <label>` pairs is itself a failure, so a cell in a
+/// shape this cannot read is named rather than skipped.
+fn check_job_cells(doc: &str) -> TallyReport {
+    let mut report = TallyReport {
+        checked: 0,
+        failures: Vec::new(),
+    };
+    for (n, line) in doc.lines().enumerate() {
+        let mut rest = line;
+        while let Some(at) = rest.find(" jobs:") {
+            let before = &rest[..at];
+            let after = &rest[at + " jobs:".len()..];
+            rest = after;
+            let Some(total) = before
+                .rsplit(|c: char| c.is_whitespace() || c == '|')
+                .next()
+                .and_then(|tok| job_count(tok).ok())
+            else {
+                continue;
+            };
+            let end = after.find(['|', ';']).unwrap_or(after.len());
+            let phrase = after[..end].trim().trim_matches('*').trim();
+            let parts: Vec<&str> = phrase.split(',').map(str::trim).collect();
+            report.checked += 1;
+            let mut sum = 0usize;
+            let mut bad = None;
+            for part in &parts {
+                let mut words = part.split_whitespace();
+                if let (Some(Ok(k)), Some(_)) = (words.next().map(job_count), words.next()) {
+                    sum += k;
+                } else {
+                    bad = Some(*part);
+                    break;
+                }
+            }
+            if let Some(part) = bad {
+                report.failures.push(format!(
+                    "{}: `{part}` is not a `<count> <label>` part of a jobs cell\n    {line}",
+                    n + 1
+                ));
+            } else if parts.len() < 2 || sum != total {
+                report.failures.push(format!(
+                    "{}: {total} jobs but the parts sum to {sum}\n    {line}",
+                    n + 1
+                ));
+            }
+        }
+    }
+    report
+}
+
 /// The registry's counts of record each sit beside the enumeration
 /// they count, as a `Tally (<id>): …` line, and the stated number
 /// equals what the enumeration holds. Four consecutive phases shipped a
@@ -585,6 +665,26 @@ fn ci_red_registry_counts_equal_their_enumerations() {
     assert!(
         report.failures.is_empty(),
         "a count of record in docs/ci-red-signatures.md disagrees with its enumeration:\n{}",
+        report.failures.join("\n")
+    );
+}
+
+/// Every run verdict in the registry sums: `N jobs: a success, b
+/// skipped, c failure` has a + b + c = N. E5 wrote the tip run
+/// 34528196810 as `19 jobs: 17 success, 1 skipped, ZERO failures`
+/// (it is 18, 1, 0) in the registry, the PR body and three vault
+/// records at once, carrying the red head's 17 forward with its
+/// failure struck; the sum is what a reader had to do by hand.
+#[test]
+fn ci_red_registry_job_cells_sum() {
+    let report = check_job_cells(&read("docs/ci-red-signatures.md"));
+    assert!(
+        report.checked > 0,
+        "docs/ci-red-signatures.md carries no `N jobs: …` cell; run verdicts are written in that form"
+    );
+    assert!(
+        report.failures.is_empty(),
+        "a run verdict in docs/ci-red-signatures.md does not sum:\n{}",
         report.failures.join("\n")
     );
 }
@@ -750,6 +850,51 @@ Tally (range): 1.5–4 s over 4, 1.5, 2.
                 report.failures[0]
             );
         }
+    }
+
+    /// The three shapes the registry writes a run's job count in, every
+    /// one summing; the checker reads all three.
+    const JOB_CELLS: &str = "\
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| attempt 1 | created 14:40:38Z, closed 15:10:57Z; 19 jobs: **17 success, 1 skipped, 1 cancelled** |
+| verdict | 18 jobs: **16 success, 1 failure, 1 skipped** |
+";
+
+    #[test]
+    fn every_job_cell_shape_is_checked_and_sums() {
+        let report = check_job_cells(JOB_CELLS);
+        assert_eq!(report.checked, 3);
+        assert!(report.failures.is_empty(), "{}", report.failures.join("\n"));
+    }
+
+    /// The cell `2a7f656` shipped for run 34528196810, verbatim: the
+    /// red head's 17 carried forward with the failure struck. It fails
+    /// naming its line and the sum it reached.
+    #[test]
+    fn the_pre_fix_tip_cell_fails_by_its_sum() {
+        let doc = JOB_CELLS.replacen(
+            "**18 success, 1 skipped, ZERO failures**",
+            "**17 success, 1 skipped, ZERO failures**",
+            1,
+        );
+        assert_ne!(doc, JOB_CELLS, "the mutation must apply");
+        let report = check_job_cells(&doc);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(
+            report.failures[0].starts_with("1: 19 jobs but the parts sum to 18"),
+            "the failure names the line and the sum; got {}",
+            report.failures[0]
+        );
+    }
+
+    /// A cell whose parts are not `<count> <label>` pairs is named, not
+    /// skipped, so a reshaped cell cannot slip past the sum.
+    #[test]
+    fn an_unreadable_job_cell_is_a_failure() {
+        let report = check_job_cells("| verdict | 19 jobs: all green |\n");
+        assert_eq!(report.checked, 1);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(report.failures[0].contains("is not a `<count> <label>` part"));
     }
 
     /// A tally with nothing under it, or in no known form, is itself a

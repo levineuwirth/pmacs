@@ -158,6 +158,13 @@ fn j1b2_a_missing_server_is_reported_with_guidance() {
         msg.contains("init.lua"),
         "says what the user can do; got {msg:?}"
     );
+    // E5.1: the guidance is also durable in `*errors*` through
+    // `pmacs.error`, where it outlives the next status message.
+    let durable = state.lua_host.errors_buffer_text();
+    assert!(
+        durable.contains("did not start") && durable.contains(&cmd),
+        "the guidance reaches *errors*; got {durable:?}"
+    );
 }
 
 /// **N** (3) — reported once per `(language, key_uri, command)`. The

@@ -552,6 +552,20 @@ local function ensure_panel(name, key_entries)
   return p
 end
 
+-- The last selection this panel held, as a stable row id plus its
+-- numeric line for the defined fallback. Cursor motion through n/p
+-- leaves no trace here; it is refreshed on open, manual refresh and
+-- every automatic rerender while the panel is active, which is exactly
+-- when the user could have moved it. A background publication then
+-- reseats the still-correct id.
+local function note_selection(p)
+  if pmacs.window.buffer() ~= p.buffer then return end
+  local line = pmacs.editor.cursor_line()
+  local row = p.line_to_row[line]
+  p.selected_id = row and row.id or nil
+  p.selected_line = line
+end
+
 function pmacs.listview.open(spec)
   assert(type(spec) == "table" and type(spec.name) == "string",
     "listview.open: spec.name (string) required")
@@ -599,6 +613,89 @@ function pmacs.listview.open(spec)
     pmacs.window.switch_buffer(p.buffer)
   end
   seat_cursor(p, 1)
+  note_selection(p)
+end
+
+-- Re-run the data source of the panel opened under `name` and re-render
+-- it in place, whichever window shows it and whether or not it is the
+-- active one. For a consumer whose data changes under it (the
+-- diagnostics panel on a `publishDiagnostics`), where `listview.refresh`
+-- --- the `g` command, active-panel-only because it re-seats the cursor
+-- through the editor's motion primitives --- cannot reach. Selection
+-- follows the same Q#TR3 discipline as manual refresh: the selected
+-- stable id is retained across the row replacement and re-seated in
+-- the window displaying the panel, falling back to the previous
+-- numeric line (clamped) when the diagnostic is gone. A background
+-- refresh never moves the user's active document window.
+-- Returns false when no live panel carries that name or it has no
+-- `on_refresh`.
+function pmacs.listview.rerender(name)
+  local p = panel_for_requested_name(name)
+  if not (p and p.on_refresh) then return false end
+  local focused = pmacs.window.buffer() == p.buffer
+  local saved_id, saved_line
+  if focused then
+    saved_line = pmacs.editor.cursor_line()
+    local row = p.line_to_row[saved_line]
+    saved_id = row and row.id
+  else
+    saved_id, saved_line = p.selected_id, p.selected_line
+  end
+  local rows = check_ids(p.on_refresh() or {})
+  p.rows = rows
+  render(p, rows)
+  local target = (saved_id ~= nil and line_of_id(p, saved_id)) or saved_line
+  if target == nil then
+    p.selected_id, p.selected_line = nil, nil
+    return true
+  end
+  if (p.visible or 0) == 0 then return true end
+  target = math.max(1, math.min(target, p.visible))
+  if focused then
+    -- Mirror `listview.refresh`: re-seat the active window through
+    -- the editor primitives.
+    pmacs.editor.clear_selection()
+    pmacs.editor.set_view_top(0)
+    pmacs.editor.move_to_line(0)
+    seat_cursor(p, target)
+  else
+    -- The panel sits in the background: reseat its own window
+    -- without moving the active document window. `target` is already
+    -- a 0-based buffer line, matching the binding.
+    pmacs.window._reseat_window_on_buffer(p.buffer, target)
+  end
+  local row = p.line_to_row[target]
+  p.selected_id = row and row.id or nil
+  p.selected_line = target
+  return true
+end
+
+-- The item under the cursor in the active panel, or nil (no panel is
+-- active, or the line carries no item). For a consumer's own `keys`
+-- commands, which must ask the same question `listview.visit` asks
+-- without duplicating the panel record lookup (E5.5).
+function pmacs.listview.current_item()
+  local p = active_panel()
+  if not p then return nil end
+  return p.line_to_item[pmacs.editor.cursor_line()]
+end
+
+-- Record the active panel's current row as its retained selection, so
+-- a later background `rerender` reseats the row the user actually
+-- holds. Needed by consumers that move the cursor after `open`
+-- returns (the diagnostics panel seats its first data row itself);
+-- `open`, manual refresh and automatic rerender note it themselves.
+function pmacs.listview.retain_selection()
+  local p = active_panel()
+  if not p then return false end
+  note_selection(p)
+  return true
+end
+
+-- The requested name of the panel the active window shows, or nil.
+function pmacs.listview.current_panel_name()
+  local p = active_panel()
+  return p and p.requested_name or nil
 end
 
 pmacs.command.define {
@@ -634,6 +731,7 @@ pmacs.command.define {
     pmacs.editor.set_view_top(0)
     pmacs.editor.move_to_line(0)
     seat_cursor(p, line_of_id(p, saved_id) or saved)
+    note_selection(p)
   end,
 }
 

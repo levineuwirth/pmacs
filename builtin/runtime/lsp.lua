@@ -530,6 +530,60 @@ pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
 -- equal as raw keys).
 local attachments = {}
 
+-- E5.3: servers that are gone underneath something that still refers
+-- to them. Keyed by `tostring(sid)`; each entry carries the label, the
+-- last kind seen (`crashed` or `stopped`), the reason, and the attempt
+-- it was reported for. `note_dead_server` reports through `pmacs.error`
+-- once per (sid, attempt, kind), so a crash-looping server under
+-- `OnCrash` reports each attempt and a stale attachment found on a
+-- later attach reports once rather than on every open. The table feeds
+-- the `*lsp*` panel's "Crashed" section and the modeline's `LSP:!`.
+local dead_servers = {}
+
+local function note_dead_server(sid, kind, reason)
+  if not sid then return end
+  local skey = tostring(sid)
+  local label, attempt = skey, 0
+  local ok, rows = pcall(pmacs.lsp.list)
+  if ok and rows then
+    for _, info in ipairs(rows) do
+      if tostring(info.id) == skey then
+        label = info.label or label
+        attempt = info.attempt or 0
+        if reason == nil and info.state and info.state.reason then
+          reason = info.state.reason
+        end
+      end
+    end
+  end
+  local prior = dead_servers[skey]
+  if prior and prior.kind == kind and prior.attempt == attempt then
+    return
+  end
+  dead_servers[skey] = {
+    label = label,
+    kind = kind,
+    reason = reason,
+    attempt = attempt,
+    at = pmacs.editor.monotonic_ms(),
+  }
+  local msg
+  if kind == "crashed" then
+    msg = string.format("LSP: %s crashed%s", label,
+      reason and (": " .. tostring(reason)) or "")
+  else
+    msg = string.format("LSP: %s stopped underneath an attached buffer", label)
+  end
+  pmacs.error(msg)
+end
+
+-- A server that came back (a restart under `OnCrash`, or a fresh spawn
+-- reusing nothing) leaves the dead list; the panel shows only what is
+-- gone now.
+local function clear_dead_server(sid)
+  if sid then dead_servers[tostring(sid)] = nil end
+end
+
 -- Minimal file:// percent-encoder. Matches src/lsp.rs's policy: ASCII
 -- alpha-num + a small set of path-safe punctuation pass through; every
 -- other byte goes through %XX. Iterates per-byte (`gmatch(".")` is
@@ -760,19 +814,13 @@ local function resolve_root_fn(language, resolver, path)
   if failure then
     local msg = string.format(
       "LSP: %s root resolver for %s %s", language, dir, failure)
-    -- Report on the channel that EXISTS. `pmacs.error` is referenced by
-    -- fifteen guarded call sites across the runtime and is defined
-    -- nowhere in production (only by a test stub in `src/editor.rs`), so
-    -- `if pmacs.error then ...` alone would be a sixteenth report that
-    -- never fires — the unwired-guard shape, not a fix for it. The
-    -- status line is what lsp.lua already uses for every other LSP
-    -- error. The `pmacs.error` arm rides along so this upgrades for free
-    -- if that channel is ever built.
-    --
-    -- Both reports are pcall'd: a broken reporting channel must not turn
-    -- a declined root into a failed attach.
+    -- Both channels: the status line, which lsp.lua uses for every
+    -- other LSP error, and `pmacs.error` (E5.1), which keeps the trace
+    -- in `*errors*` after the next status message replaces this one.
+    -- The status report is pcall'd: a broken reporting channel must not
+    -- turn a declined root into a failed attach.
     pcall(pmacs.editor.set_status, msg)
-    if pmacs.error then pcall(pmacs.error, msg) end
+    pmacs.error(msg)
     resolved = nil
   end
   if type(resolved) ~= "string" then resolved = nil end
@@ -908,7 +956,7 @@ local function report_spawn_failure(language, key_uri, command, err)
     "pmacs.lsp.config.%s.command in init.lua. M-x lsp.status for detail.",
     tostring(command), language, tostring(err), language)
   pcall(pmacs.editor.set_status, msg)
-  if pmacs.error then pcall(pmacs.error, msg) end
+  pmacs.error(msg)
   return key
 end
 
@@ -1003,6 +1051,9 @@ local function ensure_server(language, path)
         clear_failure(affinity_key(language, key_uri))
         return info.id
       end
+      -- E5.3: a dead server for this key is reported, not skipped in
+      -- silence; a replacement is spawned below.
+      note_dead_server(info.id, kind)
     end
   end
   local ok, sid = pcall(pmacs.lsp.spawn, {
@@ -1011,6 +1062,9 @@ local function ensure_server(language, path)
     command = cfg.command,
     args = cfg.args or {},
     env = cfg.env,
+    -- E5.3: forwarded so a config may say `restart = "never"`; nil keeps
+    -- the spawner's default.
+    restart = cfg.restart,
     init_options = cfg.init_options,
     settings = cfg.settings,
     cwd = root,
@@ -1190,12 +1244,20 @@ local function attach_buffer(buf)
   if existing then
     local kind = server_state_kind(existing.server)
     if kind == "crashed" or kind == "stopped" then
+      -- E5.3: the buffer's server is gone; say so before rebuilding.
+      note_dead_server(existing.server, kind)
       -- A terminal OnCrash client may still have `next_restart_at`
       -- armed. Spawning beside it creates two same-root servers when
       -- the old id restarts. `forget` is the terminal-state operation:
       -- it removes the client and cancels that pending restart before
       -- the replacement is created.
       pcall(pmacs.lsp.forget, existing.server)
+      -- The forgotten ID is replaced below: its crash is history kept
+      -- in the error log, not current state for `*lsp*`. Retire it now
+      -- so a successful replacement cannot leave a stale `Crashed`
+      -- entry beside a ready server. An actually dead server stays
+      -- listed until forgotten or restarted under the same ID.
+      clear_dead_server(existing.server)
     end
     attachments[key] = nil
     -- Unsent edits targeted the dead attachment; the did_open below
@@ -1341,7 +1403,12 @@ pmacs.statusline.register {
   fn = function(ctx)
     local bkey = tostring(ctx.buffer)
     local rec = attachments[bkey]
-    if rec then return "LSP:" .. pmacs.lsp.modeline_label(rec.server) end
+    if rec then
+      -- E5.3: a crashed server is `LSP:!`, the same mark a server that
+      -- never started gets, rather than the state's own label.
+      if server_state_kind(rec.server) == "crashed" then return "LSP:!" end
+      return "LSP:" .. pmacs.lsp.modeline_label(rec.server)
+    end
     -- Journey Stage 1b-2. A plain map lookup, deliberately: deriving an
     -- affinity key here would run root resolvers and project detection
     -- once per window per paint.
@@ -2136,7 +2203,7 @@ local function finish_group_scan(group, gen, scan_members, ok, result)
       if group.failure_reported ~= msg then
         group.failure_reported = msg
         local report = "lsp: file watch scan failed for " .. group.base .. ": " .. msg
-        if pmacs.error then pcall(pmacs.error, report) end
+        pmacs.error(report)
         pcall(pmacs.editor.set_status, report)
       end
     end
@@ -2525,11 +2592,10 @@ local function report_subscriber_error(what, err)
   local msg = string.format("LSP: %s subscriber failed: %s", what,
     tostring(err))
   -- COHERENCE §1.2: a pcall around background wiring must report, not
-  -- discard. `pmacs.editor.set_status` is the channel that exists;
-  -- `pmacs.error` is referenced by fifteen call sites and defined
-  -- nowhere in production, so it rides along rather than standing alone.
+  -- discard. Both channels: the status line for the moment, and
+  -- `pmacs.error` (E5.1) for the durable trace in `*errors*`.
   pcall(pmacs.editor.set_status, msg)
-  if pmacs.error then pcall(pmacs.error, msg) end
+  pmacs.error(msg)
 end
 
 -- Current spawn attempt for `sid`, or nil if the manager has forgotten
@@ -2773,7 +2839,13 @@ local function handle_server_requests()
           dispatch_notification(sid, ev)
         elseif ev.kind == "response" then
           deliver_response(sid, ev)
+        elseif ev.kind == "crashed" then
+          -- E5.3: a crash was consumed silently here; it is reported
+          -- through `pmacs.error`, marks the modeline `LSP:!` for every
+          -- buffer attached to the server, and lists in `*lsp*`.
+          note_dead_server(sid, "crashed", ev.reason)
         elseif ev.kind == "initialized" then
+          clear_dead_server(sid)
           -- Buffers attach before the server finishes initializing, so
           -- the pulls in `attach_buffer` are no-ops for the FIRST file
           -- (their `server_is_initialized` guard is false). This is the
@@ -3569,6 +3641,34 @@ end
 -- without one, which would leave `g` bound and silently dead.
 local function lsp_status_rows()
   local rows = {}
+  -- E5.3: what is gone underneath an attachment, first. Reconciled
+  -- against the manager's current IDs: a forgotten ID is replaced, not
+  -- gone, so it never renders. Reporting for an actually dead server
+  -- (still listed as crashed/stopped) and clearing on same-ID restart
+  -- are preserved.
+  local dead = {}
+  local live_ids = {}
+  local ok_list, listed = pcall(pmacs.lsp.list)
+  if ok_list and listed then
+    for _, info in ipairs(listed) do live_ids[tostring(info.id)] = true end
+  end
+  for skey, entry in pairs(dead_servers) do
+    if not ok_list or live_ids[skey] then
+      dead[#dead + 1] = { key = skey, entry = entry }
+    else
+      dead_servers[skey] = nil
+    end
+  end
+  table.sort(dead, function(a, b) return a.entry.at < b.entry.at end)
+  if #dead > 0 then
+    rows[#rows + 1] = { text = string.format("Crashed (%d):", #dead) }
+    for _, d in ipairs(dead) do
+      rows[#rows + 1] = { text = string.format("  %s (%s, attempt %d) — %s",
+        d.entry.label, d.entry.kind, d.entry.attempt,
+        d.entry.reason and tostring(d.entry.reason) or "no reason recorded") }
+    end
+    rows[#rows + 1] = { text = "" }
+  end
   local fails = pmacs.lsp.spawn_failures()
   if #fails > 0 then
     rows[#rows + 1] = { text = string.format("Failed to start (%d):", #fails) }
@@ -3607,6 +3707,161 @@ pmacs.command.define {
     }
   end,
 }
+
+-- E5.4: `*diagnostics*` --- a listview over `pmacs.diag` for the active
+-- buffer and then the rest of the project, RET visiting through the
+-- same jump-ring path the references panel uses, re-rendered on every
+-- `publishDiagnostics` while it is open.
+
+local DIAGNOSTICS_PANEL = "*diagnostics*"
+
+local function active_buffer_uri()
+  local rec = pmacs.lsp.active_attachment()
+  if rec and rec.uri then return rec.uri end
+  local buf = pmacs.window.buffer()
+  local ok, path = pcall(function() return buf and buf:path() end)
+  if ok and type(path) == "string" and path ~= "" then
+    return file_uri_for(path)
+  end
+  return nil
+end
+
+-- The diagnostics source resolved separately from panel focus: opening
+-- `lsp.diagnostics` focuses `*diagnostics*`, which has no file, so a
+-- refresh that recomputes from the active window loses the document.
+-- The originating URI is retained on open (and whenever a document is
+-- active) and reused while the panel is focused, for both manual `g`
+-- and publish refresh.
+local diagnostics_source_uri = nil
+
+local function diagnostics_source()
+  local buf = pmacs.window.buffer()
+  local is_panel = false
+  if buf then
+    local ok, desc = pcall(pmacs.describe.buffer, buf)
+    if ok and desc and desc.name == DIAGNOSTICS_PANEL then is_panel = true end
+  end
+  if is_panel and diagnostics_source_uri then
+    return diagnostics_source_uri
+  end
+  local uri = active_buffer_uri()
+  if uri then diagnostics_source_uri = uri end
+  return uri
+end
+
+local function diagnostic_rows()
+  local rows = {}
+  local here_uri = diagnostics_source()
+  local here = here_uri and pmacs.lsp.path_for_uri(here_uri) or nil
+  -- The originating project scope: only diagnostics from the same
+  -- project belong in `Project`. Resolved from the source document so
+  -- two unrelated roots do not list each other's errors, while a
+  -- same-project second file still appears.
+  local function project_root_of(path)
+    if not path then return nil end
+    local ok, proj = pcall(pmacs.project.detect, path)
+    if ok and proj and proj.root then return proj.root end
+    return nil
+  end
+  local here_root = here and project_root_of(here) or nil
+  local function push_uri(uri)
+    local path = pmacs.lsp.path_for_uri(uri) or uri
+    local shown = here and display_path(path, here) or path
+    local diags = pmacs.diag.list(uri)
+    table.sort(diags, function(a, b)
+      if a.start_line ~= b.start_line then return a.start_line < b.start_line end
+      if a.start_col ~= b.start_col then return a.start_col < b.start_col end
+      if (a.end_line or 0) ~= (b.end_line or 0) then return (a.end_line or 0) < (b.end_line or 0) end
+      if (a.end_col or 0) ~= (b.end_col or 0) then return (a.end_col or 0) < (b.end_col or 0) end
+      if a.severity ~= b.severity then return a.severity < b.severity end
+      return (a.message or "") < (b.message or "")
+    end)
+    -- A diagnostic's position is not its identity: distinct diagnostics
+    -- may share a start position, so the row id carries the end
+    -- position, severity, message, source and code too, with an
+    -- occurrence discriminator for exact duplicates. Content-derived
+    -- ids keep a selected row stable when a publication reorders the
+    -- same diagnostic set.
+    local seen = {}
+    for _, d in ipairs(diags) do
+      local base = string.format("%s:%d:%d:%d:%d:%s:%s:%s:%s", uri, d.start_line, d.start_col,
+        d.end_line or 0, d.end_col or 0, tostring(d.severity),
+        tostring(d.message or ""), tostring(d.source or ""), tostring(d.code or ""))
+      seen[base] = (seen[base] or 0) + 1
+      rows[#rows + 1] = {
+        text = string.format("%s:%d:%d  %s  %s", shown, d.start_line + 1,
+          d.start_col + 1, d.severity, (d.message:gsub("\n.*$", ""))),
+        item = { uri = uri, line = d.start_line, col = d.start_col },
+        id = base .. "#" .. seen[base],
+      }
+    end
+    return #diags
+  end
+  local buffer_count = 0
+  if here_uri then
+    local at = #rows + 1
+    buffer_count = push_uri(here_uri)
+    table.insert(rows, at, { text = string.format("This buffer (%d):", buffer_count) })
+  else
+    rows[#rows + 1] = { text = "This buffer: no file" }
+  end
+  local others = {}
+  for _, uri in ipairs(pmacs.diag.uris()) do
+    if uri ~= here_uri and pmacs.diag.count(uri) > 0 then
+      if here_root then
+        local other_path = pmacs.lsp.path_for_uri(uri)
+        if other_path and project_root_of(other_path) == here_root then
+          others[#others + 1] = uri
+        end
+      else
+        others[#others + 1] = uri
+      end
+    end
+  end
+  table.sort(others)
+  rows[#rows + 1] = { text = "" }
+  local at = #rows + 1
+  local project_count = 0
+  for _, uri in ipairs(others) do project_count = project_count + push_uri(uri) end
+  table.insert(rows, at, { text = string.format("Project (%d):", project_count) })
+  return rows
+end
+
+function pmacs.lsp.diagnostics()
+  -- Capture the source before the panel takes focus; `diagnostic_rows`
+  -- then retains it while the panel is focused.
+  local src = active_buffer_uri()
+  if src then diagnostics_source_uri = src end
+  local rows = diagnostic_rows()
+  pmacs.listview.open {
+    name = DIAGNOSTICS_PANEL,
+    header = "Diagnostics   RET visit  n/p move  g refresh  q quit",
+    rows = rows,
+    on_visit = visit_location,
+    on_refresh = diagnostic_rows,
+  }
+  -- The panel opens seated on its first data line, the buffer's section
+  -- label, which visits nothing; when the buffer has a diagnostic, RET
+  -- should land on it at once.
+  if rows[2] and rows[2].item then pmacs.editor.move_down() end
+  -- The cursor moved after `open` seated it: retain the row it holds
+  -- so a background publication reseats this diagnostic, not the
+  -- section label.
+  pcall(pmacs.listview.retain_selection)
+end
+
+pmacs.command.define {
+  name = "lsp.diagnostics",
+  description = "List the diagnostics for the active buffer and the project in *diagnostics*; RET visits.",
+  fn = pmacs.lsp.diagnostics,
+}
+
+-- Refresh on publish: a subscriber for every server, at module load, so
+-- the panel follows the store wherever the panel is shown. Cheap when
+-- the panel is not open: `rerender` finds no live panel and returns.
+pmacs.lsp.on_notification("textDocument/publishDiagnostics", function()
+  pcall(pmacs.listview.rerender, DIAGNOSTICS_PANEL)
+end)
 
 pmacs.command.define {
   name = "lsp.go-to-definition",

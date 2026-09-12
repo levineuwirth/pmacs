@@ -675,6 +675,15 @@ impl EditorState {
         let async_runtime =
             crate::lua_bindings::make_async_runtime(lua_host.lua(), Some(lua_host.registry()))
                 .expect("install pmacs._async raw helpers");
+        // E5.1: the error channel's mode-line mark. First, because it
+        // registers only a statusline provider over `pmacs.error_log`
+        // (both Rust-installed) and every later chunk may report.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/errors.lua"),
+                include_str!("../builtin/runtime/errors.lua"),
+            )
+            .expect("load errors builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/async.lua"),
@@ -5726,6 +5735,49 @@ fn paint_window_content(
     );
 }
 
+/// E5.1: showing the `*errors*` buffer reads it. Called by both
+/// painters (the grid's [`paint_frame`] and the semantic
+/// `render_frame`) before the statusline fan-out, so the mode line's
+/// unread mark and the status line's last-error trace clear on the
+/// same frame the buffer appears in, on either frontend.
+///
+/// Only a buffer actually presented by the rendering frontend counts:
+/// the window must belong to that frontend's layout, and a side window
+/// must not be hidden (`panel_hidden`). A retained but hidden panel
+/// window is not evidence anyone saw the errors, so a shrunken frame
+/// keeps the unread mark and the transient message on both paths.
+/// Windows of any other frontend never count for this one.
+pub fn mark_errors_read_if_presented(state: &EditorState, frontend_id: FrontendId) {
+    if state.lua_host.unread_errors() == 0 {
+        return;
+    }
+    let presented = {
+        let core = state.core.borrow();
+        let registry = core.registry.borrow();
+        let Some(view) = core.views.get(&frontend_id) else {
+            return;
+        };
+        view.layout.iter_ids().into_iter().any(|id| {
+            if view.panel_hidden
+                && core
+                    .windows
+                    .get(&id)
+                    .is_some_and(crate::window::Window::is_side)
+            {
+                return false;
+            }
+            core.windows.get(&id).is_some_and(|window| {
+                registry
+                    .get(window.buffer_id)
+                    .is_ok_and(|buf| buf.name() == crate::lua::ERRORS_BUFFER_NAME)
+            })
+        })
+    };
+    if presented {
+        state.lua_host.mark_errors_read();
+    }
+}
+
 /// Paint one full frame into `grid` and return the desired terminal
 /// cursor position.
 ///
@@ -5759,6 +5811,7 @@ pub fn paint_frame(
     // geometry, and a panel the frame can no longer satisfy has already
     // surrendered focus and its terminal controller.
     state.sync_frame_geometry(frontend_id, term_size);
+    mark_errors_read_if_presented(state, frontend_id);
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow
     // below, then paint only the transactionally validated owned results.
@@ -6904,9 +6957,14 @@ fn build_status_line(
     let mut line = String::new();
     if !core.status.is_empty() {
         line.push_str(&sanitize_single_line(&core.status));
-    } else if let Some(err) = lua_host.last_error() {
-        use std::fmt::Write;
-        let _ = write!(line, "lua: {}", sanitize_single_line(&err.message));
+    } else if let Some(msg) = lua_host.unread_error_status_message() {
+        // E5.1: the last error shows while it is unread, and stops once
+        // a window has shown `*errors*` --- a transient trace, where it
+        // used to nag on every idle frame until the next error. Shared
+        // with the semantic `StatusFacts` producer through
+        // `LuaHost::unread_error_status_message`, so both frontends see
+        // the same text and clear together.
+        line.push_str(&msg);
     }
     if !dispatcher.pending().is_empty() {
         use std::fmt::Write;
@@ -9606,8 +9664,9 @@ mod tests {
             .invoke_command("editor.list-buffers", mlua::MultiValue::new())
             .unwrap();
         // After list-buffers, the cursor sits on data line 1 (the
-        // first registered buffer, i.e. *scratch*). Walk down until we
-        // land on `target.txt`.
+        // first registered buffer, i.e. *scratch*). Walk down until the
+        // listview's item under the cursor is `target.txt` (E5.5: the
+        // listing is a listview panel, so the row's buffer is its item).
         let mut hops = 0;
         loop {
             let line: i64 = s
@@ -9617,9 +9676,15 @@ mod tests {
                 .eval()
                 .unwrap();
             assert!(line >= 1, "cursor should be on a data line");
-            let name_at_cursor = s.lua_host.lua()
-                .load("local i = pmacs.editor.cursor_line(); local ids = pmacs.buffer.list(); local nth = 1; for _, id in ipairs(ids) do if pmacs.describe.buffer(id).name == '*buffer-list*' then else if nth == i then return pmacs.describe.buffer(id).name end; nth = nth + 1 end end")
-                .eval::<Option<String>>().unwrap();
+            let name_at_cursor = s
+                .lua_host
+                .lua()
+                .load(
+                    "local id = pmacs.listview.current_item(); \
+                     return id and pmacs.describe.buffer(id).name or nil",
+                )
+                .eval::<Option<String>>()
+                .unwrap();
             if name_at_cursor.as_deref() == Some("target.txt") {
                 break;
             }
@@ -9630,7 +9695,7 @@ mod tests {
             assert!(hops < 32, "couldn't find target.txt in buffer list");
         }
         s.lua_host
-            .invoke_command("editor.buffer-list-visit", mlua::MultiValue::new())
+            .invoke_command("listview.visit", mlua::MultiValue::new())
             .unwrap();
         assert_eq!(s.core.borrow().active_buffer_name(), "target.txt");
     }
@@ -12846,7 +12911,14 @@ mod tests {
 
     /// Drive `tick_async` until `predicate` is true, sleeping briefly
     /// between ticks so workers have a chance to send replies. Panics
-    /// after a 2-second deadline so a stuck test doesn't hang CI.
+    /// after a 10-second deadline so a stuck test doesn't hang CI.
+    ///
+    /// Ten seconds and not two (E5.0): a deadline asserts that something
+    /// eventually happens, and two seconds was the window in which R5
+    /// and #263 fired under sweep load --- on the hosted macOS runners a
+    /// 2 ms sleep returns after 12--17 ms, so the old bound bought a
+    /// fifth of its nominal polls. The message still carries the elapsed
+    /// time and the poll count, so R5's discriminator reads as a rate.
     ///
     /// `what` names the condition being waited on, and the panic carries
     /// it with the deadline, the elapsed time and the number of times the
@@ -12856,7 +12928,7 @@ mod tests {
     /// inward by hand: that module is compiled into the integration
     /// targets and an in-crate unit test cannot reach it.
     fn pump_async<F: Fn(&EditorState) -> bool>(state: &mut EditorState, what: &str, predicate: F) {
-        const DEADLINE: Duration = Duration::from_secs(2);
+        const DEADLINE: Duration = Duration::from_secs(10);
         let start = std::time::Instant::now();
         let mut polls = 0u32;
         while !predicate(state) {

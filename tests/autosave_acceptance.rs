@@ -440,6 +440,12 @@ fn a_failing_sweep_is_reported_not_swallowed() {
         status.contains("autosave FAILED") && status.contains("NOT being protected"),
         "the failure is surfaced: {status:?}"
     );
+    // E5.1: logged once through `pmacs.error`, durable in `*errors*`.
+    let durable = s.lua_host.errors_buffer_text();
+    assert!(
+        durable.contains("autosave FAILED"),
+        "the failure is durable in *errors*: {durable:?}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

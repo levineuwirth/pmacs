@@ -168,11 +168,10 @@ end
 
 local function report(msg)
   -- COHERENCE §1.2: background work must leave an attributed trace.
-  -- `pmacs.editor.set_status` is the channel that EXISTS; `pmacs.error`
-  -- is referenced by fifteen call sites and defined nowhere in
-  -- production, so it rides along rather than standing alone.
+  -- Both channels: the status line for the moment, and `pmacs.error`
+  -- (E5.1) for the durable trace in `*errors*`.
   pcall(pmacs.editor.set_status, msg)
-  if pmacs.error then pcall(pmacs.error, msg) end
+  pmacs.error(msg)
 end
 
 -- `lake serve` below 3.1.0 starts a server that cannot answer, which is
