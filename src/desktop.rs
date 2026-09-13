@@ -467,6 +467,7 @@ pub fn restore_into(
                 panel_capable: true,
                 frame_geometry: None,
                 panel_hidden: false,
+                document_viewport: None,
             },
         );
         active

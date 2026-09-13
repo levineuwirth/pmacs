@@ -1261,6 +1261,20 @@ fn main() {
                 // range hold (which defaults to the full hold).
                 if mode == "semantichold" {
                     full_count += 1;
+                    // Append the range asked for to PMACS_FAKE_RANGE_SINK
+                    // when named, one JSON line per request, so a test
+                    // can read which lines the client chose (E6b.4).
+                    if let Ok(sink) = std::env::var("PMACS_FAKE_RANGE_SINK") {
+                        use std::io::Write as _;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&sink)
+                        {
+                            let _ =
+                                writeln!(f, "{}", params.get("range").cloned().unwrap_or_default());
+                        }
+                    }
                     let uri = params
                         .get("textDocument")
                         .and_then(|t| t.get("uri"))

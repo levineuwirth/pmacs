@@ -700,6 +700,7 @@ fn review3_errors_shown_only_on_another_frontend_stay_unread_here() {
                 panel_capable: false,
                 frame_geometry: None,
                 panel_hidden: false,
+                document_viewport: None,
             },
         );
     }

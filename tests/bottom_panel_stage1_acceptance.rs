@@ -207,6 +207,7 @@ fn attach_frontend(s: &EditorState, fid: FrontendId, panel_capable: bool) -> Win
             panel_capable,
             frame_geometry: None,
             panel_hidden: false,
+            document_viewport: None,
         },
     );
     drop(core);

@@ -1642,7 +1642,11 @@ fn marked_covers(marked: &[(u64, u64)], start: u64, end: u64) -> bool {
 /// `PMACS_GPU_PROBE_TYPE_AT=<byte>` first walks the caret there with
 /// `Right`, one round-trip each, and types once the daemon's
 /// `CursorByte` confirms it; without it the text goes in at the caret
-/// the snapshot placed. "Settled" is the first daemon frame after the
+/// the snapshot placed. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole
+/// run (30 s by default), and `PMACS_GPU_PROBE_SETTLE=change` settles
+/// on the first daemon frame whose marked spans differ from the
+/// keystroke's translated set, for a real server whose answer removes
+/// the mark from the identifier the character broke. "Settled" is the first daemon frame after the
 /// keystroke whose marked spans cover the typed bytes: the fixture
 /// types at the start of an identifier so the server's answer, and only
 /// the server's answer, can color what was typed. After settling the
@@ -1693,11 +1697,27 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let type_at = std::env::var("PMACS_GPU_PROBE_TYPE_AT")
         .ok()
         .and_then(|value| value.parse::<u64>().ok());
+    // `cover` (the default): settled when a daemon frame's marked spans
+    // cover the typed bytes. `change`: settled at the first daemon
+    // frame after the keystroke whose marked spans differ from the
+    // keystroke's own translated set --- for a real server, whose
+    // answer to a character typed into an identifier is to STOP
+    // marking it (`xstd` resolves to nothing), so covering never comes.
+    let settle_on_change = std::env::var("PMACS_GPU_PROBE_SETTLE").is_ok_and(|v| v == "change");
     let started = std::time::Instant::now();
     let ms = |t: std::time::Instant| {
         u64::try_from(t.duration_since(started).as_millis()).unwrap_or(u64::MAX)
     };
-    let deadline = started + std::time::Duration::from_secs(30);
+    // Thirty seconds by default; a measurement against a real server
+    // that indexes a workspace first raises it with
+    // PMACS_GPU_PROBE_DEADLINE_MS.
+    let deadline = started
+        + std::time::Duration::from_millis(
+            std::env::var("PMACS_GPU_PROBE_DEADLINE_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30_000),
+        );
     let settle_quiet = std::time::Duration::from_millis(500);
 
     let mut trace: Vec<TypingProbeFrame> = Vec::new();
@@ -1705,6 +1725,7 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let mut walked = false;
     let mut typed_at: Option<std::time::Instant> = None;
     let mut typed_at_byte: u64 = 0;
+    let mut typed_marked: Vec<(u64, u64)> = Vec::new();
     let mut settled_at: Option<std::time::Instant> = None;
     // The last message that could change what is styled: a styling
     // frame or a snapshot. The daemon attaches a `CursorByte` and its
@@ -1786,11 +1807,16 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             let t = std::time::Instant::now();
             typed_at = Some(t);
             if let Some(after) = typing_probe_observe(&app, ms(t), "key", mark) {
+                typed_marked.clone_from(&after.marked);
                 trace.push(after);
             }
         } else if settled_at.is_none()
             && is_style
-            && marked_covers(&frame.marked, typed_at_byte, typed_at_byte + typed_len)
+            && (if settle_on_change {
+                frame.marked != typed_marked
+            } else {
+                marked_covers(&frame.marked, typed_at_byte, typed_at_byte + typed_len)
+            })
         {
             settled_at = Some(now);
         } else if settled_at.is_some() && now.duration_since(last_styling_at) >= settle_quiet {

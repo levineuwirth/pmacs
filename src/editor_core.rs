@@ -789,6 +789,7 @@ impl EditorCore {
                 // Real geometry arrives with the first render/resize.
                 frame_geometry: None,
                 panel_hidden: false,
+                document_viewport: None,
             },
         );
         Self {
@@ -6402,6 +6403,7 @@ mod tests {
                 panel_capable: true,
                 frame_geometry: None,
                 panel_hidden: false,
+                document_viewport: None,
             },
         );
         win_id

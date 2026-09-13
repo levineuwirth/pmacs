@@ -1188,6 +1188,11 @@ local function server_supports_semantic_delta(sid)
   return type(p.full) == "table" and p.full.delta == true
 end
 
+-- E6b.4: how many lines beyond the visible ones the range pull asks
+-- for on each side, so a scroll of a few lines lands on tokens the
+-- last pull already refreshed.
+local SEMANTIC_RANGE_MARGIN = 40
+
 function pull_semantic_tokens_quiet(rec)
   if not rec or not server_is_initialized(rec.server) then return end
   local has_full = server_supports_semantic_full(rec.server)
@@ -1209,6 +1214,36 @@ function pull_semantic_tokens_quiet(rec)
   local end_line, end_col
   if not has_full then
     end_line, end_col = document_end_position(buffer_text(rec.buffer))
+  end
+  -- E6b.4: when the server tokenizes a range and some frontend has
+  -- lines of this buffer on screen, ask for those lines (with a
+  -- margin) FIRST, so the tokens the user is looking at come back
+  -- ahead of the whole document's; the whole-document pull below
+  -- follows and replaces everything when it lands. The store merges
+  -- a range answer into the lines it covers and keeps the rest.
+  local visible = nil
+  if has_range and has_full then
+    local ok, lines = pcall(pmacs.lsp._visible_lines, rec.buffer)
+    if ok and type(lines) == "table" then
+      local start = math.max(0, lines.start - SEMANTIC_RANGE_MARGIN)
+      local stop = lines.stop + SEMANTIC_RANGE_MARGIN
+      -- The end is the start of the line after `stop`, or the document
+      -- end when `stop` reaches it: a position past the last line is
+      -- one a server may refuse.
+      if stop >= lines.last_line then
+        visible = { start = start, stop_line = lines.last_line, stop_col = lines.last_col }
+      else
+        visible = { start = start, stop_line = stop + 1, stop_col = 0 }
+      end
+    end
+  end
+  if visible then
+    pmacs.async(function()
+      pcall(function()
+        pmacs.lsp.request_semantic_tokens_range(
+          rec.server, rec.uri, visible.start, 0, visible.stop_line, visible.stop_col):await()
+      end)
+    end)
   end
   pmacs.async(function()
     pcall(function()

@@ -911,6 +911,11 @@ enum ResponseRoute {
         uri: String,
         anchor: std::sync::Arc<str>,
         base_seq: u64,
+        /// `Some((start_line, start_col), (end_line, end_col))`, byte
+        /// columns, for a `/range` request: the answer replaces the
+        /// held tokens between those positions and keeps the rest
+        /// (E6b.4); `None` for `/full`.
+        lines: Option<((u32, u32), (u32, u32))>,
     },
     /// Absorb a `textDocument/semanticTokens/full/delta` response —
     /// spliced against the store's retained raw int stream at
@@ -2183,6 +2188,7 @@ impl LspManager {
                 uri,
                 anchor,
                 base_seq,
+                lines: None,
             },
         );
         Ok(job_id)
@@ -2225,6 +2231,7 @@ impl LspManager {
                 uri,
                 anchor,
                 base_seq,
+                lines: Some(((start_line, start_col), (end_line, end_col))),
             },
         );
         Ok(job_id)
@@ -2927,6 +2934,7 @@ impl LspManager {
                 uri,
                 anchor,
                 base_seq,
+                lines,
             } => {
                 let resp = crate::semantic_tokens::SemanticTokensResponse::from_lsp_value(result);
                 let key = crate::semantic_tokens::SemanticTokenKey::new(server_key, uri.clone());
@@ -2935,7 +2943,14 @@ impl LspManager {
                     .semantic_token_store
                     .lock()
                     .expect("semantic token store mutex poisoned");
-                guard.set(key, resp, anchor, encoding, *base_seq);
+                match lines {
+                    Some(lines) => {
+                        guard.set_range(key, &resp, anchor, encoding, *base_seq, *lines);
+                    }
+                    None => {
+                        guard.set(key, resp, anchor, encoding, *base_seq);
+                    }
+                }
             }
             ResponseRoute::SemanticTokensDelta {
                 uri,

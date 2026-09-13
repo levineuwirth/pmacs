@@ -85,6 +85,7 @@ impl Session {
                     // Q#BP15a: UNKNOWN, never the attach placeholder.
                     frame_geometry: None,
                     panel_hidden: false,
+                    document_viewport: None,
                 },
             );
             // Programmatic Lua calls act for the ambient active frontend,

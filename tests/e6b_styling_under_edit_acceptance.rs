@@ -116,6 +116,17 @@ fn store_is_stale(state: &EditorState, uri: &str) -> bool {
 /// A state with the fake server on Rust, the marker face, and `a.rs`
 /// open with its tokens pulled. Returns the state and the file URI.
 fn attached(text: &str) -> (EditorState, tempfile::TempDir, String) {
+    attached_with(text, HOLD_MS, HOLD_MS, None)
+}
+
+/// [`attached`] with the fake server's two holds chosen, and the file
+/// its `/range` requests are appended to.
+fn attached_with(
+    text: &str,
+    full_hold_ms: u64,
+    range_hold_ms: u64,
+    range_sink: Option<&std::path::Path>,
+) -> (EditorState, tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let a_path = dir.path().join("a.rs");
     std::fs::write(&a_path, text).expect("write a.rs");
@@ -123,6 +134,9 @@ fn attached(text: &str) -> (EditorState, tempfile::TempDir, String) {
 
     let mut state = EditorState::new_with_roots(&iso::roots());
     let fake = fake_lsp_path();
+    let sink = range_sink.map_or(String::new(), |p| {
+        format!("PMACS_FAKE_RANGE_SINK = '{}',", p.display())
+    });
     state
         .lua_host
         .lua()
@@ -131,7 +145,9 @@ fn attached(text: &str) -> (EditorState, tempfile::TempDir, String) {
                command = '{fake}',
                env = {{
                  PMACS_FAKE_LSP_MODE = 'semantichold',
-                 PMACS_FAKE_LSP_SEMANTIC_HOLD_MS = '{HOLD_MS}',
+                 PMACS_FAKE_LSP_SEMANTIC_HOLD_MS = '{full_hold_ms}',
+                 PMACS_FAKE_LSP_SEMANTIC_RANGE_HOLD_MS = '{range_hold_ms}',
+                 {sink}
                }},
              }}
              pmacs.theme.merge {{ namespace = {{ fg = {{ 0x7b, 0x1f, 0xa2 }} }} }}"
@@ -291,5 +307,89 @@ fn e6b_3_the_grid_keeps_the_refinement_on_every_tick_until_the_answer_lands() {
         marked_runs(&state),
         vec![(0, 3), (4, 8)],
         "settled: the server's tokens for `xfn main`"
+    );
+}
+
+/// E6b.4 --- **the visible lines are asked for first, and their answer
+/// aligns the store before the whole document's.** The fake server
+/// answers `/range` at once and holds `/full` for 1.5 s. After the
+/// attach pull has fully landed (the whole-document `resultId` is in
+/// the store), typing `x` sends one `didChange`, one `/range` for the
+/// lines on screen and one `/full`; the store is fresh again within
+/// 800 ms of the keystroke, which only the range answer can do, and
+/// the range the server was asked covers line 0 with the margin the
+/// runtime adds. Without the range pull the store stays stale until
+/// the held whole-document answer, past the bound.
+#[test]
+fn e6b_4_the_visible_range_is_pulled_first_and_lands_ahead_of_the_whole_document() {
+    let sink_dir = tempfile::tempdir().expect("sink tempdir");
+    let sink = sink_dir.path().join("ranges.jsonl");
+    let (mut state, _dir, uri) = attached_with("fn main() {}\n", 1500, 0, Some(&sink));
+
+    // The whole-document answer from the attach pull, so the server is
+    // idle when the keystroke's requests reach it.
+    let full_landed = "(function() \
+       for _, r in ipairs(pmacs.lsp.list()) do \
+         if r.state and r.state.kind == 'initialized' then \
+           local rid = pmacs.semantic_tokens.result_id(r.id, '"
+        .to_owned()
+        + &uri
+        + "') \
+           return rid ~= nil and rid:sub(1, 5) == 'hold-' and rid:sub(1, 11) ~= 'hold-range-' \
+         end \
+       end \
+       return false \
+     end)()";
+    assert!(
+        pump_lua_flag(&mut state, &full_landed, 10),
+        "the attach pull's whole-document answer never landed"
+    );
+    let ranges_before = std::fs::read_to_string(&sink).unwrap_or_default();
+    let asked_before = ranges_before.lines().count();
+    assert!(
+        asked_before >= 1,
+        "the attach pull asked for the visible range"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.editor.goto_byte(0)")
+        .exec()
+        .expect("cursor to the top");
+    let typed_at = Instant::now();
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+    assert!(store_is_stale(&state, &uri), "stale by the keystroke");
+    let deadline = typed_at + Duration::from_millis(800);
+    while store_is_stale(&state, &uri) {
+        assert!(
+            Instant::now() < deadline,
+            "the store did not turn fresh within 800 ms of the keystroke; only the \
+             range answer could, the whole-document one is held 1.5 s"
+        );
+        tick(&mut state);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        positioned(&state, &uri),
+        Some(vec![(0, 3), (4, 8)]),
+        "the range answer for `xfn main`"
+    );
+    let ranges_after = std::fs::read_to_string(&sink).expect("range sink");
+    let asked_after: Vec<&str> = ranges_after.lines().collect();
+    assert!(
+        asked_after.len() > asked_before,
+        "the keystroke's flush asked for a range: {ranges_after}"
+    );
+    let last: serde_json::Value =
+        serde_json::from_str(asked_after.last().expect("a range")).expect("range json");
+    let start_line = last["start"]["line"].as_u64().expect("start line");
+    let end_line = last["end"]["line"].as_u64().expect("end line");
+    assert!(
+        start_line == 0 && end_line >= 1,
+        "the range covers the one visible line: {last}"
     );
 }

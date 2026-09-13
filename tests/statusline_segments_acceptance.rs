@@ -475,6 +475,7 @@ fn a05_08_evaluator_latches_reentrancy_contexts_and_mutation_guards() {
                 panel_capable: true,
                 frame_geometry: None,
                 panel_hidden: false,
+                document_viewport: None,
             },
         );
     }

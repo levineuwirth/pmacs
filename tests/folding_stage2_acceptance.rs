@@ -1524,6 +1524,7 @@ fn attach_frontend(s: &EditorState, fid: FrontendId, fold_projection: bool) -> W
             panel_capable: true,
             frame_geometry: None,
             panel_hidden: false,
+            document_viewport: None,
         },
     );
     win_id

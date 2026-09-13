@@ -517,6 +517,101 @@ impl SemanticTokenStore {
         true
     }
 
+    /// Absorb a `semanticTokens/range` answer for the positions
+    /// `range` --- `((start_line, start_col), (end_line, end_col))` in
+    /// byte columns, end exclusive --- of `text` (E6b.4): the held
+    /// tokens inside that extent are replaced by the answer's, the
+    /// ones outside are kept, the Lua surface's decoded tokens become
+    /// the answer's, and the entry's `raw` and `result_id` stay as the
+    /// last whole answer put them so the delta chain is not broken by
+    /// a range's `resultId`; an entry created by a range answer holds
+    /// no `raw` and no `result_id`, so the next pull asks for the
+    /// whole document. The requested lines
+    /// are carried across the same edits as the tokens, so the region
+    /// replaced is where those lines are now. Refused and held
+    /// unalignable on the same terms as [`Self::set`].
+    pub fn set_range(
+        &mut self,
+        key: SemanticTokenKey,
+        response: &SemanticTokensResponse,
+        text: &str,
+        encoding: crate::lsp::PositionEncoding,
+        base_seq: u64,
+        range: ((u32, u32), (u32, u32)),
+    ) -> bool {
+        if self
+            .by_key
+            .get(&key)
+            .is_some_and(|e| !e.unalignable && e.base_seq > base_seq)
+        {
+            return false;
+        }
+        // The byte extent of the requested range on the server's text,
+        // as one token so it rides the same translation.
+        let mut line_starts = vec![0usize];
+        line_starts.extend(
+            text.bytes()
+                .enumerate()
+                .filter_map(|(i, b)| (b == b'\n').then_some(i + 1)),
+        );
+        let byte_at = |(line, col): (u32, u32)| -> usize {
+            line_starts.get(line as usize).map_or(text.len(), |&ls| {
+                ls.saturating_add(col as usize).min(text.len())
+            })
+        };
+        let extent_start = byte_at(range.0);
+        let extent_end = byte_at(range.1).max(extent_start);
+        let mut extent = vec![PositionedToken {
+            start: extent_start as u64,
+            end: extent_end.max(extent_start + 1) as u64,
+            token_type: 0,
+            token_modifiers: 0,
+        }];
+        let mut fresh = resolve_tokens(&response.tokens, text, encoding);
+        let mut pending = 0;
+        let mut unalignable = false;
+        if let Some(log) = self.logs.get(&key.uri) {
+            if base_seq < log.dropped_below {
+                unalignable = true;
+            } else {
+                for &(seq, edit) in &log.edits {
+                    if seq >= base_seq {
+                        translate_spans(&mut fresh, edit);
+                        translate_spans(&mut extent, edit);
+                        pending += 1;
+                    }
+                }
+            }
+        }
+        self.stale_uris.remove(&key.uri);
+        let entry = self.by_key.entry(key).or_insert_with(|| Entry {
+            response: SemanticTokensResponse::default(),
+            spans: Vec::new(),
+            base_seq,
+            pending: 0,
+            unalignable: false,
+        });
+        if unalignable {
+            entry.unalignable = true;
+            entry.spans.clear();
+        } else {
+            let (ext_start, ext_end) = extent
+                .first()
+                .map_or((u64::MAX, u64::MAX), |e| (e.start, e.end));
+            entry
+                .spans
+                .retain(|t| t.end <= ext_start || t.start >= ext_end);
+            entry.spans.extend(fresh);
+            entry.spans.sort_unstable_by_key(|t| (t.start, t.end));
+            entry.unalignable = false;
+        }
+        entry.response.tokens.clone_from(&response.tokens);
+        entry.base_seq = base_seq;
+        entry.pending = pending;
+        self.version += 1;
+        true
+    }
+
     /// [`Self::set`] for a response that describes the document as it
     /// stands now (`base_seq` = the next edit number): the shape a
     /// test seeds with, and a server answering a document no edit has
@@ -1020,6 +1115,64 @@ mod tests {
         );
         assert_eq!(after, before, "a 0→0 edit is not an edit to this store");
         assert!(!s.is_stale(uri));
+    }
+
+    /// E6b.4 --- a range answer replaces the held tokens on its lines
+    /// and keeps the rest; the whole-document answer after it is not
+    /// refused; an entry made by a range answer leaves no `result_id`
+    /// for a delta to chain on.
+    #[test]
+    fn e6b_4_a_range_answer_replaces_its_lines_and_keeps_the_rest() {
+        let mut s = SemanticTokenStore::new();
+        let uri = "file:///a.rs";
+        s.open_log(uri);
+        let key = SemanticTokenKey::new("1", uri);
+        // Three lines, one word each: aa / bb / cc.
+        let text = "aa\nbb\ncc\n";
+        s.set_current(
+            key.clone(),
+            resp(vec![tok(0, 0, 2), tok(1, 0, 2), tok(2, 0, 2)]),
+            text,
+            UTF16,
+        );
+        assert_eq!(ranges(&s, uri), Some(vec![(0, 2), (3, 5), (6, 8)]));
+        // The middle line changes to `b` and the server answers the
+        // range for line 1 alone: [3,4) now, the others untouched.
+        s.record_edit(uri, edit(4, 5, 0));
+        s.note_synced(uri);
+        let base = s.synced_seq(uri);
+        assert!(s.set_range(
+            key.clone(),
+            &resp(vec![tok(1, 0, 1)]),
+            "aa\nb\ncc\n",
+            UTF16,
+            base,
+            ((1, 0), (2, 0))
+        ));
+        assert_eq!(ranges(&s, uri), Some(vec![(0, 2), (3, 4), (5, 7)]));
+        assert!(!s.is_stale(uri));
+        // The whole-document answer for the same base lands after it.
+        assert!(s.set(
+            key.clone(),
+            resp(vec![tok(0, 0, 2), tok(1, 0, 1), tok(2, 0, 2)]),
+            "aa\nb\ncc\n",
+            UTF16,
+            base
+        ));
+        assert_eq!(ranges(&s, uri), Some(vec![(0, 2), (3, 4), (5, 7)]));
+        // A range answer for a URI with no entry yet creates one with
+        // no delta cursor.
+        let other = SemanticTokenKey::new("1", "file:///b.rs");
+        assert!(s.set_range(
+            other.clone(),
+            &resp(vec![tok(0, 0, 2)]),
+            "aa\n",
+            UTF16,
+            0,
+            ((0, 0), (1, 0))
+        ));
+        assert_eq!(ranges(&s, "file:///b.rs"), Some(vec![(0, 2)]));
+        assert!(s.get(&other).expect("entry").result_id.is_none());
     }
 
     /// A URI with an edit log ignores `mark_stale`: the log is the

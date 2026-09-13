@@ -2632,6 +2632,13 @@ fn handle_dispatcher_event(
                         // focused window would let an ordinary document
                         // viewport overwrite a focused panel's buffer.
                         align_primary_document_window(editor, source, buffer_id);
+                        // E6b.4 — remember what this frontend has on
+                        // screen where Lua can read it, so the next
+                        // semantic-token pull can ask for those lines
+                        // first.
+                        if let Some(view) = editor.core.borrow_mut().views.get_mut(&source) {
+                            view.document_viewport = Some((buffer_id, visible));
+                        }
                         if let Some(sem) = semantic_states.get_mut(&source) {
                             sem.set_viewport(buffer_id, visible, generation);
                         }
@@ -3914,6 +3921,7 @@ fn build_fresh_frontend_view(
         // request's permanent 24×80 placeholder (Q#BP15a).
         frame_geometry: None,
         panel_hidden: false,
+        document_viewport: None,
     }
 }
 
@@ -4488,6 +4496,7 @@ mod tests {
                     panel_capable: false,
                     frame_geometry: None,
                     panel_hidden: false,
+                    document_viewport: None,
                 },
             );
         }
@@ -4848,6 +4857,10 @@ mod tests {
     /// fan-outs with a nil record and proved nothing.
     #[cfg(feature = "crdt")]
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a FrontendView literal inside grew E6b.4's document_viewport field"
+    )]
     fn the_optimistic_producer_also_expands_a_lean_abbreviation() {
         use crate::editor::EditorState;
         use crate::protocol::FrontendId;
@@ -4903,6 +4916,7 @@ mod tests {
                     panel_capable: true,
                     frame_geometry: None,
                     panel_hidden: false,
+                    document_viewport: None,
                 },
             );
         }
@@ -5389,6 +5403,7 @@ mod tests {
                     panel_capable: true,
                     frame_geometry: None,
                     panel_hidden: false,
+                    document_viewport: None,
                 },
             );
         }
@@ -5862,6 +5877,10 @@ mod tests {
     /// ever rejected the mismatched buffer.
     #[cfg(feature = "crdt")]
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a FrontendView literal inside grew E6b.4's document_viewport field"
+    )]
     fn a_stale_document_pointer_does_not_steal_focus_from_a_panel() {
         use crate::editor::EditorState;
         use crate::protocol::FrontendId;
@@ -5911,6 +5930,7 @@ mod tests {
                     panel_capable: true,
                     frame_geometry: None,
                     panel_hidden: false,
+                    document_viewport: None,
                 },
             );
             (document, panel_id, dead_buffer)
@@ -6303,6 +6323,7 @@ mod tests {
                     panel_capable: true,
                     frame_geometry: None,
                     panel_hidden: false,
+                    document_viewport: None,
                 },
             );
             (document, panel)

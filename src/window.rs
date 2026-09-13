@@ -720,6 +720,14 @@ pub struct FrontendView {
     /// `EditorState::reconcile_panel_layout`; never persisted, never set
     /// from Lua, and never `true` while no side window exists.
     pub panel_hidden: bool,
+    /// The byte range a semantic frontend last declared on screen for
+    /// its document, with the buffer it named (`FrontendEvent::Viewport`,
+    /// recorded by the daemon beside the window alignment). `None` for
+    /// a grid frontend, whose windows carry `view_top` and whose frame
+    /// geometry says how many rows follow it. Read by
+    /// `pmacs.lsp._visible_lines` so a semantic-token pull can ask the
+    /// server for the lines on screen first (E6b.4).
+    pub document_viewport: Option<(BufferId, pmacs_protocol::ByteRange)>,
 }
 
 impl Layout {
