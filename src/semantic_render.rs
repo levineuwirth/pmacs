@@ -1182,8 +1182,7 @@ impl SemanticRenderState {
     /// to say (no hints, no prior non-empty send).
     #[allow(clippy::too_many_lines)]
     pub fn render_frame(&mut self, state: &EditorState) -> Vec<InstanceMessage> {
-        // E5.1: a semantic frontend showing `*errors*` reads it too.
-        crate::editor::mark_errors_read_if_presented(state, self.frontend_id);
+        self.mark_presented_errors_read(state);
         // Vterm Stage 3: a terminal window suppresses the whole document
         // projection. It is checked FIRST because the terminal identity
         // buffer is a valid (empty) document — running the document path
@@ -1430,6 +1429,36 @@ impl SemanticRenderState {
         }
         self.emit_panel_frame(state, panel_statusline.as_ref(), &mut out);
         out
+    }
+
+    /// Acknowledge only the document and panel this renderer projects.
+    /// Other document splits belong to the grid's presentation, even
+    /// when they remain in this frontend's layout.
+    fn mark_presented_errors_read(&self, state: &EditorState) {
+        if state.lua_host.unread_errors() == 0 {
+            return;
+        }
+        let Some(errors) = state.lua_host.errors_buffer_id() else {
+            return;
+        };
+        let presented = {
+            let core = state.core.borrow();
+            let document = self.viewport.as_ref().is_some_and(|vp| {
+                vp.buffer_id == errors
+                    && core.primary_document_buffer(self.frontend_id) == Some(errors)
+            });
+            let panel = self.peer_knows_panel_frames
+                && core.panel_capable_for(self.frontend_id)
+                && core.panel_grid_size(self.frontend_id).is_some()
+                && core
+                    .side_window_for(self.frontend_id)
+                    .and_then(|id| core.windows.get(&id))
+                    .is_some_and(|window| window.buffer_id == errors);
+            document || panel
+        };
+        if presented {
+            state.lua_host.mark_errors_read();
+        }
     }
 
     /// Project this frontend's active terminal, or `None` when it is

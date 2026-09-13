@@ -5735,17 +5735,17 @@ fn paint_window_content(
     );
 }
 
-/// E5.1: showing the `*errors*` buffer reads it. Called by both
-/// painters (the grid's [`paint_frame`] and the semantic
-/// `render_frame`) before the statusline fan-out, so the mode line's
-/// unread mark and the status line's last-error trace clear on the
-/// same frame the buffer appears in, on either frontend.
+/// E5.1: showing the `*errors*` buffer reads it. Called by the grid's
+/// [`paint_frame`] before the statusline fan-out, so the unread count
+/// and last-error trace clear on the frame the buffer appears in.
+/// The semantic renderer checks its own document and panel projection;
+/// it does not display every document split in the layout.
 ///
 /// Only a buffer actually presented by the rendering frontend counts:
 /// the window must belong to that frontend's layout, and a side window
 /// must not be hidden (`panel_hidden`). A retained but hidden panel
 /// window is not evidence anyone saw the errors, so a shrunken frame
-/// keeps the unread mark and the transient message on both paths.
+/// keeps the unread mark and the transient message.
 /// Windows of any other frontend never count for this one.
 pub fn mark_errors_read_if_presented(state: &EditorState, frontend_id: FrontendId) {
     if state.lua_host.unread_errors() == 0 {

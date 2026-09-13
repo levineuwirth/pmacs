@@ -728,3 +728,168 @@ fn review3_errors_shown_only_on_another_frontend_stay_unread_here() {
     }
     assert_eq!(state.lua_host.unread_errors(), 0);
 }
+
+fn error_panel_becomes_visible(semantic: bool) {
+    let state = EditorState::new_with_roots(&iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    exec(
+        &state,
+        r"
+        pmacs.error('first visible error')
+        for _, b in ipairs(pmacs.buffer.list()) do
+            if b:name() == '*errors*' then
+                pmacs.window.display(b, { side = 'bottom', height = 8, select = false })
+            end
+        end
+    ",
+    );
+    let mut renderer = pmacs::semantic_render::SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
+    renderer.set_viewport(
+        state.core.borrow().active_buffer_id(),
+        pmacs::protocol::ByteRange { start: 0, end: 64 },
+        0,
+    );
+    let mut paint = |rows| {
+        if semantic {
+            let _ = renderer.render_frame(&state);
+        } else {
+            review3_paint(&state, rows);
+        }
+    };
+    paint(40);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        0,
+        "initial visible panel reads the seed"
+    );
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(4, 100));
+    assert!(state.core.borrow().panel_hidden_for(FrontendId::LOCAL));
+    exec(&state, "pmacs.error('arrived while hidden')");
+    paint(4);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        1,
+        "the hidden frame keeps the new error unread"
+    );
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    assert!(!state.core.borrow().panel_hidden_for(FrontendId::LOCAL));
+    paint(40);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        0,
+        "presenting the panel again reads the pending error"
+    );
+    assert_eq!(state.lua_host.unread_error_status_message(), None);
+    assert!(
+        state
+            .lua_host
+            .errors_buffer_text()
+            .contains("arrived while hidden")
+    );
+}
+
+#[test]
+fn review4_unhiding_the_errors_panel_reads_pending_errors_on_grid() {
+    error_panel_becomes_visible(false);
+}
+
+#[test]
+fn review4_unhiding_the_errors_panel_reads_pending_errors_on_wire() {
+    error_panel_becomes_visible(true);
+}
+
+fn review4_errors_in_other_document_split() -> EditorState {
+    let state = EditorState::new_with_roots(&iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    state.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    let scratch = state.core.borrow().active_buffer_id();
+    exec(
+        &state,
+        r"
+        REVIEW_DOC = pmacs.window.buffer()
+        pmacs.error('seed')
+        for _, b in ipairs(pmacs.buffer.list()) do
+            if b:name() == '*errors*' then
+                pmacs.window.switch_buffer(b)
+                break
+            end
+        end
+        pmacs.window.split_vertical()
+        pmacs.window.switch_buffer(REVIEW_DOC)
+        pmacs.error_log.mark_read()
+    ",
+    );
+    let errors = state
+        .lua_host
+        .errors_buffer_id()
+        .expect("seed created errors buffer");
+    {
+        let core = state.core.borrow();
+        assert_eq!(core.active_buffer_id(), scratch);
+        let ids = core
+            .views
+            .get(&FrontendId::LOCAL)
+            .expect("local view")
+            .layout
+            .iter_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(
+            ids.iter().any(|id| core
+                .windows
+                .get(id)
+                .is_some_and(|w| w.buffer_id == errors && !w.is_side())),
+            "the other split holds errors as an ordinary document"
+        );
+    }
+    state
+}
+
+#[test]
+fn review4_grid_reads_errors_in_an_inactive_document_split() {
+    let state = review4_errors_in_other_document_split();
+    exec(&state, "pmacs.error('visible in the other grid split')");
+    let cells = paint(&state, 40, 100);
+    assert_eq!(state.lua_host.unread_errors(), 0);
+    assert!(
+        (0..40).any(|row| row_text(&cells, 100, row).contains("visible in the other grid split"))
+    );
+}
+
+#[test]
+fn review4_wire_does_not_read_errors_in_an_unprojected_document_split() {
+    use pmacs::protocol::{ByteRange, InstanceMessage};
+    use pmacs::semantic_render::SemanticRenderState;
+    let state = review4_errors_in_other_document_split();
+    let scratch = state.core.borrow().active_buffer_id();
+    let errors = state.lua_host.errors_buffer_id().expect("errors buffer");
+    let mut renderer = SemanticRenderState::for_peer(FrontendId::LOCAL, 25);
+    renderer.set_viewport(scratch, ByteRange { start: 0, end: 64 }, 0);
+    let initial = renderer.render_frame(&state);
+    assert!(
+        initial.iter().any(
+            |m| matches!(m, InstanceMessage::StatusFacts { buffer_id, .. } if *buffer_id == scratch)
+        ),
+        "the semantic document projection is the scratch buffer"
+    );
+    exec(
+        &state,
+        "pmacs.error('new error in a document split the GPU does not project')",
+    );
+    assert_eq!(state.lua_host.unread_errors(), 1);
+    let frame = renderer.render_frame(&state);
+    assert_eq!(
+        state.lua_host.unread_errors(),
+        1,
+        "layout membership cannot acknowledge a document the semantic frontend is not showing: {frame:?}"
+    );
+    assert!(frame.iter().any(|m| matches!(m, InstanceMessage::StatusFacts { message: Some(message), .. } if message.contains("new error in a document split"))));
+
+    // Bringing the errors document into the projection acknowledges it.
+    exec(&state, "pmacs.window.focus_next()");
+    assert_eq!(state.core.borrow().active_buffer_id(), errors);
+    renderer.set_viewport(errors, ByteRange { start: 0, end: 256 }, 0);
+    let frame = renderer.render_frame(&state);
+    assert_eq!(state.lua_host.unread_errors(), 0);
+    assert!(frame.iter().any(|m| matches!(m, InstanceMessage::StatusFacts { buffer_id, message: None, .. } if *buffer_id == errors)));
+}
