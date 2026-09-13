@@ -65,6 +65,18 @@
 //!   unreadable or unparsable plan sends no `applyEdit` at all and
 //!   reports itself through the sink, so a broken fixture cannot read
 //!   as a pass.
+//! * If launched with `PMACS_FAKE_LSP_MODE=semantichold` (E6b.3): a
+//!   full-only, range-capable semantic-token server whose answers are
+//!   computed from the document it holds --- every maximal run of ASCII
+//!   word bytes is one `namespace` token (legend index 0) --- and are
+//!   HELD for `PMACS_FAKE_LSP_SEMANTIC_HOLD_MS` milliseconds before
+//!   they are written (`PMACS_FAKE_LSP_SEMANTIC_RANGE_HOLD_MS` for
+//!   `/range`, defaulting to the same). The hold makes the window
+//!   between a keystroke and the server's answer long enough and
+//!   deterministic enough for the headless GPU probe to watch the
+//!   frames inside it; the document-derived tokens make the answer
+//!   align with the text as a real server's would, so a token typed
+//!   into existence appears only when the answer lands.
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
 //!   one `{"method", "text"}` JSON line per received didOpen /
 //!   didChange, so a test can replay the exact document-sync sequence
@@ -221,6 +233,13 @@ fn main() {
                 if mode == "fullonly" {
                     resp["result"]["capabilities"]["semanticTokensProvider"]["full"] =
                         serde_json::Value::from(true);
+                }
+                // `semantichold`: full-only AND range-capable, as
+                // rust-analyzer advertises both; the client picks.
+                if mode == "semantichold" {
+                    let p = &mut resp["result"]["capabilities"]["semanticTokensProvider"];
+                    p["full"] = serde_json::Value::from(true);
+                    p["range"] = serde_json::Value::from(true);
                 }
                 // `rangeonly`: LSP allows a provider to advertise
                 // `range` WITHOUT `full` — the /full arm below rejects
@@ -1169,6 +1188,28 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/full", Some(idv)) => {
+                // `semantichold` (E6b.3): tokens from the document as
+                // the server holds it at THIS point of the stream, then
+                // the hold, then the answer. Notifications that arrive
+                // during the hold wait in the pipe, as they would
+                // behind a slow server's main loop.
+                if mode == "semantichold" {
+                    full_count += 1;
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|t| t.get("uri"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let data = word_tokens(open_docs.get(uri).map_or("", String::as_str), None);
+                    hold_for("PMACS_FAKE_LSP_SEMANTIC_HOLD_MS", None);
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "result": { "resultId": format!("hold-{full_count}"), "data": data }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // `rangeonly`: a range-only provider rejects /full —
                 // the client should have sent a range request.
                 if mode.starts_with("rangeonly") {
@@ -1215,6 +1256,39 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/range", Some(idv)) => {
+                // `semantichold` (E6b.3): the same document-derived
+                // tokens, restricted to the requested lines, under the
+                // range hold (which defaults to the full hold).
+                if mode == "semantichold" {
+                    full_count += 1;
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|t| t.get("uri"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let line = |key: &str| {
+                        params
+                            .get("range")
+                            .and_then(|r| r.get(key))
+                            .and_then(|p| p.get("line"))
+                            .and_then(serde_json::Value::as_u64)
+                            .map_or(0, |l| u32::try_from(l).unwrap_or(u32::MAX))
+                    };
+                    let lines = (line("start"), line("end"));
+                    let data =
+                        word_tokens(open_docs.get(uri).map_or("", String::as_str), Some(lines));
+                    hold_for(
+                        "PMACS_FAKE_LSP_SEMANTIC_RANGE_HOLD_MS",
+                        Some("PMACS_FAKE_LSP_SEMANTIC_HOLD_MS"),
+                    );
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "result": { "resultId": format!("hold-range-{full_count}"), "data": data }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // `rangeonly16`: strict bounds validation in UTF-16
                 // units. A client that sent raw byte columns for
                 // non-ASCII text overshoots the last line's UTF-16
@@ -1249,8 +1323,8 @@ fn main() {
                 // `fullonly`: a conforming full-only server rejects a
                 // delta request outright — the client should never have
                 // sent it (capabilities advertised `"full": true` with
-                // no delta member).
-                if mode == "fullonly" {
+                // no delta member). `semantichold` is full-only too.
+                if mode == "fullonly" || mode == "semantichold" {
                     let resp = serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": idv,
@@ -1620,5 +1694,56 @@ fn inlay_range_error(
         ))
     } else {
         None
+    }
+}
+
+/// `semantichold`: every maximal run of ASCII word bytes
+/// (`[A-Za-z0-9_]`) in `text` as one relative-encoded semantic token of
+/// legend type 0 (`namespace`) with no modifiers, in document order;
+/// with `lines`, only the runs on lines `start..=end`. Columns are
+/// byte columns, which on this ASCII-only tokenizer equal UTF-16 units.
+fn word_tokens(text: &str, lines: Option<(u32, u32)>) -> Vec<u32> {
+    let mut data = Vec::new();
+    let (mut prev_line, mut prev_col) = (0u32, 0u32);
+    for (line_idx, line) in text.split('\n').enumerate() {
+        let line_no = u32::try_from(line_idx).unwrap_or(u32::MAX);
+        if let Some((start, end)) = lines
+            && (line_no < start || line_no > end)
+        {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if !(bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let col = u32::try_from(start).unwrap_or(u32::MAX);
+            let len = u32::try_from(i - start).unwrap_or(u32::MAX);
+            let delta_line = line_no - prev_line;
+            let delta_col = if delta_line == 0 { col - prev_col } else { col };
+            data.extend_from_slice(&[delta_line, delta_col, len, 0, 0]);
+            prev_line = line_no;
+            prev_col = col;
+        }
+    }
+    data
+}
+
+/// `semantichold`: sleep for the milliseconds named by `var`, or by
+/// `fallback` when `var` is unset; no sleep when neither is.
+fn hold_for(var: &str, fallback: Option<&str>) {
+    let ms = std::env::var(var)
+        .ok()
+        .or_else(|| fallback.and_then(|f| std::env::var(f).ok()))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }

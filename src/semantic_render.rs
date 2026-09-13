@@ -3549,19 +3549,25 @@ fn flatten_layer_spans(styled: &[StyledLayerSpan]) -> Vec<StyleSpan> {
     out
 }
 
-/// Policy-A fallback for languages with no bundled tree-sitter
-/// grammar (C/C++, …): project the LSP semantic-token store into the
-/// same `StyleSpan` shape the tree-sitter path emits, so the existing
-/// M11.4 diff pipeline (`render_frame`) consumes it unchanged and the
-/// frontend never learns which producer fed it. The instance stays
-/// the single styling authority.
+/// The LSP semantic-token store projected into the same `StyleSpan`
+/// shape the tree-sitter path emits, so the existing M11.4 diff
+/// pipeline (`render_frame`) consumes it unchanged and the frontend
+/// never learns which producer fed it. The whole styling of a buffer
+/// with no bundled grammar (C/C++, …; policy A's fallback), and the
+/// refinement merged over the grammar's captures for one that has
+/// (E5.6). The instance stays the single styling authority.
 ///
-/// `SemanticToken` `start`/`length` are LSP encoding units (UTF-16
-/// for clangd's default) and — unlike inlay hints — are *not*
-/// byte-rewritten upstream, so this converts them per line via the
-/// owning server's negotiated encoding
-/// ([`crate::lsp::LspManager::semantic_style_context`]). Tokens are
-/// single-line by the LSP grammar, so per-line conversion is exact.
+/// The store hands out tokens already in the document's current byte
+/// coordinates ([`crate::semantic_tokens::SemanticTokenStore::positioned_tokens`]):
+/// the server's answer resolved against the text it was computed for
+/// and carried across every edit recorded since, so a stale store
+/// yields SHIFTED tokens rather than none (E6b.2). Before E6b this
+/// returned empty while stale, which on a grammar-backed buffer
+/// removed the refinement for the length of every server round-trip
+/// --- the flash the phase exists for. The one case that still paints
+/// nothing is a URI declared stale with no edit log to shift by,
+/// which no production buffer is: the recorder attaches with the
+/// server.
 fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
     let core = state.core.borrow();
     let Some(uri) = buffer_file_uri(&core, vp.buffer_id) else {
@@ -3575,32 +3581,32 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
     let Some(ctx) = mgr.semantic_style_context(&uri) else {
         return Vec::new();
     };
-    let tokens = {
+    let tokens: Vec<crate::semantic_tokens::PositionedToken> = {
         let store = mgr.semantic_token_store();
         let guard = store.lock().expect("semantic-token store mutex poisoned");
-        if guard.is_stale(&uri) {
-            return Vec::new();
-        }
-        match guard.for_uri(&uri) {
-            Some((_, resp)) => resp.tokens.clone(),
+        match guard.positioned_tokens(&uri) {
+            Some((_, tokens)) => tokens.to_vec(),
             None => return Vec::new(),
         }
     };
     drop(mgr);
-
-    let registry = core.registry.clone();
-    let reg = registry.borrow();
-    let Ok(buf) = reg.get(vp.buffer_id) else {
-        return Vec::new();
+    let Some(legend) = ctx.legend.as_ref() else {
+        return Vec::new(); // No legend ⇒ cannot name a style.
     };
-    let source = buffer_source_bytes(buf);
-    let source_len = source.len() as u64;
+
+    let source_len = {
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
+        let Ok(buf) = reg.get(vp.buffer_id) else {
+            return Vec::new();
+        };
+        buf.len()
+    };
     let vis_start = vp.visible.start.min(source_len);
     let vis_end = vp.visible.end.min(source_len);
     if vis_end <= vis_start {
         return Vec::new();
     }
-    let line_starts = line_start_offsets(&source);
 
     let theme = state
         .syntax_registry
@@ -3611,32 +3617,15 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 
     let mut out = Vec::new();
     for t in &tokens {
-        let li = t.line as usize;
-        let Some(&ls) = line_starts.get(li) else {
-            continue; // Token line past EOF (stale response) — skip.
-        };
-        let le = line_starts
-            .get(li + 1)
-            .map_or(source_len, |&n| n.saturating_sub(1));
-        let Ok(line_text) = std::str::from_utf8(&source[ls as usize..le as usize]) else {
-            continue; // Non-UTF-8 line — cannot do encoded conversion.
-        };
-        let start_b = ls + crate::lsp::char_to_byte(line_text, t.start, ctx.encoding) as u64;
-        let end_char = t.start.saturating_add(t.length);
-        let end_b = ls + crate::lsp::char_to_byte(line_text, end_char, ctx.encoding) as u64;
-        let s = start_b.max(vis_start);
-        let e = end_b.min(vis_end);
+        let s = t.start.max(vis_start);
+        let e = t.end.min(vis_end);
         if e <= s {
-            continue; // Empty, or no overlap with the viewport.
+            continue; // No overlap with the viewport.
         }
         // One resolver on both paths (`SemanticTokensLegend::style_name_for`),
         // so a modifier-specific face agrees with the grid's `LspStyleView`.
-        let Some(lookup_name) = ctx
-            .legend
-            .as_ref()
-            .and_then(|lg| lg.style_name_for(t.token_type, t.token_modifiers))
-        else {
-            continue; // No legend / unknown type ⇒ cannot name a style.
+        let Some(lookup_name) = legend.style_name_for(t.token_type, t.token_modifiers) else {
+            continue; // Unknown type ⇒ cannot name a style.
         };
         let style = theme.lookup(&lookup_name);
         if style == Style::default() {
@@ -6698,6 +6687,199 @@ mod tests {
             w_off.iter().all(|(_, _, st)| !st.italic),
             "off: no refinement anywhere: {w_off:?}"
         );
+    }
+
+    /// E6b.2 --- the flash's exact frame, on the wire, on a grammar-backed
+    /// buffer, both ways. A Rust buffer with its grammar and a fake
+    /// server's italic refinement on `main` ships a baseline; typing a
+    /// comment line above it and settling the reparse then ships the
+    /// post-edit frame `render_frame` recomputes on every keystroke.
+    /// With the edit recorder on the buffer (production), that frame
+    /// carries the refinement at `main`'s new bytes; with the store
+    /// declared stale and no recorder (the pre-E6b path), the same
+    /// frame is grammar-only --- which is what the GPU painted for the
+    /// length of every round-trip. The grid's cells agree with the
+    /// wire after the edit, as E5.6 requires, so the shift is one
+    /// implementation and not two.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one seeded buffer driven through the same edit twice, with and without the recorder, and the grid read once beside the wire"
+    )]
+    fn e6b_2_the_wire_keeps_the_refinement_across_an_edit_on_a_rust_buffer() {
+        use crate::cell::{Cell, CellCoord, CellGrid, CellSize};
+        use crate::view::{View, Viewport, WrapMode};
+
+        type Runs = Vec<(u64, u64)>;
+
+        // The refinement's face is an RGB the bundled theme never uses,
+        // so a span is the server's by its color alone (comments are
+        // italic in that theme, which is why italic cannot be the mark).
+        const MARK: crate::cell::Color = crate::cell::Color::Rgb(0x7b, 0x1f, 0xa2);
+        let marked_at = |msgs: &[InstanceMessage]| -> Vec<(u64, u64)> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    InstanceMessage::StyleSpans { segments, .. } => Some(segments),
+                    _ => None,
+                })
+                .flat_map(|segments| segments.iter().flat_map(|seg| seg.spans.iter()))
+                .filter(|s| s.style.fg == MARK)
+                .map(|s| (s.range.start, s.range.end))
+                .collect()
+        };
+
+        // Drive one scenario; `with_recorder` selects the production
+        // path (recorder attached, log open) or the pre-E6b one (the
+        // store declared stale with no log, as `mark_document_stale`
+        // did on every keystroke).
+        let run = |with_recorder: bool| -> (Runs, Runs, Runs) {
+            let state = empty_state();
+            let mut s = local();
+            let bid = active_buffer(&state);
+            let text = b"fn main() {}\n";
+            let handle = seed_rust_parse_view(&state, bid, text);
+            state.syntax_registry.theme().lock().expect("theme").insert(
+                "e6brefine",
+                Style {
+                    fg: MARK,
+                    ..Style::default()
+                },
+            );
+            let sid = state
+                .lsp_manager
+                .borrow_mut()
+                .insert_initialized_test_client(
+                    serde_json::json!({
+                        "semanticTokensProvider": {
+                            "legend": { "tokenTypes": ["e6brefine"], "tokenModifiers": [] }
+                        }
+                    }),
+                    crate::lsp::PositionEncoding::Utf16,
+                );
+            let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.rs"));
+            let store = state.lsp_manager.borrow().semantic_token_store();
+            if with_recorder {
+                store.lock().expect("store").open_log(&uri);
+                let registry = state.core.borrow().registry.clone();
+                registry
+                    .borrow_mut()
+                    .get_mut(bid)
+                    .expect("buffer")
+                    .attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
+                        store.clone(),
+                    )));
+            }
+            // "main" is bytes [3, 7) of line 0.
+            set_tokens_for(&state, sid, &uri, vec![tok(0, 3, 4)]);
+            s.set_viewport(
+                bid,
+                ByteRange {
+                    start: 0,
+                    end: 4096,
+                },
+                0,
+            );
+            let baseline = marked_at(&s.render_frame(&state));
+
+            // Type a comment line above `main`, as the keystrokes of one
+            // command would; the pre-E6b path marks the store stale with
+            // no position, as the after-edit hook did.
+            {
+                let core = state.core.borrow();
+                core.registry
+                    .borrow_mut()
+                    .get_mut(bid)
+                    .expect("active buffer")
+                    .apply_edit(crate::buffer::EditOp::Insert {
+                        pos: 0,
+                        bytes: b"// c\n",
+                    })
+                    .expect("typing edit");
+            }
+            if !with_recorder {
+                store.lock().expect("store").mark_stale(uri.clone());
+            }
+            assert!(
+                store.lock().expect("store").is_stale(&uri),
+                "either way the store is stale by the edit"
+            );
+            // Settle the grammar's reparse, as the parse worker would.
+            let req = handle.make_request();
+            let bundle = crate::syntax::run_parse(req).expect("settled rust parse");
+            handle.install(state.syntax_registry.resolve_layer_queries(&bundle));
+            let after = marked_at(&s.render_frame(&state));
+
+            // The grid, after the same edit, through the same two views.
+            let grid = {
+                let registry = state.core.borrow().registry.clone();
+                let reg = registry.borrow();
+                let buf = reg.get(bid).expect("buffer");
+                let cols = 20u32;
+                let mut backing = vec![Cell::default(); cols as usize];
+                let mut hv = crate::highlight::SyntaxHighlightView::new(
+                    handle.clone(),
+                    state.syntax_registry.theme(),
+                );
+                let mut lv = crate::highlight::LspStyleView::new(
+                    state.lsp_manager.clone(),
+                    state.syntax_registry.theme(),
+                    None,
+                );
+                let mut cells = CellGrid {
+                    cells: &mut backing,
+                    stride: cols,
+                    size: CellSize::new(1, cols),
+                };
+                // Row 0 is the comment line; the grid's second row is
+                // `fn main() {}`, read through a viewport that starts
+                // there so one row of cells is the line the token is on.
+                let second_line = Viewport {
+                    buffer_start: 5,
+                    buffer_end: u64::MAX,
+                    cell_origin: CellCoord::new(0, 0),
+                    cell_size: CellSize::new(1, cols),
+                    gutter_w: 0,
+                    folds: None,
+                    wrap: WrapMode::Truncate,
+                    view_left: 0,
+                };
+                hv.render(buf, second_line, &mut cells);
+                lv.render(buf, second_line, &mut cells);
+                let mut out: Vec<(u64, u64)> = Vec::new();
+                for (col, cell) in backing.iter().enumerate() {
+                    if cell.style.fg != MARK {
+                        continue;
+                    }
+                    let b = 5 + col as u64;
+                    match out.last_mut() {
+                        Some((_, end)) if *end == b => *end += 1,
+                        _ => out.push((b, b + 1)),
+                    }
+                }
+                out
+            };
+            (baseline, after, grid)
+        };
+
+        let (baseline, after, grid) = run(true);
+        assert_eq!(baseline, vec![(3, 7)], "baseline: the refinement on `main`");
+        assert_eq!(
+            after,
+            vec![(8, 12)],
+            "with the recorder, the post-edit frame carries the refinement where `main` is now"
+        );
+        assert_eq!(
+            grid, after,
+            "the grid's marked cells are the wire's marked spans"
+        );
+
+        let (baseline, after, grid) = run(false);
+        assert_eq!(baseline, vec![(3, 7)]);
+        assert!(
+            after.is_empty(),
+            "without a recorder the same frame is grammar-only: {after:?} (the pre-E6b flash)"
+        );
+        assert!(grid.is_empty(), "and the grid drops them the same way");
     }
 
     #[test]

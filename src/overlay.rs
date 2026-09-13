@@ -332,7 +332,8 @@ impl View for BufferStyleOverlay {
     }
 }
 
-fn compute_line_offsets(buf: &Buffer) -> Vec<u64> {
+/// Byte offset of every line start in `buf`, the first being `0`.
+pub(crate) fn compute_line_offsets(buf: &Buffer) -> Vec<u64> {
     let mut offsets = vec![0];
     let rope = buf.snapshot_rope();
     let mut pos = 0;
@@ -348,7 +349,8 @@ fn compute_line_offsets(buf: &Buffer) -> Vec<u64> {
     offsets
 }
 
-fn line_at_offset(line_offsets: &[u64], offset: u64) -> usize {
+/// The line containing byte `offset`, given [`compute_line_offsets`]'s table.
+pub(crate) fn line_at_offset(line_offsets: &[u64], offset: u64) -> usize {
     match line_offsets.binary_search(&offset) {
         Ok(i) => i,
         Err(i) => i.saturating_sub(1),
@@ -365,7 +367,10 @@ fn line_end(buf: &Buffer, line_offsets: &[u64], line: usize) -> u64 {
     }
 }
 
-fn render_buffer_style_span(
+/// Paint one buffer-byte span into the cells `viewport` shows, merging
+/// its style over what is there. Shared with `LspStyleView` (E6b.2),
+/// whose tokens arrive in the same byte coordinates.
+pub(crate) fn render_buffer_style_span(
     buf: &Buffer,
     line_offsets: &[u64],
     start_line: usize,

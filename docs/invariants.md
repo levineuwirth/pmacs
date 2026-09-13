@@ -93,8 +93,10 @@ exists.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
-`rangeonly16` (UTF-16 with fail-closed bounds validation), `sighelp`,
-`prepare`, `preprefuse`, `rename`, `inlaybounds`, `inlayrefresh`,
+`rangeonly16` (UTF-16 with fail-closed bounds validation),
+`semantichold` (document-derived tokens, held for
+`PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`), `sighelp`, `prepare`,
+`preprefuse`, `rename`, `inlaybounds`, `inlayrefresh`,
 `semantictokensrefresh`, `applyeditplan`, `resourceops`, `posecho`,
 `defenv`, `wsconfig`, `rooturi`, `leanprogress`. Failure shapes:
 `crash`, `error`, `garbage`, `silent`. File watchers: `filewatch`
