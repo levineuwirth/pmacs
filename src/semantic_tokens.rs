@@ -986,6 +986,42 @@ mod tests {
         assert!(s.is_stale(uri));
     }
 
+    /// The census's version-only history `Edit` (an undo or redo in
+    /// CRDT mode whose text delta is empty: `start == old_end` and
+    /// nothing inserted) leaves the store byte-identical --- no edit
+    /// number consumed, no span moved, no version bump --- so the
+    /// recorder is inert on it, like the two translators before it.
+    /// Deleting the early return in `record_edit` fires this: the
+    /// version bumps and an edit is logged.
+    #[test]
+    fn a_version_only_history_edit_leaves_the_store_untouched() {
+        let mut s = SemanticTokenStore::new();
+        let uri = "file:///a.rs";
+        s.open_log(uri);
+        s.set_current(
+            SemanticTokenKey::new("1", uri),
+            resp(vec![tok(0, 3, 4)]),
+            "fn main()\n",
+            UTF16,
+        );
+        let before = (
+            s.version(),
+            s.next_seq(uri),
+            ranges(&s, uri),
+            s.pending_edits(uri),
+        );
+        s.record_edit(uri, edit(5, 5, 0)); // strictly inside the token
+        s.record_edit(uri, edit(9, 9, 0)); // at the buffer end, where undo puts it
+        let after = (
+            s.version(),
+            s.next_seq(uri),
+            ranges(&s, uri),
+            s.pending_edits(uri),
+        );
+        assert_eq!(after, before, "a 0→0 edit is not an edit to this store");
+        assert!(!s.is_stale(uri));
+    }
+
     /// A URI with an edit log ignores `mark_stale`: the log is the
     /// authority, and a declared-stale flag would drop what the log
     /// can shift. A URI without one keeps the pre-E6b drop.
