@@ -1290,6 +1290,14 @@ local function attach_buffer(buf)
     version = 1,
   }
   attachments[key] = rec
+  -- E6b.1: record every edit the buffer takes into the semantic-token
+  -- store's log BEFORE the document is sent, so the text `did_open`
+  -- carries is the log's edit zero and a token answer for it shifts by
+  -- exactly what was typed after. The recorder is a buffer view, not a
+  -- window overlay: it hears the optimistic keystrokes of a GPU peer
+  -- and the intercept-skipping Lua writes that the after-edit hook
+  -- below sees only as "the revision moved".
+  pcall(pmacs.lsp._track_edits, buf, uri)
   -- did_open is a notification; the manager queues it cleanly even
   -- while the server is in `starting` / `initializing`.
   pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
@@ -4178,6 +4186,10 @@ pmacs.hook.add("resource.renamed", function(old_path, new_path)
         rec.uri = new_uri
         rec.version = 1
         local ok_text, text = sink:step("read " .. new_uri, buffer_text, rec.buffer)
+        -- E6b.1: the recorder logs under the buffer's path as it stands
+        -- at each edit, so it already writes to the new URI; opening the
+        -- log here makes the didOpen below its edit zero.
+        sink:step("track edits for " .. new_uri, pmacs.lsp._track_edits, rec.buffer, new_uri)
         sink:step("didOpen " .. new_uri, pmacs.lsp.did_open,
           sid, new_uri, rec.version, ok_text and text or "")
         -- 6. Re-root the diagnostic overlays. `DiagnosticView.uri` is

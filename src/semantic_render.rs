@@ -3631,7 +3631,11 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
         }
         // One resolver on both paths (`SemanticTokensLegend::style_name_for`),
         // so a modifier-specific face agrees with the grid's `LspStyleView`.
-        let Some(lookup_name) = ctx.legend.as_ref().and_then(|lg| lg.style_name_for(t)) else {
+        let Some(lookup_name) = ctx
+            .legend
+            .as_ref()
+            .and_then(|lg| lg.style_name_for(t.token_type, t.token_modifiers))
+        else {
             continue; // No legend / unknown type ⇒ cannot name a style.
         };
         let style = theme.lookup(&lookup_name);
@@ -5570,21 +5574,43 @@ mod tests {
     }
 
     /// Overwrite the semantic-token store entry for the test client
-    /// `sid` on the `/tmp/x.cpp` URI.
+    /// `sid` on the `/tmp/x.cpp` URI, as an answer for the active
+    /// buffer's text as it stands now.
     fn set_tokens(
         state: &EditorState,
         sid: crate::lsp::LspServerId,
         tokens: Vec<crate::semantic_tokens::SemanticToken>,
     ) {
         let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.cpp"));
+        set_tokens_for(state, sid, &uri, tokens);
+    }
+
+    /// [`set_tokens`] keyed to `uri`, anchored to the active buffer's
+    /// current text (the text a test seeded before calling).
+    fn set_tokens_for(
+        state: &EditorState,
+        sid: crate::lsp::LspServerId,
+        uri: &str,
+        tokens: Vec<crate::semantic_tokens::SemanticToken>,
+    ) {
+        let text = {
+            let core = state.core.borrow();
+            let bid = core.active_window().buffer_id;
+            let registry = core.registry.clone();
+            let reg = registry.borrow();
+            let buf = reg.get(bid).expect("active buffer");
+            String::from_utf8(buffer_source_bytes(buf)).expect("utf-8 fixture text")
+        };
         let store = state.lsp_manager.borrow().semantic_token_store();
-        store.lock().expect("sem token store").set(
+        store.lock().expect("sem token store").set_current(
             crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
             crate::semantic_tokens::SemanticTokensResponse {
                 tokens,
                 result_id: None,
                 raw: Vec::new(),
             },
+            &text,
+            crate::lsp::PositionEncoding::Utf16,
         );
     }
 
@@ -6566,15 +6592,7 @@ mod tests {
         // path (`set_tokens` keys to the `.cpp` fixture).
         {
             let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.rs"));
-            let store = state.lsp_manager.borrow().semantic_token_store();
-            store.lock().expect("sem token store").set(
-                crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
-                crate::semantic_tokens::SemanticTokensResponse {
-                    tokens: vec![tok(0, 3, 4)],
-                    result_id: None,
-                    raw: Vec::new(),
-                },
-            );
+            set_tokens_for(&state, sid, &uri, vec![tok(0, 3, 4)]);
         }
 
         let content = u64::try_from(text.len() - 1).expect("small");
@@ -6717,17 +6735,14 @@ mod tests {
         // path (`set_tokens` keys to the `.cpp` fixture).
         {
             let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.rs"));
-            let store = state.lsp_manager.borrow().semantic_token_store();
-            store.lock().expect("sem token store").set(
-                crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
-                crate::semantic_tokens::SemanticTokensResponse {
-                    tokens: vec![crate::semantic_tokens::SemanticToken {
-                        token_modifiers: 1,
-                        ..tok(0, 3, 4)
-                    }],
-                    result_id: None,
-                    raw: Vec::new(),
-                },
+            set_tokens_for(
+                &state,
+                sid,
+                &uri,
+                vec![crate::semantic_tokens::SemanticToken {
+                    token_modifiers: 1,
+                    ..tok(0, 3, 4)
+                }],
             );
         }
 
@@ -6879,15 +6894,7 @@ mod tests {
             );
         {
             let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.rs"));
-            let store = state.lsp_manager.borrow().semantic_token_store();
-            store.lock().expect("sem token store").set(
-                crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
-                crate::semantic_tokens::SemanticTokensResponse {
-                    tokens: vec![tok(0, 3, 4)],
-                    result_id: None,
-                    raw: Vec::new(),
-                },
-            );
+            set_tokens_for(&state, sid, &uri, vec![tok(0, 3, 4)]);
         }
 
         let content = u64::try_from(text.len() - 1).expect("small");

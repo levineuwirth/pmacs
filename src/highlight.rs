@@ -784,7 +784,8 @@ impl View for LspStyleView {
                 // The theme's dotted-prefix `lookup` walks back to the base if a
                 // more specific entry isn't defined, so adding a modifier suffix
                 // is a strict refinement — never worse than the unmodified lookup.
-                let Some(lookup_name) = legend.style_name_for(t) else {
+                let Some(lookup_name) = legend.style_name_for(t.token_type, t.token_modifiers)
+                else {
                     continue; // Unknown type index.
                 };
                 let style = theme.lookup(&lookup_name);
@@ -1131,7 +1132,7 @@ mod tests {
         {
             let mgr = state.lsp_manager.borrow();
             let store = mgr.semantic_token_store();
-            store.lock().expect("store").set(
+            store.lock().expect("store").set_current(
                 SemanticTokenKey::new(sid.raw().to_string(), uri),
                 SemanticTokensResponse {
                     tokens: vec![SemanticToken {
@@ -1144,6 +1145,8 @@ mod tests {
                     result_id: None,
                     raw: Vec::new(),
                 },
+                "int main\n",
+                PositionEncoding::Utf16,
             );
         }
         // Render into a small grid.
@@ -1187,8 +1190,12 @@ mod tests {
         );
     }
 
+    /// The pre-E6b drop, kept for the one case it still governs: a URI
+    /// declared stale that no recorder tracks has nothing to shift by,
+    /// so its tokens do not paint over text that has moved under them.
+    /// Its partner above is the production case.
     #[test]
-    fn lsp_style_view_suppresses_stale_semantic_tokens() {
+    fn lsp_style_view_suppresses_stale_semantic_tokens_without_an_edit_log() {
         use crate::cell::{Cell, CellSize};
         use crate::editor::EditorState;
         use crate::lsp::PositionEncoding;
@@ -1234,7 +1241,7 @@ mod tests {
             let mgr = state.lsp_manager.borrow();
             let store = mgr.semantic_token_store();
             let mut guard = store.lock().expect("store");
-            guard.set(
+            guard.set_current(
                 SemanticTokenKey::new(sid.raw().to_string(), uri.clone()),
                 SemanticTokensResponse {
                     tokens: vec![SemanticToken {
@@ -1247,6 +1254,8 @@ mod tests {
                     result_id: None,
                     raw: Vec::new(),
                 },
+                "foo\n",
+                PositionEncoding::Utf16,
             );
             guard.mark_stale(uri);
         }
@@ -1353,7 +1362,7 @@ mod tests {
         {
             let mgr = state.lsp_manager.borrow();
             let store = mgr.semantic_token_store();
-            store.lock().expect("store").set(
+            store.lock().expect("store").set_current(
                 SemanticTokenKey::new(sid.raw().to_string(), uri),
                 SemanticTokensResponse {
                     tokens: vec![
@@ -1375,6 +1384,8 @@ mod tests {
                     result_id: None,
                     raw: Vec::new(),
                 },
+                "foo bar\n",
+                PositionEncoding::Utf16,
             );
         }
         let mut view = LspStyleView::new(

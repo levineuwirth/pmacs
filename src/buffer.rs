@@ -703,6 +703,15 @@ impl Buffer {
         self.views.iter().map(|(id, _)| *id)
     }
 
+    /// The attached views' `View::kind`s in attach order, the buffer
+    /// twin of `Window::overlay_kinds`: what lets a resource-backed
+    /// buffer view attach at most once (E6b.1's edit recorder) and a
+    /// test see that a wire-up step attached what it claims.
+    #[must_use]
+    pub fn view_kinds(&self) -> Vec<&'static str> {
+        self.views.iter().map(|(_, v)| v.kind()).collect()
+    }
+
     /// Attach a view. Returns the freshly allocated [`ViewId`].
     pub fn attach_view(&mut self, view: Box<dyn View>) -> ViewId {
         let id = ViewId(self.next_view_id);

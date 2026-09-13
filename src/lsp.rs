@@ -811,7 +811,11 @@ pub struct LspManager {
     /// only thing that lets the position codec convert between the
     /// server's `character` units and pmacs byte offsets per line.
     /// Dropped on `did_close` and at every server-teardown site.
-    documents: HashMap<(LspServerId, String), String>,
+    /// Shared (`Arc<str>`) so a semantic-token request can keep the
+    /// exact text it will be answered against without copying it
+    /// (E6b.1: the answer is resolved against that text, not against
+    /// whatever the document has become by the time it lands).
+    documents: HashMap<(LspServerId, String), std::sync::Arc<str>>,
     /// Async runtime handle. The bridge between the supervisor
     /// reader-thread response delivery and Lua-side `Handle:await()`
     /// resumption; mirrors [`crate::mcp::McpManager`]'s `runtime`.
@@ -898,12 +902,25 @@ enum ResponseRoute {
     InlayHint { uri: String },
     /// Absorb a `textDocument/semanticTokens/full` (or `/range`)
     /// response into [`crate::semantic_tokens::SemanticTokenStore`]
-    /// at `(server, uri)`.
-    SemanticTokens { uri: String },
+    /// at `(server, uri)`, resolved against `anchor` --- the document
+    /// text the server held when the request went out (the last
+    /// `didOpen` / `didChange`), current as of the URI's edit number
+    /// `base_seq` --- so the store can carry it across every edit made
+    /// since (E6b.1).
+    SemanticTokens {
+        uri: String,
+        anchor: std::sync::Arc<str>,
+        base_seq: u64,
+    },
     /// Absorb a `textDocument/semanticTokens/full/delta` response —
     /// spliced against the store's retained raw int stream at
-    /// `(server, uri)` — back into that same entry.
-    SemanticTokensDelta { uri: String },
+    /// `(server, uri)` — back into that same entry, resolved against
+    /// the same kind of anchor as [`Self::SemanticTokens`].
+    SemanticTokensDelta {
+        uri: String,
+        anchor: std::sync::Arc<str>,
+        base_seq: u64,
+    },
     /// Absorb a Location-shaped nav response (references / declaration
     /// / typeDefinition / implementation) into
     /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
@@ -961,8 +978,8 @@ impl ResponseRoute {
             | ResponseRoute::PrepareRename { uri }
             | ResponseRoute::CodeAction { uri }
             | ResponseRoute::InlayHint { uri }
-            | ResponseRoute::SemanticTokens { uri }
-            | ResponseRoute::SemanticTokensDelta { uri }
+            | ResponseRoute::SemanticTokens { uri, .. }
+            | ResponseRoute::SemanticTokensDelta { uri, .. }
             | ResponseRoute::Locations { uri, .. }
             | ResponseRoute::DocumentSymbol { uri }
             | ResponseRoute::DocumentHighlight { uri } => Some(uri),
@@ -2157,10 +2174,17 @@ impl LspManager {
     ) -> Result<JobId, String> {
         let uri = uri.into();
         let params = json!({ "textDocument": { "uri": uri.clone() } });
+        let (anchor, base_seq) = self.semantic_token_anchor(sid, &uri);
         let req_id = self.send_request(sid, "textDocument/semanticTokens/full", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/semanticTokens/full", &uri);
-        self.pending_routes
-            .insert((sid, req_id), ResponseRoute::SemanticTokens { uri });
+        self.pending_routes.insert(
+            (sid, req_id),
+            ResponseRoute::SemanticTokens {
+                uri,
+                anchor,
+                base_seq,
+            },
+        );
         Ok(job_id)
     }
 
@@ -2192,10 +2216,17 @@ impl LspManager {
                 "end": self.outbound_position(sid, &uri, end_line, end_col),
             },
         });
+        let (anchor, base_seq) = self.semantic_token_anchor(sid, &uri);
         let req_id = self.send_request(sid, "textDocument/semanticTokens/range", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/semanticTokens/range", &uri);
-        self.pending_routes
-            .insert((sid, req_id), ResponseRoute::SemanticTokens { uri });
+        self.pending_routes.insert(
+            (sid, req_id),
+            ResponseRoute::SemanticTokens {
+                uri,
+                anchor,
+                base_seq,
+            },
+        );
         Ok(job_id)
     }
 
@@ -2215,11 +2246,18 @@ impl LspManager {
             "textDocument": { "uri": uri.clone() },
             "previousResultId": previous_result_id.into(),
         });
+        let (anchor, base_seq) = self.semantic_token_anchor(sid, &uri);
         let req_id = self.send_request(sid, "textDocument/semanticTokens/full/delta", params)?;
         let job_id =
             self.register_awaiter(sid, req_id, "textDocument/semanticTokens/full/delta", &uri);
-        self.pending_routes
-            .insert((sid, req_id), ResponseRoute::SemanticTokensDelta { uri });
+        self.pending_routes.insert(
+            (sid, req_id),
+            ResponseRoute::SemanticTokensDelta {
+                uri,
+                anchor,
+                base_seq,
+            },
+        );
         Ok(job_id)
     }
 
@@ -2885,17 +2923,27 @@ impl LspManager {
                     .expect("inlay hint store mutex poisoned");
                 guard.set(key, resp);
             }
-            ResponseRoute::SemanticTokens { uri } => {
+            ResponseRoute::SemanticTokens {
+                uri,
+                anchor,
+                base_seq,
+            } => {
                 let resp = crate::semantic_tokens::SemanticTokensResponse::from_lsp_value(result);
                 let key = crate::semantic_tokens::SemanticTokenKey::new(server_key, uri.clone());
+                let encoding = self.position_encoding(sid);
                 let mut guard = self
                     .semantic_token_store
                     .lock()
                     .expect("semantic token store mutex poisoned");
-                guard.set(key, resp);
+                guard.set(key, resp, anchor, encoding, *base_seq);
             }
-            ResponseRoute::SemanticTokensDelta { uri } => {
+            ResponseRoute::SemanticTokensDelta {
+                uri,
+                anchor,
+                base_seq,
+            } => {
                 let key = crate::semantic_tokens::SemanticTokenKey::new(server_key, uri.clone());
+                let encoding = self.position_encoding(sid);
                 let mut guard = self
                     .semantic_token_store
                     .lock()
@@ -2907,7 +2955,7 @@ impl LspManager {
                 let prev_raw = guard.get(&key).map(|r| r.raw.clone()).unwrap_or_default();
                 let resp =
                     crate::semantic_tokens::SemanticTokensResponse::apply_delta(&prev_raw, result);
-                guard.set(key, resp);
+                guard.set(key, resp, anchor, encoding, *base_seq);
             }
         }
     }
@@ -3393,7 +3441,9 @@ impl LspManager {
         // T M4.5 Option B: mirror the document so the position codec
         // can convert per-line between the server's `character` units
         // and pmacs byte offsets.
-        self.documents.insert((sid, uri.clone()), text.clone());
+        self.documents
+            .insert((sid, uri.clone()), std::sync::Arc::from(text.as_str()));
+        self.note_document_synced(&uri);
         let params = json!({
             "textDocument": {
                 "uri": uri,
@@ -3417,7 +3467,9 @@ impl LspManager {
     ) -> Result<(), String> {
         let uri = uri.into();
         let text = text.into();
-        self.documents.insert((sid, uri.clone()), text.clone());
+        self.documents
+            .insert((sid, uri.clone()), std::sync::Arc::from(text.as_str()));
+        self.note_document_synced(&uri);
         self.mark_document_stale(sid, &uri);
         let params = json!({
             "textDocument": {
@@ -3468,6 +3520,35 @@ impl LspManager {
             .lock()
             .expect("inlay hint store mutex poisoned")
             .mark_stale(uri.to_owned());
+    }
+
+    /// E6b.1 --- the document's current text has just been handed to
+    /// the server, so a semantic-token request sent from now on is
+    /// answered against every edit the store's log has recorded so
+    /// far. Told to the token store, which is what numbers the edits.
+    fn note_document_synced(&self, uri: &str) {
+        self.semantic_token_store
+            .lock()
+            .expect("semantic token store mutex poisoned")
+            .note_synced(uri);
+    }
+
+    /// The anchor a semantic-token request sent now carries: the text
+    /// the server holds for `(sid, uri)` (empty when no `didOpen` has
+    /// been sent, in which case the answer resolves to nothing) and
+    /// the edit number that text is current at.
+    fn semantic_token_anchor(&self, sid: LspServerId, uri: &str) -> (std::sync::Arc<str>, u64) {
+        let anchor = self
+            .documents
+            .get(&(sid, uri.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| std::sync::Arc::from(""));
+        let base_seq = self
+            .semantic_token_store
+            .lock()
+            .expect("semantic token store mutex poisoned")
+            .synced_seq(uri);
+        (anchor, base_seq)
     }
 
     /// Send `workspace/didChangeWatchedFiles` to `sid`. `changes` is
@@ -4267,14 +4348,16 @@ mod resource_reconciliation_tests {
                 "label": ": i32",
             }])),
         );
-        mgr.semantic_token_store.lock().unwrap().set(
+        mgr.semantic_token_store.lock().unwrap().set_current(
             crate::semantic_tokens::SemanticTokenKey::new(server, uri),
             crate::semantic_tokens::SemanticTokensResponse::from_lsp_value(&json!({
                 "data": [0, 0, 1, 0, 0],
             })),
+            "text",
+            PositionEncoding::Utf16,
         );
         mgr.documents
-            .insert((sid, uri.to_owned()), "text".to_owned());
+            .insert((sid, uri.to_owned()), std::sync::Arc::from("text"));
     }
 
     /// Which of the fourteen families still hold an entry for
