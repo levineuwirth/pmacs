@@ -4217,6 +4217,23 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
             )
         })?,
     )?;
+    // E6.1: two predicates `find-file` needs to prefill its field with
+    // the directory it is rooted in and to send a directory to dired
+    // rather than to a file load. `cwd()` is the process directory as
+    // an absolute path, the root a pathless buffer's prompt names;
+    // `is_dir(path)` follows symlinks and is false for a missing path.
+    path.set(
+        "cwd",
+        lua.create_function(|_, ()| {
+            std::env::current_dir()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+    path.set(
+        "is_dir",
+        lua.create_function(|_, raw: String| Ok(std::path::Path::new(&raw).is_dir()))?,
+    )?;
     // Journey Stage 1a (Q#JR7): the directory fallback.
     //
     // The resolver for a directory open is a two-tier arrangement, and
@@ -14263,6 +14280,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                         | "ranked"
                         | "on_accept"
                         | "on_cancel"
+                        | "accept"
                 ) {
                     return Err(mlua::Error::external(
                         crate::command::CommandError::UnknownField { field: key },
@@ -14301,6 +14319,28 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                      the builtin sources have no order to keep",
                 ));
             }
+            // D18 (E6.1): what RET commits. `candidate` is the
+            // default so a prompt that says nothing keeps the picker
+            // semantics it always had; the open-set prompts name
+            // `typed` themselves.
+            let accept = match spec.get::<Value>("accept")? {
+                Value::Nil => crate::minibuffer::AcceptPolicy::Candidate,
+                Value::String(s) => {
+                    let name = s.to_str()?;
+                    crate::minibuffer::AcceptPolicy::parse(&name).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "pmacs.minibuffer.read: accept must be \"candidate\" or \"typed\", got {:?}",
+                            name.as_ref()
+                        ))
+                    })?
+                }
+                _ => {
+                    return Err(mlua::Error::external(BindingError::SpecFieldType {
+                        field: "accept",
+                        expected: "string",
+                    }));
+                }
+            };
             let session = crate::minibuffer::MinibufferSession {
                 prompt: prompt.unwrap_or_default(),
                 initial: initial.unwrap_or_default(),
@@ -14313,6 +14353,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                 selected: None,
                 history_index: None,
                 typed_before_history_nav: None,
+                accept,
             };
             cc.borrow_mut().minibuffer.begin(session);
             // Compute initial candidate list against the live registries.

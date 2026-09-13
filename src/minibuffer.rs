@@ -269,7 +269,25 @@ impl Minibuffer {
             .as_ref()
             .and_then(|s| s.selected.and_then(|i| s.candidates.get(i).cloned()));
         let Some(pick) = pick else { return };
-        self.replace_contents(&pick);
+        self.replace_base(&pick);
+    }
+
+    /// Replace the part of the field a candidate stands for: the whole
+    /// field, or for a files prompt the part after the last `/`, so a
+    /// completion keeps the directory the user is in.
+    fn replace_base(&mut self, text: &str) {
+        let files = self
+            .session
+            .as_ref()
+            .is_some_and(|s| matches!(s.source, CompletionSource::Files { .. }));
+        let contents = self.contents();
+        let next = if files {
+            let (dir, _) = split_dir_base(&contents);
+            format!("{dir}{text}")
+        } else {
+            text.to_owned()
+        };
+        self.replace_contents(&next);
     }
 
     /// Step backwards through history, replacing the buffer contents.
@@ -338,9 +356,23 @@ impl Minibuffer {
     /// The caller is expected to invoke the callback (firing user
     /// code from inside the minibuffer would re-enter the registry).
     pub fn accept(&mut self) -> Option<(Function, String)> {
+        self.accept_with(false)
+    }
+
+    /// Commit the typed text as written, whatever the session's accept
+    /// policy or selection: `C-j` under D18. Otherwise [`Self::accept`].
+    pub fn accept_typed(&mut self) -> Option<(Function, String)> {
+        self.accept_with(true)
+    }
+
+    fn accept_with(&mut self, typed_wins: bool) -> Option<(Function, String)> {
         let session = self.session.take()?;
         let typed = self.contents();
-        let resolved = resolve_accepted_value(&session, &typed);
+        let resolved = if typed_wins {
+            typed.clone()
+        } else {
+            resolve_accepted_value(&session, &typed)
+        };
         if !session.history_bucket.is_empty() && !resolved.is_empty() {
             let history = self
                 .history
@@ -379,7 +411,7 @@ impl Minibuffer {
             // needle it was handed; only the cap applies.
             pool.into_iter().take(CANDIDATE_LIMIT).collect()
         } else {
-            filter_and_sort(&needle, &pool)
+            filter_and_sort(filter_needle(&s.source, &needle), &pool)
         };
         s.candidates = candidates;
         s.selected = if s.candidates.is_empty() {
@@ -432,6 +464,44 @@ pub struct MinibufferSession {
     /// Stash of typed input when entering history navigation, so
     /// stepping forward to the front restores it.
     pub typed_before_history_nav: Option<String>,
+    /// What RET resolves to (D18, E6.1). Set by the caller of
+    /// `pmacs.minibuffer.read`; `candidate` when omitted.
+    pub accept: AcceptPolicy,
+}
+
+/// What RET commits: the selected candidate or the typed text (D18).
+///
+/// Every prompt names its policy because the two are different
+/// contracts. A picker over a closed set --- `M-x`, `where-is` --- wants
+/// the selection, since the typed text is a search query and cannot be
+/// a command that does not exist. A prompt over an open set --- a file
+/// to create, a buffer name --- wants the text as written, or a new
+/// name that happens to be a subsequence of an existing one silently
+/// opens the existing entry (`C-x C-f nots RET` opened `notes.md`; audit
+/// §3.1). Under either policy `C-j` takes the typed text and TAB
+/// completes to the selection, so the policy decides only what RET
+/// means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcceptPolicy {
+    /// RET takes the selected candidate when one exists, else the
+    /// typed text. Today's behavior for every prompt that does not say
+    /// otherwise.
+    #[default]
+    Candidate,
+    /// RET takes the typed text as written, whatever is selected.
+    Typed,
+}
+
+impl AcceptPolicy {
+    /// Parse the `accept` field of `pmacs.minibuffer.read`.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "candidate" => Some(Self::Candidate),
+            "typed" => Some(Self::Typed),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +517,8 @@ pub struct MinibufferSession {
 pub enum MinibufferAction {
     /// Commit the current contents (RET / C-m).
     Accept,
+    /// Commit the typed text as written, whatever is selected (C-j).
+    AcceptTyped,
     /// Discard the session (C-g).
     Cancel,
     /// Replace the buffer with the selected candidate (TAB / C-i).
@@ -518,6 +590,7 @@ impl MinibufferAction {
                 return match c {
                     'g' => Self::Cancel,
                     'm' => Self::Accept,
+                    'j' => Self::AcceptTyped,
                     'i' => Self::Complete,
                     'a' => Self::LineStart,
                     'e' => Self::LineEnd,
@@ -581,15 +654,69 @@ impl CompletionSource {
 }
 
 fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
-    if matches!(session.source, CompletionSource::None) {
+    if matches!(session.source, CompletionSource::None) || session.accept == AcceptPolicy::Typed {
         return typed.to_owned();
     }
     if let Some(idx) = session.selected
         && let Some(cand) = session.candidates.get(idx)
     {
+        // A file candidate is a bare entry of the directory the field
+        // names; the value is the path, so the directory part is put
+        // back in front of it.
+        if matches!(session.source, CompletionSource::Files { .. }) {
+            let (dir, _) = split_dir_base(typed);
+            return format!("{dir}{cand}");
+        }
         return cand.clone();
     }
     typed.to_owned()
+}
+
+/// Split a files-prompt field at its last `/`: `("src/", "ma")` for
+/// `src/ma`, `("", "ma")` for `ma`, `("/tmp/", "")` for `/tmp/`. The
+/// directory part keeps its trailing slash so `dir + name` is a path.
+#[must_use]
+pub fn split_dir_base(input: &str) -> (&str, &str) {
+    match input.rfind('/') {
+        Some(idx) => input.split_at(idx + 1),
+        None => ("", input),
+    }
+}
+
+/// The directory a files prompt lists for the field's directory part:
+/// absolute as written, `~` and `~/` under `$HOME`, anything else
+/// joined onto the prompt's root, and the root itself for an empty
+/// part.
+#[must_use]
+pub fn listing_dir(root: &Path, dir_part: &str) -> PathBuf {
+    if dir_part.is_empty() {
+        return root.to_path_buf();
+    }
+    if dir_part.starts_with('/') {
+        return PathBuf::from(dir_part);
+    }
+    if let Some(rest) = dir_part.strip_prefix('~')
+        && (rest.is_empty() || rest.starts_with('/'))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let rest = rest.trim_start_matches('/');
+        return if rest.is_empty() {
+            PathBuf::from(home)
+        } else {
+            PathBuf::from(home).join(rest)
+        };
+    }
+    root.join(dir_part)
+}
+
+/// The text the candidate filter runs against: the whole field, except
+/// for a files prompt, whose pool is the entries of the directory the
+/// field names and whose filter is the part after the last `/`.
+fn filter_needle<'a>(source: &CompletionSource, needle: &'a str) -> &'a str {
+    match source {
+        CompletionSource::Files { .. } => split_dir_base(needle).1,
+        _ => needle,
+    }
 }
 
 fn collect_pool(
@@ -606,7 +733,10 @@ fn collect_pool(
             .iter()
             .filter_map(|id| registry.get(*id).ok().map(|b| b.name().to_owned()))
             .collect()),
-        CompletionSource::Files { root } => Ok(list_directory(root)),
+        CompletionSource::Files { root } => {
+            let (dir_part, _) = split_dir_base(needle);
+            Ok(list_directory(&listing_dir(root, dir_part)))
+        }
         CompletionSource::Custom(f) => {
             // The typed text is the source's one argument (E4.1). A
             // source that ignores it behaves exactly as before; one
@@ -892,6 +1022,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            accept: AcceptPolicy::Candidate,
         });
     }
 

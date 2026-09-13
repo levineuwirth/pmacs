@@ -1608,9 +1608,11 @@ fn preservation_an_unreadable_file_reports_with_its_path() {
 /// does not enter the resolver chain.
 ///
 /// *Mutation:* route `display_file` into the directory resolver.
-/// `find_file_accepting_a_directory_reports_instead_of_raising` in
-/// `find_file_acceptance.rs` is the companion pin through find-file's
-/// real accept path; this one pins the primitive and the window state.
+/// Since E6.1 find-file itself sends a directory to the resolver
+/// before it would reach `display_file`
+/// (`find_file_accepting_a_directory_opens_it_in_dired` in
+/// `find_file_acceptance.rs`); this row pins that the primitive still
+/// refuses one, and the window state.
 #[test]
 fn preservation_display_file_still_refuses_a_directory() {
     if reexec_isolated("preservation_display_file_still_refuses_a_directory") {

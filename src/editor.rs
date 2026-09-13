@@ -3739,7 +3739,9 @@ impl EditorState {
     /// Hardcoded handler for keys delivered while a minibuffer prompt
     /// is active. Recognized chords:
     ///
-    /// * `RET` / `C-m`           --- accept (invoke `on_accept`).
+    /// * `RET` / `C-m`           --- accept (invoke `on_accept` with the
+    ///   selection or the typed text, by the session's accept policy).
+    /// * `C-j`                   --- accept the typed text as written.
     /// * `C-g`                   --- cancel (invoke `on_cancel`).
     /// * `TAB` / `C-i`           --- complete to selected candidate.
     /// * `Up`                    --- previous candidate with a dropdown, else previous history.
@@ -3765,7 +3767,8 @@ impl EditorState {
 
         let action = MinibufferAction::from_chord(chord);
         match action {
-            MinibufferAction::Accept => self.minibuffer_accept(frontend_id),
+            MinibufferAction::Accept => self.minibuffer_accept(frontend_id, false),
+            MinibufferAction::AcceptTyped => self.minibuffer_accept(frontend_id, true),
             MinibufferAction::Cancel => self.minibuffer_cancel(),
             MinibufferAction::Complete => self.minibuffer_complete(),
             MinibufferAction::HistoryPrev => self.with_minibuffer(Minibuffer::history_prev),
@@ -4043,8 +4046,14 @@ impl EditorState {
         }
     }
 
-    fn minibuffer_accept(&mut self, frontend_id: FrontendId) {
-        let outcome = self.core.borrow_mut().minibuffer.accept();
+    /// `typed_wins` is `C-j`: the field as written, whatever the
+    /// session's policy or selection (D18).
+    fn minibuffer_accept(&mut self, frontend_id: FrontendId, typed_wins: bool) {
+        let outcome = if typed_wins {
+            self.core.borrow_mut().minibuffer.accept_typed()
+        } else {
+            self.core.borrow_mut().minibuffer.accept()
+        };
         let Some((on_accept, contents)) = outcome else {
             return;
         };
@@ -7753,6 +7762,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            accept: crate::minibuffer::AcceptPolicy::Candidate,
             ranked: false,
         });
         assert!(
@@ -9286,6 +9296,7 @@ mod tests {
                 selected: None,
                 history_index: None,
                 typed_before_history_nav: None,
+                accept: crate::minibuffer::AcceptPolicy::Candidate,
                 ranked: false,
             });
             for c in entry.chars() {
@@ -9311,6 +9322,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            accept: crate::minibuffer::AcceptPolicy::Candidate,
             ranked: false,
         });
         let h: &History = mb2.history.get("test").expect("history loaded");
