@@ -84,6 +84,15 @@ raw byte columns on non-ASCII text. Semantic tokens `full`, `full.delta`
 and `range` are three independent capabilities and each is gated on its
 own.
 
+The semantic-token store hands out tokens in the document's current
+bytes, never in the server's: every buffer a server attaches to carries
+a `SemanticEditRecorder` view that logs each edit the buffer broadcasts,
+a token request carries the text the server holds and the edit number
+it is current at, and the answer is resolved against that text and
+carried across the edits since. A stale store therefore shifts its
+tokens and does not drop them; both merge sites read
+`positioned_tokens` and neither converts a column per frame.
+
 LaTeX is served by `texlab`, and its root is not the repository root.
 `pmacs.lsp.config.latex` resolves the document root by an upward marker
 walk over texlab's own markers (`.texlabroot`, `texlabroot`), and `.git`
