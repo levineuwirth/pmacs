@@ -864,6 +864,48 @@ them as E3's inherited #259's fourth.
 
 Tally (run-34774221987-reds): 2 = 1 + 1.
 
+### PR #270's fix-round-1 head run 34779061403 at `c844de9`: #271 filed on one ubuntu luajit leg, U4 and U17 green
+
+Read at E6 fix round 1's close on 2026-09-13, from the jobs endpoint and the red job's log; not re-run.
+
+| field | value |
+|---|---|
+| run | 34779061403, `pull_request`, one attempt |
+| head | `c844de9`, the `manual_assert` fix over `8e57fa1`; the run tests the merge into `main` |
+| window | created 2026-09-13T19:53:29Z, updated 20:13:52Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the skip | `Docs consistency`; the push changed code |
+
+Tally (run-34779061403-jobs): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 103782631063 | success |
+| Commit attribution (D9) | 103782631162 | success |
+| Docs consistency | 103782655284 | skipped |
+| Format | 103782631045 | success |
+| GPU Render (headless) | 103782654522 | success |
+| Lint (lua54) | 103782630993 | success |
+| Lint (luajit) | 103782631121 | success |
+| M1 Acceptance Gates | 103782654512 | success |
+| M10 Perf Gates (crdt) | 103782654513 | success |
+| M4 Perf Gates | 103782654524 | success |
+| M5 Perf Gates | 103782654526 | success |
+| M6 Perf Gates | 103782654518 | success |
+| Perf budgets (debug) | 103782654562 | success |
+| Test (crdt) | 103782654515 | success |
+| Test (macos-latest / lua54) | 103782654578 | success |
+| Test (macos-latest / luajit) | 103782654568 | success |
+| Test (ubuntu-latest / lua54) | 103782654658 | success |
+| Test (ubuntu-latest / luajit) | 103782654603 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 103782654533 | success |
+
+Four failing targets, all inside `Test (ubuntu-latest / luajit)` (103782654603) within five minutes of one another, filed as #271 in the `intermittent-red` shape: two copies of `readiness_is_a_served_hello_not_a_connect` (`gpu_invocation_acceptance` and `lsp_dispatch_seams_acceptance`, `tests/common/ready.rs:423:9`), each refusing every connect for the full 10 s deadline against a listener the test itself bound in-process (`last: "connect: Connection refused (os error 111)"`); `dedup_upgrade_publishes_the_snapshot_to_preexisting_grid_replicas` (`tests/gpu_invocation_acceptance.rs:487:64`) on a WouldBlock snapshot read; and `m10_10_crdt_op_from_a_reaches_b_via_daemon_broadcast` (`tests/m5_5_acceptance.rs:1169:5`) on a missed broadcast. The branch's diff at the head touches none of the four paths (two new probe files, a comment, the divergences entry), the same tip is green on the local gate (`20260913T195329Z-1785013`, six of six, 139 targets 4843/0/51), all other legs of the run are green, and the base control `aa1363e` ran this leg green --- one runner's bad window for daemon-serving, stated as a candidate, and the discriminating control (a rerun of the job) has not been run.
+
+Tally (run-34779061403-reds): 4 = 2 + 1 + 1.
+
+The superseded head `8e57fa1` ran as 34778589012, cancelled by the `c844de9` push after its `Lint (luajit)` leg had already failed on this round's own committed probe (`manual_assert` in `e6_review1_undo_probes.rs:66` without `crdt`, reproduced locally by the leg's exact command, fixed at `c844de9`); this run's `Lint (luajit)` leg is green, confirming the fix. U4's and U17's selectors all pass on this run --- green samples, non-reproduction and nothing more, and neither count moves. **So the head is not green, on #271 alone**, and a merge decision inherits it the way the previous head inherited U4's fourth and U17's seventh.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
