@@ -846,6 +846,20 @@ pmacs.command.define {
 -- shared by autosave.enable/recentf.enable/saveplace.enable — coerce
 -- FIRST, then hand the registry an already-conforming boolean, since
 -- `pmacs.config.set` itself is strict.
+-- E6.4: consecutive typed characters undo as one step, in groups of
+-- this many (Emacs's amalgamating-undo-limit is 20). Any other command
+-- --- a motion, a delete, a paste --- ends the group. Read by the core
+-- at every typed self-insert; 0 undoes every keystroke separately.
+pmacs.config.define {
+  name = "undo.amalgamate",
+  description = "Consecutive typed characters undone as one step, in groups of this many; 0 undoes each character separately.",
+  type = "integer",
+  default = 20,
+  min = 0,
+  max = 1000,
+  mutability = "live",
+}
+
 pmacs.config.define {
   name = "editing.trim-on-save",
   description = "Delete trailing whitespace from every line before a save.",

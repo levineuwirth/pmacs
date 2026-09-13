@@ -1994,6 +1994,8 @@ impl EditorState {
                         .borrow_mut()
                         .rotate_command(frontend_id, "buffer.self-insert");
                     self.core.borrow_mut().typed_edit_arm(frontend_id, ch);
+                    let limit = self.undo_amalgamate_limit();
+                    self.core.borrow_mut().typed_run_begin(frontend_id, limit);
                     let mut args = mlua::MultiValue::new();
                     args.push_back(mlua::Value::Integer(ch as i64));
                     if let Err(e) = self.lua_host.invoke_command("buffer.self-insert", args) {
@@ -2012,6 +2014,7 @@ impl EditorState {
         let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
         let post_revision = self.active_buffer_revision();
         if pre_revision != post_revision {
+            self.note_typed_run(frontend_id, typed_edit.as_ref());
             if let Some(record) = typed_edit {
                 self.core
                     .borrow_mut()
@@ -2022,6 +2025,28 @@ impl EditorState {
             self.core.borrow_mut().typed_edit_clear_armed();
         }
         self.core.borrow_mut().completion_popup_validate();
+    }
+
+    /// The registered `undo.amalgamate` (Integer, default 20): how many
+    /// consecutive typed characters undo as one step; zero for none.
+    fn undo_amalgamate_limit(&self) -> u32 {
+        crate::lua_bindings::config_u32(self.lua_host.lua(), "undo.amalgamate", None, 20)
+    }
+
+    /// After a dispatch changed the buffer: if the change was a typed
+    /// self-insert (the record proves the insert primitive landed),
+    /// hand it to the undo amalgamation (E6.4).
+    fn note_typed_run(
+        &self,
+        frontend_id: FrontendId,
+        typed_edit: Option<&crate::editor_core::TypedEditRecord>,
+    ) {
+        if let Some(record) = typed_edit {
+            let limit = self.undo_amalgamate_limit();
+            self.core
+                .borrow_mut()
+                .typed_run_end(frontend_id, limit, record.buffer);
+        }
     }
 
     fn active_terminal_key(&self, frontend_id: FrontendId) -> Option<TerminalViewKey> {
@@ -2196,11 +2221,13 @@ impl EditorState {
         };
 
         let pre_revision = self.active_buffer_revision();
+        let limit = self.undo_amalgamate_limit();
         {
             let mut core = self.core.borrow_mut();
             if let Some(ch) = single {
                 core.rotate_command(frontend_id, "buffer.self-insert");
                 core.typed_edit_arm(frontend_id, ch);
+                core.typed_run_begin(frontend_id, limit);
                 // **Must go through `insert_char_over_region`, not
                 // the generic byte insert.** Arming provenance is
                 // only half of it: `typed_edit_complete` is called
@@ -2229,6 +2256,7 @@ impl EditorState {
         // it, so it is armed across the fan-out and cleared after.
         let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
         if pre_revision != self.active_buffer_revision() {
+            self.note_typed_run(frontend_id, typed_edit.as_ref());
             if let Some(record) = typed_edit {
                 self.core
                     .borrow_mut()

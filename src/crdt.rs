@@ -153,11 +153,10 @@ impl CrdtState {
     /// (same effect).
     fn create_undo_manager(doc: &LoroDoc) -> UndoManager {
         let mut undo = UndoManager::new(doc);
-        // Raise max undo steps from loro's default 100 to 10_000.
-        // v0.1's undo stack is effectively unbounded; 10k is the
-        // realistic ceiling for human-driven editing and gives users
-        // ample undo depth without unreasonable memory cost.
-        undo.set_max_undo_steps(10_000);
+        // Raise max undo steps from loro's default 100 to the one
+        // ceiling both histories share (E6.4): the realistic depth for
+        // human-driven editing, and what the v0.1 stack drops past.
+        undo.set_max_undo_steps(crate::buffer::UNDO_HISTORY_LIMIT);
         undo
     }
 
@@ -485,6 +484,24 @@ impl CrdtState {
     /// should group into one undo unit.
     pub fn record_checkpoint(&self) -> LoroResult<()> {
         self.undo.borrow_mut().record_new_checkpoint()
+    }
+
+    /// E6.4: open an undo group. Loro merges every push after the
+    /// group's first into the group's step, so consecutive typed
+    /// self-inserts between here and [`Self::undo_group_end`] undo as
+    /// one. Any group already open is closed first, since loro refuses
+    /// a second `group_start`; a group whose manager is not yet ready
+    /// (no op recorded) is simply not opened, which leaves the edits
+    /// ungrouped rather than failing the keystroke.
+    pub fn undo_group_start(&self) {
+        let mut undo = self.undo.borrow_mut();
+        undo.group_end();
+        let _ = undo.group_start();
+    }
+
+    /// E6.4: close the open undo group, if any.
+    pub fn undo_group_end(&self) {
+        self.undo.borrow_mut().group_end();
     }
 
     /// Discard the bound peer's undo and redo history, keeping the
