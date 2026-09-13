@@ -135,6 +135,20 @@ pub enum EditOp<'a> {
 /// than felt.
 pub const UNDO_HISTORY_LIMIT: usize = 10_000;
 
+/// CRDT mode (E6.4): the state of the loro undo group a run of typed
+/// self-inserts opens on a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoGroup {
+    /// No group is open.
+    Closed,
+    /// A group is open and the next edit is the announced typed one,
+    /// which joins it.
+    AwaitingTyped,
+    /// A group is open and no typed edit is announced: the next edit
+    /// is foreign and cuts the group before it reaches loro.
+    Open,
+}
+
 /// One entry in the undo (or redo) stack.
 struct UndoEntry {
     /// Pre-edit rope. Cheap to retain: persistent rope, structural sharing.
@@ -229,12 +243,10 @@ pub struct Buffer {
     undo: VecDeque<UndoEntry>,
     /// Redo stack. Cleared by any forward edit.
     redo: VecDeque<UndoEntry>,
-    /// CRDT mode (E6.4): a loro undo group is open on this buffer for a
-    /// run of typed self-inserts.
-    undo_group_open: bool,
-    /// CRDT mode (E6.4): the next edit is the typed one the core
-    /// announced; any other edit while the group is open cuts it.
-    undo_typed_pending: bool,
+    /// CRDT mode (E6.4): the loro undo group open on this buffer for a
+    /// run of typed self-inserts, and whether the next edit is the
+    /// typed one the core announced.
+    undo_group: UndoGroup,
     /// Path this buffer is bound to on disk, if any (T M4.5 L1:
     /// relocated here from `EditorCore` so cross-file navigation can
     /// keep each buffer's identity straight — the v0.1 single-file
@@ -309,8 +321,7 @@ impl Buffer {
             next_mark_id: 0,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
-            undo_group_open: false,
-            undo_typed_pending: false,
+            undo_group: UndoGroup::Closed,
             file_path: None,
             file_meta: None,
             editing_in_progress: false,
@@ -1271,11 +1282,11 @@ impl Buffer {
         // not in `apply_edit_inner`, because this is the one stage
         // every local edit passes through, intercepts skipped or not.
         #[cfg(feature = "crdt")]
-        if self.crdt.is_some() && self.undo_group_open && !is_no_op_edit(current) {
-            if self.undo_typed_pending {
-                self.undo_typed_pending = false;
-            } else {
-                self.undo_group_end();
+        if self.crdt.is_some() && !is_no_op_edit(current) {
+            match self.undo_group {
+                UndoGroup::Closed => {}
+                UndoGroup::AwaitingTyped => self.undo_group = UndoGroup::Open,
+                UndoGroup::Open => self.undo_group_end(),
             }
         }
 
@@ -1440,8 +1451,7 @@ impl Buffer {
         #[cfg(feature = "crdt")]
         if let Some(crdt) = self.crdt.as_ref() {
             crdt.undo_group_start();
-            self.undo_group_open = true;
-            self.undo_typed_pending = true;
+            self.undo_group = UndoGroup::AwaitingTyped;
         }
     }
 
@@ -1449,10 +1459,10 @@ impl Buffer {
     /// group is already open; when a foreign edit has cut it, open a
     /// new one instead.
     pub fn undo_group_continue(&mut self) {
-        if self.undo_group_open {
-            self.undo_typed_pending = true;
-        } else {
+        if self.undo_group == UndoGroup::Closed {
             self.undo_group_start();
+        } else {
+            self.undo_group = UndoGroup::AwaitingTyped;
         }
     }
 
@@ -1462,8 +1472,7 @@ impl Buffer {
         if let Some(crdt) = self.crdt.as_ref() {
             crdt.undo_group_end();
         }
-        self.undo_group_open = false;
-        self.undo_typed_pending = false;
+        self.undo_group = UndoGroup::Closed;
     }
 
     /// How many undo steps the v0.1 stack holds; `None` in CRDT mode,
