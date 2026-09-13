@@ -712,6 +712,52 @@ and pass with the fixes, rebuilt before running. The local protocol
 gate passed eight stages, with 4797/0/51 and 4481/0/37 over 133 targets
 in each sweep. No new red appeared. This sample retires no known red.
 
+### `main` after E5: run 34767391694 at `aa1363e`, and it is GREEN
+
+Read at E6's opening on 2026-09-13, from the jobs endpoint and the
+two macOS job logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 34767391694, `push`, one attempt |
+| head | `aa1363e`, E5's squash merge (PR #269 at `d93715d`, `--match-head-commit`) |
+| window | created 2026-09-13T16:02:43Z, updated 16:19:11Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+Tally (run-34767391694-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 103750691006 | success |
+| Format | 103750691084 | success |
+| Commit attribution (D9) | 103750691096 | success |
+| Lint (lua54) | 103750691129 | success |
+| Lint (luajit) | 103750691134 | success |
+| Test (crdt) | 103750712211 | success |
+| M4 Perf Gates | 103750712217 | success |
+| GPU Render (headless) | 103750712227 | success |
+| M5 Perf Gates | 103750712231 | success |
+| M1 Acceptance Gates | 103750712256 | success |
+| M6 Perf Gates | 103750712259 | success |
+| Perf budgets (debug) | 103750712285 | success |
+| M10 Perf Gates (crdt) | 103750712289 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 103750712307 | success |
+| Test (macos-latest / luajit) | 103750712309 | success |
+| Test (ubuntu-latest / lua54) | 103750712312 | success |
+| Test (macos-latest / lua54) | 103750712347 | success |
+| Test (ubuntu-latest / luajit) | 103750712358 | success |
+| Docs consistency | 103750712786 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 103750712309,
+`Test (macos-latest / lua54)` 103750712347) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 132 `test result:
+ok` and zero `FAILED` in each. So neither the `read Hello` family nor
+#259 sampled on this trunk run; the family stays at sixteen and #259
+at seven, and under the rerun rule a green sample retires nothing.
+E5's merge is the third consecutive squash whose post-merge run is
+read and recorded before the next phase's first row.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
