@@ -84,6 +84,11 @@ pub struct HookCallback {
     pub body: Function,
     /// Where the call to `pmacs.hook.add` originated.
     pub source: SourceLocation,
+    /// The token `add` handed back, unique across the registry; what
+    /// `remove` takes. E5.2: before it, a callback could be attached
+    /// and never detached, so every `hook.add` in a package leaked
+    /// across `reload`.
+    pub token: u64,
 }
 
 /// A defined hook: name, description, registered callbacks (in
@@ -183,6 +188,9 @@ pub struct HookRegistry {
     by_name: HashMap<String, Hook>,
     /// Insertion order for stable listing.
     order: Vec<String>,
+    /// The next token `add` hands out. Never reused, so a stale token
+    /// can only miss.
+    next_token: u64,
 }
 
 impl HookRegistry {
@@ -223,22 +231,45 @@ impl HookRegistry {
         Ok(())
     }
 
-    /// Attach `body` to the hook named `name`. Returns
-    /// [`HookError::NotFound`] if the hook hasn't been defined.
+    /// Attach `body` to the hook named `name` and return the token that
+    /// [`Self::remove`] takes. Returns [`HookError::NotFound`] if the
+    /// hook hasn't been defined.
     pub fn add(
         &mut self,
         name: &str,
         body: Function,
         source: SourceLocation,
-    ) -> Result<(), HookError> {
+    ) -> Result<u64, HookError> {
         let hook = self
             .by_name
             .get_mut(name)
             .ok_or_else(|| HookError::NotFound {
                 name: name.to_owned(),
             })?;
-        hook.callbacks.push(HookCallback { body, source });
-        Ok(())
+        self.next_token += 1;
+        let token = self.next_token;
+        hook.callbacks.push(HookCallback {
+            body,
+            source,
+            token,
+        });
+        Ok(token)
+    }
+
+    /// Detach the callback `add` returned `token` for. `true` if it was
+    /// attached, `false` if it had already gone (a stale token is not
+    /// an error: teardown must be safe to run twice). A run in progress
+    /// keeps its snapshot, so a callback removed during a run finishes
+    /// that run and is absent from the next.
+    pub fn remove(&mut self, token: u64) -> bool {
+        for hook in self.by_name.values_mut() {
+            let before = hook.callbacks.len();
+            hook.callbacks.retain(|callback| callback.token != token);
+            if hook.callbacks.len() != before {
+                return true;
+            }
+        }
+        false
     }
 
     /// Look up a hook by name.
@@ -426,6 +457,48 @@ mod tests {
             cbs.iter().map(|c| c.source.line).collect::<Vec<_>>(),
             vec![10, 11, 12, 13]
         );
+    }
+
+    #[test]
+    fn remove_detaches_exactly_the_token_and_is_idempotent() {
+        let lua = Lua::new();
+        let mut r = HookRegistry::new();
+        r.define("h".into(), "desc".into(), HookKind::AllMustSucceed, src(1))
+            .unwrap();
+        r.define("k".into(), "desc".into(), HookKind::AllMustSucceed, src(2))
+            .unwrap();
+        let mut tokens = Vec::new();
+        for line in 10..13 {
+            let f = lua.create_function(|_, ()| Ok(())).unwrap();
+            tokens.push(r.add("h", f, src(line)).unwrap());
+        }
+        let other = r
+            .add("k", lua.create_function(|_, ()| Ok(())).unwrap(), src(20))
+            .unwrap();
+        assert_eq!(tokens.len(), 3);
+        assert!(
+            tokens.windows(2).all(|w| w[0] != w[1]),
+            "tokens are distinct"
+        );
+        assert!(r.remove(tokens[1]), "an attached callback is removed");
+        assert_eq!(
+            r.get("h")
+                .unwrap()
+                .callbacks
+                .iter()
+                .map(|c| c.source.line)
+                .collect::<Vec<_>>(),
+            vec![10, 12],
+            "only the token's callback went, order kept"
+        );
+        assert!(
+            !r.remove(tokens[1]),
+            "a second remove is false, not an error"
+        );
+        assert!(!r.remove(999_999), "a token nobody handed out is false");
+        assert_eq!(r.get("k").unwrap().callbacks.len(), 1);
+        assert!(r.remove(other));
+        assert!(r.get("k").unwrap().callbacks.is_empty());
     }
 
     #[test]

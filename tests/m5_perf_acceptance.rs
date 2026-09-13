@@ -148,14 +148,23 @@ fn do_handshake(stream: &mut UnixStream) -> Hello {
     hello
 }
 
+/// The longest one `drain_pending` call may run. A drain that returned
+/// only on a read error had no bound of its own when the daemon kept
+/// producing (E5.0, issue #268).
+const DRAIN_CEILING: Duration = Duration::from_millis(250);
+
 /// Drain any pending instance messages with a short read timeout.
 /// Returns the count drained (for diagnostics in case of skew).
 fn drain_pending(stream: &mut UnixStream) -> usize {
     stream
         .set_read_timeout(Some(Duration::from_millis(1)))
         .expect("set drain timeout");
+    let stop = Instant::now() + DRAIN_CEILING;
     let mut n = 0;
     loop {
+        if Instant::now() >= stop {
+            return n;
+        }
         match read_message::<InstanceMessage>(stream) {
             Ok(_) => n += 1,
             // Timeout = no more pending. Either stdlib or transport
@@ -180,6 +189,15 @@ const WARMUP_SAMPLES: usize = 100;
 const MEASURED_SAMPLES: usize = 1000;
 const P99_THRESHOLD_MS: u128 = 10;
 const PER_KEY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole run's ceiling. `PER_KEY_TIMEOUT` bounds one operation
+/// only, and 1100 of them admitted 91 minutes with nothing printed ---
+/// which is what CI's job ceiling then cancelled with no log (E5.0,
+/// issue #268). At the threshold's own pace the run takes seconds;
+/// past this it is a hung attach and the panic says how far it got.
+const WHOLE_RUN_CEILING: Duration = Duration::from_mins(5);
+/// Print one progress line per this many keys, so a slow run shows
+/// where it is before any ceiling fires.
+const PROGRESS_EVERY: usize = 100;
 
 #[test]
 #[ignore = "perf gate; requires release build"]
@@ -200,8 +218,20 @@ fn keystroke_to_render_p99_under_10ms_over_loopback_local_socket() {
     let total = WARMUP_SAMPLES + MEASURED_SAMPLES;
     let mut samples: Vec<Duration> = Vec::with_capacity(total);
     let mut cursor: u8 = b'a';
+    let run_start = Instant::now();
 
     for i in 0..total {
+        let run_elapsed = run_start.elapsed();
+        assert!(
+            run_elapsed < WHOLE_RUN_CEILING,
+            "perf run exceeded {WHOLE_RUN_CEILING:?} at key #{i} of {total} \
+             (waited {run_elapsed:?}; {} samples so far, last {:?})",
+            samples.len(),
+            samples.last()
+        );
+        if i > 0 && i % PROGRESS_EVERY == 0 {
+            println!("  key #{i} of {total} at {run_elapsed:?}");
+        }
         let key = FrontendEvent::Key(KeyEvent {
             frontend_id: hello.assigned_frontend_id,
             key: Key::Char(cursor as char),

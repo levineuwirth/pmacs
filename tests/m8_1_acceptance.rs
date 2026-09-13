@@ -22,11 +22,11 @@ use pmacs::editor::EditorState;
 /// test file owns its pump (avoids cross-test private-helper
 /// dependencies).
 fn pump_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, predicate: F) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate(state) {
         assert!(
             Instant::now() < deadline,
-            "async pump deadline exceeded after 2s"
+            "async pump deadline exceeded after 10s"
         );
         state.tick_async();
         std::thread::sleep(Duration::from_millis(2));

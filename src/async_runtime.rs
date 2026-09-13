@@ -2216,7 +2216,12 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// Tick the runtime until `f` holds, or panic on a 2-second deadline.
+    /// Tick the runtime until `f` holds, or panic on a 10-second deadline.
+    ///
+    /// Ten seconds and not two (E5.0, D12): a deadline asserts that
+    /// something eventually happens, and two seconds is the window in
+    /// which #263's seven fired at once under sweep load. The hand-rolled
+    /// waits below carry the same constant for the same reason.
     ///
     /// `what` names the condition; the panic carries it with the
     /// deadline, the elapsed time and the number of times `f` was asked,
@@ -2225,7 +2230,7 @@ mod tests {
     /// is unreachable from an in-crate unit test, so the reporting is
     /// carried inward here.
     fn pump_until<F: Fn() -> bool>(rt: &AsyncRuntime, what: &str, f: F) {
-        const DEADLINE: Duration = Duration::from_secs(2);
+        const DEADLINE: Duration = Duration::from_secs(10);
         let start = Instant::now();
         let mut polls = 0u32;
         while !f() {
@@ -2513,7 +2518,7 @@ mod tests {
             ids.push(rt.dispatch_sleep(0, Some("k")));
         }
         // Pump until every dispatched id (gate + 100 keyed) settles.
-        let deadline = Duration::from_secs(3);
+        let deadline = Duration::from_secs(10);
         let start = Instant::now();
         let mut polls = 0u32;
         loop {
@@ -2581,7 +2586,7 @@ mod tests {
             // Try to take_result eventually; even if the worker
             // hasn't replied yet, the cancel token is flipped.
             // Pump until it settles into Cancelled.
-            const DEADLINE: Duration = Duration::from_millis(500);
+            const DEADLINE: Duration = Duration::from_secs(10);
             let start = Instant::now();
             let mut polls = 0u32;
             while !rt.is_complete(*id) {
@@ -2611,7 +2616,7 @@ mod tests {
         let beta = rt.dispatch_sleep(0, Some("beta"));
         let _alpha2 = rt.dispatch_sleep(0, Some("alpha"));
         // beta should complete cleanly; alpha1 should be cancelled.
-        let deadline = Duration::from_secs(2);
+        let deadline = Duration::from_secs(10);
         let start = Instant::now();
         let mut polls = 0u32;
         while !(rt.is_complete(beta) && rt.is_complete(alpha1)) {
@@ -2645,7 +2650,7 @@ mod tests {
         for _ in 0..5 {
             let _ = rt.dispatch_sleep(0, Some("noisy"));
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !rt.is_complete(keyless) {
             assert!(Instant::now() < deadline, "keyless job stalled");
             let _ = rt.tick();
@@ -2810,7 +2815,7 @@ mod tests {
         // we observe the supersede slot.
         let successor = rt.dispatch_sleep(5_000, Some("k"));
         // Drain until the prior stream emits its closed batch.
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let mut prior_done = false;
         while !prior_done {
             assert!(Instant::now() < deadline, "prior never settled");
@@ -2837,7 +2842,7 @@ mod tests {
         let successor = rt.dispatch_sleep(2_000, Some("k"));
         // Pump until prior settles (Cancelled). Successor still
         // running; key→successor must persist.
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !rt.is_complete(prior) {
             assert!(Instant::now() < deadline, "prior never settled");
             let _ = rt.tick();
@@ -3371,7 +3376,7 @@ mod tests {
             let id = rt.dispatch_emit_n(8, None, Some(8));
             // Drain until the batch carrying `closed = true` for this
             // id is observed.
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut closed = false;
             while !closed {
                 assert!(Instant::now() < deadline, "stream close deadline");

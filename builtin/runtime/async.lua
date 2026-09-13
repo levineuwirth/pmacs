@@ -218,13 +218,10 @@ end
 local function step(co)
   local ok, yielded = coroutine.resume(co)
   if not ok then
-    -- An uncaught error inside the coroutine. Surface via pmacs.error
-    -- if available; fall back to a plain error otherwise.
-    if pmacs.error then
-      pmacs.error("pmacs.async: coroutine raised: " .. tostring(yielded))
-    else
-      error("pmacs.async: coroutine raised: " .. tostring(yielded))
-    end
+    -- An uncaught error inside the coroutine. Report it (E5.1: the
+    -- channel exists); the scheduler itself must not raise, or one bad
+    -- coroutine would take every other parked one down with it.
+    pmacs.error("pmacs.async: coroutine raised: " .. tostring(yielded))
     return
   end
   if coroutine.status(co) == "dead" then
@@ -237,12 +234,8 @@ local function step(co)
   elseif type(yielded) == "table" and yielded._is_pmacs_next_tick then
     next_tick_coroutines[#next_tick_coroutines + 1] = co
   else
-    if pmacs.error then
-      pmacs.error("pmacs.async: coroutine yielded a non-Handle value (" ..
-        type(yielded) .. "); use Handle:await() per R46")
-    else
-      error("pmacs.async: coroutine yielded a non-Handle value")
-    end
+    pmacs.error("pmacs.async: coroutine yielded a non-Handle value (" ..
+      type(yielded) .. "); use Handle:await() per R46")
   end
 end
 
@@ -538,7 +531,7 @@ function pmacs._async.tick()
       for _, cb in ipairs(callbacks) do
         local status, value = async_mod._take_result(id)
         local ok, err = pcall(cb, status, value)
-        if not ok and pmacs.error then
+        if not ok then
           pmacs.error("on_complete callback failed: " .. tostring(err))
         end
       end
@@ -565,7 +558,7 @@ function pmacs._async.tick()
       if list ~= nil then
         for _, cb in ipairs(list) do
           local ok, err = pcall(cb, items)
-          if not ok and pmacs.error then
+          if not ok then
             pmacs.error("on_batch callback failed: " .. tostring(err))
           end
         end
@@ -577,7 +570,7 @@ function pmacs._async.tick()
       if closers ~= nil then
         for _, cb in ipairs(closers) do
           local ok, err = pcall(cb, batch.status, batch.value)
-          if not ok and pmacs.error then
+          if not ok then
             pmacs.error("on_close callback failed: " .. tostring(err))
           end
         end

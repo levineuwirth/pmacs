@@ -5,7 +5,11 @@
 //! Per spec §4.2 every editor action is a named, introspectable
 //! [`Command`]. Commands carry name, description (R42 makes this
 //! mandatory), source location (file + line where they were defined),
-//! a Lua function body, and an optional availability predicate.
+//! and a Lua function body. There is no availability field (D19, E5.7):
+//! the one there was got parsed, displayed and never evaluated, and a
+//! spec that passes it is refused by name at definition, like any other
+//! unknown key. Availability returns, if it does, as one concept
+//! consumed by `M-x`, dispatch and the menu in one phase.
 //!
 //! # Storage and lookup
 //!
@@ -94,10 +98,6 @@ pub struct Command {
     /// The Lua function body. Invoked by [`crate::lua::LuaHost`] and by
     /// keymap dispatch (T M2.4).
     pub body: Function,
-    /// Optional availability predicate. Returns `true` when the command
-    /// applies in the current state. The command palette (T M2.7) uses
-    /// it to gray out unavailable entries.
-    pub predicate: Option<Function>,
 }
 
 impl Command {
@@ -185,7 +185,7 @@ pub enum CommandError {
 
     /// R50: the spec table contained a key the registry doesn't know
     /// about. Typo-detection.
-    #[error("unknown field `{field}` in command spec; supported: name, description, fn, predicate")]
+    #[error("unknown field `{field}` in command spec; supported: name, description, fn")]
     UnknownField {
         /// The offending key.
         field: String,
@@ -298,7 +298,6 @@ mod tests {
                 line: 1,
             },
             body: lua.create_function(|_, ()| Ok(())).unwrap(),
-            predicate: None,
         }
     }
 

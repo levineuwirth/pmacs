@@ -625,17 +625,68 @@ pub fn is_default_style(style: Style) -> bool {
 pub struct LspStyleView {
     lsp: SharedLspManager,
     theme: ThemeHandle,
+    /// The `pmacs.config` registry `ui.semantic-styling` is read from
+    /// on every render; `None` (a bare core) means the default, on.
+    config: Option<crate::lua_bindings::SharedConfigRegistry>,
 }
 
 impl LspStyleView {
     /// Construct a view that paints LSP semantic-token styling using
     /// `lsp` as the source of truth and `theme` as the capture-name →
     /// style map. The view shares both handles; updates from elsewhere
-    /// (a new LSP response, a theme edit) are observable on the next
-    /// render.
+    /// (a new LSP response, a theme edit, the styling knob) are
+    /// observable on the next render.
     #[must_use]
-    pub fn new(lsp: SharedLspManager, theme: ThemeHandle) -> Self {
-        Self { lsp, theme }
+    pub fn new(
+        lsp: SharedLspManager,
+        theme: ThemeHandle,
+        config: Option<crate::lua_bindings::SharedConfigRegistry>,
+    ) -> Self {
+        Self { lsp, theme, config }
+    }
+}
+
+/// One styling policy for both frontends (E5.6, D20): whether LSP
+/// semantic tokens merge over tree-sitter captures. Read from the
+/// registered `ui.semantic-styling` (Boolean, default on) by the grid's
+/// [`LspStyleView`] and by the wire's `scoped_style_spans`, so the two
+/// paths cannot answer differently. Policy A ("never both") on the wire
+/// is retired by this; the minimap's whole-file summary stays
+/// grammar-only and says so at its producer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StylePolicy {
+    /// LSP semantic tokens are merged over grammar captures.
+    pub semantic: bool,
+}
+
+impl StylePolicy {
+    /// The registered knob's name.
+    pub const SETTING: &'static str = "ui.semantic-styling";
+
+    /// Read the policy from the registry installed in `lua` for `buffer`;
+    /// the default when nothing is registered is on. The buffer matters
+    /// because `ConfigRegistry::get` resolves buffer-local overrides only
+    /// when given one: passing `None` makes a local false read back false
+    /// while changing nothing.
+    #[must_use]
+    pub fn from_lua(lua: &mlua::Lua, buffer: Option<crate::buffer::BufferId>) -> Self {
+        Self {
+            semantic: crate::lua_bindings::config_bool(lua, Self::SETTING, buffer, true),
+        }
+    }
+
+    /// Read the policy from a registry handle for `buffer`, or the default
+    /// without one.
+    #[must_use]
+    pub fn from_registry(
+        registry: Option<&crate::lua_bindings::SharedConfigRegistry>,
+        buffer: Option<crate::buffer::BufferId>,
+    ) -> Self {
+        Self {
+            semantic: registry.is_none_or(|registry| {
+                crate::lua_bindings::config_bool_in(registry, Self::SETTING, buffer, true)
+            }),
+        }
     }
 }
 
@@ -645,6 +696,9 @@ impl View for LspStyleView {
     }
 
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        if !StylePolicy::from_registry(self.config.as_ref(), Some(buf.id())).semantic {
+            return; // E5.6: the knob is off; grammar captures alone paint.
+        }
         let Some(path) = buf.file_path() else {
             return; // No path ⇒ no URI ⇒ nothing to look up.
         };
@@ -725,21 +779,13 @@ impl View for LspStyleView {
                 let Some(legend) = ctx.legend.as_ref() else {
                     continue; // No legend ⇒ cannot name a style.
                 };
-                let Some(name) = legend.type_name(t.token_type) else {
+                // One resolver on both paths (`SemanticTokensLegend::style_name_for`):
+                // `<type>.<first-modifier>` when modifiers are set, else `<type>`.
+                // The theme's dotted-prefix `lookup` walks back to the base if a
+                // more specific entry isn't defined, so adding a modifier suffix
+                // is a strict refinement — never worse than the unmodified lookup.
+                let Some(lookup_name) = legend.style_name_for(t) else {
                     continue; // Unknown type index.
-                };
-                // Build the lookup name as `<type>.<first-modifier>`
-                // when modifiers are set, else just `<type>`. The
-                // theme's dotted-prefix `lookup` walks back to the
-                // base if a more specific entry isn't defined, so
-                // adding a modifier suffix is a strict refinement —
-                // never worse than the unmodified lookup. Allocation
-                // is skipped in the no-modifier case (the common one)
-                // via `Cow::Borrowed`.
-                let mods = legend.modifier_names(t.token_modifiers);
-                let lookup_name: std::borrow::Cow<'_, str> = match mods.first() {
-                    Some(m) => std::borrow::Cow::Owned(format!("{name}.{m}")),
-                    None => std::borrow::Cow::Borrowed(name),
                 };
                 let style = theme.lookup(&lookup_name);
                 if is_default_style(style) {
@@ -1101,7 +1147,11 @@ mod tests {
             );
         }
         // Render into a small grid.
-        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut view = LspStyleView::new(
+            state.lsp_manager.clone(),
+            state.syntax_registry.theme(),
+            None,
+        );
         let mut backing: Vec<Cell> = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1201,7 +1251,11 @@ mod tests {
             guard.mark_stale(uri);
         }
 
-        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut view = LspStyleView::new(
+            state.lsp_manager.clone(),
+            state.syntax_registry.theme(),
+            None,
+        );
         let mut backing: Vec<Cell> = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1323,7 +1377,11 @@ mod tests {
                 },
             );
         }
-        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut view = LspStyleView::new(
+            state.lsp_manager.clone(),
+            state.syntax_registry.theme(),
+            None,
+        );
         let mut backing: Vec<Cell> = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,

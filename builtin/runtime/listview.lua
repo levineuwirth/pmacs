@@ -601,6 +601,72 @@ function pmacs.listview.open(spec)
   seat_cursor(p, 1)
 end
 
+-- Re-run the data source of the panel opened under `name` and re-render
+-- it in place, whichever window shows it and whether or not it is the
+-- active one. For a consumer whose data changes under it (the
+-- diagnostics panel on a `publishDiagnostics`), where `listview.refresh`
+-- --- the `g` command, active-panel-only because it re-seats the cursor
+-- through the editor's motion primitives --- cannot reach. Selection
+-- follows the same Q#TR3 discipline as manual refresh: the selected
+-- stable id is retained across the row replacement and re-seated in
+-- the window displaying the panel, falling back to the previous
+-- numeric line (clamped) when the diagnostic is gone. A background
+-- refresh never moves the user's active document window.
+-- Returns false when no live panel carries that name or it has no
+-- `on_refresh`.
+function pmacs.listview.rerender(name)
+  local p = panel_for_requested_name(name)
+  if not (p and p.on_refresh) then return false end
+  local focused = pmacs.window.buffer() == p.buffer
+  local saved_line
+  if focused then
+    saved_line = pmacs.editor.cursor_line()
+  else
+    -- Read the window before replacing its contents: motion followed
+    -- by a focus change must retain the row the user actually selected.
+    saved_line = pmacs.window._cursor_line_on_buffer(p.buffer)
+  end
+  local saved_row = saved_line and p.line_to_row[saved_line]
+  local saved_id = saved_row and saved_row.id
+  local rows = check_ids(p.on_refresh() or {})
+  p.rows = rows
+  render(p, rows)
+  local target = (saved_id ~= nil and line_of_id(p, saved_id)) or saved_line
+  if target == nil then return true end
+  if (p.visible or 0) == 0 then return true end
+  target = math.max(1, math.min(target, p.visible))
+  if focused then
+    -- Mirror `listview.refresh`: re-seat the active window through
+    -- the editor primitives.
+    pmacs.editor.clear_selection()
+    pmacs.editor.set_view_top(0)
+    pmacs.editor.move_to_line(0)
+    seat_cursor(p, target)
+  else
+    -- The panel sits in the background: reseat its own window
+    -- without moving the active document window. `target` is already
+    -- a 0-based buffer line, matching the binding.
+    pmacs.window._reseat_window_on_buffer(p.buffer, target)
+  end
+  return true
+end
+
+-- The item under the cursor in the active panel, or nil (no panel is
+-- active, or the line carries no item). For a consumer's own `keys`
+-- commands, which must ask the same question `listview.visit` asks
+-- without duplicating the panel record lookup (E5.5).
+function pmacs.listview.current_item()
+  local p = active_panel()
+  if not p then return nil end
+  return p.line_to_item[pmacs.editor.cursor_line()]
+end
+
+-- The requested name of the panel the active window shows, or nil.
+function pmacs.listview.current_panel_name()
+  local p = active_panel()
+  return p and p.requested_name or nil
+end
+
 pmacs.command.define {
   name = "listview.visit",
   description = "Visit the list-panel item under the cursor.",

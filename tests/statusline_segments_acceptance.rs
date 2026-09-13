@@ -136,12 +136,13 @@ fn a01_04_registry_contract_limits_epochs_and_results() {
             .iter()
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>(),
-        // `activity` is worker identity Stage 1's fourth adopter, and it
-        // sorts first because `async.lua` is loaded before `syntax.lua`,
-        // `terminal.lua` and `lsp.lua`. This is an INVENTORY assertion:
-        // it grows when a builtin provider is added, which is exactly
-        // what it is for.
-        ["activity", "mode", "terminal", "lsp"],
+        // `errors` is E5.1's unread mark and sorts first because
+        // `errors.lua` is the first runtime chunk loaded; `activity` is
+        // worker identity Stage 1's fourth adopter and follows because
+        // `async.lua` is loaded before `syntax.lua`, `terminal.lua` and
+        // `lsp.lua`. This is an INVENTORY assertion: it grows when a
+        // builtin provider is added, which is exactly what it is for.
+        ["errors", "activity", "mode", "terminal", "lsp"],
         "built-in providers are discoverable in registration order"
     );
     let before_epochs = {
@@ -990,8 +991,18 @@ fn a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join() {
 
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
+        // `ready::DEADLINE` and not 200 ms (the `read Hello` family's
+        // sixteenth occurrence, at PR #269's head, with readiness
+        // already a served `Hello`): a live daemon accepts a fresh
+        // connection on its accept loop's next poll --- `accept_loop`
+        // sleeps `ACCEPT_POLL_INTERVAL` (50 ms, `src/daemon.rs`) on
+        // every `WouldBlock` of its non-blocking listener, and the
+        // per-attach thread writes the `Hello` first; no dispatcher is
+        // in that path. The quantum is production and persists, and on
+        // a loaded macOS runner it lands past a sub-second read. A
+        // deadline asserts the `Hello` eventually arrives.
         stream
-            .set_read_timeout(Some(Duration::from_millis(200)))
+            .set_read_timeout(Some(common::ready::DEADLINE))
             .unwrap();
         let hello: Hello = read_message(&mut stream).unwrap();
         write_message(

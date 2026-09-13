@@ -129,6 +129,9 @@ pub type SharedMenuRegistry = Rc<RefCell<MenuRegistry>>;
 /// state mutated by `pmacs.editor.*` primitives invoked from inside
 /// command bodies.
 pub type SharedCore = Rc<RefCell<EditorCore>>;
+/// The `pmacs.config` registry handle, re-exported for consumers outside
+/// the bindings (the grid's `LspStyleView` reads the styling policy through it).
+pub use config::SharedConfigRegistry;
 
 /// Shared, single-threaded handle to the hook registry. Same
 /// rationale as the other `Rc<RefCell<...>>` aliases.
@@ -670,6 +673,41 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
         Ok(crate::config_registry::ConfigValue::Int(v)) => u32::try_from(*v).unwrap_or(fallback),
         _ => fallback,
     }
+}
+
+/// Resolve a Boolean setting out of the shared `pmacs.config` registry.
+/// `fallback` covers a bare core whose runtime never defined the
+/// setting, matching [`config_u32`].
+#[must_use]
+pub fn config_bool(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: bool) -> bool {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return fallback;
+    };
+    config_bool_in(&registry, name, buffer_id, fallback)
+}
+
+/// [`config_bool`] over a registry handle a consumer already holds
+/// (the grid's `LspStyleView`, which renders without a `Lua` in reach).
+#[must_use]
+pub fn config_bool_in(
+    registry: &config::SharedConfigRegistry,
+    name: &str,
+    buffer_id: Option<BufferId>,
+    fallback: bool,
+) -> bool {
+    let borrowed = registry.borrow();
+    match borrowed.get(name, buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Bool(v)) => *v,
+        _ => fallback,
+    }
+}
+
+/// The registry's value epoch, for a cache keyed on "some setting may
+/// have changed"; zero when no registry is installed.
+#[must_use]
+pub fn config_value_epoch(lua: &Lua) -> u64 {
+    lua.app_data_ref::<config::SharedConfigRegistry>()
+        .map_or(0, |registry| registry.borrow().value_epoch())
 }
 
 /// Resolve `ui.line-wrap` for `buffer_id`.
@@ -2796,8 +2834,24 @@ pub fn install(
     let config_registry: config::SharedConfigRegistry =
         Rc::new(RefCell::new(crate::config_registry::ConfigRegistry::new()));
     lua.set_app_data(config_registry.clone());
+    let error_log: crate::lua::SharedErrorLog =
+        Rc::new(RefCell::new(crate::lua::ErrorLog::default()));
+    lua.set_app_data(error_log.clone());
 
     let pmacs = lua.create_table()?;
+    // E5.1: `pmacs.error(message [, label])` --- the one error channel,
+    // behind `crate::lua::report_error` like every Rust-side writer.
+    // The label defaults to the calling chunk's location, so a package's
+    // report says where it came from without the package saying so.
+    pmacs.set(
+        "error",
+        lua.create_function(|lua, (message, label): (String, Option<String>)| {
+            let label = label.unwrap_or_else(|| caller_source(lua, 2).render());
+            crate::lua::report_error(lua, &label, &message);
+            Ok(())
+        })?,
+    )?;
+    pmacs.set("error_log", install_error_log_module(lua, &error_log)?)?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
     pmacs.set("command", install_command_module(lua, commands)?)?;
     pmacs.set("keymap", install_keymap_module(lua, keymaps)?)?;
@@ -3856,40 +3910,10 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
         // primitive-side logging would miss the common unattended case
         // entirely. Hence a narrow surface reachable from the layer
         // that actually knows the outcome.
-        let reg = registry.clone();
         buffer.set(
             "_append_error_record",
             lua.create_function(move |lua, (label, message): (String, String)| {
-                let line = format!("[{label}] {message}\n");
-                let (id, edit) = {
-                    let mut r = reg.borrow_mut();
-                    let id = match r.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
-                        Some(id) => id,
-                        None => r.create(crate::lua::ERRORS_BUFFER_NAME),
-                    };
-                    let Ok(buf) = r.get_mut(id) else {
-                        return Ok(());
-                    };
-                    let pos = buf.len();
-                    let Ok(edit) = buf.apply_edit(EditOp::Insert {
-                        pos,
-                        bytes: line.as_bytes(),
-                    }) else {
-                        return Ok(());
-                    };
-                    (id, edit)
-                };
-                // Window TextViews are not attached views, so they miss
-                // `Buffer::apply_edit`'s broadcast; a window displaying
-                // `*errors*` would paint a stale line cache without
-                // this. The CRDT queue matters for the same reason it
-                // does on the host path: `*errors*` is upgraded at every
-                // replica attach.
-                if let Some(core) = lua.app_data_ref::<SharedCore>() {
-                    let mut core = core.borrow_mut();
-                    core.notify_buffer_edit(id, &edit);
-                    core.queue_daemon_origin_crdt_op(id, &edit);
-                }
+                crate::lua::report_error(lua, &label, &message);
                 Ok(())
             })?,
         )?;
@@ -6483,6 +6507,49 @@ fn install_help_module(
     Ok(help_t)
 }
 
+/// `pmacs.error_log`: the read side of the error channel. `unread()`
+/// is what the mode line's mark shows; `mark_read()` is what showing
+/// the `*errors*` buffer does; `list()` returns the records as tables
+/// with `label` and `message`, oldest first.
+fn install_error_log_module(lua: &Lua, log: &crate::lua::SharedErrorLog) -> mlua::Result<Table> {
+    let module = lua.create_table()?;
+    {
+        let log = log.clone();
+        module.set(
+            "unread",
+            lua.create_function(move |_, ()| Ok(log.borrow().unread()))?,
+        )?;
+    }
+    {
+        let log = log.clone();
+        module.set(
+            "mark_read",
+            lua.create_function(move |_, ()| {
+                log.borrow_mut().mark_read();
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let log = log.clone();
+        module.set(
+            "list",
+            lua.create_function(move |lua, ()| {
+                let log = log.borrow();
+                let out = lua.create_table_with_capacity(log.records().len(), 0)?;
+                for (i, record) in log.records().iter().enumerate() {
+                    let entry = lua.create_table_with_capacity(0, 2)?;
+                    entry.set("label", record.source.as_deref().unwrap_or("[chunk]"))?;
+                    entry.set("message", record.message.as_str())?;
+                    out.set(i + 1, entry)?;
+                }
+                Ok(out)
+            })?,
+        )?;
+    }
+    Ok(module)
+}
+
 fn install_hook_module(lua: &Lua, hooks: &SharedHookRegistry) -> mlua::Result<Table> {
     let hook = lua.create_table()?;
 
@@ -6528,13 +6595,28 @@ fn install_hook_module(lua: &Lua, hooks: &SharedHookRegistry) -> mlua::Result<Ta
         hook.set(
             "add",
             lua.create_function(
-                move |lua, (name, body): (String, Function)| -> mlua::Result<()> {
-                    hks.borrow_mut()
+                move |lua, (name, body): (String, Function)| -> mlua::Result<u64> {
+                    let token = hks
+                        .borrow_mut()
                         .add(&name, body, caller_source(lua, 2))
                         .map_err(mlua::Error::external)?;
-                    Ok(())
+                    Ok(token)
                 },
             )?,
+        )?;
+    }
+
+    {
+        // E5.2: `pmacs.hook.remove(token)` detaches what `add` attached.
+        // `true` if it was still attached, `false` if already gone; a
+        // stale token is not an error, so a package's teardown may run
+        // twice. A run in progress keeps its snapshot.
+        let hks = hooks.clone();
+        hook.set(
+            "remove",
+            lua.create_function(move |_, token: u64| -> mlua::Result<bool> {
+                Ok(hks.borrow_mut().remove(token))
+            })?,
         )?;
     }
 
@@ -6606,149 +6688,57 @@ fn run_hook_from_lua(
     }
 }
 
-/// Append a one-line entry to the `*errors*` buffer naming the hook
-/// and the failing callback's source. Mirrors the behaviour of
-/// [`crate::lua::LuaHost::eval`] for chunk-level errors --- failures
-/// in user-attached hooks should land in the same place as syntax
-/// errors in `init.lua`.
+/// Report a hook callback failure, naming the hook and the failing
+/// callback's source, through [`crate::lua::report_error`] --- the
+/// same writer [`crate::lua::LuaHost::eval`] uses for chunk-level
+/// errors, so a failure in a user-attached hook lands where a syntax
+/// error in `init.lua` does: `*errors*`, the log, the status line and
+/// the mode line's unread mark.
 fn log_hook_error(lua: &Lua, hook_name: &str, err: &crate::hook::HookCallbackError) {
-    let line = format!(
-        "[hook:{hook_name}] callback at {} raised: {}\n",
-        err.source.render(),
-        err.error
+    crate::lua::report_error(
+        lua,
+        &format!("hook:{hook_name}"),
+        &format!("callback at {} raised: {}", err.source.render(), err.error),
     );
-    let result = {
-        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
-            return;
-        };
-        let mut reg = app.borrow_mut();
-        let id = match reg.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
-            Some(id) => id,
-            None => reg.create(crate::lua::ERRORS_BUFFER_NAME),
-        };
-        let Ok(buf) = reg.get_mut(id) else {
-            return;
-        };
-        let pos = buf.len();
-        let edit = buf
-            .apply_edit(EditOp::Insert {
-                pos,
-                bytes: line.as_bytes(),
-            })
-            .ok();
-        edit.map(|e| (id, e))
-    };
-    // Notify any window viewing *errors* — same staleness fix as
-    // `LuaHost::append_to_errors_buffer`.
-    if let Some((id, edit)) = result {
-        notify_buffer_edit_to_windows(lua, id, &edit);
-    }
 }
-/// Append a first-in-run statusline provider failure to `*errors*`.
+/// Report a first-in-run statusline provider failure.
 ///
 /// The latch decision lives in [`crate::statusline::StatuslineRegistry`];
-/// this function owns only the repository-standard durable sink and window
-/// invalidation.
+/// this function owns only the message and hands it to the one writer.
 pub(crate) fn log_statusline_provider_error(lua: &Lua, failure: &StatuslineProviderFailure) {
     let message = crate::statusline::sanitize_provider_error_text(&failure.message);
-    let line = format!(
-        "[statusline:{}] provider registered at {} failed for {:?}/{:?}/{:?}/active={}: {}\n",
-        failure.provider_name,
-        failure.source.render(),
-        failure.context.frontend_id,
-        failure.context.window_id,
-        failure.context.buffer_id,
-        failure.context.active,
-        message,
+    crate::lua::report_error(
+        lua,
+        &format!("statusline:{}", failure.provider_name),
+        &format!(
+            "provider registered at {} failed for {:?}/{:?}/{:?}/active={}: {}",
+            failure.source.render(),
+            failure.context.frontend_id,
+            failure.context.window_id,
+            failure.context.buffer_id,
+            failure.context.active,
+            message,
+        ),
     );
-    let result = {
-        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
-            return;
-        };
-        let mut registry = app.borrow_mut();
-        let id = match registry.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
-            Some(id) => id,
-            None => registry.create(crate::lua::ERRORS_BUFFER_NAME),
-        };
-        let Ok(buffer) = registry.get_mut(id) else {
-            return;
-        };
-        let position = buffer.len();
-        let edit = buffer
-            .apply_edit(EditOp::Insert {
-                pos: position,
-                bytes: line.as_bytes(),
-            })
-            .ok();
-        edit.map(|edit| (id, edit))
-    };
-    if let Some((id, edit)) = result {
-        notify_buffer_edit_to_windows(lua, id, &edit);
-    }
 }
 
-/// T M7.8: append a `[package <name>]` entry to `*errors*`.
-///
-/// Mirrors `log_hook_error`'s implementation. Used by
+/// T M7.8: report a `[package <name>]` load failure. Used by
 /// `pmacs.packages.load` so a single failing package's error lands in
 /// the canonical sink without abandoning the rest of the load list.
 fn log_package_load_error(lua: &Lua, package: &str, err: &mlua::Error) {
-    let line = format!("[package {package}] load failed: {err}\n");
-    let result = {
-        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
-            return;
-        };
-        let mut reg = app.borrow_mut();
-        let id = match reg.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
-            Some(id) => id,
-            None => reg.create(crate::lua::ERRORS_BUFFER_NAME),
-        };
-        let Ok(buf) = reg.get_mut(id) else {
-            return;
-        };
-        let pos = buf.len();
-        let edit = buf
-            .apply_edit(EditOp::Insert {
-                pos,
-                bytes: line.as_bytes(),
-            })
-            .ok();
-        edit.map(|e| (id, e))
-    };
-    if let Some((id, edit)) = result {
-        notify_buffer_edit_to_windows(lua, id, &edit);
-    }
+    crate::lua::report_error(
+        lua,
+        &format!("package {package}"),
+        &format!("load failed: {err}"),
+    );
 }
 
 fn log_buffer_removed_error(lua: &Lua, source: &SourceLocation, err: &mlua::Error) {
-    let line = format!(
-        "[buffer.on_removed] callback at {} raised: {err}\n",
-        source.render()
+    crate::lua::report_error(
+        lua,
+        "buffer.on_removed",
+        &format!("callback at {} raised: {err}", source.render()),
     );
-    let result = {
-        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
-            return;
-        };
-        let mut reg = app.borrow_mut();
-        let id = match reg.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
-            Some(id) => id,
-            None => reg.create(crate::lua::ERRORS_BUFFER_NAME),
-        };
-        let Ok(buf) = reg.get_mut(id) else {
-            return;
-        };
-        let pos = buf.len();
-        let edit = buf
-            .apply_edit(EditOp::Insert {
-                pos,
-                bytes: line.as_bytes(),
-            })
-            .ok();
-        edit.map(|e| (id, e))
-    };
-    if let Some((id, edit)) = result {
-        notify_buffer_edit_to_windows(lua, id, &edit);
-    }
 }
 
 #[allow(
@@ -11221,7 +11211,10 @@ pub fn install_lsp(
                         id.0
                     )));
                 }
-                let overlay = crate::highlight::LspStyleView::new(m.clone(), theme);
+                let config = lua
+                    .app_data_ref::<config::SharedConfigRegistry>()
+                    .map(|registry| registry.clone());
+                let overlay = crate::highlight::LspStyleView::new(m.clone(), theme, config);
                 win.push_overlay(Box::new(overlay));
                 Ok(true)
             })?,
@@ -14754,7 +14747,10 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
                 }));
             }
         };
-        if !matches!(key.as_str(), "name" | "description" | "fn" | "predicate") {
+        // D19 / E5.7: `predicate` is not a key. It was parsed, shown by
+        // `describe.command` and never evaluated; a definition passing
+        // it is refused by name here like any other unknown field.
+        if !matches!(key.as_str(), "name" | "description" | "fn") {
             return Err(mlua::Error::external(CommandError::UnknownField {
                 field: key,
             }));
@@ -14771,8 +14767,6 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
     let body: Function = spec
         .get("fn")
         .map_err(|_| mlua::Error::external(CommandError::MissingFn { name: name.clone() }))?;
-    let predicate: Option<Function> = spec.get("predicate")?;
-
     let description = description
         .filter(|d| !d.trim().is_empty())
         .ok_or_else(|| {
@@ -14784,7 +14778,6 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
         description,
         source: caller_source(lua, 2),
         body,
-        predicate,
     })
 }
 
@@ -16569,26 +16562,34 @@ mod tests {
         assert!(matches!(v, Value::Nil), "expected nil, got {v:?}");
     }
 
+    /// D19 / E5.7: a definition passing `predicate` is refused by name,
+    /// and nothing is registered. Before this phase the field was
+    /// preserved and this test asserted it was callable.
     #[test]
-    fn predicate_is_preserved_and_callable() {
+    fn predicate_is_refused_by_name() {
         let (lua, _reg, cmds, _kms, _hks) = fresh();
-        lua.load(
-            r#"
-            pmacs.command.define {
-                name = "with.pred",
-                description = "Has a predicate.",
-                fn = function() return 7 end,
-                predicate = function() return true end,
-            }
-            "#,
-        )
-        .exec()
-        .unwrap();
-        let r = cmds.borrow();
-        let cmd = r.get("with.pred").expect("registered");
-        let pred = cmd.predicate.as_ref().expect("predicate present");
-        let ok: bool = pred.call::<bool>(()).unwrap();
-        assert!(ok);
+        let err = lua
+            .load(
+                r#"
+                pmacs.command.define {
+                    name = "with.pred",
+                    description = "Has a predicate.",
+                    fn = function() return 7 end,
+                    predicate = function() return true end,
+                }
+                "#,
+            )
+            .exec()
+            .expect_err("a predicate is an unknown field");
+        let text = err.to_string();
+        assert!(
+            text.contains("unknown field `predicate`"),
+            "refused by name: {text}"
+        );
+        assert!(
+            cmds.borrow().get("with.pred").is_none(),
+            "nothing registered"
+        );
     }
 
     #[test]

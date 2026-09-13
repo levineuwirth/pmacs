@@ -24,7 +24,10 @@ Always true:
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before
   any branch operation, never delete untracked files you did not
-  create, never `git stash`.
+  create, never `git stash`, and never `git checkout <file>` or
+  `git restore <file>` on a path with uncommitted edits (E5 discarded
+  two files' uncommitted work that way while restoring a bitten file;
+  copy the file out first, or commit).
 - The harness is `scripts/gate`, run from the repository root. It owns
   the build directory, the ambient roots and `TMPDIR`; do not retype its
   stages. Green means every stage's log ends in a zero-failure result

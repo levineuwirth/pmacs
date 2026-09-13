@@ -73,10 +73,6 @@ pub fn render_command(
     let _ = writeln!(text, "{}", cmd.description);
     let _ = writeln!(text);
     write_command_bindings(registry, &mut text, &cmd.name, keymaps);
-    if cmd.predicate.is_some() {
-        let _ = writeln!(text);
-        let _ = writeln!(text, "Predicate: yes (this command can refuse to run).");
-    }
     let _ = writeln!(text);
     let _ = writeln!(text, "See also: [keymap: list].");
     Some(replace_help_buffer(registry, &text))
@@ -553,7 +549,6 @@ mod tests {
                 line: 1,
             },
             body: lua.create_function(|_, ()| Ok(())).unwrap(),
-            predicate: None,
         }
     }
 

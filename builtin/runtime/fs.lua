@@ -354,10 +354,8 @@ function fs.watch(path, callback, opts)
           path = path,
           recursive = recursive,
         })
-        if not ok and pmacs.error then
+        if not ok then
           pmacs.error("pmacs.fs.watch callback failed: " .. tostring(err))
-        elseif not ok then
-          error(err)
         end
       end
     end

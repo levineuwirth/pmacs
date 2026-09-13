@@ -469,29 +469,40 @@ fn d8b_preservation_list_buffers_and_workers_are_untouched() {
     }
 }
 
-/// **P (acceptance 9)** — no command's predicate is evaluated.
-///
-/// Driven through the real palette, not `invoke_interactive` directly:
-/// otherwise it would pass even if M-x itself grew predicate filtering.
-/// A stage that starts evaluating predicates must change this pin
-/// knowingly.
+/// **P (acceptance 9), rewritten as a refusal (D19, E5.7)** — there is
+/// no command predicate. The pin used to assert that a raising
+/// predicate never blocked a command, because the field was stored
+/// and never evaluated; now a definition that passes one is refused
+/// by name at `define`, like any unknown field, and registers nothing,
+/// so no stage can start evaluating a predicate without first adding
+/// the field back knowingly.
 #[test]
-fn d9_preservation_a_raising_predicate_does_not_block_a_command() {
-    let mut s = editor();
-    exec(
-        &s,
-        "_ran = false
-         pmacs.command.define {
-           name = 'test.predicate-probe',
-           description = 'probe whose predicate raises',
-           predicate = function() error('predicate evaluated') end,
-           fn = function() _ran = true end,
-         }",
-    );
-    run_from_palette(&mut s, "test.predicate-probe", None);
+fn d9_a_definition_passing_a_predicate_is_refused_by_name() {
+    let s = editor();
+    let err = s
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.command.define {
+               name = 'test.predicate-probe',
+               description = 'probe that passes a predicate',
+               predicate = function() error('predicate evaluated') end,
+               fn = function() end,
+             }",
+        )
+        .exec()
+        .expect_err("a predicate is an unknown field");
+    let text = err.to_string();
     assert!(
-        eval::<bool>(&s, "return _ran"),
-        "the command must run: predicates are stored and exposed but \
-         never evaluated (framing §2.4)"
+        text.contains("unknown field `predicate`"),
+        "refused by name, not silently dropped: {text}"
+    );
+    let names: Vec<String> = eval(
+        &s,
+        "local out = {} for _, c in ipairs(pmacs.command.list()) do out[#out + 1] = c.name end return out",
+    );
+    assert!(
+        !names.iter().any(|n| n == "test.predicate-probe"),
+        "nothing was registered"
     );
 }

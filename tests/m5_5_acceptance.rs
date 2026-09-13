@@ -2332,10 +2332,20 @@ fn m10_10_f14_production_path_keystroke_flows_to_broadcast() {
 fn m10_10_non_replica_frontend_does_not_receive_cursor_byte() {
     let daemon = TestDaemon::spawn();
     let mut stream = daemon.connect();
+    // The handshake's `Hello` is read under `ready::DEADLINE`, not
+    // 500 ms: a live daemon accepts a fresh connection on its accept
+    // loop's next poll (`ACCEPT_POLL_INTERVAL`, 50 ms, production and
+    // persisting), and on a loaded macOS runner that quantum lands
+    // past a sub-second read timeout (the `read Hello` family; this
+    // row is its `m10_10` selector). The negative drain below keeps
+    // its 500 ms, which is the silence that ends it.
+    stream
+        .set_read_timeout(Some(common::ready::DEADLINE))
+        .unwrap();
+    let _hello = do_handshake(&mut stream);
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
-    let _hello = do_handshake(&mut stream);
 
     // Read a handful of incoming frames; assert none is CursorByte.
     // 16 frames is enough to cover at least a couple of per-tick

@@ -137,13 +137,8 @@ fn sync_parse_now_resolves_alias() {
 #[test]
 fn injection_cap_surfaced_once_and_rearms_via_lua() {
     let mut state = EditorState::new_with_roots(&crate::iso::roots());
-    // Capture pmacs.error messages into a Lua global.
-    state
-        .lua_host
-        .lua()
-        .load("_CAP = {}\npmacs.error = function(msg) _CAP[#_CAP + 1] = tostring(msg) end")
-        .exec()
-        .expect("install error capture");
+    // E5.1: `pmacs.error` is the real channel; the cap's reports are
+    // counted in `*errors*` rather than in a stub.
 
     let capping: String = "```rust\nx\n```\n\n".repeat(4096 + 8);
     let buf_id = state
@@ -167,7 +162,11 @@ fn injection_cap_surfaced_once_and_rearms_via_lua() {
             .expect("dispatch");
     };
     let cap_count = |state: &EditorState| -> usize {
-        state.lua_host.lua().load("return #_CAP").eval().unwrap()
+        state
+            .lua_host
+            .errors_buffer_text()
+            .matches("injection layer cap")
+            .count()
     };
     let current =
         |state: &EditorState| state.syntax_registry.view(buf_id).and_then(|h| h.current());
@@ -187,10 +186,10 @@ fn injection_cap_surfaced_once_and_rearms_via_lua() {
     dispatch(&state);
     pump_async(&mut state, |s| current(s).is_some());
     assert_eq!(cap_count(&state), 1, "cap surfaced once on first settle");
-    let msg: String = state.lua_host.lua().load("return _CAP[1]").eval().unwrap();
+    let msg = state.lua_host.errors_buffer_text();
     assert!(
-        msg.contains("injection layer cap"),
-        "message names the cap: {msg}"
+        msg.contains("some embedded regions are unhighlighted"),
+        "message names the consequence: {msg}"
     );
 
     // 2) Re-dispatch with no change → suppressed (still once).

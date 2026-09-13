@@ -827,16 +827,25 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
 
         // Spawner: defer binding by 100ms in a worker thread, then
-        // hold the listener long enough for `ensure_running` to see
-        // it. The spawner returns Ok as soon as the worker is
-        // launched; the polling in `ensure_running` does the rest.
+        // hold the listener until the caller has returned. The spawner
+        // returns Ok as soon as the worker is launched; the polling in
+        // `ensure_running` does the rest.
+        //
+        // The hold is a signal, not a sleep (E5.0, issue #264): a fixed
+        // 500 ms hold made the real window [100, 600) ms after the spawn
+        // while the caller polled under a 2 s deadline, so under sweep
+        // load the poll could land after the listener was gone and the
+        // 2 s could only ever report the wrong bound.
+        let (released_tx, released_rx) = std::sync::mpsc::channel::<()>();
         let spawner = move |path: &Path| -> Result<(), BridgeError> {
             let path = path.to_path_buf();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(100));
                 let listener = UnixListener::bind(&path).unwrap();
-                // Hold the listener until the test should be done.
-                thread::sleep(Duration::from_millis(500));
+                // Hold the listener until the test releases it (or a
+                // generous ceiling, so a panicking caller cannot leak
+                // the thread).
+                let _ = released_rx.recv_timeout(Duration::from_secs(30));
                 drop(listener);
             });
             Ok(())
@@ -845,6 +854,7 @@ mod tests {
         let start = Instant::now();
         let result = ensure_daemon_running_with(&socket_path, Duration::from_secs(2), spawner);
         let elapsed = start.elapsed();
+        let _ = released_tx.send(());
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(

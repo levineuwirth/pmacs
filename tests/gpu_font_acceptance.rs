@@ -230,10 +230,20 @@ fn v16_peer_never_receives_font_facts_and_v17_does() {
     /// deadline.
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
+        // The `Hello` is read under `ready::DEADLINE`, not 250 ms: a live
+        // daemon accepts a fresh connection on its accept loop's next
+        // poll (`ACCEPT_POLL_INTERVAL`, 50 ms, production and
+        // persisting), and on a loaded macOS runner that quantum lands
+        // past a sub-second read timeout (the `read Hello` family; this
+        // row is its `v16_peer` selector). The classification reads
+        // below keep their 250 ms, which is the window they poll on.
+        stream
+            .set_read_timeout(Some(common::ready::DEADLINE))
+            .unwrap();
+        let hello: Hello = read_message(&mut stream).expect("read Hello");
         stream
             .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap();
-        let hello: Hello = read_message(&mut stream).expect("read Hello");
         let fid = hello.assigned_frontend_id;
         write_message(
             &mut stream,

@@ -2407,7 +2407,12 @@ fn acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel() {
         "the panel opt-in selects the panel"
     );
     assert_eq!(
-        wait_for_file(&ready_path, Duration::from_secs(5)),
+        // `ready::DEADLINE` and not 5 s (E5.0, issue #259): the file is
+        // written by a `python3` child after its interpreter start,
+        // which on the hosted macOS runners took 1.4--4.2 s in four green
+        // samples and just over 5 s in seven reds. A deadline asserts
+        // that it eventually arrives; nothing here measures its speed.
+        wait_for_file(&ready_path, ready::DEADLINE),
         b"1",
         "the child in the PANEL reached raw mode"
     );
@@ -2424,7 +2429,7 @@ fn acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel() {
         s.dispatch_key(FrontendId::LOCAL, ev);
     }
     assert_eq!(
-        wait_for_file(&input_path, Duration::from_secs(5)),
+        wait_for_file(&input_path, ready::DEADLINE),
         b"\x1bv\x03\x1bw",
         "child input routing through a SIDE window is byte-identical"
     );

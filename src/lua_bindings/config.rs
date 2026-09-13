@@ -112,8 +112,7 @@ use std::rc::Rc;
 use mlua::{Function, Lua, Table, UserData, UserDataMethods, Value};
 use thiserror::Error;
 
-use super::{BufferIdLua, InitCompleteFlag, SharedRegistry, caller_source, require_string_key};
-use crate::buffer::EditOp;
+use super::{BufferIdLua, InitCompleteFlag, caller_source, require_string_key};
 use crate::command::SourceLocation;
 use crate::config_registry::{
     ConfigChange, ConfigError, ConfigKind, ConfigMutability, ConfigRegistry, ConfigValue,
@@ -494,39 +493,16 @@ fn dispatch_config_listeners(
     Ok(())
 }
 
-/// Append a one-line entry to the `*errors*` buffer naming the
-/// listener's source. Mirrors `log_hook_error` / `log_buffer_removed_error`
-/// in `mod.rs`; a no-op (rather than a panic) if the buffer registry
-/// app data isn't installed, matching those precedents.
+/// Report a raising `on_change` listener, naming its source, through
+/// `crate::lua::report_error` --- the one writer, so the failure lands
+/// in `*errors*`, the log, the status line and the mode line's unread
+/// mark like every other reporter's.
 fn log_config_listener_error(lua: &Lua, source: &SourceLocation, err: &mlua::Error) {
-    let line = format!(
-        "[config] on_change listener at {} raised: {err}\n",
-        source.render()
+    crate::lua::report_error(
+        lua,
+        "config",
+        &format!("on_change listener at {} raised: {err}", source.render()),
     );
-    let result = {
-        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
-            return;
-        };
-        let mut reg = app.borrow_mut();
-        let id = match reg.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
-            Some(id) => id,
-            None => reg.create(crate::lua::ERRORS_BUFFER_NAME),
-        };
-        let Ok(buf) = reg.get_mut(id) else {
-            return;
-        };
-        let pos = buf.len();
-        let edit = buf
-            .apply_edit(EditOp::Insert {
-                pos,
-                bytes: line.as_bytes(),
-            })
-            .ok();
-        edit.map(|e| (id, e))
-    };
-    if let Some((id, edit)) = result {
-        super::notify_buffer_edit_to_windows(lua, id, &edit);
-    }
 }
 
 /// If the init phase has completed and the registry isn't frozen yet,

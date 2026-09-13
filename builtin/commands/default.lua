@@ -491,213 +491,139 @@ cmd { name = "editor.previous-buffer",
 
 -- Buffer list (Emacs Buffer-menu-mode-style) ---------------------------------
 --
--- `editor.list-buffers` renders one line per registered buffer into a
--- regular buffer named `*buffer-list*`, then switches the active
--- window to it. Inside that buffer a small per-buffer keymap turns the
--- listing into a navigable mode:
+-- `editor.list-buffers` opens `*buffer-list*` as a listview panel
+-- (E5.5): one row per registered buffer, RET/SPC visits, n/p move, g
+-- refreshes, q returns to the buffer that was active when the list
+-- opened --- all of that is the primitive's own key surface. The marks
+-- ride the `keys` extension:
 --
---   RET / SPC : visit the buffer on the current line.
---   n / down  : next line.   p / up : previous line.
---   d         : mark current line for deletion (renders a `D` in col 0).
---   u         : unmark.
---   x         : kill every marked buffer, then refresh.
---   k         : kill the buffer on the current line immediately.
---   q         : return to the buffer that was active when the list opened.
---   g         : refresh the listing.
+--   d : mark the row's buffer for deletion (renders a `D` in column 0).
+--   u : unmark.
+--   x : kill every marked buffer, then refresh.
+--   k : kill the row's buffer immediately, then refresh.
 --
+-- The buffer is a generated buffer and not writable: the rope is
+-- locked between renders, so a stray keystroke cannot edit the listing
+-- (before E5.5 it was a plain buffer rendered by delete-all + insert).
 -- Marks live in a Lua-side set keyed by `tostring(BufferIdLua)`; the
--- `D` is part of the rendering, so any toggle re-renders the buffer.
--- Killing routes through `pmacs.buffer.kill`, which redirects any
--- window showing the doomed buffer to `*scratch*` first so windows
--- never end up pointing at a missing id.
+-- `D` is part of the rendering, so a toggle re-renders through the
+-- primitive's refresh. Killing routes through `pmacs.buffer.kill`,
+-- which redirects any window showing the doomed buffer first.
 
 local LIST_NAME = "*buffer-list*"
-local LIST_HEADER = "  Buffer                          Size"
+local LIST_HEADER = "  Buffer                          Size   RET visit  d/u mark  x kill marked  k kill  g refresh  q quit"
 
-local list_state = {
-  buffer_id = nil,        -- the *buffer-list* BufferIdLua, once created
-  prev_buffer_id = nil,   -- buffer to return to on `q`
-  marks = {},             -- { [tostring(id)] = BufferIdLua } -- mark-for-kill set
-  line_to_buffer = {},    -- 1-based: data line N -> BufferIdLua
-  bound = false,          -- buffer-local bindings installed?
-}
+local list_marks = {} -- { [tostring(id)] = BufferIdLua }
 
-local function find_list_buffer()
-  for _, id in ipairs(pmacs.buffer.list()) do
-    if pmacs.describe.buffer(id).name == LIST_NAME then
-      return id
-    end
-  end
-  return nil
-end
-
-local function render_list(buf)
-  list_state.line_to_buffer = {}
-  local lines = { LIST_HEADER }
+local function buffer_list_rows()
+  -- Drop marks whose buffer is gone, then render.
+  local live = {}
+  local rows = {}
   for _, id in ipairs(pmacs.buffer.list()) do
     local d = pmacs.describe.buffer(id)
     if d ~= nil then
-      local marked = list_state.marks[tostring(id)] ~= nil
-      local mark = marked and "D" or " "
-      local modified = d.modified and "*" or " "
-      table.insert(lines, string.format("%s%s %-30s %d bytes",
-        mark, modified, d.name, d.length))
-      list_state.line_to_buffer[#lines - 1] = id
+      local key = tostring(id)
+      local marked = list_marks[key] ~= nil
+      if marked then live[key] = id end
+      rows[#rows + 1] = {
+        text = string.format("%s%s %-30s %d bytes",
+          marked and "D" or " ", d.modified and "*" or " ", d.name, d.length),
+        item = id,
+      }
     end
   end
-  local body = table.concat(lines, "\n")
-  local len = buf:len()
-  if len > 0 then buf:delete(0, len) end
-  if #body > 0 then buf:insert(0, body) end
+  list_marks = live
+  return rows
 end
 
-local function bind_local_keymap(buf)
-  local function bind(seq, command)
-    pmacs.keymap.bind { scope = "buffer", buffer = buf, sequence = seq, command = command }
-  end
-  bind("RET",     "editor.buffer-list-visit")
-  bind("SPC",     "editor.buffer-list-visit")
-  bind("n",       "cursor.down")
-  bind("<down>",  "cursor.down")
-  bind("p",       "cursor.up")
-  bind("<up>",    "cursor.up")
-  bind("d",       "editor.buffer-list-mark-delete")
-  bind("u",       "editor.buffer-list-unmark")
-  bind("x",       "editor.buffer-list-execute")
-  bind("k",       "editor.buffer-list-kill-now")
-  bind("q",       "editor.buffer-list-quit")
-  bind("g",       "editor.buffer-list-refresh")
+-- The panel's own buffer, if the listing is open (by ownership, never
+-- by name: listview disambiguates a collision to `<2>`).
+local function list_buffer()
+  local buf = pmacs.window.buffer()
+  if buf and pmacs.listview.current_panel_name() == LIST_NAME then return buf end
+  return nil
 end
 
-local function ensure_list_buffer()
-  local existing = find_list_buffer()
-  if existing then
-    list_state.buffer_id = existing
-    return existing, false
-  end
-  local buf = pmacs.buffer.create(LIST_NAME)
-  list_state.buffer_id = buf
-  return buf, true
-end
-
-local function current_buffer_at_cursor()
-  local line = pmacs.editor.cursor_line()
-  if line < 1 then return nil end
-  return list_state.line_to_buffer[line]
-end
-
-local function refresh()
-  if list_state.buffer_id == nil then return end
-  -- Drop any marks whose target buffer no longer exists.
-  local pruned = {}
-  for _, id in ipairs(pmacs.buffer.list()) do
-    local key = tostring(id)
-    if list_state.marks[key] then
-      pruned[key] = id
-    end
-  end
-  list_state.marks = pruned
-  -- Wholesale-rewriting the buffer leaves the cursor at a stale byte
-  -- offset (the engine adjusts text-view caches on edit but doesn't
-  -- touch window.cursor). Save the line, rewrite, then re-seat the
-  -- cursor on the same line (clamped to the new data extent).
-  local saved_line = pmacs.editor.cursor_line()
-  render_list(list_state.buffer_id)
-  pmacs.window.switch_buffer(list_state.buffer_id)
-  local data_count = #list_state.line_to_buffer
-  local target = math.min(saved_line, data_count)
-  if target < 1 and data_count >= 1 then target = 1 end
-  for _ = 1, target do pmacs.editor.move_down() end
+local function refresh_list()
+  pmacs.command.invoke("listview.refresh")
 end
 
 cmd { name = "editor.list-buffers",
       description = "Show the buffer list with buffer-menu-mode-style bindings.",
       fn = function()
-        local active = pmacs.window.buffer()
-        local buf, fresh = ensure_list_buffer()
-        -- Don't overwrite prev_buffer_id when re-entering from inside
-        -- *buffer-list* itself; preserve the original return target.
-        if tostring(active) ~= tostring(buf) then
-          list_state.prev_buffer_id = active
-        end
-        render_list(buf)
-        if fresh or not list_state.bound then
-          bind_local_keymap(buf)
-          list_state.bound = true
-        end
-        pmacs.window.switch_buffer(buf)
-        -- Land on the first data line, not the header.
-        if #list_state.line_to_buffer >= 1 then
-          pmacs.editor.move_down()
-        end
+        pmacs.listview.open {
+          name = LIST_NAME,
+          header = LIST_HEADER,
+          rows = buffer_list_rows(),
+          on_visit = function(id) pmacs.window.switch_buffer(id) end,
+          on_refresh = buffer_list_rows,
+          keys = {
+            d = "editor.buffer-list-mark-delete",
+            u = "editor.buffer-list-unmark",
+            x = "editor.buffer-list-execute",
+            k = "editor.buffer-list-kill-now",
+          },
+          -- In place, as the classic buffer menu is: the listing takes
+          -- the active window and `q` gives it back.
+          display = "current",
+        }
       end }
 
-cmd { name = "editor.buffer-list-visit",
-      description = "Switch to the buffer named on the current *buffer-list* line.",
-      fn = function()
-        local target = current_buffer_at_cursor()
-        if target == nil then
-          pmacs.editor.set_status("not on a buffer line")
-          return
-        end
-        pmacs.window.switch_buffer(target)
-      end }
+local function current_row_buffer()
+  local id = pmacs.listview.current_item()
+  if id == nil then
+    pmacs.editor.set_status("not on a buffer line")
+  end
+  return id
+end
 
 cmd { name = "editor.buffer-list-mark-delete",
       description = "Mark the buffer on the current line for deletion (column 0 = `D`).",
       fn = function()
-        local target = current_buffer_at_cursor()
-        if target == nil then
-          pmacs.editor.set_status("not on a buffer line")
-          return
-        end
-        list_state.marks[tostring(target)] = target
-        refresh()
+        local target = current_row_buffer()
+        if target == nil then return end
+        list_marks[tostring(target)] = target
+        refresh_list()
         pmacs.editor.move_down()
       end }
 
 cmd { name = "editor.buffer-list-unmark",
       description = "Clear the deletion mark on the current line.",
       fn = function()
-        local target = current_buffer_at_cursor()
-        if target == nil then
-          pmacs.editor.set_status("not on a buffer line")
-          return
-        end
-        list_state.marks[tostring(target)] = nil
-        refresh()
+        local target = current_row_buffer()
+        if target == nil then return end
+        list_marks[tostring(target)] = nil
+        refresh_list()
         pmacs.editor.move_down()
       end }
 
 cmd { name = "editor.buffer-list-execute",
       description = "Kill every buffer marked with `D`, then refresh the listing.",
       fn = function()
-        if list_state.buffer_id == nil then return end
+        local own = list_buffer()
         local doomed = {}
-        for _, id in pairs(list_state.marks) do
-          if tostring(id) ~= tostring(list_state.buffer_id) then
+        for _, id in pairs(list_marks) do
+          if not (own and tostring(id) == tostring(own)) then
             table.insert(doomed, id)
           end
         end
-        list_state.marks = {}
+        list_marks = {}
         local killed = 0
         for _, id in ipairs(doomed) do
           local ok = pcall(pmacs.buffer.kill, id)
           if ok then killed = killed + 1 end
         end
-        refresh()
+        refresh_list()
         pmacs.editor.set_status(string.format("killed %d buffer(s)", killed))
       end }
 
 cmd { name = "editor.buffer-list-kill-now",
       description = "Kill the buffer on the current line immediately, then refresh.",
       fn = function()
-        local target = current_buffer_at_cursor()
-        if target == nil then
-          pmacs.editor.set_status("not on a buffer line")
-          return
-        end
-        if tostring(target) == tostring(list_state.buffer_id) then
+        local target = current_row_buffer()
+        if target == nil then return end
+        local own = list_buffer()
+        if own and tostring(target) == tostring(own) then
           pmacs.editor.set_status("can't kill *buffer-list* from inside itself")
           return
         end
@@ -706,37 +632,9 @@ cmd { name = "editor.buffer-list-kill-now",
           pmacs.editor.set_status("kill failed: " .. tostring(err))
           return
         end
-        list_state.marks[tostring(target)] = nil
-        refresh()
+        list_marks[tostring(target)] = nil
+        refresh_list()
       end }
-
-cmd { name = "editor.buffer-list-quit",
-      description = "Switch the active window back to the buffer that was active when the list opened.",
-      fn = function()
-        local prev = list_state.prev_buffer_id
-        if prev == nil then return end
-        -- The previous buffer may have been killed in the meantime;
-        -- fall back to *scratch* (creating it on demand) so the user
-        -- still gets a valid buffer in the window.
-        local exists = false
-        for _, id in ipairs(pmacs.buffer.list()) do
-          if tostring(id) == tostring(prev) then exists = true; break end
-        end
-        if not exists then
-          local scratch
-          for _, id in ipairs(pmacs.buffer.list()) do
-            if pmacs.describe.buffer(id).name == "*scratch*" then
-              scratch = id; break
-            end
-          end
-          prev = scratch or pmacs.buffer.create("*scratch*")
-        end
-        pmacs.window.switch_buffer(prev)
-      end }
-
-cmd { name = "editor.buffer-list-refresh",
-      description = "Re-render the *buffer-list* listing to reflect the current registry.",
-      fn = function() refresh() end }
 
 cmd { name = "editor.switch-buffer",
       description = "Switch the active window to a buffer chosen via M-x-style prompt.",

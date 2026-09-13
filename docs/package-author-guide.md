@@ -463,6 +463,43 @@ returns whether it removed a live provider. Registering in package
 top-level code without the matching `on_unload` cleanup leaks the old
 provider across `reload(name)`.
 
+### Hooks: `add` returns a token, `remove` takes it back
+
+`pmacs.hook.add(name, fn)` returns an opaque token, and
+`pmacs.hook.remove(token)` detaches exactly that callback, returning
+`true` if it was still attached and `false` if it had already gone (a
+stale token is not an error). A package that attaches to a hook at
+top level needs the matching `on_unload`, or `reload(name)` runs the
+old callback and the new one side by side:
+
+```lua
+local after_save = pmacs.hook.add("buffer.after-save", function()
+  -- ...
+end)
+
+pmacs.packages.on_unload(function()
+  pmacs.hook.remove(after_save) -- idempotent; false if already gone
+end)
+```
+
+`remove` reaches only what `add` attached: hooks are defined once
+(`pmacs.hook.define`) and never undefined, and a callback removed while
+its hook is running finishes that run, because `run` snapshots the
+callback list before calling anything.
+
+### `pmacs.error(message [, label])` — the error channel
+
+Report a failure your package caught but could not handle:
+`pmacs.error(message)` appends `[<your chunk>:<line>] message` to the
+`*errors*` buffer, shows the message on the status line until the
+buffer is shown, and counts it in the mode line's `!N` mark. Pass a
+label (`pmacs.error(msg, "mypkg")`) to replace the chunk location.
+`pmacs.editor.set_status` alone is erased by the next status message;
+the channel keeps the trace. `pmacs.error_log.list()` returns the
+records (`label`, `message`) oldest first, `pmacs.error_log.unread()`
+the count the mode line shows, and `pmacs.error_log.mark_read()`
+clears it.
+
 ### `pmacs.fs.*` — worker-dispatched filesystem primitives
 
 The four async fs operations packages need without reaching for

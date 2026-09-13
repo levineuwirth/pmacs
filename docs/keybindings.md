@@ -242,20 +242,22 @@ today:
 command-surface decision the Stage 1 framing did not make, so the entry
 point is `M-x git.status`.
 
-`*buffer-list*` (`editor.list-buffers`, `C-x C-b`) uses its own
-keymap, layered on the same idiom, in `builtin/commands/default.lua`:
+`*buffer-list*` (`editor.list-buffers`, `C-x C-b`) is a listview
+panel opened in place (`builtin/commands/default.lua`): the primitive's
+own keys carry the navigation and the marks ride its `keys` extension.
+The listing is a generated buffer and not writable.
 
 | Key | Command |
 |---|---|
-| `RET` / `SPC` | `editor.buffer-list-visit` |
+| `RET` / `SPC` | `listview.visit` — switch to the row's buffer |
 | `n` / `<down>` | `cursor.down` |
 | `p` / `<up>` | `cursor.up` |
 | `d` | `editor.buffer-list-mark-delete` |
 | `u` | `editor.buffer-list-unmark` |
 | `x` | `editor.buffer-list-execute` — kill every marked buffer |
 | `k` | `editor.buffer-list-kill-now` |
-| `g` | `editor.buffer-list-refresh` |
-| `q` | `editor.buffer-list-quit` |
+| `g` | `listview.refresh` |
+| `q` | `listview.quit` — back to the buffer that was active |
 
 One-off buffer-local bindings, each scoped to a single generated
 buffer:

@@ -450,6 +450,18 @@ end
 -- attach; the kill path clears the entry below if/when it lands.
 local highlighted_buffers = {}
 
+-- E5.6 (D20): one styling policy for both frontends. On, LSP semantic
+-- tokens merge over tree-sitter captures on the grid and on the wire
+-- alike; off, both are grammar-only. Read on every paint and every
+-- frame by `StylePolicy` in `src/highlight.rs`.
+pmacs.config.define {
+  name = "ui.semantic-styling",
+  description = "Merge language-server semantic tokens over tree-sitter highlighting, on both frontends. Off leaves the grammar's colors alone; a language with no bundled grammar is then uncolored.",
+  type = "boolean",
+  default = true,
+  mutability = "live",
+}
+
 -- Fresh language inference for a buffer, in precedence order: explicit
 -- modeline → grammar extension → LSP filetype map → filename → shebang.
 -- Path components intentionally come from `buf:name()` to preserve syntax's
@@ -520,7 +532,7 @@ pmacs.hook.add("buffer.after-load", function()
   -- Best-effort: a missing grammar / re-entry / stale buffer
   -- mustn't poison the rest of the after-load chain.
   local ok, err = pcall(function() attach_for_active_buffer(true) end)
-  if not ok and pmacs.error then
+  if not ok then
     pmacs.error("syntax.after-load: " .. tostring(err))
   end
 end)
@@ -539,7 +551,7 @@ pmacs.hook.add("buffer.after-switch", function()
     highlighted_buffers[tostring(buf)] = nil
     attach_for_active_buffer(false)
   end)
-  if not ok and pmacs.error then
+  if not ok then
     pmacs.error("syntax.after-switch: " .. tostring(err))
   end
 end)
@@ -582,7 +594,7 @@ pmacs.hook.add("buffer.after-edit", function()
   -- `ParseView:on_edit` records incremental edits synchronously, but
   -- highlight overlays only see new spans after a fresh parse settles.
   local ok, err = pcall(reparse_active_buffer_after_edit)
-  if not ok and pmacs.error then
+  if not ok then
     pmacs.error("syntax.after-edit: " .. tostring(err))
   end
 end)
@@ -616,7 +628,7 @@ pmacs._async.tick = function(...)
       -- buffer or error here must not stall the settle loop.
       local capped_buf = key and parse_buffer_by_key[key]
       if capped_buf and pmacs.parse._injection_capped(capped_buf) then
-        if not injection_cap_warned[key] and pmacs.error then
+        if not injection_cap_warned[key] then
           injection_cap_warned[key] = true
           pmacs.error(
             "syntax: injection layer cap reached; some embedded regions are unhighlighted")
