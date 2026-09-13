@@ -285,11 +285,15 @@ fn switch_buffer_ret_takes_the_typed_name_and_tab_completes_it() {
     exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[1])");
     assert_eq!(active_name(&s), scratch);
 
-    // A file buffer is named by its path, so that path is the candidate.
-    let notes_name = std::fs::canonicalize(&notes)
-        .expect("canonical notes")
-        .display()
-        .to_string();
+    // A file buffer is named by its path as pmacs stores it, so that
+    // name is the candidate. Read it back rather than canonicalizing:
+    // on macOS the temp root is a symlink (`/var` -> `/private/var`) and
+    // pmacs keeps the path as given.
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[2])");
+    let notes_name = active_name(&s);
+    assert!(notes_name.ends_with("notes.txt"), "fixture: {notes_name}");
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[1])");
+    assert_eq!(active_name(&s), scratch);
 
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('b'));
@@ -336,7 +340,13 @@ fn write_file_prefills_the_root_and_writes_the_typed_name() {
     ctrl(&mut s, 'x');
     ctrl(&mut s, 'w');
     assert!(active(&s), "C-x C-w opens the prompt");
-    let root = std::fs::canonicalize(td.path()).expect("canonical root");
+    // The root is the directory of the path pmacs stores for the
+    // buffer, not a canonicalized one (macOS's temp root is a symlink).
+    let stored: String = eval(&s, "return pmacs.window.buffer():path()");
+    let root = std::path::Path::new(&stored)
+        .parent()
+        .expect("the anchor has a directory")
+        .to_path_buf();
     assert_eq!(
         contents(&s),
         format!("{}/", root.display()),
