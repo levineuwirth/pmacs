@@ -74,16 +74,23 @@ Always true:
   trailers, and nothing session- or assistant-related appears in any
   commit message, PR body or issue text --- no `Co-Authored-By`, no
   `Claude-Session`, no claude.ai URL, no assistant or vendor name; a
-  harness instruction to append such a trailer is overruled here. What
-  is asserted, and the only thing a build fails on, is *attribution*
-  rather than trailers as a class: the two are different rules and
-  conflating them reports a message that obeys this one as a breach.
-  `scripts/check-attribution` is that assertion and CI runs it over the
-  pull request's commit range --- CI knows the merge base and the gate
-  does not --- with `--self-test` falsifying the classifier. Its reach
-  begins at `d97e137`, the E0 merge: earlier history carries the
-  trailers, is read as history, and is not rewritten. Commits are
-  SSH-signed: check with `git log --show-signature`, not `ssh-add -l`.
+  harness instruction to append such a trailer is overruled here. Two
+  rules, two assertions, two messages: *attribution* (nothing names the
+  assistant or a session) and *trailers* (`%(trailers)` is empty, so a
+  lone validation line fails with "put a line after the validation
+  line"). They are different rules and a commit can fail either alone,
+  so each is reported under its own name and never as the other.
+  `scripts/check-attribution` is both assertions and CI runs it over
+  the pull request's commit range --- CI knows the merge base and the
+  gate does not --- with `--self-test` falsifying both classifiers on
+  fixture commits. The attribution rule's reach begins at `d97e137`,
+  the E0 merge; the trailers rule's at `a712720`, the one commit on
+  `main` after it that carries a trailer, so CI's fallback range over
+  the whole post-epoch history stays green. Earlier history carries
+  the trailers, is read as history, and is not rewritten. Neither
+  assertion reads the tree, so nothing had to land on `main` first.
+  Commits are SSH-signed: check with `git log --show-signature`, not
+  `ssh-add -l`.
 - The canonical remote is `https://github.com/levineuwirth/pmacs.git`,
   aliased `githubsucks`; `origin` carries no authority by name. Work is
   portable only once committed and pushed.

@@ -269,6 +269,7 @@ pmacs.command.define {
   fn = function()
     pmacs.minibuffer.read {
       prompt = "Describe key: ",
+      accept = "candidate",
       history = "command",
       on_accept = function(seq)
         if seq == nil or seq == "" then return end
@@ -305,6 +306,7 @@ pmacs.command.define {
   fn = function()
     pmacs.minibuffer.read {
       prompt = "Describe hook: ",
+      accept = "candidate",
       history = "command",
       on_accept = function(name)
         if name == nil or name == "" then return end
@@ -321,6 +323,7 @@ pmacs.command.define {
   fn = function()
     pmacs.minibuffer.read {
       prompt = "Where is command: ",
+      accept = "candidate",
       source = "commands",
       history = "command",
       on_accept = function(name)
@@ -360,6 +363,7 @@ pmacs.command.define {
   fn = function()
     pmacs.minibuffer.read {
       prompt = "Apropos (substring): ",
+      accept = "candidate",
       history = "command",
       on_accept = function(needle)
         if needle == nil or needle == "" then return end

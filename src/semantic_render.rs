@@ -129,7 +129,8 @@ type CompletionPopupFacts = (
 
 /// How many completion candidates the minibuffer ships per frame — a
 /// scrolled window around the selection, not the full (≤1024) list.
-const MB_VISIBLE: usize = 10;
+/// The grid's band (E6.2) shows the same window.
+use crate::minibuffer::MB_VISIBLE;
 
 /// The first protocol version that carries
 /// [`InstanceMessage::MinibufferPromptRows`] (Discovery Stage 2).

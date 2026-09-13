@@ -643,6 +643,8 @@ cmd { name = "editor.switch-buffer",
           prompt = "Switch to buffer: ",
           source = "buffers",
           history = "buffer",
+          -- D18: the name as written; TAB completes to the selection.
+          accept = "typed",
           on_accept = function(name)
             if name == nil or name == "" then return end
             for _, id in ipairs(pmacs.buffer.list()) do
@@ -665,46 +667,27 @@ cmd { name = "editor.switch-buffer",
 --
 -- Two substrate facts shape it, and both are load-bearing:
 --
--- 1. COMPLETION IS FLAT. `source = "files"` lists ONE directory and
---    yields bare basenames (`minibuffer.rs` `list_directory`), capped at
---    the shared candidate limit. A custom function source could not do
---    better: sources are called with NO arguments, so a callback cannot
---    see the input to re-root on, and it runs synchronously outside any
---    coroutine, where `Handle:await()` raises --- so it cannot list a
---    directory either. Hierarchical completion is a named Rust change in
---    the framing, not something this command can fake.
+-- 1. COMPLETION LISTS THE DIRECTORY THE FIELD NAMES. `source = "files"`
+--    lists ONE directory --- the part of the field before its last `/`,
+--    resolved against `source_root` when relative --- and yields bare
+--    basenames (`minibuffer.rs` `list_directory`), capped at the shared
+--    candidate limit; the part after the last `/` is what they are
+--    filtered by. So the field is prefilled with the directory the
+--    prompt is rooted in, Emacs's own shape, and typing `sub/` moves
+--    the listing into `sub` (E6.1, E6.3). Nothing recurses.
 --
--- 2. A SELECTED CANDIDATE SHADOWS TYPED TEXT. `recompute_candidates`
---    sets `selected = Some(0)` whenever the candidate list is non-empty,
---    and `resolve_accepted_value` returns the CANDIDATE whenever
---    anything is selected. So `on_accept` receives typed text only when
---    the input filters every candidate away --- which, since candidates
---    are basenames and the filter is a subsequence match, is exactly
---    when the input contains a `/`. That makes the deeper-path case work
---    (`sub/inner.txt` matches no basename, so it arrives verbatim) and
---    leaves TWO documented consequences, each pinned by a test rather
---    than left to be rediscovered:
---
---    (a) typing a NEW bare name that happens to be a subsequence of an
---        existing entry opens the existing file instead of creating the
---        new one --- `find_file_selected_candidate_shadows_typed_text`.
---        A new bare name that matches nothing is unaffected and creates
---        normally (`find_file_bare_new_name_creates_in_the_root`).
---    (b) accepting on EMPTY input opens the first candidate in sort
---        order. `fuzzy_score` returns `Some(0)` for an empty needle, so
---        everything ties and `filter_and_sort` falls back to
---        lexicographic order --- which puts dotfiles first, and can put
---        a DIRECTORY first, in which case the open fails and reports.
---        This is the same mechanism `M-x` and `switch-buffer` already
---        have, so it is inherited rather than introduced; it is recorded
---        as decided, not overlooked, and listed in the framing's
---        deferrals beside the accept-semantics fix that would close it.
+-- 2. RET TAKES THE TYPED TEXT (D18, `accept = "typed"`). What arrives at
+--    `on_accept` is the field as written, whatever is selected: a new
+--    bare name that is a subsequence of an existing entry CREATES the
+--    new file (`find_file_typed_text_wins_over_the_selected_candidate`),
+--    and RET on the untouched prefilled directory opens it in dired
+--    (`find_file_ret_on_the_prefilled_directory_opens_dired`). TAB
+--    completes to the selection, so an existing file is still one TAB
+--    and RET away. Before E6.1 the selected candidate shadowed the
+--    typed text and `C-x C-f nots RET` opened `notes.md` (audit §3.1).
 --
 -- The root is the active buffer's directory, or the process cwd when the
--- buffer has no backing path (`source_root` defaults to "." Rust-side,
--- so the nil case needs no special handling here). It appears in the
--- prompt because the field itself must stay empty: any prefill would
--- contain a `/` and filter every candidate away, killing completion.
+-- buffer has no backing path; both are prefilled with a trailing `/`.
 
 -- Directory part of a path. "/a/b" -> "/a"; "/a" -> "/"; "a" -> nil.
 local function find_file_dirname(path)
@@ -733,10 +716,10 @@ local function find_file_expand_tilde(path)
   return home .. "/" .. rest
 end
 
--- Turn an accepted value into a path. The value is either a bare
--- basename (a selected candidate) or whatever the user typed, so a
--- non-absolute value joins onto the prompt's root --- which resolves
--- both cases to the same file when they name the same one.
+-- Turn an accepted value into a path. The value is the field as
+-- written --- normally the prefilled absolute directory plus a name ---
+-- so a non-absolute value (the user replaced the prefill) joins onto
+-- the prompt's root.
 local function find_file_resolve(root, value)
   local path = find_file_expand_tilde(value)
   if path:sub(1, 1) == "/" then return path end
@@ -754,23 +737,56 @@ local function find_file_root()
   return find_file_dirname(path)
 end
 
+-- The field a files prompt starts with: the root directory with a
+-- trailing `/`, so the user types a name into it, and RET on it
+-- untouched names the directory itself.
+local function find_file_prefill(root)
+  local dir = root or pmacs.path.cwd()
+  if dir:sub(-1) ~= "/" then dir = dir .. "/" end
+  return dir
+end
+
+-- Send a directory to whatever surfaces directories (dired by default,
+-- through the `pmacs.path.directory_handler` slot the `dired` command
+-- and `pmacs .` already use), reporting through `where` on failure.
+local function find_file_open_directory(where, path)
+  local handler = pmacs.path.directory_handler
+  if handler == nil then
+    pmacs.editor.set_status(where .. ": no handler for directory " .. path)
+    return
+  end
+  local ok, err = pcall(handler, path)
+  if not ok then
+    pmacs.editor.set_status(where .. ": " .. tostring(err))
+  end
+end
+
 cmd { name = "find-file",
-      description = "Open a file by path, completing within one directory.",
+      description = "Open a file by path; RET on a directory opens it in dired.",
       fn = function()
         local root = find_file_root()
         pmacs.minibuffer.read {
-          prompt = "Find file (" .. (root or ".") .. "): ",
+          prompt = "Find file: ",
+          initial = find_file_prefill(root),
           source = "files",
           source_root = root,
           history = "find-file",
+          accept = "typed",
           on_accept = function(value)
             if value == nil or value == "" then return end
             local path = find_file_resolve(root, value)
+            -- A directory --- the prefilled root left as it was, or
+            -- one named by hand --- opens in dired (D18).
+            if pmacs.path.is_dir(path) then
+              find_file_open_directory("find-file", path)
+              return
+            end
             -- A path that does not exist yet CREATES a buffer bound to
             -- it: `display_file` routes through `resolve_target_buffer`,
             -- which on NotFound creates, binds, and sets "[new file]".
             -- That is Emacs parity and deliberate, so only a real
-            -- failure (a directory, a permission error) reaches here.
+            -- failure (a permission error, a path under a file) reaches
+            -- here.
             local ok, err = pcall(pmacs.window.display_file, path, { select = true })
             if not ok then
               pmacs.editor.set_status("find-file: " .. tostring(err))
@@ -791,10 +807,12 @@ cmd { name = "buffer.write-file",
       fn = function()
         local root = find_file_root()
         pmacs.minibuffer.read {
-          prompt = "Write file (" .. (root or ".") .. "): ",
+          prompt = "Write file: ",
+          initial = find_file_prefill(root),
           source = "files",
           source_root = root,
           history = "find-file",
+          accept = "typed",
           on_accept = function(value)
             if value == nil or value == "" then return end
             local path = find_file_resolve(root, value)
@@ -890,6 +908,9 @@ cmd { name = "editor.execute-command",
           prompt = "M-x ",
           source = "commands",
           history = "command",
+          -- D18: the selection; `M-x hel RET` runs `help`, and `C-j`
+          -- takes the text as typed.
+          accept = "candidate",
           on_accept = function(name)
             if name == nil or name == "" then return end
             -- invoke_interactive records the command boundary (kill

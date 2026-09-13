@@ -1994,6 +1994,8 @@ impl EditorState {
                         .borrow_mut()
                         .rotate_command(frontend_id, "buffer.self-insert");
                     self.core.borrow_mut().typed_edit_arm(frontend_id, ch);
+                    let limit = self.undo_amalgamate_limit();
+                    self.core.borrow_mut().typed_run_begin(frontend_id, limit);
                     let mut args = mlua::MultiValue::new();
                     args.push_back(mlua::Value::Integer(ch as i64));
                     if let Err(e) = self.lua_host.invoke_command("buffer.self-insert", args) {
@@ -2012,6 +2014,7 @@ impl EditorState {
         let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
         let post_revision = self.active_buffer_revision();
         if pre_revision != post_revision {
+            self.note_typed_run(frontend_id, typed_edit.as_ref());
             if let Some(record) = typed_edit {
                 self.core
                     .borrow_mut()
@@ -2022,6 +2025,28 @@ impl EditorState {
             self.core.borrow_mut().typed_edit_clear_armed();
         }
         self.core.borrow_mut().completion_popup_validate();
+    }
+
+    /// The registered `undo.amalgamate` (Integer, default 20): how many
+    /// consecutive typed characters undo as one step; zero for none.
+    fn undo_amalgamate_limit(&self) -> u32 {
+        crate::lua_bindings::config_u32(self.lua_host.lua(), "undo.amalgamate", None, 20)
+    }
+
+    /// After a dispatch changed the buffer: if the change was a typed
+    /// self-insert (the record proves the insert primitive landed),
+    /// hand it to the undo amalgamation (E6.4).
+    fn note_typed_run(
+        &self,
+        frontend_id: FrontendId,
+        typed_edit: Option<&crate::editor_core::TypedEditRecord>,
+    ) {
+        if let Some(record) = typed_edit {
+            let limit = self.undo_amalgamate_limit();
+            self.core
+                .borrow_mut()
+                .typed_run_end(frontend_id, limit, record.buffer);
+        }
     }
 
     fn active_terminal_key(&self, frontend_id: FrontendId) -> Option<TerminalViewKey> {
@@ -2196,11 +2221,13 @@ impl EditorState {
         };
 
         let pre_revision = self.active_buffer_revision();
+        let limit = self.undo_amalgamate_limit();
         {
             let mut core = self.core.borrow_mut();
             if let Some(ch) = single {
                 core.rotate_command(frontend_id, "buffer.self-insert");
                 core.typed_edit_arm(frontend_id, ch);
+                core.typed_run_begin(frontend_id, limit);
                 // **Must go through `insert_char_over_region`, not
                 // the generic byte insert.** Arming provenance is
                 // only half of it: `typed_edit_complete` is called
@@ -2229,6 +2256,7 @@ impl EditorState {
         // it, so it is armed across the fan-out and cleared after.
         let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
         if pre_revision != self.active_buffer_revision() {
+            self.note_typed_run(frontend_id, typed_edit.as_ref());
             if let Some(record) = typed_edit {
                 self.core
                     .borrow_mut()
@@ -3739,7 +3767,9 @@ impl EditorState {
     /// Hardcoded handler for keys delivered while a minibuffer prompt
     /// is active. Recognized chords:
     ///
-    /// * `RET` / `C-m`           --- accept (invoke `on_accept`).
+    /// * `RET` / `C-m`           --- accept (invoke `on_accept` with the
+    ///   selection or the typed text, by the session's accept policy).
+    /// * `C-j`                   --- accept the typed text as written.
     /// * `C-g`                   --- cancel (invoke `on_cancel`).
     /// * `TAB` / `C-i`           --- complete to selected candidate.
     /// * `Up`                    --- previous candidate with a dropdown, else previous history.
@@ -3765,7 +3795,8 @@ impl EditorState {
 
         let action = MinibufferAction::from_chord(chord);
         match action {
-            MinibufferAction::Accept => self.minibuffer_accept(frontend_id),
+            MinibufferAction::Accept => self.minibuffer_accept(frontend_id, false),
+            MinibufferAction::AcceptTyped => self.minibuffer_accept(frontend_id, true),
             MinibufferAction::Cancel => self.minibuffer_cancel(),
             MinibufferAction::Complete => self.minibuffer_complete(),
             MinibufferAction::HistoryPrev => self.with_minibuffer(Minibuffer::history_prev),
@@ -4043,8 +4074,14 @@ impl EditorState {
         }
     }
 
-    fn minibuffer_accept(&mut self, frontend_id: FrontendId) {
-        let outcome = self.core.borrow_mut().minibuffer.accept();
+    /// `typed_wins` is `C-j`: the field as written, whatever the
+    /// session's policy or selection (D18).
+    fn minibuffer_accept(&mut self, frontend_id: FrontendId, typed_wins: bool) {
+        let outcome = if typed_wins {
+            self.core.borrow_mut().minibuffer.accept_typed()
+        } else {
+            self.core.borrow_mut().minibuffer.accept()
+        };
         let Some((on_accept, contents)) = outcome else {
             return;
         };
@@ -5993,7 +6030,9 @@ pub fn paint_frame(
         // The command registry is a separate `RefCell` from the core, so
         // this borrow does not contend with the one held above.
         let commands = state.lua_host.commands().borrow();
-        Some(paint_minibuffer(grid, core, &commands, term_size, &theme))
+        let col = paint_minibuffer(grid, core, &commands, term_size, &theme);
+        paint_minibuffer_band(grid, core, &commands, term_size);
+        Some(col)
     } else {
         None
     };
@@ -6872,6 +6911,90 @@ fn paint_minibuffer(
     }
 
     cursor_col.min(max.saturating_sub(1))
+}
+
+/// Paint the minibuffer's candidate band (E6.2): up to
+/// [`crate::minibuffer::MB_VISIBLE`] rows directly above the prompt
+/// row, full width, one candidate per row, the selection in reverse
+/// video, windowed around the selection so `Up`/`Down` move visibly
+/// through a long list. Painted with the completion popup's row
+/// painter over whatever was below it --- the band is an overlay, as
+/// the popup is, and the layout is not reflowed for it. The same
+/// window the wire ships to a semantic frontend, whose dropdown paints
+/// it. Nothing is painted when the session has no candidates.
+///
+/// The glyph column carries `/` for a directory in a files prompt and
+/// a blank otherwise; the detail is the command's description for the
+/// command source, first line only, as the inline suffix and the wire
+/// row already do.
+fn paint_minibuffer_band(
+    grid: &mut crate::cell::CellGrid<'_>,
+    core: &EditorCore,
+    commands: &crate::command::CommandRegistry,
+    term_size: crate::cell::CellSize,
+) {
+    use crate::completion::{paint_band_row, popup_window};
+    use crate::minibuffer::{CompletionSource, MB_VISIBLE, listing_dir, split_dir_base};
+
+    let Some(session) = core.minibuffer.session.as_ref() else {
+        return;
+    };
+    let n = session.candidates.len();
+    // The prompt row is the last; the band needs at least one row above
+    // it, and never covers row 0 on a two-row terminal.
+    if n == 0 || term_size.rows < 3 || term_size.cols == 0 {
+        return;
+    }
+    let selected = session.selected.unwrap_or(0).min(n - 1);
+    let (start, len) = popup_window(n, selected, MB_VISIBLE);
+    let shown = len.min((term_size.rows - 1) as usize);
+    // Keep the selection inside the rows that fit when the terminal is
+    // shorter than the window: shift the slice so it ends at or after
+    // the selection.
+    let start = if selected >= start + shown {
+        selected + 1 - shown
+    } else {
+        start
+    };
+    let top = term_size.rows - 1 - shown as u32;
+    let contents = core.minibuffer.contents();
+    let files_dir = match &session.source {
+        CompletionSource::Files { root } => {
+            let (dir_part, _) = split_dir_base(&contents);
+            Some(listing_dir(root, dir_part))
+        }
+        _ => None,
+    };
+    for (i, cand) in session
+        .candidates
+        .iter()
+        .skip(start)
+        .take(shown)
+        .enumerate()
+    {
+        let detail = matches!(session.source, CompletionSource::Commands)
+            .then(|| {
+                commands
+                    .get(cand)
+                    .map(crate::command::Command::description_first_line)
+                    .filter(|d| !d.is_empty())
+            })
+            .flatten();
+        let glyph = match &files_dir {
+            Some(dir) if dir.join(cand).is_dir() => '/',
+            _ => ' ',
+        };
+        paint_band_row(
+            grid,
+            glyph,
+            cand,
+            detail,
+            top + i as u32,
+            0,
+            term_size.cols,
+            start + i == selected,
+        );
+    }
 }
 
 /// Paint the incremental-search prompt on the bottom row:
@@ -7753,6 +7876,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            accept: crate::minibuffer::AcceptPolicy::Candidate,
             ranked: false,
         });
         assert!(
@@ -9286,6 +9410,7 @@ mod tests {
                 selected: None,
                 history_index: None,
                 typed_before_history_nav: None,
+                accept: crate::minibuffer::AcceptPolicy::Candidate,
                 ranked: false,
             });
             for c in entry.chars() {
@@ -9311,6 +9436,7 @@ mod tests {
             selected: None,
             history_index: None,
             typed_before_history_nav: None,
+            accept: crate::minibuffer::AcceptPolicy::Candidate,
             ranked: false,
         });
         let h: &History = mb2.history.get("test").expect("history loaded");

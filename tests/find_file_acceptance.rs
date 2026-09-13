@@ -81,6 +81,55 @@ fn candidates(s: &EditorState) -> Vec<String> {
     eval::<Vec<String>>(s, "return pmacs.minibuffer.candidates()")
 }
 
+fn contents(s: &EditorState) -> String {
+    eval::<String>(s, "return pmacs.minibuffer.contents()")
+}
+
+/// Erase the prefilled directory with real Backspaces, so a row that
+/// wants to type a path of its own starts from an empty field the way
+/// a user would.
+fn clear_field(s: &mut EditorState) {
+    let n = contents(s).chars().count();
+    for _ in 0..n {
+        press(s, KeyCode::Backspace);
+    }
+    assert_eq!(contents(s), "", "the field must be empty after clearing");
+}
+
+/// Drive the async runtime until nothing is parked or pending: dired
+/// lists a directory on a worker and resumes on a later tick, so a
+/// directory opened by RET is observable only after this returns.
+fn pump(s: &mut EditorState) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut spins = 0u32;
+    loop {
+        let idle: bool = eval(
+            s,
+            "return pmacs._async.parked_count() == 0 and pmacs._async.pending_count() == 0",
+        );
+        if idle {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "async pump deadline exceeded"
+        );
+        s.tick_async();
+        spins += 1;
+        if spins > 64 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+/// The active buffer's name.
+fn active_name(s: &EditorState) -> String {
+    eval::<String>(
+        s,
+        "return pmacs.describe.buffer(pmacs.window.buffer()).name",
+    )
+}
+
 fn status(s: &EditorState) -> String {
     s.core.borrow().status.clone()
 }
@@ -127,9 +176,9 @@ fn find_file_completion_lists_the_root_only_and_does_not_descend() {
     );
 }
 
-/// 0b --- free text carries the deeper case. `sub/inner.txt` matches no
-/// bare-basename candidate, so it reaches `on_accept` verbatim and is
-/// joined onto the prompt's root.
+/// 0b --- free text carries the deeper case. `sub/inner.txt`, typed
+/// after the prefilled root, reaches `on_accept` as written (D18) and
+/// names the file below the root.
 #[test]
 fn find_file_free_text_opens_a_path_below_the_root() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -141,10 +190,13 @@ fn find_file_free_text_opens_a_path_below_the_root() {
     open_prompt(&mut s);
     type_str(&mut s, "sub/inner.txt");
 
-    assert!(
-        candidates(&s).is_empty(),
-        "a needle containing '/' must filter every basename candidate away, \
-         or the selection would shadow the typed text"
+    // E6.3: the listing follows the field's directory part, so once
+    // `sub/` is typed the candidates are sub's entries, and the typed
+    // text still wins under `accept = "typed"` (D18).
+    assert_eq!(
+        candidates(&s),
+        vec!["inner.txt".to_string()],
+        "a needle containing '/' lists the directory it names"
     );
 
     press(&mut s, KeyCode::Enter);
@@ -160,10 +212,9 @@ fn find_file_free_text_opens_a_path_below_the_root() {
 }
 
 /// 0c --- a path that does not exist creates a `[new file]` buffer
-/// bound to it, rather than erroring. The name contains a `/` so the
-/// candidate list is empty and the typed text is what arrives (see
-/// `find_file_selected_candidate_shadows_typed_text` for the other
-/// half of that rule).
+/// bound to it, rather than erroring. The typed text is what arrives
+/// (D18; see `find_file_typed_text_wins_over_the_selected_candidate`
+/// for the case where a candidate is selected).
 #[test]
 fn find_file_nonexistent_path_creates_a_new_file_buffer() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -195,10 +246,8 @@ fn find_file_nonexistent_path_creates_a_new_file_buffer() {
 }
 
 /// The everyday new-file flow: a BARE name, no separator, matching no
-/// existing entry. The candidate list empties on its own, so the typed
-/// text arrives and joins onto the root. This is the path users hit
-/// first, and it is the only route through `find_file_resolve` that
-/// combines free text with a relative join.
+/// existing entry, typed after the prefilled root. The candidate list
+/// empties on its own and the typed path arrives.
 #[test]
 fn find_file_bare_new_name_creates_in_the_root() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -232,19 +281,15 @@ fn find_file_bare_new_name_creates_in_the_root() {
     assert!(!fresh.exists(), "nothing is written to disk until save");
 }
 
-/// The failure arm. Accepting a DIRECTORY candidate reaches
-/// `display_file`, whose load fails (opening a directory succeeds, the
-/// read does not), and the command's `pcall` must turn that into a
-/// status message rather than letting the error escape mid-dispatch.
-/// Without the `pcall` this test fails, which is the point --- the
-/// guard is pinned through the real accept path, not asserted directly.
+/// A DIRECTORY named by hand opens in dired (D18), the same route the
+/// prefilled root takes: `sub` completed by TAB and accepted by RET is
+/// a directory, and a directory is not a file load that fails.
 #[test]
-fn find_file_accepting_a_directory_reports_instead_of_raising() {
+fn find_file_accepting_a_directory_opens_it_in_dired() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("sub")).expect("mkdir");
 
     let mut s = editor_in(td.path());
-    let before = active_path(&s).expect("the anchor must be open");
 
     open_prompt(&mut s);
     // Only the directory matches: "anchor.txt" contains no 's'.
@@ -254,31 +299,38 @@ fn find_file_accepting_a_directory_reports_instead_of_raising() {
         vec!["sub".to_string()],
         "fixture premise: the directory must be the sole candidate"
     );
+    // The typed name is already the whole candidate, so TAB's third
+    // step (E6.3) descends into the directory rather than completing.
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        contents(&s).ends_with("/sub/"),
+        "TAB on a complete directory name descends; got {:?}",
+        contents(&s)
+    );
 
     press(&mut s, KeyCode::Enter);
+    pump(&mut s);
 
-    let line = status(&s);
-    assert!(
-        line.starts_with("find-file: "),
-        "the failure must surface as this command's status message; got {line:?}"
-    );
-    assert_eq!(
-        active_path(&s).as_deref(),
-        Some(before.as_str()),
-        "a failed open must leave the active buffer alone"
-    );
     assert!(
         !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
-        "the prompt must have closed even though the open failed"
+        "the prompt must have closed"
+    );
+    let name = active_name(&s);
+    assert!(
+        name.starts_with("*dired:") && name.contains("sub"),
+        "a directory must open in dired; the active buffer is {name:?}, status {:?}",
+        status(&s)
     );
 }
 
-/// 0d --- with no backing path, the prompt roots at the process cwd
-/// (`source_root` is omitted, and the Rust side defaults to ".").
-/// The test crate's cwd is the crate root, so `Cargo.toml` is a
-/// stable, real candidate there.
+/// 0d, rewritten under D18 (E6.1) --- with no backing path, the prompt
+/// roots at the process cwd, the field is PREFILLED with that
+/// directory (Emacs's directory-in-the-field, which E6.3's listing
+/// makes compatible with completion), and RET on the prefilled
+/// directory opens it in dired. The test crate's cwd is the crate
+/// root, so `Cargo.toml` is a stable, real candidate there.
 #[test]
-fn find_file_without_a_backing_path_roots_at_the_process_cwd() {
+fn find_file_ret_on_the_prefilled_directory_opens_dired() {
     let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.reopen_init_phase_for_testing();
     assert!(
@@ -293,33 +345,50 @@ fn find_file_without_a_backing_path_roots_at_the_process_cwd() {
         cands.iter().any(|c| c == "Cargo.toml"),
         "a pathless buffer must root the prompt at the process cwd; got {cands:?}"
     );
-    // The field must start EMPTY. Any prefill (e.g. Emacs's
-    // directory-in-the-field) would contain a `/`, which filters every
-    // basename candidate away and silently disables completion --- the
-    // reason the root is named in the prompt string instead.
-    let typed: String = eval(&s, "return pmacs.minibuffer.contents()");
+    let cwd = std::env::current_dir().expect("cwd");
+    let field = contents(&s);
     assert_eq!(
-        typed, "",
-        "the prompt field must start empty or completion is dead on arrival"
+        field,
+        format!("{}/", cwd.display()),
+        "the field is prefilled with the root directory and a trailing slash"
+    );
+
+    press(&mut s, KeyCode::Enter);
+    pump(&mut s);
+
+    assert!(
+        !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "the prompt must have closed"
+    );
+    let name = active_name(&s);
+    assert!(
+        name.starts_with("*dired:"),
+        "RET on the prefilled directory must open it in dired; the active buffer is {name:?}, status {:?}",
+        status(&s)
+    );
+    // One buffer per directory, named `*dired:<canonical path>*`.
+    let canonical = std::fs::canonicalize(&cwd).expect("canonicalize cwd");
+    assert_eq!(
+        name,
+        format!("*dired:{}*", canonical.display()),
+        "the dired buffer must be the cwd's"
     );
 }
 
-/// The documented hole in Q#DR11, pinned so it is a decision rather
-/// than an accident: `recompute_candidates` selects index 0 whenever
-/// the list is non-empty and `resolve_accepted_value` returns the
-/// SELECTED CANDIDATE over the typed text, so typing a new bare name
-/// that is a subsequence of an existing entry opens the existing file.
-/// Fixing this needs a Rust change to accept semantics, which Stage 0
-/// deliberately does not make.
+/// The hole Q#DR11 documented, closed by D18 (E6.1): under
+/// `accept = "typed"` the typed text wins over the selected candidate,
+/// so a NEW bare name that is a subsequence of an existing entry
+/// creates the new file rather than opening the existing one. Before
+/// E6.1 this row pinned the opposite as a decision.
 #[test]
-fn find_file_selected_candidate_shadows_typed_text() {
+fn find_file_typed_text_wins_over_the_selected_candidate() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::write(td.path().join("notes.md"), b"existing\n").expect("write");
 
     let mut s = editor_in(td.path());
     open_prompt(&mut s);
     // "nots" is a subsequence of "notes.md", so the candidate survives
-    // the filter and shadows the typed name.
+    // the filter and is selected while the user types.
     type_str(&mut s, "nots");
     assert_eq!(
         candidates(&s),
@@ -329,10 +398,22 @@ fn find_file_selected_candidate_shadows_typed_text() {
 
     press(&mut s, KeyCode::Enter);
 
-    let path = active_path(&s).expect("a file must be open");
+    let path = active_path(&s).expect("a buffer must be bound");
     assert!(
-        path.ends_with("notes.md"),
-        "documented behavior: the selected candidate wins over typed text; got {path}"
+        path.ends_with("/nots"),
+        "the typed text wins: a new file named as typed; got {path}"
+    );
+    assert_eq!(
+        std::path::Path::new(&path).parent(),
+        Some(td.path()),
+        "the new file lives in the prefilled root"
+    );
+    let len: usize = eval(&s, "return pmacs.window.buffer():len()");
+    assert_eq!(len, 0, "a new-file buffer starts empty");
+    assert!(
+        status(&s).contains("[new file]"),
+        "the new-file status must surface; got {:?}",
+        status(&s)
     );
 }
 
@@ -355,9 +436,10 @@ fn find_file_expands_a_leading_tilde() {
     let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.reopen_init_phase_for_testing();
     open_prompt(&mut s);
-    // Contains a '/', so the typed text reaches on_accept verbatim.
-    // The leaf does not exist, so this lands on the new-file path and
-    // touches no disk state.
+    // The field starts as the prefilled cwd; a user who wants `~/...`
+    // erases it first. The leaf does not exist, so this lands on the
+    // new-file path and touches no disk state.
+    clear_field(&mut s);
     type_str(&mut s, "~/pmacs-find-file-tilde-probe.txt");
     press(&mut s, KeyCode::Enter);
 

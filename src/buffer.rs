@@ -26,6 +26,7 @@
 //! moves its view list out of `self` before iterating, so the views can
 //! observe `&Buffer` while the buffer's own `&mut self` is held.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::file_io::FileMeta;
@@ -126,6 +127,28 @@ pub enum EditOp<'a> {
 // Buffer
 // ---------------------------------------------------------------------------
 
+/// The most entries either history keeps (E6.4). The v0.1 stack drops
+/// its oldest entry past this; loro's `UndoManager` is built with the
+/// same ceiling as its `max_undo_steps`, so both modes forget at the
+/// same depth. Ten thousand is past any human-driven session and each
+/// entry is a structurally shared rope, so the cost is bounded rather
+/// than felt.
+pub const UNDO_HISTORY_LIMIT: usize = 10_000;
+
+/// CRDT mode (E6.4): the state of the loro undo group a run of typed
+/// self-inserts opens on a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoGroup {
+    /// No group is open.
+    Closed,
+    /// A group is open and the next edit is the announced typed one,
+    /// which joins it.
+    AwaitingTyped,
+    /// A group is open and no typed edit is announced: the next edit
+    /// is foreign and cuts the group before it reaches loro.
+    Open,
+}
+
 /// One entry in the undo (or redo) stack.
 struct UndoEntry {
     /// Pre-edit rope. Cheap to retain: persistent rope, structural sharing.
@@ -133,6 +156,11 @@ struct UndoEntry {
     /// Description of the edit that produced the current rope from this
     /// entry's rope. Used to broadcast a precise inverse edit on undo.
     edit: EditDescription,
+    /// The edit was a typed self-insert (E6.4), marked by the core once
+    /// the insert landed. Only two typed entries amalgamate, so an
+    /// insert a hook or a script made between two keystrokes is never
+    /// swallowed into their group.
+    typed: bool,
 }
 
 /// A reduced [`Edit`] descriptor used by the undo stack.
@@ -212,9 +240,13 @@ pub struct Buffer {
     /// Per-buffer counter for [`MarkId`] allocation.
     next_mark_id: u64,
     /// Undo stack. Most recent entry on top.
-    undo: Vec<UndoEntry>,
+    undo: VecDeque<UndoEntry>,
     /// Redo stack. Cleared by any forward edit.
-    redo: Vec<UndoEntry>,
+    redo: VecDeque<UndoEntry>,
+    /// CRDT mode (E6.4): the loro undo group open on this buffer for a
+    /// run of typed self-inserts, and whether the next edit is the
+    /// typed one the core announced.
+    undo_group: UndoGroup,
     /// Path this buffer is bound to on disk, if any (T M4.5 L1:
     /// relocated here from `EditorCore` so cross-file navigation can
     /// keep each buffer's identity straight — the v0.1 single-file
@@ -287,8 +319,9 @@ impl Buffer {
             next_view_id: 0,
             marks: Vec::new(),
             next_mark_id: 0,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            undo: VecDeque::new(),
+            redo: VecDeque::new(),
+            undo_group: UndoGroup::Closed,
             file_path: None,
             file_meta: None,
             editing_in_progress: false,
@@ -1241,6 +1274,24 @@ impl Buffer {
         views: &mut [(ViewId, Box<dyn View>)],
         current: &EditOp<'_>,
     ) -> Result<Edit, BufferError> {
+        // E6.4 (CRDT mode): an edit that is not the typed one the core
+        // announced cuts the open undo group BEFORE it reaches loro, so
+        // a hook's or a script's insert between two keystrokes is its
+        // own step, exactly as the typed flag makes it in v0.1 --- the
+        // auto-pair closer stays an adjacent unit of its own. Here and
+        // not in `apply_edit_inner`, because this is the one stage
+        // every local edit passes through, intercepts skipped or not.
+        // Not feature-gated: a group is opened only in CRDT mode, so
+        // without the feature this is inert, and every state is
+        // constructed in every build the lints see.
+        if !is_no_op_edit(current) {
+            match self.undo_group {
+                UndoGroup::Closed => {}
+                UndoGroup::AwaitingTyped => self.undo_group = UndoGroup::Open,
+                UndoGroup::Open => self.undo_group_end(),
+            }
+        }
+
         // T M10.2: CRDT routing (Q2 defense-in-depth ordering — CRDT
         // first, then rope; if CRDT errors, abort before rope mutation).
         // The byte → str conversion uses `from_utf8_lossy` per the
@@ -1329,12 +1380,16 @@ impl Buffer {
             // in CRDT mode it's released here).
             drop(old_rope);
         } else {
-            self.undo.push(UndoEntry {
+            if self.undo.len() >= UNDO_HISTORY_LIMIT {
+                self.undo.pop_front();
+            }
+            self.undo.push_back(UndoEntry {
                 rope: old_rope,
                 edit: EditDescription {
                     pre_range,
                     inserted_len,
                 },
+                typed: false,
             });
             self.redo.clear();
         }
@@ -1347,6 +1402,90 @@ impl Buffer {
         }
 
         Ok(edit)
+    }
+
+    /// Mark the newest undo entry as a typed self-insert (E6.4) and,
+    /// when `merge` is set, amalgamate it into the entry below it when
+    /// that one is typed too and the two are contiguous: the newer is a
+    /// pure insert that begins where the older's inserted text ends.
+    /// Returns whether a merge happened. In CRDT mode the history is
+    /// loro's and grouping is [`Self::undo_group_start`]'s, so this is
+    /// `false` there.
+    ///
+    /// A merge keeps the older entry's pre-image rope --- undo restores
+    /// a whole rope, so the older pre-image is the state before both
+    /// keystrokes --- and widens its description by the newer insert,
+    /// so the inverse edit broadcast on undo covers both.
+    pub fn note_typed_edit(&mut self, merge: bool) -> bool {
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            return false;
+        }
+        let n = self.undo.len();
+        let Some(top) = self.undo.back_mut() else {
+            return false;
+        };
+        top.typed = true;
+        if !merge || n < 2 {
+            return false;
+        }
+        let top = self.undo[n - 1].edit;
+        let prev = self.undo[n - 2].edit;
+        let contiguous = top.pre_range.is_empty()
+            && top.pre_range.start == prev.pre_range.start + prev.inserted_len;
+        if !(self.undo[n - 2].typed && contiguous) {
+            return false;
+        }
+        self.undo.pop_back();
+        let prev = self.undo.back_mut().expect("n >= 2");
+        prev.edit.inserted_len += top.inserted_len;
+        true
+    }
+
+    /// CRDT mode (E6.4): open an undo group on loro's `UndoManager`,
+    /// closing any group already open, and announce that the next edit
+    /// is the typed one: the edits until [`Self::undo_group_end`] undo
+    /// as one step, except that any edit which is not an announced
+    /// typed one cuts the group first (see `apply_edit_inner`). A no-op
+    /// in v0.1 mode, where [`Self::note_typed_edit`] does the
+    /// amalgamating.
+    pub fn undo_group_start(&mut self) {
+        #[cfg(feature = "crdt")]
+        if let Some(crdt) = self.crdt.as_ref() {
+            crdt.undo_group_start();
+            self.undo_group = UndoGroup::AwaitingTyped;
+        }
+    }
+
+    /// CRDT mode (E6.4): announce the next typed edit of a run whose
+    /// group is already open; when a foreign edit has cut it, open a
+    /// new one instead.
+    pub fn undo_group_continue(&mut self) {
+        if self.undo_group == UndoGroup::Closed {
+            self.undo_group_start();
+        } else {
+            self.undo_group = UndoGroup::AwaitingTyped;
+        }
+    }
+
+    /// CRDT mode (E6.4): close the open undo group, if any.
+    pub fn undo_group_end(&mut self) {
+        #[cfg(feature = "crdt")]
+        if let Some(crdt) = self.crdt.as_ref() {
+            crdt.undo_group_end();
+        }
+        self.undo_group = UndoGroup::Closed;
+    }
+
+    /// How many undo steps the v0.1 stack holds; `None` in CRDT mode,
+    /// where loro keeps the count.
+    #[must_use]
+    pub fn undo_depth(&self) -> Option<usize> {
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            return None;
+        }
+        Some(self.undo.len())
     }
 
     /// Undo the most recent edit.
@@ -1370,7 +1509,7 @@ impl Buffer {
 
         // v0.1 mode: pop the saved UndoEntry, swap the rope back,
         // push onto redo stack.
-        let entry = self.undo.pop().ok_or(BufferError::NothingToUndo)?;
+        let entry = self.undo.pop_back().ok_or(BufferError::NothingToUndo)?;
 
         // The pre-edit rope held in `entry.rope` becomes current. The
         // inverse edit affects the post-state's range
@@ -1385,12 +1524,13 @@ impl Buffer {
         let new_rope = entry.rope.clone();
         let old_rope = std::mem::replace(&mut self.rope, new_rope.clone());
         self.adjust_marks_for_edit(inverse_pre_range, inverse_inserted_len);
-        self.redo.push(UndoEntry {
+        self.redo.push_back(UndoEntry {
             rope: old_rope,
             edit: EditDescription {
                 pre_range: inverse_pre_range,
                 inserted_len: inverse_inserted_len,
             },
+            typed: false,
         });
         self.is_modified = !self.undo.is_empty();
         self.revision = self.revision.wrapping_add(1);
@@ -1473,7 +1613,7 @@ impl Buffer {
         }
 
         // v0.1 mode: pop the saved redo entry, swap the rope forward.
-        let entry = self.redo.pop().ok_or(BufferError::NothingToRedo)?;
+        let entry = self.redo.pop_back().ok_or(BufferError::NothingToRedo)?;
 
         let inverse_pre_range = Range::new(
             entry.edit.pre_range.start,
@@ -1484,12 +1624,13 @@ impl Buffer {
         let new_rope = entry.rope.clone();
         let old_rope = std::mem::replace(&mut self.rope, new_rope.clone());
         self.adjust_marks_for_edit(inverse_pre_range, inverse_inserted_len);
-        self.undo.push(UndoEntry {
+        self.undo.push_back(UndoEntry {
             rope: old_rope,
             edit: EditDescription {
                 pre_range: inverse_pre_range,
                 inserted_len: inverse_inserted_len,
             },
+            typed: false,
         });
         self.is_modified = true;
         self.revision = self.revision.wrapping_add(1);
@@ -1831,8 +1972,8 @@ fn derive_replacement_edit(old_rope: &Rope, new_rope: &Rope) -> (Range, u64) {
 /// both) that the CRDT must observe to keep the rope ≡ projection
 /// invariant. The rope path's own no-op short-circuit handles the
 /// truly-empty cases AFTER the rope mutation runs; this helper lets
-/// the CRDT path skip the round-trip BEFORE the rope runs.
-#[cfg(feature = "crdt")]
+/// the CRDT path skip the round-trip BEFORE the rope runs, and the undo
+/// group cut (E6.4) decide before either.
 fn is_no_op_edit(op: &EditOp<'_>) -> bool {
     match op {
         EditOp::Insert { bytes, .. } => bytes.is_empty(),

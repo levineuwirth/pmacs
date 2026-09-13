@@ -467,6 +467,9 @@ pub struct QueryReplaceSession {
     found_any: bool,
 }
 
+/// The name the typed-character producers rotate the boundary to.
+pub const SELF_INSERT_COMMAND: &str = "buffer.self-insert";
+
 /// One frontend's command boundary — Emacs's `this-command` /
 /// `last-command` pair (kill ring, Q#KR2).
 ///
@@ -484,6 +487,11 @@ pub struct CommandBoundary {
     pub this: Option<String>,
     /// The command before `this`.
     pub last: Option<String>,
+    /// How many times in a row `this` has rotated onto the same name:
+    /// zero for the first, one for the second consecutive. Undo
+    /// amalgamation (E6.4) reads it for `buffer.self-insert`; a break
+    /// resets it.
+    pub run: u32,
 }
 
 /// Exact provenance of one typed self-insert (auto-pairing Q#AP9).
@@ -680,6 +688,10 @@ pub struct EditorCore {
     /// gestures, pastes, unbound keys) break the chain. Entries are
     /// pruned on `SessionDetached` (Q#KR11).
     pub command_history: HashMap<FrontendId, CommandBoundary>,
+    /// The buffer with an undo group open for a run of typed
+    /// self-inserts (E6.4, CRDT mode), closed at the next command
+    /// boundary that is not a self-insert.
+    undo_group: Option<BufferId>,
     /// Open context menu (Q#CM1), or `None` when closed. Shared
     /// `Arc<Mutex>` so the TUI [`crate::menu::MenuView`] overlay renders
     /// from the same state the dispatch path mutates — the menu twin of
@@ -796,6 +808,7 @@ impl EditorCore {
             clipboard_slot: Vec::new(),
             pending_clipboard: None,
             command_history: HashMap::new(),
+            undo_group: None,
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
             round_trip_buffers: std::collections::HashSet::new(),
@@ -4945,8 +4958,18 @@ impl EditorCore {
     /// `pmacs.command.invoke_interactive` (`M-x`).
     pub fn rotate_command(&mut self, fid: FrontendId, name: &str) {
         let entry = self.command_history.entry(fid).or_default();
+        entry.run = if entry.this.as_deref() == Some(name) {
+            entry.run.saturating_add(1)
+        } else {
+            0
+        };
         entry.last = entry.this.take();
         entry.this = Some(name.to_owned());
+        // E6.4: any command that is not a typed self-insert ends the
+        // run of typed characters undo groups together.
+        if name != SELF_INSERT_COMMAND {
+            self.undo_group_close();
+        }
     }
 
     /// Break `fid`'s command chain: a non-command input happened (an
@@ -4955,7 +4978,75 @@ impl EditorCore {
     /// rotation yields `last = None` and every chain-sensitive check
     /// (kill append, `M-y`) fails.
     pub fn break_command_chain(&mut self, fid: FrontendId) {
-        self.command_history.entry(fid).or_default().this = None;
+        let entry = self.command_history.entry(fid).or_default();
+        entry.this = None;
+        entry.run = 0;
+        self.undo_group_close();
+    }
+
+    // ---- undo amalgamation (E6.4) ---------------------------------------
+
+    /// Before a typed self-insert lands, once `rotate_command` has
+    /// stamped it: when this keystroke begins a group --- the first of
+    /// a run, or the first past every `limit` characters --- close the
+    /// open undo group and, in CRDT mode, open a new one on the active
+    /// buffer. `limit == 0` disables amalgamation: every keystroke is
+    /// its own step and no group is ever opened.
+    ///
+    /// Groups are what loro offers; the v0.1 stack has no group and is
+    /// amalgamated after the fact by [`Self::typed_run_end`]. Both are
+    /// driven from the same `run` count so the two histories cut their
+    /// groups at the same keystroke.
+    pub fn typed_run_begin(&mut self, fid: FrontendId, limit: u32) {
+        if limit == 0 {
+            self.undo_group_close();
+            return;
+        }
+        let run = self.command_history.get(&fid).map_or(0, |e| e.run);
+        let first_of_group = run.is_multiple_of(limit);
+        if first_of_group {
+            self.undo_group_close();
+        }
+        let buffer_id = self.active_buffer_id();
+        if let Ok(mut reg) = self.registry.try_borrow_mut()
+            && let Ok(buffer) = reg.get_mut(buffer_id)
+        {
+            if first_of_group {
+                buffer.undo_group_start();
+            } else {
+                buffer.undo_group_continue();
+            }
+            self.undo_group = Some(buffer_id);
+        }
+    }
+
+    /// After a typed self-insert landed in `buffer_id`: mark the new
+    /// undo entry typed and, unless this keystroke began a group,
+    /// amalgamate it into the previous typed entry (v0.1 mode; a no-op
+    /// under CRDT, where the open group does it).
+    pub fn typed_run_end(&mut self, fid: FrontendId, limit: u32, buffer_id: BufferId) {
+        let run = self.command_history.get(&fid).map_or(0, |e| e.run);
+        let merge = limit != 0 && !run.is_multiple_of(limit);
+        if let Ok(mut reg) = self.registry.try_borrow_mut()
+            && let Ok(buffer) = reg.get_mut(buffer_id)
+        {
+            buffer.note_typed_edit(merge);
+        }
+    }
+
+    /// Close the undo group left open on a buffer, if any. Left open
+    /// when the registry is borrowed at the moment of the call, and
+    /// retried by the next boundary.
+    fn undo_group_close(&mut self) {
+        let Some(buffer_id) = self.undo_group else {
+            return;
+        };
+        if let Ok(mut reg) = self.registry.try_borrow_mut() {
+            if let Ok(buffer) = reg.get_mut(buffer_id) {
+                buffer.undo_group_end();
+            }
+            self.undo_group = None;
+        }
     }
 
     /// The active frontend's previous command — Emacs's `last-command`

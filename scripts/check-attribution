@@ -1,5 +1,6 @@
 #!/bin/sh
-# Is every commit in a range free of attribution trailers? (D9)
+# Is every commit in a range free of attribution, and free of trailers?
+# (D9, and the house rule beside it.)
 #
 # WHY THIS EXISTS. D9 says nothing session- or assistant-related appears
 # in any commit message --- no `Co-Authored-By`, no `Claude-Session`, no
@@ -16,45 +17,64 @@
 # a local gate run does not, and inventing one locally would either
 # re-check `main`'s whole history on every run or guess.
 #
-# WHAT IT ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. It asserts no
-# ATTRIBUTION trailer, not "no trailers at all". Those are different
-# rules and conflating them is what produced a defect report against
-# `a712720`, whose whole message obeys D9 and whose final `Validation:`
-# line git's trailer parser reads as a trailer. The format half of that
-# --- a validation line must not be the only line of its final paragraph
-# --- is a writing rule stated in CLAUDE.md, not a thing to fail a build
-# on: it has no user-visible consequence and a checker for it would
-# reject honest messages.
+# TWO ASSERTIONS, TWO RULES, TWO MESSAGES. The first is ATTRIBUTION
+# (D9): no commit names the assistant or carries a session trailer. The
+# second is TRAILERS: `%(trailers)` is empty for every commit, because
+# commits carry no trailers at all, and a validation line standing alone
+# in a message's final paragraph is one --- git's trailer parser reads a
+# closing paragraph made wholly of `Token: value` lines as a trailer
+# block, which is how `a712720` and `66195b5`, two messages that obey D9
+# completely, came to carry one. The two rules are different: the first
+# is about what a message says, the second about how its last paragraph
+# is shaped, and a commit can fail either alone. They are therefore
+# reported separately, each naming its own rule, so a breach of one is
+# never read as a breach of the other. An earlier version of this header
+# argued that a trailers checker "would reject honest messages"; the
+# same honest message contradicted that twice, and the rule now fails
+# the build with the fix in its message: put a line after the validation
+# line.
 #
-# THE EPOCH. `d97e137` is the E0 merge, the first commit under D9.
+# THE EPOCHS. `d97e137` is the E0 merge, the first commit under D9.
 # Before it the history carries `Co-Authored-By:` and `Claude-Session:`
 # on a long run of commits, and no phase has proposed rewriting them.
-# The scan therefore excludes everything reachable from the epoch, so
-# pre-D9 history reads as history rather than as a breach. D9's own
-# text says "anywhere"; its enforced reach starts here, and that
-# sentence belongs beside the rule.
+# The attribution scan therefore excludes everything reachable from that
+# epoch, so pre-D9 history reads as history rather than as a breach.
+# D9's own text says "anywhere"; its enforced reach starts here, and
+# that sentence belongs beside the rule. The trailers rule has an epoch
+# of its own, `a712720`: that commit is on `main` between the two epochs
+# and is the lone-validation-line message the rule was written from, so
+# a scan reaching it would fail on the trunk's own history. The PR range
+# never contains it (it is an ancestor of every merge base since E3),
+# but CI's fallback range for a first push, a force-push or a manual
+# dispatch is `d97e137..sha`, and that one would. Excluding `a712720`
+# and its ancestors from the second assertion is the epoch device
+# applied a second time; everything on `main` after it carries no
+# trailer. Neither assertion reads the registry or any file in the tree:
+# both read commit messages, so nothing on `main` had to change before
+# the rule landed.
 #
 # USAGE
 #   scripts/check-attribution <range>       e.g. origin/main..HEAD
 #   scripts/check-attribution <base> <head> the merge base is computed
-#   scripts/check-attribution --self-test   falsify the classifier
+#   scripts/check-attribution --self-test   falsify both classifiers
 #
 # EXIT
 #   0  every commit in scope is clean (or the scope is empty)
-#   1  at least one commit carries an attribution trailer
+#   1  at least one commit carries attribution, or a trailer block
 #   2  usage or repository error
 set -eu
 
 EPOCH=d97e137
+TRAILERS_EPOCH=a712720
 
 usage() {
 	echo "usage: scripts/check-attribution <range> | <base> <head> | --self-test" >&2
 	exit 2
 }
 
-# The classifier, and the only place the rule is written. Reads a commit
-# message on stdin; prints the offending markers, one per line, and
-# nothing at all when the message is clean.
+# The attribution classifier, and the only place that rule is written.
+# Reads a commit message on stdin; prints the offending markers, one
+# per line, and nothing at all when the message is clean.
 #
 # `CLAUDE.md` is removed FIRST and by exact spelling. That filename is
 # in this repository and commits legitimately name it --- `dbe40a1`'s
@@ -68,6 +88,44 @@ markers() {
 		| sort -u
 }
 
+# The trailers classifier: git's own parser, nothing of ours. Prints
+# the commit's trailer block as git reads it, and nothing when there is
+# none. What counts as a block is git's rule (a final paragraph made
+# wholly of `Token: value` lines, folded continuations included), which
+# is exactly the rule a writer has to satisfy, so the check cannot
+# disagree with the tool that will later display the trailer.
+trailer_block() {
+	git log -1 --format='%(trailers)' "$1"
+}
+
+# One commit against both rules. Prints each breach on its own line to
+# stderr, naming the rule; returns 0 when clean, 1 otherwise.
+check_commit() {
+	sha=$1
+	check_attr=$2
+	check_trail=$3
+	clean=0
+	if [ "$check_attr" = yes ]; then
+		found=$(git log -1 --format='%B%n%an%n%ae%n%cn%n%ce' "$sha" | markers | tr '\n' ' ')
+		if [ -n "$found" ]; then
+			clean=1
+			echo "check-attribution: $sha carries attribution: $found" >&2
+			git log -1 --format='  %s' "$sha" >&2
+		fi
+	fi
+	if [ "$check_trail" = yes ]; then
+		block=$(trailer_block "$sha")
+		if [ -n "$block" ]; then
+			clean=1
+			echo "check-attribution: $sha carries a trailer block, and commits carry no trailers:" >&2
+			printf '%s\n' "$block" | sed 's/^/    /' >&2
+			git log -1 --format='  %s' "$sha" >&2
+			echo "  put a line after the validation line: a validation line must not be the only line of its final paragraph" >&2
+		fi
+	fi
+	return "$clean"
+}
+
 self_test() {
 	work=$(mktemp -d)
 	trap 'rm -rf "$work"' EXIT
@@ -79,8 +137,9 @@ self_test() {
 		git config commit.gpgsign false
 	) >/dev/null 2>&1
 	fail=0
-	# Three messages: one clean, one naming this repository's own
-	# instruction file, one carrying the trailer the rule is about.
+	# Three messages for the attribution classifier alone: one clean,
+	# one naming this repository's own instruction file, one carrying
+	# the trailer the rule is about.
 	printf 'gpu: do a thing\n\nBody.\n\nValidation: cargo test, ok.\n' >"$work/clean"
 	printf 'docs: state the rule in CLAUDE.md\n\nBody naming CLAUDE.md again.\n' >"$work/filename"
 	printf 'gpu: do a thing\n\nBody.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n' >"$work/dirty"
@@ -101,19 +160,75 @@ self_test() {
 			;;
 		esac
 	done
-	# And the epoch's own boundary: a712720's `Validation:` line is a
-	# git trailer and is NOT an attribution trailer, so this checker
-	# must pass it. Skipped when that commit is not present, so the
-	# self-test runs in a shallow clone rather than failing there.
+	# Three REAL commits for the two rules together, because the
+	# trailers classifier is git's parser and only a commit exercises
+	# it. `ok`: a validation line followed by another line, so its
+	# final paragraph is prose. `lone`: the validation line alone in
+	# its final paragraph --- attribution-clean, and a trailer block.
+	# `coauthor`: a `Co-Authored-By` trailer --- both rules at once.
+	# Each is then classified as the range check would classify it.
+	printf 'area: do a thing\n\nBody.\n\nValidation: cargo test, ok.\nThe line after it keeps the paragraph prose.\n' >"$work/m-ok"
+	printf 'area: do a thing\n\nBody.\n\nValidation: cargo test, ok.\n' >"$work/m-lone"
+	printf 'area: do a thing\n\nBody.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n' >"$work/m-coauthor"
+	for case in ok lone coauthor; do
+		(
+			cd "$work"
+			echo "$case" >>tracked
+			git add tracked
+			git commit -q -F "m-$case"
+		) >/dev/null 2>&1
+		sha=$(git -C "$work" rev-parse HEAD)
+		attr=$(git -C "$work" log -1 --format='%B' "$sha" | markers | tr '\n' ' ')
+		trail=$(git -C "$work" log -1 --format='%(trailers)' "$sha")
+		case "$case" in
+		ok)
+			if [ -n "$attr" ] || [ -n "$trail" ]; then
+				echo "self-test: the ok commit must pass both rules, got attribution [$attr] trailers [$trail]" >&2
+				fail=1
+			fi
+			;;
+		lone)
+			if [ -n "$attr" ]; then
+				echo "self-test: the lone-validation commit must pass attribution, got: $attr" >&2
+				fail=1
+			fi
+			if [ -z "$trail" ]; then
+				echo "self-test: the lone-validation commit must fail the trailers rule, got no block" >&2
+				fail=1
+			fi
+			;;
+		coauthor)
+			if [ -z "$attr" ]; then
+				echo "self-test: the co-authored commit must fail attribution, got nothing" >&2
+				fail=1
+			fi
+			if [ -z "$trail" ]; then
+				echo "self-test: the co-authored commit must fail the trailers rule, got no block" >&2
+				fail=1
+			fi
+			;;
+		esac
+	done
+	# And the epochs' own boundary: a712720's `Validation:` line is a
+	# git trailer and is NOT an attribution trailer, so the attribution
+	# rule must pass it and the trailers rule must reject it --- which
+	# is why it is the trailers epoch. Skipped when that commit is not
+	# present, so the self-test runs in a shallow clone rather than
+	# failing there.
 	if git cat-file -e a712720^{commit} 2>/dev/null; then
 		found=$(git log -1 --format=%B a712720 | markers | tr '\n' ' ')
 		if [ -n "$found" ]; then
-			echo "self-test: a712720 must pass under the restated rule, got: $found" >&2
+			echo "self-test: a712720 must pass the attribution rule, got: $found" >&2
+			fail=1
+		fi
+		block=$(trailer_block a712720)
+		if [ -z "$block" ]; then
+			echo "self-test: a712720 must carry a trailer block under git's parser, got none" >&2
 			fail=1
 		fi
 	fi
 	if [ "$fail" -eq 0 ]; then
-		echo "check-attribution: self-test ok"
+		echo "check-attribution: self-test ok (attribution and trailers)"
 	fi
 	return "$fail"
 }
@@ -132,31 +247,42 @@ else
 	usage
 fi
 
-if ! git cat-file -e "$EPOCH^{commit}" 2>/dev/null; then
-	echo "check-attribution: the D9 epoch $EPOCH is not in this clone;" >&2
-	echo "  fetch the full history (actions/checkout fetch-depth: 0)." >&2
-	exit 2
-fi
+for epoch in "$EPOCH" "$TRAILERS_EPOCH"; do
+	if ! git cat-file -e "$epoch^{commit}" 2>/dev/null; then
+		echo "check-attribution: the epoch $epoch is not in this clone;" >&2
+		echo "  fetch the full history (actions/checkout fetch-depth: 0)." >&2
+		exit 2
+	fi
+done
 
 commits=$(git rev-list "$range" "^$EPOCH")
 if [ -z "$commits" ]; then
 	echo "check-attribution: no commits in $range after $EPOCH; nothing to check"
 	exit 0
 fi
+# The trailers rule's reach is narrower by one epoch; a commit in the
+# range but reachable from `a712720` is checked for attribution only.
+trailer_commits=$(git rev-list "$range" "^$TRAILERS_EPOCH")
 
 status=0
 count=0
+trailer_count=0
 for sha in $commits; do
 	count=$((count + 1))
-	found=$(git log -1 --format='%B%n%an%n%ae%n%cn%n%ce' "$sha" | markers | tr '\n' ' ')
-	if [ -n "$found" ]; then
+	check_trail=no
+	# Full 40-hex shas, so a substring match is a membership test.
+	case "$trailer_commits" in
+	*"$sha"*)
+		check_trail=yes
+		trailer_count=$((trailer_count + 1))
+		;;
+	esac
+	if ! check_commit "$sha" yes "$check_trail"; then
 		status=1
-		echo "check-attribution: $sha carries attribution: $found" >&2
-		git log -1 --format='  %s' "$sha" >&2
 	fi
 done
 
 if [ "$status" -eq 0 ]; then
-	echo "check-attribution: $count commit(s) in $range after $EPOCH, none carrying attribution"
+	echo "check-attribution: $count commit(s) in $range after $EPOCH, none carrying attribution; $trailer_count after $TRAILERS_EPOCH, none carrying a trailer"
 fi
 exit "$status"
