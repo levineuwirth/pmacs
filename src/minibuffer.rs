@@ -59,6 +59,12 @@ pub const CANDIDATE_LIMIT: usize = 1024;
 /// Canonical name of the minibuffer's backing buffer.
 pub const MINIBUFFER_NAME: &str = "*minibuffer*";
 
+/// How many candidates a frontend shows at once: the grid's band above
+/// the prompt (E6.2) and the wire's windowed slice for a semantic
+/// frontend share this, so both paint the same window around the
+/// selection.
+pub const MB_VISIBLE: usize = 10;
+
 // ---------------------------------------------------------------------------
 // Minibuffer
 // ---------------------------------------------------------------------------

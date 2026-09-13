@@ -765,6 +765,38 @@ fn paint_popup_row(
     width: u32,
     selected: bool,
 ) {
+    paint_band_row(
+        cells,
+        item.kind.glyph(),
+        &item.label,
+        item.detail.as_deref(),
+        r,
+        abs_left,
+        width,
+        selected,
+    );
+}
+
+/// The popup's row painter, shared with the minibuffer's candidate
+/// band (E6.2): a full-width background, a one-character glyph in
+/// column 0, and `label` plus an optional two-space-separated `detail`
+/// from column 2, clipped to `width`; the selected row in reverse
+/// video. The popup passes its LSP kind glyph, the band a `/` for a
+/// directory and a blank otherwise.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one row of a cell grid: the geometry is the signature"
+)]
+pub(crate) fn paint_band_row(
+    cells: &mut CellGrid<'_>,
+    glyph: char,
+    label: &str,
+    detail: Option<&str>,
+    r: u32,
+    abs_left: u32,
+    width: u32,
+    selected: bool,
+) {
     let row_style = if selected {
         selected_style()
     } else {
@@ -778,18 +810,18 @@ fn paint_popup_row(
         cell.style = row_style;
         cell.attachment = None;
     }
-    // Column 0: kind glyph.
+    // Column 0: the glyph.
     let kind_cell = cells.at(CellCoord::new(r, abs_left));
-    kind_cell.glyph = Glyph::Char(item.kind.glyph());
+    kind_cell.glyph = Glyph::Char(glyph);
     kind_cell.style = if selected {
         selected_style()
     } else {
         kind_style()
     };
     // Columns 2..: label, optionally followed by the detail.
-    let mut text = String::with_capacity(item.label.len() + 4);
-    text.push_str(&item.label);
-    if let Some(detail) = item.detail.as_deref() {
+    let mut text = String::with_capacity(label.len() + 4);
+    text.push_str(label);
+    if let Some(detail) = detail {
         text.push_str("  ");
         text.push_str(detail);
     }
