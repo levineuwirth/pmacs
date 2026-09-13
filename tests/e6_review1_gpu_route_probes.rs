@@ -197,9 +197,12 @@ fn review_gpu_route_plain_typing_is_beyond_the_daemon_undo_and_so_beyond_e6_4() 
             r.insert(i, &ch.to_string()).expect("insert");
         });
     }
-    pump_until(&mut observer, Duration::from_secs(5), "observer hello", |o| {
-        o.text == "hello"
-    });
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer hello",
+        |o| o.text == "hello",
+    );
     // Move the daemon's cursor for `source` to the end, as the GPU's
     // own CursorByte round-trips would: End is a command chord.
     send_key(&mut source, Key::End, Modifiers::NONE);
@@ -207,9 +210,12 @@ fn review_gpu_route_plain_typing_is_beyond_the_daemon_undo_and_so_beyond_e6_4() 
     pump_until(&mut source, Duration::from_secs(5), "source hello()", |o| {
         o.text == "hello()"
     });
-    pump_until(&mut observer, Duration::from_secs(5), "observer hello()", |o| {
-        o.text == "hello()"
-    });
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer hello()",
+        |o| o.text == "hello()",
+    );
 
     send_key(&mut source, Key::Char('/'), Modifiers::CTRL);
     pump_until(&mut source, Duration::from_secs(5), "source hello(", |o| {
@@ -219,9 +225,12 @@ fn review_gpu_route_plain_typing_is_beyond_the_daemon_undo_and_so_beyond_e6_4() 
     pump_until(&mut source, Duration::from_secs(5), "source hello", |o| {
         o.text == "hello"
     });
-    pump_until(&mut observer, Duration::from_secs(5), "observer hello", |o| {
-        o.text == "hello"
-    });
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer hello",
+        |o| o.text == "hello",
+    );
 
     // The third undo: the word is source-peer history, beyond reach.
     send_key(&mut source, Key::Char('/'), Modifiers::CTRL);
