@@ -229,6 +229,12 @@ pub struct Buffer {
     undo: VecDeque<UndoEntry>,
     /// Redo stack. Cleared by any forward edit.
     redo: VecDeque<UndoEntry>,
+    /// CRDT mode (E6.4): a loro undo group is open on this buffer for a
+    /// run of typed self-inserts.
+    undo_group_open: bool,
+    /// CRDT mode (E6.4): the next edit is the typed one the core
+    /// announced; any other edit while the group is open cuts it.
+    undo_typed_pending: bool,
     /// Path this buffer is bound to on disk, if any (T M4.5 L1:
     /// relocated here from `EditorCore` so cross-file navigation can
     /// keep each buffer's identity straight — the v0.1 single-file
@@ -303,6 +309,8 @@ impl Buffer {
             next_mark_id: 0,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
+            undo_group_open: false,
+            undo_typed_pending: false,
             file_path: None,
             file_meta: None,
             editing_in_progress: false,
@@ -1255,6 +1263,22 @@ impl Buffer {
         views: &mut [(ViewId, Box<dyn View>)],
         current: &EditOp<'_>,
     ) -> Result<Edit, BufferError> {
+        // E6.4 (CRDT mode): an edit that is not the typed one the core
+        // announced cuts the open undo group BEFORE it reaches loro, so
+        // a hook's or a script's insert between two keystrokes is its
+        // own step, exactly as the typed flag makes it in v0.1 --- the
+        // auto-pair closer stays an adjacent unit of its own. Here and
+        // not in `apply_edit_inner`, because this is the one stage
+        // every local edit passes through, intercepts skipped or not.
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() && self.undo_group_open && !is_no_op_edit(current) {
+            if self.undo_typed_pending {
+                self.undo_typed_pending = false;
+            } else {
+                self.undo_group_end();
+            }
+        }
+
         // T M10.2: CRDT routing (Q2 defense-in-depth ordering — CRDT
         // first, then rope; if CRDT errors, abort before rope mutation).
         // The byte → str conversion uses `from_utf8_lossy` per the
@@ -1406,22 +1430,40 @@ impl Buffer {
     }
 
     /// CRDT mode (E6.4): open an undo group on loro's `UndoManager`,
-    /// closing any group already open, so the edits until
-    /// [`Self::undo_group_end`] undo as one step. A no-op in v0.1 mode,
-    /// where [`Self::note_typed_edit`] does the amalgamating.
-    pub fn undo_group_start(&self) {
+    /// closing any group already open, and announce that the next edit
+    /// is the typed one: the edits until [`Self::undo_group_end`] undo
+    /// as one step, except that any edit which is not an announced
+    /// typed one cuts the group first (see `apply_edit_inner`). A no-op
+    /// in v0.1 mode, where [`Self::note_typed_edit`] does the
+    /// amalgamating.
+    pub fn undo_group_start(&mut self) {
         #[cfg(feature = "crdt")]
         if let Some(crdt) = self.crdt.as_ref() {
             crdt.undo_group_start();
+            self.undo_group_open = true;
+            self.undo_typed_pending = true;
+        }
+    }
+
+    /// CRDT mode (E6.4): announce the next typed edit of a run whose
+    /// group is already open; when a foreign edit has cut it, open a
+    /// new one instead.
+    pub fn undo_group_continue(&mut self) {
+        if self.undo_group_open {
+            self.undo_typed_pending = true;
+        } else {
+            self.undo_group_start();
         }
     }
 
     /// CRDT mode (E6.4): close the open undo group, if any.
-    pub fn undo_group_end(&self) {
+    pub fn undo_group_end(&mut self) {
         #[cfg(feature = "crdt")]
         if let Some(crdt) = self.crdt.as_ref() {
             crdt.undo_group_end();
         }
+        self.undo_group_open = false;
+        self.undo_typed_pending = false;
     }
 
     /// How many undo steps the v0.1 stack holds; `None` in CRDT mode,

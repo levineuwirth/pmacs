@@ -248,6 +248,37 @@ fn typing_a_word_undoes_as_one_step_in_crdt_mode() {
     assert_eq!(text(&s), "", "the word, as one");
 }
 
+/// CRDT mode probe: an edit that is not a keystroke --- here a script's
+/// insert, the shape of an auto-pair closer --- cuts the group, so it
+/// undoes alone and the keystrokes after it form a new group, as in
+/// v0.1.
+#[cfg(feature = "crdt")]
+#[test]
+fn a_foreign_edit_cuts_the_group_in_crdt_mode() {
+    let mut s = fresh();
+    {
+        let core = s.core.borrow();
+        let id = core.active_buffer_id();
+        let mut reg = core.registry.borrow_mut();
+        reg.get_mut(id)
+            .expect("scratch")
+            .upgrade_to_crdt(1)
+            .expect("upgrade");
+    }
+    s.core.borrow_mut().pending_crdt_ops.clear();
+    type_str(&mut s, "ab");
+    exec(&s, "local b = pmacs.window.buffer() b:insert(2, 'X')");
+    exec(&s, "pmacs.editor.goto_byte(3)");
+    type_str(&mut s, "cd");
+    assert_eq!(text(&s), "abXcd");
+    undo(&mut s);
+    assert_eq!(text(&s), "abX", "the two typed after the script's insert");
+    undo(&mut s);
+    assert_eq!(text(&s), "ab", "the script's insert alone");
+    undo(&mut s);
+    assert_eq!(text(&s), "", "the two typed before it");
+}
+
 /// The cap: the v0.1 history keeps `UNDO_HISTORY_LIMIT` steps and
 /// forgets the oldest past it.
 #[test]

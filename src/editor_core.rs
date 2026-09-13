@@ -4998,20 +4998,24 @@ impl EditorCore {
     /// driven from the same `run` count so the two histories cut their
     /// groups at the same keystroke.
     pub fn typed_run_begin(&mut self, fid: FrontendId, limit: u32) {
-        let run = self.command_history.get(&fid).map_or(0, |e| e.run);
-        let first_of_group = limit == 0 || run % limit == 0;
-        if !first_of_group {
+        if limit == 0 {
+            self.undo_group_close();
             return;
         }
-        self.undo_group_close();
-        if limit == 0 {
-            return;
+        let run = self.command_history.get(&fid).map_or(0, |e| e.run);
+        let first_of_group = run.is_multiple_of(limit);
+        if first_of_group {
+            self.undo_group_close();
         }
         let buffer_id = self.active_buffer_id();
-        if let Ok(reg) = self.registry.try_borrow()
-            && let Ok(buffer) = reg.get(buffer_id)
+        if let Ok(mut reg) = self.registry.try_borrow_mut()
+            && let Ok(buffer) = reg.get_mut(buffer_id)
         {
-            buffer.undo_group_start();
+            if first_of_group {
+                buffer.undo_group_start();
+            } else {
+                buffer.undo_group_continue();
+            }
             self.undo_group = Some(buffer_id);
         }
     }
@@ -5022,7 +5026,7 @@ impl EditorCore {
     /// under CRDT, where the open group does it).
     pub fn typed_run_end(&mut self, fid: FrontendId, limit: u32, buffer_id: BufferId) {
         let run = self.command_history.get(&fid).map_or(0, |e| e.run);
-        let merge = limit != 0 && run % limit != 0;
+        let merge = limit != 0 && !run.is_multiple_of(limit);
         if let Ok(mut reg) = self.registry.try_borrow_mut()
             && let Ok(buffer) = reg.get_mut(buffer_id)
         {
@@ -5037,8 +5041,8 @@ impl EditorCore {
         let Some(buffer_id) = self.undo_group else {
             return;
         };
-        if let Ok(reg) = self.registry.try_borrow() {
-            if let Ok(buffer) = reg.get(buffer_id) {
+        if let Ok(mut reg) = self.registry.try_borrow_mut() {
+            if let Ok(buffer) = reg.get_mut(buffer_id) {
                 buffer.undo_group_end();
             }
             self.undo_group = None;
