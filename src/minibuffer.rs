@@ -266,33 +266,64 @@ impl Minibuffer {
             .is_some_and(|s| !s.candidates.is_empty())
     }
 
-    /// Replace the buffer contents with the currently-selected
-    /// candidate, leaving the session active so the user can continue
-    /// editing or accept. No-op when nothing is selected.
+    /// TAB (E6.3). Three steps, the first that changes the field wins,
+    /// leaving the session active so the user can keep typing or
+    /// accept:
+    ///
+    /// 1. The longest common prefix of every candidate, when it is
+    ///    longer than what is typed: `alp` over `alpha-one.txt` and
+    ///    `alpha-two.txt` becomes `alpha-`. A single candidate is its
+    ///    own prefix, so a unique match completes whole.
+    /// 2. Otherwise the selected candidate, when it differs from what is
+    ///    typed (D18: "TAB completes to the selection"), which is also
+    ///    what a fuzzy match reaches when no prefix extends.
+    /// 3. Otherwise, in a files prompt, when the typed name is a
+    ///    directory, a trailing `/`: the listing descends into it on
+    ///    the recompute that follows. So `su TAB TAB` is `sub/` with
+    ///    sub's entries as the candidates.
+    ///
+    /// In a files prompt every step edits the part after the last `/`
+    /// and keeps the directory part. No-op with no candidates. The
+    /// prefix is compared case-sensitively, so a case split in the
+    /// candidates (`Makefile`, `main.rs`) has no common prefix and
+    /// falls to the selection.
     pub fn complete(&mut self) {
-        let pick = self
-            .session
-            .as_ref()
-            .and_then(|s| s.selected.and_then(|i| s.candidates.get(i).cloned()));
-        let Some(pick) = pick else { return };
-        self.replace_base(&pick);
-    }
-
-    /// Replace the part of the field a candidate stands for: the whole
-    /// field, or for a files prompt the part after the last `/`, so a
-    /// completion keeps the directory the user is in.
-    fn replace_base(&mut self, text: &str) {
-        let files = self
-            .session
-            .as_ref()
-            .is_some_and(|s| matches!(s.source, CompletionSource::Files { .. }));
-        let contents = self.contents();
-        let next = if files {
-            let (dir, _) = split_dir_base(&contents);
-            format!("{dir}{text}")
-        } else {
-            text.to_owned()
+        let Some(s) = self.session.as_ref() else {
+            return;
         };
+        if s.candidates.is_empty() {
+            return;
+        }
+        let contents = self.contents();
+        let files_root = match &s.source {
+            CompletionSource::Files { root } => Some(root.clone()),
+            _ => None,
+        };
+        let (dir_part, base) = if files_root.is_some() {
+            split_dir_base(&contents)
+        } else {
+            ("", contents.as_str())
+        };
+        let prefix = common_prefix(&s.candidates);
+        let selected = s
+            .selected
+            .and_then(|i| s.candidates.get(i))
+            .map(String::as_str);
+        let next_base = if prefix.len() > base.len() {
+            prefix
+        } else if let Some(pick) = selected
+            && pick != base
+        {
+            pick.to_owned()
+        } else if let Some(root) = files_root.as_deref()
+            && !base.is_empty()
+            && listing_dir(root, dir_part).join(base).is_dir()
+        {
+            format!("{base}/")
+        } else {
+            return;
+        };
+        let next = format!("{dir_part}{next_base}");
         self.replace_contents(&next);
     }
 
@@ -676,6 +707,28 @@ fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
         return cand.clone();
     }
     typed.to_owned()
+}
+
+/// The longest prefix every string in `items` shares, by character,
+/// case-sensitively; empty for an empty list.
+#[must_use]
+pub fn common_prefix(items: &[String]) -> String {
+    let Some(first) = items.first() else {
+        return String::new();
+    };
+    let mut prefix: Vec<char> = first.chars().collect();
+    for item in &items[1..] {
+        let shared = prefix
+            .iter()
+            .zip(item.chars())
+            .take_while(|(a, b)| **a == *b)
+            .count();
+        prefix.truncate(shared);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix.into_iter().collect()
 }
 
 /// Split a files-prompt field at its last `/`: `("src/", "ma")` for
