@@ -671,6 +671,47 @@ at `b3660f2` for the reasons the pass gives and pass at this head, each
 with a rebuild between edit and run where the probe reaches a binary.
 No new red appeared in the round's gate or in this run.
 
+### PR #269's fix-round-4 tip run 34753854886 at `d93715d`
+
+Recorded from `main` on 2026-09-13, from the jobs endpoint.
+
+| field | value |
+|---|---|
+| run | 34753854886, `pull_request`, one attempt |
+| head | `d93715d`, two product fixes over `c629f8e`; the run tests the merge into `main` |
+| window | created 2026-09-13T11:13:00Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`; the push changed code |
+
+Tally (run-34753854886-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 103714801833 | success |
+| Changed paths | 103714801878 | success |
+| Lint (luajit) | 103714801903 | success |
+| Lint (lua54) | 103714801977 | success |
+| Format | 103714802033 | success |
+| GPU Render (headless) | 103714826722 | success |
+| Test (crdt) | 103714826724 | success |
+| M1 Acceptance Gates | 103714826738 | success |
+| M4 Perf Gates | 103714826742 | success |
+| M6 Perf Gates | 103714826755 | success |
+| M10 Perf Gates (crdt) | 103714826763 | success |
+| Test (macos-latest / lua54) | 103714826773 | success |
+| M5 Perf Gates | 103714826774 | success |
+| Test (ubuntu-latest / luajit) | 103714826784 | success |
+| Test (ubuntu-latest / lua54) | 103714826787 | success |
+| Test (macos-latest / luajit) | 103714826790 | success |
+| Perf budgets (debug) | 103714826791 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 103714826883 | success |
+| Docs consistency | 103714827466 | skipped |
+
+Both review-4 regressions fail at `c629f8e` for their stated reasons
+and pass with the fixes, rebuilt before running. The local protocol
+gate passed eight stages, with 4797/0/51 and 4481/0/37 over 133 targets
+in each sweep. No new red appeared. This sample retires no known red.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
