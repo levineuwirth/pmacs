@@ -812,6 +812,58 @@ result: ok`, so neither the `read Hello` family nor #259 sampled.
 
 Tally (run-34772792926-reds): 3 = 1 + 2.
 
+### PR #270's second head run 34774221987 at `e804b97`: U4's fourth and U17's seventh, the fixture fix confirmed
+
+Read at E6's close on 2026-09-13, from the jobs endpoint and the two
+macOS job logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 34774221987, `pull_request`, one attempt |
+| head | `e804b97`, the fixture fix over `e82fcb5`; the run tests the merge into `main` |
+| window | created 2026-09-13T18:18:33Z, updated 18:35:14Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`; the push changed code |
+
+Tally (run-34774221987-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 103769237122 | success |
+| Changed paths | 103769237214 | success |
+| Lint (lua54) | 103769237247 | success |
+| Format | 103769237261 | success |
+| Commit attribution (D9) | 103769237276 | success |
+| M5 Perf Gates | 103769261373 | success |
+| M1 Acceptance Gates | 103769261393 | success |
+| M4 Perf Gates | 103769261396 | success |
+| Perf budgets (debug) | 103769261414 | success |
+| M6 Perf Gates | 103769261415 | success |
+| Test (crdt) | 103769261420 | success |
+| Test (ubuntu-latest / luajit) | 103769261443 | success |
+| GPU Render (headless) | 103769261447 | success |
+| M10 Perf Gates (crdt) | 103769261452 | success |
+| Test (macos-latest / lua54) | 103769261471 | failure |
+| Test (macos-latest / luajit) | 103769261492 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 103769261504 | success |
+| Test (ubuntu-latest / lua54) | 103769261561 | success |
+| Docs consistency | 103769261961 | skipped |
+
+Two failing targets, one per red job, both known rows and neither
+this branch's: **U4's fourth** on `Test (macos-latest / lua54)`
+(103769261471) and **U17's seventh** on `Test (macos-latest /
+luajit)` (103769261492), each recorded on its row above. **The
+fixture fix is confirmed on the legs it failed on**: the two probes
+that reddened both macOS legs at `e82fcb5` pass on both here
+(`minibuffer_accept_acceptance`, `7 passed` in each job). `WouldBlock`
+appears zero times and `did not become ready` zero times in either
+job against 133 `test result: ok`, so neither the `read Hello` family
+nor #259 sampled. So the head is not green, on two rows with open
+diagnoses that predate the branch, and a merge decision inherits
+them as E3's inherited #259's fourth.
+
+Tally (run-34774221987-reds): 2 = 1 + 1.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
@@ -1174,7 +1226,7 @@ nothing retired it and the closure was void when written.
 | selector | `--test full_grid_resync_acceptance a_pty_resize_blanks_the_host_before_repainting` |
 | job | GitHub Actions, `Test (macos-latest / lua54)` **and** `Test (macos-latest / luajit)`. Flavor is NOT a matching key for this row: it was filed from one lua54 red and then reddened twice on luajit with identical fragments |
 | required fragments | `FG-INV: the post-resize resync must blank the host` + `no CSI 2 J appeared in the` + `bytes emitted after the first painted frame` |
-| occurrences | three, all before the void closure: PR #229 (lua54) and PR #231 attempts 1 and 2 (luajit), 2026-08-15 and earlier. Full evidence in this file's history before 2026-09-05, including #231's five-observation base control and why neither branch diff excludes itself. The Linux observation of 2026-09-07 is #255 and is NOT an occurrence of this row --- the job does not match; see the section below |
+| occurrences | four: three before the void closure --- PR #229 (lua54) and PR #231 attempts 1 and 2 (luajit), 2026-08-15 and earlier --- and the first since the row was reopened, PR #270 at `e804b97`, run 34774221987, job `Test (macos-latest / lua54)` (103769261471), `tests/full_grid_resync_acceptance.rs:126:13`, all three fragments (`no CSI 2 J appeared in the 30668 bytes emitted after the first painted frame`), `5 passed; 1 failed` in 20.29 s, the job's only failure against 133 `test result: ok`, recorded 2026-09-13 at E6's close and not rerun; the branch's diff touches no PTY, resize or resync code, which is an argument from untouched files and not a measurement. Full evidence in this file's history before 2026-09-05, including #231's five-observation base control and why neither branch diff excludes itself. The Linux observation of 2026-09-07 is #255 and is NOT an occurrence of this row --- the job does not match; see the section below |
 | candidate mechanism | none. No blank was OBSERVED after the mark within the test's fixed 20 s deadline; whether it was never emitted, emitted late, or lost in transport is open, and the deliberate reintroduction of the genuine resync defect produces signature-indistinguishable output, so the fragments cannot discriminate a fixture race from a product regression |
 | retirement | producer-side emission evidence cross-checked against the collected stream. A longer deadline concludes in one direction only: if the clear arrives, "emitted late" is established; if it does not, that is "not observed by the longer deadline" and nothing more. Never a green rerun |
 
@@ -1203,11 +1255,11 @@ never shut.
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
 | job | GitHub Actions: first the serialized crdt sweep (`--test-threads=1`), since then `Test (macos-latest / luajit)` twice and `Test (ubuntu-latest / luajit)` once, all three under cargo's default parallelism. The job is not a discriminator for this row and a match needs the selector and the fragment on any CI test leg |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | six: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`; `main` at `dbe40a1`, run 34349759554 (E1's post-merge run), job `Test (macos-latest / luajit)` (102459915513), `tests/m8_1_acceptance.rs:278:5`, `assertion left == right failed: first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed`, the job's only failure against 119 `test result: ok`; and PR #269 review 2's gate at `95a6db4`, log `20260911T102129Z-2474066`, step `sweep-luajit` (the non-CRDT sweep under `--no-default-features --features luajit`), `tests/m8_1_acceptance.rs:278`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 0.33 s, the step's only failure, not rerun; and PR #270 at `e82fcb5`, run 34772792926, job `Test (macos-latest / luajit)` (103765362433), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.34 s, recorded at E6's close on 2026-09-13 and not rerun (the job's other red is the branch's own fixture defect, below). The second, third and fourth run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so are its third, fourth and fifth. Green runs are samples: non-reproduction and nothing more. The fourth occurrence is on `main` after two merges that did not touch `src/dispatch` or `tests/m8_1_acceptance.rs`, which is an argument from untouched files and not a measurement; it is the row's third occurrence on `main` and the second on this leg. The fifth is the gate's non-CRDT sweep on the reviewed head, not CI, and it establishes neither cause nor the branch's innocence; it is recorded here as an occurrence because the selector and the required fragment match exactly |
+| occurrences | seven: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`; `main` at `dbe40a1`, run 34349759554 (E1's post-merge run), job `Test (macos-latest / luajit)` (102459915513), `tests/m8_1_acceptance.rs:278:5`, `assertion left == right failed: first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed`, the job's only failure against 119 `test result: ok`; and PR #269 review 2's gate at `95a6db4`, log `20260911T102129Z-2474066`, step `sweep-luajit` (the non-CRDT sweep under `--no-default-features --features luajit`), `tests/m8_1_acceptance.rs:278`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 0.33 s, the step's only failure, not rerun; and PR #270 at `e82fcb5`, run 34772792926, job `Test (macos-latest / luajit)` (103765362433), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.34 s, recorded at E6's close on 2026-09-13 and not rerun (the job's other red is the branch's own fixture defect, below); and PR #270 at `e804b97`, run 34774221987, the very next head, job `Test (macos-latest / luajit)` (103769261492), `tests/m8_1_acceptance.rs:278:5`, the same fragment, `9 passed; 1 failed` in 1.93 s, the job's only failure against 133 `test result: ok` --- the same fragments on the next run are a second occurrence, not a coincidence, and this row now has two on consecutive heads of one PR whose diff touches neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, an argument from untouched files and not a measurement. The second, third and fourth run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so are its third, fourth and fifth. Green runs are samples: non-reproduction and nothing more. The fourth occurrence is on `main` after two merges that did not touch `src/dispatch` or `tests/m8_1_acceptance.rs`, which is an argument from untouched files and not a measurement; it is the row's third occurrence on `main` and the second on this leg. The fifth is the gate's non-CRDT sweep on the reviewed head, not CI, and it establishes neither cause nor the branch's innocence; it is recorded here as an occurrence because the selector and the required fragment match exactly |
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
-Tally (U17): 6 = 5 + 1.
+Tally (U17): 7 = 6 + 1.
 
 ### U19 — a terminal bell not observed within a 5 s poll
 
