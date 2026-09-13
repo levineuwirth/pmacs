@@ -852,9 +852,8 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
         // Read half of the `listview.rerender` seam above: the 0-based
         // line index holding the cursor of the window in the acting
         // frontend's layout that shows `buffer`, or nil when no live
-        // window shows it. Lets a test observe a background panel's
-        // retained selection without focusing it (focusing re-seats
-        // the cursor through the display transaction).
+        // window shows it. Captures a background panel's live selection
+        // before rerender replaces its contents, without changing focus.
         let cc = core.clone();
         win.set(
             "_cursor_line_on_buffer",

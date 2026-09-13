@@ -552,20 +552,6 @@ local function ensure_panel(name, key_entries)
   return p
 end
 
--- The last selection this panel held, as a stable row id plus its
--- numeric line for the defined fallback. Cursor motion through n/p
--- leaves no trace here; it is refreshed on open, manual refresh and
--- every automatic rerender while the panel is active, which is exactly
--- when the user could have moved it. A background publication then
--- reseats the still-correct id.
-local function note_selection(p)
-  if pmacs.window.buffer() ~= p.buffer then return end
-  local line = pmacs.editor.cursor_line()
-  local row = p.line_to_row[line]
-  p.selected_id = row and row.id or nil
-  p.selected_line = line
-end
-
 function pmacs.listview.open(spec)
   assert(type(spec) == "table" and type(spec.name) == "string",
     "listview.open: spec.name (string) required")
@@ -613,7 +599,6 @@ function pmacs.listview.open(spec)
     pmacs.window.switch_buffer(p.buffer)
   end
   seat_cursor(p, 1)
-  note_selection(p)
 end
 
 -- Re-run the data source of the panel opened under `name` and re-render
@@ -633,22 +618,21 @@ function pmacs.listview.rerender(name)
   local p = panel_for_requested_name(name)
   if not (p and p.on_refresh) then return false end
   local focused = pmacs.window.buffer() == p.buffer
-  local saved_id, saved_line
+  local saved_line
   if focused then
     saved_line = pmacs.editor.cursor_line()
-    local row = p.line_to_row[saved_line]
-    saved_id = row and row.id
   else
-    saved_id, saved_line = p.selected_id, p.selected_line
+    -- Read the window before replacing its contents: motion followed
+    -- by a focus change must retain the row the user actually selected.
+    saved_line = pmacs.window._cursor_line_on_buffer(p.buffer)
   end
+  local saved_row = saved_line and p.line_to_row[saved_line]
+  local saved_id = saved_row and saved_row.id
   local rows = check_ids(p.on_refresh() or {})
   p.rows = rows
   render(p, rows)
   local target = (saved_id ~= nil and line_of_id(p, saved_id)) or saved_line
-  if target == nil then
-    p.selected_id, p.selected_line = nil, nil
-    return true
-  end
+  if target == nil then return true end
   if (p.visible or 0) == 0 then return true end
   target = math.max(1, math.min(target, p.visible))
   if focused then
@@ -664,9 +648,6 @@ function pmacs.listview.rerender(name)
     -- a 0-based buffer line, matching the binding.
     pmacs.window._reseat_window_on_buffer(p.buffer, target)
   end
-  local row = p.line_to_row[target]
-  p.selected_id = row and row.id or nil
-  p.selected_line = target
   return true
 end
 
@@ -678,18 +659,6 @@ function pmacs.listview.current_item()
   local p = active_panel()
   if not p then return nil end
   return p.line_to_item[pmacs.editor.cursor_line()]
-end
-
--- Record the active panel's current row as its retained selection, so
--- a later background `rerender` reseats the row the user actually
--- holds. Needed by consumers that move the cursor after `open`
--- returns (the diagnostics panel seats its first data row itself);
--- `open`, manual refresh and automatic rerender note it themselves.
-function pmacs.listview.retain_selection()
-  local p = active_panel()
-  if not p then return false end
-  note_selection(p)
-  return true
 end
 
 -- The requested name of the panel the active window shows, or nil.
@@ -731,7 +700,6 @@ pmacs.command.define {
     pmacs.editor.set_view_top(0)
     pmacs.editor.move_to_line(0)
     seat_cursor(p, line_of_id(p, saved_id) or saved)
-    note_selection(p)
   end,
 }
 

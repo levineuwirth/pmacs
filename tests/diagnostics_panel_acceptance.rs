@@ -329,7 +329,9 @@ while True:
     elif method == 'textDocument/didOpen':
         doc = msg['params']['textDocument']
         text = doc.get('text', '')
-        if 'duplicate' in text:
+        if 'exactduplicate' in text:
+            diagnostics = [diag(0,4,'exact duplicate'), diag(0,4,'exact duplicate')]
+        elif 'duplicate' in text:
             diagnostics = [diag(0,4,'first at shared position'), diag(0,4,'second at shared position',2)]
         else:
             diagnostics = [diag(2,0,'selected target')]
@@ -639,4 +641,111 @@ fn review_project_section_excludes_an_unrelated_root() {
         !text.contains("unrelated.rs"),
         "other root leaked into Project: {text}"
     );
+}
+
+fn focus_next(state: &mut EditorState) {
+    press(state, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    press(state, KeyCode::Char('o'), KeyModifiers::NONE);
+}
+
+fn republish(state: &mut EditorState, text: &str) {
+    state
+        .lua_host
+        .lua()
+        .globals()
+        .set("REVIEW_TEXT", text)
+        .unwrap();
+    exec(
+        state,
+        r"
+        REVIEW_PUBLISHED = false
+        pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISHED = true end)
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, REVIEW_TEXT)
+    ",
+    );
+    ready::tick_until(state, "diagnostic republication", ready::DEADLINE, |s| {
+        if eval::<bool>(s, "return REVIEW_PUBLISHED") {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending("awaiting publish".to_owned())
+        }
+    });
+}
+
+#[test]
+fn review4_background_publish_preserves_selection_after_navigation_and_blur() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    let mut state = editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 2);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    assert!(panel_text(&state).contains("This buffer (2):"));
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.listview.current_item().line"),
+        0
+    );
+    press(&mut state, KeyCode::Char('n'), KeyModifiers::NONE);
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.listview.current_item().line"),
+        2,
+        "the user has selected the second diagnostic before leaving the panel"
+    );
+    focus_next(&mut state);
+    assert!(eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("main.rs"));
+    let doc_line: i64 = eval(&state, "return pmacs.editor.cursor_line()");
+    republish(&mut state, "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.editor.cursor_line()"),
+        doc_line
+    );
+    assert!(eval::<String>(&state, "return pmacs.window.buffer():name()").ends_with("main.rs"));
+    focus_next(&mut state);
+    assert_eq!(
+        eval::<String>(&state, "return pmacs.window.buffer():name()"),
+        "*diagnostics*"
+    );
+    press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
+    let (name, line): (String, i64) = eval(
+        &state,
+        "return pmacs.window.buffer():name(), pmacs.editor.cursor_line()",
+    );
+    assert!(name.ends_with("main.rs"));
+    assert_eq!(
+        line, 2,
+        "RET after n, C-x o, publish, C-x o must visit the selected second diagnostic"
+    );
+}
+
+#[test]
+fn review4_exact_duplicate_diagnostics_open_and_republish() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let content = "fn main() {} // exactduplicate\nlet x = 1;\nlet y = 2;\n";
+    let file = fx.write("proj/src/main.rs", content);
+    let mut state = review3_editor(&fx);
+    open(&state, &file);
+    wait_diag_count(&mut state, &file, 2);
+    exec(&state, "REVIEW_ATTACHMENT = pmacs.lsp.active_attachment()");
+    m_x(&mut state, "lsp.diagnostics");
+    let text = panel_text(&state);
+    assert!(text.contains("This buffer (2):"), "{text}");
+    assert_eq!(text.matches("exact duplicate").count(), 2);
+    press(&mut state, KeyCode::Char('n'), KeyModifiers::NONE);
+    assert_eq!(eval::<i64>(&state, "return pmacs.editor.cursor_line()"), 3);
+    republish(&mut state, content);
+    assert_eq!(
+        eval::<i64>(&state, "return pmacs.editor.cursor_line()"),
+        3,
+        "the occurrence discriminator keeps the second exact duplicate selectable"
+    );
+    press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
+    let (name, line, col): (String, i64, i64) = eval(
+        &state,
+        "return pmacs.window.buffer():name(), pmacs.editor.cursor_line(), pmacs.editor.cursor_col()",
+    );
+    assert!(name.ends_with("main.rs"));
+    assert_eq!((line, col), (0, 4));
 }
