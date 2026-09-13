@@ -906,6 +906,52 @@ Tally (run-34779061403-reds): 4 = 2 + 1 + 1.
 
 The superseded head `8e57fa1` ran as 34778589012, cancelled by the `c844de9` push after its `Lint (luajit)` leg had already failed on this round's own committed probe (`manual_assert` in `e6_review1_undo_probes.rs:66` without `crdt`, reproduced locally by the leg's exact command, fixed at `c844de9`); this run's `Lint (luajit)` leg is green, confirming the fix. U4's and U17's selectors all pass on this run --- green samples, non-reproduction and nothing more, and neither count moves. **So the head is not green, on #271 alone**, and a merge decision inherits it the way the previous head inherited U4's fourth and U17's seventh.
 
+### `main` after E6: run 34785311008 at `c177173`, and it is GREEN
+
+Read at E6b's opening on 2026-09-13, from the jobs endpoint and the
+two macOS job logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 34785311008, `push`, one attempt |
+| head | `c177173`, E6's squash merge (PR #270 at `c844de9`, `--match-head-commit`) |
+| window | created 2026-09-13T21:56:53Z, updated 22:19:11Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+Tally (run-34785311008-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 103799593193 | success |
+| Lint (lua54) | 103799593314 | success |
+| Format | 103799593317 | success |
+| Commit attribution (D9) | 103799593368 | success |
+| Changed paths | 103799593408 | success |
+| M5 Perf Gates | 103799610328 | success |
+| M1 Acceptance Gates | 103799610342 | success |
+| Test (crdt) | 103799610358 | success |
+| M4 Perf Gates | 103799610361 | success |
+| GPU Render (headless) | 103799610381 | success |
+| Test (macos-latest / luajit) | 103799610382 | success |
+| Perf budgets (debug) | 103799610384 | success |
+| Test (ubuntu-latest / lua54) | 103799610388 | success |
+| M10 Perf Gates (crdt) | 103799610390 | success |
+| M6 Perf Gates | 103799610399 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 103799610449 | success |
+| Test (ubuntu-latest / luajit) | 103799610515 | success |
+| Test (macos-latest / lua54) | 103799610533 | success |
+| Docs consistency | 103799610877 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 103799610382,
+`Test (macos-latest / lua54)` 103799610533) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 138 `test result:
+ok` and zero `FAILED` in each. So neither the `read Hello` family, nor
+#259, nor U4, nor U17, nor #271 sampled on this trunk run; every count
+stands where the PR #270 sections left it, and under the rerun rule a
+green sample retires nothing. This is the base control for E6b: the
+last code-bearing commit on `main`, with a full matrix run of its own.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
