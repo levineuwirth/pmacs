@@ -74,9 +74,13 @@ fn fresh(crdt: bool) -> EditorState {
                 .upgrade_to_crdt(1)
                 .expect("upgrade");
         }
-        #[cfg(not(feature = "crdt"))]
-        panic!("a CRDT row needs the crdt feature");
     }
+    // Aside from the upgrade above (compiled out without `crdt`), the
+    // two arms agree; the bare `assert!` keeps the no-`crdt` build free
+    // of clippy's `manual_assert` (an `if` whose only content is a
+    // `panic!`), which CI denies on its luajit legs.
+    #[cfg(not(feature = "crdt"))]
+    assert!(!crdt, "a CRDT row needs the crdt feature");
     s.core.borrow_mut().pending_crdt_ops.clear();
     s
 }
