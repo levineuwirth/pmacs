@@ -128,5 +128,33 @@ whole. Under one cap a growing register squeezes the rules.
   nothing here makes it worse, and the preview asks for no chord the
   grid does not also have. Removed when E11 puts `WindowTree` and
   `WindowFacts` on the wire and the GPU paints more than one document
-  window, at which point the preview is visible on both and this entry
-  becomes a statement that the two frontends agree.
+   window, at which point the preview is visible on both and this entry
+   becomes a statement that the two frontends agree.
+- **GPU plain typing is beyond the daemon's peer-bound undo (E6.4).**
+  What a GPU user sees: after typing a word, the undo chord does
+  nothing --- the word stays, where a TUI user's same word undoes as
+  one step. A GPU user's ordinary keystrokes never become `TextInput`
+  (`text_input_payload` returns `None` for a single scalar; only
+  multi-scalar IME / dead-key commits travel that way) and instead
+  reach the daemon as optimistic `FrontendEvent::CrdtOp`s on the GPU's
+  own loro peer --- the daemon's own "the bulk of plain-char typing".
+  The daemon re-classifies each as `buffer.self-insert` for the
+  command boundary, but the op stays on the source peer, and the
+  daemon's `UndoManager` is bound to the daemon's peer, so E6.4's
+  amalgamation (loro `group_start` / `group_end`) never records a GPU
+  user's typed characters and the bound undo never reaches them.
+  E6.4 is therefore met for the TUI and the daemon-peer path and
+  declared divergent for GPU plain typing. Witnessed by
+  `tests/e6_review1_gpu_route_probes.rs` (the gap: five optimistic ops
+  survive the bound undo while a round-tripped paren still peels)
+  against `tests/e6_review1_undo_probes.rs` (the daemon-peer histories
+  agreeing step-for-step). Accepted because the cross-peer gap
+  predates E6.4 and closing it is substrate work already on the
+  backlog ("Undo-group boundaries (`begin/end_undo_group`) +
+  cross-peer chronological undo arbiter", `docs/side-quest-backlog.md`
+  lines 144--146), not this row's charge --- so no issue is filed
+  here, the backlog item is cited instead. Removed when that arbiter
+  lands and the GPU-route probe's third undo empties the buffer, not
+  by E11: E11's per-buffer replicas re-cut the replication ground and
+  this entry is re-checked there, but E11 carries no undo row, so its
+  redesign does not by itself arbitrate cross-peer history.
