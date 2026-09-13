@@ -1281,8 +1281,10 @@ impl Buffer {
         // auto-pair closer stays an adjacent unit of its own. Here and
         // not in `apply_edit_inner`, because this is the one stage
         // every local edit passes through, intercepts skipped or not.
-        #[cfg(feature = "crdt")]
-        if self.crdt.is_some() && !is_no_op_edit(current) {
+        // Not feature-gated: a group is opened only in CRDT mode, so
+        // without the feature this is inert, and every state is
+        // constructed in every build the lints see.
+        if !is_no_op_edit(current) {
             match self.undo_group {
                 UndoGroup::Closed => {}
                 UndoGroup::AwaitingTyped => self.undo_group = UndoGroup::Open,
@@ -1970,8 +1972,8 @@ fn derive_replacement_edit(old_rope: &Rope, new_rope: &Rope) -> (Range, u64) {
 /// both) that the CRDT must observe to keep the rope ≡ projection
 /// invariant. The rope path's own no-op short-circuit handles the
 /// truly-empty cases AFTER the rope mutation runs; this helper lets
-/// the CRDT path skip the round-trip BEFORE the rope runs.
-#[cfg(feature = "crdt")]
+/// the CRDT path skip the round-trip BEFORE the rope runs, and the undo
+/// group cut (E6.4) decide before either.
 fn is_no_op_edit(op: &EditOp<'_>) -> bool {
     match op {
         EditOp::Insert { bytes, .. } => bytes.is_empty(),
