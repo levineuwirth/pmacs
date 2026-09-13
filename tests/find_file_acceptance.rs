@@ -299,10 +299,12 @@ fn find_file_accepting_a_directory_opens_it_in_dired() {
         vec!["sub".to_string()],
         "fixture premise: the directory must be the sole candidate"
     );
+    // The typed name is already the whole candidate, so TAB's third
+    // step (E6.3) descends into the directory rather than completing.
     press(&mut s, KeyCode::Tab);
     assert!(
-        contents(&s).ends_with("/sub"),
-        "TAB completes the base to the selection; got {:?}",
+        contents(&s).ends_with("/sub/"),
+        "TAB on a complete directory name descends; got {:?}",
         contents(&s)
     );
 

@@ -286,8 +286,14 @@ fn tab_descends_two_levels() {
     press(&mut s, KeyCode::Tab);
     assert_eq!(
         contents(&s),
+        format!("{prefill}one/two"),
+        "an empty base completes to the unique entry first"
+    );
+    press(&mut s, KeyCode::Tab);
+    assert_eq!(
+        contents(&s),
         format!("{prefill}one/two/"),
-        "a unique directory: one TAB completes, the next descends; here the name was already complete"
+        "and the next TAB descends"
     );
     assert_eq!(candidates(&s), vec!["leaf.txt".to_string()]);
 }
