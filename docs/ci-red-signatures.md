@@ -952,6 +952,54 @@ stands where the PR #270 sections left it, and under the rerun rule a
 green sample retires nothing. This is the base control for E6b: the
 last code-bearing commit on `main`, with a full matrix run of its own.
 
+### PR #272's head run 34791193724 at `3003ca9`, and it is GREEN
+
+E6b's first and only head, read at C6b on 2026-09-14 from the jobs
+endpoint and the two macOS job logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 34791193724, `pull_request`, one attempt |
+| head | `3003ca9`, `e6b/styling-under-edit` (base `c177173`) |
+| window | created 2026-09-13T23:58:09Z, updated 2026-09-14T00:20:14Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-34791193724-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 103815610606 | success |
+| Format | 103815610694 | success |
+| Commit attribution (D9) | 103815610705 | success |
+| Changed paths | 103815610711 | success |
+| Lint (lua54) | 103815610717 | success |
+| GPU Render (headless) | 103815627199 | success |
+| Test (crdt) | 103815627221 | success |
+| M5 Perf Gates | 103815627222 | success |
+| M4 Perf Gates | 103815627223 | success |
+| M10 Perf Gates (crdt) | 103815627225 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 103815627227 | success |
+| Test (ubuntu-latest / luajit) | 103815627230 | success |
+| Test (macos-latest / lua54) | 103815627236 | success |
+| Perf budgets (debug) | 103815627237 | success |
+| M1 Acceptance Gates | 103815627249 | success |
+| Test (ubuntu-latest / lua54) | 103815627251 | success |
+| Test (macos-latest / luajit) | 103815627266 | success |
+| M6 Perf Gates | 103815627299 | success |
+| Docs consistency | 103815627980 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 103815627266,
+`Test (macos-latest / lua54)` 103815627236) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 140 `test result:
+ok` and zero `FAILED` in each. The branch's new GPU probe row
+(`e6b_gpu_typing_probe_acceptance`) reports `6 passed` in 3.85 s and
+2.74 s on those legs and 2.04 s on `Test (crdt)`, elapsed times a
+daemon spawn and a real probe take and a skip does not. So neither the
+`read Hello` family, nor #259, nor U4, nor U17, nor #271 sampled; every
+count stands where the PR #270 sections left it, and under the rerun
+rule a green sample retires nothing.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
