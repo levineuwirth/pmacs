@@ -1694,6 +1694,18 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     };
 
     let mark = typing_probe_mark();
+    // Closure witnesses drive deletion and the same Paste sender used
+    // after an OS clipboard read, without touching the user's clipboard.
+    let action = std::env::var("PMACS_GPU_PROBE_ACTION").unwrap_or_default();
+    let select_bytes = std::env::var("PMACS_GPU_PROBE_SELECT_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let observe_ms = std::env::var("PMACS_GPU_PROBE_OBSERVE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut selection_sent = false;
     let type_at = std::env::var("PMACS_GPU_PROBE_TYPE_AT")
         .ok()
         .and_then(|value| value.parse::<u64>().ok());
@@ -1705,6 +1717,9 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     // marking it (`xstd` resolves to nothing), so covering never comes.
     let settle_on_change = std::env::var("PMACS_GPU_PROBE_SETTLE").is_ok_and(|v| v == "change");
     let started = std::time::Instant::now();
+    let started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_millis());
     let ms = |t: std::time::Instant| {
         u64::try_from(t.duration_since(started).as_millis()).unwrap_or(u64::MAX)
     };
@@ -1738,7 +1753,11 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     while std::time::Instant::now() < deadline {
         let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(100)) else {
             let now = std::time::Instant::now();
-            if settled_at.is_some() && now.duration_since(last_styling_at) >= settle_quiet {
+            if settled_at.is_some()
+                && now.duration_since(last_styling_at) >= settle_quiet
+                && typed_at
+                    .is_some_and(|t| now.duration_since(t).as_millis() >= u128::from(observe_ms))
+            {
                 break;
             }
             if let Some(t) = typed_at
@@ -1788,6 +1807,7 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 continue;
             };
             if let Some(at) = type_at
+                && !selection_sent
                 && cursor.byte != at
             {
                 if !walked && let Some(client) = app.attach_client.as_ref() {
@@ -1798,11 +1818,37 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 }
                 continue;
             }
+            if select_bytes > 0 {
+                if !selection_sent {
+                    selection_sent = true;
+                    if let Some(client) = app.attach_client.as_ref() {
+                        let _ = client.send_key(ProtocolKey::Char(' '), Modifiers::CTRL);
+                        for _ in 0..select_bytes {
+                            let _ = client.send_key(ProtocolKey::Right, Modifiers::NONE);
+                        }
+                    }
+                    continue;
+                }
+                if cursor.byte != type_at.unwrap_or(0) + select_bytes {
+                    continue;
+                }
+            }
             typed_at_byte = cursor.byte;
-            for ch in text.chars() {
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                app.apply_keyboard(&Key::Character(s.into()), Some(s));
+            match action.as_str() {
+                "delete" => app.apply_keyboard(&Key::Named(NamedKey::Delete), None),
+                "backspace" => app.apply_keyboard(&Key::Named(NamedKey::Backspace), None),
+                "paste" => {
+                    if let Some(client) = app.attach_client.as_ref() {
+                        let _ = client.send_paste(text.as_bytes().to_vec());
+                    }
+                }
+                _ => {
+                    for ch in text.chars() {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                    }
+                }
             }
             let t = std::time::Instant::now();
             typed_at = Some(t);
@@ -1819,12 +1865,19 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             })
         {
             settled_at = Some(now);
-        } else if settled_at.is_some() && now.duration_since(last_styling_at) >= settle_quiet {
+        } else if settled_at.is_some()
+            && now.duration_since(last_styling_at) >= settle_quiet
+            && typed_at.is_some_and(|t| now.duration_since(t).as_millis() >= u128::from(observe_ms))
+        {
             break;
         }
     }
 
     let mut out = String::new();
+    let _ = writeln!(out, "started_unix_ms={started_unix_ms}");
+    if let Some(state) = app.state.as_ref() {
+        let _ = writeln!(out, "final_text_debug={:?}", state.current_text);
+    }
     let _ = writeln!(out, "session_protocol_version={session_protocol_version}");
     let _ = writeln!(out, "typed_text={text}");
     let _ = writeln!(out, "typed_at_byte={typed_at_byte}");
