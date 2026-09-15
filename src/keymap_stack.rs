@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use crate::buffer::BufferId;
 use crate::key::{Chord, Sequence, display_sequence};
 use crate::keymap_tree::{Binding, Keymap, KeymapError, Resolution};
+use crossterm::event::KeyCode;
 
 // ---------------------------------------------------------------------------
 // Scope identifier
@@ -390,11 +391,48 @@ impl KeyDispatcher {
                 sequence: self.pending.clone(),
             },
             StackResolution::Unbound => {
+                // Emacs's `translate-upper-case-key-bindings` (E6c):
+                // an unbound sequence whose final chord is a shifted
+                // letter is retried with the letter lowered, so `C-x U`
+                // runs what `C-x u` runs. Only after a prefix --- a
+                // lone unbound letter is self-insert, and `U` must
+                // insert `U`.
+                if self.pending.len() > 1
+                    && let Some(lowered) = lowercase_last(&self.pending)
+                    && let StackResolution::Bound(rb) =
+                        stack.resolve(&lowered, active_buffer, active_modes)
+                {
+                    self.pending.clear();
+                    return Action::Run {
+                        command: rb.binding.command,
+                        sequence: lowered,
+                        scope: rb.scope,
+                    };
+                }
                 let sequence = std::mem::take(&mut self.pending);
                 Action::Unbound { sequence }
             }
         }
     }
+}
+
+/// `sequence` with its last chord's upper-case ASCII letter lowered,
+/// when it is one; `None` otherwise.
+fn lowercase_last(sequence: &[Chord]) -> Option<Sequence> {
+    let last = sequence.last()?;
+    let KeyCode::Char(ch) = last.code else {
+        return None;
+    };
+    if !ch.is_ascii_uppercase() {
+        return None;
+    }
+    let mut lowered = sequence.to_vec();
+    lowered.pop();
+    lowered.push(Chord::new(
+        KeyCode::Char(ch.to_ascii_lowercase()),
+        last.modifiers,
+    ));
+    Some(lowered)
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +598,37 @@ mod tests {
             other => panic!("expected Unbound, got {other:?}"),
         }
         assert!(d.pending().is_empty());
+    }
+
+    /// E6c: `C-x U` runs `C-x u`'s command, as Emacs lowers an unbound
+    /// shifted letter after a prefix; a lone `U` stays unbound, which
+    /// is what makes it self-insert.
+    #[test]
+    fn an_unbound_shifted_letter_after_a_prefix_runs_the_lowercase_binding() {
+        let mut s = KeymapStack::new();
+        s.bind_global(&seq("C-x u"), "buffer.undo", src(1)).unwrap();
+        let mut d = KeyDispatcher::new();
+        let cx = parse_sequence("C-x").unwrap()[0];
+        let upper = parse_sequence("U").unwrap()[0];
+        let _ = d.dispatch(cx, &s, None, &[]);
+        match d.dispatch(upper, &s, None, &[]) {
+            Action::Run {
+                command, sequence, ..
+            } => {
+                assert_eq!(command, "buffer.undo");
+                assert_eq!(
+                    sequence,
+                    seq("C-x u"),
+                    "the sequence that fired is the lowered one"
+                );
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+        assert!(d.pending().is_empty());
+        match d.dispatch(upper, &s, None, &[]) {
+            Action::Unbound { sequence } => assert_eq!(sequence, vec![upper]),
+            other => panic!("a lone U is unbound (self-insert), got {other:?}"),
+        }
     }
 
     #[test]
