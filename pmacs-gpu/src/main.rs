@@ -1538,18 +1538,234 @@ fn probe_scroll_top(app: &App) -> usize {
 }
 
 /// `--headless-probe`'s entry: the typing probe when
-/// `PMACS_GPU_PROBE_TYPE_TEXT` names text to type, else the generic
-/// observation loop. E6b.3's probe is its own loop because it owns the
-/// state and the client through the production `App` for its whole
-/// run, which the generic loop cannot: that loop reads both directly.
+/// `PMACS_GPU_PROBE_TYPE_TEXT` names text to type --- or, with
+/// `PMACS_GPU_PROBE_ACTION=undo`, the undo probe (E6c.3) --- else the
+/// generic observation loop. E6b.3's probe is its own loop because it
+/// owns the state and the client through the production `App` for
+/// its whole run, which the generic loop cannot: that loop reads both
+/// directly. The undo probe is its own loop for the same reason.
 fn run_probe(socket: &Path, report: &Path) -> i32 {
     match std::env::var_os("PMACS_GPU_PROBE_TYPE_TEXT")
         .and_then(|value| value.into_string().ok())
         .filter(|value| !value.is_empty())
     {
+        Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "undo") => {
+            run_undo_probe(socket, report, &text)
+        }
         Some(text) => run_typing_probe(socket, report, &text),
         None => run_headless_probe(socket, report),
     }
+}
+
+/// E6c.3 --- type text through the production `App` dispatch, the way
+/// a GPU user's plain characters go (optimistic `CrdtOp`s on this
+/// frontend's own peer), then press `C-x U` the way the user does, and
+/// report what the mirror holds afterward.
+///
+/// The chord is two keystrokes with the daemon between them: `C-x`
+/// round-trips, the daemon reports a pending prefix (`dispatch_idle`
+/// goes false), and only then is `U` pressed --- shifted, as the
+/// owner's finger has it --- so it round-trips too instead of being
+/// typed. The daemon's arbiter then pops this frontend's last group
+/// and broadcasts its compensation; the mirror imports it like any
+/// edit, and the text goes. Nothing is asserted here; the acceptance
+/// reads the report. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the run
+/// (30 s by default).
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-type-chord-observe session, reported line by line"
+)]
+fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    /// Where the probe is in its one session.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Attaching,
+        Typed,
+        PrefixSent,
+        UndoSent,
+        Done,
+    }
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+
+    let started = std::time::Instant::now();
+    let ms = |t: std::time::Instant| {
+        u64::try_from(t.duration_since(started).as_millis()).unwrap_or(u64::MAX)
+    };
+    let deadline = started
+        + std::time::Duration::from_millis(
+            std::env::var("PMACS_GPU_PROBE_DEADLINE_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30_000),
+        );
+    let quiet = std::time::Duration::from_millis(400);
+
+    let mut phase = Phase::Attaching;
+    let mut snapshot_seen = false;
+    let mut typed_at: Option<std::time::Instant> = None;
+    let mut text_after_typing = String::new();
+    let mut prefix_pending_at: Option<std::time::Instant> = None;
+    let mut undo_sent_at: Option<std::time::Instant> = None;
+    let mut undone_at: Option<std::time::Instant> = None;
+    let mut disconnect: Option<String> = None;
+
+    while std::time::Instant::now() < deadline && phase != Phase::Done {
+        let now = std::time::Instant::now();
+        let current = app
+            .state
+            .as_ref()
+            .map(|s| s.current_text.clone())
+            .unwrap_or_default();
+        let idle = app.state.as_ref().is_some_and(|s| s.dispatch_idle);
+        match phase {
+            Phase::Attaching => {
+                // Type once the document is here and the caret is
+                // authoritative, so the characters go optimistic.
+                if snapshot_seen
+                    && idle
+                    && app.state.as_ref().is_some_and(|s| s.own_cursor.is_some())
+                {
+                    for ch in text.chars() {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                    }
+                    typed_at = Some(now);
+                    text_after_typing = app
+                        .state
+                        .as_ref()
+                        .map(|s| s.current_text.clone())
+                        .unwrap_or_default();
+                    phase = Phase::Typed;
+                }
+            }
+            Phase::Typed => {
+                // Let the daemon settle its echo before the chord. Not
+                // by silence: the daemon attaches a `CursorByte` and
+                // its status facts to every tick it produces.
+                if typed_at.is_some_and(|t| now.duration_since(t) >= quiet) {
+                    app.modifiers = winit::keyboard::ModifiersState::CONTROL;
+                    app.apply_keyboard(&Key::Character("x".into()), None);
+                    app.modifiers = winit::keyboard::ModifiersState::empty();
+                    phase = Phase::PrefixSent;
+                }
+            }
+            Phase::PrefixSent => {
+                if !idle {
+                    prefix_pending_at = Some(now);
+                    app.modifiers = winit::keyboard::ModifiersState::SHIFT;
+                    app.apply_keyboard(&Key::Character("U".into()), Some("U"));
+                    app.modifiers = winit::keyboard::ModifiersState::empty();
+                    undo_sent_at = Some(now);
+                    phase = Phase::UndoSent;
+                }
+            }
+            Phase::UndoSent => {
+                if !current.contains(text) {
+                    undone_at.get_or_insert(now);
+                }
+                if undone_at.is_some_and(|t| now.duration_since(t) >= quiet) {
+                    phase = Phase::Done;
+                }
+            }
+            Phase::Done => {}
+        }
+        if phase == Phase::Done {
+            break;
+        }
+        let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) else {
+            continue;
+        };
+        let (is_snapshot, is_disconnect) = match &event {
+            AttachEvent::Message(msg) => (
+                matches!(msg.as_ref(), InstanceMessage::BufferSnapshot { .. }),
+                false,
+            ),
+            AttachEvent::Disconnected(reason) => {
+                disconnect = Some(reason.clone());
+                (false, true)
+            }
+        };
+        app.dispatch_app_event(AppEvent::Attach(event));
+        snapshot_seen |= is_snapshot;
+        if is_disconnect {
+            break;
+        }
+    }
+
+    let final_text = app
+        .state
+        .as_ref()
+        .map(|s| s.current_text.clone())
+        .unwrap_or_default();
+    let mut out = String::new();
+    let _ = writeln!(out, "typed_text={text}");
+    let _ = writeln!(
+        out,
+        "typed_at_ms={}",
+        typed_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(out, "text_after_typing={text_after_typing:?}");
+    let _ = writeln!(
+        out,
+        "prefix_pending_at_ms={}",
+        prefix_pending_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(
+        out,
+        "undo_sent_at_ms={}",
+        undo_sent_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(
+        out,
+        "undone_at_ms={}",
+        undone_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(out, "text_after_undo={final_text:?}");
+    let _ = writeln!(out, "undone={}", undone_at.is_some());
+    let _ = writeln!(out, "disconnect={}", disconnect.unwrap_or_default());
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!(
+            "pmacs-gpu probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
+    0
 }
 
 /// E6b.3 --- what the GPU holds for styling at one moment: the byte
