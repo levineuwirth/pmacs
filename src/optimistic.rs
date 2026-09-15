@@ -51,19 +51,14 @@ pub enum OptimisticAction {
     DeleteBack,
     /// Delete one byte/grapheme at the cursor (Delete-forward).
     DeleteForward,
-    /// Undo this frontend's most recent edit on the active buffer
-    /// (M10.11 P1). Triggered by single-key undo bindings whose
-    /// modifier set is `Ctrl` and whose `Char` is `_` or `/` — the
-    /// two terminal-portable spellings of the default-keymap undo
-    /// binding (`builtin/keymaps/default.lua`). Multi-key undo
-    /// bindings like `C-x u` fall through to `RoundTrip` because
-    /// the optimistic layer doesn't track keymap-prefix state.
-    Undo,
     /// No optimistic path applies; fall through to round-trip via
     /// `FrontendEvent::Key`. Covers control-char modifiers (Ctrl, Alt,
     /// Meta, Hyper) that aren't bound to an optimistic action,
-    /// function keys, navigation keys, and any keystroke whose
-    /// semantics aren't text-input or recognized commands.
+    /// function keys, navigation keys, undo chords of every spelling
+    /// (E6c: single-key `C-/` / `C-_` / `C-4` round-trip like the
+    /// multi-key `C-x u` always did — undo is one daemon-side
+    /// mechanism now, not a frontend fast path), and any keystroke
+    /// whose semantics aren't text-input.
     RoundTrip,
 }
 
@@ -85,52 +80,26 @@ const fn is_text_input_modifiers(mods: Modifiers) -> bool {
 /// - `DeleteBack` for `Backspace` with no editor-control modifier.
 /// - `DeleteForward` for `Delete` with no editor-control modifier.
 /// - `RoundTrip` for everything else (modified text input, function
-///   keys, arrows, escape, etc.).
+///   keys, arrows, escape, undo chords of every spelling, etc.).
 ///
 /// `char::is_control()` filters out ASCII control codes (0x00–0x1F,
 /// 0x7F) and Unicode control codes. Tab and Enter qualify as control
 /// chars and therefore round-trip — they often have non-insert
 /// semantics in editor keymaps (indentation, newline-with-indent).
+///
+/// E6c: undo chords are deliberately NOT recognized here, not even
+/// the single-key `C-/` / `C-_` / `C-4` the M10.11 arm used to take.
+/// Undo is one daemon-side mechanism (the cross-peer arbiter); a
+/// frontend fast path would race it over the same op, and the daemon
+/// would have no way to know a group was already undone locally.
+/// Every undo binding round-trips to `buffer.undo`, which pops the
+/// acting source's group — including `C-x u`, whose prefix the
+/// optimistic layer was never going to track anyway.
 #[must_use]
 pub fn classify_key(key: Key, mods: Modifiers) -> OptimisticAction {
-    // M10.11 P1 — single-key undo bindings.
-    //
-    // The default keymap (`builtin/keymaps/default.lua`) binds four
-    // forms of undo: `C-/`, `C-_`, `C-4`, and `C-x u`. Crossterm's
-    // raw-terminal parser (`crossterm-0.28.1` /
-    // `event/sys/unix/parse.rs:106-113`) only delivers some of
-    // these as the literal `Char + Modifiers::CTRL` shape:
-    //
-    // - 0x01..=0x1A (Ctrl-A..Ctrl-Z) → `Char(letter)` + CTRL
-    // - 0x1C..=0x1F → `Char('4')..Char('7')` + CTRL (the offset-
-    //   from-'4' convention crossterm uses for non-letter Ctrl
-    //   bytes; *not* the "Ctrl-_" / "Ctrl-/" naming users
-    //   intuitively expect — that mapping requires Kitty Keyboard
-    //   Protocol enhanced mode, which pmacs doesn't currently
-    //   negotiate).
-    //
-    // Practical consequence: when a real terminal user presses
-    // Ctrl-_, the byte 0x1F arrives, crossterm produces
-    // `Char('7')` + CTRL, *no* default-keymap binding matches.
-    // The deliverable undo keystrokes for raw-terminal users are
-    // C-4 (byte 0x1C) and C-x u (multi-key, falls through to
-    // daemon dispatch).
-    //
-    // We optimistically recognize `Char('4')` + CTRL as Undo
-    // because the default keymap binds it, AND it's the form a
-    // real terminal can actually deliver. `Char('/')` and
-    // `Char('_')` with CTRL are also recognized for symmetry —
-    // they'll match when Kitty enhanced mode is negotiated, or
-    // when a non-PTY frontend (future GUI) emits them directly.
-    // Multi-key bindings like `C-x u` round-trip because the
-    // optimistic layer doesn't track keymap-prefix state.
-    //
-    // The `mods == CTRL` exact-match (rather than `contains(CTRL)`)
-    // ensures combos like `C-S-_` round-trip rather than triggering
-    // undo unexpectedly. Lua-rebound forms similarly round-trip.
-    if mods == Modifiers::CTRL && matches!(key, Key::Char('/' | '_' | '4')) {
-        return OptimisticAction::Undo;
-    }
+    // No undo recognition (E6c — see above). Every Ctrl chord
+    // round-trips uniformly, including combos like `C-S-_` and
+    // Lua-rebound forms.
     if !is_text_input_modifiers(mods) {
         return OptimisticAction::RoundTrip;
     }
@@ -216,9 +185,8 @@ pub fn frontend_event_for_keystroke(
         return round_trip();
     }
     // Need: active buffer + mirror ready for it. The cursor-position
-    // and cursor-freshness checks only apply to position-targeted
-    // actions (Insert / DeleteBack); Undo reverses the last op by
-    // peer regardless of cursor position, so it skips those gates.
+    // and cursor-freshness checks below apply to the remaining
+    // position-targeted actions (Insert / DeleteBack).
     let Some(buffer_id) = mirror.active_buffer() else {
         return round_trip();
     };
@@ -226,32 +194,10 @@ pub fn frontend_event_for_keystroke(
         return round_trip();
     }
 
-    // M10.11 P1 — undo's optimistic path. Undo doesn't depend on
-    // cursor position or paint eligibility (stance α: no visual
-    // paint for optimistic undo; daemon's CellDelta drives
-    // reconciliation). The undo affects content at arbitrary
-    // positions; `apply_local_undo` marks the cursor stale so
-    // subsequent optimistic keystrokes round-trip until the daemon's
-    // `CursorByte` re-grounds.
-    if matches!(action, OptimisticAction::Undo) {
-        return match mirror.apply_local_undo(buffer_id) {
-            Ok(Some(op_bytes)) => FrontendEvent::CrdtOp {
-                frontend_id: my_fid,
-                buffer_id,
-                op: CrdtOp {
-                    peer_id: mirror.peer_id(),
-                    bytes: op_bytes,
-                },
-            },
-            // Nothing to undo locally (UndoManager stack empty) or
-            // loro error. Round-trip the Key event; the daemon's
-            // dispatch_key may have its own daemon-peer ops to undo
-            // (Lua-driven daemon-side edits), so the Key path remains
-            // the right fallback. If the daemon also has nothing, the
-            // path silently no-ops — same as v0.1.
-            Ok(None) | Err(_) => round_trip(),
-        };
-    }
+    // E6c: no frontend undo arm. Every undo chord classifies
+    // `RoundTrip` above and returns at the top of this function; the
+    // daemon's arbiter pops the acting source's group. There is no
+    // local inverse op to produce here.
 
     // Position-targeted actions need authoritative cursor state
     // (post-audit-round-4 F22 + F23 freshness invariant). A stale
@@ -324,7 +270,6 @@ pub fn frontend_event_for_keystroke(
             // source receives it).
             return round_trip();
         }
-        OptimisticAction::Undo => unreachable!("Undo handled above"),
         OptimisticAction::RoundTrip => unreachable!("RoundTrip handled above"),
     };
 
@@ -1193,62 +1138,49 @@ mod tests {
         );
     }
 
-    /// **F1 gap pin.** The manual checklist originally told operators
-    /// to undo with `C-x u`. That is the *wrong* keystroke for the
-    /// per-frontend optimistic-undo path Scenario 2 tests: only the
-    /// single-key forms (`Ctrl-4`, and — under Kitty enhanced mode —
-    /// `Ctrl-/` / `Ctrl-_`) classify as `OptimisticAction::Undo`
-    /// (frontend per-peer undo). `C-x` is a multi-key prefix the
-    /// optimistic layer has no state for; it classifies `RoundTrip`
-    /// and the sequence `C-x u` round-trips to the *daemon's* undo,
-    /// which operates on the daemon's CRDT peer and cannot isolate a
-    /// single frontend's edits.
+    /// **F1 gap pin, re-pinned for E6c.** The manual checklist
+    /// originally told operators to undo with `C-x u`. That was the
+    /// *wrong* keystroke for the M10.11 per-frontend optimistic-undo
+    /// path Scenario 2 tested: only the single-key forms (`Ctrl-4`,
+    /// and — under Kitty enhanced mode — `Ctrl-/` / `Ctrl-_`)
+    /// classified as `OptimisticAction::Undo`, while `C-x u`
+    /// round-tripped to the daemon's peer-bound undo, which could not
+    /// isolate one frontend's edits.
     ///
-    /// This pins the gap as a tested invariant rather than prose:
-    /// if a future change made `C-x` optimistic, or de-classified
-    /// `Ctrl-4`, this fails — and the checklist's `Ctrl-4`
-    /// instruction (F1 fix) would silently become wrong again.
+    /// E6c retires the frontend arm and the gap with it: undo is one
+    /// daemon-side mechanism (the cross-peer arbiter), every undo
+    /// chord round-trips to `buffer.undo`, and a prefix sequence now
+    /// undoes correctly *because* it round-trips. This pins the new
+    /// truth rather than deleting the pin: if a future change made
+    /// any undo chord optimistic again, this fails — and two undo
+    /// mechanisms would be racing over the same op again.
     #[test]
     fn f1_undo_keystroke_gap_cx_u_round_trips_only_single_key_is_optimistic() {
-        // The keystroke the manual checklist (post-F1) and the PTY
-        // test both use — reaches frontend per-peer undo.
-        assert_eq!(
-            classify_key(Key::Char('4'), Modifiers::CTRL),
-            OptimisticAction::Undo,
-            "Ctrl-4 must be the frontend per-peer optimistic undo \
-             (raw-terminal-deliverable; what the checklist now uses)"
-        );
-        // Kitty-enhanced-mode forms — also optimistic undo (only
-        // delivered when Kitty negotiation lands; v0.2).
-        assert_eq!(
-            classify_key(Key::Char('/'), Modifiers::CTRL),
-            OptimisticAction::Undo
-        );
-        assert_eq!(
-            classify_key(Key::Char('_'), Modifiers::CTRL),
-            OptimisticAction::Undo
-        );
-        // `C-x` — the prefix of the OLD (wrong) checklist instruction
-        // `C-x u`. Round-trips; the optimistic layer has no multi-key
-        // prefix state, so `C-x u` can NEVER compose to frontend
-        // per-peer undo — it reaches daemon undo, which Scenario 2's
-        // per-frontend-isolation claim is not about.
-        assert_eq!(
-            classify_key(Key::Char('x'), Modifiers::CTRL),
-            OptimisticAction::RoundTrip,
-            "C-x must round-trip — it's the daemon-undo prefix, NOT \
-             frontend per-peer undo; this is why the checklist had \
-             to switch from C-x u to Ctrl-4 (F1)"
-        );
+        // Every bound undo spelling round-trips — the single-key
+        // forms the retired arm used to take, and the multi-key
+        // prefix that never composed. None may become a frontend
+        // undo again.
+        for (key, mods) in [
+            (Key::Char('4'), Modifiers::CTRL),
+            (Key::Char('/'), Modifiers::CTRL),
+            (Key::Char('_'), Modifiers::CTRL),
+            (Key::Char('x'), Modifiers::CTRL),
+        ] {
+            assert_eq!(
+                classify_key(key, mods),
+                OptimisticAction::RoundTrip,
+                "undo must round-trip to the daemon arbiter, never compose locally"
+            );
+        }
         // The lone `u` after `C-x`, seen in isolation by the
         // stateless optimistic layer, is just text — confirming no
-        // prefix-composition path to undo exists.
+        // prefix-composition path exists, now harmlessly: the
+        // daemon resolves the prefix and arbitrates the undo.
         assert_eq!(
             classify_key(Key::Char('u'), Modifiers::NONE),
             OptimisticAction::Insert('u'),
             "no multi-key prefix state: the 'u' in C-x u is plain \
-             text to the optimistic layer; C-x u cannot be \
-             frontend-undo by construction"
+             text to the optimistic layer; the daemon owns the prefix"
         );
     }
 }

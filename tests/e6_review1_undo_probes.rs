@@ -2,9 +2,16 @@
 // experience, in both histories.
 
 //! Three user stories, each run once in a plain (v0.1 stack) buffer and
-//! once in a buffer upgraded to CRDT (loro's `UndoManager`), and the
-//! text after one `C-/` compared across the two: the two histories must
-//! agree on what one undo removes, and the record says what that is.
+//! once in a buffer upgraded to CRDT (the cross-peer arbiter since
+//! E6c; loro's `UndoManager` before it), and the text after one `C-/`
+//! compared across the two: the two histories must agree on what one
+//! undo removes, and the record says what that is.
+//!
+//! E6c re-pinned two of the grains: what a keystroke's command inserts
+//! beside the character --- the auto-pair closer, a typed-over closer's
+//! insert-and-swallow --- is part of that keystroke's undo step in both
+//! histories, as Emacs has it, where E6 left each hook edit its own
+//! step.
 //!
 //! Every keystroke goes through `dispatch_key` and the undo through the
 //! bound chord, as `undo_amalgamation_acceptance` does; the CRDT rows
@@ -109,8 +116,9 @@ fn both(story: impl Fn(&mut EditorState), undos: usize) -> (Vec<String>, Vec<Str
 }
 
 /// `abc(` with auto-pair on (the default): the closer lands inside the
-/// keystroke. One undo removes the closer alone, in both histories; the
-/// second removes `abc(` as one step, in both.
+/// keystroke's command and undoes with it. One undo removes `abc()`
+/// as one step, in both histories (E6c; E6 peeled the closer alone
+/// first); the second finds nothing.
 #[test]
 fn review_abc_paren_with_auto_pair_one_undo_agrees_across_histories() {
     let (plain, crdt) = both(
@@ -125,8 +133,11 @@ fn review_abc_paren_with_auto_pair_one_undo_agrees_across_histories() {
     );
     assert_eq!(plain[0], "abc()", "auto-pair closed the paren");
     assert_eq!(plain, crdt, "the two histories must agree step for step");
-    assert_eq!(plain[1], "abc(", "one undo: the closer alone");
-    assert_eq!(plain[2], "", "two undos: `abc(` as one step");
+    assert_eq!(
+        plain[1], "",
+        "one undo: the run and the closer it opened, as one step"
+    );
+    assert_eq!(plain[2], "", "two undos: nothing left");
 }
 
 /// Twenty-five characters: one undo removes the tail five in both
@@ -160,14 +171,17 @@ fn review_ten_then_left_then_ten_one_undo_agrees_across_histories() {
 }
 
 /// Probe beyond the charge: typing through a closer. `(` then `)` skips
-/// over the auto-inserted `)`, so the text is `()`; one undo restores
-/// the transient `())` in both histories --- a pre-E6 grain (each hook
-/// edit was its own step already), recorded so the two agree.
+/// over the auto-inserted `)`, so the text is `()`; the skip is an
+/// insert and a swallow inside the second keystroke's command, one
+/// no-op step that amalgamates into the run, so one undo empties the
+/// buffer in both histories (E6c; before it one undo restored the
+/// transient `())`, each hook edit being its own step).
 #[test]
 fn review_typing_through_a_closer_one_undo_agrees_across_histories() {
     let (plain, crdt) = both(|s| type_str(s, "()"), 1);
     assert_eq!(plain[0], "()", "the typed `)` skipped over the closer");
     assert_eq!(plain, crdt, "the two histories must agree step for step");
+    assert_eq!(plain[1], "", "one undo: the pair and the skip, as one step");
 }
 
 /// Probe beyond the charge: the knob is read per keystroke, so lowering

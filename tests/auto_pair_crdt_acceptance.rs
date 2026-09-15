@@ -6,18 +6,22 @@
 //!
 //! Dispatch route (built-in pair chars, Q#AP1): the source sends
 //! round-tripped `Key` events; the daemon pairs/skips and broadcasts
-//! `DaemonKey` ops to both replicas. Undo grain (Q#AP5) is pinned for
-//! both routing models — the TUI's single-key optimistic undo is the
-//! source replica's own peer-bound undo, `C-x u` is a round-tripped
-//! daemon undo — as assertions of the named cross-peer substrate
-//! limit, NOT frontend-equivalence claims.
+//! `DaemonKey` ops to both replicas. Undo grain (Q#AP5) since E6c: every
+//! undo chord round-trips to the daemon's cross-peer arbiter, which
+//! pops the source's last command-boundary group whichever peer
+//! carried its ops --- so the opener and its closer undo together, a
+//! run mixing optimistic and dispatched characters undoes as one step,
+//! and the source's own optimistic history is within reach. Before
+//! E6c these rows pinned the peer-bound grain (the pair as two
+//! daemon-peer units, source-peer text beyond the daemon's undo) as a
+//! named substrate limit; that limit is retired.
 //!
 //! Optimistic route (custom pair char via user config, Q#AP1 cost
 //! paragraph): the opener arrives as a `FrontendEvent::CrdtOp`; the
 //! daemon's hook-queued closer is broadcast BEFORE the opener's
 //! rebroadcast (the ordering quirk named in the framing), and the
-//! observer must still converge. The source mirror's undo removes the
-//! opener and leaves the closer — the pinned degraded undo.
+//! observer must still converge. The closer is attributed to the
+//! opener's source and undoes with it.
 
 #![cfg(feature = "crdt")]
 
@@ -249,9 +253,11 @@ fn dispatch_route_pair_and_skip_converge_on_both_replicas() {
     );
 }
 
-/// Q#AP5 undo grain over the wire: the pair is two adjacent
-/// daemon-peer units. Two `C-x u` restore `(` then empty on BOTH
-/// replicas; two `C-x r` restore `(` then `()` in order.
+/// Q#AP5 undo grain over the wire (E6c): the pair is one command's
+/// work. One `C-x u` empties BOTH replicas; one `C-x r` restores `()`
+/// on both; a further undo and a further redo find nothing. Before
+/// E6c the pair was two adjacent daemon-peer units and the walk took
+/// two of each.
 #[test]
 fn dispatch_route_daemon_undo_redo_walk_the_pair_on_both_replicas() {
     let daemon = TestDaemon::spawn();
@@ -267,14 +273,6 @@ fn dispatch_route_daemon_undo_redo_walk_the_pair_on_both_replicas() {
     });
 
     send_daemon_undo(&mut source);
-    pump_until(&mut source, Duration::from_secs(5), "source (", |o| {
-        o.text == "("
-    });
-    pump_until(&mut observer, Duration::from_secs(5), "observer (", |o| {
-        o.text == "("
-    });
-
-    send_daemon_undo(&mut source);
     pump_until(&mut source, Duration::from_secs(5), "source empty", |o| {
         o.text.is_empty()
     });
@@ -284,20 +282,8 @@ fn dispatch_route_daemon_undo_redo_walk_the_pair_on_both_replicas() {
         "observer empty",
         |o| o.text.is_empty(),
     );
-
-    send_daemon_redo(&mut source);
-    pump_until(
-        &mut source,
-        Duration::from_secs(5),
-        "source ( redone",
-        |o| o.text == "(",
-    );
-    pump_until(
-        &mut observer,
-        Duration::from_secs(5),
-        "observer ( redone",
-        |o| o.text == "(",
-    );
+    send_daemon_undo(&mut source);
+    assert_text_stays(&mut source, "", Duration::from_millis(500));
 
     send_daemon_redo(&mut source);
     pump_until(
@@ -312,17 +298,22 @@ fn dispatch_route_daemon_undo_redo_walk_the_pair_on_both_replicas() {
         "observer () redone",
         |o| o.text == "()",
     );
+    send_daemon_redo(&mut source);
+    assert_text_stays(&mut source, "()", Duration::from_millis(500));
 }
 
 // ---------------------------------------------------------------------------
-// Mixed source/daemon history (the named substrate limit, pinned)
+// Mixed source/daemon history (the retired substrate limit, flipped)
 // ---------------------------------------------------------------------------
 
-/// TUI routing model: with optimistic `a` already in the source
-/// mirror, the single-key optimistic undo (the mirror's own peer-bound
-/// undo) removes `a` — NOT the daemon-peer closer — leaving `()`.
+/// A run mixing an optimistic character and a dispatched pair char:
+/// `a` arrives as a source-peer op, `(` round-trips and its closer is
+/// a daemon-peer op inside the same command, and the three are one
+/// self-insert run of the source. One `C-x u` empties both replicas.
+/// Before E6c the source's own peer-bound mirror undo removed `a` and
+/// left the daemon-peer `()`.
 #[test]
-fn mixed_history_source_mirror_undo_removes_the_optimistic_char_first() {
+fn mixed_history_one_run_of_optimistic_and_dispatched_chars_undoes_as_one_step() {
     let daemon = TestDaemon::spawn();
     let mut source = attach_replica(&daemon);
     let mut observer = attach_replica(&daemon);
@@ -338,25 +329,27 @@ fn mixed_history_source_mirror_undo_removes_the_optimistic_char_first() {
         o.text == "a()"
     });
 
-    // The TUI's single-key undo: mirror-local, peer-bound.
-    send_optimistic_op(&mut source, |r| {
-        r.undo().expect("mirror undo");
+    send_daemon_undo(&mut source);
+    pump_until(&mut source, Duration::from_secs(5), "source empty", |o| {
+        o.text.is_empty()
     });
-    assert_eq!(
-        source.state.materialize_string(),
-        "()",
-        "the mirror undo removed source-peer `a`, not the adjacent daemon closer"
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer empty",
+        |o| o.text.is_empty(),
     );
-    pump_until(&mut observer, Duration::from_secs(5), "observer ()", |o| {
-        o.text == "()"
-    });
 }
 
 /// `C-x u` routing model (and the GPU model, which reaches the daemon
-/// the same way): daemon undos peel the pair — closer, then opener —
-/// and a FURTHER daemon undo cannot reach the source-peer `a`.
+/// the same way), with a command chord between the runs: `a` arrives
+/// as a source-peer op, `End` closes its run, `(` and its closer form
+/// the next. The first daemon undo peels the pair together; the second
+/// reaches the source-peer `a`; the third finds nothing. Before E6c
+/// the pair took two undos and `a` was beyond the daemon's reach ---
+/// the named substrate limit, retired.
 #[test]
-fn mixed_history_daemon_undo_peels_the_pair_but_cannot_reach_source_history() {
+fn mixed_history_daemon_undo_peels_the_pair_then_reaches_source_history() {
     let daemon = TestDaemon::spawn();
     let mut source = attach_replica(&daemon);
     let mut observer = attach_replica(&daemon);
@@ -364,29 +357,33 @@ fn mixed_history_daemon_undo_peels_the_pair_but_cannot_reach_source_history() {
     send_optimistic_op(&mut source, |r| {
         r.insert(0, "a").expect("insert a");
     });
+    send_key(&mut source, Key::End, Modifiers::NONE);
     send_key(&mut source, Key::Char('('), Modifiers::NONE);
     pump_until(&mut source, Duration::from_secs(5), "source a()", |o| {
         o.text == "a()"
     });
 
     send_daemon_undo(&mut source);
-    pump_until(&mut source, Duration::from_secs(5), "source a(", |o| {
-        o.text == "a("
-    });
-    pump_until(&mut observer, Duration::from_secs(5), "observer a(", |o| {
-        o.text == "a("
-    });
-
-    send_daemon_undo(&mut source);
     pump_until(&mut source, Duration::from_secs(5), "source a", |o| {
         o.text == "a"
     });
+    pump_until(&mut observer, Duration::from_secs(5), "observer a", |o| {
+        o.text == "a"
+    });
 
-    // The named limit: daemon undo is peer-bound too — source-peer
-    // `a` is beyond its reach. (Cross-peer chronological arbitration
-    // is deferred substrate work, not pair.lua's claim.)
     send_daemon_undo(&mut source);
-    assert_text_stays(&mut source, "a", Duration::from_millis(800));
+    pump_until(&mut source, Duration::from_secs(5), "source empty", |o| {
+        o.text.is_empty()
+    });
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer empty",
+        |o| o.text.is_empty(),
+    );
+
+    send_daemon_undo(&mut source);
+    assert_text_stays(&mut source, "", Duration::from_millis(800));
 }
 
 // ---------------------------------------------------------------------------
@@ -437,11 +434,15 @@ fn optimistic_route_custom_char_pairs_and_skips_despite_closer_first_broadcast()
     );
 }
 
-/// The pinned degraded undo for optimistic pair chars: the opener and
-/// closer live on DIFFERENT peers, so the source mirror's undo removes
-/// its own opener and leaves the daemon's closer behind.
+/// The opener and closer live on DIFFERENT peers --- the opener on
+/// the source's, the hook's closer on the daemon's --- and undo takes
+/// them together: the daemon runs the after-edit hook as the source's
+/// own interactive scope, so the closer joins the opener's group. One
+/// `C-x u` empties both replicas. Before E6c the source mirror's
+/// peer-bound undo removed its own opener and left the closer behind,
+/// the pinned degraded undo.
 #[test]
-fn optimistic_route_mirror_undo_removes_the_opener_leaving_the_closer() {
+fn optimistic_route_daemon_undo_removes_the_opener_and_its_closer_together() {
     let daemon = TestDaemon::spawn_with_config(CUSTOM_PAIR_CONFIG);
     let mut source = attach_replica(&daemon);
     let mut observer = attach_replica(&daemon);
@@ -456,15 +457,14 @@ fn optimistic_route_mirror_undo_removes_the_opener_leaving_the_closer() {
         o.text == "<>"
     });
 
-    send_optimistic_op(&mut source, |r| {
-        r.undo().expect("mirror undo");
+    send_daemon_undo(&mut source);
+    pump_until(&mut source, Duration::from_secs(5), "source empty", |o| {
+        o.text.is_empty()
     });
-    assert_eq!(
-        source.state.materialize_string(),
-        ">",
-        "peer-bound mirror undo removes the opener; the daemon-peer closer stays"
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer empty",
+        |o| o.text.is_empty(),
     );
-    pump_until(&mut observer, Duration::from_secs(5), "observer >", |o| {
-        o.text == ">"
-    });
 }

@@ -2014,22 +2014,29 @@ impl EditorState {
         let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
         let post_revision = self.active_buffer_revision();
         if pre_revision != post_revision {
-            self.note_typed_run(frontend_id, typed_edit.as_ref());
-            if let Some(record) = typed_edit {
+            if let Some(record) = typed_edit.as_ref() {
                 self.core
                     .borrow_mut()
-                    .typed_edit_set_armed(frontend_id, record);
+                    .typed_edit_set_armed(frontend_id, record.clone());
             }
             self.lua_host
                 .run_hook("buffer.after-edit", mlua::MultiValue::new());
             self.core.borrow_mut().typed_edit_clear_armed();
+            // After the hook, not before (E6c): what the hook inserted
+            // inside this keystroke's command --- the auto-pair closer
+            // --- is part of the keystroke's undo step in both
+            // histories, so the v0.1 amalgamation runs once the
+            // command has finished pushing.
+            self.note_typed_run(frontend_id, typed_edit.as_ref());
         }
         self.core.borrow_mut().completion_popup_validate();
     }
 
     /// The registered `undo.amalgamate` (Integer, default 20): how many
     /// consecutive typed characters undo as one step; zero for none.
-    fn undo_amalgamate_limit(&self) -> u32 {
+    /// `pub(crate)` for the daemon's optimistic-import settle (E6c),
+    /// which amalgamates remote keystrokes by the same knob.
+    pub(crate) fn undo_amalgamate_limit(&self) -> u32 {
         crate::lua_bindings::config_u32(self.lua_host.lua(), "undo.amalgamate", None, 20)
     }
 

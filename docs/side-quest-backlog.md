@@ -141,9 +141,16 @@ The direct continuation of the #114–#118 grammar/detection stack.
 - **Buffer-aware edit epoch + origin-pinned `after-edit` fan-out** — a
   command that edits buffer A then switches to B currently evades
   `didChange` / reparse / autosave observers.
-- **Undo-group boundaries (`begin/end_undo_group`) + cross-peer
-  chronological undo arbiter** — coherent multi-edit undo and mixed
-  source/daemon history.
+- ~~**Undo-group boundaries (`begin/end_undo_group`) + cross-peer
+  chronological undo arbiter**~~ — **SHIPPED in E6c.** The daemon
+  records every forward edit per source as loro op spans and
+  `buffer.undo` pops the acting source's last command-boundary group
+  whichever peer carried it (`Buffer::undo_for`), compensating on
+  the daemon's peer; groups are E6.4's amalgamation runs plus
+  whatever a hook added inside the command. What remains: daemon
+  (sourceless) edits go to whoever undoes next when newer than
+  their own last group, chronologically --- a script's edit is
+  nobody's, and no finer attribution exists for it.
 - **Viewport facts on the wire** — the GPU never consumes daemon
   `view_top`; blocks recenter and any scroll command.
 

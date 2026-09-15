@@ -1,19 +1,20 @@
-// tests/e6_review1_gpu_route_probes.rs --- E6 review 1: E6.4 on the
-// route a GPU user's plain characters actually take.
+// tests/e6_review1_gpu_route_probes.rs --- E6 review 1's fail-before,
+// flipped by E6c: undo on the route a GPU user's plain characters
+// actually take.
 
-//! The handoff's premise for E6.4 is that "the GPU types through
-//! `TextInput`, the daemon's own edit". It does not: `text_input_payload`
-//! returns `None` for a single scalar (`pmacs-gpu/src/main.rs`), so
-//! every plain character a GPU user presses is an optimistic
-//! `FrontendEvent::CrdtOp` on the GPU's own loro peer --- "the bulk of
-//! plain-char typing" in the daemon's own words --- and the daemon's
-//! peer-bound `UndoManager` never records it. This probe drives that
-//! route the way `auto_pair_crdt_acceptance` does, one op per keystroke
-//! as the GPU sends them, and asks what the bound undo does afterward:
-//! nothing. The amalgamation E6.4 delivers is unreachable from here.
+//! E6 review 1 found that every plain character a GPU user presses is
+//! an optimistic `FrontendEvent::CrdtOp` on the GPU's own loro peer
+//! (`text_input_payload` returns `None` for a single scalar), which the
+//! daemon's peer-bound `UndoManager` never recorded, so the bound undo
+//! could not reach a word typed on the GPU. That was this file's
+//! premise, and E6c inverts it: the daemon records every forward edit
+//! per source and undoes the acting source's last command-boundary
+//! group whichever peer carried it. This probe drives the same route,
+//! one op per keystroke as the GPU sends them, and is the phase's
+//! acceptance --- `hello`, undo, hello goes.
 //!
 //! Helpers are the CRDT auto-pair suite's, copied so the probe stands
-//! alone until the fix round folds it in.
+//! alone.
 
 #![cfg(feature = "crdt")]
 
@@ -177,17 +178,19 @@ fn assert_text_stays(replica: &mut Replica, expected: &str, window: Duration) {
 }
 
 /// Five plain characters typed the way the GPU sends them --- one
-/// optimistic op each, on the frontend's own peer --- then a
-/// round-tripped `(` as the positive control (a pair char round-trips
-/// and its closer is a daemon-peer step), then the bound undo three
-/// times, forwarded as the GPU forwards every command chord. The first
-/// two undos peel `)` and `(`, proving the key reaches the daemon's
-/// history; the third finds nothing: the daemon classified each of the
-/// five as `buffer.self-insert` and its history holds none of them. A
-/// TUI user's `hello C-/` empties the buffer
-/// (`undo_amalgamation_acceptance::typing_a_word_undoes_as_one_step`).
+/// optimistic op each, on the frontend's own peer --- then `End` (a
+/// command chord, which closes the run) and a round-tripped `(`, whose
+/// closer the daemon's hook adds inside the same command; then the
+/// bound undo three times, forwarded as the GPU forwards every command
+/// chord. The first undo takes `()` together, the opener and its
+/// closer being one command's work; the second takes `hello` as one
+/// step --- the five optimistic ops the daemon classified as
+/// `buffer.self-insert` and amalgamated into the source's group ---
+/// and the third finds nothing, on both replicas. Before E6c the
+/// first two undos peeled `)` and `(` and the third found nothing, the
+/// word being source-peer history beyond the daemon-peer undo.
 #[test]
-fn review_gpu_route_plain_typing_is_beyond_the_daemon_undo_and_so_beyond_e6_4() {
+fn gpu_route_plain_typing_undoes_through_the_daemon_arbiter() {
     let daemon = TestDaemon::spawn();
     let mut source = attach_replica(&daemon);
     let mut observer = attach_replica(&daemon);
@@ -218,10 +221,6 @@ fn review_gpu_route_plain_typing_is_beyond_the_daemon_undo_and_so_beyond_e6_4() 
     );
 
     send_key(&mut source, Key::Char('/'), Modifiers::CTRL);
-    pump_until(&mut source, Duration::from_secs(5), "source hello(", |o| {
-        o.text == "hello("
-    });
-    send_key(&mut source, Key::Char('/'), Modifiers::CTRL);
     pump_until(&mut source, Duration::from_secs(5), "source hello", |o| {
         o.text == "hello"
     });
@@ -232,8 +231,21 @@ fn review_gpu_route_plain_typing_is_beyond_the_daemon_undo_and_so_beyond_e6_4() 
         |o| o.text == "hello",
     );
 
-    // The third undo: the word is source-peer history, beyond reach.
+    // The second undo: the word, typed on the source's own peer,
+    // goes as one step --- the phase's acceptance.
     send_key(&mut source, Key::Char('/'), Modifiers::CTRL);
-    assert_text_stays(&mut observer, "hello", Duration::from_millis(800));
-    assert_text_stays(&mut source, "hello", Duration::from_millis(200));
+    pump_until(&mut source, Duration::from_secs(5), "source empty", |o| {
+        o.text.is_empty()
+    });
+    pump_until(
+        &mut observer,
+        Duration::from_secs(5),
+        "observer empty",
+        |o| o.text.is_empty(),
+    );
+
+    // The third undo: nothing left, on either replica.
+    send_key(&mut source, Key::Char('/'), Modifiers::CTRL);
+    assert_text_stays(&mut observer, "", Duration::from_millis(800));
+    assert_text_stays(&mut source, "", Duration::from_millis(200));
 }

@@ -453,6 +453,36 @@ fn send_crdt_op(
 /// propagation: A sends an op, B's `pump_until` reads the
 /// daemon's broadcast off `stream_b` and integrates it into
 /// `replica_b`.
+/// A round-tripped key from `frontend_id` --- how every undo chord
+/// reaches the daemon since E6c: `C-/` is `buffer.undo`, and the
+/// daemon's cross-peer arbiter pops that frontend's own last group.
+fn send_key(
+    stream: &mut std::os::unix::net::UnixStream,
+    frontend_id: FrontendId,
+    key: pmacs::protocol::Key,
+    mods: pmacs::protocol::Modifiers,
+) {
+    write_message(
+        stream,
+        &FrontendEvent::Key(pmacs::protocol::KeyEvent {
+            frontend_id,
+            key,
+            mods,
+            timestamp_ns: 0,
+        }),
+    )
+    .expect("send Key");
+}
+
+fn send_undo(stream: &mut std::os::unix::net::UnixStream, frontend_id: FrontendId) {
+    send_key(
+        stream,
+        frontend_id,
+        pmacs::protocol::Key::Char('/'),
+        pmacs::protocol::Modifiers::CTRL,
+    );
+}
+
 fn pump_until(
     stream: &mut std::os::unix::net::UnixStream,
     replica: &CrdtState,
@@ -528,17 +558,17 @@ fn m10_11_doubled_pty_fixture_propagates_keystrokes_from_both_sides() {
         .expect("observer should see both A's \"AB\" and B's \"XY\" converge");
 }
 
-/// End-to-end PTY-doubled proof that the frontend's optimistic-undo
-/// path (M10.11 P1) is wired through real pmacs binaries.
+/// End-to-end PTY-doubled proof that a TUI user's undo is wired
+/// through real pmacs binaries.
 ///
 /// **What this test verifies:** the keystroke crossterm parses as
 /// `Char('4') + CTRL` (the only undo-bound keystroke that arrives
-/// from a raw PTY without Kitty Keyboard Protocol — byte 0x1C; see
-/// `src/optimistic.rs` `classify_key` for the parsing rationale)
-/// reaches pmacs's frontend orchestrator, triggers
-/// `BufferMirror::apply_local_undo` on the local `CrdtState`'s
-/// peer-bound `UndoManager`, produces an inverse `CrdtOp`, and
-/// propagates through the daemon to the observer.
+/// from a raw PTY without Kitty Keyboard Protocol — byte 0x1C)
+/// reaches pmacs's frontend orchestrator, round-trips to the daemon
+/// as `buffer.undo` (E6c: every undo chord does; the frontend-side
+/// arm M10.11 P1 built here is retired), where the cross-peer
+/// arbiter pops A's own group and broadcasts its compensation to the
+/// observer.
 ///
 /// **What this test does NOT verify:** symmetric interleaved-edit
 /// per-frontend isolation (A edits, B edits, each undoes only their
@@ -565,20 +595,18 @@ fn m10_11_doubled_pty_optimistic_undo_propagates_end_to_end() {
 
     // A types 'X' via optimistic CrdtOp. A's mirror is fresh at
     // attach time — no remote ops have arrived yet to staleify the
-    // cursor, so the optimistic-apply predicate fires and A's
-    // local CrdtState records the insert in its peer-bound
-    // UndoManager.
+    // cursor, so the optimistic-apply predicate fires and the op
+    // lands on A's own peer, which the daemon's arbiter records
+    // under A.
     fixture.type_at(Side::A, b"X");
     let buffer_id = fixture
         .wait_for_any_buffer_contains("X", Duration::from_secs(5))
         .expect("observer should see A's 'X'");
 
     // A undoes via Ctrl-4 (byte 0x1C → crossterm parses as
-    // `Char('4')` + CTRL). The optimistic layer recognizes this as
-    // `OptimisticAction::Undo` and calls
-    // `BufferMirror::apply_local_undo`, which uses loro's
-    // peer-bound UndoManager on A's local CrdtState. The inverse
-    // op broadcasts through the daemon to the observer.
+    // `Char('4')` + CTRL). The chord round-trips to the daemon,
+    // whose arbiter undoes A's optimistic op on its own peer and
+    // broadcasts the compensation to the observer.
     fixture.type_at(Side::A, b"\x1c");
     fixture
         .wait_for_buffer_equals(buffer_id, "", Duration::from_secs(5))
@@ -674,22 +702,20 @@ fn pid_alive(pid: u32) -> bool {
 ///    Wait until B's replica materializes `"AAA"`.
 /// 2. B inserts `"BBB"` at position 3 (end) via optimistic `CrdtOp`.
 ///    Wait until A's replica materializes `"AAABBB"`.
-/// 3. A undoes its own insert: A's local `UndoManager` produces the
-///    inverse op, A sends it as a `CrdtOp`. The daemon integrates
-///    and broadcasts to B. Wait until both materialize `"BBB"`.
+/// 3. A undoes its own insert: A round-trips `C-/`, the daemon's
+///    cross-peer arbiter (E6c) pops A's last group --- A's optimistic
+///    ops, on A's peer --- and compensates on its own peer, broadcast
+///    to both. Wait until both materialize `"BBB"`: B's later text
+///    stays.
 /// 4. B undoes its own insert symmetrically. Both materialize `""`.
 ///
-/// Each undo step follows the production optimistic-undo path: the
-/// **frontend's** local `CrdtState::undo` produces the inverse op
-/// (loro's `UndoManager` is local-only per `src/crdt.rs:60-65`,
-/// scoped to the bound peer-id, so a frontend undoes its own ops
-/// regardless of remote concurrent activity). The daemon's
-/// `dispatch_key` Ctrl-/ path is the same logical path but runs
-/// against the **daemon's** local CRDT — that path is exercised
-/// by single-frontend tests in `tests/m5_5_acceptance.rs` and by
-/// the PTY-doubled tests below, where real frontend processes drive
-/// it. In this synthetic flagship, the test plays the role of the
-/// frontend's optimistic-undo orchestrator.
+/// Each undo step follows the one production undo path since E6c:
+/// every undo chord round-trips to the daemon, whose arbiter records
+/// every forward edit per source and undoes the acting source's own
+/// most recent group whichever peer carried it, so a frontend undoes
+/// its own edits and never the other's. Before E6c this test played
+/// the retired frontend-side arm, producing the inverse op from the
+/// replica's own peer-bound `UndoManager`.
 ///
 /// This test runs in the default `cargo test --features luajit,crdt`
 /// invocation — no `#[ignore]`. It is the load-bearing CI-default
@@ -758,22 +784,19 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
     .expect("A converges to AAABBB after B's optimistic append");
     assert_eq!(replica_b.materialize_string(), "AAABBB");
 
-    // ----- Step 3: A undoes its own "AAA" via optimistic CrdtOp -----
-    // Loro's UndoManager is peer-scoped: replica_a.undo() reverses
-    // A's last op regardless of B's concurrent inserts. The inverse
-    // op is broadcast to B; A applied locally already.
-    send_optimistic_op_from(
+    // ----- Step 3: A undoes its own "AAA" through the daemon -----
+    // The arbiter pops A's group (A's peer's ops) and broadcasts its
+    // daemon-peer compensation to both replicas; B's "BBB", typed
+    // after, stays.
+    send_undo(&mut stream_a, hello_a.assigned_frontend_id);
+    pump_until(
         &mut stream_a,
         &replica_a,
-        hello_a.assigned_frontend_id,
         buffer_id,
-        |r| {
-            let did = r.undo().expect("A undo");
-            assert!(did, "A's local UndoManager should have AAA on its stack");
-        },
-    );
-
-    assert_eq!(replica_a.materialize_string(), "BBB");
+        "BBB",
+        Duration::from_secs(5),
+    )
+    .expect("A converges to BBB after its own undo");
     pump_until(
         &mut stream_b,
         &replica_b,
@@ -781,21 +804,18 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
         "BBB",
         Duration::from_secs(5),
     )
-    .expect("B converges to BBB after A's undo (per-frontend undo isolates A's ops)");
+    .expect("B converges to BBB after A's undo (per-source undo isolates A's ops)");
 
-    // ----- Step 4: B undoes its own "BBB" via optimistic CrdtOp -----
-    send_optimistic_op_from(
+    // ----- Step 4: B undoes its own "BBB" through the daemon -----
+    send_undo(&mut stream_b, hello_b.assigned_frontend_id);
+    pump_until(
         &mut stream_b,
         &replica_b,
-        hello_b.assigned_frontend_id,
         buffer_id,
-        |r| {
-            let did = r.undo().expect("B undo");
-            assert!(did, "B's local UndoManager should have BBB on its stack");
-        },
-    );
-
-    assert_eq!(replica_b.materialize_string(), "");
+        "",
+        Duration::from_secs(5),
+    )
+    .expect("B converges to empty after its own undo");
     pump_until(
         &mut stream_a,
         &replica_a,
@@ -1017,15 +1037,19 @@ fn read_one_crdt_op(
 /// (M10.10 wire) — an arc-level interaction no single milestone
 /// tested.**
 ///
-/// Scenario (A = peer 2, B = peer 3):
+/// Scenario (A = peer 2, B = peer 3), with a command chord (`End`)
+/// between A's characters so each is its own undo group rather than
+/// one amalgamated run (E6c):
 /// 1. A inserts "1"@0; B integrates → B="1".
 /// 2. A inserts "2"@1 (A="12"); B *withholds* this op (delayed).
 /// 3. A inserts "3"@2 (A="123"); B integrates op3 — causally pending
 ///    op2, loro buffers it, B still "1".
-/// 4. B issues "undo my last edit": B has no ops → must be a no-op
-///    (per-peer undo isolation; B must NOT reverse any of A's ops).
-/// 5. A undoes: A's `UndoManager` reverses A's op3 → A="12". B
-///    integrates A's undo (still pending op2).
+/// 4. B issues "undo my last edit" (`C-/` round-tripped): B has no
+///    groups → the daemon finds nothing and broadcasts nothing
+///    (per-source undo isolation; B must NOT reverse any of A's ops).
+/// 5. A undoes (`C-/` round-tripped): the daemon's arbiter reverses
+///    A's op3 on its own peer → A="12". B integrates the compensation
+///    (still pending op2).
 /// 6. The withheld op2 is finally delivered to B.
 /// 7. **Assert:** both converge to "12" (op1+op2 survive, op3
 ///    undone), replicas agree, B's step-4 undo damaged nothing.
@@ -1034,6 +1058,10 @@ fn read_one_crdt_op(
 /// manufactures causally-pending-delivery + concurrent-undo, the
 /// exact interaction the happy-path tests serialize away.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "seven serial steps with a withheld op between them, each asserted where it lands"
+)]
 fn m10_11_q13_cat2_undo_across_delayed_ops() {
     let daemon = TestDaemon::spawn();
     let (hello_a, mut stream_a) = attach_multi(&daemon);
@@ -1060,6 +1088,12 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
         read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5)).expect("B receives op1");
     replica_b.import_updates(&op1).expect("B import op1");
     assert_eq!(replica_b.materialize_string(), "1", "B has op1");
+    send_key(
+        &mut stream_a,
+        hello_a.assigned_frontend_id,
+        pmacs::protocol::Key::End,
+        pmacs::protocol::Modifiers::NONE,
+    );
 
     // Step 2: A op2 "2"@1 — B withholds (delayed delivery).
     send_optimistic_op_from(
@@ -1073,6 +1107,12 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
     );
     let op2_withheld = read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5))
         .expect("B receives op2 (withheld, not yet imported)");
+    send_key(
+        &mut stream_a,
+        hello_a.assigned_frontend_id,
+        pmacs::protocol::Key::End,
+        pmacs::protocol::Modifiers::NONE,
+    );
 
     // Step 3: A op3 "3"@2; B integrates op3 (causally pending op2).
     send_optimistic_op_from(
@@ -1093,13 +1133,14 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
     // B's view with op2 causally pending: loro buffers op3's effect.
     let b_before_undo = replica_b.materialize_string();
 
-    // Step 4: B "undo my last edit" — B has no local ops. Must be a
-    // no-op; must NOT reverse any of A's ops (per-peer undo
-    // isolation, the load-bearing M10.4 property under delay).
-    let b_undid = replica_b.undo().expect("B undo call");
+    // Step 4: B "undo my last edit" — B has no groups. The daemon
+    // finds nothing to undo and broadcasts nothing; it must NOT
+    // reverse any of A's ops (per-source undo isolation, the
+    // load-bearing property under delay).
+    send_undo(&mut stream_b, hello_b.assigned_frontend_id);
     assert!(
-        !b_undid,
-        "B has no own ops; undo must be a no-op, not reach across to A's"
+        read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_millis(600)).is_err(),
+        "B has no own groups; its undo must produce no op, not reach across to A's"
     );
     assert_eq!(
         replica_b.materialize_string(),
@@ -1107,21 +1148,19 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
         "B's no-op undo must not change B's state"
     );
 
-    // Step 5: A undoes → reverses A's op3 → A="12". B integrates A's
-    // undo op (still pending op2).
-    let v_before_a_undo = replica_a.version();
-    let a_undid = replica_a.undo().expect("A undo call");
-    assert!(a_undid, "A has own ops; undo reverses op3");
-    assert_eq!(replica_a.materialize_string(), "12", "A undid op3 → 12");
-    let a_undo_bytes = replica_a
-        .export_updates_since(&v_before_a_undo)
-        .expect("export A's undo op");
-    send_crdt_op(
+    // Step 5: A undoes → the daemon reverses A's op3 → A="12". B
+    // integrates the compensation (still pending op2).
+    send_undo(&mut stream_a, hello_a.assigned_frontend_id);
+    pump_until(
         &mut stream_a,
-        hello_a.assigned_frontend_id,
+        &replica_a,
         buffer_id,
-        a_undo_bytes.clone(),
-    );
+        "12",
+        Duration::from_secs(5),
+    )
+    .expect("A undid op3 → 12");
+    let a_undo_bytes = read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5))
+        .expect("B receives A's compensation");
     replica_b
         .import_updates(&a_undo_bytes)
         .expect("B import A's undo (op2 still pending)");
@@ -1338,8 +1377,9 @@ fn m10_11_q8_convergence_under_jitter() {
 /// Per **Finding 4** (M5.8-inherited reconnect-identity gap):
 /// `daemon.rs` issues a *fresh* `FrontendId`/`peer_id` on every
 /// accepted connection (no `handle_reattach`), so reattached-A is a
-/// different CRDT peer than pre-disconnect-A; loro's per-peer
-/// `UndoManager` on reattached-A cannot reach pre-disconnect ops.
+/// different `FrontendId` than pre-disconnect-A, and the daemon's
+/// arbiter keys its groups by source: reattached-A's undo cannot
+/// reach pre-disconnect-A's groups.
 /// This is a **documented v1.0 limitation**, not a bug this test
 /// should fail on — the broken sub-claim is recorded in the manual
 /// checklist Scenario 4 wording and in V0.2-PREREQUISITES.md

@@ -513,38 +513,42 @@ fn opener_over_region_type_overs_then_pairs() {
 }
 
 // ---------------------------------------------------------------------------
-// Undo grain (Q#AP5, daemon history in the non-replica harness)
+// Undo grain (Q#AP5, daemon history in the non-replica harness). E6c:
+// what one keystroke's command inserts beside the character --- the
+// reaction closer, a skip's insert-and-swallow --- is part of that
+// keystroke's undo step, and consecutive keystrokes amalgamate; before
+// E6c each hook edit was a step of its own.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn pair_is_two_adjacent_undo_steps_and_two_redo_steps() {
+fn pair_is_one_undo_step_and_one_redo_step() {
     let mut s = editor_with("");
     type_str(&mut s, "(");
     assert_eq!(buffer_text(&s), "()");
     undo(&mut s);
     assert_eq!(
         buffer_text(&s),
-        "(",
-        "first undo removes the reaction closer"
+        "",
+        "one undo removes the typed opener and its reaction closer together"
     );
     undo(&mut s);
-    assert_eq!(buffer_text(&s), "", "second undo removes the typed opener");
+    assert_eq!(buffer_text(&s), "", "nothing left to undo");
     redo(&mut s);
-    assert_eq!(buffer_text(&s), "(", "first redo restores the opener");
+    assert_eq!(buffer_text(&s), "()", "one redo restores the pair");
     redo(&mut s);
-    assert_eq!(buffer_text(&s), "()", "second redo restores the closer");
+    assert_eq!(buffer_text(&s), "()", "nothing left to redo");
 }
 
 #[test]
-fn skip_undo_restores_the_swallowed_duplicate() {
+fn skip_undo_removes_the_pair_and_the_skip_as_one_step() {
     let mut s = editor_with("");
     type_str(&mut s, "()");
     assert_eq!(buffer_text(&s), "()");
     undo(&mut s);
     assert_eq!(
         buffer_text(&s),
-        "())",
-        "undoing the skip's delete restores the typed duplicate"
+        "",
+        "the skip's insert-and-swallow is a no-op step in the run, and the run undoes as one"
     );
 }
 
