@@ -11238,6 +11238,125 @@ pub fn install_lsp(
         )?;
     }
 
+    // E6b.1: the edit recorder. Attached to the BUFFER (not the window
+    // the style overlay above goes on), so every edit the document
+    // takes reaches the token store's log exactly once, whether the
+    // buffer is displayed or not and whichever path the edit came by.
+    // Opens the URI's log first, so from this call staleness for the
+    // URI is what the log says and `mark_document_stale` no longer
+    // drops its tokens. Idempotent by `View::kind`; returns whether a
+    // recorder is attached after the call.
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_track_edits",
+            lua.create_function(move |lua, (id, uri): (BufferIdLua, String)| {
+                let store = m.borrow().semantic_token_store();
+                store
+                    .lock()
+                    .expect("semantic token store mutex poisoned")
+                    .open_log(uri);
+                let core = lua
+                    .app_data_ref::<SharedCore>()
+                    .ok_or_else(|| mlua::Error::external("editor core not yet installed"))?;
+                let registry = core.borrow().registry.clone();
+                let mut reg = registry.borrow_mut();
+                let buf = reg
+                    .get_mut(id.0)
+                    .map_err(|e| mlua::Error::external(format!("{e}")))?;
+                if !buf
+                    .view_kinds()
+                    .contains(&crate::semantic_tokens::SemanticEditRecorder::KIND)
+                {
+                    buf.attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
+                        store,
+                    )));
+                }
+                Ok(true)
+            })?,
+        )?;
+    }
+
+    // E6b.4: the lines of `buf` some attached frontend has on screen,
+    // as `{ start = <line>, stop = <line>, last_line = <line>, last_col
+    // = <bytes> }` (zero-based, `stop` inclusive, `last_*` the document
+    // end), or nil when nothing displays it. The union over every
+    // frontend: a semantic frontend's declared byte viewport converted
+    // to lines, and a grid frontend's windows on the buffer from
+    // `view_top` for as many rows as its frame declares (forty when it
+    // has not). What the edit-flush pull passes to
+    // `semanticTokens/range` so the visible lines are re-tokenized
+    // ahead of the whole document. One pass over the rope's bytes, in
+    // Rust, because the Lua `document_end_position` walks the text a
+    // byte at a time and a 14k-line file pays for that on every pull.
+    {
+        lsp_mod.set(
+            "_visible_lines",
+            lua.create_function(move |lua, id: BufferIdLua| {
+                let core = lua
+                    .app_data_ref::<SharedCore>()
+                    .ok_or_else(|| mlua::Error::external("editor core not yet installed"))?;
+                let core = core.borrow();
+                let line_starts: Vec<u64> = {
+                    let reg = core.registry.borrow();
+                    let Ok(buf) = reg.get(id.0) else {
+                        return Ok(Value::Nil);
+                    };
+                    crate::overlay::compute_line_offsets(buf)
+                };
+                let text_len = {
+                    let reg = core.registry.borrow();
+                    reg.get(id.0).map_or(0, crate::buffer::Buffer::len)
+                };
+                let line_of = |byte: u64| -> Option<usize> {
+                    Some(crate::overlay::line_at_offset(
+                        &line_starts,
+                        byte.min(text_len),
+                    ))
+                };
+                let last_line = line_starts.len().saturating_sub(1);
+                let last_col = text_len.saturating_sub(line_starts.last().copied().unwrap_or(0));
+                let mut span: Option<(usize, usize)> = None;
+                let mut widen = |start: usize, stop: usize| {
+                    span = Some(match span {
+                        None => (start, stop),
+                        Some((s, e)) => (s.min(start), e.max(stop)),
+                    });
+                };
+                for view in core.views.values() {
+                    if let Some((bid, range)) = view.document_viewport {
+                        if bid == id.0
+                            && let (Some(start), Some(stop)) =
+                                (line_of(range.start), line_of(range.end))
+                        {
+                            widen(start, stop);
+                        }
+                        continue;
+                    }
+                    let rows = view
+                        .frame_geometry
+                        .map_or(40, |g| usize::try_from(g.total.rows).unwrap_or(40));
+                    for win_id in view.layout.iter_ids() {
+                        if let Some(win) = core.windows.get(&win_id)
+                            && win.buffer_id == id.0
+                        {
+                            widen(win.view_top, win.view_top.saturating_add(rows));
+                        }
+                    }
+                }
+                let Some((start, stop)) = span else {
+                    return Ok(Value::Nil);
+                };
+                let t = lua.create_table()?;
+                t.set("start", start)?;
+                t.set("stop", stop.min(last_line))?;
+                t.set("last_line", last_line)?;
+                t.set("last_col", last_col)?;
+                Ok(Value::Table(t))
+            })?,
+        )?;
+    }
+
     pmacs.set("lsp", lsp_mod)?;
     Ok(())
 }

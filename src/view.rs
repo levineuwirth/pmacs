@@ -618,12 +618,22 @@ mod tests {
     /// override set is unchanged — not the classifications inside it.
     /// Those are executed by
     /// `identity_replace_history_op_leaves_classified_consumers_unchanged`.
+    ///
+    /// The fifth pair postdates the census (E6b.1): the semantic-token
+    /// edit recorder, classified INERT on the version-only history
+    /// `Edit` by the same explicit `0→0` early return the two other
+    /// translators carry, and pinned where it can fire by
+    /// `semantic_tokens::tests::a_version_only_history_edit_leaves_the_store_untouched`.
+    /// The archived framing is a point-in-time measurement and is not
+    /// amended; the classification lives beside the recorder.
     #[test]
     fn every_in_tree_on_edit_override_is_one_the_census_classified() {
-        /// `(file, impl target)`, as measured by the census.
-        const CLASSIFIED: [(&str, &str); 4] = [
+        /// `(file, impl target)`, as measured by the census, plus the
+        /// one override classified since.
+        const CLASSIFIED: [(&str, &str); 5] = [
             ("fold.rs", "FoldStoreTranslator"),
             ("overlay.rs", "BufferStyleSpanTranslator"),
+            ("semantic_tokens.rs", "SemanticEditRecorder"),
             ("syntax.rs", "ParseView"),
             ("text_view.rs", "TextView"),
         ];

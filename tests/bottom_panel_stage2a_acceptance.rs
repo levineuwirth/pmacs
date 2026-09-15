@@ -507,6 +507,7 @@ fn semantic_frontend_with_focused_panel(
                 panel_capable: true,
                 frame_geometry: None,
                 panel_hidden: false,
+                document_viewport: None,
             },
         );
         (doc_win, panel_win, doc_buf)

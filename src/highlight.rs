@@ -704,9 +704,15 @@ impl View for LspStyleView {
         };
         let uri = crate::lsp::path_to_file_uri(path);
 
-        // Pull encoding + legend, and clone the token vec so we can
-        // drop both the manager borrow and the store lock before
-        // walking the viewport (cheap: tokens are small structs).
+        // Pull the legend and the positioned tokens, and drop both the
+        // manager borrow and the store lock before walking the cells.
+        // The tokens arrive in the buffer's current byte coordinates
+        // (E6b.2): the server's answer resolved against the text it
+        // described and carried across every edit recorded since, so
+        // a store that is stale by an edit paints SHIFTED tokens rather
+        // than none. Only a URI declared stale with no edit log to
+        // shift by --- which no production buffer is, the recorder
+        // attaching with the server --- paints nothing here.
         let (ctx, tokens) = {
             let mgr = self.lsp.borrow();
             let Some(ctx) = mgr.semantic_style_context(&uri) else {
@@ -714,103 +720,52 @@ impl View for LspStyleView {
             };
             let store = mgr.semantic_token_store();
             let guard = store.lock().expect("semantic-token store mutex poisoned");
-            if guard.is_stale(&uri) {
-                return;
-            }
-            let Some((_, resp)) = guard.for_uri(&uri) else {
+            let Some((_, tokens)) = guard.positioned_tokens(&uri) else {
                 return;
             };
-            (ctx, resp.tokens.clone())
+            (ctx, tokens.to_vec())
         };
         if tokens.is_empty() {
             return;
         }
+        let Some(legend) = ctx.legend.as_ref() else {
+            return; // No legend ⇒ cannot name a style.
+        };
         let theme = self.theme.lock().expect("theme mutex poisoned").clone();
 
-        // Buffer source bytes (cheap rope slice, mirrors
-        // `semantic_render::buffer_source_bytes`).
-        let source = {
-            let len = buf.len();
-            let mut bytes = vec![0u8; len as usize];
-            if !bytes.is_empty() {
-                buf.snapshot_rope().slice(0, len, &mut bytes);
+        // The same byte-span painter `BufferStyleOverlay` uses, so a
+        // token and a REPL style annotation at the same bytes land in
+        // the same cells by the same arithmetic.
+        let line_offsets = crate::overlay::compute_line_offsets(buf);
+        let start_line = crate::overlay::line_at_offset(&line_offsets, viewport.buffer_start);
+        for t in &tokens {
+            if t.end <= viewport.buffer_start || t.start >= viewport.buffer_end {
+                continue;
             }
-            bytes
-        };
-        let line_offsets = compute_line_offsets(&source);
-        if line_offsets.is_empty() {
-            return;
-        }
-
-        let start_line = line_at_offset(&line_offsets, viewport.buffer_start as u32);
-        let max_rows = viewport.cell_size.rows;
-        let cell_origin = viewport.cell_origin;
-        let total_lines = line_offsets.len() as u32;
-
-        for row_offset in 0..max_rows {
-            // Arc 6 Stage 2: row `r` shows the `r`-th VISIBLE line.
-            let line_idx =
-                u32::try_from(viewport.line_at_row_offset(start_line as usize, row_offset))
-                    .unwrap_or(u32::MAX);
-            if line_idx >= total_lines {
-                break;
-            }
-            let line_start = line_offsets[line_idx as usize];
-            let line_end = line_offsets
-                .get(line_idx as usize + 1)
-                .copied()
-                .unwrap_or(source.len() as u32);
-            let line_end_no_nl = if line_end > line_start
-                && source.get(line_end as usize - 1).copied() == Some(b'\n')
-            {
-                line_end - 1
-            } else {
-                line_end
+            // One resolver on both paths (`SemanticTokensLegend::style_name_for`):
+            // `<type>.<first-modifier>` when modifiers are set, else `<type>`.
+            // The theme's dotted-prefix `lookup` walks back to the base if a
+            // more specific entry isn't defined, so adding a modifier suffix
+            // is a strict refinement — never worse than the unmodified lookup.
+            let Some(lookup_name) = legend.style_name_for(t.token_type, t.token_modifiers) else {
+                continue; // Unknown type index.
             };
-            let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
-            let Ok(line_str) = std::str::from_utf8(line_bytes) else {
-                continue; // Non-UTF-8 line ⇒ skip encoding conversion.
-            };
-
-            // O(tokens × visible_lines) — fine for the typical
-            // semantic-token set; if it ever becomes the bottleneck,
-            // pre-bucket tokens by line at the top of `render`.
-            for t in tokens.iter().filter(|t| t.line == line_idx) {
-                let Some(legend) = ctx.legend.as_ref() else {
-                    continue; // No legend ⇒ cannot name a style.
-                };
-                // One resolver on both paths (`SemanticTokensLegend::style_name_for`):
-                // `<type>.<first-modifier>` when modifiers are set, else `<type>`.
-                // The theme's dotted-prefix `lookup` walks back to the base if a
-                // more specific entry isn't defined, so adding a modifier suffix
-                // is a strict refinement — never worse than the unmodified lookup.
-                let Some(lookup_name) = legend.style_name_for(t) else {
-                    continue; // Unknown type index.
-                };
-                let style = theme.lookup(&lookup_name);
-                if is_default_style(style) {
-                    continue;
-                }
-                let start_b = crate::lsp::char_to_byte(line_str, t.start, ctx.encoding);
-                let end_char = t.start.saturating_add(t.length);
-                let end_b = crate::lsp::char_to_byte(line_str, end_char, ctx.encoding);
-                if end_b <= start_b {
-                    continue;
-                }
-                let (start_col, end_col) = byte_range_to_columns(line_bytes, start_b, end_b);
-                // `visible_cols` returns `None` for an empty range too, so the
-                // old `end_col <= start_col` guard is subsumed rather than
-                // dropped.
-                let Some((clamped_start, clamped_end)) = viewport.visible_cols(start_col, end_col)
-                else {
-                    continue;
-                };
-                let cell_row = cell_origin.row + row_offset;
-                for col in clamped_start..clamped_end {
-                    let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
-                    cell.style = merge_styles(cell.style, style);
-                }
+            let style = theme.lookup(&lookup_name);
+            if is_default_style(style) {
+                continue;
             }
+            crate::overlay::render_buffer_style_span(
+                buf,
+                &line_offsets,
+                start_line,
+                viewport,
+                cells,
+                crate::overlay::BufferStyleSpan {
+                    start: t.start,
+                    end: t.end,
+                    style,
+                },
+            );
         }
     }
 }
@@ -1131,7 +1086,7 @@ mod tests {
         {
             let mgr = state.lsp_manager.borrow();
             let store = mgr.semantic_token_store();
-            store.lock().expect("store").set(
+            store.lock().expect("store").set_current(
                 SemanticTokenKey::new(sid.raw().to_string(), uri),
                 SemanticTokensResponse {
                     tokens: vec![SemanticToken {
@@ -1144,6 +1099,8 @@ mod tests {
                     result_id: None,
                     raw: Vec::new(),
                 },
+                "int main\n",
+                PositionEncoding::Utf16,
             );
         }
         // Render into a small grid.
@@ -1187,8 +1144,165 @@ mod tests {
         );
     }
 
+    /// E6b.2 --- the flipped premise of the pin below. With the edit
+    /// recorder on the buffer (what `pmacs.lsp._track_edits` attaches
+    /// with the server), a store that is stale by an edit paints its
+    /// tokens SHIFTED to the current text: `foo` seeded at [0,3) is
+    /// painted at [3,6) after `ab ` is typed in front of it, and
+    /// nothing at the unshifted cells; typing at the token's end
+    /// extends it over the new character.
     #[test]
-    fn lsp_style_view_suppresses_stale_semantic_tokens() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one seeded buffer, one recorder, two edits and two renders; the fixture is the neighbours' shape"
+    )]
+    fn e6b_2_lsp_style_view_paints_stale_tokens_shifted_to_the_current_text() {
+        use crate::cell::{Cell, CellSize};
+        use crate::editor::EditorState;
+        use crate::lsp::PositionEncoding;
+        use crate::semantic_tokens::{
+            SemanticEditRecorder, SemanticToken, SemanticTokenKey, SemanticTokensResponse,
+        };
+
+        let state = EditorState::new();
+        let buffer_id = state.core.borrow().active_window().buffer_id;
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"foo\n",
+                })
+                .expect("seed");
+            core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.c")));
+        }
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "function",
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+        );
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": { "tokenTypes": ["function"], "tokenModifiers": [] }
+                    }
+                }),
+                PositionEncoding::Utf16,
+            );
+        let active_path = state.core.borrow().active_buffer_path().expect("path set");
+        let uri = crate::lsp::path_to_file_uri(&active_path);
+        let store = state.lsp_manager.borrow().semantic_token_store();
+        {
+            let mut guard = store.lock().expect("store");
+            guard.open_log(&uri);
+            guard.set_current(
+                SemanticTokenKey::new(sid.raw().to_string(), uri.clone()),
+                SemanticTokensResponse {
+                    tokens: vec![SemanticToken {
+                        line: 0,
+                        start: 0,
+                        length: 3,
+                        token_type: 0,
+                        token_modifiers: 0,
+                    }],
+                    result_id: None,
+                    raw: Vec::new(),
+                },
+                "foo\n",
+                PositionEncoding::Utf16,
+            );
+        }
+        let registry = state.core.borrow().registry.clone();
+        registry
+            .borrow_mut()
+            .get_mut(buffer_id)
+            .expect("buffer")
+            .attach_view(Box::new(SemanticEditRecorder::new(store.clone())));
+
+        let render = |state: &EditorState| -> Vec<bool> {
+            let mut view = LspStyleView::new(
+                state.lsp_manager.clone(),
+                state.syntax_registry.theme(),
+                None,
+            );
+            let mut backing: Vec<Cell> = vec![Cell::default(); 20];
+            let mut grid = CellGrid {
+                cells: &mut backing,
+                stride: 20,
+                size: CellSize::new(1, 20),
+            };
+            let viewport = Viewport {
+                buffer_start: 0,
+                buffer_end: u64::MAX,
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(1, 20),
+                gutter_w: 0,
+                folds: None,
+                wrap: WrapMode::Truncate,
+                view_left: 0,
+            };
+            let registry = state.core.borrow().registry.clone();
+            let reg = registry.borrow();
+            let buf = reg.get(buffer_id).expect("buffer");
+            view.render(buf, viewport, &mut grid);
+            (0..8)
+                .map(|c| grid.get(CellCoord::new(0, c)).style.bold)
+                .collect()
+        };
+
+        // Type `ab ` in front of `foo`: the recorder sees the edit, the
+        // store is stale by it, and the token paints where `foo` is now.
+        registry
+            .borrow_mut()
+            .get_mut(buffer_id)
+            .expect("buffer")
+            .apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: b"ab ",
+            })
+            .expect("edit in front of the token");
+        assert!(
+            store.lock().expect("store").is_stale(&uri),
+            "an edit the server has not answered leaves the store stale"
+        );
+        assert_eq!(
+            render(&state),
+            vec![false, false, false, true, true, true, false, false],
+            "shifted stale tokens paint, aligned with the current text: `ab foo`"
+        );
+
+        // Type `d` at the end of `foo`: the token extends over it.
+        registry
+            .borrow_mut()
+            .get_mut(buffer_id)
+            .expect("buffer")
+            .apply_edit(crate::buffer::EditOp::Insert {
+                pos: 6,
+                bytes: b"d",
+            })
+            .expect("edit at the token's end");
+        assert_eq!(
+            render(&state),
+            vec![false, false, false, true, true, true, true, false],
+            "typing at a token's end extends it: `ab food`"
+        );
+    }
+
+    /// The pre-E6b drop, kept for the one case it still governs: a URI
+    /// declared stale that no recorder tracks has nothing to shift by,
+    /// so its tokens do not paint over text that has moved under them.
+    /// Its partner above is the production case.
+    #[test]
+    fn lsp_style_view_suppresses_stale_semantic_tokens_without_an_edit_log() {
         use crate::cell::{Cell, CellSize};
         use crate::editor::EditorState;
         use crate::lsp::PositionEncoding;
@@ -1234,7 +1348,7 @@ mod tests {
             let mgr = state.lsp_manager.borrow();
             let store = mgr.semantic_token_store();
             let mut guard = store.lock().expect("store");
-            guard.set(
+            guard.set_current(
                 SemanticTokenKey::new(sid.raw().to_string(), uri.clone()),
                 SemanticTokensResponse {
                     tokens: vec![SemanticToken {
@@ -1247,6 +1361,8 @@ mod tests {
                     result_id: None,
                     raw: Vec::new(),
                 },
+                "foo\n",
+                PositionEncoding::Utf16,
             );
             guard.mark_stale(uri);
         }
@@ -1353,7 +1469,7 @@ mod tests {
         {
             let mgr = state.lsp_manager.borrow();
             let store = mgr.semantic_token_store();
-            store.lock().expect("store").set(
+            store.lock().expect("store").set_current(
                 SemanticTokenKey::new(sid.raw().to_string(), uri),
                 SemanticTokensResponse {
                     tokens: vec![
@@ -1375,6 +1491,8 @@ mod tests {
                     result_id: None,
                     raw: Vec::new(),
                 },
+                "foo bar\n",
+                PositionEncoding::Utf16,
             );
         }
         let mut view = LspStyleView::new(

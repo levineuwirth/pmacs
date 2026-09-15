@@ -933,6 +933,7 @@ fn attach_frontend(s: &EditorState, fid: FrontendId) -> WindowId {
             panel_capable: true,
             frame_geometry: None,
             panel_hidden: false,
+            document_viewport: None,
         },
     );
     win_id

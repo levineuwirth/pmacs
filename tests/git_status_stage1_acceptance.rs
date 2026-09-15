@@ -2541,6 +2541,7 @@ fn attach_frontend(s: &EditorState) -> pmacs::window::WindowId {
             panel_capable: true,
             frame_geometry: None,
             panel_hidden: false,
+            document_viewport: None,
         },
     );
     win

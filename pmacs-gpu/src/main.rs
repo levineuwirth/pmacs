@@ -939,7 +939,7 @@ fn main() {
             return;
         }
         Mode::HeadlessProbe { socket, report } => {
-            std::process::exit(run_headless_probe(socket, report));
+            std::process::exit(run_probe(socket, report));
         }
         Mode::HeadlessManagedProbe {
             socket,
@@ -1535,6 +1535,401 @@ impl ScrollbarGesture {
 /// This probe's viewport top line, or 0 when there is no state left.
 fn probe_scroll_top(app: &App) -> usize {
     app.state.as_ref().map_or(0, |state| state.scroll_top)
+}
+
+/// `--headless-probe`'s entry: the typing probe when
+/// `PMACS_GPU_PROBE_TYPE_TEXT` names text to type, else the generic
+/// observation loop. E6b.3's probe is its own loop because it owns the
+/// state and the client through the production `App` for its whole
+/// run, which the generic loop cannot: that loop reads both directly.
+fn run_probe(socket: &Path, report: &Path) -> i32 {
+    match std::env::var_os("PMACS_GPU_PROBE_TYPE_TEXT")
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.is_empty())
+    {
+        Some(text) => run_typing_probe(socket, report, &text),
+        None => run_headless_probe(socket, report),
+    }
+}
+
+/// E6b.3 --- what the GPU holds for styling at one moment: the byte
+/// ranges of the spans in the marker face, and how many spans in all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TypingProbeFrame {
+    /// Milliseconds since the probe connected.
+    at_ms: u64,
+    /// `key` for the keystroke's own frame, the message label for a
+    /// frame observed after a daemon message.
+    origin: String,
+    /// The mirror's text length in bytes.
+    text_len: usize,
+    /// The spans in the marker face, sorted, as byte ranges.
+    marked: Vec<(u64, u64)>,
+    /// Every span the GPU holds, whatever its face.
+    spans: usize,
+}
+
+/// The marker face's foreground, from `PMACS_GPU_PROBE_MARK_RGB`
+/// (`rrggbb`, six hex digits) or the default the acceptance fixtures
+/// merge into the theme. A span is the server's by this color alone,
+/// since the bundled theme never emits an RGB.
+fn typing_probe_mark() -> CellColor {
+    let parsed = std::env::var("PMACS_GPU_PROBE_MARK_RGB")
+        .ok()
+        .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
+        .unwrap_or(0x007b_1fa2);
+    CellColor::Rgb(
+        u8::try_from((parsed >> 16) & 0xff).unwrap_or(0),
+        u8::try_from((parsed >> 8) & 0xff).unwrap_or(0),
+        u8::try_from(parsed & 0xff).unwrap_or(0),
+    )
+}
+
+/// Snapshot the spans the GPU holds now, for the typing probe's trace.
+fn typing_probe_observe(
+    app: &App,
+    at_ms: u64,
+    origin: &str,
+    mark: CellColor,
+) -> Option<TypingProbeFrame> {
+    let state = app.state.as_ref()?;
+    let mut marked: Vec<(u64, u64)> = state
+        .current_spans
+        .iter()
+        .filter(|span| span.style.fg == mark)
+        .map(|span| (span.range.start, span.range.end))
+        .collect();
+    marked.sort_unstable();
+    Some(TypingProbeFrame {
+        at_ms,
+        origin: origin.to_owned(),
+        text_len: state.current_text.len(),
+        marked,
+        spans: state.current_spans.len(),
+    })
+}
+
+/// True when `marked` covers every byte of `[start, end)`.
+fn marked_covers(marked: &[(u64, u64)], start: u64, end: u64) -> bool {
+    let mut at = start;
+    for &(s, e) in marked {
+        if s <= at && at < e {
+            at = e;
+            if at >= end {
+                return true;
+            }
+        }
+    }
+    at >= end
+}
+
+/// E6b.3 --- **the instrument.** Type `text` into the attached
+/// document through the production `App` dispatch --- `apply_keyboard`,
+/// so a plain character takes the optimistic `CrdtOp` route a GPU user's
+/// keystroke takes --- and record the style spans the GPU holds after
+/// every daemon message from the keystroke until the server's answer
+/// has landed and the stream is quiet.
+///
+/// The daemon messages go through `dispatch_app_event`, the same
+/// consumer the winit path feeds, so a frame in the trace is what the
+/// window would have painted. What this exists to see is a frame in
+/// which the server's refinement is absent where it stood before the
+/// keystroke: before E6b.2 the daemon's post-edit `StyleSpans` carried
+/// the grammar alone for the length of every round-trip, and no
+/// witness in the tree could observe a frame between two settled
+/// states.
+///
+/// `PMACS_GPU_PROBE_TYPE_AT=<byte>` first walks the caret there with
+/// `Right`, one round-trip each, and types once the daemon's
+/// `CursorByte` confirms it; without it the text goes in at the caret
+/// the snapshot placed. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole
+/// run (30 s by default), and `PMACS_GPU_PROBE_SETTLE=change` settles
+/// on the first daemon frame whose marked spans differ from the
+/// keystroke's translated set, for a real server whose answer removes
+/// the mark from the identifier the character broke. "Settled" is the first daemon frame after the
+/// keystroke whose marked spans cover the typed bytes: the fixture
+/// types at the start of an identifier so the server's answer, and only
+/// the server's answer, can color what was typed. After settling the
+/// probe waits for half a second of silence, then reports. Nothing is
+/// asserted here; the acceptance reads the trace.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-observe-type-observe session, reported line by line"
+)]
+fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let session_protocol_version = client.session_protocol_version();
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+
+    let mark = typing_probe_mark();
+    // Closure witnesses drive deletion and the same Paste sender used
+    // after an OS clipboard read, without touching the user's clipboard.
+    let action = std::env::var("PMACS_GPU_PROBE_ACTION").unwrap_or_default();
+    let select_bytes = std::env::var("PMACS_GPU_PROBE_SELECT_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let observe_ms = std::env::var("PMACS_GPU_PROBE_OBSERVE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut selection_sent = false;
+    let type_at = std::env::var("PMACS_GPU_PROBE_TYPE_AT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    // `cover` (the default): settled when a daemon frame's marked spans
+    // cover the typed bytes. `change`: settled at the first daemon
+    // frame after the keystroke whose marked spans differ from the
+    // keystroke's own translated set --- for a real server, whose
+    // answer to a character typed into an identifier is to STOP
+    // marking it (`xstd` resolves to nothing), so covering never comes.
+    let settle_on_change = std::env::var("PMACS_GPU_PROBE_SETTLE").is_ok_and(|v| v == "change");
+    let started = std::time::Instant::now();
+    let started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_millis());
+    let ms = |t: std::time::Instant| {
+        u64::try_from(t.duration_since(started).as_millis()).unwrap_or(u64::MAX)
+    };
+    // Thirty seconds by default; a measurement against a real server
+    // that indexes a workspace first raises it with
+    // PMACS_GPU_PROBE_DEADLINE_MS.
+    let deadline = started
+        + std::time::Duration::from_millis(
+            std::env::var("PMACS_GPU_PROBE_DEADLINE_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30_000),
+        );
+    let settle_quiet = std::time::Duration::from_millis(500);
+
+    let mut trace: Vec<TypingProbeFrame> = Vec::new();
+    let mut snapshot_seen = false;
+    let mut walked = false;
+    let mut typed_at: Option<std::time::Instant> = None;
+    let mut typed_at_byte: u64 = 0;
+    let mut typed_marked: Vec<(u64, u64)> = Vec::new();
+    let mut settled_at: Option<std::time::Instant> = None;
+    // The last message that could change what is styled: a styling
+    // frame or a snapshot. The daemon attaches a `CursorByte` and its
+    // status facts to every tick it produces, so waiting for total
+    // silence would wait for the deadline.
+    let mut last_styling_at = started;
+    let mut disconnect: Option<String> = None;
+    let typed_len = text.len() as u64;
+
+    while std::time::Instant::now() < deadline {
+        let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(100)) else {
+            let now = std::time::Instant::now();
+            if settled_at.is_some()
+                && now.duration_since(last_styling_at) >= settle_quiet
+                && typed_at
+                    .is_some_and(|t| now.duration_since(t).as_millis() >= u128::from(observe_ms))
+            {
+                break;
+            }
+            if let Some(t) = typed_at
+                && now.duration_since(t) >= std::time::Duration::from_secs(15)
+            {
+                break; // no answer ever landed; the report says so
+            }
+            continue;
+        };
+        let now = std::time::Instant::now();
+        let (label, is_snapshot, is_style, is_disconnect) = match &event {
+            AttachEvent::Message(msg) => (
+                instance_message_label(msg.as_ref()),
+                matches!(msg.as_ref(), InstanceMessage::BufferSnapshot { .. }),
+                matches!(msg.as_ref(), InstanceMessage::StyleSpans { .. }),
+                false,
+            ),
+            AttachEvent::Disconnected(_) => ("Disconnected", false, false, true),
+        };
+        if let AttachEvent::Disconnected(reason) = &event {
+            disconnect = Some(reason.clone());
+        }
+        app.dispatch_app_event(AppEvent::Attach(event));
+        if is_disconnect {
+            break;
+        }
+        snapshot_seen |= is_snapshot;
+        if is_style || is_snapshot {
+            last_styling_at = now;
+        }
+        let Some(frame) = typing_probe_observe(&app, ms(now), label, mark) else {
+            break;
+        };
+        let changed = trace
+            .last()
+            .is_none_or(|prev| prev.marked != frame.marked || prev.text_len != frame.text_len);
+        if is_style || is_snapshot || changed {
+            trace.push(frame.clone());
+        }
+        if typed_at.is_none() {
+            // Type once the document is here with its refinement, and
+            // the caret is where the fixture asked.
+            if !snapshot_seen || frame.marked.is_empty() {
+                continue;
+            }
+            let Some(cursor) = app.state.as_ref().and_then(|s| s.own_cursor) else {
+                continue;
+            };
+            if let Some(at) = type_at
+                && !selection_sent
+                && cursor.byte != at
+            {
+                if !walked && let Some(client) = app.attach_client.as_ref() {
+                    walked = true;
+                    for _ in cursor.byte..at {
+                        let _ = client.send_key(ProtocolKey::Right, Modifiers::NONE);
+                    }
+                }
+                continue;
+            }
+            if select_bytes > 0 {
+                if !selection_sent {
+                    selection_sent = true;
+                    if let Some(client) = app.attach_client.as_ref() {
+                        let _ = client.send_key(ProtocolKey::Char(' '), Modifiers::CTRL);
+                        for _ in 0..select_bytes {
+                            let _ = client.send_key(ProtocolKey::Right, Modifiers::NONE);
+                        }
+                    }
+                    continue;
+                }
+                if cursor.byte != type_at.unwrap_or(0) + select_bytes {
+                    continue;
+                }
+            }
+            typed_at_byte = cursor.byte;
+            match action.as_str() {
+                "delete" => app.apply_keyboard(&Key::Named(NamedKey::Delete), None),
+                "backspace" => app.apply_keyboard(&Key::Named(NamedKey::Backspace), None),
+                "paste" => {
+                    if let Some(client) = app.attach_client.as_ref() {
+                        let _ = client.send_paste(text.as_bytes().to_vec());
+                    }
+                }
+                _ => {
+                    for ch in text.chars() {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                    }
+                }
+            }
+            let t = std::time::Instant::now();
+            typed_at = Some(t);
+            if let Some(after) = typing_probe_observe(&app, ms(t), "key", mark) {
+                typed_marked.clone_from(&after.marked);
+                trace.push(after);
+            }
+        } else if settled_at.is_none()
+            && is_style
+            && (if settle_on_change {
+                frame.marked != typed_marked
+            } else {
+                marked_covers(&frame.marked, typed_at_byte, typed_at_byte + typed_len)
+            })
+        {
+            settled_at = Some(now);
+        } else if settled_at.is_some()
+            && now.duration_since(last_styling_at) >= settle_quiet
+            && typed_at.is_some_and(|t| now.duration_since(t).as_millis() >= u128::from(observe_ms))
+        {
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "started_unix_ms={started_unix_ms}");
+    if let Some(state) = app.state.as_ref() {
+        let _ = writeln!(out, "final_text_debug={:?}", state.current_text);
+    }
+    let _ = writeln!(out, "session_protocol_version={session_protocol_version}");
+    let _ = writeln!(out, "typed_text={text}");
+    let _ = writeln!(out, "typed_at_byte={typed_at_byte}");
+    let _ = writeln!(
+        out,
+        "typed_at_ms={}",
+        typed_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(
+        out,
+        "settled_at_ms={}",
+        settled_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(
+        out,
+        "window_ms={}",
+        match (typed_at, settled_at) {
+            (Some(k), Some(s)) => ms(s).saturating_sub(ms(k)).to_string(),
+            _ => String::from("none"),
+        }
+    );
+    let _ = writeln!(out, "frames={}", trace.len());
+    for (i, frame) in trace.iter().enumerate() {
+        let marked: Vec<String> = frame
+            .marked
+            .iter()
+            .map(|(s, e)| format!("{s}-{e}"))
+            .collect();
+        let _ = writeln!(
+            out,
+            "frame.{i}={}|{}|{}|{}|{}",
+            frame.at_ms,
+            frame.origin,
+            frame.text_len,
+            marked.join(";"),
+            frame.spans
+        );
+    }
+    let _ = writeln!(
+        out,
+        "completion_observed={}",
+        typed_at.is_some() && settled_at.is_some()
+    );
+    let _ = writeln!(out, "disconnect={}", disconnect.unwrap_or_default());
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!(
+            "pmacs-gpu probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
+    0
 }
 
 /// E3.1 — drive one scrollbar gesture through the **production `App`
