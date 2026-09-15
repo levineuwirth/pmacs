@@ -26,6 +26,8 @@
 //! moves its view list out of `self` before iterating, so the views can
 //! observe `&Buffer` while the buffer's own `&mut self` is held.
 
+#[cfg(feature = "crdt")]
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -128,25 +130,136 @@ pub enum EditOp<'a> {
 // ---------------------------------------------------------------------------
 
 /// The most entries either history keeps (E6.4). The v0.1 stack drops
-/// its oldest entry past this; loro's `UndoManager` is built with the
-/// same ceiling as its `max_undo_steps`, so both modes forget at the
-/// same depth. Ten thousand is past any human-driven session and each
-/// entry is a structurally shared rope, so the cost is bounded rather
-/// than felt.
+/// its oldest entry past this; each per-source stack of the CRDT-mode
+/// arbiter (E6c) is capped at the same depth, so both modes forget at
+/// the same depth. Ten thousand is past any human-driven session; a
+/// v0.1 entry is a structurally shared rope and an arbiter group is a
+/// few op spans, so the cost is bounded rather than felt.
 pub const UNDO_HISTORY_LIMIT: usize = 10_000;
 
-/// CRDT mode (E6.4): the state of the loro undo group a run of typed
-/// self-inserts opens on a buffer.
+/// Who a forward edit belongs to for undo purposes (E6c).
+///
+/// Every forward edit the daemon applies is attributed to exactly one
+/// source: a remote `CrdtOp` import to its authenticated frontend, a
+/// dispatch-path edit to the acting frontend
+/// (`EditorCore::active_frontend`, set by dispatch before the command
+/// runs), and a Lua edit to the frontend whose interactive command is
+/// in scope (`InteractiveCommandOrigin`), or to [`UndoSource::Daemon`]
+/// when no command is --- a script, a server-driven
+/// `workspace/applyEdit`, a generated-buffer write. Undo pops the
+/// acting source's own most recent group, so two frontends typing
+/// into one buffer each undo their own last group and never each
+/// other's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UndoSource {
+    /// An attached frontend, by id.
+    Frontend(crate::protocol::FrontendId),
+    /// The daemon itself: background Lua, server-driven edits, and
+    /// anything with no interactive command in scope.
+    Daemon,
+}
+
+/// One recorded op span (E6c) with the foreign changes that landed
+/// after it, in its own coordinates (see
+/// [`crate::crdt::ChangeBase`]). The base of a group's last span
+/// absorbs everything foreign that happens while the group is the
+/// newest thing its source did; the base of an earlier span holds what
+/// landed between it and the next.
+#[cfg(feature = "crdt")]
+#[derive(Clone, Debug)]
+struct RecordedSpan {
+    span: loro::IdSpan,
+    base: crate::crdt::ChangeBase,
+}
+
+/// One undo step for one source (E6c): the loro op spans its edits
+/// produced, in application order. Up to `undo.amalgamate` consecutive
+/// typed inserts merge into one group; every other forward edit is a
+/// group of its own. A span names ops by `(peer, counter range)`, so a
+/// group can hold a frontend's optimistic ops beside the daemon-peer
+/// ops a hook added inside the same command (the auto-pair closer),
+/// and undoing it removes both. `seqno` orders groups across sources
+/// for the recency pick (see [`Buffer::undo_for`]).
+#[cfg(feature = "crdt")]
+#[derive(Clone, Debug, Default)]
+struct SourceGroup {
+    spans: Vec<RecordedSpan>,
+    seqno: u64,
+}
+
+#[cfg(feature = "crdt")]
+impl SourceGroup {
+    fn of(spans: Vec<loro::IdSpan>) -> Self {
+        Self {
+            spans: spans
+                .into_iter()
+                .map(|span| RecordedSpan {
+                    span,
+                    base: crate::crdt::ChangeBase::default(),
+                })
+                .collect(),
+            seqno: 0,
+        }
+    }
+
+    /// Compose a foreign change into the last span's base.
+    fn absorb(&mut self, change: &crate::crdt::ChangeBase) {
+        if let Some(last) = self.spans.last_mut() {
+            last.base.compose(change);
+        }
+    }
+}
+
+/// Which stack a compensation pops from (E6c).
+#[cfg(feature = "crdt")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UndoGroup {
-    /// No group is open.
-    Closed,
-    /// A group is open and the next edit is the announced typed one,
-    /// which joins it.
-    AwaitingTyped,
-    /// A group is open and no typed edit is announced: the next edit
-    /// is foreign and cuts the group before it reaches loro.
-    Open,
+enum HistoryStep {
+    Undo,
+    Redo,
+}
+
+/// Per-source undo state on one buffer (E6c): the cross-peer arbiter's
+/// record. Each source has its own group stack, its own redo stack and
+/// its own open group, so two frontends typing into one buffer never
+/// share a group --- E6.4's single global loro group did, and a second
+/// typer's run closed the first's.
+#[cfg(feature = "crdt")]
+#[derive(Debug, Default)]
+struct SourceUndoStacks {
+    /// Closed groups, oldest first. Capped at [`UNDO_HISTORY_LIMIT`].
+    groups: VecDeque<SourceGroup>,
+    /// Groups this source undid, oldest first: each holds the spans
+    /// of the compensation that undid it, which is what redo undoes.
+    /// Cleared by this source's own forward edits.
+    redo: VecDeque<SourceGroup>,
+    /// The amalgamation run currently open, if any.
+    open: Option<SourceGroup>,
+}
+
+#[cfg(feature = "crdt")]
+impl SourceUndoStacks {
+    /// The newest group on the undo side: the open run if one is
+    /// open, else the top closed group.
+    fn undo_top(&mut self) -> Option<&mut SourceGroup> {
+        match self.open.as_mut() {
+            Some(open) => Some(open),
+            None => self.groups.back_mut(),
+        }
+    }
+
+    /// Compose a foreign change into the undo side's newest group.
+    fn absorb_undo(&mut self, change: &crate::crdt::ChangeBase) {
+        if let Some(top) = self.undo_top() {
+            top.absorb(change);
+        }
+    }
+
+    /// Compose a foreign change into the redo side's newest group.
+    fn absorb_redo(&mut self, change: &crate::crdt::ChangeBase) {
+        if let Some(top) = self.redo.back_mut() {
+            top.absorb(change);
+        }
+    }
 }
 
 /// One entry in the undo (or redo) stack.
@@ -243,10 +356,34 @@ pub struct Buffer {
     undo: VecDeque<UndoEntry>,
     /// Redo stack. Cleared by any forward edit.
     redo: VecDeque<UndoEntry>,
-    /// CRDT mode (E6.4): the loro undo group open on this buffer for a
-    /// run of typed self-inserts, and whether the next edit is the
-    /// typed one the core announced.
-    undo_group: UndoGroup,
+    /// v0.1 mode (E6c): the undo depth when the current typed
+    /// self-insert's command began, so every entry the command pushed
+    /// --- the character, and whatever a hook added inside the same
+    /// command, the auto-pair closer above all --- collapses into one
+    /// entry when the keystroke is noted. The arbiter has the same
+    /// rule through its open group, and the two histories agree.
+    typed_floor: Option<usize>,
+    /// Cross-peer undo arbiter record (E6c, CRDT mode): per-source
+    /// group stacks plus one open group each. Replaces E6.4's single
+    /// global loro `UndoManager` group. Every forward edit is recorded
+    /// here with its source (see [`UndoSource`]) as the op spans it
+    /// produced; `buffer.undo` pops the acting source's most recent
+    /// group and compensates on the daemon peer.
+    #[cfg(feature = "crdt")]
+    arbiter: HashMap<UndoSource, SourceUndoStacks>,
+    /// Buffer-global sequence stamped on every closed group (E6c),
+    /// so the recency pick can order one source's groups against the
+    /// daemon's unowned ones.
+    #[cfg(feature = "crdt")]
+    arbiter_seq: u64,
+    /// A remote import's spans and diff, stashed by
+    /// [`Self::apply_remote_crdt_op`] for [`Self::arbiter_settle_remote`]:
+    /// the op's typed-ness and the source's run counter live in the
+    /// core, so the daemon settles the record right after the import,
+    /// in the same synchronous flow with no edit possible between.
+    /// Single-threaded, so one slot suffices.
+    #[cfg(feature = "crdt")]
+    pending_remote: Option<(Vec<loro::IdSpan>, crate::crdt::ChangeBase)>,
     /// Path this buffer is bound to on disk, if any (T M4.5 L1:
     /// relocated here from `EditorCore` so cross-file navigation can
     /// keep each buffer's identity straight — the v0.1 single-file
@@ -321,7 +458,13 @@ impl Buffer {
             next_mark_id: 0,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
-            undo_group: UndoGroup::Closed,
+            typed_floor: None,
+            #[cfg(feature = "crdt")]
+            arbiter: HashMap::new(),
+            #[cfg(feature = "crdt")]
+            arbiter_seq: 0,
+            #[cfg(feature = "crdt")]
+            pending_remote: None,
             file_path: None,
             file_meta: None,
             editing_in_progress: false,
@@ -406,15 +549,12 @@ impl Buffer {
     ///
     /// **Undo-history loss**: Pre-upgrade entries in the v0.1 undo
     /// stack (and redo stack) are cleared explicitly during the
-    /// upgrade. Post-upgrade undo routes through loro's `UndoManager`,
-    /// which has no knowledge of pre-upgrade edits. Users wishing to
-    /// preserve undo history should attach collaboration before
-    /// making edits, or accept that mid-session collaboration loses
-    /// prior undo state. A v0.2+ refinement preserving v0.1 history
-    /// alongside `UndoManager` is feasible but out of scope for v1.0
-    /// (the synthesis from v0.1 entries → CRDT ops is structurally
-    /// problematic since the pre-upgrade ops have no `peer_id` to
-    /// attribute to `UndoManager`).
+    /// upgrade. Post-upgrade undo routes through the cross-peer
+    /// arbiter (E6c), which records edits as loro op spans, and a
+    /// pre-upgrade edit has no ops to name. Users wishing to preserve
+    /// undo history should attach collaboration before making edits,
+    /// or accept that mid-session collaboration loses prior undo
+    /// state.
     ///
     /// Used by M10.8 (multi-frontend instance state) when a v0.1
     /// frontend's buffer is promoted to CRDT-backed at attach time
@@ -446,13 +586,11 @@ impl Buffer {
             self.rope.slice(0, rope_len, &mut bytes);
         }
         self.crdt = Some(crate::crdt::CrdtState::from_bytes(peer_id, &bytes)?);
-        // M10.4 reframe: clear v0.1 undo/redo stacks on upgrade. The
-        // pre-upgrade entries can't be replayed through UndoManager
-        // (no peer_id attribution); leaving them in self.undo would
-        // make them unreachable through CRDT-mode undo (which
-        // bypasses self.undo). Clear explicitly + log so the data
-        // loss is visible. v0.2+ may revisit (preserve alongside
-        // UndoManager, route undo to v0.1 stack first then switch).
+        // Clear the v0.1 undo/redo stacks on upgrade. The pre-upgrade
+        // entries have no op spans for the arbiter to name; leaving
+        // them in self.undo would make them unreachable through
+        // CRDT-mode undo (which bypasses self.undo). Clear explicitly
+        // + log so the data loss is visible.
         if !self.undo.is_empty() || !self.redo.is_empty() {
             // The buffer-registry / Lua-binding layer wraps this in
             // a user-facing notification; the log here is for
@@ -461,8 +599,7 @@ impl Buffer {
             // surface from inside the rope/buffer layer.
             eprintln!(
                 "Buffer {} ({:?}): upgrade_to_crdt clearing {} undo + {} redo entries; \
-                 v0.1 history is not preserved across CRDT mode upgrade. See M10.4 audit doc \
-                 for the v0.2+ refinement path.",
+                 v0.1 history is not preserved across CRDT mode upgrade.",
                 self.name,
                 self.id,
                 self.undo.len(),
@@ -618,7 +755,8 @@ impl Buffer {
     /// undo entries holding full rope clones that nothing can ever pop —
     /// `read_only` guarantees they are unreachable — so a periodically
     /// refreshed buffer would grow without bound. In CRDT mode the same
-    /// retention lives in loro's `UndoManager`, so both are cleared.
+    /// retention lives in the arbiter's per-source stacks, so both
+    /// are cleared.
     ///
     /// # The returned edit must be fanned out
     ///
@@ -651,8 +789,9 @@ impl Buffer {
         self.undo.clear();
         self.redo.clear();
         #[cfg(feature = "crdt")]
-        if let Some(crdt) = self.crdt.as_ref() {
-            crdt.clear_undo_history();
+        {
+            self.arbiter.clear();
+            self.pending_remote = None;
         }
     }
 
@@ -869,7 +1008,24 @@ impl Buffer {
     /// would already fail at `&mut` aliasing in safe Rust.
     ///
     /// Threading: main thread only.
+    ///
+    /// Attributed to [`UndoSource::Daemon`]; see [`Self::apply_edit_as`].
     pub fn apply_edit(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
+        self.apply_edit_as(UndoSource::Daemon, op)
+    }
+
+    /// [`Self::apply_edit`] with an explicit undo source (E6c).
+    ///
+    /// The [`EditorCore`](crate::editor_core::EditorCore) command
+    /// primitives attribute to their acting frontend; every other
+    /// direct caller is daemon work and uses [`Self::apply_edit`].
+    ///
+    /// Threading: main thread only.
+    pub fn apply_edit_as(
+        &mut self,
+        source: UndoSource,
+        op: EditOp<'_>,
+    ) -> Result<Edit, BufferError> {
         self.ensure_writable()?;
         if self.editing_in_progress {
             return Err(BufferError::ConcurrentEdit {
@@ -882,7 +1038,7 @@ impl Buffer {
         // panics during it would leave an empty view list (acceptable: views
         // are held by `Box`, no resource leak).
         let mut views = std::mem::take(&mut self.views);
-        let result = self.apply_edit_inner(&mut views, op);
+        let result = self.apply_edit_inner(&mut views, op, source);
         // Restore views even on error.
         self.views = views;
         result
@@ -902,9 +1058,11 @@ impl Buffer {
     /// 3. Apply the rope stages (rope mutation + mark adjustment +
     ///    revision bump + modified flag + `on_edit` broadcast).
     ///    Skips the CRDT-application stage (already done in step 2)
-    ///    AND the undo push (remote ops aren't locally undoable per
-    ///    M10.4's per-peer undo design — loro's `UndoManager` tracks
-    ///    history).
+    ///    and the v0.1 undo push. The op's spans are stashed for the
+    ///    arbiter (E6c) rather than recorded: the import's typed-ness
+    ///    and the source's run counter are the daemon's to settle,
+    ///    right after this returns, via
+    ///    [`Self::arbiter_settle_remote`].
     ///
     /// # Why the diff-then-EditOp shape
     ///
@@ -960,11 +1118,17 @@ impl Buffer {
         // Integrate the remote op and capture Loro's projection diff.
         // Optimistic GUI typing produces one Insert delta, so handle
         // that shape without copying or materializing the document.
-        let text_deltas = crdt
-            .import_updates_with_text_deltas(op_bytes)
-            .map_err(|e| BufferError::CrdtRejected {
-                reason: format!("import_updates: {e:?}"),
-            })?;
+        // E6c: the spans the import advanced are the arbiter's record
+        // of this edit, stashed below once an edit is known to have
+        // happened (a no-op import advances the version but changes
+        // no text, and undoing it would do nothing).
+        let pre_version = crdt.version();
+        let (text_deltas, imported_diff) =
+            crdt.capture(|| crdt.import_updates_with_text_deltas(op_bytes));
+        let text_deltas = text_deltas.map_err(|e| BufferError::CrdtRejected {
+            reason: format!("import_updates: {e:?}"),
+        })?;
+        let imported = (crdt.spans_since(&pre_version), imported_diff);
         if let Some((unicode_pos, inserted)) = single_remote_text_insert(&text_deltas)
             && let Some(byte_pos) = crdt.unicode_to_utf8_pos(unicode_pos)
         {
@@ -973,6 +1137,7 @@ impl Buffer {
             let result =
                 self.run_remote_rope_stages(&mut views, byte_pos, byte_pos, inserted.as_bytes());
             self.views = views;
+            self.pending_remote = Some(imported);
             return result.map(Some);
         }
 
@@ -991,6 +1156,7 @@ impl Buffer {
             let mut views = std::mem::take(&mut self.views);
             let result = self.run_remote_rope_stages(&mut views, byte_start, byte_end, b"");
             self.views = views;
+            self.pending_remote = Some(imported);
             return result.map(Some);
         }
 
@@ -1067,11 +1233,12 @@ impl Buffer {
         let inserted = &new_bytes[prefix..new_bytes.len() - suffix];
 
         // Apply rope stages without re-applying to CRDT
-        // (CRDT was applied above in step 2) and without undo push
-        // (remote ops aren't locally undoable per M10.4).
+        // (CRDT was applied above in step 2) and without the v0.1
+        // undo push; the arbiter's record is the stash.
         let mut views = std::mem::take(&mut self.views);
         let result = self.run_remote_rope_stages(&mut views, range_start, range_end, inserted);
         self.views = views;
+        self.pending_remote = Some(imported);
         result.map(Some)
     }
 
@@ -1104,8 +1271,9 @@ impl Buffer {
 
     /// T M10.10 — rope-stages-only path for remote CRDT ops. Mirrors
     /// `run_rope_edit_and_broadcast`'s stages 2–4 but skips CRDT
-    /// application (already done) and undo push (remote ops aren't
-    /// locally undoable). Always called from
+    /// application (already done) and the v0.1 undo push (a remote op
+    /// implies a CRDT-backed buffer, whose history is the arbiter's).
+    /// Always called from
     /// [`apply_remote_crdt_op`](Self::apply_remote_crdt_op).
     #[cfg(feature = "crdt")]
     fn run_remote_rope_stages(
@@ -1119,7 +1287,7 @@ impl Buffer {
         let edit = self.rope.replace(range_start, range_end, inserted)?;
 
         // Stage 3: state update (mark adjustment + revision bump +
-        // modified flag; no undo push for remote ops).
+        // modified flag; no v0.1 undo push for remote ops).
         let pre_range = edit.range;
         let inserted_len = edit.inserted_len;
         self.rope = edit.new_rope.clone();
@@ -1153,9 +1321,25 @@ impl Buffer {
         reason = "by-value mirrors apply_edit's signature; the Lua bindings build a fresh EditOp per call"
     )]
     pub fn apply_edit_skip_intercepts(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
+        self.apply_edit_skip_intercepts_as(UndoSource::Daemon, op)
+    }
+
+    /// [`Self::apply_edit_skip_intercepts`] with an explicit undo
+    /// source (E6c). The Lua bindings attribute to the frontend whose
+    /// interactive command is in scope, or to [`UndoSource::Daemon`]
+    /// outside one.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "by-value mirrors apply_edit's signature; the Lua bindings build a fresh EditOp per call"
+    )]
+    pub fn apply_edit_skip_intercepts_as(
+        &mut self,
+        source: UndoSource,
+        op: EditOp<'_>,
+    ) -> Result<Edit, BufferError> {
         self.ensure_writable()?;
         let mut views = std::mem::take(&mut self.views);
-        let result = self.run_rope_edit_and_broadcast(&mut views, &op);
+        let result = self.run_rope_edit_and_broadcast(&mut views, &op, source);
         self.views = views;
         result
     }
@@ -1164,6 +1348,7 @@ impl Buffer {
         &mut self,
         views: &mut [(ViewId, Box<dyn View>)],
         op: EditOp<'_>,
+        source: UndoSource,
     ) -> Result<Edit, BufferError> {
         // Stage 1: intercept chain.
         let mut current = op;
@@ -1173,7 +1358,7 @@ impl Buffer {
         }
 
         // Stages 2-4: rope edit + state update + broadcast.
-        self.run_rope_edit_and_broadcast(views, &current)
+        self.run_rope_edit_and_broadcast(views, &current, source)
     }
 
     /// T M10.2: apply an `EditOp` to the CRDT, return the lossy-
@@ -1194,7 +1379,7 @@ impl Buffer {
     /// op for Insert/Delete, two ops for Replace). The bytes are
     /// what M10.5 (wire protocol) sends across the network.
     ///
-    /// Returns `(normalized_bytes, crdt_op)`:
+    /// Returns `(normalized_bytes, crdt_op, spans)`:
     ///
     /// * `normalized_bytes`: `Some` if the rope must mirror lossy-
     ///   converted bytes (UTF-8 normalization happened); `None` if
@@ -1204,6 +1389,8 @@ impl Buffer {
     ///   detection path: pre-checked at the `EditOp` level so true
     ///   no-ops skip the CRDT path entirely; this function isn't
     ///   invoked for them).
+    /// * `record`: the op spans this edit produced and its document
+    ///   diff (E6c), the arbiter's record of it; empty for no-ops.
     #[cfg(feature = "crdt")]
     fn apply_to_crdt_then_normalize_bytes(
         crdt: &crate::crdt::CrdtState,
@@ -1213,14 +1400,38 @@ impl Buffer {
         // returns exactly the ops produced by THIS edit. Loro's
         // transactional model gives a consistent before/after pair.
         let pre_version = crdt.version();
+        let (routed, diff) = crdt.capture(|| Self::route_to_crdt(crdt, op, &pre_version));
+        let Some((normalized, bytes)) = routed? else {
+            return Ok((None, None, (Vec::new(), diff)));
+        };
+        let crdt_op = Box::new(crate::rope::CrdtOp {
+            peer_id: crdt.peer_id(),
+            bytes,
+        });
+        Ok((
+            normalized,
+            Some(crdt_op),
+            (crdt.spans_since(&pre_version), diff),
+        ))
+    }
 
+    /// The CRDT ops of one edit plus their wire export, run inside
+    /// [`apply_to_crdt_then_normalize_bytes`](Self::apply_to_crdt_then_normalize_bytes)'s
+    /// capture so the export's commit lands in it. `None` for the
+    /// no-op shapes the caller already pre-checks.
+    #[cfg(feature = "crdt")]
+    fn route_to_crdt(
+        crdt: &crate::crdt::CrdtState,
+        op: &EditOp<'_>,
+        pre_version: &loro::VersionVector,
+    ) -> Result<Option<RoutedCrdtOps>, BufferError> {
         let normalized: Option<Vec<u8>> = match op {
             EditOp::Insert { pos, bytes } => {
                 if bytes.is_empty() {
                     // Pre-checked at the caller (no-op detection),
                     // but defensive-return-None-here in case a future
                     // caller forgets.
-                    return Ok((None, None));
+                    return Ok(None);
                 }
                 let s = String::from_utf8_lossy(bytes);
                 crdt.insert(*pos as usize, &s)?;
@@ -1232,7 +1443,7 @@ impl Buffer {
             }
             EditOp::Delete { range } => {
                 if range.is_empty() {
-                    return Ok((None, None));
+                    return Ok(None);
                 }
                 crdt.delete(range.start as usize, range.len() as usize)?;
                 None
@@ -1269,38 +1480,18 @@ impl Buffer {
         };
 
         // Export the wire bytes for the delta produced by the ops
-        // above. This is the `crdt_op` field on the resulting Edit.
-        let bytes = crdt.export_updates_since(&pre_version)?;
-        let crdt_op = Box::new(crate::rope::CrdtOp {
-            peer_id: crdt.peer_id(),
-            bytes,
-        });
-        Ok((normalized, Some(crdt_op)))
+        // above. This is the `crdt_op` field on the resulting Edit,
+        // and the export is what commits the ops.
+        let bytes = crdt.export_updates_since(pre_version)?;
+        Ok(Some((normalized, bytes)))
     }
 
     fn run_rope_edit_and_broadcast(
         &mut self,
         views: &mut [(ViewId, Box<dyn View>)],
         current: &EditOp<'_>,
+        source: UndoSource,
     ) -> Result<Edit, BufferError> {
-        // E6.4 (CRDT mode): an edit that is not the typed one the core
-        // announced cuts the open undo group BEFORE it reaches loro, so
-        // a hook's or a script's insert between two keystrokes is its
-        // own step, exactly as the typed flag makes it in v0.1 --- the
-        // auto-pair closer stays an adjacent unit of its own. Here and
-        // not in `apply_edit_inner`, because this is the one stage
-        // every local edit passes through, intercepts skipped or not.
-        // Not feature-gated: a group is opened only in CRDT mode, so
-        // without the feature this is inert, and every state is
-        // constructed in every build the lints see.
-        if !is_no_op_edit(current) {
-            match self.undo_group {
-                UndoGroup::Closed => {}
-                UndoGroup::AwaitingTyped => self.undo_group = UndoGroup::Open,
-                UndoGroup::Open => self.undo_group_end(),
-            }
-        }
-
         // T M10.2: CRDT routing (Q2 defense-in-depth ordering — CRDT
         // first, then rope; if CRDT errors, abort before rope mutation).
         // The byte → str conversion uses `from_utf8_lossy` per the
@@ -1310,13 +1501,11 @@ impl Buffer {
         // sees the lossy bytes when CRDT mode is active. v0.1 mode
         // (CRDT off) is unchanged.
         #[cfg(feature = "crdt")]
-        let (lossy_owned, captured_crdt_op): (
-            Option<Vec<u8>>,
-            Option<Box<crate::rope::CrdtOp>>,
-        ) = match (&self.crdt, is_no_op_edit(current)) {
-            (Some(crdt), false) => Self::apply_to_crdt_then_normalize_bytes(crdt, current)?,
-            _ => (None, None),
-        };
+        let (lossy_owned, captured_crdt_op, crdt_record): CrdtRoutingResult =
+            match (&self.crdt, is_no_op_edit(current)) {
+                (Some(crdt), false) => Self::apply_to_crdt_then_normalize_bytes(crdt, current)?,
+                _ => (None, None, (Vec::new(), crate::crdt::ChangeBase::default())),
+            };
 
         // Stage 2: rope edit. In CRDT mode, the EditOp's byte payload
         // is replaced by the lossy-normalized version so the rope
@@ -1375,19 +1564,21 @@ impl Buffer {
         let inserted_len = edit.inserted_len;
         let old_rope = std::mem::replace(&mut self.rope, edit.new_rope.clone());
         self.adjust_marks_for_edit(pre_range, inserted_len);
-        // T M10.4: in CRDT mode, loro's UndoManager tracks undo
-        // history; the v0.1 self.undo stack is bypassed (would grow
-        // unboundedly otherwise since nothing pops it in CRDT mode).
-        // The redo stack is similarly unused in CRDT mode.
+        // In CRDT mode the history is the arbiter's (E6c): the edit
+        // is recorded below as the op spans it produced, and the v0.1
+        // self.undo stack is bypassed (it would grow unboundedly
+        // otherwise, since nothing pops it in CRDT mode). The v0.1
+        // redo stack is similarly unused in CRDT mode.
         #[cfg(feature = "crdt")]
         let in_crdt_mode = self.crdt.is_some();
         #[cfg(not(feature = "crdt"))]
         let in_crdt_mode = false;
         if in_crdt_mode {
-            // CRDT mode: loro's UndoManager tracks history; drop the
-            // old rope (in v0.1 it's owned by the pushed UndoEntry,
-            // in CRDT mode it's released here).
+            // The old rope is owned by the pushed UndoEntry in v0.1;
+            // in CRDT mode it is released here.
             drop(old_rope);
+            #[cfg(feature = "crdt")]
+            self.arbiter_record(source, crdt_record.0, &crdt_record.1);
         } else {
             if self.undo.len() >= UNDO_HISTORY_LIMIT {
                 self.undo.pop_front();
@@ -1402,6 +1593,8 @@ impl Buffer {
             });
             self.redo.clear();
         }
+        #[cfg(not(feature = "crdt"))]
+        let _ = source;
         self.is_modified = true;
         self.revision = self.revision.wrapping_add(1);
 
@@ -1415,21 +1608,26 @@ impl Buffer {
 
     /// Mark the newest undo entry as a typed self-insert (E6.4) and,
     /// when `merge` is set, amalgamate it into the entry below it when
-    /// that one is typed too and the two are contiguous: the newer is a
-    /// pure insert that begins where the older's inserted text ends.
-    /// Returns whether a merge happened. In CRDT mode the history is
-    /// loro's and grouping is [`Self::undo_group_start`]'s, so this is
-    /// `false` there.
+    /// that one is typed too. Returns whether a merge happened. In
+    /// CRDT mode the history is the arbiter's and grouping is
+    /// [`Self::arbiter_typed_begin`]'s, so this is `false` there.
     ///
     /// A merge keeps the older entry's pre-image rope --- undo restores
     /// a whole rope, so the older pre-image is the state before both
-    /// keystrokes --- and widens its description by the newer insert,
-    /// so the inverse edit broadcast on undo covers both.
+    /// keystrokes --- and describes the whole as one minimal covering
+    /// edit against the current rope, so the inverse edit broadcast on
+    /// undo covers both. E6.4 merged only a pure insert contiguous with
+    /// the older's text; E6c drops that condition, because a keystroke
+    /// whose command also replaced text (an input method's expansion)
+    /// joins the run in the arbiter and must here too, and the run
+    /// counter --- reset by every motion and every other command ---
+    /// is what says the two keystrokes are one run.
     pub fn note_typed_edit(&mut self, merge: bool) -> bool {
         #[cfg(feature = "crdt")]
         if self.crdt.is_some() {
             return false;
         }
+        self.collapse_typed_command();
         let n = self.undo.len();
         let Some(top) = self.undo.back_mut() else {
             return false;
@@ -1438,56 +1636,198 @@ impl Buffer {
         if !merge || n < 2 {
             return false;
         }
-        let top = self.undo[n - 1].edit;
-        let prev = self.undo[n - 2].edit;
-        let contiguous = top.pre_range.is_empty()
-            && top.pre_range.start == prev.pre_range.start + prev.inserted_len;
-        if !(self.undo[n - 2].typed && contiguous) {
+        if !self.undo[n - 2].typed {
             return false;
         }
         self.undo.pop_back();
         let prev = self.undo.back_mut().expect("n >= 2");
-        prev.edit.inserted_len += top.inserted_len;
+        let (pre_range, inserted_len) = derive_replacement_edit(&prev.rope, &self.rope);
+        prev.edit = EditDescription {
+            pre_range,
+            inserted_len,
+        };
         true
     }
 
-    /// CRDT mode (E6.4): open an undo group on loro's `UndoManager`,
-    /// closing any group already open, and announce that the next edit
-    /// is the typed one: the edits until [`Self::undo_group_end`] undo
-    /// as one step, except that any edit which is not an announced
-    /// typed one cuts the group first (see `apply_edit_inner`). A no-op
-    /// in v0.1 mode, where [`Self::note_typed_edit`] does the
+    /// v0.1 mode (E6c): collapse every entry pushed since the typed
+    /// self-insert's command began into one, keeping the oldest
+    /// pre-image and describing the whole as one minimal covering edit
+    /// (prefix/suffix diff, as the CRDT compensation does). One
+    /// keystroke's command is one undo step whatever a hook added
+    /// inside it: `(` and its auto-pair closer come and go together,
+    /// and a typed-over closer's insert-and-swallow is one no-op step
+    /// that amalgamates into the run. Called from
+    /// [`Self::note_typed_edit`]; nothing to do when the command pushed
+    /// one entry or none.
+    fn collapse_typed_command(&mut self) {
+        let Some(floor) = self.typed_floor.take() else {
+            return;
+        };
+        if floor + 1 >= self.undo.len() {
+            return;
+        }
+        let oldest = self.undo.remove(floor).expect("floor < len");
+        self.undo.truncate(floor);
+        let (pre_range, inserted_len) = derive_replacement_edit(&oldest.rope, &self.rope);
+        self.undo.push_back(UndoEntry {
+            rope: oldest.rope,
+            edit: EditDescription {
+                pre_range,
+                inserted_len,
+            },
+            typed: false,
+        });
+    }
+
+    /// Open (or continue) `source`'s amalgamation run (E6c; E6.4's
+    /// group, per source).
+    ///
+    /// Called before a typed self-insert lands, once the command
+    /// boundary has stamped it. When this keystroke begins a group ---
+    /// the first of a run, or the first past every `limit` characters
+    /// --- the open group closes and a new one opens; otherwise the
+    /// open group is kept, or opened if a boundary closed it. Every
+    /// forward edit `source` makes while its group is open joins it,
+    /// the auto-pair closer a hook inserts inside the same command
+    /// included. `limit == 0` disables amalgamation: the open group
+    /// closes and none opens, so every keystroke is its own step. In
+    /// v0.1 mode this marks where the keystroke's command begins on
+    /// the rope stack, and [`Self::note_typed_edit`] does the
     /// amalgamating.
-    pub fn undo_group_start(&mut self) {
+    pub fn arbiter_typed_begin(&mut self, source: UndoSource, run: u32, limit: u32) {
         #[cfg(feature = "crdt")]
-        if let Some(crdt) = self.crdt.as_ref() {
-            crdt.undo_group_start();
-            self.undo_group = UndoGroup::AwaitingTyped;
+        {
+            if self.crdt.is_none() {
+                self.typed_floor = Some(self.undo.len());
+                return;
+            }
+            if limit == 0 || run.is_multiple_of(limit) {
+                self.arbiter_close(source);
+            }
+            if limit != 0 {
+                self.arbiter
+                    .entry(source)
+                    .or_default()
+                    .open
+                    .get_or_insert_with(SourceGroup::default);
+            }
+        }
+        #[cfg(not(feature = "crdt"))]
+        {
+            let _ = (source, run, limit);
+            self.typed_floor = Some(self.undo.len());
         }
     }
 
-    /// CRDT mode (E6.4): announce the next typed edit of a run whose
-    /// group is already open; when a foreign edit has cut it, open a
-    /// new one instead.
-    pub fn undo_group_continue(&mut self) {
-        if self.undo_group == UndoGroup::Closed {
-            self.undo_group_start();
+    /// Close `source`'s open group, if any (E6c), pushing it when it
+    /// holds spans. An empty open group (opened, then nothing typed)
+    /// vanishes. Called at every command boundary of `source` that is
+    /// not a self-insert, and by undo itself, so the run a user is in
+    /// the middle of is what their undo pops.
+    pub fn arbiter_close(&mut self, source: UndoSource) {
+        #[cfg(feature = "crdt")]
+        {
+            let group = self
+                .arbiter
+                .get_mut(&source)
+                .and_then(|stacks| stacks.open.take())
+                .filter(|group| !group.spans.is_empty());
+            if let Some(group) = group {
+                self.push_group(source, group);
+            }
+        }
+        #[cfg(not(feature = "crdt"))]
+        let _ = source;
+    }
+
+    /// Push a closed group onto its source's undo stack (E6c), stamped
+    /// with the next sequence number for the recency pick and capped
+    /// at [`UNDO_HISTORY_LIMIT`].
+    #[cfg(feature = "crdt")]
+    fn push_group(&mut self, source: UndoSource, mut group: SourceGroup) {
+        self.arbiter_seq = self.arbiter_seq.wrapping_add(1);
+        group.seqno = self.arbiter_seq;
+        let stacks = self.arbiter.entry(source).or_default();
+        if stacks.groups.len() >= UNDO_HISTORY_LIMIT {
+            stacks.groups.pop_front();
+        }
+        stacks.groups.push_back(group);
+    }
+
+    /// Whether any source holds an undoable group (E6c).
+    #[cfg(feature = "crdt")]
+    fn arbiter_has_history(&self) -> bool {
+        self.arbiter.values().any(|s| !s.groups.is_empty())
+    }
+
+    /// Record one forward edit in the arbiter (E6c): the op spans it
+    /// produced, and what it did to the document.
+    ///
+    /// For every other source the edit is foreign, and its change is
+    /// composed into the base of that source's newest undo group and
+    /// newest redo group. For `source` itself it is a new step: it
+    /// clears the source's redo stack and joins the source's open
+    /// group when one is open, otherwise stands alone as a group on
+    /// its own stack. A daemon edit also closes every open group on
+    /// this buffer --- a script's insert between two keystrokes ends
+    /// the run it lands in, so it undoes alone, as E6.4 had it ---
+    /// while another frontend's run is never disturbed.
+    #[cfg(feature = "crdt")]
+    fn arbiter_record(
+        &mut self,
+        source: UndoSource,
+        spans: Vec<loro::IdSpan>,
+        change: &crate::crdt::ChangeBase,
+    ) {
+        if spans.is_empty() {
+            return;
+        }
+        for (other, stacks) in &mut self.arbiter {
+            if *other != source {
+                stacks.absorb_undo(change);
+                stacks.absorb_redo(change);
+            }
+        }
+        if source == UndoSource::Daemon {
+            let sources: Vec<UndoSource> = self.arbiter.keys().copied().collect();
+            for open_source in sources {
+                self.arbiter_close(open_source);
+            }
+        }
+        let stacks = self.arbiter.entry(source).or_default();
+        stacks.redo.clear();
+        if let Some(open) = stacks.open.as_mut() {
+            open.spans.extend(SourceGroup::of(spans).spans);
         } else {
-            self.undo_group = UndoGroup::AwaitingTyped;
+            self.push_group(source, SourceGroup::of(spans));
         }
     }
 
-    /// CRDT mode (E6.4): close the open undo group, if any.
-    pub fn undo_group_end(&mut self) {
-        #[cfg(feature = "crdt")]
-        if let Some(crdt) = self.crdt.as_ref() {
-            crdt.undo_group_end();
+    /// Settle a remote import's stashed spans in the arbiter (E6c).
+    ///
+    /// Called by the daemon synchronously after
+    /// [`Self::apply_remote_crdt_op`] returned an edit, with the
+    /// source's current run counter, the `undo.amalgamate` limit and
+    /// whether the op was a single-codepoint insert. A typed op joins
+    /// the source's amalgamation run exactly as a dispatched keystroke
+    /// does through [`Self::arbiter_typed_begin`]; any other shape
+    /// closes the source's run and stands alone. An import that
+    /// stashed nothing settles to nothing.
+    #[cfg(feature = "crdt")]
+    pub fn arbiter_settle_remote(&mut self, source: UndoSource, run: u32, limit: u32, typed: bool) {
+        let Some((spans, change)) = self.pending_remote.take() else {
+            return;
+        };
+        if typed {
+            self.arbiter_typed_begin(source, run, limit);
+        } else {
+            self.arbiter_close(source);
         }
-        self.undo_group = UndoGroup::Closed;
+        self.arbiter_record(source, spans, &change);
     }
 
     /// How many undo steps the v0.1 stack holds; `None` in CRDT mode,
-    /// where loro keeps the count.
+    /// where the arbiter keeps a stack per source instead of one count.
     #[must_use]
     pub fn undo_depth(&self) -> Option<usize> {
         #[cfg(feature = "crdt")]
@@ -1503,21 +1843,17 @@ impl Buffer {
     /// recent forward edit is moved from the undo stack to the redo stack.
     /// On error (nothing to undo), the buffer is unchanged.
     ///
-    /// Threading: main thread only.
+    /// In CRDT mode this is the daemon's own undo: it pops the daemon
+    /// stack, which holds the sourceless edits (scripts, server-driven
+    /// edits, direct callers). A frontend's undo is
+    /// [`Self::undo_for`]. Threading: main thread only.
     pub fn undo(&mut self) -> Result<Edit, BufferError> {
-        self.ensure_writable()?;
-        // T M10.4: in CRDT mode, route through loro's UndoManager via
-        // the materialize-and-replace path (Day 1 morning audit
-        // decision — path (a)). Inverse ops are produced as proper
-        // CRDT ops by UndoManager, interacting with concurrent remote
-        // ops via CRDT convergence rules.
-        #[cfg(feature = "crdt")]
-        if self.crdt.is_some() {
-            return self.undo_crdt_mode();
-        }
+        self.undo_for(UndoSource::Daemon)
+    }
 
-        // v0.1 mode: pop the saved UndoEntry, swap the rope back,
-        // push onto redo stack.
+    /// v0.1 undo: pop the saved `UndoEntry`, swap the rope back, push
+    /// onto the redo stack.
+    fn undo_v01(&mut self) -> Result<Edit, BufferError> {
         let entry = self.undo.pop_back().ok_or(BufferError::NothingToUndo)?;
 
         // The pre-edit rope held in `entry.rope` becomes current. The
@@ -1554,74 +1890,21 @@ impl Buffer {
         Ok(inverse_edit)
     }
 
-    /// T M10.4: CRDT-mode undo via loro's `UndoManager`.
-    ///
-    /// Materialize-and-replace path (Day 1 morning audit decision).
-    /// Inverse ops are produced by `UndoManager` as proper CRDT ops
-    /// (not synthetic Replace as M10.2's path did); they interact
-    /// with concurrent remote ops via CRDT convergence rules.
-    ///
-    /// The Edit description is derived via [`derive_replacement_edit`]:
-    /// longest-common-prefix + longest-common-suffix trim against the
-    /// pre-undo rope. This produces a minimal `(range, inserted_len)`
-    /// covering exactly the bytes that changed, so marks adjust
-    /// correctly and tree-sitter's incremental parse stays
-    /// incremental. Cost: O(min(`old_len`, `new_len`)) byte compare via
-    /// rope chunks; sub-ms at typical edit sizes.
-    #[cfg(feature = "crdt")]
-    fn undo_crdt_mode(&mut self) -> Result<Edit, BufferError> {
-        // Extract everything we need from `self.crdt` before mutating
-        // `self.rope` / `self.marks` / `self.revision` etc., to
-        // avoid a borrow-checker conflict between the immutable
-        // crdt-ref and the upcoming `&mut self` method calls.
-        let (new_text, bytes, peer_id, can_undo_after) = {
-            let crdt = self.crdt.as_ref().expect("checked");
-            let pre_version = crdt.version();
-            let undid = crdt.undo()?;
-            if !undid {
-                return Err(BufferError::NothingToUndo);
-            }
-            let new_text = crdt.materialize_string();
-            let bytes = crdt.export_updates_since(&pre_version)?;
-            (new_text, bytes, crdt.peer_id(), crdt.can_undo())
-        };
-        let new_rope = crate::rope::Rope::from_bytes(new_text.as_bytes());
-        let (range, inserted_len) = derive_replacement_edit(&self.rope, &new_rope);
-        self.rope = new_rope.clone();
-        self.adjust_marks_for_edit(range, inserted_len);
-        self.revision = self.revision.wrapping_add(1);
-        // is_modified stays true while there's still anything in the
-        // CRDT's undo stack (i.e. local edits not yet at the buffer's
-        // saved baseline). Matches v0.1 mode's `!self.undo.is_empty()`
-        // semantics translated to CrdtState's bookkeeping.
-        self.is_modified = can_undo_after;
-
-        let inverse_edit = Edit {
-            new_rope,
-            range,
-            inserted_len,
-            crdt_op: Some(Box::new(crate::rope::CrdtOp { peer_id, bytes })),
-        };
-        self.broadcast_on_edit(&inverse_edit)?;
-        Ok(inverse_edit)
-    }
-
     /// Redo a previously undone edit.
     ///
     /// Symmetric to [`Buffer::undo`]. The redo stack is cleared by any
     /// forward edit, so `redo` is only meaningful immediately after a
     /// sequence of `undo`s.
     ///
-    /// Threading: main thread only.
+    /// In CRDT mode this redoes the daemon's own last undo; a
+    /// frontend's redo is [`Self::redo_for`]. Threading: main thread
+    /// only.
     pub fn redo(&mut self) -> Result<Edit, BufferError> {
-        self.ensure_writable()?;
-        // T M10.4: in CRDT mode, route through loro's UndoManager.
-        #[cfg(feature = "crdt")]
-        if self.crdt.is_some() {
-            return self.redo_crdt_mode();
-        }
+        self.redo_for(UndoSource::Daemon)
+    }
 
-        // v0.1 mode: pop the saved redo entry, swap the rope forward.
+    /// v0.1 redo: pop the saved redo entry, swap the rope forward.
+    fn redo_v01(&mut self) -> Result<Edit, BufferError> {
         let entry = self.redo.pop_back().ok_or(BufferError::NothingToRedo)?;
 
         let inverse_pre_range = Range::new(
@@ -1654,30 +1937,221 @@ impl Buffer {
         Ok(inverse_edit)
     }
 
-    /// T M10.4: CRDT-mode redo via loro's `UndoManager`.
+    /// Undo `source`'s most recent command-boundary group (E6c), the
+    /// cross-peer arbiter.
     ///
-    /// Symmetric to [`Self::undo_crdt_mode`]; same materialize-and-
-    /// replace path.
-    #[cfg(feature = "crdt")]
-    fn redo_crdt_mode(&mut self) -> Result<Edit, BufferError> {
-        let (new_text, bytes, peer_id) = {
-            let crdt = self.crdt.as_ref().expect("checked");
-            let pre_version = crdt.version();
-            let redid = crdt.redo()?;
-            if !redid {
-                return Err(BufferError::NothingToRedo);
+    /// **Architecture record, superseding M10.11's.** Loro's
+    /// `UndoManager` binds one peer at construction, so per-peer
+    /// managers on one doc are impossible and M10.11 put per-frontend
+    /// undo on the frontend side, in each `BufferMirror`'s own
+    /// peer-bound manager --- an arm the GPU never built and that
+    /// reached only single-key chords. Loro's undo *primitive*
+    /// ([`crate::crdt::CrdtState::undo_span_against`]) is not bound to a
+    /// peer: given any peer's op span it computes the inverse and
+    /// transforms it against everything that landed after. So the
+    /// daemon, where every op from every peer already passes and the
+    /// command boundary is already stamped, records each forward edit
+    /// as the op spans it produced under its source, and undo pops
+    /// the acting source's most recent group and undoes its spans,
+    /// newest first, as ordinary daemon-peer ops. That is the
+    /// compensation: it broadcasts as any edit does and converges on
+    /// every replica, and the frontend-side arm is retired --- one
+    /// mechanism, every binding, both frontends.
+    ///
+    /// **The compensation is not a group of its own.** It never
+    /// passes through the forward-edit path, so nothing records it on
+    /// any undo stack; its spans go to `source`'s redo stack instead,
+    /// and a second undo pops the user's previous group, not the
+    /// compensation. The daemon's own loro `UndoManager` is gone with
+    /// the M10.4 path: it would have recorded every compensation as an
+    /// undoable step of the daemon's, the second mechanism this design
+    /// exists to remove.
+    ///
+    /// **The stack drawn from.** A frontend's run is closed first, so
+    /// the keystrokes it is in the middle of are what it pops. Then
+    /// the newer of its own last group and the daemon's last unowned
+    /// group is taken: daemon edits belong to nobody, so whoever
+    /// undoes takes the most recent unowned work along with their own,
+    /// and a lone user with script inserts interleaved walks back
+    /// chronologically, exactly the old global behavior. Between two
+    /// frontends there is no sharing: each undoes only its own groups
+    /// and leaves the other's. A group whose text is already gone
+    /// (deleted by another peer since) undoes to nothing and the next
+    /// group is popped, as loro's own manager does.
+    ///
+    /// Views hear one synthetic edit covering the whole compensation
+    /// (derived by prefix/suffix diff), and the returned [`Edit`]
+    /// carries the daemon-peer ops for broadcast. In v0.1 mode the
+    /// history is the single rope stack, as before.
+    ///
+    /// Threading: main thread only.
+    pub fn undo_for(&mut self, source: UndoSource) -> Result<Edit, BufferError> {
+        self.ensure_writable()?;
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            if source != UndoSource::Daemon {
+                self.arbiter_close(source);
             }
-            let new_text = crdt.materialize_string();
-            let bytes = crdt.export_updates_since(&pre_version)?;
-            (new_text, bytes, crdt.peer_id())
+            let from = self.undo_pick(source);
+            return self.compensate(source, from, HistoryStep::Undo);
+        }
+        #[cfg(not(feature = "crdt"))]
+        let _ = source;
+        self.undo_v01()
+    }
+
+    /// Redo `source`'s most recently undone group (E6c). Symmetric to
+    /// [`Self::undo_for`]: pmacs has redo, and under the arbiter it
+    /// means undoing the compensation --- the compensation's spans are
+    /// a group like any other, and undoing them re-applies what the
+    /// user undid. Each source has its own redo stack, fed only by its
+    /// own undos, and any forward edit by any source clears every redo
+    /// stack. The redo's own ops become a closed group on `source`'s
+    /// undo stack, so undo after redo round-trips.
+    ///
+    /// Threading: main thread only.
+    pub fn redo_for(&mut self, source: UndoSource) -> Result<Edit, BufferError> {
+        self.ensure_writable()?;
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            return self.compensate(source, source, HistoryStep::Redo);
+        }
+        #[cfg(not(feature = "crdt"))]
+        let _ = source;
+        self.redo_v01()
+    }
+
+    /// Which stack `source`'s undo draws from (E6c): its own, or the
+    /// daemon's unowned one when that holds the newer group. The
+    /// daemon source draws from its own stack only.
+    #[cfg(feature = "crdt")]
+    fn undo_pick(&self, source: UndoSource) -> UndoSource {
+        let UndoSource::Frontend(_) = source else {
+            return source;
+        };
+        let newest = |s: &UndoSource| {
+            self.arbiter
+                .get(s)
+                .and_then(|stacks| stacks.groups.back())
+                .map(|group| group.seqno)
+        };
+        match (newest(&source), newest(&UndoSource::Daemon)) {
+            (own, Some(daemon)) if own.is_none_or(|own| daemon > own) => UndoSource::Daemon,
+            _ => source,
+        }
+    }
+
+    /// Pop groups from `from`'s stack of `step`'s kind and undo their
+    /// spans as daemon-peer ops until one produces ops (E6c). See
+    /// [`Self::undo_for`] for what the compensation is.
+    ///
+    /// Each span is undone against its base composed with the bases
+    /// carried down from the spans after it, newest first, and the
+    /// base comes back re-expressed in the coordinates before the
+    /// span; what is carried out of the group is composed into the
+    /// next group below on the same stack, which now sees everything
+    /// foreign since itself. The compensation's own spans become a
+    /// group on `source`'s opposite stack (its redo for an undo, its
+    /// undo for a redo), and its change is foreign to every other
+    /// stack --- including `source`'s own undo stack when the group
+    /// came from the daemon's --- and composed into their bases.
+    #[cfg(feature = "crdt")]
+    fn compensate(
+        &mut self,
+        source: UndoSource,
+        from: UndoSource,
+        step: HistoryStep,
+    ) -> Result<Edit, BufferError> {
+        let pre_rope = self.rope.clone();
+        let crdt = self
+            .crdt
+            .as_ref()
+            .expect("compensate implies a CRDT-backed buffer");
+        let pre_version = crdt.version();
+        let (produced, change) = loop {
+            let group = self
+                .arbiter
+                .get_mut(&from)
+                .and_then(|stacks| match step {
+                    HistoryStep::Undo => stacks.groups.pop_back(),
+                    HistoryStep::Redo => stacks.redo.pop_back(),
+                })
+                .ok_or(match step {
+                    HistoryStep::Undo => BufferError::NothingToUndo,
+                    HistoryStep::Redo => BufferError::NothingToRedo,
+                })?;
+            let (carried, change) = crdt.capture(|| {
+                let mut carry = crate::crdt::ChangeBase::default();
+                for recorded in group.spans.into_iter().rev() {
+                    let mut base = recorded.base;
+                    base.compose(&carry);
+                    crdt.undo_span_against(recorded.span, &mut base)?;
+                    carry = base;
+                }
+                Ok::<_, BufferError>(carry)
+            });
+            let carried = carried?;
+            if let Some(stacks) = self.arbiter.get_mut(&from) {
+                match step {
+                    HistoryStep::Undo => stacks.absorb_undo(&carried),
+                    HistoryStep::Redo => stacks.absorb_redo(&carried),
+                }
+            }
+            let produced = crdt.spans_since(&pre_version);
+            if !produced.is_empty() {
+                break (produced, change);
+            }
+            // The group's text was already gone: nothing to
+            // compensate, nothing to redo. Pop the next one.
+        };
+        let opposite = match step {
+            HistoryStep::Undo => HistoryStep::Redo,
+            HistoryStep::Redo => HistoryStep::Undo,
+        };
+        for (other, stacks) in &mut self.arbiter {
+            if (*other, HistoryStep::Undo) != (from, step)
+                && (*other, HistoryStep::Undo) != (source, opposite)
+            {
+                stacks.absorb_undo(&change);
+            }
+            if (*other, HistoryStep::Redo) != (from, step)
+                && (*other, HistoryStep::Redo) != (source, opposite)
+            {
+                stacks.absorb_redo(&change);
+            }
+        }
+        match opposite {
+            HistoryStep::Redo => {
+                let stacks = self.arbiter.entry(source).or_default();
+                if stacks.redo.len() >= UNDO_HISTORY_LIMIT {
+                    stacks.redo.pop_front();
+                }
+                stacks.redo.push_back(SourceGroup::of(produced));
+            }
+            HistoryStep::Undo => self.push_group(source, SourceGroup::of(produced)),
+        }
+        // Materialize-and-replace, as the M10.4 path did: one minimal
+        // covering edit for views and marks, the daemon-peer ops for
+        // the wire.
+        let (new_text, bytes, peer_id) = {
+            let crdt = self.crdt.as_ref().expect("checked above");
+            (
+                crdt.materialize_string(),
+                crdt.export_updates_since(&pre_version)?,
+                crdt.peer_id(),
+            )
         };
         let new_rope = crate::rope::Rope::from_bytes(new_text.as_bytes());
-        let (range, inserted_len) = derive_replacement_edit(&self.rope, &new_rope);
+        let (range, inserted_len) = derive_replacement_edit(&pre_rope, &new_rope);
         self.rope = new_rope.clone();
         self.adjust_marks_for_edit(range, inserted_len);
         self.revision = self.revision.wrapping_add(1);
-        self.is_modified = true;
-
+        // Modified while anything remains to undo, as v0.1's
+        // `!self.undo.is_empty()` has it; a redo is a forward step.
+        self.is_modified = match step {
+            HistoryStep::Undo => self.arbiter_has_history(),
+            HistoryStep::Redo => true,
+        };
         let inverse_edit = Edit {
             new_rope,
             range,
@@ -1687,62 +2161,6 @@ impl Buffer {
         self.broadcast_on_edit(&inverse_edit)?;
         Ok(inverse_edit)
     }
-
-    /// T M10.4: per-frontend undo for a specific attached frontend.
-    ///
-    /// **M10.11 architecture-record:** the M10.4 framing predicted
-    /// that this method would dispatch by `frontend_id` to a
-    /// `HashMap<FrontendId, UndoManager>` on the buffer. M10.11's
-    /// Day 2 verification surfaced that loro's `UndoManager` binds
-    /// to one peer at construction (`src/crdt.rs:60-65`,
-    /// `loro-internal/src/undo.rs:572-672`) — you can't maintain
-    /// per-peer `UndoManager` instances on a single doc. The
-    /// CRDT-native per-frontend undo path lives on the **frontend**
-    /// side: each `BufferMirror` holds its own `CrdtState` whose
-    /// `UndoManager` is bound to that frontend's `peer_id` (see
-    /// `BufferMirror::apply_local_undo` and
-    /// `optimistic::frontend_event_for_keystroke`'s
-    /// `OptimisticAction::Undo` arm). The frontend produces an
-    /// inverse `CrdtOp` and the daemon imports it as an ordinary
-    /// update. The daemon-side `Buffer::undo` (this method's
-    /// no-arg sibling) remains the daemon-peer-only undo path —
-    /// used for Lua-driven daemon-side edits and the v0.1 single-
-    /// frontend mode.
-    ///
-    /// This method therefore routes `frontend_id` arguments to
-    /// `Self::undo` directly: there is no per-frontend dispatch to
-    /// do at the buffer level. The signature is preserved for any
-    /// callers that were threading a frontend id; behavior is
-    /// unchanged from the M10.4 single-frontend semantics.
-    ///
-    /// Threading: main thread only.
-    pub fn undo_for(
-        &mut self,
-        _frontend_id: crate::protocol::FrontendId,
-    ) -> Result<Edit, BufferError> {
-        // Per the M10.11 architecture record above: per-frontend
-        // undo lives frontend-side via BufferMirror's peer-bound
-        // UndoManager. Daemon-side undo is daemon-peer-scoped.
-        self.undo()
-    }
-
-    /// T M10.4: symmetric to [`Self::undo_for`]. Same architecture
-    /// record applies: per-frontend redo lives frontend-side.
-    pub fn redo_for(
-        &mut self,
-        _frontend_id: crate::protocol::FrontendId,
-    ) -> Result<Edit, BufferError> {
-        self.redo()
-    }
-
-    // T M10.4: `sync_crdt_for_history_swap` removed. M10.2 Day 2's
-    // synthetic-Replace path produced inverse ops attributed to the
-    // editing peer that looked like fresh edits to the CRDT (not
-    // semantic undos). M10.4 replaces this with loro's UndoManager
-    // (see `undo_crdt_mode` / `redo_crdt_mode` above), which produces
-    // proper inverse ops that interact correctly with concurrent
-    // remote edits per the M10.4 acceptance: "B's edit lands on
-    // whatever surrounding text remains."
 
     fn broadcast_on_edit(&mut self, edit: &Edit) -> Result<(), BufferError> {
         let mut views = std::mem::take(&mut self.views);
@@ -1797,7 +2215,16 @@ impl Buffer {
 /// normalized bytes (if any) plus the captured CRDT op (if any).
 /// Factored out to silence clippy's `type_complexity`.
 #[cfg(feature = "crdt")]
-type CrdtRoutingResult = (Option<Vec<u8>>, Option<Box<crate::rope::CrdtOp>>);
+type CrdtRoutingResult = (
+    Option<Vec<u8>>,
+    Option<Box<crate::rope::CrdtOp>>,
+    (Vec<loro::IdSpan>, crate::crdt::ChangeBase),
+);
+
+/// What routing one edit to the CRDT produced: the lossy-normalized
+/// bytes the rope must mirror, if any, and the wire export.
+#[cfg(feature = "crdt")]
+type RoutedCrdtOps = (Option<Vec<u8>>, Vec<u8>);
 
 /// Recognize the hot-path projection delta produced by one remote
 /// insertion. Loro's retain/delete lengths use Unicode scalar offsets;
@@ -1908,19 +2335,16 @@ fn rope_byte_end_after_chars(
 /// the minimal Edit description by trimming matching prefix +
 /// suffix from both ropes.
 ///
-/// Correctness: assumes the change is a single contiguous edit
-/// (which `UndoManager`.undo / .redo always produces — each undo
-/// reverses one logical `apply_edit` op). For multi-edit changes
-/// (concurrent remote ops applied during the undo, hypothetically)
-/// the derived Edit description is still correct in the sense that
-/// applying it to `old_rope` produces `new_rope` — the change just
-/// covers a wider range.
+/// Correctness: for a single contiguous change the description is
+/// exact. A compensation that undoes a group of several spans is
+/// several edits, and the derived description is still correct in
+/// the sense that applying it to `old_rope` produces `new_rope` ---
+/// the change just covers the range from the first to the last.
 ///
 /// Cost: O(min(`old_len`, `new_len`)) byte comparison via rope
 /// chunk iteration. At 1MB doc size with one-keystroke undo, the
 /// prefix walk hits the divergence point within microseconds; same
 /// for the suffix walk.
-#[cfg(feature = "crdt")]
 fn derive_replacement_edit(old_rope: &Rope, new_rope: &Rope) -> (Range, u64) {
     let old_len = old_rope.len();
     let new_len = new_rope.len();
@@ -1981,8 +2405,8 @@ fn derive_replacement_edit(old_rope: &Rope, new_rope: &Rope) -> (Range, u64) {
 /// both) that the CRDT must observe to keep the rope ≡ projection
 /// invariant. The rope path's own no-op short-circuit handles the
 /// truly-empty cases AFTER the rope mutation runs; this helper lets
-/// the CRDT path skip the round-trip BEFORE the rope runs, and the undo
-/// group cut (E6.4) decide before either.
+/// the CRDT path skip the round-trip BEFORE the rope runs.
+#[cfg(feature = "crdt")]
 fn is_no_op_edit(op: &EditOp<'_>) -> bool {
     match op {
         EditOp::Insert { bytes, .. } => bytes.is_empty(),
@@ -2270,7 +2694,7 @@ mod tests {
 
     /// Review round 3, P2. In CRDT mode the v0.1 stacks are bypassed
     /// entirely, so clearing them proves nothing: the history the
-    /// primitive promises to discard lives in loro's `UndoManager`.
+    /// primitive promises to discard lives in the arbiter's stacks.
     /// The lock is lifted deliberately — `read_only` stops the replay,
     /// but the contract is that there is nothing left to replay.
     #[cfg(feature = "crdt")]
@@ -2284,8 +2708,8 @@ mod tests {
         }
         assert_eq!(rope_string(&buf), "render 9");
         assert!(
-            !buf.crdt_state().expect("crdt-backed").can_undo(),
-            "the UndoManager must have nothing recorded"
+            !buf.arbiter_has_history(),
+            "the arbiter must have nothing recorded"
         );
 
         buf.set_read_only(false);
@@ -3269,8 +3693,8 @@ mod tests {
         /// bytes is a textual no-op but a real CRDT operation (a delete
         /// plus an insert). Undoing it therefore advances the CRDT
         /// version while leaving the materialized text unchanged, so
-        /// `undo_crdt_mode` derives an EMPTY replacement edit — and
-        /// still attaches the `crdt_op` that `crdt.undo()` produced.
+        /// the compensation derives an EMPTY replacement edit — and
+        /// still attaches the `crdt_op` its daemon-peer ops produced.
         ///
         /// **The ruling** (`docs/archive/framings/crdt-identity-undo-framing.md`, and
         /// this is no longer an open question): a visible TEXT delta
@@ -3278,8 +3702,8 @@ mod tests {
         /// `Edit`, so the behavior is right and the *invariant* was
         /// mis-scoped. It was written for [`is_no_op_edit`], a
         /// pre-check on the forward `EditOp` that returns before the
-        /// CRDT path exists; `undo_crdt_mode` and `redo_crdt_mode`
-        /// never reach it. The invariant is now keyed on **provenance**
+        /// CRDT path exists; the arbiter's undo and redo never reach
+        /// it. The invariant is now keyed on **provenance**
         /// — see `check_crdt_op_shape` — and still rejects this shape
         /// on the forward path, where it remains unreachable.
         ///
@@ -3470,7 +3894,7 @@ mod tests {
         /// before the CRDT path, and a real-delta form is not empty — so
         /// the proptest alone cannot tell a narrowed rule from a deleted
         /// one. `(history, empty, None)` is equally unreachable, because
-        /// `undo_crdt_mode` and `redo_crdt_mode` always attach the op;
+        /// the arbiter's undo and redo always attach the op;
         /// it is asserted so that a future change which stops attaching
         /// it fails here rather than silently losing version advances.
         #[test]

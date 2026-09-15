@@ -88,7 +88,7 @@ lua54 = ["mlua/lua54", "mlua/vendored"]
 # dependency, no field on the Buffer struct layout and no branch on
 # apply_edit, and the rope-projection redirect keeps the flip invisible
 # to grid frontends and to workers.
-crdt = ["dep:loro", "pmacs-protocol/crdt"]
+crdt = ["dep:loro", "dep:loro-internal", "pmacs-protocol/crdt"]
 
 [dependencies]
 crossterm = "0.28"
@@ -315,6 +315,12 @@ sha2 = "0.10"
 # proptest, run acceptance suite), not Cargo background activity.
 # Optional + feature-gated: zero footprint in v0.1 builds.
 loro = { version = "=1.12.0", optional = true }
+# E6c: the cross-peer undo arbiter runs loro's undo primitive
+# (`undo_internal`, reached through `LoroDoc::inner`) and keeps each
+# undo group's transform base as loro's own `DiffBatch`, whose
+# `compose`/`transform` the facade does not re-export. Same exact pin,
+# same crate graph (`loro` depends on it); it adds no second copy.
+loro-internal = { version = "=1.12.0", optional = true }
 
 [dev-dependencies]
 proptest = "1"

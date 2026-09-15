@@ -3522,6 +3522,10 @@ fn decoded_single_codepoint(edit: &crate::rope::Edit) -> Option<char> {
 ///    `pending_crdt_ops`. Sender-exclusion uses the authenticated
 ///    `source`.
 #[cfg(feature = "crdt")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one import with its four effects in order; the E6c settle and the deferred chain break each add a few lines to a function that was near the limit"
+)]
 fn handle_remote_crdt_op(
     editor: &mut EditorState,
     source: FrontendId,
@@ -3531,14 +3535,17 @@ fn handle_remote_crdt_op(
     // Kill ring Q#KR2: an optimistic edit arrives here without ever
     // touching dispatch_key, so the source's command boundary must be
     // updated — or `C-k x C-k` on the GPU would append across the typed
-    // character. Break first (covers every early-return path); a
-    // successful apply refines this below: a single-codepoint insert is
-    // re-classified as `buffer.self-insert`, giving typed characters the
-    // same boundary on both frontends. That keeps kill-chain semantics
+    // character. Every path breaks the chain except one: a successful
+    // apply of a single-codepoint insert is classified as
+    // `buffer.self-insert` instead, giving typed characters the same
+    // boundary on both frontends. That keeps kill-chain semantics
     // identical (self-insert is not a kill) while making `this_command`
     // a usable input-origin signal for typed-char consumers (signature
-    // help; the completion popup can migrate later).
-    editor.core.borrow_mut().break_command_chain(source);
+    // help; the completion popup can migrate later). E6c: the break
+    // is decided by the outcome, not taken up front and refined — a
+    // break resets the source's run counter and closes its undo
+    // group, so breaking first made every optimistic keystroke the
+    // first of a run and no two ever amalgamated on this route.
     // Effect 1: apply to buffer's CRDT + rope. Capture the Edit
     // (or `None` for an op that imported cleanly but produced no
     // text delta — F17).
@@ -3555,20 +3562,31 @@ fn handle_remote_crdt_op(
                         "pmacs daemon: apply_remote_crdt_op for \
                      {buffer_id:?} failed: {e:?}; dropping op"
                     );
+                    drop(registry);
+                    editor.core.borrow_mut().break_command_chain(source);
                     return;
                 }
             }
         } else {
             eprintln!("pmacs daemon: CrdtOp for unknown {buffer_id:?}; dropping op");
+            drop(registry);
+            editor.core.borrow_mut().break_command_chain(source);
             return;
         }
     };
+    if edit_opt.is_none() {
+        editor.core.borrow_mut().break_command_chain(source);
+    }
 
     // Effects 2 + 3: update window cursors + notify views. ONLY
     // when an Edit was produced — a CRDT import with no text delta
     // (e.g. concurrent same-character delete) has nothing to
     // notify but the op still needs broadcasting (F17).
     if let Some(edit) = edit_opt.as_ref() {
+        // E6c: the amalgamation knob, read before the core borrow
+        // below — the optimistic import amalgamates by the same
+        // `undo.amalgamate` as dispatched keystrokes.
+        let amalgamate_limit = editor.undo_amalgamate_limit();
         let mut core = editor.core.borrow_mut();
         // The input-origin refinement promised above. The optimistic
         // layer emits exactly one op per keystroke, so an empty-range
@@ -3590,6 +3608,7 @@ fn handle_remote_crdt_op(
                 // intercepts, so requested == effective and clean == true.
                 decoded_single_codepoint(edit)
             } else {
+                core.break_command_chain(source);
                 None
             };
         // Transient status messages clear on user input. The Key path
@@ -3692,6 +3711,25 @@ fn handle_remote_crdt_op(
                 },
             );
         }
+        // E6c: settle the import's stashed span in the cross-peer
+        // arbiter. A single-codepoint insert joins the source's
+        // amalgamation run exactly like a dispatched keystroke (the
+        // run counter rotated above); any other shape closes the
+        // run and stands alone. Same synchronous flow as the import
+        // — no edit can land between the stash and this call.
+        {
+            let run = core
+                .command_history
+                .get(&source)
+                .map_or(0, |entry| entry.run);
+            core.arbiter_settle_remote(
+                source,
+                buffer_id,
+                run,
+                amalgamate_limit,
+                typed_codepoint.is_some(),
+            );
+        }
         // T M11.9 — temporarily switch active_frontend to source so
         // the `buffer.after-edit` hook's Lua observers (notably the
         // LSP `did_change` glue in `builtin/runtime/lsp.lua`) read
@@ -3701,6 +3739,11 @@ fn handle_remote_crdt_op(
         core.active_frontend = source;
         drop(core);
 
+        // E6c: the hook runs as the source's own interactive scope, so
+        // an edit it makes --- the auto-pair closer for an optimistic
+        // opener --- is attributed to the source and joins the
+        // keystroke's undo group, as it does on the dispatch path.
+        let _origin = editor.interactive_origin.enter(source);
         // T M11.9 — fire `buffer.after-edit` for replicated edits.
         // Without this, LSP `textDocument/didChange` is never sent
         // for keystrokes the M10.10 optimistic-apply layer routed as
@@ -5154,7 +5197,11 @@ mod tests {
         // character: the boundary rotates to buffer.self-insert (the
         // input-origin signal), which — not being a kill command —
         // still breaks the kill chain exactly like the TUI typed-char
-        // path.
+        // path: a following kill reads last = self-insert after its
+        // own rotation and never appends. E6c: the rotation is the
+        // boundary, with no break before it, so `last` reads the kill
+        // as it does on the dispatch path and the source's run counter
+        // survives for undo amalgamation.
         assert_eq!(
             core.command_history
                 .get(&source)
@@ -5166,10 +5213,9 @@ mod tests {
             core.command_history
                 .get(&source)
                 .and_then(|b| b.last.as_deref()),
-            None,
-            "the pre-existing kill chain is gone (break-then-classify): a \
-             following kill reads last = self-insert after its own rotation \
-             and never appends"
+            Some("edit.kill-line"),
+            "the boundary rotated like a dispatched keystroke's: the kill \
+             is `last`, and the next kill's rotation reads self-insert"
         );
         drop(core);
 

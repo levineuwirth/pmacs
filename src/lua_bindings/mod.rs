@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use crate::async_runtime::{
     AsyncRuntime, GrepMatch, GrepSpec, JobOutcome, JobResult, SharedAsyncRuntime, StreamPayload,
 };
-use crate::buffer::{BufferId, EditOp, MarkGravity, MarkId};
+use crate::buffer::{BufferId, EditOp, MarkGravity, MarkId, UndoSource};
 use crate::buffer_registry::BufferRegistry;
 use crate::cell::{Color, Style, UnderlineStyle};
 use crate::command::{Command, CommandError, CommandRegistry, SourceLocation};
@@ -1510,15 +1510,26 @@ fn unfold_before_interactive_lua_edit(lua: &Lua, id: BufferId, edit_start: u64) 
 }
 
 fn run_bypass_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<crate::rope::Edit> {
+    let source = lua_edit_source(lua);
     with_registry_mut(lua, |r| {
         let buf = resolve_mut(r, id)?;
         buf.begin_edit().map_err(mlua::Error::external)?;
         let result = buf
-            .apply_edit_skip_intercepts(op)
+            .apply_edit_skip_intercepts_as(source, op)
             .map_err(mlua::Error::external);
         buf.end_edit();
         result
     })
+}
+
+/// E6c: attribute a Lua edit to the frontend whose interactive command
+/// is in scope — so a hook insert like the auto-pair closer joins
+/// that source's open group — or to the daemon outside one, so a
+/// script's insert stands alone and ends every run it lands among.
+fn lua_edit_source(lua: &Lua) -> UndoSource {
+    lua.app_data_ref::<InteractiveCommandOrigin>()
+        .and_then(|origin| origin.current())
+        .map_or(UndoSource::Daemon, UndoSource::Frontend)
 }
 
 /// Three-phase edit flow that lets intercepts re-enter `pmacs.buffer.X`
@@ -1575,14 +1586,16 @@ fn run_managed_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<cra
 
     // Phase 3: re-borrow, restore views, clear mid-edit flag, apply.
     // We restore views and clear the flag even on intercept error,
-    // so the buffer is left in a usable state.
+    // so the buffer is left in a usable state. E6c: the apply carries
+    // the edit's source (see `lua_edit_source`).
+    let source = lua_edit_source(lua);
     with_registry_mut(lua, |r| {
         let buf = resolve_mut(r, id)?;
         buf.restore_views(views);
         buf.end_edit();
         match intercept_result {
             Ok(final_op) => buf
-                .apply_edit_skip_intercepts(final_op)
+                .apply_edit_skip_intercepts_as(source, final_op)
                 .map_err(mlua::Error::external),
             Err(e) => Err(mlua::Error::external(e)),
         }
@@ -1591,7 +1604,10 @@ fn run_managed_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<cra
 
 fn add_history_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
     methods.add_method("undo", |lua, this, ()| {
-        let edit = with_registry_mut(lua, |r| Ok(resolve_mut(r, this.0)?.undo().ok()))?;
+        // E6c: a script's undo pops the daemon stack; inside a
+        // command it pops the acting source's (see `lua_edit_source`).
+        let source = lua_edit_source(lua);
+        let edit = with_registry_mut(lua, |r| Ok(resolve_mut(r, this.0)?.undo_for(source).ok()))?;
         if let Some(edit) = edit.as_ref() {
             notify_buffer_edit_to_windows(lua, this.0, edit);
         }
@@ -1599,7 +1615,8 @@ fn add_history_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
     });
 
     methods.add_method("redo", |lua, this, ()| {
-        let edit = with_registry_mut(lua, |r| Ok(resolve_mut(r, this.0)?.redo().ok()))?;
+        let source = lua_edit_source(lua);
+        let edit = with_registry_mut(lua, |r| Ok(resolve_mut(r, this.0)?.redo_for(source).ok()))?;
         if let Some(edit) = edit.as_ref() {
             notify_buffer_edit_to_windows(lua, this.0, edit);
         }
