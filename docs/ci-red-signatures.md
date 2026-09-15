@@ -1000,6 +1000,52 @@ daemon spawn and a real probe take and a skip does not. So neither the
 count stands where the PR #270 sections left it, and under the rerun
 rule a green sample retires nothing.
 
+### `main` after E6b: run 35013609842 at `7880c4b`, and it is GREEN
+
+Read at E6c's opening on 2026-09-15, from the jobs endpoint and the
+two macOS job logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 35013609842, `push`, one attempt |
+| head | `7880c4b`, E6b's squash merge (PR #272 at `3003ca9`, `--match-head-commit`) |
+| window | created 2026-09-15T19:26:13Z, updated 19:45:23Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+Tally (run-35013609842-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 104531400717 | success |
+| Commit attribution (D9) | 104531400965 | success |
+| Changed paths | 104531401025 | success |
+| Format | 104531401097 | success |
+| Lint (luajit) | 104531401219 | success |
+| M1 Acceptance Gates | 104531476039 | success |
+| M10 Perf Gates (crdt) | 104531476087 | success |
+| GPU Render (headless) | 104531476104 | success |
+| M6 Perf Gates | 104531476199 | success |
+| M5 Perf Gates | 104531476232 | success |
+| M4 Perf Gates | 104531476290 | success |
+| Perf budgets (debug) | 104531476359 | success |
+| Test (crdt) | 104531476365 | success |
+| Test (ubuntu-latest / luajit) | 104531476512 | success |
+| Test (macos-latest / lua54) | 104531476576 | success |
+| Test (macos-latest / luajit) | 104531476581 | success |
+| Test (ubuntu-latest / lua54) | 104531476594 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 104531476611 | success |
+| Docs consistency | 104531477793 | skipped |
+
+On both macOS legs (`Test (macos-latest / lua54)` 104531476576,
+`Test (macos-latest / luajit)` 104531476581) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 141 `test result:
+ok` and zero `FAILED` in each. So neither the `read Hello` family, nor
+#259, nor U4, nor U17, nor #271 sampled on this trunk run; every count
+stands where the PR #272 section left it, and under the rerun rule a
+green sample retires nothing. This is the base control for E6c: the
+last code-bearing commit on `main`, with a full matrix run of its own.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
