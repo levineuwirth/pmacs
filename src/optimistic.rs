@@ -1155,7 +1155,7 @@ mod tests {
     /// any undo chord optimistic again, this fails — and two undo
     /// mechanisms would be racing over the same op again.
     #[test]
-    fn f1_undo_keystroke_gap_cx_u_round_trips_only_single_key_is_optimistic() {
+    fn f1_undo_keystroke_gap_closed_cx_u_undoes_because_every_undo_chord_round_trips() {
         // Every bound undo spelling round-trips — the single-key
         // forms the retired arm used to take, and the multi-key
         // prefix that never composed. None may become a frontend
