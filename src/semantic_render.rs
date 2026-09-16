@@ -259,6 +259,10 @@ pub struct SemanticRenderState {
     /// suppressed send still inserts, or the whole-file recompute
     /// repeats every tick.
     last_summary: HashMap<BufferId, SummaryCache>,
+    /// `(quiet, max_lag)` for the whole-file summary after an edit
+    /// (E6d.4): [`SUMMARY_QUIET`] and [`SUMMARY_MAX_LAG`], which a
+    /// test may shorten.
+    summary_debounce: (std::time::Duration, std::time::Duration),
     /// `(name, modified, diag_errors, diag_warnings, message)` last
     /// emitted as `StatusFacts` (Q#S1; `message` since v15) —
     /// cached-compare suppression. A peer emission baseline ONLY:
@@ -560,7 +564,31 @@ struct SummaryCache {
     /// The computed summary — compared before emitting (Q#TH6
     /// payload-equality suppression).
     lines: Vec<Style>,
+    /// When the summary was last computed (E6d.4).
+    computed_at: std::time::Instant,
+    /// The generation the frame last saw, and when it first saw it: the
+    /// clock the quiet window in [`SemanticRenderState::file_style_summary_msg`]
+    /// runs on (E6d.4).
+    seen: (u64, std::time::Instant),
 }
+
+/// How long a buffer must have gone unedited before its whole-file
+/// summary is recomputed, and the longest a summary may lag the text
+/// under continuous typing (E6d.4). The summary is a tree-sitter pass
+/// over every line, 175 ms on a 14k-line file, on the dispatcher
+/// thread; recomputed per edit it stood between every keystroke and
+/// the frame that answers it. The minimap it feeds carries the
+/// frontend's own line shapes and only borrows these colors, so it
+/// may lag typing by the quiet window, or by the lag cap when a burst
+/// runs longer than that. The window is a second rather than a
+/// word's pause because the pass still blocks the keystroke that
+/// resumes typing inside it: measured at 200 ms, a character typed
+/// 300 ms after the last edit waited 184 ms for it (p50, thirty
+/// samples on `src/editor.rs`), and a second is past most pauses
+/// between words and inside the ones spent thinking.
+pub const SUMMARY_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
+/// See [`SUMMARY_QUIET`].
+pub const SUMMARY_MAX_LAG: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The stage-1 UI face inventory (themes arc Q#TH3): the names the
 /// `ThemeFacts` producer resolves through [`crate::highlight::Theme::face`]
@@ -648,6 +676,17 @@ impl StyleGate {
 }
 
 impl SemanticRenderState {
+    /// Shorten the whole-file summary's debounce (E6d.4), for a test
+    /// that edits and reads the next frame's summary at once.
+    #[cfg(test)]
+    pub(crate) fn set_summary_debounce(
+        &mut self,
+        quiet: std::time::Duration,
+        max_lag: std::time::Duration,
+    ) {
+        self.summary_debounce = (quiet, max_lag);
+    }
+
     /// Fresh session state for a peer that negotiated
     /// `negotiated_protocol_version` — the real daemon construction
     /// path (PR #120 round 1 finding 3): a `< 16` peer gets no
@@ -693,6 +732,7 @@ impl SemanticRenderState {
             peer_knows_mapped_panel: true,
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
+            summary_debounce: (SUMMARY_QUIET, SUMMARY_MAX_LAG),
             last_status: HashMap::new(),
             // Seed to the frontend's default (gutter off): a plain default
             // window never emits `LineNumbers`, so the common case adds no
@@ -2546,12 +2586,26 @@ impl SemanticRenderState {
             0
         };
         let key = (generation, diag_epoch, syntax_epoch, face_key);
-        if self
-            .last_summary
-            .get(&buffer_id)
-            .is_some_and(|c| c.key == key)
-        {
-            return None;
+        let now = std::time::Instant::now();
+        if let Some(cache) = self.last_summary.get_mut(&buffer_id) {
+            if cache.key == key {
+                return None;
+            }
+            if cache.seen.0 != generation {
+                cache.seen = (generation, now);
+            }
+            // E6d.4: an edit (a generation the cache does not hold)
+            // waits for the buffer to go quiet before the whole-file
+            // pass runs again, and never longer than the lag cap; an
+            // epoch change alone (diagnostics, theme) recomputes at
+            // once, since no keystroke is behind it.
+            let (quiet, max_lag) = self.summary_debounce;
+            if cache.key.0 != generation
+                && now.duration_since(cache.seen.1) < quiet
+                && now.duration_since(cache.computed_at) < max_lag
+            {
+                return None;
+            }
         }
         let lines = scoped_file_summary(state, buffer_id, self.peer_knows_theme_facts);
         // Payload-equality suppression (Q#TH6): a face edit that
@@ -2568,6 +2622,8 @@ impl SemanticRenderState {
             SummaryCache {
                 key,
                 lines: lines.clone(),
+                computed_at: now,
+                seen: (generation, now),
             },
         );
         if unchanged {
@@ -6486,6 +6542,87 @@ mod tests {
         assert!(
             summary_of(&again).is_none(),
             "unchanged generation suppresses the summary"
+        );
+    }
+
+    /// E6d.4: an edit's whole-file summary waits for the buffer to go
+    /// quiet, and never longer than the lag cap, while an epoch change
+    /// alone recomputes at once.
+    #[test]
+    fn e6d_4_summary_waits_for_quiet_after_an_edit_and_no_longer_than_the_lag_cap() {
+        use std::time::Duration;
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        let edit = |bytes: &[u8]| {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            let buf = reg.get_mut(bid).expect("active buffer");
+            if buf.crdt_state().is_none() {
+                buf.upgrade_to_crdt(1).expect("upgrade to crdt");
+            }
+            buf.apply_edit(crate::buffer::EditOp::Insert { pos: 0, bytes })
+                .expect("buffer edit");
+        };
+        edit(b"a\nb\n");
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+        s.set_summary_debounce(Duration::from_millis(60), Duration::from_secs(10));
+        assert!(
+            summary_of(&s.render_frame(&state)).is_some(),
+            "the first frame ships a summary at once"
+        );
+
+        // An edit: the frames inside the quiet window ship nothing.
+        edit(b"c\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "the frame after an edit waits for quiet"
+        );
+        // A second edit inside the window restarts it.
+        std::thread::sleep(Duration::from_millis(40));
+        edit(b"d\n");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "an edit inside the window restarts the quiet clock"
+        );
+        std::thread::sleep(Duration::from_millis(70));
+        let (gen_after, lines) =
+            summary_of(&s.render_frame(&state)).expect("quiet: the summary ships");
+        assert_eq!(
+            lines.len(),
+            5,
+            "and it describes the edited text: d, c, a, b, tail"
+        );
+        assert_eq!(gen_after, buffer_generation(&state, bid));
+
+        // Under a burst that never goes quiet, the lag cap ships one.
+        s.set_summary_debounce(Duration::from_secs(10), Duration::from_millis(60));
+        edit(b"e\n");
+        assert!(summary_of(&s.render_frame(&state)).is_none());
+        std::thread::sleep(Duration::from_millis(30));
+        edit(b"f\n");
+        assert!(summary_of(&s.render_frame(&state)).is_none());
+        std::thread::sleep(Duration::from_millis(40));
+        edit(b"g\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_some(),
+            "the lag cap ships a summary under a burst that never goes quiet"
+        );
+
+        // An epoch change with no edit recomputes at once, inside any window.
+        s.set_summary_debounce(Duration::from_secs(10), Duration::from_secs(10));
+        {
+            let theme = state.syntax_registry.theme();
+            let mut th = theme.lock().expect("lock");
+            th.syntax_epoch += 1;
+        }
+        let key_before = s.last_summary.get(&bid).expect("cache").key;
+        let _ = s.render_frame(&state);
+        let key_after = s.last_summary.get(&bid).expect("cache").key;
+        assert_ne!(
+            key_before.2, key_after.2,
+            "a theme epoch alone recomputes at once"
         );
     }
 
