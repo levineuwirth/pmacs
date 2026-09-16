@@ -3944,7 +3944,8 @@ fn broadcast_pending_crdt_ops(
     // to keep the non-CRDT build free of unused imports.
     #[cfg(not(feature = "crdt"))]
     {
-        let _ = (session_registry, streams, latency);
+        let _ = (session_registry, streams);
+        let _ = (latency.jitter_ms, latency.fixed_ms, &*latency.rng);
         // Defensive: empty the queue in case shared state was
         // populated through some path we haven't traced.
         let _ = std::mem::take(&mut editor.core.borrow_mut().pending_crdt_ops);

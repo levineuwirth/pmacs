@@ -678,7 +678,7 @@ impl StyleGate {
 impl SemanticRenderState {
     /// Shorten the whole-file summary's debounce (E6d.4), for a test
     /// that edits and reads the next frame's summary at once.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "crdt"))]
     pub(crate) fn set_summary_debounce(
         &mut self,
         quiet: std::time::Duration,
@@ -6547,7 +6547,9 @@ mod tests {
 
     /// E6d.4: an edit's whole-file summary waits for the buffer to go
     /// quiet, and never longer than the lag cap, while an epoch change
-    /// alone recomputes at once.
+    /// alone recomputes at once. CRDT-only: the generation an edit
+    /// bumps is the CRDT's version scalar.
+    #[cfg(feature = "crdt")]
     #[test]
     fn e6d_4_summary_waits_for_quiet_after_an_edit_and_no_longer_than_the_lag_cap() {
         use std::time::Duration;

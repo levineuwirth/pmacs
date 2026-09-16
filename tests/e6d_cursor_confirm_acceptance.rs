@@ -25,6 +25,10 @@
 //! release the floor, and three more are typed after. The text must
 //! carry every character once, in order, and the run must have
 //! released a floor for the row to say anything.
+//!
+//! CRDT-only: the probe is a semantic replica, which a daemon can host
+//! only with the feature.
+#![cfg(feature = "crdt")]
 
 use std::fmt::Write as _;
 use std::path::Path;
