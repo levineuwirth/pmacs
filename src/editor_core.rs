@@ -5014,8 +5014,9 @@ impl EditorCore {
     /// stamped it: when this keystroke begins a group --- the first of
     /// a run, or the first past every `limit` characters --- close the
     /// source's open undo group and open a new one on the active
-    /// buffer. `limit == 0` disables amalgamation: every keystroke is
-    /// its own step and no group is ever opened.
+    /// buffer. `limit == 0` disables amalgamation across keystrokes:
+    /// every keystroke begins a group, which its command boundary
+    /// closes, so each keystroke's command is its own step.
     ///
     /// The v0.1 stack has no group and is amalgamated after the fact
     /// by [`Self::typed_run_end`]. Both are driven from the same
@@ -5089,7 +5090,7 @@ impl EditorCore {
             && let Ok(buffer) = reg.get_mut(buffer_id)
         {
             buffer.arbiter_settle_remote(UndoSource::Frontend(source), run, limit, typed);
-            if typed && limit != 0 {
+            if typed {
                 self.undo_group.insert(source, buffer_id);
             } else {
                 self.undo_group.remove(&source);

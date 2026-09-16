@@ -1689,10 +1689,13 @@ impl Buffer {
     /// open group is kept, or opened if a boundary closed it. Every
     /// forward edit `source` makes while its group is open joins it,
     /// the auto-pair closer a hook inserts inside the same command
-    /// included. `limit == 0` disables amalgamation: the open group
-    /// closes and none opens, so every keystroke is its own step. In
-    /// v0.1 mode this marks where the keystroke's command begins on
-    /// the rope stack, and [`Self::note_typed_edit`] does the
+    /// included. `limit == 0` disables amalgamation across keystrokes
+    /// and nothing else: every keystroke begins a group, so the group
+    /// holds one keystroke's command --- the character and what a
+    /// hook inserted inside the same command --- and the two
+    /// histories cut the same steps at zero as at any limit. In v0.1
+    /// mode this marks where the keystroke's command begins on the
+    /// rope stack, and [`Self::note_typed_edit`] does the
     /// amalgamating.
     pub fn arbiter_typed_begin(&mut self, source: UndoSource, run: u32, limit: u32) {
         #[cfg(feature = "crdt")]
@@ -1704,13 +1707,11 @@ impl Buffer {
             if limit == 0 || run.is_multiple_of(limit) {
                 self.arbiter_close(source);
             }
-            if limit != 0 {
-                self.arbiter
-                    .entry(source)
-                    .or_default()
-                    .open
-                    .get_or_insert_with(SourceGroup::default);
-            }
+            self.arbiter
+                .entry(source)
+                .or_default()
+                .open
+                .get_or_insert_with(SourceGroup::default);
         }
         #[cfg(not(feature = "crdt"))]
         {

@@ -328,6 +328,44 @@ fn a_command_after_optimistic_typing_is_its_own_undo_step() {
     both_see(&mut gpu, &mut tui, "", "the typed run undone");
 }
 
+/// The knob at zero on the GPU route: `undo.amalgamate = 0` makes
+/// every keystroke its own step, and a keystroke's command stays
+/// whole. The GPU types `a(` optimistically and the daemon's hook
+/// closes the pair; `End`, then Backspace takes the closer. The first
+/// undo restores the closer alone (a command chord after zero-limit
+/// typing is its own step, as after a run); the second removes `(`
+/// with the closer it came with, one step; the third removes `a`.
+/// Before the fix round the arbiter opened no group at zero, so the
+/// opener and the closer stood as two steps, and the settle path
+/// registered no run at zero, so a following command chord joined the
+/// group left open.
+#[test]
+fn amalgamate_zero_keeps_a_keystrokes_command_whole_on_the_gpu_route() {
+    let daemon = TestDaemon::spawn_with_config("pmacs.config.set('undo.amalgamate', 0)\n");
+    let mut gpu = attach_replica(&daemon);
+    let mut tui = attach_replica(&daemon);
+
+    type_optimistic(&mut gpu, 0, "a(");
+    both_see(&mut gpu, &mut tui, "a()", "a( with its closer");
+    send_key(&mut gpu, Key::End, Modifiers::NONE);
+    send_key(&mut gpu, Key::Backspace, Modifiers::NONE);
+    both_see(&mut gpu, &mut tui, "a(", "the closer deleted");
+
+    send_undo(&mut gpu);
+    both_see(&mut gpu, &mut tui, "a()", "the Backspace undone alone");
+    send_undo(&mut gpu);
+    both_see(
+        &mut gpu,
+        &mut tui,
+        "a",
+        "the opener and its closer, one step",
+    );
+    send_undo(&mut gpu);
+    both_see(&mut gpu, &mut tui, "", "a, its own step");
+    send_undo(&mut gpu);
+    assert_text_stays(&mut gpu, "", Duration::from_millis(500));
+}
+
 /// Undo, type, undo again, on the GPU route: `ab`, undo, `cd`, undo
 /// leaves the buffer empty at each undo; and the forward edit cleared
 /// the redo, so `C-x r` after it restores nothing.

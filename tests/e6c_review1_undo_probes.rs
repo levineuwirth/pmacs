@@ -279,13 +279,13 @@ fn review_lean_expansion_one_undo_agrees_across_histories() {
 /// keep a keystroke's command whole: `(` and the closer its hook
 /// inserted are one step in both histories, and `ab(` undoes as `ab`,
 /// `a`, empty. The v0.1 stack collapses the command's entries whatever
-/// the knob says; the arbiter opens no group at zero
-/// (`Buffer::arbiter_typed_begin`), so the opener and the closer land
-/// as two groups and the CRDT history walks `ab(`, `ab`, `a`, empty.
-/// Fails at the reviewed head `c4be8aa` on that first undo; ignored
-/// until the fix round lands the fix and lifts the ignore.
+/// the knob says; the arbiter opened no group at zero
+/// (`Buffer::arbiter_typed_begin`'s `if limit != 0` guard), so the
+/// opener and the closer landed as two groups and the CRDT history
+/// walked `ab(`, `ab`, `a`, empty. Failed at the reviewed head
+/// `c4be8aa` on that first undo (E6c review 1, Medium 1); the fix
+/// round opens the group at zero as at any limit.
 #[test]
-#[ignore = "E6c review 1, Medium 1: at undo.amalgamate = 0 the arbiter splits a keystroke's command from the closer its hook inserted; the two histories disagree"]
 fn review_amalgamate_zero_keeps_the_pair_as_one_step_across_histories() {
     let (plain, crdt) = both(
         |s| {
