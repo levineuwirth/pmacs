@@ -1103,6 +1103,65 @@ green, on U17 alone**, stated at the moment of writing; no rerun taken,
 and a merge decision inherits U17's eighth the way PR #270's head
 inherited its seventh.
 
+### PR #273's fix-round-1 head run 35087226398 at `a6687b1`, and it is GREEN
+
+E6c fix round 1's head --- `2cd174c` plus four fix commits: the group
+opened at `undo.amalgamate = 0`, a detached frontend's undo groups
+handed on, the GPU witness at `== ""`, the F1 pin renamed --- read on
+2026-09-16 from the jobs endpoint and the two macOS job logs after
+the run completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35087226398, `pull_request`, one attempt |
+| head | `a6687b1`, `e6c/undo-across-peers` (base `7880c4b`) |
+| window | created 2026-09-16T10:51:30Z, updated 2026-09-16T11:11:27Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35087226398-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 104764802176 | success |
+| Format | 104764802475 | success |
+| Changed paths | 104764802482 | success |
+| Lint (luajit) | 104764802543 | success |
+| Lint (lua54) | 104764802587 | success |
+| M1 Acceptance Gates | 104764856410 | success |
+| Test (crdt) | 104764856434 | success |
+| M4 Perf Gates | 104764856472 | success |
+| GPU Render (headless) | 104764856478 | success |
+| M5 Perf Gates | 104764856488 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 104764856547 | success |
+| Test (macos-latest / lua54) | 104764856551 | success |
+| Test (ubuntu-latest / luajit) | 104764856558 | success |
+| M6 Perf Gates | 104764856573 | success |
+| Test (macos-latest / luajit) | 104764856581 | success |
+| Test (ubuntu-latest / lua54) | 104764856618 | success |
+| M10 Perf Gates (crdt) | 104764856635 | success |
+| Perf budgets (debug) | 104764856698 | success |
+| Docs consistency | 104764857972 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 104764856581,
+`Test (macos-latest / lua54)` 104764856551) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 145 `test result:
+ok` and zero `FAILED` in each. U17's selector
+`read_dir_supersede_cancels_in_flight_predecessor` ran `ok` on both,
+inside `m8_1_acceptance` `10 passed`: a second green sample after the
+eighth at `c4be8aa`, non-reproduction and nothing more, and the count
+stays at eight. Neither the `read Hello` family, nor #259, nor U4, nor
+#271 sampled. The suites the round touched ran on both legs by
+elapsed time, not as skips: `undo_across_peers_acceptance` `18 passed`
+(6.86 s luajit, 5.47 s lua54; fourteen rows plus the zero-limit
+GPU-route row and the three detach rows), `e6c_review1_undo_probes`
+`9 passed` (4.66 s, 0.59 s; the review's Medium 1 witness un-ignored
+and passing), `e6c_review1_undo_across_peers_probes` `11 passed`
+(3.79 s, 2.70 s), `undo_arbiter_differential_acceptance` `2 passed`
+(8.14 s, 6.99 s). Both lint legs green, `Lint (lua54)` included.
+**So the head is green**, stated at the moment of writing, one
+attempt, nothing rerun.
+
 ### PR #273's review-round-1 head run 35037221750 at `2cd174c`, and it is GREEN
 
 E6c review 1's head --- `c4be8aa` plus one witness commit, two test
