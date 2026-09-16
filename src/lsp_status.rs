@@ -19,7 +19,9 @@
 //!         │                                   └────────┘
 //!         │
 //!         ├── ProtocolError / response.error ─→ Degraded { reason }
-//!         │       ↑                                │
+//!         │       ↑   (not the retry codes:       │
+//!         │       │    RequestCancelled,          │
+//!         │       │    ContentModified)           │
 //!         │       └─ further errors stay degraded; │ next Initialized
 //!         │                                        │ flips back to Ready
 //!         │
@@ -166,6 +168,11 @@ pub struct LspStatus {
     pub recent_messages: Vec<LspStatusMessage>,
     /// Capacity of [`Self::recent_messages`].
     pub message_capacity: usize,
+    /// Responses answered with a retry code (E6d.2): requests the
+    /// document moved out from under, counted rather than logged, so
+    /// the `*lsp*` surface can say how often the server was asked
+    /// about text that was already gone.
+    pub retry_responses: u64,
 }
 
 impl LspStatus {
@@ -181,6 +188,7 @@ impl LspStatus {
             server_info: None,
             recent_messages: Vec::with_capacity(DEFAULT_MESSAGE_CAPACITY),
             message_capacity: DEFAULT_MESSAGE_CAPACITY,
+            retry_responses: 0,
         }
     }
 
@@ -263,6 +271,28 @@ impl LspServerInfo {
 /// Past this window, an otherwise-`Ready` server clears its degraded
 /// flag automatically.
 pub const DEGRADED_STICKY: Duration = Duration::from_secs(15);
+
+/// `RequestCancelled` (LSP 3.17 §3.3): the client asked for the
+/// request to stop, which every superseded request does.
+pub const REQUEST_CANCELLED: i64 = -32800;
+
+/// `ContentModified` (LSP 3.17 §3.3): the document moved under the
+/// request and the answer would describe text that is gone. Under
+/// typing this is the normal case, not a failure of the server.
+pub const CONTENT_MODIFIED: i64 = -32801;
+
+/// Whether an error response is one of the spec's retry codes, which
+/// say the request is moot rather than that the server is unwell:
+/// neither flips the status to `Degraded`, sets `last_error`, nor
+/// lands in the recent messages (E6d.2). The modeline read "degraded"
+/// through ordinary typing because every keystroke's `didChange` made
+/// rust-analyzer answer the in-flight token request with
+/// `ContentModified`, and each such answer re-armed the fifteen-second
+/// sticky window.
+#[must_use]
+pub const fn is_retry_code(code: i64) -> bool {
+    matches!(code, REQUEST_CANCELLED | CONTENT_MODIFIED)
+}
 
 /// Per-manager status tracker. Holds one [`LspStatus`] per known
 /// server and folds events into it.
@@ -363,7 +393,10 @@ impl LspStatusTracker {
                 });
             }
             LspEventKind::Response { method, error, .. } => {
-                if let Some(err) = error {
+                if error.as_ref().is_some_and(|err| is_retry_code(err.code)) {
+                    st.retry_responses += 1;
+                }
+                if let Some(err) = error.as_ref().filter(|err| !is_retry_code(err.code)) {
                     st.last_error = Some(LspStatusError::from_lsp_error(ev.at, err));
                     st.set_kind(
                         LspStatusKind::Degraded {
@@ -1111,5 +1144,80 @@ mod tests {
             })
         });
         assert_eq!(t.get(sid).unwrap().kind, LspStatusKind::Ready);
+    }
+
+    /// E6d.2 --- a hundred keystrokes' worth of in-flight requests
+    /// answered `ContentModified` (and a few `RequestCancelled`) leave
+    /// a ready server ready, with no last error and nothing in the
+    /// recent messages; a real error still degrades it.
+    #[test]
+    fn retry_codes_are_not_degradation_and_a_real_error_still_is() {
+        let mut t = LspStatusTracker::new();
+        let sid = LspServerId::next();
+        let now = Instant::now();
+        t.observe(
+            &ev(
+                sid,
+                LspEventKind::Initialized {
+                    capabilities: json!({}),
+                },
+                now,
+            ),
+            None,
+        );
+        let before = t.get(sid).unwrap().recent_messages.len();
+        for i in 0..100u64 {
+            let code = if i % 10 == 0 {
+                REQUEST_CANCELLED
+            } else {
+                CONTENT_MODIFIED
+            };
+            t.observe(
+                &ev(
+                    sid,
+                    LspEventKind::Response {
+                        id: i,
+                        result: Value::Null,
+                        error: Some(LspError {
+                            code,
+                            message: "content modified".into(),
+                            data: None,
+                        }),
+                        method: "textDocument/semanticTokens/range".into(),
+                    },
+                    now + Duration::from_millis(i),
+                ),
+                None,
+            );
+            let st = t.get(sid).unwrap();
+            assert_eq!(st.kind, LspStatusKind::Ready, "keystroke {i}");
+            assert!(st.last_error.is_none(), "keystroke {i} left a last error");
+            assert_eq!(st.retry_responses, i + 1, "counted, not logged");
+        }
+        assert_eq!(
+            t.get(sid).unwrap().recent_messages.len(),
+            before,
+            "retry codes are not messages either"
+        );
+        t.observe(
+            &ev(
+                sid,
+                LspEventKind::Response {
+                    id: 1000,
+                    result: Value::Null,
+                    error: Some(LspError {
+                        code: -32603,
+                        message: "internal error".into(),
+                        data: None,
+                    }),
+                    method: "textDocument/hover".into(),
+                },
+                now + Duration::from_secs(1),
+            ),
+            None,
+        );
+        let st = t.get(sid).unwrap();
+        assert!(matches!(st.kind, LspStatusKind::Degraded { .. }));
+        assert_eq!(st.last_error.as_ref().unwrap().code, Some(-32603));
     }
 }
