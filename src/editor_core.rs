@@ -21,7 +21,7 @@
 //! window's --- two windows on the same buffer keep their layout
 //! caches synchronized.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::buffer::{Buffer, BufferId, EditOp, UndoSource};
@@ -1054,13 +1054,29 @@ impl EditorCore {
         self.views.insert(fid, view);
     }
 
-    /// T M10.8 — drop a frontend's view on detach. The frontend's
-    /// windows remain in `self.windows` until explicit cleanup (M10.x
-    /// may add per-detach window pruning); for M10.8 they're
-    /// orphaned but accessible by id (matches v0.1 behavior where
-    /// closing a window left others intact).
+    /// T M10.8 — drop a frontend's view on detach, and with it the
+    /// windows only that view showed (E6d.5). They used to stay in
+    /// `self.windows`, orphaned but reachable by id, and every edit to
+    /// their buffer still updated each one: a `TextView` rescans the
+    /// rope from the edited line to the end on every edit, about 0.4 ms
+    /// on a 14k-line file, so a daemon that had seen ninety attaches
+    /// spent 36 ms per keystroke on windows nobody would paint again,
+    /// and the auto-pair closer that landed in 5 ms on a fresh daemon
+    /// took 98 after half an hour of scripted typing. A window another
+    /// view still shows is kept.
     pub fn unregister_frontend_view(&mut self, fid: FrontendId) {
-        self.views.remove(&fid);
+        if let Some(view) = self.views.remove(&fid) {
+            let still_shown: HashSet<WindowId> = self
+                .views
+                .values()
+                .flat_map(|v| v.layout.iter_ids())
+                .collect();
+            for id in view.layout.iter_ids() {
+                if !still_shown.contains(&id) {
+                    self.windows.remove(&id);
+                }
+            }
+        }
         // Bottom-panel arc (Q#BP11c): a detached frontend's navigation
         // trail dies with its view — its `WindowId`s are gone, and no
         // other frontend may pop or destroy those entries.

@@ -8908,6 +8908,35 @@ mod tests {
         );
     }
 
+    /// E6d.5 --- a detached frontend's windows go with its view. Every
+    /// edit updates every window on its buffer (a `TextView` rescans the
+    /// rope from the edited line to the end), so windows left behind by
+    /// departed frontends made each keystroke cost a little more for the
+    /// daemon's whole life: ninety attaches, 36 ms per keystroke.
+    #[test]
+    fn a_detached_frontends_windows_leave_with_its_view() {
+        let mut editor = crate::editor::EditorState::new();
+        let before = editor.core.borrow().windows.len();
+        let fid = FrontendId(40);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        assert_eq!(
+            editor.core.borrow().windows.len(),
+            before + 1,
+            "an attach adds the frontend's window"
+        );
+        let mut semantic_states = HashMap::new();
+        let mut render_states = HashMap::new();
+        detach_session(&mut editor, &mut semantic_states, &mut render_states, fid);
+        let core = editor.core.borrow();
+        assert!(!core.views.contains_key(&fid), "the view is gone");
+        assert_eq!(
+            core.windows.len(),
+            before,
+            "and so is its window; the daemon's own windows stay"
+        );
+    }
+
     /// Cancel the live gesture from INSIDE PROJECTION, by taking the
     /// panel away.
     ///
@@ -9513,20 +9542,25 @@ mod tests {
                                      cleared, or its stale anchor captures \
                                      the next shift-motion"
                                 ),
-                                // WINDOW REPLACED: the window the gesture
-                                // belonged to is gone, so the completion
-                                // has nothing left to clear and the
-                                // gesture ENDING is the whole of the
+                                // WINDOW REPLACED, or DETACH: the window
+                                // the gesture belonged to is gone, so the
+                                // completion has nothing left to clear and
+                                // the gesture ENDING is the whole of the
                                 // effect --- already asserted above. Said
                                 // out loud rather than skipped, because a
                                 // silently absent assertion is how a
-                                // quadrant stops testing anything.
+                                // quadrant stops testing anything. A detach
+                                // takes the frontend's windows with its
+                                // view (E6d.5); before that they were left
+                                // behind, and this arm named the
+                                // replacement alone.
                                 None => assert!(
-                                    matches!(cause, WindowReplaced),
+                                    matches!(cause, WindowReplaced | Detach),
                                     "{label}: the panel window vanished for \
                                      a cause that should not remove it --- \
                                      `Absent` hides the panel and leaves the \
-                                     window, so only a replacement may land here"
+                                     window, so only a replacement or the \
+                                     frontend's departure may land here"
                                 ),
                             }
                         }
