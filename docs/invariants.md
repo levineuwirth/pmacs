@@ -91,37 +91,39 @@ and `range` are three independent capabilities and each is gated on its
 own.
 
 The semantic-token store hands out tokens in the document's current
-bytes, never in the server's: every buffer a server attaches to carries
-a `SemanticEditRecorder` view that logs each edit the buffer broadcasts,
-a token request carries the text the server holds and the edit number
-it is current at, and the answer is resolved against that text and
-carried across the edits since. A stale store therefore shifts its
-tokens and does not drop them; both merge sites read
-`positioned_tokens` and neither converts a column per frame.
+bytes, never the server's: every buffer a server attaches to carries a
+`SemanticEditRecorder` view logging each edit the buffer broadcasts, a
+token request carries the text the server holds and its edit number, and
+the answer is resolved against that text and carried across the edits
+since, so a stale store shifts its tokens, never drops them; both merge
+sites read `positioned_tokens` and neither converts a column per frame.
+The same log is what a `didChange` ships as ranges to a server that
+negotiated incremental sync, the codec's mirror moving with it; a log
+that cannot account for the buffer's length sends the whole document.
 
-LaTeX is served by `texlab`, and its root is not the repository root.
+LaTeX is served by `texlab`, and its root is not the repository root:
 `pmacs.lsp.config.latex` resolves the document root by an upward marker
 walk over texlab's own markers (`.texlabroot`, `texlabroot`), and `.git`
-is deliberately excluded from that walk: a repository root is the wrong
-answer for a multi-file document, which is the reason the resolver
-exists.
+is deliberately excluded from that walk, because a repository root is
+the wrong answer for a multi-file document, which is why it exists.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
 `rangeonly16` (UTF-16 with fail-closed bounds validation),
 `semantichold` (document-derived tokens, held for
-`PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`), `sighelp`, `prepare`,
-`preprefuse`, `rename`, `inlaybounds`, `inlayrefresh`,
+`PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`), `incremental` and `incremental8`
+(ranged `didChange` applied in UTF-16 and UTF-8 units), `sighelp`,
+`prepare`, `preprefuse`, `rename`, `inlaybounds`, `inlayrefresh`,
 `semantictokensrefresh`, `applyeditplan`, `resourceops`, `posecho`,
 `defenv`, `wsconfig`, `rooturi`, `leanprogress`. Failure shapes:
-`crash`, `error`, `garbage`, `silent`. File watchers: `filewatch`
-(a `RelativePattern` `**/*.txt`), `filewatchabs` (an absolute plain
-glob), `filewatchflat` (a `RelativePattern` with no leading `**/`),
+`crash`, `error`, `garbage`, `silent`. File watchers: `filewatch` (a
+`RelativePattern` `**/*.txt`), `filewatchabs` (an absolute plain glob),
+`filewatchflat` (a `RelativePattern` with no leading `**/`),
 `filewatchbare` (a bare relative string), `filewatchrereg` (the same id
 twice with no unregister), `filewatchjoin`, `filewatchretire`. Use these
-for capability-matrix tests, never a real server; the list is
-enumerated from the binary and a stale copy is how a test ends up
-covering the shape next to the defect.
+for capability-matrix tests, never a real server; the list is enumerated
+from the binary and a stale copy is how a test ends up covering the
+shape next to the defect.
 
 ## Persistence
 

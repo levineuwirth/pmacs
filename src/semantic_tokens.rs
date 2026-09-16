@@ -394,9 +394,14 @@ struct EditLog {
     /// copy of the document reflects every edit numbered below it.
     synced_seq: u64,
     /// Edits numbered below this were forgotten (cap or clear), so a
-    /// response with an older base cannot be aligned.
+    /// response with an older base cannot be aligned, and an
+    /// incremental `didChange` cannot be built from them.
     dropped_below: u64,
-    edits: VecDeque<(u64, DocumentEdit)>,
+    /// Each edit with the text it inserted (empty for a delete), which
+    /// is what an incremental `didChange` carries for it (E6d.1); the
+    /// byte range alone cannot name the bytes a later edit may have
+    /// changed again.
+    edits: VecDeque<(u64, DocumentEdit, Arc<str>)>,
 }
 
 /// One server's answer for one document, held in both the server's
@@ -503,13 +508,13 @@ impl SemanticTokenStore {
                 entry.unalignable = true;
                 entry.spans.clear();
             } else {
-                for &(seq, edit) in &log.edits {
+                for &(seq, edit, _) in &log.edits {
                     if seq >= base_seq {
                         translate_spans(&mut entry.spans, edit);
                         entry.pending += 1;
                     }
                 }
-                log.edits.retain(|(seq, _)| *seq >= base_seq);
+                log.edits.retain(|(seq, ..)| *seq >= base_seq);
             }
         }
         self.by_key.insert(key, entry);
@@ -574,7 +579,7 @@ impl SemanticTokenStore {
             if base_seq < log.dropped_below {
                 unalignable = true;
             } else {
-                for &(seq, edit) in &log.edits {
+                for &(seq, edit, _) in &log.edits {
                     if seq >= base_seq {
                         translate_spans(&mut fresh, edit);
                         translate_spans(&mut extent, edit);
@@ -666,16 +671,21 @@ impl SemanticTokenStore {
     /// nothing inserted) are ignored: buffers broadcast them
     /// deliberately, and translating by zero would only bump the
     /// version.
-    pub fn record_edit(&mut self, uri: &str, edit: DocumentEdit) {
+    ///
+    /// `inserted` is the text the edit put at `edit.start`, kept so an
+    /// incremental `didChange` can ship the edit itself instead of the
+    /// document (E6d.1); it is `edit.inserted_len` bytes long, and
+    /// empty for a delete.
+    pub fn record_edit(&mut self, uri: &str, edit: DocumentEdit, inserted: &str) {
         if edit.old_end == edit.start && edit.inserted_len == 0 {
             return;
         }
         let log = self.logs.entry(uri.to_owned()).or_default();
         let seq = log.next_seq;
         log.next_seq += 1;
-        log.edits.push_back((seq, edit));
+        log.edits.push_back((seq, edit, Arc::from(inserted)));
         if log.edits.len() > EDIT_LOG_CAP
-            && let Some((dropped, _)) = log.edits.pop_front()
+            && let Some((dropped, ..)) = log.edits.pop_front()
         {
             log.dropped_below = dropped + 1;
         }
@@ -717,8 +727,30 @@ impl SemanticTokenStore {
     pub fn pending_edits(&self, uri: &str) -> Vec<DocumentEdit> {
         self.logs
             .get(uri)
-            .map(|l| l.edits.iter().map(|(_, e)| *e).collect())
+            .map(|l| l.edits.iter().map(|(_, e, _)| *e).collect())
             .unwrap_or_default()
+    }
+
+    /// The edits `uri` has taken since its text was last sent to the
+    /// server, oldest first, each with the text it inserted: what an
+    /// incremental `didChange` ships (E6d.1). `None` when the URI has
+    /// no log, or when an edit since the last sync has been forgotten
+    /// (the cap, or a clear), in which case only the whole document
+    /// can bring the server up to date. An empty vector means the
+    /// server already holds the current text.
+    #[must_use]
+    pub fn unsynced_edits(&self, uri: &str) -> Option<Vec<(DocumentEdit, Arc<str>)>> {
+        let log = self.logs.get(uri)?;
+        if log.dropped_below > log.synced_seq {
+            return None;
+        }
+        Some(
+            log.edits
+                .iter()
+                .filter(|(seq, ..)| *seq >= log.synced_seq)
+                .map(|(_, edit, inserted)| (*edit, Arc::clone(inserted)))
+                .collect(),
+        )
     }
 
     /// Declare `uri`'s tokens stale without saying where the edit was.
@@ -878,6 +910,20 @@ impl crate::view::View for SemanticEditRecorder {
             return Ok(());
         };
         let uri = crate::lsp::path_to_file_uri(path);
+        // The inserted bytes sit at `range.start` of the post-edit
+        // rope; an incremental `didChange` ships them (E6d.1). A
+        // buffer holds UTF-8 and an insert is a whole string, so the
+        // lossy conversion is a formality.
+        let inserted_len = usize::try_from(edit.inserted_len).unwrap_or(usize::MAX);
+        let mut inserted = vec![0u8; inserted_len];
+        if inserted_len > 0 {
+            edit.new_rope.slice(
+                edit.range.start,
+                edit.range.start + edit.inserted_len,
+                &mut inserted,
+            );
+        }
+        let inserted = String::from_utf8_lossy(&inserted);
         self.store
             .lock()
             .expect("semantic token store mutex poisoned")
@@ -888,6 +934,7 @@ impl crate::view::View for SemanticEditRecorder {
                     old_end: edit.range.end,
                     inserted_len: edit.inserted_len,
                 },
+                &inserted,
             );
         Ok(())
     }
@@ -950,9 +997,9 @@ mod tests {
         let uri = "file:///a.rs";
         s.open_log(uri);
         assert_eq!(s.next_seq(uri), 0);
-        s.record_edit(uri, edit(0, 0, 1));
-        s.record_edit(uri, edit(4, 6, 0));
-        s.record_edit(uri, edit(2, 2, 0)); // a no-op broadcast is not an edit
+        s.record_edit(uri, edit(0, 0, 1), "x");
+        s.record_edit(uri, edit(4, 6, 0), "");
+        s.record_edit(uri, edit(2, 2, 0), ""); // a no-op broadcast is not an edit
         assert_eq!(s.next_seq(uri), 2);
         assert_eq!(
             s.pending_edits(uri),
@@ -1001,36 +1048,36 @@ mod tests {
         assert_eq!(ranges(&s, uri), Some(vec![(3, 7), (12, 15), (16, 19)]));
 
         // Insert two bytes at 0: everything shifts.
-        s.record_edit(uri, edit(0, 0, 2));
+        s.record_edit(uri, edit(0, 0, 2), "xx");
         assert_eq!(ranges(&s, uri), Some(vec![(5, 9), (14, 17), (18, 21)]));
         assert!(s.is_stale(uri), "shifted is not fresh");
 
         // Type one byte at the end of `main` (now [5,9)): it extends;
         // the later tokens move.
-        s.record_edit(uri, edit(9, 9, 1));
+        s.record_edit(uri, edit(9, 9, 1), "x");
         assert_eq!(ranges(&s, uri), Some(vec![(5, 10), (15, 18), (19, 22)]));
 
         // Type inside `foo` (now [15,18)) at 16: the token extends over
         // the inserted byte.
-        s.record_edit(uri, edit(16, 16, 1));
+        s.record_edit(uri, edit(16, 16, 1), "x");
         assert_eq!(ranges(&s, uri), Some(vec![(5, 10), (15, 19), (20, 23)]));
 
         // Delete the last byte of `bar` (now [20,23)): it shrinks.
-        s.record_edit(uri, edit(22, 23, 0));
+        s.record_edit(uri, edit(22, 23, 0), "");
         assert_eq!(ranges(&s, uri), Some(vec![(5, 10), (15, 19), (20, 22)]));
 
         // Delete across the end of `foo` and the start of `bar`: each
         // keeps what stood outside the deletion, and they stay disjoint.
-        s.record_edit(uri, edit(17, 21, 0));
+        s.record_edit(uri, edit(17, 21, 0), "");
         assert_eq!(ranges(&s, uri), Some(vec![(5, 10), (15, 17), (17, 18)]));
 
         // Delete a whole token: it is dropped.
-        s.record_edit(uri, edit(5, 10, 0));
+        s.record_edit(uri, edit(5, 10, 0), "");
         assert_eq!(ranges(&s, uri), Some(vec![(10, 12), (12, 13)]));
 
         // A replace over the boundary claims none of the new text for
         // either neighbor.
-        s.record_edit(uri, edit(11, 13, 3));
+        s.record_edit(uri, edit(11, 13, 3), "xxx");
         assert_eq!(ranges(&s, uri), Some(vec![(10, 11)]));
     }
 
@@ -1048,8 +1095,8 @@ mod tests {
         s.note_synced(uri);
         let base = s.synced_seq(uri);
         // The user types "xy" at 0 while the server thinks.
-        s.record_edit(uri, edit(0, 0, 1));
-        s.record_edit(uri, edit(1, 1, 1));
+        s.record_edit(uri, edit(0, 0, 1), "x");
+        s.record_edit(uri, edit(1, 1, 1), "x");
         // The answer for "ab\n" lands: `ab` is [0,2) there, [2,4) now.
         assert!(s.set(key.clone(), resp(vec![tok(0, 0, 2)]), "ab\n", UTF16, base));
         assert_eq!(ranges(&s, uri), Some(vec![(2, 4)]));
@@ -1073,7 +1120,7 @@ mod tests {
 
         // Clearing forgets the log's edits; a response for text before
         // the clear cannot be aligned and paints nothing.
-        s.record_edit(uri, edit(0, 0, 1));
+        s.record_edit(uri, edit(0, 0, 1), "x");
         let stale_base = s.synced_seq(uri);
         s.clear(&key);
         assert!(s.set(key, resp(vec![tok(0, 0, 4)]), "xyab\n", UTF16, stale_base));
@@ -1105,8 +1152,8 @@ mod tests {
             ranges(&s, uri),
             s.pending_edits(uri),
         );
-        s.record_edit(uri, edit(5, 5, 0)); // strictly inside the token
-        s.record_edit(uri, edit(9, 9, 0)); // at the buffer end, where undo puts it
+        s.record_edit(uri, edit(5, 5, 0), ""); // strictly inside the token
+        s.record_edit(uri, edit(9, 9, 0), ""); // at the buffer end, where undo puts it
         let after = (
             s.version(),
             s.next_seq(uri),
@@ -1138,7 +1185,7 @@ mod tests {
         assert_eq!(ranges(&s, uri), Some(vec![(0, 2), (3, 5), (6, 8)]));
         // The middle line changes to `b` and the server answers the
         // range for line 1 alone: [3,4) now, the others untouched.
-        s.record_edit(uri, edit(4, 5, 0));
+        s.record_edit(uri, edit(4, 5, 0), "");
         s.note_synced(uri);
         let base = s.synced_seq(uri);
         assert!(s.set_range(
