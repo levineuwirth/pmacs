@@ -611,9 +611,12 @@ fn hello_on_the_gpu_then_c_x_shift_u_and_hello_goes() {
         "hello did not go: {}",
         fact("text_after_undo")
     );
-    assert!(
-        !fact("text_after_undo").contains("hello"),
-        "hello still in the mirror after C-x U: {}",
-        fact("text_after_undo")
+    // The report writes its texts in `{:?}` form, so an empty mirror
+    // reads as two quote characters; a partial undo (`hell`) would
+    // satisfy a `!contains("hello")` and does not satisfy this.
+    assert_eq!(
+        fact("text_after_undo"),
+        "\"\"",
+        "the mirror is not empty after C-x U: hello, or part of it, is still there"
     );
 }
