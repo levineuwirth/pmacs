@@ -2883,7 +2883,18 @@ local function handle_server_requests()
         elseif ev.kind == "request"
             and ev.method == "workspace/semanticTokens/refresh" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
-          repull_for_attachments(sid, pmacs.lsp.request_semantic_tokens)
+          -- E6d.5: through the quiet pull, which awaits its handle in
+          -- a coroutine, and not the bare request. The bare request
+          -- returned a handle nobody awaited, so every answer --- a
+          -- whole document's tokens, some 25 MB of JSON value on a
+          -- 14k-line file, and rust-analyzer asks for this refresh
+          -- after nearly every edit --- stayed in the async runtime's
+          -- job table forever: the daemon grew by about 3 MB per
+          -- keystroke, to gigabytes in a session. The quiet pull also
+          -- asks for the visible range first and a delta where it can.
+          repull_for_attachments(sid, function(_, _, rec)
+            pull_semantic_tokens_quiet(rec)
+          end)
         elseif ev.kind == "request"
             and ev.method == "client/registerCapability" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)

@@ -682,6 +682,20 @@ fn main() {
             ("textDocument/didOpen" | "textDocument/didChange", _) => {
                 if method == "textDocument/didChange" {
                     didchange_count += 1;
+                    // `semantictokensrefresh` (E6d.5): a refresh after
+                    // every didChange as well, which is rust-analyzer's
+                    // cadence --- it asks after nearly every edit --- so
+                    // a client that answers each with a request it
+                    // never awaits is caught by the job it leaves.
+                    if mode == "semantictokensrefresh" {
+                        let req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 9300 + u64::from(didchange_count),
+                            "method": "workspace/semanticTokens/refresh",
+                            "params": serde_json::Value::Null
+                        });
+                        write_frame(&mut stdout, &req);
+                    }
                     let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
                     // `filewatchjoin` / `filewatchretire`: a didChange
                     // is the test's mid-session trigger; see the
