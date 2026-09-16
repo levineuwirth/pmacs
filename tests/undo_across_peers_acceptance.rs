@@ -388,6 +388,138 @@ fn undo_type_undo_again_on_the_gpu_route() {
     both_see(&mut gpu, &mut tui, "", "empty after the second undo");
 }
 
+/// A `frontend.detached` hook that logs the departed id into the
+/// daemon's isolated home, so a test can wait for a detach to have
+/// been handled --- the hook runs last in the daemon's detach arm ---
+/// without editing any buffer.
+const DETACH_LOG_CONFIG: &str = "\
+pmacs.hook.add('frontend.detached', function(fid)
+  local f = assert(io.open(os.getenv('HOME') .. '/detached.log', 'a'))
+  f:write(tostring(fid), '\\n')
+  f:close()
+end)
+";
+
+/// The same, also inserting `X` at the start of `*scratch*`: a daemon
+/// edit, nobody's, landing after the detach arm's own work.
+const DETACH_LOG_AND_INSERT_CONFIG: &str = "\
+pmacs.hook.add('frontend.detached', function(fid)
+  local f = assert(io.open(os.getenv('HOME') .. '/detached.log', 'a'))
+  f:write(tostring(fid), '\\n')
+  f:close()
+  for _, id in ipairs(pmacs.buffer.list()) do
+    local ok, described = pcall(pmacs.describe.buffer, id)
+    if ok and described and described.name == '*scratch*' then
+      id:insert(0, 'X')
+    end
+  end
+end)
+";
+
+/// Drop `replica` and wait until the daemon has run the detach hook
+/// for it, which is after the detach arm handed its undo history on.
+fn detach_and_wait(daemon: &TestDaemon, replica: Replica) {
+    let fid = replica.fid;
+    drop(replica);
+    let log = daemon
+        .socket_path()
+        .parent()
+        .expect("socket parent")
+        .join("detached.log");
+    let seen = || std::fs::read_to_string(&log).unwrap_or_default();
+    common::ready::expect_true(
+        &format!("the daemon's detach hook for frontend {}", fid.0),
+        Duration::from_secs(5),
+        || seen().lines().any(|line| line == fid.0.to_string()),
+        || format!("detached.log: {:?}", seen()),
+    );
+}
+
+/// A departed user's word goes to whoever undoes next, when it is the
+/// newest thing and not before: the GPU types `hello`, the TUI types
+/// ` world` after it, the GPU detaches. The TUI's first undo takes
+/// its own ` world`, the newer group; its second takes `hello`, now
+/// the newest unowned group, as it would take a script's insert; a
+/// third finds nothing. Before the fix round the detach arm left the
+/// GPU's stack under its id, reachable by nobody, and `hello` stayed.
+#[test]
+fn a_departed_users_word_goes_to_whoever_undoes_next_when_newest() {
+    let daemon = TestDaemon::spawn_with_config(DETACH_LOG_CONFIG);
+    let mut gpu = attach_replica(&daemon);
+    let mut tui = attach_replica(&daemon);
+
+    type_optimistic(&mut gpu, 0, "hello");
+    both_see(&mut gpu, &mut tui, "hello", "hello");
+    send_key(&mut tui, Key::End, Modifiers::NONE);
+    type_keys(&mut tui, " world");
+    both_see(&mut gpu, &mut tui, "hello world", "hello world");
+    detach_and_wait(&daemon, gpu);
+
+    send_undo(&mut tui);
+    pump_until_text(&mut tui, "hello", "the tui's own world, the newest");
+    send_undo(&mut tui);
+    pump_until_text(&mut tui, "", "the departed gpu's hello, next newest");
+    send_undo(&mut tui);
+    assert_text_stays(&mut tui, "", Duration::from_millis(500));
+}
+
+/// A departed user's word is taken at once when it is the newest: the
+/// GPU types `hello` and detaches; the TUI, which typed nothing,
+/// undoes and `hello` goes.
+#[test]
+fn a_departed_users_word_is_taken_at_once_when_it_is_the_newest() {
+    let daemon = TestDaemon::spawn_with_config(DETACH_LOG_CONFIG);
+    let mut gpu = attach_replica(&daemon);
+    let mut tui = attach_replica(&daemon);
+
+    type_optimistic(&mut gpu, 0, "hello");
+    both_see(&mut gpu, &mut tui, "hello", "hello");
+    detach_and_wait(&daemon, gpu);
+
+    send_undo(&mut tui);
+    pump_until_text(&mut tui, "", "the departed gpu's hello");
+    send_undo(&mut tui);
+    assert_text_stays(&mut tui, "", Duration::from_millis(500));
+}
+
+/// A departed user's groups keep their bases: the GPU types `ab`; a
+/// script inserts `X` in front of it (a passerby's detach hook does),
+/// so the GPU's group now carries that foreign insert in its base;
+/// the GPU detaches and the same hook inserts a second `X`. The TUI
+/// undoes three times: the newer `X`, the older `X`, then `ab` ---
+/// whole, at its own position. Handing the groups to the daemon's
+/// stack instead would leave the older `X` in `ab`'s base after that
+/// `X` had been undone from the same stack, and the third undo would
+/// miss.
+#[test]
+fn a_departed_users_groups_keep_their_bases_beside_script_edits() {
+    let daemon = TestDaemon::spawn_with_config(DETACH_LOG_AND_INSERT_CONFIG);
+    let mut gpu = attach_replica(&daemon);
+    let mut tui = attach_replica(&daemon);
+
+    type_optimistic(&mut gpu, 0, "ab");
+    both_see(&mut gpu, &mut tui, "ab", "ab");
+    let passerby = attach_replica(&daemon);
+    detach_and_wait(&daemon, passerby);
+    both_see(
+        &mut gpu,
+        &mut tui,
+        "Xab",
+        "the passerby's detach inserted X",
+    );
+    detach_and_wait(&daemon, gpu);
+    pump_until_text(&mut tui, "XXab", "the gpu's detach inserted a second X");
+
+    send_undo(&mut tui);
+    pump_until_text(&mut tui, "Xab", "the newer X");
+    send_undo(&mut tui);
+    pump_until_text(&mut tui, "ab", "the older X");
+    send_undo(&mut tui);
+    pump_until_text(&mut tui, "", "the departed gpu's ab, whole");
+    send_undo(&mut tui);
+    assert_text_stays(&mut tui, "", Duration::from_millis(500));
+}
+
 /// The phase's acceptance through the production GPU dispatch: a real
 /// `pmacs-gpu --headless-probe` types `hello` as optimistic ops
 /// through `App::apply_keyboard`, presses `C-x` and, once the daemon

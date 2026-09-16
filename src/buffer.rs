@@ -234,6 +234,10 @@ struct SourceUndoStacks {
     redo: VecDeque<SourceGroup>,
     /// The amalgamation run currently open, if any.
     open: Option<SourceGroup>,
+    /// The source has departed (a frontend detached) and its groups
+    /// are nobody's: the recency pick offers them to whoever undoes
+    /// next, as it offers the daemon's. See [`Buffer::arbiter_detach`].
+    detached: bool,
 }
 
 #[cfg(feature = "crdt")]
@@ -1755,6 +1759,40 @@ impl Buffer {
         stacks.groups.push_back(group);
     }
 
+    /// Hand a departing source's history to whoever undoes next
+    /// (E6c; the kill ring's Q#KR11 rule, per-frontend state must not
+    /// outlive the session, met here by transfer rather than by
+    /// dropping). Its open run closes, its redo stack is dropped ---
+    /// redo is the undoer's, and the undoer is gone --- and its undo
+    /// stack is marked unowned, which the recency pick reads exactly
+    /// as it reads the daemon's: the departed source's groups go to
+    /// whoever undoes next when they are the newest thing, and not
+    /// before. A source with nothing left to undo leaves no entry.
+    ///
+    /// The groups keep their own stack rather than joining the
+    /// daemon's, because a base is relative to its source: it holds
+    /// what was foreign to *that* source since the span, and the
+    /// daemon's own groups, interleaved in time with the departed
+    /// source's, are among what it holds. Merging the two stacks
+    /// would need every base re-cut against the other stack's
+    /// groups, which the record does not carry. Kept apart, foreign
+    /// composition maintains the unowned stack from here as it
+    /// maintains the daemon's, and [`Self::undo_for`] drops it once
+    /// its last group is popped.
+    #[cfg(feature = "crdt")]
+    pub fn arbiter_detach(&mut self, source: UndoSource) {
+        self.arbiter_close(source);
+        let Some(stacks) = self.arbiter.get_mut(&source) else {
+            return;
+        };
+        stacks.redo.clear();
+        if stacks.groups.is_empty() {
+            self.arbiter.remove(&source);
+        } else {
+            stacks.detached = true;
+        }
+    }
+
     /// Whether any source holds an undoable group (E6c).
     #[cfg(feature = "crdt")]
     fn arbiter_has_history(&self) -> bool {
@@ -1976,7 +2014,9 @@ impl Buffer {
     /// and a lone user with script inserts interleaved walks back
     /// chronologically, exactly the old global behavior. Between two
     /// frontends there is no sharing: each undoes only its own groups
-    /// and leaves the other's. A group whose text is already gone
+    /// and leaves the other's --- until one detaches, when its groups
+    /// become nobody's like the daemon's ([`Self::arbiter_detach`]).
+    /// A group whose text is already gone
     /// (deleted by another peer since) undoes to nothing and the next
     /// group is popped, as loro's own manager does.
     ///
@@ -1994,7 +2034,12 @@ impl Buffer {
                 self.arbiter_close(source);
             }
             let from = self.undo_pick(source);
-            return self.compensate(source, from, HistoryStep::Undo);
+            let result = self.compensate(source, from, HistoryStep::Undo);
+            // A departed source's stack ends with its last group,
+            // whether that group compensated or had nothing left.
+            self.arbiter
+                .retain(|_, stacks| !(stacks.detached && stacks.groups.is_empty()));
+            return result;
         }
         #[cfg(not(feature = "crdt"))]
         let _ = source;
@@ -2022,22 +2067,25 @@ impl Buffer {
         self.redo_v01()
     }
 
-    /// Which stack `source`'s undo draws from (E6c): its own, or the
-    /// daemon's unowned one when that holds the newer group. The
-    /// daemon source draws from its own stack only.
+    /// Which stack `source`'s undo draws from (E6c): its own, or an
+    /// unowned one --- the daemon's, or a departed frontend's (see
+    /// [`Self::arbiter_detach`]) --- when that holds the newest group.
+    /// The daemon source draws from its own stack only.
     #[cfg(feature = "crdt")]
     fn undo_pick(&self, source: UndoSource) -> UndoSource {
         let UndoSource::Frontend(_) = source else {
             return source;
         };
-        let newest = |s: &UndoSource| {
-            self.arbiter
-                .get(s)
-                .and_then(|stacks| stacks.groups.back())
-                .map(|group| group.seqno)
-        };
-        match (newest(&source), newest(&UndoSource::Daemon)) {
-            (own, Some(daemon)) if own.is_none_or(|own| daemon > own) => UndoSource::Daemon,
+        let newest = |stacks: &SourceUndoStacks| stacks.groups.back().map(|group| group.seqno);
+        let own = self.arbiter.get(&source).and_then(newest);
+        let unowned = self
+            .arbiter
+            .iter()
+            .filter(|(s, stacks)| **s == UndoSource::Daemon || stacks.detached)
+            .filter_map(|(s, stacks)| newest(stacks).map(|seqno| (seqno, *s)))
+            .max_by_key(|(seqno, _)| *seqno);
+        match (own, unowned) {
+            (own, Some((seqno, from))) if own.is_none_or(|own| seqno > own) => from,
             _ => source,
         }
     }

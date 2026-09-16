@@ -5069,6 +5069,26 @@ impl EditorCore {
         }
     }
 
+    /// A frontend has detached (E6c; the kill ring's Q#KR11 rule,
+    /// per-frontend state must not outlive the session): forget the
+    /// run it had open, and on every buffer hand its undo history to
+    /// whoever undoes next ([`Buffer::arbiter_detach`]). Called from
+    /// the daemon's `SessionDetached` arm before the
+    /// `frontend.detached` hook runs, so a hook's own edit lands after
+    /// the transfer, as the newest thing.
+    pub fn detach_undo_source(&mut self, fid: FrontendId) {
+        self.undo_group.remove(&fid);
+        #[cfg(feature = "crdt")]
+        {
+            let mut reg = self.registry.borrow_mut();
+            for buffer_id in reg.ids().to_vec() {
+                if let Ok(buffer) = reg.get_mut(buffer_id) {
+                    buffer.arbiter_detach(UndoSource::Frontend(fid));
+                }
+            }
+        }
+    }
+
     /// E6c: settle a remote import's stashed span (see
     /// [`Buffer::arbiter_settle_remote`]). The daemon calls this
     /// synchronously after a successful import with the source's

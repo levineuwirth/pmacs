@@ -3051,6 +3051,10 @@ fn handle_dispatcher_event(
                 // Kill ring Q#KR11: frontend ids are monotonic, so
                 // per-frontend state must not outlive the session.
                 core.command_history.remove(&frontend_id);
+                // E6c: its open undo run and, on every buffer, its
+                // undo groups --- handed to whoever undoes next, not
+                // dropped, and before the hook below can edit.
+                core.detach_undo_source(frontend_id);
             }
             // Q#KR11: let Lua modules holding per-frontend tables
             // (killring sessions / kill flags) drop this id's entries.
