@@ -11193,10 +11193,11 @@ pub fn install_lsp(
                 let Some(st) = mgr_ref.status_for(id.0) else {
                     return Ok(Value::Nil);
                 };
-                let t = lua.create_table_with_capacity(0, 6)?;
+                let t = lua.create_table_with_capacity(0, 7)?;
                 t.set("kind", st.kind.tag())?;
                 t.set("label", st.kind.label())?;
                 t.set("restarts", st.restarts)?;
+                t.set("retry_responses", st.retry_responses)?;
                 if let crate::lsp_status::LspStatusKind::Indexing { title, percentage } = &st.kind {
                     t.set("indexing_title", title.as_str())?;
                     if let Some(p) = percentage {

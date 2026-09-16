@@ -77,6 +77,12 @@
 //!   frames inside it; the document-derived tokens make the answer
 //!   align with the text as a real server's would, so a token typed
 //!   into existence appears only when the answer lands.
+//! * If launched with `PMACS_FAKE_LSP_MODE=contentmodified` (E6d.2):
+//!   every `textDocument/*` request is answered with the
+//!   `ContentModified` error (-32801), the spec's "the document moved,
+//!   ask again" code, which is what rust-analyzer answers a request
+//!   overtaken by the next `didChange`; notifications still update
+//!   the held document.
 //! * If launched with `PMACS_FAKE_LSP_MODE=incremental` (E6d.1): a
 //!   server that negotiates `TextDocumentSyncKind.Incremental`
 //!   (`textDocumentSync: { openClose, change: 2 }`, the object form
@@ -186,6 +192,19 @@ fn main() {
                     "jsonrpc": "2.0",
                     "id": id.clone(),
                     "error": { "code": -32603, "message": "synthetic error" }
+                });
+                write_frame(&mut stdout, &resp);
+                continue;
+            }
+            // `contentmodified` (E6d.2): every request is answered with
+            // the spec's retry code, as rust-analyzer answers a request
+            // the next `didChange` overtook. Notifications (`didOpen`,
+            // `didChange`) still update the held document below.
+            if mode == "contentmodified" && id.is_some() {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "error": { "code": -32801, "message": "content modified" }
                 });
                 write_frame(&mut stdout, &resp);
                 continue;
