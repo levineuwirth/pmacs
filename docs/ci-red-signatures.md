@@ -2583,3 +2583,53 @@ spread does not:
 
 Both are a comment on #258 with the matching-rule difference stated:
 target 1 **is** #258, target 2 is the family and not #258.
+
+### PR #273's fix-round-2 head run 35111050634 at `523ce99`, and it is GREEN
+
+E6c's post-owner-pass fix round: `a6687b1` plus one witness commit that
+pins `foo(` undoing as one step through the production GPU dispatch (the
+owner's window run read it as sometimes leaving `foo`; 800 samples
+through the production dispatch removed `foo()` in one undo at every
+inter-key cadence). Read on 2026-09-16 from the jobs endpoint and the
+two macOS job logs after the run completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35111050634, `pull_request`, one attempt |
+| head | `523ce99`, `e6c/undo-across-peers` (base `7880c4b`) |
+| window | created 2026-09-16T14:48:26Z, updated 2026-09-16T15:09:22Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35111050634-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 104844546313 | success |
+| Format | 104844546082 | success |
+| Changed paths | 104844546483 | success |
+| Lint (luajit) | 104844546345 | success |
+| Lint (lua54) | 104844547036 | success |
+| M1 Acceptance Gates | 104844623732 | success |
+| Test (crdt) | 104844623718 | success |
+| M4 Perf Gates | 104844623774 | success |
+| GPU Render (headless) | 104844623716 | success |
+| M5 Perf Gates | 104844623665 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 104844623865 | success |
+| Test (macos-latest / lua54) | 104844623770 | success |
+| Test (ubuntu-latest / luajit) | 104844623918 | success |
+| M6 Perf Gates | 104844623595 | success |
+| Test (macos-latest / luajit) | 104844623755 | success |
+| Test (ubuntu-latest / lua54) | 104844623736 | success |
+| M10 Perf Gates (crdt) | 104844623646 | success |
+| Perf budgets (debug) | 104844623565 | success |
+| Docs consistency | 104844625249 | skipped |
+
+Both macOS job logs (luajit 104844623755, lua54 104844623770) carry 145
+`test result: ok` and zero `FAILED`, `WouldBlock` zero times and `did
+not become ready` zero times; `undo_across_peers_acceptance` ran `19
+passed` on both (the new `foo(` GPU-dispatch witness among them), and
+U17's selector `read_dir_supersede_cancels_in_flight_predecessor` ran
+`ok` on both --- a green sample after its eighth, the count staying at
+eight. The base control is `7880c4b`, the last code-bearing commit on
+`main`, run 35013609842, 18/1/0.
