@@ -1103,6 +1103,60 @@ green, on U17 alone**, stated at the moment of writing; no rerun taken,
 and a merge decision inherits U17's eighth the way PR #270's head
 inherited its seventh.
 
+### PR #273's review-round-1 head run 35037221750 at `2cd174c`, and it is GREEN
+
+E6c review 1's head --- `c4be8aa` plus one witness commit, two test
+files and nothing else --- read on 2026-09-16 from the jobs endpoint
+and the two macOS job logs after the run completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35037221750, `pull_request`, one attempt |
+| head | `2cd174c`, `e6c/undo-across-peers` (base `7880c4b`) |
+| window | created 2026-09-15T23:47:28Z, updated 2026-09-16T00:04:24Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35037221750-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Format | 104608922757 | success |
+| Changed paths | 104608923020 | success |
+| Lint (luajit) | 104608923057 | success |
+| Lint (lua54) | 104608923068 | success |
+| Commit attribution (D9) | 104608923110 | success |
+| GPU Render (headless) | 104608957091 | success |
+| M4 Perf Gates | 104608957112 | success |
+| M5 Perf Gates | 104608957160 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 104608957171 | success |
+| Test (macos-latest / luajit) | 104608957180 | success |
+| Test (crdt) | 104608957196 | success |
+| M1 Acceptance Gates | 104608957202 | success |
+| M10 Perf Gates (crdt) | 104608957211 | success |
+| Test (ubuntu-latest / luajit) | 104608957263 | success |
+| M6 Perf Gates | 104608957283 | success |
+| Perf budgets (debug) | 104608957303 | success |
+| Test (macos-latest / lua54) | 104608957311 | success |
+| Test (ubuntu-latest / lua54) | 104608957359 | success |
+| Docs consistency | 104608958630 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 104608957180,
+`Test (macos-latest / lua54)` 104608957311) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 145 `test result:
+ok` and zero `FAILED` in each. U17's selector
+`read_dir_supersede_cancels_in_flight_predecessor` ran `ok` on both,
+inside `m8_1_acceptance` `19 passed`: a green sample after the eighth
+at `c4be8aa`, non-reproduction and nothing more, and the count stays at
+eight. Neither the `read Hello` family, nor #259, nor U4, nor #271
+sampled. The review's two new suites ran on both legs by elapsed time,
+not as skips: `e6c_review1_undo_across_peers_probes` `11 passed`
+(2.95 s luajit, 2.72 s lua54) and `e6c_review1_undo_probes` `8 passed;
+1 ignored` (3.32 s, 1.77 s), the ignored row being the review's Medium
+1 witness, named in its ignore reason. **So the head is green**, stated
+at the moment of writing, one attempt, nothing rerun; it does not make
+`c4be8aa`'s red innocent, and U17's eighth stands.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
