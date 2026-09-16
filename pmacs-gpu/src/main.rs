@@ -1869,8 +1869,12 @@ fn typing_probe_observe(
 /// still applied, before the (n+1)-th character goes, so a run can
 /// pause long enough for an unconfirmed floor to release and then keep
 /// typing through the fallback (E6d.3's probe of the transition); a
-/// missing gap is zero. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole
-/// run.
+/// missing gap is zero. `PMACS_GPU_PROBE_OPEN=<path>` attaches with
+/// that file as the initial target, so the daemon opens it at attach
+/// as it does for `pmacs --gpu <file>` and the first keystroke lands on
+/// a daemon that has just opened the file (E6d.3's cold case); without
+/// it the probe types into whatever the daemon already shows.
+/// `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole run.
 ///
 /// Per sample the report carries, in milliseconds after the
 /// keystroke: `cursor` (the confirming `CursorByte`: the predicted byte
@@ -1933,13 +1937,31 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         return 3;
     };
     let (tx, rx) = mpsc::channel::<AttachEvent>();
-    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+    let open = std::env::var_os("PMACS_GPU_PROBE_OPEN").map(std::path::PathBuf::from);
+    let connected = match open {
+        Some(path) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+            attach::connect_with_target_and_sink(
+                socket,
+                attach::InitialTargetPaths { cwd, path },
+                move |event| tx.send(event).is_ok(),
+            )
+        }
+        None => attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()),
+    };
+    let mut client = match connected {
         Ok(client) => client,
         Err(error) => {
             eprintln!("pmacs-gpu probe: attach failed: {error}");
             return 4;
         }
     };
+    // The opened target's snapshot arrives as the initial message; it
+    // goes through the same dispatch as everything after it.
+    let initial: Vec<AttachEvent> = client
+        .take_initial_message()
+        .map(|message| vec![AttachEvent::Message(Box::new(message))])
+        .unwrap_or_default();
     state.set_frontend_id(client.frontend_id());
     state.set_panel_wire(client.session_protocol_version());
     let mut app = App {
@@ -2030,6 +2052,13 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let mut degraded_first_at: Option<std::time::Instant> = None;
     let mut disconnect: Option<String> = None;
     let mut failure: Option<String> = None;
+    for event in initial {
+        snapshot_seen |= matches!(
+            &event,
+            AttachEvent::Message(msg) if matches!(msg.as_ref(), InstanceMessage::BufferSnapshot { .. })
+        );
+        app.dispatch_app_event(AppEvent::Attach(event));
+    }
 
     while std::time::Instant::now() < deadline {
         let now = std::time::Instant::now();
