@@ -1863,8 +1863,14 @@ fn typing_probe_observe(
 /// for the modeline to read `LSP:ready` before the first sample, so a
 /// warm server is measured when a warm server is what was asked for;
 /// unset, the first keystroke goes as soon as the caret is placed,
-/// which is E6d.3's cold case. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the
-/// whole run.
+/// which is E6d.3's cold case. `PMACS_GPU_PROBE_KEY_GAPS_MS`, a
+/// comma-separated list, spaces the characters of a multi-character
+/// keystroke: the n-th gap is waited out, with the daemon's messages
+/// still applied, before the (n+1)-th character goes, so a run can
+/// pause long enough for an unconfirmed floor to release and then keep
+/// typing through the fallback (E6d.3's probe of the transition); a
+/// missing gap is zero. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole
+/// run.
 ///
 /// Per sample the report carries, in milliseconds after the
 /// keystroke: `cursor` (the confirming `CursorByte`: the predicted byte
@@ -1968,6 +1974,15 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         .and_then(|value| value.parse::<u64>().ok())
         .map(std::time::Duration::from_millis);
     let per_sample = std::time::Duration::from_millis(env_u64("PMACS_GPU_PROBE_SAMPLE_MS", 5_000));
+    let key_gaps: Vec<std::time::Duration> = std::env::var("PMACS_GPU_PROBE_KEY_GAPS_MS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|g| g.trim().parse::<u64>().ok())
+                .map(std::time::Duration::from_millis)
+                .collect()
+        })
+        .unwrap_or_default();
     let started = std::time::Instant::now();
     let started_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2007,6 +2022,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let mut typed_at: Option<std::time::Instant> = None;
     let mut sample = Sample::default();
     let mut samples: Vec<Sample> = Vec::new();
+    // The characters of the keystroke still to type, and when the
+    // next one goes, when the keystroke is spaced by `key_gaps`.
+    let mut pending_chars: Vec<char> = Vec::new();
+    let mut next_char_at = started;
     let mut degraded_frames: u64 = 0;
     let mut degraded_first_at: Option<std::time::Instant> = None;
     let mut disconnect: Option<String> = None;
@@ -2075,12 +2094,22 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     sample = Sample::default();
                     if is_enter {
                         app.apply_keyboard(&Key::Named(NamedKey::Enter), None);
-                    } else {
+                    } else if key_gaps.is_empty() {
                         for ch in text.chars() {
                             let mut buf = [0u8; 4];
                             let s = ch.encode_utf8(&mut buf);
                             app.apply_keyboard(&Key::Character(s.into()), Some(s));
                         }
+                    } else {
+                        let mut chars = text.chars();
+                        if let Some(first) = chars.next() {
+                            let mut buf = [0u8; 4];
+                            let s = first.encode_utf8(&mut buf);
+                            app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                        }
+                        pending_chars = chars.rev().collect();
+                        next_char_at = std::time::Instant::now()
+                            + key_gaps.first().copied().unwrap_or_default();
                     }
                     typed_at = Some(std::time::Instant::now());
                     sample.floor_armed = app
@@ -2093,6 +2122,19 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             }
             Phase::Sampling => {
                 let since = since_typed.unwrap_or(0);
+                // The next spaced character, once its gap is out.
+                if let Some(&ch) = pending_chars.last()
+                    && now >= next_char_at
+                {
+                    pending_chars.pop();
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                    let typed_so_far = text.chars().count() - pending_chars.len();
+                    next_char_at =
+                        now + key_gaps.get(typed_so_far - 1).copied().unwrap_or_default();
+                    sample.trace.push(format!("key:{ch}@{since}"));
+                }
                 // The text: the typed bytes at `at` (Enter: a newline
                 // there), and beside an opener, its closer.
                 if sample.text_ms.is_none() {

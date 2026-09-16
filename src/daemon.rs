@@ -1455,54 +1455,20 @@ fn dispatcher_loop(
         // visually + the new cursor position) before the `CrdtOp`
         // that updates their `BufferMirror`'s rope state — a fast
         // next keystroke would run optimistic logic against stale
-        // mirror content with the new cursor position.
-        //
-        // F16 — `CrdtOpOrigin` controls sender exclusion:
-        // `OptimisticReplica(fid)` excludes `fid` (already
-        // locally-applied); `DaemonKey` excludes nobody (no
-        // frontend has applied locally; the active frontend's
-        // mirror must receive too).
-        #[cfg(feature = "crdt")]
-        {
-            let pending_ops = std::mem::take(&mut editor.core.borrow_mut().pending_crdt_ops);
-            for (origin, buffer_id, op) in pending_ops {
-                let exclude = match origin {
-                    crate::editor_core::CrdtOpOrigin::OptimisticReplica(fid) => Some(fid),
-                    crate::editor_core::CrdtOpOrigin::DaemonKey => None,
-                };
-                let entries = session_registry.broadcast_crdt_op(exclude, buffer_id, op);
-                for entry in entries {
-                    if let Some(stream) = streams.get_mut(&entry.recipient) {
-                        // T M10.11 F2 — THE criterion-3 jitter site.
-                        // CRDT convergence is driven by these
-                        // `broadcast_crdt_op` writes, NOT by render
-                        // CellDeltas. Finding 5's first fix jittered
-                        // the render loop (which never carries
-                        // broadcast CrdtOps) and falsely claimed
-                        // criterion 3 was exercised. This is the
-                        // write that actually delivers ops to
-                        // replicas; jittering here is what makes
-                        // `m10_11_q8_convergence_under_jitter`
-                        // genuinely test CRDT-under-jitter.
-                        maybe_jitter_sleep(
-                            injected_render_latency_jitter_ms,
-                            injected_render_latency_ms,
-                            &mut jitter_rng,
-                        );
-                        let _ = write_message(stream, &entry.message);
-                    }
-                }
-            }
-        }
-        // Non-CRDT build: `pending_crdt_ops` is empty (only the
-        // CRDT-feature code paths push to it). Drop the take/iter
-        // to keep the non-CRDT build free of unused imports.
-        #[cfg(not(feature = "crdt"))]
-        {
-            // Defensive: empty the queue in case shared state was
-            // populated through some path we haven't traced.
-            let _ = std::mem::take(&mut editor.core.borrow_mut().pending_crdt_ops);
-        }
+        // mirror content with the new cursor position. E6d.3 also
+        // drains right after each handled event, so the same rule
+        // holds for the early `CursorByte` and an edit's op does not
+        // wait for the ticks between the event and the next pass.
+        broadcast_pending_crdt_ops(
+            editor,
+            &mut session_registry,
+            &mut streams,
+            &mut CrdtBroadcastLatency {
+                jitter_ms: injected_render_latency_jitter_ms,
+                fixed_ms: injected_render_latency_ms,
+                rng: &mut jitter_rng,
+            },
+        );
 
         // Q#CM6 — outbound clipboard publish. A copy/cut queued the
         // region bytes for the originating frontend; deliver them as an
@@ -1978,6 +1944,11 @@ fn dispatcher_loop(
                     &mut last_active_buffer_sent,
                     &mut terminal_bell_baselines,
                     &mut session_registry,
+                    &mut CrdtBroadcastLatency {
+                        jitter_ms: injected_render_latency_jitter_ms,
+                        fixed_ms: injected_render_latency_ms,
+                        rng: &mut jitter_rng,
+                    },
                 );
                 // Drain a burst of immediately-available events to
                 // coalesce typing-flurries / multi-frontend traffic
@@ -1995,6 +1966,11 @@ fn dispatcher_loop(
                         &mut last_active_buffer_sent,
                         &mut terminal_bell_baselines,
                         &mut session_registry,
+                        &mut CrdtBroadcastLatency {
+                            jitter_ms: injected_render_latency_jitter_ms,
+                            fixed_ms: injected_render_latency_ms,
+                            rng: &mut jitter_rng,
+                        },
                     );
                 }
             }
@@ -2478,6 +2454,7 @@ fn handle_dispatcher_event(
     last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
     terminal_bell_baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
     session_registry: &mut SessionRegistry,
+    broadcast_latency: &mut CrdtBroadcastLatency<'_>,
 ) {
     match event {
         DispatcherEvent::SessionEstablished {
@@ -2572,7 +2549,24 @@ fn handle_dispatcher_event(
                             pid = op.peer_id
                         );
                     } else {
-                        handle_remote_crdt_op(editor, source, buffer_id, op);
+                        handle_remote_crdt_op(editor, source, buffer_id, op, |editor| {
+                            confirm_cursor_early(
+                                editor,
+                                source,
+                                session_registry,
+                                semantic_states,
+                                streams,
+                                last_dispatch_idle_sent,
+                            );
+                        });
+                        // The op itself reaches the other replicas
+                        // now rather than after the ticks (E6d.3).
+                        broadcast_pending_crdt_ops(
+                            editor,
+                            session_registry,
+                            streams,
+                            broadcast_latency,
+                        );
                     }
                 }
                 FrontendEvent::Viewport {
@@ -2988,6 +2982,20 @@ fn handle_dispatcher_event(
                         return;
                     }
                     editor.dispatch_text_input(source, &text);
+                    broadcast_pending_crdt_ops(
+                        editor,
+                        session_registry,
+                        streams,
+                        broadcast_latency,
+                    );
+                    confirm_cursor_early(
+                        editor,
+                        source,
+                        session_registry,
+                        semantic_states,
+                        streams,
+                        last_dispatch_idle_sent,
+                    );
                 }
                 _ => {
                     let Some(&term_size) = term_sizes.get(&source) else {
@@ -2997,6 +3005,11 @@ fn handle_dispatcher_event(
                         return;
                     };
                     let mut term_size = term_size;
+                    // E6d.3: a round-tripped key (a pair character,
+                    // Enter) moves the caret inside its command; the
+                    // GPU is in round-trip input until it hears where,
+                    // so it hears as soon as the command returns.
+                    let moves_caret = matches!(event, FrontendEvent::Key(_));
                     if let Some(render_state) = render_states.get_mut(&source) {
                         apply_event(editor, source, event, &mut term_size, render_state);
                         term_sizes.insert(source, term_size);
@@ -3016,6 +3029,25 @@ fn handle_dispatcher_event(
                     } else {
                         eprintln!(
                             "pmacs: dropping frontend event without render state for {source:?}"
+                        );
+                    }
+                    if moves_caret {
+                        // F18 for the early confirmation: the edit's
+                        // op (a newline, a pair's closer) reaches the
+                        // replica before it hears where its caret went.
+                        broadcast_pending_crdt_ops(
+                            editor,
+                            session_registry,
+                            streams,
+                            broadcast_latency,
+                        );
+                        confirm_cursor_early(
+                            editor,
+                            source,
+                            session_registry,
+                            semantic_states,
+                            streams,
+                            last_dispatch_idle_sent,
                         );
                     }
                 }
@@ -3535,6 +3567,7 @@ fn handle_remote_crdt_op(
     source: FrontendId,
     buffer_id: crate::buffer::BufferId,
     op: crate::rope::CrdtOp,
+    confirm_cursor: impl FnOnce(&EditorState),
 ) {
     // Kill ring Q#KR2: an optimistic edit arrives here without ever
     // touching dispatch_key, so the source's command boundary must be
@@ -3743,6 +3776,12 @@ fn handle_remote_crdt_op(
         core.active_frontend = source;
         drop(core);
 
+        // E6d.3: the caret is known now --- the window loop above set
+        // it to the optimistic post-edit position --- so confirm it
+        // before the hook runs the fan-out (the LSP glue, auto-pairing)
+        // and before the tick renders. This is what keeps a GPU
+        // keystroke inside its optimistic floor on a large file.
+        confirm_cursor(editor);
         // E6c: the hook runs as the source's own interactive scope, so
         // an edit it makes --- the auto-pair closer for an optimistic
         // opener --- is attributed to the source and joins the
@@ -3835,6 +3874,144 @@ fn document_buffer_to_follow(
 /// Q#BP14's vocabulary split: "active buffer" in the replica is a
 /// DOCUMENT-SURFACE term, not an input-focus term, so a focused panel
 /// must not retarget the document caret at the panel's buffer.
+/// The injected-latency knobs the CRDT broadcast site applies per
+/// write (T M10.11 F2), carried together so the drain can run from
+/// more than one point of the dispatcher loop.
+struct CrdtBroadcastLatency<'a> {
+    jitter_ms: u64,
+    fixed_ms: u64,
+    rng: &'a mut SplitMix64,
+}
+
+impl CrdtBroadcastLatency<'_> {
+    /// No injected latency: what a test drives the loop with.
+    #[cfg(test)]
+    fn none(rng: &mut SplitMix64) -> CrdtBroadcastLatency<'_> {
+        CrdtBroadcastLatency {
+            jitter_ms: 0,
+            fixed_ms: 0,
+            rng,
+        }
+    }
+}
+
+/// Drain the editor's pending CRDT ops and write each to every replica
+/// it is for. F16 — `CrdtOpOrigin` controls sender exclusion:
+/// `OptimisticReplica(fid)` excludes `fid` (already locally applied);
+/// `DaemonKey` excludes nobody (no frontend has applied locally; the
+/// active frontend's mirror must receive too). Called at the top of
+/// every dispatcher pass and, since E6d.3, right after each handled
+/// frontend event, ahead of that event's early `CursorByte`, so a
+/// replica never hears where its caret went before it has the edit
+/// that moved it.
+#[cfg_attr(not(feature = "crdt"), allow(clippy::needless_pass_by_ref_mut))]
+fn broadcast_pending_crdt_ops(
+    editor: &mut EditorState,
+    session_registry: &mut SessionRegistry,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+    latency: &mut CrdtBroadcastLatency<'_>,
+) {
+    #[cfg(feature = "crdt")]
+    {
+        let pending_ops = std::mem::take(&mut editor.core.borrow_mut().pending_crdt_ops);
+        for (origin, buffer_id, op) in pending_ops {
+            let exclude = match origin {
+                crate::editor_core::CrdtOpOrigin::OptimisticReplica(fid) => Some(fid),
+                crate::editor_core::CrdtOpOrigin::DaemonKey => None,
+            };
+            let entries = session_registry.broadcast_crdt_op(exclude, buffer_id, op);
+            for entry in entries {
+                if let Some(stream) = streams.get_mut(&entry.recipient) {
+                    // T M10.11 F2 — THE criterion-3 jitter site.
+                    // CRDT convergence is driven by these
+                    // `broadcast_crdt_op` writes, NOT by render
+                    // CellDeltas. Finding 5's first fix jittered
+                    // the render loop (which never carries
+                    // broadcast CrdtOps) and falsely claimed
+                    // criterion 3 was exercised. This is the
+                    // write that actually delivers ops to
+                    // replicas; jittering here is what makes
+                    // `m10_11_q8_convergence_under_jitter`
+                    // genuinely test CRDT-under-jitter.
+                    maybe_jitter_sleep(latency.jitter_ms, latency.fixed_ms, latency.rng);
+                    let _ = write_message(stream, &entry.message);
+                }
+            }
+        }
+    }
+    // Non-CRDT build: `pending_crdt_ops` is empty (only the
+    // CRDT-feature code paths push to it). Drop the take/iter
+    // to keep the non-CRDT build free of unused imports.
+    #[cfg(not(feature = "crdt"))]
+    {
+        let _ = (session_registry, streams, latency);
+        // Defensive: empty the queue in case shared state was
+        // populated through some path we haven't traced.
+        let _ = std::mem::take(&mut editor.core.borrow_mut().pending_crdt_ops);
+    }
+}
+
+/// E6d.3 --- confirm a replica frontend's caret the moment it is known,
+/// ahead of the tick that will render its frame.
+///
+/// The per-tick `CursorByte` trails the whole render pass: on a 14k-line
+/// file the semantic projection, the parse and the token pull stand
+/// between an edit and the confirmation, and the GPU's optimistic floor
+/// waits on that confirmation for up to `FLOOR_CONFIRM_TIMEOUT` before
+/// dropping to round-trip input and releasing the keys it held as a
+/// burst. The caret is known as soon as the edit applies, so the same
+/// message goes out then; the tick's copy still follows, and a peer
+/// that reads both sees the same value twice.
+///
+/// Gated exactly as the tick gates it (a `crdt_replica` session, not in
+/// terminal mode), and on one more thing: the dispatcher is idle for
+/// the frontend AND the frontend already knows it. A `CursorByte` restores
+/// the GPU's `cursor_fresh`, and the tick ships `DispatchIdle` before it
+/// so a prefix key's second stroke round-trips instead of being typed
+/// optimistically; an early confirmation after a key that opened a
+/// prefix (or closed one) would arrive before that flip, so those keys
+/// are left to the tick.
+fn confirm_cursor_early(
+    editor: &EditorState,
+    source: FrontendId,
+    session_registry: &SessionRegistry,
+    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+    last_dispatch_idle_sent: &HashMap<FrontendId, bool>,
+) {
+    if !session_registry
+        .session_state(source)
+        .is_some_and(|s| s.negotiated_capabilities.crdt_replica)
+    {
+        return;
+    }
+    if semantic_states
+        .get(&source)
+        .is_some_and(crate::semantic_render::SemanticRenderState::in_terminal_mode)
+    {
+        return;
+    }
+    if last_dispatch_idle_sent.get(&source) != Some(&true) || !editor.dispatch_idle_for(source) {
+        return;
+    }
+    let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, source) else {
+        return;
+    };
+    if let Some(stream) = streams.get_mut(&source)
+        && let Err(e) = write_message(
+            stream,
+            &InstanceMessage::CursorByte {
+                buffer_id,
+                byte_pos,
+            },
+        )
+    {
+        // The tick's own write will fail the same way and drop the
+        // connection there, where the cleanup lives.
+        eprintln!("pmacs: early CursorByte for {source:?} failed: {e}");
+    }
+}
+
 fn document_cursor_byte(
     editor: &EditorState,
     fid: FrontendId,
@@ -4750,6 +4927,7 @@ mod tests {
             &mut last_active_buffer_sent,
             &mut terminal_bell_baselines,
             &mut session_registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
 
         assert_eq!(editor.core.borrow().active_frontend, FrontendId::LOCAL);
@@ -4860,6 +5038,7 @@ mod tests {
                 peer_id: 99,
                 bytes: op_bytes,
             },
+            |_| {},
         );
 
         // The hook should have fired exactly once.
@@ -5000,6 +5179,7 @@ mod tests {
                     peer_id: 77,
                     bytes: op_bytes,
                 },
+                |_| {},
             );
         }
 
@@ -5066,6 +5246,7 @@ mod tests {
                     peer_id: FrontendId::LOCAL.0,
                     bytes: op_bytes,
                 },
+                |_| {},
             );
         }
 
@@ -5194,6 +5375,7 @@ mod tests {
                 peer_id: 7,
                 bytes: op_bytes,
             },
+            |_| {},
         );
 
         let core = editor.core.borrow();
@@ -5258,6 +5440,7 @@ mod tests {
                 peer_id: 7,
                 bytes: op_bytes,
             },
+            |_| {},
         );
         let core = editor.core.borrow();
         assert_eq!(
@@ -5325,6 +5508,7 @@ mod tests {
             &mut last_active_buffer_sent,
             &mut terminal_bell_baselines,
             &mut session_registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
 
         assert_eq!(render_states[&source].size(), new_size);
@@ -5561,6 +5745,7 @@ mod tests {
                 peer_id: 99,
                 bytes: op_bytes,
             },
+            |_| {},
         );
         assert!(
             editor.core.borrow().status.is_empty(),
@@ -6033,6 +6218,7 @@ mod tests {
             &mut last_active,
             &mut bells,
             &mut registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
 
         assert_eq!(
@@ -6425,6 +6611,7 @@ mod tests {
             &mut last_active,
             &mut bells,
             &mut registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
     }
 
@@ -6576,6 +6763,7 @@ mod tests {
             &mut last_active,
             &mut bells,
             &mut registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
     }
 
@@ -8715,6 +8903,7 @@ mod tests {
             &mut last_active,
             &mut bells,
             &mut registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
     }
 
