@@ -575,6 +575,19 @@ pub fn connect_with_sink(
     connect_stream_with_sink(stream, None, sink)
 }
 
+/// [`connect_with_sink`] carrying an initial target, so the daemon opens
+/// the file at attach as it does for `pmacs --gpu <file>`; the opened
+/// buffer's snapshot is the client's initial message. The latency
+/// probe's cold case (E6d.3) attaches this way.
+pub fn connect_with_target_and_sink(
+    socket_path: &Path,
+    initial_target: InitialTargetPaths,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
+    let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
+    connect_stream_with_sink(stream, Some(initial_target), sink)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the synchronous handshake and thread startup remain one ordered transport transaction"
