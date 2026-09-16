@@ -619,19 +619,25 @@ end
 
 -- didChange coalescing (typing perf) -----------------------------------------
 --
--- Document sync is full-text, so each `textDocument/didChange` ships
--- the entire buffer. Sending one per keystroke cost three O(file)
--- copies plus an O(file) JSON write to the server pipe *per typed
--- character* — the dominant daemon-side typing cost on large files.
--- The after-edit hook now only bumps the version, marks the cached
--- render families stale (cheap), and records the buffer as dirty;
--- the actual notification ships from the async tick once the buffer
--- has been quiet for DID_CHANGE_QUIET_MS, or unconditionally once
--- the oldest unsent edit is DID_CHANGE_MAX_LAG_MS old (so the server
--- keeps converging during continuous typing). Versions may skip
--- values across a coalesced burst; LSP only requires that they
--- increase. Anything that asks the server about a document flushes
--- it first so no request is answered against stale text.
+-- A `textDocument/didChange` carries the edits since the last one as
+-- ranges where the server negotiated incremental sync (E6d.1:
+-- rust-analyzer, clangd, gopls all do), and the whole document where
+-- it did not. The ranges come from the edit log the semantic-token
+-- store already keeps per document (E6b.1's recorder on the buffer's
+-- edit broadcast), so nothing O(file) crosses from Lua for them; the
+-- full-text form is the fallback, and it costs three O(file) copies
+-- plus an O(file) JSON write to the server pipe per send, which on a
+-- 14k-line file was the dominant daemon-side typing cost when every
+-- send was that form. Either way the sends are coalesced: the
+-- after-edit hook only bumps the version, marks the cached render
+-- families stale (cheap), and records the buffer as dirty; the
+-- notification ships from the async tick once the buffer has been
+-- quiet for DID_CHANGE_QUIET_MS, or unconditionally once the oldest
+-- unsent edit is DID_CHANGE_MAX_LAG_MS old (so the server keeps
+-- converging during continuous typing). Versions may skip values
+-- across a coalesced burst; LSP only requires that they increase.
+-- Anything that asks the server about a document flushes it first so
+-- no request is answered against stale text.
 local DID_CHANGE_QUIET_MS = 75
 local DID_CHANGE_MAX_LAG_MS = 400
 
@@ -658,9 +664,20 @@ local function flush_did_change(key)
   -- crash -> re-attach) since the edit was recorded; only the live
   -- record's server should hear about the buffer.
   if attachments[key] ~= rec then return end
-  local ok, text = pcall(buffer_text, rec.buffer)
-  if not ok then return end
-  pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, text)
+  -- Ranges first: the manager ships the log's edits since the last
+  -- sync and says whether the server now holds the current text. It
+  -- says no when the server wants whole documents, or when the log
+  -- cannot account for the buffer's length, and then the document
+  -- goes whole, which is always right.
+  local ok_len, len = pcall(function() return rec.buffer:len() end)
+  if not ok_len then return end
+  local ok_inc, sent = pcall(pmacs.lsp.did_change_incremental,
+    rec.server, rec.uri, rec.version, len)
+  if not (ok_inc and sent) then
+    local ok, text = pcall(buffer_text, rec.buffer)
+    if not ok then return end
+    pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, text)
+  end
   -- Inlay hints are pull-model: the store's stale flag (set per edit)
   -- only clears on a fresh `textDocument/inlayHint` response, and the
   -- server never volunteers one. Re-request at flush cadence so

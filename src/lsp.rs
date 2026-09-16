@@ -612,6 +612,28 @@ fn byte_to_char(line: &str, byte_col: usize, enc: PositionEncoding) -> u32 {
     }
 }
 
+/// Outbound: the LSP `Position` of absolute byte offset `byte` in
+/// `text`, `character` in `enc` units. Counts the newlines before
+/// `byte` for the line and converts the rest within it, so a caller
+/// converting several offsets of one document walks the text once
+/// per offset; an offset past the end is clamped to it. An
+/// incremental `didChange` range is built from two of these (E6d.1).
+fn byte_to_position(text: &str, byte: usize, enc: PositionEncoding) -> (u32, u32) {
+    let byte = byte.min(text.len());
+    let before = &text[..byte];
+    let line = before.split('\n').count() - 1;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text.as_bytes()[byte..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(text.len(), |i| byte + i);
+    let line_text = &text[line_start..line_end];
+    (
+        u32::try_from(line).unwrap_or(u32::MAX),
+        byte_to_char(line_text, byte - line_start, enc),
+    )
+}
+
 /// Recursively rewrite every LSP `Position` (`{ line, character }`)
 /// in `value` so `character` becomes a pmacs byte offset instead of
 /// a count in `enc` units. In LSP the `(line, character)` key pair
@@ -3470,9 +3492,10 @@ impl LspManager {
         self.send_notification(sid, "textDocument/didOpen", params)
     }
 
-    /// Convenience: send `textDocument/didChange` to `sid` with full
-    /// text replacement (the simplest sync mode; M5+ may add
-    /// incremental sync).
+    /// Send `textDocument/didChange` to `sid` with full text
+    /// replacement: the sync every server accepts, and the path an
+    /// incremental send falls back to when it cannot be built
+    /// ([`Self::did_change_incremental`]).
     pub fn did_change_full(
         &mut self,
         sid: LspServerId,
@@ -3496,6 +3519,112 @@ impl LspManager {
             }],
         });
         self.send_notification(sid, "textDocument/didChange", params)
+    }
+
+    /// Whether `sid` negotiated `TextDocumentSyncKind.Incremental`:
+    /// `textDocumentSync` is either the kind itself or an options
+    /// object carrying it as `change`; anything else (absent, `None`,
+    /// `Full`, a server not yet initialized) means the whole document
+    /// is what a `didChange` must carry.
+    #[must_use]
+    pub fn incremental_sync_supported(&self, sid: LspServerId) -> bool {
+        const INCREMENTAL: u64 = 2;
+        self.capabilities(sid)
+            .and_then(|caps| caps.get("textDocumentSync"))
+            .is_some_and(|sync| {
+                sync.as_u64() == Some(INCREMENTAL)
+                    || sync.get("change").and_then(Value::as_u64) == Some(INCREMENTAL)
+            })
+    }
+
+    /// E6d.1 --- send `textDocument/didChange` to `sid` carrying only
+    /// the edits `uri` has taken since its text was last sent, as
+    /// ranged `contentChanges` in the server's negotiated encoding,
+    /// each range in the document as the previous change left it,
+    /// which is how the spec has a server apply them. The edits are
+    /// the semantic-token store's log, the one record of the
+    /// document's edits (E6b.1); the mirror the position codec reads
+    /// is carried across the same edits, so it stays the text the
+    /// server holds without a copy of the buffer crossing from Lua.
+    ///
+    /// Returns `Ok(false)`, having sent nothing, when the whole
+    /// document must go instead: the server did not negotiate
+    /// incremental sync, no `didOpen` has been sent, an edit since the
+    /// last sync has been forgotten, or the mirror carried across the
+    /// edits does not end at `buffer_len` bytes --- the buffer's
+    /// current length, which the caller passes so a drift between the
+    /// log and the buffer resynchronizes through the full path rather
+    /// than shipping ranges the server would apply to the wrong text.
+    /// `Ok(true)` when the server holds the current text afterward,
+    /// including when there was nothing to send.
+    pub fn did_change_incremental(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        version: i64,
+        buffer_len: u64,
+    ) -> Result<bool, String> {
+        let uri = uri.into();
+        if !self.incremental_sync_supported(sid) {
+            return Ok(false);
+        }
+        let Some(held) = self.documents.get(&(sid, uri.clone())) else {
+            return Ok(false);
+        };
+        let edits = {
+            let store = self
+                .semantic_token_store
+                .lock()
+                .expect("semantic token store mutex poisoned");
+            store.unsynced_edits(&uri)
+        };
+        let Some(edits) = edits else {
+            return Ok(false);
+        };
+        if edits.is_empty() {
+            return Ok(held.len() as u64 == buffer_len);
+        }
+        let enc = self.position_encoding(sid);
+        let mut mirror = String::with_capacity(held.len() + 64);
+        mirror.push_str(held);
+        let mut changes = Vec::with_capacity(edits.len());
+        for (edit, inserted) in &edits {
+            let start = usize::try_from(edit.start).unwrap_or(usize::MAX);
+            let old_end = usize::try_from(edit.old_end).unwrap_or(usize::MAX);
+            if start > old_end
+                || old_end > mirror.len()
+                || !mirror.is_char_boundary(start)
+                || !mirror.is_char_boundary(old_end)
+            {
+                return Ok(false);
+            }
+            let (sl, sc) = byte_to_position(&mirror, start, enc);
+            let (el, ec) = byte_to_position(&mirror, old_end, enc);
+            changes.push(json!({
+                "range": {
+                    "start": { "line": sl, "character": sc },
+                    "end": { "line": el, "character": ec },
+                },
+                "text": inserted.as_ref(),
+            }));
+            mirror.replace_range(start..old_end, inserted);
+        }
+        if mirror.len() as u64 != buffer_len {
+            return Ok(false);
+        }
+        self.documents
+            .insert((sid, uri.clone()), std::sync::Arc::from(mirror.as_str()));
+        self.note_document_synced(&uri);
+        self.mark_document_stale(sid, &uri);
+        let params = json!({
+            "textDocument": {
+                "uri": uri,
+                "version": version,
+            },
+            "contentChanges": changes,
+        });
+        self.send_notification(sid, "textDocument/didChange", params)?;
+        Ok(true)
     }
 
     /// T M11.8 / Session 8 — mark cached LSP-derived render families

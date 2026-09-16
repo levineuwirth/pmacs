@@ -10519,6 +10519,26 @@ pub fn install_lsp(
     }
 
     {
+        // E6d.1: ship the edits since the last sync as ranged
+        // `contentChanges`, or report `false` so the caller sends the
+        // whole document instead (the server did not negotiate
+        // incremental sync, or the edit log cannot account for the
+        // buffer's current length). Takes the buffer's byte length
+        // rather than its text, which is the point.
+        let m = manager.clone();
+        lsp_mod.set(
+            "did_change_incremental",
+            lua.create_function(
+                move |_, (id, uri, version, buffer_len): (LspServerIdLua, String, i64, u64)| {
+                    m.borrow_mut()
+                        .did_change_incremental(id.0, uri, version, buffer_len)
+                        .map_err(mlua::Error::external)
+                },
+            )?,
+        )?;
+    }
+
+    {
         // Mark `uri`'s cached LSP render families (diagnostics,
         // semantic tokens, inlay hints) stale without sending
         // anything. The didChange-debounce glue in
