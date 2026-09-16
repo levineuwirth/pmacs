@@ -529,66 +529,9 @@ fn a_departed_users_groups_keep_their_bases_beside_script_edits() {
 /// the binary or an adapter unless `PMACS_REQUIRE_GPU` is set.
 #[test]
 fn hello_on_the_gpu_then_c_x_shift_u_and_hello_goes() {
-    use std::path::{Path, PathBuf};
-
-    fn gpu_binary() -> PathBuf {
-        Path::new(env!("CARGO_BIN_EXE_pmacs"))
-            .parent()
-            .expect("test binary directory")
-            .join("pmacs-gpu")
-    }
-
-    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
-    let binary = gpu_binary();
-    if !binary.exists() {
-        assert!(
-            !required,
-            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
-            binary.display()
-        );
-        eprintln!(
-            "skipping the GPU undo probe: {} is not built",
-            binary.display()
-        );
-        return;
-    }
-    let daemon = TestDaemon::spawn_with_env(&[
-        ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
-        ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
-    ]);
-    let report = daemon
-        .socket_path()
-        .parent()
-        .expect("socket parent")
-        .join("gpu-undo.txt");
-    let output = std::process::Command::new(&binary)
-        .arg("--headless-probe")
-        .arg(daemon.socket_path())
-        .arg(&report)
-        .env("PMACS_GPU_PROBE_TYPE_TEXT", "hello")
-        .env("PMACS_GPU_PROBE_ACTION", "undo")
-        .output()
-        .expect("run the headless GPU undo probe");
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let no_adapter = output.status.code() == Some(3);
-        assert!(
-            no_adapter && !required,
-            "headless GPU undo probe failed (status {:?}):\n{stderr}",
-            output.status.code()
-        );
-        eprintln!("skipping the GPU undo probe: no wgpu adapter available");
-        return;
-    }
-    let text = std::fs::read_to_string(&report).expect("probe report");
-    eprintln!("--- probe report ---\n{text}--- end ---");
-    let facts: std::collections::HashMap<String, String> = text
-        .lines()
-        .filter_map(|line| {
-            let (k, v) = line.split_once('=')?;
-            Some((k.to_owned(), v.to_owned()))
-        })
-        .collect();
+    let Some(facts) = run_gpu_undo_probe("hello", "gpu-undo-hello.txt") else {
+        return; // skipped: no binary or no adapter (asserted inside)
+    };
     let fact = |key: &str| -> &str {
         facts
             .get(key)
@@ -619,4 +562,116 @@ fn hello_on_the_gpu_then_c_x_shift_u_and_hello_goes() {
         "\"\"",
         "the mirror is not empty after C-x U: hello, or part of it, is still there"
     );
+}
+
+/// The designed grain through the production GPU dispatch, at the
+/// keystroke the owner's C6c walk-through questioned: `foo(` typed as
+/// four optimistic self-inserts, the auto-pair closer round-tripping
+/// and joining that keystroke's group, then one `C-x U`. The mirror
+/// settles to `foo()` before the chord (the closer is inside the
+/// group) and one undo empties it --- `foo(` amalgamates with its
+/// hook's closer into a single undo step, so undo does NOT leave `foo`.
+/// A run cut between the `o` and the `(` would leave `foo` (or `foo(`)
+/// after one undo; this pins that it does not, on the same
+/// `App::apply_keyboard` route a GPU user types through, and at every
+/// inter-key cadence the measurement in [[pmacs E6c fixes 2]] drove
+/// (0/20/100/300 ms, 400 samples, one undo each). Skips without the
+/// binary or an adapter unless `PMACS_REQUIRE_GPU` is set.
+#[test]
+fn foo_paren_on_the_gpu_undoes_as_one_step_with_its_auto_pair_closer() {
+    let Some(facts) = run_gpu_undo_probe("foo(", "gpu-undo-foo-paren.txt") else {
+        return; // skipped: no binary or no adapter (asserted inside)
+    };
+    let fact = |key: &str| -> &str {
+        facts
+            .get(key)
+            .map_or_else(|| panic!("report carries no {key}"), String::as_str)
+    };
+    assert_eq!(fact("disconnect"), "", "the probe stayed attached");
+    // The closer round-tripped and joined the keystroke's group before
+    // the chord: the settled mirror is `foo()`, not `foo(`.
+    assert_eq!(
+        fact("text_before_chord"),
+        "\"foo()\"",
+        "the auto-pair closer did not settle into the group before C-x U: {}",
+        fact("text_before_chord")
+    );
+    // One undo removes the whole group, closer included: the mirror is
+    // empty, not `foo` (a run cut between the o and the `(`) and not
+    // `foo(` (a closer left outside the group).
+    assert_eq!(
+        fact("text_after_undo"),
+        "\"\"",
+        "foo( did not undo as one step: the mirror is {} after C-x U (a cut leaves foo)",
+        fact("text_after_undo")
+    );
+}
+
+/// Run the headless GPU undo probe with `text` and parse its report,
+/// or `None` when the run is skipped (no `pmacs-gpu` binary, or no wgpu
+/// adapter). A skip panics instead when `PMACS_REQUIRE_GPU` is set, so
+/// the gate's GPU leg never passes vacuously. Shared by the GPU-route
+/// undo witnesses.
+fn run_gpu_undo_probe(
+    text: &str,
+    report_name: &str,
+) -> Option<std::collections::HashMap<String, String>> {
+    use std::path::Path;
+
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("test binary directory")
+        .join("pmacs-gpu");
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+            binary.display()
+        );
+        eprintln!(
+            "skipping the GPU undo probe: {} is not built",
+            binary.display()
+        );
+        return None;
+    }
+    let daemon = TestDaemon::spawn_with_env(&[
+        ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
+        ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
+    ]);
+    let report = daemon
+        .socket_path()
+        .parent()
+        .expect("socket parent")
+        .join(report_name);
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", text)
+        .env("PMACS_GPU_PROBE_ACTION", "undo")
+        .output()
+        .expect("run the headless GPU undo probe");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "headless GPU undo probe failed (status {:?}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping the GPU undo probe: no wgpu adapter available");
+        return None;
+    }
+    let report_text = std::fs::read_to_string(&report).expect("probe report");
+    eprintln!("--- probe report ({text}) ---\n{report_text}--- end ---");
+    Some(
+        report_text
+            .lines()
+            .filter_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                Some((k.to_owned(), v.to_owned()))
+            })
+            .collect(),
+    )
 }

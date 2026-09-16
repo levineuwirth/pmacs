@@ -1571,6 +1571,12 @@ fn run_probe(socket: &Path, report: &Path) -> i32 {
 /// edit, and the text goes. Nothing is asserted here; the acceptance
 /// reads the report. `PMACS_GPU_PROBE_DEADLINE_MS` bounds the run
 /// (30 s by default).
+///
+/// The report also carries `text_before_chord`, the mirror the daemon
+/// had settled just before `C-x` --- `foo()` once an auto-pair closer
+/// has round-tripped and joined the keystroke's group --- so a witness
+/// can assert the closer is inside the one group the undo removes, not
+/// only that the buffer ends empty (C6c fixes 2).
 #[allow(
     clippy::too_many_lines,
     reason = "one linear attach-type-chord-observe session, reported line by line"
@@ -1641,6 +1647,11 @@ fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let mut prefix_pending_at: Option<std::time::Instant> = None;
     let mut undo_sent_at: Option<std::time::Instant> = None;
     let mut undone_at: Option<std::time::Instant> = None;
+    // The mirror the daemon had settled just before the undo chord ---
+    // `foo()` once an auto-pair closer has round-tripped and joined the
+    // keystroke's group, so a witness can assert the closer is inside
+    // the group undo removes, not merely that the buffer ends empty.
+    let mut text_before_chord = String::new();
     let mut disconnect: Option<String> = None;
 
     while std::time::Instant::now() < deadline && phase != Phase::Done {
@@ -1678,6 +1689,7 @@ fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 // by silence: the daemon attaches a `CursorByte` and
                 // its status facts to every tick it produces.
                 if typed_at.is_some_and(|t| now.duration_since(t) >= quiet) {
+                    text_before_chord.clone_from(&current);
                     app.modifiers = winit::keyboard::ModifiersState::CONTROL;
                     app.apply_keyboard(&Key::Character("x".into()), None);
                     app.modifiers = winit::keyboard::ModifiersState::empty();
@@ -1740,6 +1752,7 @@ fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         typed_at.map_or(String::from("none"), |t| ms(t).to_string())
     );
     let _ = writeln!(out, "text_after_typing={text_after_typing:?}");
+    let _ = writeln!(out, "text_before_chord={text_before_chord:?}");
     let _ = writeln!(
         out,
         "prefix_pending_at_ms={}",
