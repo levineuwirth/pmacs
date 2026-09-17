@@ -1698,6 +1698,56 @@ not green, on U17 alone**, stated at the moment of writing; no rerun
 taken, and a merge decision inherits U17's tenth as #270's and #273's
 heads inherited its seventh and eighth.
 
+### `main` after E6d: run 35265450358 at `25d2ce5`, and it is GREEN
+
+Read at E7's opening on 2026-09-17, from the jobs endpoint and the
+two macOS job logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 35265450358, `push`, one attempt |
+| head | `25d2ce5`, E6d's squash merge (PR #275 at `97b0d0f`, `--match-head-commit`) |
+| window | created 2026-09-17T19:32:06Z, updated 19:56:08Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+Tally (run-35265450358-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105351364176 | success |
+| Format | 105351364413 | success |
+| Lint (luajit) | 105351364530 | success |
+| Lint (lua54) | 105351364640 | success |
+| Commit attribution (D9) | 105351364666 | success |
+| GPU Render (headless) | 105351428804 | success |
+| M6 Perf Gates | 105351428835 | success |
+| Perf budgets (debug) | 105351428861 | success |
+| Test (crdt) | 105351428874 | success |
+| M4 Perf Gates | 105351428892 | success |
+| M1 Acceptance Gates | 105351428904 | success |
+| M5 Perf Gates | 105351428943 | success |
+| M10 Perf Gates (crdt) | 105351428956 | success |
+| Test (ubuntu-latest / lua54) | 105351428989 | success |
+| Test (ubuntu-latest / luajit) | 105351429018 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105351429042 | success |
+| Test (macos-latest / luajit) | 105351429145 | success |
+| Test (macos-latest / lua54) | 105351429151 | success |
+| Docs consistency | 105351430435 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 105351429145,
+`Test (macos-latest / lua54)` 105351429151) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 151 `test result:
+ok` and zero `FAILED` in each, and U17's selector
+`read_dir_supersede_cancels_in_flight_predecessor` ran `ok` on both.
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276 sampled on this trunk run; every count stands where the
+PR #275 sections left it, and under the rerun rule a green sample
+retires nothing. This is the last code-bearing commit on `main` at
+E7's opening and E7's base control until the U17 witness lands on
+`main` with a full matrix run of its own (its section follows when
+that run has completed).
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
