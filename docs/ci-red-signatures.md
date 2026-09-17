@@ -1216,6 +1216,152 @@ not as skips: `e6c_review1_undo_across_peers_probes` `11 passed`
 at the moment of writing, one attempt, nothing rerun; it does not make
 `c4be8aa`'s red innocent, and U17's eighth stands.
 
+### PR #274's head run 35163382662 at `a456d6a`: two reds of the branch's own, both macOS legs
+
+E6d, typing on a real file, stacked on E6c's `523ce99` (#273 open at
+the session's start; the PR's base branch is `e6c/undo-across-peers`
+and it is retargeted and rebased when #273 merges). Read on 2026-09-17
+from the jobs endpoint and the two macOS job logs after the run
+completed; not re-run --- the fixes are pushed as a new head, whose
+run is the section below.
+
+| field | value |
+|---|---|
+| run | 35163382662, `pull_request`, one attempt |
+| head | `a456d6a`, `e6d/typing-on-a-real-file` (base `523ce99`) |
+| window | created 2026-09-16T23:41:13Z, updated 2026-09-17T00:02:01Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35163382662-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105018958497 | success |
+| Lint (luajit) | 105018958617 | success |
+| Lint (lua54) | 105018958652 | success |
+| Commit attribution (D9) | 105018958679 | success |
+| Format | 105018958722 | success |
+| GPU Render (headless) | 105018990945 | success |
+| M1 Acceptance Gates | 105018990955 | success |
+| M5 Perf Gates | 105018990981 | success |
+| M4 Perf Gates | 105018990994 | success |
+| Test (crdt) | 105018990997 | success |
+| Perf budgets (debug) | 105018991069 | success |
+| M10 Perf Gates (crdt) | 105018991100 | success |
+| M6 Perf Gates | 105018991104 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105018991119 | success |
+| Test (ubuntu-latest / luajit) | 105018991156 | success |
+| Test (ubuntu-latest / lua54) | 105018991168 | success |
+| Test (macos-latest / lua54) | 105018991191 | failure |
+| Test (macos-latest / luajit) | 105018991229 | failure |
+| Docs consistency | 105018991777 | skipped |
+
+Three failing targets across the two red jobs, every one a row new in
+this branch, no row of this registry. On both macOS legs (105018991191
+lua54, 105018991229 luajit): the `pmacs` unit target's
+`semantic_render::tests::e6d_4_summary_waits_for_quiet_after_an_edit_and_no_longer_than_the_lag_cap`,
+`assertion failed: summary_of(&s.render_frame(&state)).is_none()` at
+`src/semantic_render.rs:6607`, `test result: FAILED. 2221 passed; 1
+failed; 12 ignored` --- a row that slept 30 ms inside a 60 ms lag cap
+and asserted nothing had shipped, which a loaded runner's oversleep
+defeats (the luajit leg's unit target took 138.59 s where Linux takes
+30). On the lua54 leg alone (105018991191):
+`tests/e6d_incremental_didchange_acceptance.rs`'s
+`the_same_edits_leave_every_server_holding_the_buffer_under_both_sync_kinds`,
+`after a burst of five edits the server holds what the buffer holds`
+with `left: "fn maxyinlet…"` against `right: "fn maxywinlet…"` at
+`:202`, `test result: FAILED. 1 passed; 1 failed` in 1.38 s --- the
+witness read the fake server's document at the first new line of its
+change sink after a step's flush, and a step that sends two
+`didChange`s (a completion request flushes on its own) can be read at
+the mid-step one when the second lands after the poll; the luajit leg
+ran the same target `2 passed` in 3.11 s. Both are timing defects of
+the branch's own rows, fixed on the branch (the unit row now moves the
+cache's clocks instead of sleeping and runs the production windows;
+the witness waits until the server holds the buffer's text, and
+reports what it holds otherwise), and the unit row's rewrite exposed a
+clock defect in the code it covers, also fixed there. `WouldBlock`
+appears zero times and `did not become ready` zero times in either
+job against 145 and 146 `test result: ok`, so neither the `read
+Hello` family nor #259 sampled; U17's selector ran `ok` on both legs,
+its fragment absent, and no live row's fragments appear in either log.
+
+Tally (run-35163382662-reds): 3 = 2 + 1.
+
+### R7's eighteenth, local, on E6d's branch
+
+`scripts/gate` on `e6d/typing-on-a-real-file` at the two CI fixes'
+first form (rewritten before the push; the tree is `a456d6a` plus
+those two files), log `20260917T001151Z-3116741`, step `05-sweep`:
+`attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`,
+`transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))` at
+`pmacs-gpu/src/attach.rs:1971` (the panic line has moved again, from
+`:1958`; not part of the signature), `test result: FAILED. 365 passed;
+1 failed` on the `pmacs-gpu` unit target, under the default sweep's
+load. All three of R7's fragments. The branch's one touch on
+`pmacs-gpu/src/attach.rs` is a thirteen-line connect wrapper for the
+latency probe (`connect_with_target_and_sink`), which this test does
+not call; the retry path has no diff. The gate was re-run at the
+rewritten tip for the clippy stage that failed beside it, and R7's
+selector passed there: a green sample, which retires nothing. Recorded
+on the row: eighteen.
+### PR #274's second head run 35166500864 at `db36faa`, and it is GREEN
+
+`a456d6a` plus the two commits its run cost: `d464029`, the
+summary-debounce unit row on a moved clock (and the lag-cap clock it
+exposed, corrected), and `db36faa`, the incremental witness waiting
+for the server to hold the buffer's text. Read on 2026-09-17 from the
+jobs endpoint and the two macOS job logs after the run completed; not
+re-run.
+
+| field | value |
+|---|---|
+| run | 35166500864, `pull_request`, one attempt |
+| head | `db36faa`, `e6d/typing-on-a-real-file` (base `523ce99`) |
+| window | created 2026-09-17T00:25:30Z, updated 2026-09-17T00:44:29Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35166500864-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Format | 105028664901 | success |
+| Changed paths | 105028665067 | success |
+| Lint (luajit) | 105028665112 | success |
+| Commit attribution (D9) | 105028665115 | success |
+| Lint (lua54) | 105028665164 | success |
+| M4 Perf Gates | 105028702954 | success |
+| GPU Render (headless) | 105028702971 | success |
+| Test (crdt) | 105028702977 | success |
+| M1 Acceptance Gates | 105028703002 | success |
+| M10 Perf Gates (crdt) | 105028703006 | success |
+| M5 Perf Gates | 105028703011 | success |
+| M6 Perf Gates | 105028703022 | success |
+| Perf budgets (debug) | 105028703048 | success |
+| Test (ubuntu-latest / luajit) | 105028703049 | success |
+| Test (macos-latest / luajit) | 105028703055 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105028703057 | success |
+| Test (ubuntu-latest / lua54) | 105028703064 | success |
+| Test (macos-latest / lua54) | 105028703130 | success |
+| Docs consistency | 105028703861 | skipped |
+
+Both macOS job logs (luajit 105028703055, lua54 105028703130) carry 149
+`test result: ok` and zero `FAILED`, `WouldBlock` zero times and `did
+not become ready` zero times. The two rows red on the previous head
+ran `ok` on both legs: the `pmacs` unit target's
+`e6d_4_summary_waits_for_quiet_after_an_edit_and_no_longer_than_the_lag_cap`
+(the unit target finishing in 137.25 s on luajit and 24.90 s on lua54,
+the same spread as before, which the row no longer feels) and
+`e6d_incremental_didchange_acceptance`'s
+`the_same_edits_leave_every_server_holding_the_buffer_under_both_sync_kinds`.
+U17's selector `read_dir_supersede_cancels_in_flight_predecessor` ran
+`ok` on both --- a green sample after its eighth, the count staying at
+eight --- and no live row's fragments appear in either log. The base
+control is `523ce99`'s run 35111050634, 18/1/0.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
@@ -1539,19 +1685,20 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least seventeen, 2026-08-07 to 2026-09-10, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the five since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least eighteen, 2026-08-07 to 2026-09-17, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the six since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 17 = 12 + 5.
+Tally (R7): 18 = 12 + 6.
 
-Tally (R7-held): 5 items in the list below.
+Tally (R7-held): 6 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
 - fifteenth: gate log `20260907T170429Z-45241`, step `06-sweep-luajit` (the LuaJIT-only sweep `--protocol` adds), `test result: FAILED. 325 passed; 1 failed` on `-p pmacs-gpu --bin pmacs-gpu`, `attach.rs:1889`
 - sixteenth: gate log `20260907T185321Z-604527`, step `06-sweep-luajit`, the same result line, `attach.rs:1889`
 - seventeenth: gate log `20260910T203556Z-1854124`, step `05-sweep` of E5's tip gate, `attach.rs:1958`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
+- eighteenth: gate log `20260917T001151Z-3116741`, step `05-sweep` on E6d's branch, `attach.rs:1971`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
