@@ -62,6 +62,16 @@ impl FormattingResponse {
     }
 }
 
+impl TextEdit {
+    /// Parse one LSP `TextEdit` (`{ range, newText }`); `None` for any
+    /// other shape. E7.4 reads a completion item's `additionalTextEdits`
+    /// through this.
+    #[must_use]
+    pub fn from_lsp_value(v: &Value) -> Option<Self> {
+        parse_text_edit(v)
+    }
+}
+
 fn parse_text_edit(v: &Value) -> Option<TextEdit> {
     let range = v.get("range")?;
     let start = range.get("start")?;

@@ -1653,6 +1653,19 @@ impl Buffer {
         true
     }
 
+    /// Collapse every undo entry pushed since the command's floor was
+    /// marked by [`Self::arbiter_typed_begin`] into one (E7.4: a
+    /// completion accept's replace and the item's `additionalTextEdits`
+    /// are one step). v0.1 mode only; under CRDT the open group does
+    /// it and closes at the next command boundary.
+    pub fn command_collapse(&mut self) {
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            return;
+        }
+        self.collapse_typed_command();
+    }
+
     /// v0.1 mode (E6c): collapse every entry pushed since the typed
     /// self-insert's command began into one, keeping the oldest
     /// pre-image and describing the whole as one minimal covering edit

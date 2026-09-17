@@ -562,6 +562,19 @@ struct TypedEditPending {
     record: Option<TypedEditRecord>,
 }
 
+/// What [`EditorCore::completion_popup_accept_edits`] did (E7.4): the
+/// single replace it applied and the candidate's carry for the
+/// dispatcher to place and apply afterwards.
+#[derive(Clone, Debug)]
+pub struct AcceptedCompletion {
+    /// Where the replaced prefix began; the inserted text starts here.
+    pub anchor: Position,
+    /// Bytes inserted at `anchor`; the caret sits at `anchor + inserted`.
+    pub inserted: u64,
+    /// The candidate's `additionalTextEdits` and how to place them.
+    pub carry: crate::completion::CompletionEditsCarry,
+}
+
 /// The world state mutated by editor commands.
 pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
@@ -5056,6 +5069,27 @@ impl EditorCore {
         }
     }
 
+    /// Open a one-command undo group on `buffer_id` for `fid` (E7.4):
+    /// the group a keystroke's command gets at `undo.amalgamate = 0`,
+    /// so every edit the command makes --- a completion's replace and
+    /// its item's `additionalTextEdits` --- undoes as one step. Under
+    /// CRDT the group closes at the next command boundary; in v0.1
+    /// mode [`Self::command_group_collapse`] folds the entries.
+    pub fn command_group_begin(&mut self, fid: FrontendId, buffer_id: BufferId) {
+        self.typed_run_begin_for(fid, buffer_id, 0);
+    }
+
+    /// Fold the undo entries `buffer_id` took since
+    /// [`Self::command_group_begin`] into one (v0.1 mode; a no-op
+    /// under CRDT, where the group is the arbiter's).
+    pub fn command_group_collapse(&mut self, buffer_id: BufferId) {
+        if let Ok(mut reg) = self.registry.try_borrow_mut()
+            && let Ok(buffer) = reg.get_mut(buffer_id)
+        {
+            buffer.command_collapse();
+        }
+    }
+
     /// After a typed self-insert landed in `buffer_id`: mark the new
     /// undo entry typed and, unless this keystroke began a group,
     /// amalgamate it into the previous typed entry (v0.1 mode; a no-op
@@ -5627,19 +5661,29 @@ impl EditorCore {
     /// buffer was edited (the dispatcher fires `buffer.after-edit`
     /// off that signal).
     pub fn completion_popup_accept(&mut self) -> bool {
+        self.completion_popup_accept_edits().is_some()
+    }
+
+    /// [`Self::completion_popup_accept`] returning what it accepted:
+    /// the anchor, the inserted length and the candidate's
+    /// `additionalTextEdits` carry (E7.4), for the dispatcher to place
+    /// through the edit log and apply inside the same command. `None`
+    /// when nothing was edited.
+    pub fn completion_popup_accept_edits(&mut self) -> Option<AcceptedCompletion> {
         let holds = self.completion_session_holds();
         let snap = {
             let guard = self
                 .completion_popup
                 .lock()
                 .expect("completion popup poisoned");
-            guard
-                .as_ref()
-                .and_then(|p| p.selected_candidate().map(|c| c.insert_text.clone()))
+            guard.as_ref().and_then(|p| {
+                p.selected_candidate()
+                    .map(|c| (c.insert_text.clone(), c.carry.clone()))
+            })
         };
         self.completion_popup_close();
-        let (Some((anchor, cursor)), Some(text)) = (holds, snap) else {
-            return false;
+        let (Some((anchor, cursor)), Some((text, carry))) = (holds, snap) else {
+            return None;
         };
         self.active_window_mut().goal_col = None;
         // An empty range degenerates to a plain insert (the
@@ -5660,12 +5704,16 @@ impl EditorCore {
         };
         if let Err(e) = result {
             self.status = format!("completion accept failed: {e}");
-            return false;
+            return None;
         }
         let aw = self.active_window_mut();
         aw.cursor = anchor + text.len() as u64;
         aw.selection = None;
-        true
+        Some(AcceptedCompletion {
+            anchor,
+            inserted: text.len() as u64,
+            carry,
+        })
     }
 
     // ---- round-trip input buffers (Arc 1b, Q#P6) ----------------------------
@@ -7578,6 +7626,7 @@ mod tests {
             anchor,
             prefix.to_owned(),
             vec![crate::completion::PopupCandidate {
+                carry: crate::completion::CompletionEditsCarry::default(),
                 label: insert_text.to_owned(),
                 kind: crate::completion::CompletionItemKind::Text,
                 detail: None,
@@ -7652,6 +7701,7 @@ mod tests {
             0,
             String::new(),
             vec![crate::completion::PopupCandidate {
+                carry: crate::completion::CompletionEditsCarry::default(),
                 label: "x".into(),
                 kind: crate::completion::CompletionItemKind::Text,
                 detail: None,

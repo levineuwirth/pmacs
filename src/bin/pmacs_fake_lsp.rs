@@ -591,7 +591,26 @@ fn main() {
             }
             ("exit", _) => return,
             ("textDocument/completion", Some(idv)) => {
-                let resp = serde_json::json!({
+                // E7.4: `PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT=line:col:text`
+                // gives every item one `additionalTextEdits` entry
+                // inserting `text` (with `\n` spelled `\\n`) at that
+                // position --- an auto-import's shape.
+                let extra = std::env::var("PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT")
+                    .ok()
+                    .and_then(|spec| {
+                        let mut parts = spec.splitn(3, ':');
+                        let line: u32 = parts.next()?.parse().ok()?;
+                        let col: u32 = parts.next()?.parse().ok()?;
+                        let text = parts.next()?.replace("\\n", "\n");
+                        Some(serde_json::json!([{
+                            "range": {
+                                "start": { "line": line, "character": col },
+                                "end": { "line": line, "character": col }
+                            },
+                            "newText": text
+                        }]))
+                    });
+                let mut resp = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": idv,
                     "result": {
@@ -622,6 +641,16 @@ fn main() {
                         ]
                     }
                 });
+                if let Some(extra) = extra
+                    && let Some(items) = resp
+                        .get_mut("result")
+                        .and_then(|r| r.get_mut("items"))
+                        .and_then(serde_json::Value::as_array_mut)
+                {
+                    for item in items {
+                        item["additionalTextEdits"] = extra.clone();
+                    }
+                }
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/hover", Some(idv)) => {

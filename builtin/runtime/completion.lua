@@ -80,6 +80,12 @@ local function collect_rows(buf, prefix, trigger, trigger_char)
           kind = c.kind,
           detail = c.detail,
           insert_text = c.insert_text,
+          -- E7.4: an LSP item's additionalTextEdits ride along in the
+          -- shape `collect` hands them out, for the accept to place.
+          additional_edits = c.additional_edits,
+          edits_uri = c.edits_uri,
+          edits_base = c.edits_base,
+          edits_unresolved = c.edits_unresolved,
         }
       end
     end

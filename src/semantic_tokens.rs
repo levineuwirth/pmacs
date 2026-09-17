@@ -385,7 +385,6 @@ const EDIT_LOG_CAP: usize = 4096;
 /// The edits a document has taken since its text was last sent to the
 /// server, in order, each numbered so a response can say which of them
 /// it already reflects (E6b.1).
-#[derive(Default)]
 struct EditLog {
     /// Number the next recorded edit takes; every edit so far has a
     /// smaller one.
@@ -402,6 +401,25 @@ struct EditLog {
     /// byte range alone cannot name the bytes a later edit may have
     /// changed again.
     edits: VecDeque<(u64, DocumentEdit, Arc<str>)>,
+    /// The edit number the newest completion answer for this document
+    /// was answered against (E7.4). A token answer's absorb prunes the
+    /// log below its own base, tokens being the log's first consumer;
+    /// an accepted completion's `additionalTextEdits` are carried from
+    /// this number, so the prune keeps everything from here on while
+    /// an answer is held. `u64::MAX` when none is.
+    completion_floor: u64,
+}
+
+impl Default for EditLog {
+    fn default() -> Self {
+        Self {
+            next_seq: 0,
+            synced_seq: 0,
+            dropped_below: 0,
+            edits: VecDeque::new(),
+            completion_floor: u64::MAX,
+        }
+    }
 }
 
 /// One server's answer for one document, held in both the server's
@@ -514,7 +532,8 @@ impl SemanticTokenStore {
                         entry.pending += 1;
                     }
                 }
-                log.edits.retain(|(seq, ..)| *seq >= base_seq);
+                let keep_from = base_seq.min(log.completion_floor);
+                log.edits.retain(|(seq, ..)| *seq >= keep_from);
             }
         }
         self.by_key.insert(key, entry);
@@ -698,6 +717,17 @@ impl SemanticTokenStore {
         self.version += 1;
     }
 
+    /// Note that a completion answer for `uri` was answered against
+    /// the text at edit number `base` (E7.4): until a newer answer
+    /// replaces it, a token answer's absorb keeps the log from `base`
+    /// on, so the accepted item's `additionalTextEdits` can be carried
+    /// to the current text. Nothing to note for a URI with no log.
+    pub fn note_completion_base(&mut self, uri: &str, base: u64) {
+        if let Some(log) = self.logs.get_mut(uri) {
+            log.completion_floor = base;
+        }
+    }
+
     /// Note that the document's current text has just been sent to the
     /// server (`didOpen` / `didChange`): a response to a request sent
     /// from now on reflects every edit recorded so far. Nothing to note
@@ -751,6 +781,38 @@ impl SemanticTokenStore {
                 .map(|(_, edit, inserted)| (*edit, Arc::clone(inserted)))
                 .collect(),
         )
+    }
+
+    /// Carry a byte range of `uri`'s text as it stood at edit number
+    /// `base` across every edit recorded since, to the coordinates of
+    /// the current text (E7.4: a completion item's `additionalTextEdits`
+    /// at accept time, answered for the text the server held when the
+    /// request went out). `None` when the URI has no log, or when an
+    /// edit since `base` has been forgotten (the cap, or a clear), in
+    /// which case nothing can place the range and a caller applies
+    /// nothing. A range's start snaps past a replacement that swallowed
+    /// it and its end keeps only what stood before one, as tokens do; an
+    /// insertion point at a pure insert moves past the inserted text.
+    #[must_use]
+    pub fn translate_range_since(
+        &self,
+        uri: &str,
+        base: u64,
+        start: u64,
+        end: u64,
+    ) -> Option<(u64, u64)> {
+        let log = self.logs.get(uri)?;
+        if log.dropped_below > base {
+            return None;
+        }
+        let (mut start, mut end) = (start, end);
+        for (seq, edit, _) in &log.edits {
+            if *seq >= base {
+                start = edit.translate_start(start);
+                end = edit.translate_end(end);
+            }
+        }
+        Some((start, end.max(start)))
     }
 
     /// Declare `uri`'s tokens stale without saying where the edit was.
