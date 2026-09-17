@@ -235,19 +235,33 @@ fn the_first_keystroke_confirms_before_a_slow_after_edit_hook() {
 }
 
 /// Typing through a floor timeout keeps every character once, in
-/// order: `abc` typed at once with a 700 ms render pass behind the
-/// first, an 800 ms pause in which that frame lands and releases the
-/// floor, then `def` typed after the transition; the mirror ends with
-/// `abcdef` at the typed byte and the run restores.
+/// order: `abc` typed at once with a render pass of `SPIN_MS` behind
+/// the first, a pause of `PAUSE_MS` in which that frame lands and
+/// releases the floor, then `def` typed after the transition; the
+/// mirror ends with `abcdef` at the typed byte and the run restores.
+///
+/// The floor's clock restarts at every optimistic keystroke, so the
+/// release the row depends on needs the frame to land at least
+/// `FLOOR_CONFIRM_TIMEOUT` (500 ms) after `c` was typed. The probe
+/// paces its characters on a 10 ms receive timeout that the hosted
+/// macOS runners stretch to about 100 ms, so `c` goes at 200--260 ms
+/// there where Linux types it at ~105; against a 700 ms spin that
+/// left a margin of a few milliseconds, and PR #275's run at
+/// `888e5e1` lost it on both macOS legs (`fallbacks=0`, `c` at 205
+/// and 261 ms). The spin now outlasts the slowest observed `c` by
+/// more than the timeout, and the pause outlasts the spin.
 #[test]
 fn typing_through_a_floor_timeout_keeps_every_character_once_in_order() {
-    let (daemon, _dir) = daemon_with_slow_first_edit(700, SpinIn::RenderPass);
+    const SPIN_MS: u64 = 1000;
+    const PAUSE_MS: u64 = 1300;
+    let (daemon, _dir) = daemon_with_slow_first_edit(SPIN_MS, SpinIn::RenderPass);
+    let gaps = format!("50,50,{PAUSE_MS},50,50");
     let Some(facts) = run_latency_probe(
         &daemon,
         "fallback.txt",
         &[
             ("PMACS_GPU_PROBE_TYPE_TEXT", "abcdef"),
-            ("PMACS_GPU_PROBE_KEY_GAPS_MS", "50,50,800,50,50"),
+            ("PMACS_GPU_PROBE_KEY_GAPS_MS", &gaps),
         ],
     ) else {
         return;
@@ -262,7 +276,7 @@ fn typing_through_a_floor_timeout_keeps_every_character_once_in_order() {
         .parse()
         .expect("a fallback time");
     assert!(
-        (500..1000).contains(&fallback_ms),
+        (SPIN_MS..SPIN_MS + 400).contains(&fallback_ms),
         "the floor released when the slow frame landed, during the pause: {fallback_ms} ms"
     );
     assert_eq!(
