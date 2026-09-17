@@ -560,7 +560,33 @@ struct SummaryCache {
     /// The computed summary — compared before emitting (Q#TH6
     /// payload-equality suppression).
     lines: Vec<Style>,
+    /// The generation the frame last saw, and when it first saw it: the
+    /// clock the quiet window in [`SemanticRenderState::file_style_summary_msg`]
+    /// runs on (E6d.4).
+    seen: (u64, std::time::Instant),
+    /// When the frame first saw a generation this summary does not
+    /// describe, since it was computed: the clock the lag cap runs on
+    /// (E6d.4). `None` while the summary is current.
+    behind_since: Option<std::time::Instant>,
 }
+
+/// How long a buffer must have gone unedited before its whole-file
+/// summary is recomputed, and the longest a summary may lag the text
+/// under continuous typing (E6d.4). The summary is a tree-sitter pass
+/// over every line, 175 ms on a 14k-line file, on the dispatcher
+/// thread; recomputed per edit it stood between every keystroke and
+/// the frame that answers it. The minimap it feeds carries the
+/// frontend's own line shapes and only borrows these colors, so it
+/// may lag typing by the quiet window, or by the lag cap when a burst
+/// runs longer than that. The window is a second rather than a
+/// word's pause because the pass still blocks the keystroke that
+/// resumes typing inside it: measured at 200 ms, a character typed
+/// 300 ms after the last edit waited 184 ms for it (p50, thirty
+/// samples on `src/editor.rs`), and a second is past most pauses
+/// between words and inside the ones spent thinking.
+pub const SUMMARY_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
+/// See [`SUMMARY_QUIET`].
+pub const SUMMARY_MAX_LAG: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The stage-1 UI face inventory (themes arc Q#TH3): the names the
 /// `ThemeFacts` producer resolves through [`crate::highlight::Theme::face`]
@@ -2546,12 +2572,30 @@ impl SemanticRenderState {
             0
         };
         let key = (generation, diag_epoch, syntax_epoch, face_key);
-        if self
-            .last_summary
-            .get(&buffer_id)
-            .is_some_and(|c| c.key == key)
-        {
-            return None;
+        let now = std::time::Instant::now();
+        if let Some(cache) = self.last_summary.get_mut(&buffer_id) {
+            if cache.key == key {
+                return None;
+            }
+            // E6d.4: an edit (a generation the cache does not hold)
+            // waits for the buffer to go quiet before the whole-file
+            // pass runs again, and never longer than the lag cap
+            // behind the first edit it has yet to describe --- not
+            // behind its own computation, or the first keystroke after
+            // an idle longer than the cap would pay the pass at once;
+            // an epoch change alone (diagnostics, theme) recomputes at
+            // once, since no keystroke is behind it.
+            if cache.key.0 != generation {
+                let behind_since = *cache.behind_since.get_or_insert(now);
+                if cache.seen.0 != generation {
+                    cache.seen = (generation, now);
+                }
+                if now.duration_since(cache.seen.1) < SUMMARY_QUIET
+                    && now.duration_since(behind_since) < SUMMARY_MAX_LAG
+                {
+                    return None;
+                }
+            }
         }
         let lines = scoped_file_summary(state, buffer_id, self.peer_knows_theme_facts);
         // Payload-equality suppression (Q#TH6): a face edit that
@@ -2568,6 +2612,8 @@ impl SemanticRenderState {
             SummaryCache {
                 key,
                 lines: lines.clone(),
+                seen: (generation, now),
+                behind_since: None,
             },
         );
         if unchanged {
@@ -6486,6 +6532,136 @@ mod tests {
         assert!(
             summary_of(&again).is_none(),
             "unchanged generation suppresses the summary"
+        );
+    }
+
+    /// E6d.4: an edit's whole-file summary waits for the buffer to go
+    /// quiet, and never longer than the lag cap behind the first edit
+    /// it has yet to describe; the first edit after a long idle waits
+    /// like any other; an epoch change alone recomputes at once. Time
+    /// passes by moving the cache's clocks back rather than sleeping,
+    /// so the row runs the production windows and no runner's load
+    /// can shift it. CRDT-only: the generation an edit bumps is the
+    /// CRDT's version scalar.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn e6d_4_summary_waits_for_quiet_after_an_edit_and_no_longer_than_the_lag_cap() {
+        use std::time::Duration;
+        // `by` passes with no frame in between: every clock the cache
+        // holds moves that far into the past.
+        fn elapse(s: &mut SemanticRenderState, bid: BufferId, by: Duration) {
+            let cache = s.last_summary.get_mut(&bid).expect("cache");
+            cache.seen.1 = cache.seen.1.checked_sub(by).expect("clock");
+            if let Some(behind) = cache.behind_since.as_mut() {
+                *behind = behind.checked_sub(by).expect("clock");
+            }
+        }
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        let edit = |bytes: &[u8]| {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            let buf = reg.get_mut(bid).expect("active buffer");
+            if buf.crdt_state().is_none() {
+                buf.upgrade_to_crdt(1).expect("upgrade to crdt");
+            }
+            buf.apply_edit(crate::buffer::EditOp::Insert { pos: 0, bytes })
+                .expect("buffer edit");
+        };
+        let quiet = SUMMARY_QUIET;
+        let lag = SUMMARY_MAX_LAG;
+        edit(b"a\nb\n");
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+        assert!(
+            summary_of(&s.render_frame(&state)).is_some(),
+            "the first frame ships a summary at once"
+        );
+
+        // An edit: the frames inside the quiet window ship nothing.
+        edit(b"c\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "the frame after an edit waits for quiet"
+        );
+        // A second edit inside the window restarts it: the frame that
+        // sees the second edit starts the quiet clock over, and the
+        // one seven tenths of a window later still ships nothing,
+        // though the first edit is by then well past the window.
+        elapse(&mut s, bid, quiet * 7 / 10);
+        edit(b"d\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "the frame after the second edit waits too"
+        );
+        elapse(&mut s, bid, quiet * 7 / 10);
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "an edit inside the window restarts the quiet clock"
+        );
+        elapse(&mut s, bid, quiet * 4 / 10);
+        let (gen_after, lines) =
+            summary_of(&s.render_frame(&state)).expect("quiet: the summary ships");
+        assert_eq!(
+            lines.len(),
+            5,
+            "and it describes the edited text: d, c, a, b, tail"
+        );
+        assert_eq!(gen_after, buffer_generation(&state, bid));
+
+        // Under a burst that never goes quiet, the lag cap ships one:
+        // an edit every nine tenths of the quiet window, none until
+        // the first undescribed edit is the cap old.
+        edit(b"e\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "the burst's first edit waits"
+        );
+        let step = quiet * 9 / 10;
+        let mut behind = Duration::ZERO;
+        while behind + step < lag {
+            elapse(&mut s, bid, step);
+            behind += step;
+            edit(b"f\n");
+            assert!(
+                summary_of(&s.render_frame(&state)).is_none(),
+                "under the cap ({behind:?} behind) the burst ships nothing"
+            );
+        }
+        elapse(&mut s, bid, step);
+        edit(b"g\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_some(),
+            "the lag cap ships a summary under a burst that never goes quiet"
+        );
+
+        // The first edit after an idle longer than the cap waits for
+        // quiet like any other: the cap bounds the lag behind an edit,
+        // not the age of the summary.
+        elapse(&mut s, bid, lag * 3);
+        edit(b"h\n");
+        assert!(
+            summary_of(&s.render_frame(&state)).is_none(),
+            "the first keystroke after a long idle does not pay the pass"
+        );
+        elapse(&mut s, bid, quiet);
+        assert!(
+            summary_of(&s.render_frame(&state)).is_some(),
+            "and the summary follows once the buffer is quiet"
+        );
+
+        // An epoch change with no edit recomputes at once.
+        {
+            let theme = state.syntax_registry.theme();
+            let mut th = theme.lock().expect("lock");
+            th.syntax_epoch += 1;
+        }
+        let key_before = s.last_summary.get(&bid).expect("cache").key;
+        let _ = s.render_frame(&state);
+        let key_after = s.last_summary.get(&bid).expect("cache").key;
+        assert_ne!(
+            key_before.2, key_after.2,
+            "a theme epoch alone recomputes at once"
         );
     }
 

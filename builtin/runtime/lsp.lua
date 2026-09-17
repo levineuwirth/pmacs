@@ -619,19 +619,25 @@ end
 
 -- didChange coalescing (typing perf) -----------------------------------------
 --
--- Document sync is full-text, so each `textDocument/didChange` ships
--- the entire buffer. Sending one per keystroke cost three O(file)
--- copies plus an O(file) JSON write to the server pipe *per typed
--- character* — the dominant daemon-side typing cost on large files.
--- The after-edit hook now only bumps the version, marks the cached
--- render families stale (cheap), and records the buffer as dirty;
--- the actual notification ships from the async tick once the buffer
--- has been quiet for DID_CHANGE_QUIET_MS, or unconditionally once
--- the oldest unsent edit is DID_CHANGE_MAX_LAG_MS old (so the server
--- keeps converging during continuous typing). Versions may skip
--- values across a coalesced burst; LSP only requires that they
--- increase. Anything that asks the server about a document flushes
--- it first so no request is answered against stale text.
+-- A `textDocument/didChange` carries the edits since the last one as
+-- ranges where the server negotiated incremental sync (E6d.1:
+-- rust-analyzer, clangd, gopls all do), and the whole document where
+-- it did not. The ranges come from the edit log the semantic-token
+-- store already keeps per document (E6b.1's recorder on the buffer's
+-- edit broadcast), so nothing O(file) crosses from Lua for them; the
+-- full-text form is the fallback, and it costs three O(file) copies
+-- plus an O(file) JSON write to the server pipe per send, which on a
+-- 14k-line file was the dominant daemon-side typing cost when every
+-- send was that form. Either way the sends are coalesced: the
+-- after-edit hook only bumps the version, marks the cached render
+-- families stale (cheap), and records the buffer as dirty; the
+-- notification ships from the async tick once the buffer has been
+-- quiet for DID_CHANGE_QUIET_MS, or unconditionally once the oldest
+-- unsent edit is DID_CHANGE_MAX_LAG_MS old (so the server keeps
+-- converging during continuous typing). Versions may skip values
+-- across a coalesced burst; LSP only requires that they increase.
+-- Anything that asks the server about a document flushes it first so
+-- no request is answered against stale text.
 local DID_CHANGE_QUIET_MS = 75
 local DID_CHANGE_MAX_LAG_MS = 400
 
@@ -658,9 +664,20 @@ local function flush_did_change(key)
   -- crash -> re-attach) since the edit was recorded; only the live
   -- record's server should hear about the buffer.
   if attachments[key] ~= rec then return end
-  local ok, text = pcall(buffer_text, rec.buffer)
-  if not ok then return end
-  pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, text)
+  -- Ranges first: the manager ships the log's edits since the last
+  -- sync and says whether the server now holds the current text. It
+  -- says no when the server wants whole documents, or when the log
+  -- cannot account for the buffer's length, and then the document
+  -- goes whole, which is always right.
+  local ok_len, len = pcall(function() return rec.buffer:len() end)
+  if not ok_len then return end
+  local ok_inc, sent = pcall(pmacs.lsp.did_change_incremental,
+    rec.server, rec.uri, rec.version, len)
+  if not (ok_inc and sent) then
+    local ok, text = pcall(buffer_text, rec.buffer)
+    if not ok then return end
+    pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, text)
+  end
   -- Inlay hints are pull-model: the store's stale flag (set per edit)
   -- only clears on a fresh `textDocument/inlayHint` response, and the
   -- server never volunteers one. Re-request at flush cadence so
@@ -1221,6 +1238,19 @@ function pull_semantic_tokens_quiet(rec)
   -- ahead of the whole document's; the whole-document pull below
   -- follows and replaces everything when it lands. The store merges
   -- a range answer into the lines it covers and keeps the rest.
+  --
+  -- Not debounced, on a measurement (E6d.2, 2026-09-16, the tip's
+  -- daemon on src/editor.rs with rust-analyzer, the dispatcher loop
+  -- traced): the `buffer.after-edit` fan-out that carries the
+  -- coalesced didChange flush and this request's send cost n=526,
+  -- p50 0.09 ms, p90 0.33, max 3.07 per keystroke, and the ticks'
+  -- per-keystroke cost was the /full answer's absorption --- the LSP
+  -- tick p50 25 ms, max 125, over the 432 loops above 1.5 ms, the
+  -- async tick p50 17.6, max 105, over 465 --- which is the pull that
+  -- stays behind this one. Debouncing the range pull would delay the
+  -- visible lines' colors for no daemon-side saving; the /full
+  -- answer's cost is the scheduled item. The trace is retained beside
+  -- the phase's other runs (E6d fixes 1).
   local visible = nil
   if has_range and has_full then
     local ok, lines = pcall(pmacs.lsp._visible_lines, rec.buffer)
@@ -2866,7 +2896,18 @@ local function handle_server_requests()
         elseif ev.kind == "request"
             and ev.method == "workspace/semanticTokens/refresh" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
-          repull_for_attachments(sid, pmacs.lsp.request_semantic_tokens)
+          -- E6d.5: through the quiet pull, which awaits its handle in
+          -- a coroutine, and not the bare request. The bare request
+          -- returned a handle nobody awaited, so every answer --- a
+          -- whole document's tokens, some 25 MB of JSON value on a
+          -- 14k-line file, and rust-analyzer asks for this refresh
+          -- after nearly every edit --- stayed in the async runtime's
+          -- job table forever: the daemon grew by about 3 MB per
+          -- keystroke, to gigabytes in a session. The quiet pull also
+          -- asks for the visible range first and a delta where it can.
+          repull_for_attachments(sid, function(_, _, rec)
+            pull_semantic_tokens_quiet(rec)
+          end)
         elseif ev.kind == "request"
             and ev.method == "client/registerCapability" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)

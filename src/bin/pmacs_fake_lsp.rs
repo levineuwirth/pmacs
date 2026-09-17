@@ -77,11 +77,30 @@
 //!   frames inside it; the document-derived tokens make the answer
 //!   align with the text as a real server's would, so a token typed
 //!   into existence appears only when the answer lands.
+//! * If launched with `PMACS_FAKE_LSP_MODE=contentmodified` (E6d.2):
+//!   every `textDocument/*` request is answered with the
+//!   `ContentModified` error (-32801), the spec's "the document moved,
+//!   ask again" code, which is what rust-analyzer answers a request
+//!   overtaken by the next `didChange`; notifications still update
+//!   the held document.
+//! * If launched with `PMACS_FAKE_LSP_MODE=incremental` (E6d.1): a
+//!   server that negotiates `TextDocumentSyncKind.Incremental`
+//!   (`textDocumentSync: { openClose, change: 2 }`, the object form
+//!   rust-analyzer sends) and applies each ranged `contentChange` to
+//!   the document it holds, in order, ranges read in the spec-default
+//!   UTF-16 units; `incremental8` is the same server advertising
+//!   `positionEncoding: "utf-8"`, so both encodings of a range are
+//!   exercised. A change carrying no `range` replaces the document.
+//!   Every other mode negotiates full sync (`textDocumentSync: 1`),
+//!   which is what the client must fall back to.
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
-//!   one `{"method", "text"}` JSON line per received didOpen /
-//!   didChange, so a test can replay the exact document-sync sequence
-//!   the server saw — the auto-pairing Q#AP7 ordering observable
-//!   ("the first didChange after `(` carries `()`").
+//!   one `{"method", "text", "ranged"}` JSON line per received didOpen
+//!   / didChange --- `text` the document as the server holds it after
+//!   the notification, `ranged` whether the didChange carried ranges
+//!   --- so a test can replay the exact document-sync sequence the
+//!   server saw: the auto-pairing Q#AP7 ordering observable ("the
+//!   first didChange after `(` carries `()`"), and E6d.1's equality of
+//!   the held document under both sync kinds.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -177,6 +196,19 @@ fn main() {
                 write_frame(&mut stdout, &resp);
                 continue;
             }
+            // `contentmodified` (E6d.2): every request is answered with
+            // the spec's retry code, as rust-analyzer answers a request
+            // the next `didChange` overtook. Notifications (`didOpen`,
+            // `didChange`) still update the held document below.
+            if mode == "contentmodified" && id.is_some() {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "error": { "code": -32801, "message": "content modified" }
+                });
+                write_frame(&mut stdout, &resp);
+                continue;
+            }
             if mode == "silent" {
                 continue;
             }
@@ -258,6 +290,18 @@ fn main() {
                 if mode == "rangeonly16" {
                     resp["result"]["capabilities"]["positionEncoding"] =
                         serde_json::Value::from("utf-16");
+                }
+                // `incremental` / `incremental8`: ranged didChange, in
+                // the object form rust-analyzer advertises; the `8`
+                // variant negotiates UTF-8 columns as rust-analyzer
+                // does, the bare one the spec's UTF-16 default.
+                if mode.starts_with("incremental") {
+                    resp["result"]["capabilities"]["textDocumentSync"] =
+                        serde_json::json!({ "openClose": true, "change": 2 });
+                    if mode == "incremental8" {
+                        resp["result"]["capabilities"]["positionEncoding"] =
+                            serde_json::Value::from("utf-8");
+                    }
                 }
                 // Arc 1d: advertise signature help only in `sighelp`, so
                 // every other mode keeps the no-auto-trigger path (the
@@ -638,6 +682,20 @@ fn main() {
             ("textDocument/didOpen" | "textDocument/didChange", _) => {
                 if method == "textDocument/didChange" {
                     didchange_count += 1;
+                    // `semantictokensrefresh` (E6d.5): a refresh after
+                    // every didChange as well, which is rust-analyzer's
+                    // cadence --- it asks after nearly every edit --- so
+                    // a client that answers each with a request it
+                    // never awaits is caught by the job it leaves.
+                    if mode == "semantictokensrefresh" {
+                        let req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 9300 + u64::from(didchange_count),
+                            "method": "workspace/semanticTokens/refresh",
+                            "params": serde_json::Value::Null
+                        });
+                        write_frame(&mut stdout, &req);
+                    }
                     let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
                     // `filewatchjoin` / `filewatchretire`: a didChange
                     // is the test's mid-session trigger; see the
@@ -698,20 +756,49 @@ fn main() {
                     .and_then(|t| t.get("uri"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                // The document as the server holds it after this
+                // notification: a didOpen's text; a didChange's
+                // changes applied in order to the held text, a ranged
+                // one replacing its range (E6d.1) and an unranged one
+                // the whole document.
+                let mut ranged = false;
                 let text = if method == "textDocument/didOpen" {
                     params
                         .get("textDocument")
                         .and_then(|t| t.get("text"))
                         .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
                 } else {
+                    let held = uri
+                        .as_str()
+                        .and_then(|u| open_docs.get(u))
+                        .cloned()
+                        .unwrap_or_default();
                     params
                         .get("contentChanges")
                         .and_then(serde_json::Value::as_array)
-                        .and_then(|a| a.first())
-                        .and_then(|c| c.get("text"))
-                        .and_then(serde_json::Value::as_str)
+                        .and_then(|changes| {
+                            let mut doc = held;
+                            for change in changes {
+                                let text = change.get("text")?.as_str()?;
+                                match change.get("range") {
+                                    Some(range) => {
+                                        ranged = true;
+                                        let utf8 = mode == "incremental8";
+                                        let start = range_offset(&doc, range.get("start")?, utf8)?;
+                                        let end = range_offset(&doc, range.get("end")?, utf8)?;
+                                        if start > end || end > doc.len() {
+                                            return None;
+                                        }
+                                        doc.replace_range(start..end, text);
+                                    }
+                                    None => text.clone_into(&mut doc),
+                                }
+                            }
+                            Some(doc)
+                        })
                 };
-                if let (Some(uri_s), Some(text)) = (uri.as_str(), text) {
+                if let (Some(uri_s), Some(text)) = (uri.as_str(), text.as_deref()) {
                     open_docs.insert(uri_s.to_owned(), text.to_owned());
                 }
                 // Auto-pairing Q#AP7: the ordering observable is "the
@@ -720,7 +807,8 @@ fn main() {
                 // order. Mirror of `PMACS_FAKE_LSP_ROOT_SINK`: append
                 // one JSON line per didOpen/didChange to the sink
                 // file so a test can replay the exact sequence.
-                if let (Ok(sink), Some(text)) = (std::env::var("PMACS_FAKE_LSP_CHANGE_SINK"), text)
+                if let (Ok(sink), Some(text)) =
+                    (std::env::var("PMACS_FAKE_LSP_CHANGE_SINK"), text.as_deref())
                 {
                     use std::io::Write as _;
                     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -728,7 +816,8 @@ fn main() {
                         .append(true)
                         .open(&sink)
                     {
-                        let line = serde_json::json!({ "method": method, "text": text });
+                        let line =
+                            serde_json::json!({ "method": method, "text": text, "ranged": ranged });
                         let _ = writeln!(f, "{line}");
                     }
                 }
@@ -1641,6 +1730,40 @@ fn utf16_range_error(
         ))
     } else {
         None
+    }
+}
+
+/// The byte offset in `text` of an LSP `Position`, its `character`
+/// read in UTF-8 units when `utf8`, else UTF-16 (E6d.1's incremental
+/// modes). `None` for a position past the document, so a range the
+/// client got wrong fails the application rather than clamping into
+/// a document that happens to look right.
+fn range_offset(text: &str, position: &serde_json::Value, utf8: bool) -> Option<usize> {
+    let line = usize::try_from(position.get("line")?.as_u64()?).ok()?;
+    let character = usize::try_from(position.get("character")?.as_u64()?).ok()?;
+    let mut line_start = 0usize;
+    for _ in 0..line {
+        line_start = text[line_start..].find('\n').map(|i| line_start + i + 1)?;
+    }
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |i| line_start + i);
+    let line_text = &text[line_start..line_end];
+    if utf8 {
+        (character <= line_text.len() && line_text.is_char_boundary(character))
+            .then_some(line_start + character)
+    } else {
+        let mut units = 0usize;
+        for (byte_idx, ch) in line_text.char_indices() {
+            if units == character {
+                return Some(line_start + byte_idx);
+            }
+            if units > character {
+                return None;
+            }
+            units += ch.len_utf16();
+        }
+        (units == character).then_some(line_end)
     }
 }
 

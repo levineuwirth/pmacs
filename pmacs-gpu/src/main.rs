@@ -1552,6 +1552,9 @@ fn run_probe(socket: &Path, report: &Path) -> i32 {
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "undo") => {
             run_undo_probe(socket, report, &text)
         }
+        Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "latency") => {
+            run_latency_probe(socket, report, &text)
+        }
         Some(text) => run_typing_probe(socket, report, &text),
         None => run_headless_probe(socket, report),
     }
@@ -1836,6 +1839,573 @@ fn typing_probe_observe(
         marked,
         spans: state.current_spans.len(),
     })
+}
+
+/// E6d.0 --- **the measurement.** Type one keystroke at a fixed byte of
+/// the attached document through the production `App` dispatch, the
+/// way a GPU user's key goes (a plain character as an optimistic
+/// `CrdtOp`, a pair character or Enter as a round-tripping key), and
+/// time what the daemon sends back: the `CursorByte` that confirms the
+/// caret, the text landing in the mirror (the auto-pair closer for an
+/// opener, the newline and its indent for Enter), the first styling
+/// frame, and the moment the GPU is back in optimistic mode. Then
+/// delete what was typed, wait for the mirror to read as it did, and
+/// repeat, `PMACS_GPU_PROBE_SAMPLES` times (thirty by default), so the
+/// report is a distribution and not a verdict.
+///
+/// `PMACS_GPU_PROBE_TYPE_TEXT` is the keystroke: one or more
+/// characters, or a lone newline for Enter. `PMACS_GPU_PROBE_TYPE_AT`
+/// is the byte to type at (walked with `Right` as the typing probe
+/// does). `PMACS_GPU_PROBE_GAP_MS` (300 by default) is the quiet
+/// between a settled sample and its restore, and between the restore
+/// and the next sample, so one sample's `didChange` flush does not
+/// land inside the next. `PMACS_GPU_PROBE_WAIT_LSP_MS` waits that long
+/// for the modeline to read `LSP:ready` before the first sample, and
+/// that is what "warm" means in every cell measured with it: the
+/// status tracker's `Ready`, the server's handshake answered, which
+/// rust-analyzer reaches some 200 ms after the daemon comes up and
+/// before its indexing begins (a `$/progress` then reads `LSP:idx`,
+/// and the probe latches the first `ready` it saw); it is not a
+/// finished index, and both arms of E6d's table ran while
+/// rust-analyzer still indexed. Unset, the first keystroke goes as
+/// soon as the caret is placed, which is E6d.3's cold case.
+/// `PMACS_GPU_PROBE_KEY_GAPS_MS`, a comma-separated list, spaces the
+/// characters of a multi-character keystroke: the n-th gap is waited
+/// out, with the daemon's messages still applied, before the (n+1)-th
+/// character goes, so a run can pause long enough for an unconfirmed
+/// floor to release and then keep typing through the fallback (E6d.3's
+/// probe of the transition); a missing gap is zero.
+/// `PMACS_GPU_PROBE_OPEN=<path>` attaches with that file as the initial
+/// target, so the daemon opens it at attach as it does for `pmacs --gpu
+/// <file>` and the first keystroke lands on a daemon that has just
+/// opened the file (E6d.3's cold case); without it the probe types into
+/// whatever the daemon already shows.
+/// `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole run.
+///
+/// Per sample the report carries, in milliseconds after the
+/// keystroke: `cursor` (the confirming `CursorByte`: the predicted byte
+/// for an optimistic character, the first past the typed byte for a
+/// round-tripped key), `text` (the typed bytes in the mirror), `closer`
+/// (the auto-pair closer beside an opener, else `none`), `style` (the
+/// first `StyleSpans`), `settled` (cursor confirmed and text landed,
+/// closer included), `fallback` (the floor released unconfirmed, the
+/// GPU dropped to round-trip input --- `none` when it did not) and
+/// `restore` (the mirror back to its original text with the caret
+/// confirmed at the typed byte). `trace` lists every daemon message in
+/// the sample's window with its offset. Nothing is asserted here; the
+/// baseline and the after both read the report.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-walk-sample-restore session, reported line by line"
+)]
+fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    /// Where one sample is.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        /// Walking the caret to the typed byte, or waiting for the
+        /// server, before the first sample.
+        Placing,
+        /// Between samples: waiting the gap out.
+        Gap,
+        /// The keystroke is sent; watching for the confirmation, the
+        /// text and the styling frame.
+        Sampling,
+        /// Settled; waiting the gap out before the restore.
+        Settled,
+        /// The deletes are sent; waiting for the original text back.
+        Restoring,
+    }
+
+    /// One sample's observations, each in milliseconds after its
+    /// keystroke.
+    #[derive(Default)]
+    struct Sample {
+        cursor_ms: Option<u64>,
+        text_ms: Option<u64>,
+        closer_ms: Option<u64>,
+        style_ms: Option<u64>,
+        settled_ms: Option<u64>,
+        fallback_ms: Option<u64>,
+        restore_ms: Option<u64>,
+        /// Whether the keystroke armed an optimistic floor (a plain
+        /// character) rather than round-tripping (a pair character,
+        /// Enter); only an armed floor can release unconfirmed.
+        floor_armed: bool,
+        trace: Vec<String>,
+        restore_trace: Vec<String>,
+    }
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let open = std::env::var_os("PMACS_GPU_PROBE_OPEN").map(std::path::PathBuf::from);
+    let connected = match open {
+        Some(path) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+            attach::connect_with_target_and_sink(
+                socket,
+                attach::InitialTargetPaths { cwd, path },
+                move |event| tx.send(event).is_ok(),
+            )
+        }
+        None => attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()),
+    };
+    let mut client = match connected {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    // The opened target's snapshot arrives as the initial message; it
+    // goes through the same dispatch as everything after it.
+    let initial: Vec<AttachEvent> = client
+        .take_initial_message()
+        .map(|message| vec![AttachEvent::Message(Box::new(message))])
+        .unwrap_or_default();
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+
+    let env_u64 = |name: &str, default: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(default)
+    };
+    let at = env_u64("PMACS_GPU_PROBE_TYPE_AT", 0);
+    let samples_wanted = env_u64("PMACS_GPU_PROBE_SAMPLES", 30).max(1);
+    let gap = std::time::Duration::from_millis(env_u64("PMACS_GPU_PROBE_GAP_MS", 300));
+    let wait_lsp = std::env::var("PMACS_GPU_PROBE_WAIT_LSP_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis);
+    let per_sample = std::time::Duration::from_millis(env_u64("PMACS_GPU_PROBE_SAMPLE_MS", 5_000));
+    let key_gaps: Vec<std::time::Duration> = std::env::var("PMACS_GPU_PROBE_KEY_GAPS_MS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|g| g.trim().parse::<u64>().ok())
+                .map(std::time::Duration::from_millis)
+                .collect()
+        })
+        .unwrap_or_default();
+    let started = std::time::Instant::now();
+    let started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_millis());
+    let ms = |t: std::time::Instant| {
+        u64::try_from(t.duration_since(started).as_millis()).unwrap_or(u64::MAX)
+    };
+    let deadline =
+        started + std::time::Duration::from_millis(env_u64("PMACS_GPU_PROBE_DEADLINE_MS", 120_000));
+
+    // The keystroke: Enter for a lone newline, else the characters.
+    let is_enter = text == "\n";
+    let typed_len = if is_enter { 0 } else { text.len() as u64 };
+    // A lone built-in pair opener is answered by the pairing hook's
+    // closer; that arrival is what `closer` times.
+    let closer: Option<char> = {
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some(ch), None) if is_builtin_pair_char(ch) => match ch {
+                '(' => Some(')'),
+                '[' => Some(']'),
+                '{' => Some('}'),
+                '<' => Some('>'),
+                other => Some(other),
+            },
+            _ => None,
+        }
+    };
+
+    let mut phase = Phase::Placing;
+    let mut snapshot_seen = false;
+    let mut walked = false;
+    let mut lsp_ready_at: Option<std::time::Instant> = None;
+    let mut original_text = String::new();
+    let mut placed_at: Option<std::time::Instant> = None;
+    let mut phase_since = started;
+    let mut typed_at: Option<std::time::Instant> = None;
+    let mut sample = Sample::default();
+    let mut samples: Vec<Sample> = Vec::new();
+    // The characters of the keystroke still to type, and when the
+    // next one goes, when the keystroke is spaced by `key_gaps`.
+    let mut pending_chars: Vec<char> = Vec::new();
+    let mut next_char_at = started;
+    let mut degraded_frames: u64 = 0;
+    let mut degraded_first_at: Option<std::time::Instant> = None;
+    let mut disconnect: Option<String> = None;
+    let mut failure: Option<String> = None;
+    for event in initial {
+        snapshot_seen |= matches!(
+            &event,
+            AttachEvent::Message(msg) if matches!(msg.as_ref(), InstanceMessage::BufferSnapshot { .. })
+        );
+        app.dispatch_app_event(AppEvent::Attach(event));
+    }
+
+    while std::time::Instant::now() < deadline {
+        let now = std::time::Instant::now();
+        let since_typed = typed_at.map(|t| ms(now).saturating_sub(ms(t)));
+        // What the GPU holds now: the caret, whether it is confirmed
+        // and authoritative, and the mirror text.
+        let (cursor_byte, confirmed, fresh, idle, current) =
+            app.state
+                .as_ref()
+                .map_or((None, false, false, false, String::new()), |s| {
+                    (
+                        s.own_cursor.map(|c| c.byte),
+                        s.optimistic_cursor_floor.is_none(),
+                        s.cursor_fresh,
+                        s.dispatch_idle,
+                        s.current_text.clone(),
+                    )
+                });
+        let caret_settled_at = |byte: u64| confirmed && fresh && idle && cursor_byte == Some(byte);
+
+        match phase {
+            Phase::Placing => {
+                if snapshot_seen && cursor_byte.is_some() && idle {
+                    if cursor_byte != Some(at) {
+                        if !walked && let Some(client) = app.attach_client.as_ref() {
+                            walked = true;
+                            for _ in cursor_byte.unwrap_or(0)..at {
+                                let _ = client.send_key(ProtocolKey::Right, Modifiers::NONE);
+                            }
+                        }
+                    } else if caret_settled_at(at) {
+                        let server_ready = match wait_lsp {
+                            None => true,
+                            Some(limit) => {
+                                lsp_ready_at.is_some() || now.duration_since(started) >= limit
+                            }
+                        };
+                        if server_ready {
+                            original_text.clone_from(&current);
+                            placed_at = Some(now);
+                            phase = Phase::Gap;
+                            phase_since = now;
+                        }
+                    }
+                }
+            }
+            Phase::Gap => {
+                if now.duration_since(phase_since) >= gap {
+                    if samples.len() as u64 >= samples_wanted {
+                        break;
+                    }
+                    if current != original_text || !caret_settled_at(at) {
+                        failure = Some(format!(
+                            "sample {} precondition: caret={cursor_byte:?} confirmed={confirmed} \
+                             fresh={fresh} idle={idle} text_len={} original_len={}",
+                            samples.len(),
+                            current.len(),
+                            original_text.len()
+                        ));
+                        break;
+                    }
+                    sample = Sample::default();
+                    if is_enter {
+                        app.apply_keyboard(&Key::Named(NamedKey::Enter), None);
+                    } else if key_gaps.is_empty() {
+                        for ch in text.chars() {
+                            let mut buf = [0u8; 4];
+                            let s = ch.encode_utf8(&mut buf);
+                            app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                        }
+                    } else {
+                        let mut chars = text.chars();
+                        if let Some(first) = chars.next() {
+                            let mut buf = [0u8; 4];
+                            let s = first.encode_utf8(&mut buf);
+                            app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                        }
+                        pending_chars = chars.rev().collect();
+                        next_char_at = std::time::Instant::now()
+                            + key_gaps.first().copied().unwrap_or_default();
+                    }
+                    typed_at = Some(std::time::Instant::now());
+                    sample.floor_armed = app
+                        .state
+                        .as_ref()
+                        .is_some_and(|s| s.optimistic_cursor_floor.is_some());
+                    phase = Phase::Sampling;
+                    phase_since = now;
+                }
+            }
+            Phase::Sampling => {
+                let since = since_typed.unwrap_or(0);
+                // The next spaced character, once its gap is out.
+                if let Some(&ch) = pending_chars.last()
+                    && now >= next_char_at
+                {
+                    pending_chars.pop();
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                    let typed_so_far = text.chars().count() - pending_chars.len();
+                    next_char_at =
+                        now + key_gaps.get(typed_so_far - 1).copied().unwrap_or_default();
+                    sample.trace.push(format!("key:{ch}@{since}"));
+                }
+                // The text: the typed bytes at `at` (Enter: a newline
+                // there), and beside an opener, its closer.
+                if sample.text_ms.is_none() {
+                    let landed = if is_enter {
+                        current.len() > original_text.len()
+                            && current.as_bytes().get(at as usize) == Some(&b'\n')
+                    } else {
+                        current
+                            .get(at as usize..(at + typed_len) as usize)
+                            .is_some_and(|got| got == text)
+                    };
+                    if landed {
+                        sample.text_ms = Some(since);
+                    }
+                }
+                if let Some(close) = closer
+                    && sample.closer_ms.is_none()
+                    && current
+                        .get((at + typed_len) as usize..)
+                        .and_then(|rest| rest.chars().next())
+                        == Some(close)
+                {
+                    sample.closer_ms = Some(since);
+                }
+                // The confirmation: the floor gone with the caret past
+                // the typed byte and authoritative again. An
+                // optimistic character's floor is its predicted byte;
+                // a round-tripped key's caret arrives with the
+                // `CursorByte` that also restores `cursor_fresh`.
+                if sample.cursor_ms.is_none()
+                    && confirmed
+                    && fresh
+                    && cursor_byte.is_some_and(|b| {
+                        if is_enter {
+                            b > at
+                        } else {
+                            b == at + typed_len
+                        }
+                    })
+                {
+                    sample.cursor_ms = Some(since);
+                }
+                // The escape hatch fired: the floor released with the
+                // caret unconfirmed, and typing would round-trip now.
+                if sample.floor_armed
+                    && sample.fallback_ms.is_none()
+                    && sample.cursor_ms.is_none()
+                    && confirmed
+                    && !fresh
+                {
+                    sample.fallback_ms = Some(since);
+                }
+                let text_done =
+                    sample.text_ms.is_some() && (closer.is_none() || sample.closer_ms.is_some());
+                if sample.settled_ms.is_none() && sample.cursor_ms.is_some() && text_done {
+                    sample.settled_ms = Some(since);
+                    phase = Phase::Settled;
+                    phase_since = now;
+                } else if now.duration_since(phase_since) >= per_sample {
+                    failure = Some(format!(
+                        "sample {} did not settle within {per_sample:?}: cursor={:?} text={:?} \
+                         closer={:?} caret={cursor_byte:?} confirmed={confirmed} fresh={fresh}",
+                        samples.len(),
+                        sample.cursor_ms,
+                        sample.text_ms,
+                        sample.closer_ms
+                    ));
+                    break;
+                }
+            }
+            Phase::Settled => {
+                if now.duration_since(phase_since) >= gap {
+                    // Delete what the keystroke and its hooks inserted:
+                    // what stands after the caret with Delete, what
+                    // stands before it with Backspace, each the way
+                    // the user's key goes.
+                    let inserted = current.len().saturating_sub(original_text.len()) as u64;
+                    let caret = cursor_byte.unwrap_or(at);
+                    let before = caret.saturating_sub(at).min(inserted);
+                    let after = inserted.saturating_sub(before);
+                    for _ in 0..after {
+                        app.apply_keyboard(&Key::Named(NamedKey::Delete), None);
+                    }
+                    for _ in 0..before {
+                        app.apply_keyboard(&Key::Named(NamedKey::Backspace), None);
+                    }
+                    phase = Phase::Restoring;
+                    phase_since = now;
+                }
+            }
+            Phase::Restoring => {
+                if current == original_text && caret_settled_at(at) {
+                    sample.restore_ms = Some(since_typed.unwrap_or(0));
+                    samples.push(std::mem::take(&mut sample));
+                    typed_at = None;
+                    phase = Phase::Gap;
+                    phase_since = now;
+                } else if now.duration_since(phase_since) >= per_sample {
+                    failure = Some(format!(
+                        "sample {} did not restore within {per_sample:?}: caret={cursor_byte:?} \
+                         confirmed={confirmed} fresh={fresh} text_len={} original_len={}",
+                        samples.len(),
+                        current.len(),
+                        original_text.len()
+                    ));
+                    break;
+                }
+            }
+        }
+        let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(10)) else {
+            continue;
+        };
+        let now = std::time::Instant::now();
+        let (label, is_snapshot, is_style, is_disconnect) = match &event {
+            AttachEvent::Message(msg) => (
+                instance_message_label(msg.as_ref()),
+                matches!(msg.as_ref(), InstanceMessage::BufferSnapshot { .. }),
+                matches!(msg.as_ref(), InstanceMessage::StyleSpans { .. }),
+                false,
+            ),
+            AttachEvent::Disconnected(_) => ("Disconnected", false, false, true),
+        };
+        if let AttachEvent::Disconnected(reason) = &event {
+            disconnect = Some(reason.clone());
+        }
+        if let AttachEvent::Message(msg) = &event
+            && let InstanceMessage::StatuslineSegments { left, right, .. } = msg.as_ref()
+        {
+            let texts = left.iter().chain(right.iter()).map(|s| s.text.as_str());
+            let mut ready = false;
+            let mut degraded = false;
+            for t in texts {
+                ready |= t == "LSP:ready";
+                degraded |= t.contains("degraded");
+            }
+            if ready {
+                lsp_ready_at.get_or_insert(now);
+            }
+            if degraded {
+                degraded_frames += 1;
+                degraded_first_at.get_or_insert(now);
+            }
+        }
+        app.dispatch_app_event(AppEvent::Attach(event));
+        snapshot_seen |= is_snapshot;
+        let since = typed_at.map_or(0, |t| ms(now).saturating_sub(ms(t)));
+        match phase {
+            Phase::Sampling => {
+                sample.trace.push(format!("{label}@{since}"));
+                if is_style && sample.style_ms.is_none() {
+                    sample.style_ms = Some(since);
+                }
+            }
+            Phase::Restoring => sample.restore_trace.push(format!("{label}@{since}")),
+            _ => {}
+        }
+        if is_disconnect {
+            break;
+        }
+    }
+
+    let quantiles = |pick: &dyn Fn(&Sample) -> Option<u64>| -> String {
+        let mut values: Vec<u64> = samples.iter().filter_map(pick).collect();
+        if values.is_empty() {
+            return String::from("n=0");
+        }
+        values.sort_unstable();
+        let n = values.len();
+        format!(
+            "n={n} min={} p50={} p90={} max={}",
+            values[0],
+            values[n / 2],
+            values[(n * 9 / 10).min(n - 1)],
+            values[n - 1]
+        )
+    };
+    let opt = |v: Option<u64>| v.map_or(String::from("none"), |v| v.to_string());
+    let mut out = String::new();
+    let _ = writeln!(out, "started_unix_ms={started_unix_ms}");
+    let _ = writeln!(out, "typed_text={text:?}");
+    let _ = writeln!(out, "typed_at_byte={at}");
+    let _ = writeln!(out, "samples_wanted={samples_wanted}");
+    let _ = writeln!(out, "samples={}", samples.len());
+    let _ = writeln!(out, "lsp_ready_at_ms={}", opt(lsp_ready_at.map(ms)));
+    let _ = writeln!(out, "placed_at_ms={}", opt(placed_at.map(ms)));
+    let _ = writeln!(out, "cursor={}", quantiles(&|s| s.cursor_ms));
+    let _ = writeln!(out, "text={}", quantiles(&|s| s.text_ms));
+    let _ = writeln!(out, "closer={}", quantiles(&|s| s.closer_ms));
+    let _ = writeln!(out, "style={}", quantiles(&|s| s.style_ms));
+    let _ = writeln!(out, "settled={}", quantiles(&|s| s.settled_ms));
+    let _ = writeln!(out, "restore={}", quantiles(&|s| s.restore_ms));
+    let _ = writeln!(
+        out,
+        "fallbacks={}",
+        samples.iter().filter(|s| s.fallback_ms.is_some()).count()
+    );
+    let _ = writeln!(out, "degraded_frames={degraded_frames}");
+    let _ = writeln!(
+        out,
+        "degraded_first_at_ms={}",
+        opt(degraded_first_at.map(ms))
+    );
+    for (i, s) in samples.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "sample.{i}=cursor={} text={} closer={} style={} settled={} fallback={} restore={} \
+             trace={} restore_trace={}",
+            opt(s.cursor_ms),
+            opt(s.text_ms),
+            opt(s.closer_ms),
+            opt(s.style_ms),
+            opt(s.settled_ms),
+            opt(s.fallback_ms),
+            opt(s.restore_ms),
+            s.trace.join(","),
+            s.restore_trace.join(",")
+        );
+    }
+    if let Some(state) = app.state.as_ref() {
+        let _ = writeln!(out, "final_text_len={}", state.current_text.len());
+        let _ = writeln!(
+            out,
+            "final_text_matches_original={}",
+            state.current_text == original_text
+        );
+    }
+    let _ = writeln!(out, "failure={}", failure.unwrap_or_default());
+    let _ = writeln!(out, "disconnect={}", disconnect.unwrap_or_default());
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!(
+            "pmacs-gpu probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
+    0
 }
 
 /// True when `marked` covers every byte of `[start, end)`.

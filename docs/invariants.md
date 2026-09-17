@@ -83,45 +83,47 @@ authenticated source, never by a `frontend_id` carried in the payload.
 
 ## LSP
 
-Every `Position` and `Range` builder in `src/lsp.rs` routes through
-`outbound_position`, which converts byte offsets to the negotiated
-encoding; a new request builder must too, because UTF-16 servers reject
-raw byte columns on non-ASCII text. Semantic tokens `full`, `full.delta`
-and `range` are three independent capabilities and each is gated on its
-own.
+Every `Position` and `Range` builder in `src/lsp.rs` converts byte
+offsets to the negotiated encoding, and a new one must too, or UTF-16
+servers reject non-ASCII columns: a request uses `outbound_position` on
+the text the server holds, and a `didChange` ranged by negotiation uses
+`byte_to_position` on a mirror carried across the edits, since its ranges
+address the text as each previous change left it. Semantic tokens `full`,
+`full.delta` and `range` are three capabilities, each gated on its own.
 
 The semantic-token store hands out tokens in the document's current
-bytes, never in the server's: every buffer a server attaches to carries
-a `SemanticEditRecorder` view that logs each edit the buffer broadcasts,
-a token request carries the text the server holds and the edit number
-it is current at, and the answer is resolved against that text and
-carried across the edits since. A stale store therefore shifts its
-tokens and does not drop them; both merge sites read
-`positioned_tokens` and neither converts a column per frame.
+bytes, never the server's: every buffer a server attaches to carries a
+`SemanticEditRecorder` view logging each edit the buffer broadcasts, a
+token request carries the text the server holds and its edit number, and
+the answer is resolved against that text and carried across the edits
+since, so a stale store shifts its tokens, never drops them; both merge
+sites read `positioned_tokens` and neither converts a column per frame.
+The same log feeds a ranged `didChange`; one that cannot account for the
+buffer's length sends the whole document.
 
-LaTeX is served by `texlab`, and its root is not the repository root.
+LaTeX is served by `texlab`, and its root is not the repository root:
 `pmacs.lsp.config.latex` resolves the document root by an upward marker
 walk over texlab's own markers (`.texlabroot`, `texlabroot`), and `.git`
-is deliberately excluded from that walk: a repository root is the wrong
-answer for a multi-file document, which is the reason the resolver
-exists.
+is deliberately excluded from that walk, because a repository root is
+the wrong answer for a multi-file document, which is why it exists.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
 `rangeonly16` (UTF-16 with fail-closed bounds validation),
 `semantichold` (document-derived tokens, held for
-`PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`), `sighelp`, `prepare`,
-`preprefuse`, `rename`, `inlaybounds`, `inlayrefresh`,
+`PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`), `incremental` and `incremental8`
+(ranged `didChange` applied in UTF-16 and UTF-8 units), `sighelp`,
+`prepare`, `preprefuse`, `rename`, `inlaybounds`, `inlayrefresh`,
 `semantictokensrefresh`, `applyeditplan`, `resourceops`, `posecho`,
 `defenv`, `wsconfig`, `rooturi`, `leanprogress`. Failure shapes:
-`crash`, `error`, `garbage`, `silent`. File watchers: `filewatch`
-(a `RelativePattern` `**/*.txt`), `filewatchabs` (an absolute plain
-glob), `filewatchflat` (a `RelativePattern` with no leading `**/`),
-`filewatchbare` (a bare relative string), `filewatchrereg` (the same id
-twice with no unregister), `filewatchjoin`, `filewatchretire`. Use these
-for capability-matrix tests, never a real server; the list is
-enumerated from the binary and a stale copy is how a test ends up
-covering the shape next to the defect.
+`crash`, `error`, `contentmodified`, `garbage`, `silent`. File watchers:
+`filewatch` (a `RelativePattern` `**/*.txt`), `filewatchabs` (an
+absolute plain glob), `filewatchflat` (a `RelativePattern` with no
+leading `**/`), `filewatchbare` (a bare relative string),
+`filewatchrereg` (the same id twice with no unregister),
+`filewatchjoin`, `filewatchretire`. Use these for capability-matrix
+tests, never a real server; the list is enumerated from the binary and a
+stale copy is how a test ends up covering the shape next to the defect.
 
 ## Persistence
 
