@@ -1817,6 +1817,57 @@ the `read Hello` family, nor #259, nor U4, nor #271, nor #276 sampled
 here; #253 moves to three and #277 opens at one. **E7's base control
 is this run, red on one ubuntu leg on rows the branch does not touch.**
 
+### PR #278's head run 35277461945 at `0c6f8ff`, and it is GREEN
+
+E7's delivered tip (`e7/git-and-lsp-affordances`, base `7002308`),
+read at C7's close on 2026-09-17 from the jobs endpoint and three test
+legs' logs after the run had completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35277461945, `pull_request`, one attempt |
+| head | `0c6f8ff`, PR #278's opening head |
+| window | created 2026-09-17T21:34:46Z, updated 21:56:35Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35277461945-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Format | 105391401664 | success |
+| Changed paths | 105391401949 | success |
+| Lint (lua54) | 105391402005 | success |
+| Lint (luajit) | 105391402067 | success |
+| Commit attribution (D9) | 105391402149 | success |
+| GPU Render (headless) | 105391445115 | success |
+| M1 Acceptance Gates | 105391445158 | success |
+| Test (crdt) | 105391445175 | success |
+| Test (macos-latest / luajit) | 105391445182 | success |
+| M4 Perf Gates | 105391445217 | success |
+| Test (ubuntu-latest / luajit) | 105391445218 | success |
+| Perf budgets (debug) | 105391445222 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105391445232 | success |
+| Test (ubuntu-latest / lua54) | 105391445243 | success |
+| M5 Perf Gates | 105391445253 | success |
+| M10 Perf Gates (crdt) | 105391445256 | success |
+| Test (macos-latest / lua54) | 105391445290 | success |
+| M6 Perf Gates | 105391445326 | success |
+| Docs consistency | 105391446634 | skipped |
+
+On both macOS legs (`Test (macos-latest / luajit)` 105391445182,
+`Test (macos-latest / lua54)` 105391445290) `WouldBlock` appears zero
+times and `did not become ready` zero times, against 155 `test result:
+ok` and zero `FAILED` in each (the four E7 suites are the four targets
+over the 151 of `main`'s last green run); on `Test (ubuntu-latest /
+lua54)` (105391445243), the leg the base control was red on, 154 ok,
+zero `FAILED`, `WouldBlock` zero --- the three first-snapshot reads of
+#253 and #277 did not recur here, which is a green sample and nothing
+more. U17's witness ran `ok` on all three legs. So neither the `read
+Hello` family, nor #259, nor U4, nor #271, nor #276, nor #253, nor
+#277 sampled on this run; every count stands where the section above
+left it. **The head is green**, stated at the moment of writing.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
