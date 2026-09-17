@@ -83,12 +83,13 @@ authenticated source, never by a `frontend_id` carried in the payload.
 
 ## LSP
 
-Every `Position` and `Range` builder in `src/lsp.rs` routes through
-`outbound_position`, which converts byte offsets to the negotiated
-encoding; a new request builder must too, because UTF-16 servers reject
-raw byte columns on non-ASCII text. Semantic tokens `full`, `full.delta`
-and `range` are three independent capabilities and each is gated on its
-own.
+Every `Position` and `Range` builder in `src/lsp.rs` converts byte
+offsets to the negotiated encoding, and a new one must too, or UTF-16
+servers reject non-ASCII columns: a request uses `outbound_position` on
+the text the server holds, and a `didChange` ranged by negotiation uses
+`byte_to_position` on a mirror carried across the edits, since its ranges
+address the text as each previous change left it. Semantic tokens `full`,
+`full.delta` and `range` are three capabilities, each gated on its own.
 
 The semantic-token store hands out tokens in the document's current
 bytes, never the server's: every buffer a server attaches to carries a
@@ -97,9 +98,8 @@ token request carries the text the server holds and its edit number, and
 the answer is resolved against that text and carried across the edits
 since, so a stale store shifts its tokens, never drops them; both merge
 sites read `positioned_tokens` and neither converts a column per frame.
-The same log is what a `didChange` ships as ranges to a server that
-negotiated incremental sync, the codec's mirror moving with it; a log
-that cannot account for the buffer's length sends the whole document.
+The same log feeds a ranged `didChange`; one that cannot account for the
+buffer's length sends the whole document.
 
 LaTeX is served by `texlab`, and its root is not the repository root:
 `pmacs.lsp.config.latex` resolves the document root by an upward marker
