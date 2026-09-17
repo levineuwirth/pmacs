@@ -159,11 +159,15 @@ fn did_changes(sink: &Path) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// Flush the coalescer and pump until the fake has written at least
-/// one more didChange to the sink (a completion request raised by the
-/// typing flushes on its own, so a step may have sent more than one),
-/// returning the last one --- what the server holds after the step ---
-/// and how many didChanges the sink holds now.
+/// Flush the coalescer and pump until the fake's latest didChange in
+/// the sink is a new one that leaves it holding the buffer's text,
+/// returning that one --- what the server holds after the step ---
+/// and how many didChanges the sink holds now. A completion request
+/// raised by the typing flushes on its own, so a step may have sent
+/// more than one, and the fake writes them one at a time: the first
+/// new line can be a mid-step state that the last line has moved past.
+/// A server left holding something else is the failure, reported with
+/// what it holds.
 fn flush_and_wait(
     s: &mut EditorState,
     sink: &Path,
@@ -171,18 +175,22 @@ fn flush_and_wait(
     what: &str,
 ) -> ((String, bool), usize) {
     exec(s, "pmacs.lsp._flush_did_changes()");
+    let expected = buffer_text(s);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         tick(s);
         let changes = did_changes(sink);
         if changes.len() > seen {
             let last = changes.last().cloned().expect("at least one");
-            return (last, changes.len());
+            if last.0 == expected {
+                return (last, changes.len());
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "no didChange reached the fake server after {what}; buffer: {:?}",
-            buffer_text(s)
+            "after {what} the server holds {:?} where the buffer holds {expected:?} ({} didChanges, {seen} before the step)",
+            changes.last().map_or("", |(t, _)| t.as_str()),
+            changes.len()
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -199,11 +207,6 @@ fn drive(s: &mut EditorState, sink: &Path) -> Vec<(String, bool)> {
     let mut step = |s: &mut EditorState, what: &str| {
         let (got, total) = flush_and_wait(s, sink, seen, what);
         seen = total;
-        assert_eq!(
-            got.0,
-            buffer_text(s),
-            "after {what} the server holds what the buffer holds"
-        );
         out.push(got);
     };
     // Two self-inserts at the top, coalesced.
