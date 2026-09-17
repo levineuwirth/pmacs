@@ -11,11 +11,12 @@
 --                 behind a y-or-n question, and `c` commits what is
 --                 staged with a message typed at the minibuffer.
 --   *git-diff*    the diff for the FILE under point, in a generated
---                 buffer rendered as plain text. There is no bundled
---                 `diff` grammar (checked: `BUILTIN_LANGUAGES` in
---                 src/syntax.rs has no entry), and there is no hunk
---                 model anywhere in the tree --- hunks are what gutter
---                 markers need, and that is Stage 2's protocol work.
+--                 buffer rendered as plain text under the `diff` major
+--                 mode (E7.2: `n`/`p` move between hunks). There is no
+--                 bundled `diff` grammar (checked: `BUILTIN_LANGUAGES`
+--                 in src/syntax.rs has no entry), and no hunk model
+--                 beyond the mode's line scan --- gutter markers are
+--                 Stage 2's protocol work.
 --
 -- NO WIRE CHANGE. Stage 2 (gutter markers) needs new `DecorationKind`
 -- variants and a `PROTOCOL_VERSION` bump, and must be scheduled alone.
@@ -1107,6 +1108,9 @@ local function show_diff_buffer(title, body)
       error(DIFF_BUFFER .. " is read-only")
     end)
     pmacs.buffer.set_round_trip_input(buf, true)
+    -- E7.2: the `diff` major mode carries `n`/`p` hunk motion
+    -- (`diffmode.lua`); the buffer stays plain text.
+    pmacs.buffer.set_major_mode(buf, "diff")
     state.diff_buffer = buf
   end
   pmacs.buffer.set_generated_contents(buf, title .. "\n\n" .. body)

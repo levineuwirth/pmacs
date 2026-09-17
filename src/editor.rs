@@ -1045,6 +1045,15 @@ impl EditorState {
                 include_str!("../builtin/runtime/linewrap.lua"),
             )
             .expect("load linewrap builtin chunk");
+        // E7.2: the `diff` major mode (hunk motion on `n`/`p`), a mode
+        // keymap like dired's. Loaded before `git.lua`, which gives
+        // `*git-diff*` the mode when it creates the buffer.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/diffmode.lua"),
+                include_str!("../builtin/runtime/diffmode.lua"),
+            )
+            .expect("load diffmode builtin chunk");
         // Git integration Stage 1 (docs/archive/framings/git-integration-framing.md):
         // `*git-status*` and `*git-diff*`. Loaded after `listview.lua`,
         // whose `open` (and whose new optional `keys` table) it drives,
