@@ -876,6 +876,22 @@ impl AsyncRuntime {
         self.supersede.borrow().get(key).copied()
     }
 
+    /// The worker pool beneath this runtime.
+    ///
+    /// Work dispatched on it directly is not a runtime job: it is born
+    /// outside [`Self::allocate`], carries no identity, no purpose and
+    /// no `*workers*` row, and settles nothing. That is the point of
+    /// exposing it --- a caller that must occupy or measure the pool's
+    /// threads themselves (the supersede witness in
+    /// `tests/m8_1_acceptance.rs` holds every worker behind a channel
+    /// it releases, so the predecessor it supersedes is in flight by
+    /// construction rather than by load) needs the pool and not a job.
+    /// Production code dispatches through the `dispatch_*` methods.
+    #[must_use]
+    pub fn pool(&self) -> &WorkerPool {
+        &self.pool
+    }
+
     /// Editor frame target in milliseconds. The run loop reads this
     /// to size its `poll_event` timeout, which is what bounds
     /// streaming-worker wakeups to one per frame.

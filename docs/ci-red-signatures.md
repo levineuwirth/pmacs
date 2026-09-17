@@ -2133,19 +2133,6 @@ never shut.
 | candidate mechanism | Ctrl-C reached the process as `SIGINT` rather than as the raw-mode key event the test drives, and the process died of the signal instead of exiting cleanly. That is all the exit status shows. Whether the injection preceded raw mode, whether raw mode was lost, or whether the reconnect sleep's handler was not yet installed, are three mechanisms this fragment separates not at all |
 | retirement | diagnosis: a readiness record written by the child as it enters raw mode, so the injection is ordered against setup rather than raced against it. Never a green rerun |
 
-### U17 — a supersede race lost the other way, on `main`
-
-| field | value |
-|---|---|
-| selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
-| job | GitHub Actions: first the serialized crdt sweep (`--test-threads=1`), since then `Test (macos-latest / luajit)` seven times and `Test (ubuntu-latest / luajit)` once, all under cargo's default parallelism, and once the local gate's non-CRDT sweep. The job is not a discriminator for this row and a match needs the selector and the fragment on any CI test leg |
-| required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | ten: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`; `main` at `dbe40a1`, run 34349759554 (E1's post-merge run), job `Test (macos-latest / luajit)` (102459915513), `tests/m8_1_acceptance.rs:278:5`, `assertion left == right failed: first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed`, the job's only failure against 119 `test result: ok`; and PR #269 review 2's gate at `95a6db4`, log `20260911T102129Z-2474066`, step `sweep-luajit` (the non-CRDT sweep under `--no-default-features --features luajit`), `tests/m8_1_acceptance.rs:278`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 0.33 s, the step's only failure, not rerun; and PR #270 at `e82fcb5`, run 34772792926, job `Test (macos-latest / luajit)` (103765362433), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.34 s, recorded at E6's close on 2026-09-13 and not rerun (the job's other red is the branch's own fixture defect, below); and PR #270 at `e804b97`, run 34774221987, the very next head, job `Test (macos-latest / luajit)` (103769261492), `tests/m8_1_acceptance.rs:278:5`, the same fragment, `9 passed; 1 failed` in 1.93 s, the job's only failure against 133 `test result: ok` --- the same fragments on the next run are a second occurrence, not a coincidence, and this row now has two on consecutive heads of one PR whose diff touches neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, an argument from untouched files and not a measurement; and PR #273 at `c4be8aa`, run 35031658924, job `Test (macos-latest / luajit)` (104591399407), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.26 s, the job's only failure against 140 `test result: ok`, recorded at E6c's close on 2026-09-16 and not rerun; the branch's diff touches neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, and its base control, `main`'s run at `7880c4b`, ran this leg green, which is one sample; and PR #275 at `b1ef903`, run 35221439579, job `Test (macos-latest / luajit)` (105202355414), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.49 s, the job's only failure against 148 `test result: ok`, recorded at E6d's fix round 1 on 2026-09-17 and not rerun; the commit is the review's witness commit and adds two files under `tests/`, touching neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, and the selector ran `ok` on both macOS legs of the previous head `085ae4d`'s run, green samples; and PR #275 at `97b0d0f`, run 35252684064, job `Test (macos-latest / luajit)` (105308655905), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.61 s, the job's only failure against 148 `test result: ok`, recorded at E6d's fix round 1 on 2026-09-17 and not rerun; the commit touches one test file of the branch's own, and the selector ran `ok` on both macOS legs of the head before it, `888e5e1`, green samples. The second, third and fourth run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so are its third, fourth and fifth. Green runs are samples: non-reproduction and nothing more. The fourth occurrence is on `main` after two merges that did not touch `src/dispatch` or `tests/m8_1_acceptance.rs`, which is an argument from untouched files and not a measurement; it is the row's third occurrence on `main` and the second on this leg. The fifth is the gate's non-CRDT sweep on the reviewed head, not CI, and it establishes neither cause nor the branch's innocence; it is recorded here as an occurrence because the selector and the required fragment match exactly |
-| candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
-| retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
-
-Tally (U17): 10 = 9 + 1.
-
 ### U19 — a terminal bell not observed within a 5 s poll
 
 **Reopened 2026-09-09 as NEVER CLOSED**, on R5's ground and not on a
@@ -2197,12 +2184,13 @@ explained, which is the only retirement the rerun rule allows.
 - **REFERRED** --- not a test, so outside this file; the question lives
   in a GitHub issue.
 
-Twenty-eight rows are listed on twenty-seven lines (A1 and A2 share
-one). Seventeen lines are causal closures and stand: a wall-clock
+Twenty-nine rows are listed on twenty-eight lines (A1 and A2 share
+one). Eighteen lines are causal closures and stand: a wall-clock
 assertion made `#[ignore]`, a duplicated test execution removed by the
 one-sweep gate, a fixture race fixed with a readiness gate, a
-hermeticity fault fixed, and U16's process-global cwd mutation deleted.
-The ten that are not now say which word they are. **Recount these
+hermeticity fault fixed, U16's process-global cwd mutation deleted,
+and U17's load-dependent predecessor held by the fixture. The ten that
+are not now say which word they are. **Recount these
 against the table below rather than trusting them**: they were written
 as twenty-seven, twenty-six, eighteen and eight one commit before U16
 closed and moved into it, then as nineteen and eight while R6 and U19
@@ -2234,6 +2222,7 @@ line was rewritten by counting again.
 | U14 | four selectors red in one gate run across three stages | 2026-09-05 | three are budgets, now `#[ignore]`; the fourth (`state: initializing`) is a readiness wait, migrated |
 | U15 | a rotated multi-red cluster with a load reading | 2026-09-05 | all budgets, now `#[ignore]` |
 | U16 | a `git` child inheriting a working directory another test deleted | 2026-09-08 | the process-global `set_current_dir` was removed: `bare_filename_saves_in_cwd` now makes the cwd move in a subprocess (`ee28bf8`), and `set_current_dir` no longer occurs anywhere in the workspace. Causal, and demonstrated in both directions --- see below |
+| U17 | `read_dir_supersede_cancels_in_flight_predecessor`, the predecessor complete before the cancel took effect, ten occurrences across three CI legs and one local sweep | 2026-09-17 | the witness holds every worker thread behind a channel it releases, so the predecessor is in flight by construction when the supersede flips its token, and the bitten product (the cancel removed from `allocate`) fails it 30 of 30. Causal, and demonstrated in both directions --- see below |
 | U18 | a Go checksum-database fetch failed before anything was built | 2026-09-05, **REFERRED** | not a test and so out of this file's scope; the question lives in issue #249 |
 | U19 | a terminal bell not observed within a 5 s poll | 2026-09-05, **VOID** | the closer named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test --- R5's ground exactly --- and the loop at `src/daemon.rs:5294-5298` is unchanged since `dc92257` and reports nothing. Ruled at C1's close. U19 is live again above, as never-closed |
 | U20 | `composition_overhead` red alone | 2026-09-05 | a budget, now `#[ignore]` |
@@ -2339,6 +2328,83 @@ The count is a floor for the reason R7's is --- an occurrence is
 recorded only when someone reads a log --- and the three reproductions
 in the retirement experiment below are deliberate and are NOT counted
 here
+
+### U17's mechanism, held and then removed
+
+U17 is the second row retired on a demonstration rather than an
+argument (U16 is the first), and for the same reason the demonstration
+stays where the closer can be checked against it. The row as it stood
+live, with the ten occurrences it closed on:
+
+
+| field | value |
+|---|---|
+| selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
+| job | GitHub Actions: first the serialized crdt sweep (`--test-threads=1`), since then `Test (macos-latest / luajit)` seven times and `Test (ubuntu-latest / luajit)` once, all under cargo's default parallelism, and once the local gate's non-CRDT sweep. The job is not a discriminator for this row and a match needs the selector and the fragment on any CI test leg |
+| required fragments | `first read_dir must be superseded; got ok` |
+| occurrences | ten: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`; `main` at `dbe40a1`, run 34349759554 (E1's post-merge run), job `Test (macos-latest / luajit)` (102459915513), `tests/m8_1_acceptance.rs:278:5`, `assertion left == right failed: first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed`, the job's only failure against 119 `test result: ok`; and PR #269 review 2's gate at `95a6db4`, log `20260911T102129Z-2474066`, step `sweep-luajit` (the non-CRDT sweep under `--no-default-features --features luajit`), `tests/m8_1_acceptance.rs:278`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 0.33 s, the step's only failure, not rerun; and PR #270 at `e82fcb5`, run 34772792926, job `Test (macos-latest / luajit)` (103765362433), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.34 s, recorded at E6's close on 2026-09-13 and not rerun (the job's other red is the branch's own fixture defect, below); and PR #270 at `e804b97`, run 34774221987, the very next head, job `Test (macos-latest / luajit)` (103769261492), `tests/m8_1_acceptance.rs:278:5`, the same fragment, `9 passed; 1 failed` in 1.93 s, the job's only failure against 133 `test result: ok` --- the same fragments on the next run are a second occurrence, not a coincidence, and this row now has two on consecutive heads of one PR whose diff touches neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, an argument from untouched files and not a measurement; and PR #273 at `c4be8aa`, run 35031658924, job `Test (macos-latest / luajit)` (104591399407), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.26 s, the job's only failure against 140 `test result: ok`, recorded at E6c's close on 2026-09-16 and not rerun; the branch's diff touches neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, and its base control, `main`'s run at `7880c4b`, ran this leg green, which is one sample; and PR #275 at `b1ef903`, run 35221439579, job `Test (macos-latest / luajit)` (105202355414), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.49 s, the job's only failure against 148 `test result: ok`, recorded at E6d's fix round 1 on 2026-09-17 and not rerun; the commit is the review's witness commit and adds two files under `tests/`, touching neither `src/dispatch` nor `tests/m8_1_acceptance.rs`, and the selector ran `ok` on both macOS legs of the previous head `085ae4d`'s run, green samples; and PR #275 at `97b0d0f`, run 35252684064, job `Test (macos-latest / luajit)` (105308655905), `tests/m8_1_acceptance.rs:278:5`, `first read_dir must be superseded; got ok` with `left: "ok"` and `right: "cancelled"`, `test result: FAILED. 9 passed; 1 failed` in 2.61 s, the job's only failure against 148 `test result: ok`, recorded at E6d's fix round 1 on 2026-09-17 and not rerun; the commit touches one test file of the branch's own, and the selector ran `ok` on both macOS legs of the head before it, `888e5e1`, green samples. The second, third and fourth run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so are its third, fourth and fifth. Green runs are samples: non-reproduction and nothing more. The fourth occurrence is on `main` after two merges that did not touch `src/dispatch` or `tests/m8_1_acceptance.rs`, which is an argument from untouched files and not a measurement; it is the row's third occurrence on `main` and the second on this leg. The fifth is the gate's non-CRDT sweep on the reviewed head, not CI, and it establishes neither cause nor the branch's innocence; it is recorded here as an occurrence because the selector and the required fragment match exactly |
+| candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
+| closure | **2026-09-17, causal.** The witness holds the predecessor in flight deterministically: every worker thread of the editor's pool is occupied by a hold that reports it is running and then blocks on a channel the test owns, the two `read_dir`s are dispatched only after every hold has reported, so the first sits in the queue unable to complete while the second's `allocate` flips its token, and only then are the holds released. `read_dir_blocking` polls the token before its first entry, so the released predecessor returns `Cancelled` whatever the directory holds. The mechanism named above --- the predecessor completing before the cancellation took effect --- cannot occur in the witness, because the predecessor cannot start until the fixture lets it. Demonstrated in both directions below |
+
+Tally (U17): 10 = 9 + 1.
+
+**The chain.** `read_dir_supersede_cancels_in_flight_predecessor`
+dispatched two `pmacs.fs.read_dir`s under one supersede key in one Lua
+chunk and asserted the first settled `cancelled`. `AsyncRuntime::
+allocate` flips the predecessor's token synchronously when the
+successor is allocated, but the predecessor's worker had already been
+running since its own dispatch: the pool's threads take a queued job
+within microseconds, and `read_dir_blocking` over 256 empty files
+finishes in well under a millisecond on a fast runner. When the
+worker's enumeration ended before the flip, its reply was `ok`, and
+`tick` surfaced it as such --- the "supersede race lost the other
+way". Directory size and scheduler luck decided the outcome; the
+product's supersede contract was never what the test measured, which
+is why ten occurrences across three CI legs and one local non-CRDT
+sweep never converged on a mechanism in the code.
+
+**What was removed** is the test's dependence on the worker being slow.
+`AsyncRuntime::pool()` (new, `src/async_runtime.rs`) exposes the pool
+beneath the runtime, and the witness dispatches one hold per thread on
+it --- a closure that sends on a `started` channel and then blocks
+until the test drops its release sender --- and waits for as many
+`started` reports as `pool().size()`. The pool steals from its injector
+in batches, so a *queued* hold does not occupy a thread; a *started*
+one does, which is why the reports are the precondition and not the
+dispatches. From that moment no thread is free: the predecessor's
+dispatch queues it, the successor's dispatch flips its token, and the
+test asserts before releasing that neither job has settled and the key
+already names the successor (the positive control). Releasing lets the
+predecessor run into its flipped token at the first entry. The test
+still asserts the successor returns every entry.
+
+**The experiment**, on the gate's `m8_1_acceptance` binary at this
+commit, the same machine that produced the fifth occurrence:
+
+| binary | arm | runs | `got ok` |
+|---|---|---|---|
+| this commit | the witness alone, 300 runs | 300 | **0** |
+| this commit | the whole `m8_1_acceptance` suite (10 tests, default parallelism), 40 runs | 40 | **0** |
+| this commit with `job.cancel.cancel()` removed from `allocate` | the witness alone, 30 runs | 30 | **30** |
+
+Tally (U17-bite): 30 = 30 + 0.
+
+The third row is the bite and the reason the first two are not a count
+of green runs: with the supersede's cancel removed the witness fails
+every time with the row's exact fragment (`first read_dir must be
+superseded; got ok`), so what the 340 green runs show is a test that
+now decides on the product's behavior and on nothing else. The removal
+is what closes the row; the 0/340 is corroboration.
+
+**What is not closed.** A predecessor whose worker has *finished* ---
+its `ok` reply on the bus, not yet absorbed by `tick` --- and is then
+superseded still settles `ok`, because the runtime decides a job's
+outcome from the worker's reply and not from the token at absorption.
+That is a product nuance the contract's own words ("in-flight
+predecessor") admit, it is not what this row measured, and it is not
+filed here; naming it is not a claim that a user can observe it. The
+retirement criterion the row carried since C1 was the witness, and
+that is what landed.
 
 ### What U8 falsified: reporting is not repair
 

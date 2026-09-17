@@ -226,20 +226,76 @@ fn read_dir_reports_symlinks_with_separate_target_field() {
 // cancels the first
 // ---------------------------------------------------------------------------
 
+/// The predecessor is held in flight by the fixture, not by load.
+///
+/// The row this witnesses (U17 in `docs/ci-red-signatures.md`, ten
+/// occurrences across three CI legs and one local sweep) was a race
+/// the test itself ran: it wrote 256 files and hoped the first
+/// `read_dir` was still enumerating when the second superseded it,
+/// and on a fast enough runner the first worker finished before the
+/// cancel token flipped, so `A_STATUS` read `ok`. Nothing about the
+/// product decided that outcome; directory size and scheduler luck
+/// did.
+///
+/// Now every worker thread is occupied before the predecessor is
+/// dispatched: each hold reports that it is running and then blocks
+/// on a channel the test owns, and the test waits for as many reports
+/// as the pool has threads. From that moment no worker is free, so
+/// the predecessor sits in the queue --- dispatched, in flight, and
+/// unable to complete --- while the successor's dispatch flips its
+/// cancel token synchronously in `allocate`. Releasing the holds
+/// lets the predecessor run, and `read_dir_blocking` polls the token
+/// before its first entry (index 0 of the enumeration), so a
+/// pre-flipped token returns `Cancelled` whatever the directory
+/// holds; one entry is enough, and a handful keeps the successor's
+/// length assertion meaningful.
+///
+/// Bitten by removing the `job.cancel.cancel()` in
+/// `AsyncRuntime::allocate`: with the gate in place the predecessor
+/// then completes with `ok` every time, and the assertion fails
+/// deterministically rather than by chance.
 #[test]
 fn read_dir_supersede_cancels_in_flight_predecessor() {
-    // A directory with enough entries that the cancel-poll boundary
-    // is visible. Realistically supersede latency is bounded by
-    // worker dispatch + a single readdir loop iteration; we just
-    // need the first call to be in flight when the second comes in.
+    const ENTRIES: usize = 8;
     let dir = tempfile::tempdir().expect("tempdir");
-    for i in 0..256 {
+    for i in 0..ENTRIES {
         std::fs::write(dir.path().join(format!("f{i}")), b"").expect("write");
     }
 
     let mut state = fresh_editor();
     let path_str = dir.path().display().to_string();
 
+    // The gate. One hold per worker thread; each reports that it has
+    // started (so the test knows the thread is occupied, not merely
+    // that the hold is queued --- the pool steals in batches, and a
+    // queued hold leaves its thread free) and then blocks until its
+    // release sender is dropped.
+    let workers = state.async_runtime.pool().size();
+    assert!(workers >= 1, "the pool always has at least one thread");
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let mut releases = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let started = started_tx.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        releases.push(release_tx);
+        state.async_runtime.pool().dispatch(move |_| {
+            let _ = started.send(());
+            // Returns when the test drops the sender.
+            let _ = release_rx.recv();
+        });
+    }
+    drop(started_tx);
+    for i in 0..workers {
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|e| {
+                panic!("hold {i} of {workers} did not report running within 10 s: {e}")
+            });
+    }
+
+    // Both dispatches in one chunk, with every worker held: the first
+    // is queued and cannot run; the second supersedes it before the
+    // chunk returns.
     let chunk = format!(
         r#"
         _G.A_STATUS = nil
@@ -259,9 +315,27 @@ fn read_dir_supersede_cancels_in_flight_predecessor() {
         pmacs.async(function()
             _G.B_RESULT = h_b:await()
         end)
+        return h_a:id(), h_b:id()
     "#,
     );
-    eval_sync::<()>(&mut state, &chunk);
+    let (a_id, b_id): (u64, u64) = eval_sync(&mut state, &chunk);
+
+    // Positive control for the hold: with every worker occupied,
+    // neither job has settled, and the key already names the
+    // successor --- the supersede was issued while the predecessor
+    // was in flight.
+    assert!(
+        !state.async_runtime.is_complete(a_id) && !state.async_runtime.is_complete(b_id),
+        "neither read_dir may settle while every worker is held"
+    );
+    assert_eq!(
+        state.async_runtime.active_for_key("dired"),
+        Some(b_id),
+        "the supersede key must already name the successor"
+    );
+
+    // Release the gate; the predecessor runs into its flipped token.
+    drop(releases);
 
     pump_until(&mut state, |s| {
         let lua = s.lua_host.lua();
@@ -285,7 +359,11 @@ fn read_dir_supersede_cancels_in_flight_predecessor() {
         .load("return #_G.B_RESULT")
         .eval()
         .unwrap();
-    assert_eq!(b_len, 256, "second read_dir should return all 256 entries");
+    assert_eq!(
+        b_len,
+        i64::try_from(ENTRIES).expect("fits"),
+        "second read_dir should return all {ENTRIES} entries"
+    );
 }
 
 // ---------------------------------------------------------------------------
