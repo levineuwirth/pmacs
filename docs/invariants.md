@@ -34,10 +34,9 @@ setter, is the primitive, for three reasons:
   that never import the write.
 
 History clearing must clear whichever history the buffer has. In CRDT
-mode the undo history lives in loro's `UndoManager`, which has no
-`clear`; `CrdtState::clear_undo_history` rebinds a fresh manager to the
-same document, which is equivalent because a manager records only what
-happens after its construction.
+mode the undo history is the cross-peer arbiter's per-source stacks
+on the `Buffer`; the v0.1 rope stacks and those stacks are cleared
+together, and a remote import's pending record with them.
 
 The protection is layered and both layers are needed: rope-level
 `read_only` refuses the op at the daemon, while `set_round_trip_input`
@@ -56,6 +55,13 @@ deliberately does not break), and unified paste. Plain
 A single-codepoint optimistic CRDT insert classifies as
 `buffer.self-insert` by exact decode; a longer insert breaks. Lua reads
 the boundary through `ed.this_command()` and `ed.last_command()`.
+
+## Undo
+
+One mechanism, at the daemon: `Buffer` records each forward edit's loro
+op spans under its `UndoSource`, and `buffer.undo` pops the acting
+source's own last group, compensating on the daemon peer. No frontend
+undoes locally, and a compensation is never recorded as a group.
 
 ## Effective-edit returns
 

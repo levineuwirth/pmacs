@@ -2576,6 +2576,7 @@ dependencies = [
  "crossterm",
  "filedescriptor",
  "loro",
+ "loro-internal",
  "mlua",
  "nix 0.29.0",
  "pmacs-protocol",

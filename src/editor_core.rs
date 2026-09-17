@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::buffer::{Buffer, BufferId, EditOp};
+use crate::buffer::{Buffer, BufferId, EditOp, UndoSource};
 use crate::file_io::{FileMeta, save_atomic};
 use crate::lua_bindings::SharedRegistry;
 use crate::minibuffer::Minibuffer;
@@ -688,10 +688,13 @@ pub struct EditorCore {
     /// gestures, pastes, unbound keys) break the chain. Entries are
     /// pruned on `SessionDetached` (Q#KR11).
     pub command_history: HashMap<FrontendId, CommandBoundary>,
-    /// The buffer with an undo group open for a run of typed
-    /// self-inserts (E6.4, CRDT mode), closed at the next command
-    /// boundary that is not a self-insert.
-    undo_group: Option<BufferId>,
+    /// The buffer with an undo group open for each frontend's run of
+    /// typed self-inserts (E6c; E6.4 kept one global). The run counter
+    /// is per source (`command_history` is keyed by frontend), so the
+    /// open group must be too — otherwise a second typer's
+    /// `typed_run_begin` closes the first's group. Closed at the next
+    /// command boundary of that source that is not a self-insert.
+    undo_group: HashMap<FrontendId, BufferId>,
     /// Open context menu (Q#CM1), or `None` when closed. Shared
     /// `Arc<Mutex>` so the TUI [`crate::menu::MenuView`] overlay renders
     /// from the same state the dispatch path mutates — the menu twin of
@@ -809,7 +812,7 @@ impl EditorCore {
             clipboard_slot: Vec::new(),
             pending_clipboard: None,
             command_history: HashMap::new(),
-            undo_group: None,
+            undo_group: HashMap::new(),
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
             round_trip_buffers: std::collections::HashSet::new(),
@@ -1951,12 +1954,19 @@ impl EditorCore {
         // peer's edit inside my fold must not unfold it (Stage 3).
         self.unfold_before_point_edit();
         let buffer_id = self.active_buffer_id();
+        // E6c: a command-path edit belongs to the acting frontend
+        // (dispatch sets `active_frontend` before the command runs),
+        // including hook inserts like the auto-pair closer that land
+        // inside the command's fan-out.
+        let source = UndoSource::Frontend(self.active_frontend);
         // Scope the registry borrow: the origin translation below needs
         // `&mut self` after the views have been notified.
         let edit = {
             let mut reg = self.registry.borrow_mut();
             let buffer = reg.get_mut(buffer_id).map_err(|e| e.to_string())?;
-            let edit = buffer.apply_edit(op).map_err(|e| e.to_string())?;
+            let edit = buffer
+                .apply_edit_as(source, op)
+                .map_err(|e| e.to_string())?;
             for win in self.windows.values_mut() {
                 if win.buffer_id == buffer_id {
                     let _ = win.text_view.on_edit(buffer, &edit);
@@ -3007,15 +3017,22 @@ impl EditorCore {
     /// Undo the most recent edit on the active buffer; clamp the
     /// active window's cursor to the new length and notify all
     /// windows on this buffer.
+    ///
+    /// E6c: undoes the acting frontend's most recent
+    /// command-boundary group through the cross-peer arbiter (see
+    /// [`Buffer::undo_for`]), on every route — a prefix chord like
+    /// `C-x u` round-trips to this command, so it undoes correctly
+    /// without any frontend-side undo state.
     pub fn undo(&mut self) {
         self.active_window_mut().goal_col = None;
         let buffer_id = self.active_buffer_id();
+        let source = crate::buffer::UndoSource::Frontend(self.active_frontend);
         let edit = {
             let mut reg = self.registry.borrow_mut();
             let Ok(buffer) = reg.get_mut(buffer_id) else {
                 return;
             };
-            buffer.undo()
+            buffer.undo_for(source)
         };
         match edit {
             Ok(edit) => {
@@ -3048,15 +3065,20 @@ impl EditorCore {
     }
 
     /// Redo the most recently undone edit on the active buffer.
+    ///
+    /// E6c: redoes the acting frontend's most recently undone group
+    /// (see [`Buffer::redo_for`]); any forward edit by any source
+    /// clears every source's redo stack.
     pub fn redo(&mut self) {
         self.active_window_mut().goal_col = None;
         let buffer_id = self.active_buffer_id();
+        let source = crate::buffer::UndoSource::Frontend(self.active_frontend);
         let edit = {
             let mut reg = self.registry.borrow_mut();
             let Ok(buffer) = reg.get_mut(buffer_id) else {
                 return;
             };
-            buffer.redo()
+            buffer.redo_for(source)
         };
         match edit {
             Ok(edit) => {
@@ -4967,9 +4989,10 @@ impl EditorCore {
         entry.last = entry.this.take();
         entry.this = Some(name.to_owned());
         // E6.4: any command that is not a typed self-insert ends the
-        // run of typed characters undo groups together.
+        // run of typed characters undo groups together. E6c: per
+        // source — another frontend's command never ends yours.
         if name != SELF_INSERT_COMMAND {
-            self.undo_group_close();
+            self.undo_group_close_for(fid);
         }
     }
 
@@ -4982,42 +5005,38 @@ impl EditorCore {
         let entry = self.command_history.entry(fid).or_default();
         entry.this = None;
         entry.run = 0;
-        self.undo_group_close();
+        self.undo_group_close_for(fid);
     }
 
-    // ---- undo amalgamation (E6.4) ---------------------------------------
+    // ---- undo amalgamation (E6.4, per-source since E6c) -------------------
 
     /// Before a typed self-insert lands, once `rotate_command` has
     /// stamped it: when this keystroke begins a group --- the first of
     /// a run, or the first past every `limit` characters --- close the
-    /// open undo group and, in CRDT mode, open a new one on the active
-    /// buffer. `limit == 0` disables amalgamation: every keystroke is
-    /// its own step and no group is ever opened.
+    /// source's open undo group and open a new one on the active
+    /// buffer. `limit == 0` disables amalgamation across keystrokes:
+    /// every keystroke begins a group, which its command boundary
+    /// closes, so each keystroke's command is its own step.
     ///
-    /// Groups are what loro offers; the v0.1 stack has no group and is
-    /// amalgamated after the fact by [`Self::typed_run_end`]. Both are
-    /// driven from the same `run` count so the two histories cut their
-    /// groups at the same keystroke.
+    /// The v0.1 stack has no group and is amalgamated after the fact
+    /// by [`Self::typed_run_end`]. Both are driven from the same
+    /// per-source `run` count so the two histories cut their groups at
+    /// the same keystroke.
     pub fn typed_run_begin(&mut self, fid: FrontendId, limit: u32) {
-        if limit == 0 {
-            self.undo_group_close();
-            return;
-        }
-        let run = self.command_history.get(&fid).map_or(0, |e| e.run);
-        let first_of_group = run.is_multiple_of(limit);
-        if first_of_group {
-            self.undo_group_close();
-        }
         let buffer_id = self.active_buffer_id();
+        self.typed_run_begin_for(fid, buffer_id, limit);
+    }
+
+    /// E6c: buffer-targeted [`Self::typed_run_begin`] for the
+    /// optimistic import path, whose buffer is the op's, not
+    /// necessarily the source's active one.
+    pub fn typed_run_begin_for(&mut self, fid: FrontendId, buffer_id: BufferId, limit: u32) {
+        let run = self.command_history.get(&fid).map_or(0, |e| e.run);
         if let Ok(mut reg) = self.registry.try_borrow_mut()
             && let Ok(buffer) = reg.get_mut(buffer_id)
         {
-            if first_of_group {
-                buffer.undo_group_start();
-            } else {
-                buffer.undo_group_continue();
-            }
-            self.undo_group = Some(buffer_id);
+            buffer.arbiter_typed_begin(UndoSource::Frontend(fid), run, limit);
+            self.undo_group.insert(fid, buffer_id);
         }
     }
 
@@ -5035,18 +5054,67 @@ impl EditorCore {
         }
     }
 
-    /// Close the undo group left open on a buffer, if any. Left open
-    /// when the registry is borrowed at the moment of the call, and
-    /// retried by the next boundary.
-    fn undo_group_close(&mut self) {
-        let Some(buffer_id) = self.undo_group else {
+    /// Close the undo group `fid` left open on a buffer, if any. Left
+    /// open when the registry is borrowed at the moment of the call,
+    /// and retried by the next boundary.
+    fn undo_group_close_for(&mut self, fid: FrontendId) {
+        let Some(buffer_id) = self.undo_group.get(&fid).copied() else {
             return;
         };
         if let Ok(mut reg) = self.registry.try_borrow_mut() {
             if let Ok(buffer) = reg.get_mut(buffer_id) {
-                buffer.undo_group_end();
+                buffer.arbiter_close(UndoSource::Frontend(fid));
             }
-            self.undo_group = None;
+            self.undo_group.remove(&fid);
+        }
+    }
+
+    /// A frontend has detached (E6c; the kill ring's Q#KR11 rule,
+    /// per-frontend state must not outlive the session): forget the
+    /// run it had open, and on every buffer hand its undo history to
+    /// whoever undoes next ([`Buffer::arbiter_detach`]). Called from
+    /// the daemon's `SessionDetached` arm before the
+    /// `frontend.detached` hook runs, so a hook's own edit lands after
+    /// the transfer, as the newest thing.
+    pub fn detach_undo_source(&mut self, fid: FrontendId) {
+        self.undo_group.remove(&fid);
+        #[cfg(feature = "crdt")]
+        {
+            let mut reg = self.registry.borrow_mut();
+            for buffer_id in reg.ids().to_vec() {
+                if let Ok(buffer) = reg.get_mut(buffer_id) {
+                    buffer.arbiter_detach(UndoSource::Frontend(fid));
+                }
+            }
+        }
+    }
+
+    /// E6c: settle a remote import's stashed span (see
+    /// [`Buffer::arbiter_settle_remote`]). The daemon calls this
+    /// synchronously after a successful import with the source's
+    /// current run counter, so a typed op joins the source's
+    /// amalgamation run exactly like a dispatched keystroke --- and,
+    /// like one, leaves the run registered here, so the source's next
+    /// command boundary closes it and the command's own edit stands
+    /// alone instead of joining the run.
+    #[cfg(feature = "crdt")]
+    pub fn arbiter_settle_remote(
+        &mut self,
+        source: FrontendId,
+        buffer_id: BufferId,
+        run: u32,
+        limit: u32,
+        typed: bool,
+    ) {
+        if let Ok(mut reg) = self.registry.try_borrow_mut()
+            && let Ok(buffer) = reg.get_mut(buffer_id)
+        {
+            buffer.arbiter_settle_remote(UndoSource::Frontend(source), run, limit, typed);
+            if typed {
+                self.undo_group.insert(source, buffer_id);
+            } else {
+                self.undo_group.remove(&source);
+            }
         }
     }
 

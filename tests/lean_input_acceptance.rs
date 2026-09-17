@@ -91,17 +91,22 @@ fn lean_editor() -> (EditorState, PathBuf) {
 }
 
 // ---------------------------------------------------------------------------
-// 38 / 41 — the two expansion paths, and what an undo restores
+// 38 / 41 — the two expansion paths, and what an undo restores. E6c:
+// an expansion happens inside the keystroke's command that triggered
+// it and is part of that keystroke's undo step, and consecutive
+// keystrokes amalgamate (E6.4's run), so one undo takes the typed run
+// with the expansion it produced --- the same grain as auto-pair's
+// closer. Before E6c the expansion was a step of its own and cut the
+// run.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_finish_path_retains_the_terminator_in_one_undo_step() {
+fn the_finish_path_retains_the_terminator_and_undoes_with_its_run() {
     // `alp` is not a key; `alpha` is the shortest key extending it. The
     // space does not extend anything, so it lands first and the
     // expansion replaces the leader and the typed text — the span stops
     // BEFORE the terminator, so whatever auto-pairing did with it
-    // survives. One undo restores the same text either way, because the
-    // terminator was its own insert to begin with.
+    // survives.
     let (mut s, _f) = lean_editor();
     type_str(&mut s, "\\alp ");
     assert_eq!(text(&s), "α ", "terminator retained, not consumed");
@@ -109,18 +114,17 @@ fn the_finish_path_retains_the_terminator_in_one_undo_step() {
     exec(&s, "pmacs.window.buffer():undo()");
     assert_eq!(
         text(&s),
-        "\\alp ",
-        "one undo restores the pre-expansion text WITH its terminator — \
-         the expansion is a single edit"
+        "",
+        "one undo takes the typed run, its terminator and the expansion the \
+         terminator's keystroke produced, as one step"
     );
 }
 
 #[test]
-fn the_eager_path_takes_no_terminator_and_undoes_separately() {
+fn the_eager_path_takes_no_terminator_and_the_run_continues_past_it() {
     // `alpha` has no longer key extending it, so it is one of the 1,550
     // eager keys: it expands the moment the final `a` lands, and a
-    // following space is a SEPARATE edit. Rev 8 asserted the finish-path
-    // undo text for this example, which is the trap (round 9).
+    // following space is a separate edit that continues the same run.
     let (mut s, _f) = lean_editor();
     type_str(&mut s, "\\alpha");
     assert_eq!(text(&s), "α", "eager expansion, no terminator typed");
@@ -128,9 +132,12 @@ fn the_eager_path_takes_no_terminator_and_undoes_separately() {
     type_str(&mut s, " ");
     assert_eq!(text(&s), "α ");
     exec(&s, "pmacs.window.buffer():undo()");
-    assert_eq!(text(&s), "α", "the first undo removes the separate space");
-    exec(&s, "pmacs.window.buffer():undo()");
-    assert_eq!(text(&s), "\\alpha", "the second undoes the expansion");
+    assert_eq!(
+        text(&s),
+        "",
+        "one undo takes the run: the six keystrokes, the expansion inside the \
+         sixth, and the space that continued it"
+    );
 }
 
 #[test]

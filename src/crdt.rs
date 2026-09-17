@@ -46,12 +46,47 @@ use std::sync::{
 };
 
 use loro::{
-    ContainerTrait, ExportMode, LoroDoc, LoroEncodeError, LoroResult, TextDelta, UndoManager,
+    ContainerTrait, ExportMode, IdSpan, LoroDoc, LoroEncodeError, LoroResult, TextDelta,
     VersionVector,
 };
+use loro_internal::undo::DiffBatch;
 
 type TextDeltaBatches = Arc<Mutex<Vec<Vec<TextDelta>>>>;
 type TextDeltaSubscription = (TextDeltaBatches, Arc<AtomicBool>, loro::Subscription);
+type DiffCapture = Arc<Mutex<DiffBatch>>;
+type DiffSubscription = (DiffCapture, Arc<AtomicBool>, loro_internal::Subscription);
+
+/// The foreign changes that landed after one recorded op span (E6c),
+/// in the coordinates of the document right after that span.
+///
+/// The arbiter's undo is loro's own: the inverse of a span is a delta
+/// in the coordinates the span left the document in, and it is
+/// transformed against what changed since. What changed since is not
+/// everything --- the same source's later groups are undone before
+/// this one (LIFO) and cancel with their compensations --- but every
+/// change by anyone else, forward or compensation, which this base
+/// accumulates by composition. When a later span of the same source is
+/// undone, the base is transformed by that undo's inverse so it stays
+/// expressed in this span's coordinates, exactly as loro's
+/// `UndoManager` keeps the remote diff of each of its stack rows.
+#[derive(Clone, Debug, Default)]
+pub struct ChangeBase(DiffBatch);
+
+impl ChangeBase {
+    /// Compose a later change into this base.
+    pub fn compose(&mut self, later: &ChangeBase) {
+        self.0.compose(&later.0);
+    }
+
+    /// Whether nothing has landed since the span.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0
+            .cid_to_events
+            .values()
+            .all(loro_internal::event::Diff::is_empty)
+    }
+}
 
 /// The CRDT-backed buffer state.
 ///
@@ -71,25 +106,13 @@ pub struct CrdtState {
     text_delta_batches: TextDeltaBatches,
     text_delta_capture_enabled: Arc<AtomicBool>,
     _text_delta_subscription: loro::Subscription,
-    /// T M10.4: per-peer undo machinery. Bound to `doc`'s `peer_id`
-    /// at construction; produces inverse ops attributed to that peer.
-    ///
-    /// Loro's `UndoManager`:
-    /// - Local-only: undoes the bound peer's most recent change, not
-    ///   the document's most recent change (the M10.4 collaborative
-    ///   semantics that "undo my edits, not theirs" is provided by
-    ///   loro's underlying design, not by pmacs).
-    /// - Inverse ops interact with concurrent remote ops via the
-    ///   CRDT's normal convergence rules — the M10.4 acceptance
-    ///   criterion "B's edit lands on whatever surrounding text
-    ///   remains" is loro's intrinsic behavior.
-    /// - Default max undo steps: 100. Pmacs raises this to `10_000` to
-    ///   match v0.1's effectively-unbounded undo stack semantics.
-    ///
-    /// `UndoManager` is `!Send + !Sync` internally; `CrdtState` is
-    /// main-thread-only, matching the M10.1 rope-projection-redirect
-    /// constraint (workers consume the rope, not the CRDT).
-    undo: std::cell::RefCell<UndoManager>,
+    /// The document diff of one edit, captured while
+    /// [`Self::capture`] runs it (E6c): what the arbiter composes into
+    /// the other sources' bases. Kept subscribed for the state's life,
+    /// enabled only inside a capture, like the text-delta capture.
+    diff_capture: DiffCapture,
+    diff_capture_enabled: Arc<AtomicBool>,
+    _diff_subscription: loro_internal::Subscription,
 }
 
 impl CrdtState {
@@ -109,14 +132,67 @@ impl CrdtState {
         let _ = doc.get_text("body");
         let (text_delta_batches, text_delta_capture_enabled, text_delta_subscription) =
             Self::subscribe_text_deltas(&doc);
-        let undo = Self::create_undo_manager(&doc);
+        let (diff_capture, diff_capture_enabled, diff_subscription) = Self::subscribe_diffs(&doc);
         Ok(Self {
             doc,
             text_delta_batches,
             text_delta_capture_enabled,
             _text_delta_subscription: text_delta_subscription,
-            undo: std::cell::RefCell::new(undo),
+            diff_capture,
+            diff_capture_enabled,
+            _diff_subscription: diff_subscription,
         })
+    }
+
+    /// Subscribe to every document diff on the inner doc, composing
+    /// them into one batch while a capture is enabled (E6c).
+    fn subscribe_diffs(doc: &LoroDoc) -> DiffSubscription {
+        let capture = Arc::new(Mutex::new(DiffBatch::default()));
+        let enabled = Arc::new(AtomicBool::new(false));
+        let captured = Arc::clone(&capture);
+        let captured_enabled = Arc::clone(&enabled);
+        let subscription = doc.inner().subscribe_root(Arc::new(move |event| {
+            if !captured_enabled.load(Ordering::Relaxed) {
+                return;
+            }
+            let mut batch = DiffBatch::default();
+            for diff in event.events {
+                if batch
+                    .cid_to_events
+                    .insert(diff.id.clone(), diff.diff.clone())
+                    .is_none()
+                {
+                    batch.order.push(diff.id.clone());
+                }
+            }
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .compose(&batch);
+        }));
+        (capture, enabled, subscription)
+    }
+
+    /// Run `edit` and return what it did to the document as a
+    /// [`ChangeBase`] (E6c), composed from every diff event it
+    /// committed. Every arbiter-recorded change --- a local edit, a
+    /// remote import, a compensation --- runs inside one capture, and
+    /// its diff is what the other sources' bases absorb.
+    pub fn capture<T>(&self, edit: impl FnOnce() -> T) -> (T, ChangeBase) {
+        self.diff_capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.diff_capture_enabled.store(true, Ordering::Relaxed);
+        let result = edit();
+        self.diff_capture_enabled.store(false, Ordering::Relaxed);
+        let batch = std::mem::take(
+            &mut *self
+                .diff_capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        (result, ChangeBase(batch))
     }
 
     fn subscribe_text_deltas(doc: &LoroDoc) -> TextDeltaSubscription {
@@ -146,20 +222,6 @@ impl CrdtState {
         (batches, capture_enabled, subscription)
     }
 
-    /// T M10.4: construct a fresh `UndoManager` bound to the given doc.
-    /// Extracted as a helper because `from_bytes` constructs it AFTER
-    /// the initial seed insert (so the seed isn't observable as an
-    /// undoable op), while `new` constructs it before any ops happen
-    /// (same effect).
-    fn create_undo_manager(doc: &LoroDoc) -> UndoManager {
-        let mut undo = UndoManager::new(doc);
-        // Raise max undo steps from loro's default 100 to the one
-        // ceiling both histories share (E6.4): the realistic depth for
-        // human-driven editing, and what the v0.1 stack drops past.
-        undo.set_max_undo_steps(crate::buffer::UNDO_HISTORY_LIMIT);
-        undo
-    }
-
     /// Construct a CRDT state seeded with the given bytes.
     ///
     /// Used by the cold-path attach: an existing rope's contents are
@@ -179,20 +241,21 @@ impl CrdtState {
             let text = String::from_utf8_lossy(bytes);
             doc.get_text("body").insert(0, &text)?;
         }
-        // T M10.4: construct UndoManager AFTER the initial seed
-        // insert so the seed is not observable as an undoable op.
-        // The buffer's starting contents (from file load, scratch
-        // initial text, etc.) shouldn't be undoable from the user's
-        // perspective; only post-construction edits are.
+        // The seed insert is the buffer's starting contents and is
+        // not undoable: the arbiter (E6c) records only the spans of
+        // edits applied through `Buffer`, and the seed lands here
+        // before any of them.
         let (text_delta_batches, text_delta_capture_enabled, text_delta_subscription) =
             Self::subscribe_text_deltas(&doc);
-        let undo = Self::create_undo_manager(&doc);
+        let (diff_capture, diff_capture_enabled, diff_subscription) = Self::subscribe_diffs(&doc);
         Ok(Self {
             doc,
             text_delta_batches,
             text_delta_capture_enabled,
             _text_delta_subscription: text_delta_subscription,
-            undo: std::cell::RefCell::new(undo),
+            diff_capture,
+            diff_capture_enabled,
+            _diff_subscription: diff_subscription,
         })
     }
 
@@ -431,97 +494,60 @@ impl CrdtState {
         Ok(())
     }
 
-    /// T M10.4: undo the bound peer's most recent change.
+    /// E6c: the op spans applied since `from`, one per peer whose
+    /// counter advanced, in peer order.
     ///
-    /// Returns `true` if an undo was performed, `false` if there was
-    /// nothing to undo (the undo stack was empty). Inverse ops are
-    /// applied to the doc; the projection (`materialize_string`)
-    /// reflects the post-undo state immediately. Callers needing the
-    /// wire-format bytes for the inverse should use the
-    /// `version()` → `undo()` → `export_updates_since()` pattern,
-    /// mirroring the `apply_edit` path.
-    ///
-    /// Loro's `UndoManager`:
-    /// - Affects only the bound peer's ops; remote ops are unchanged
-    /// - Inverse interacts with concurrent remote ops via CRDT
-    ///   convergence (M10.4 acceptance: "B's edit lands on
-    ///   whatever surrounding text remains")
-    ///
-    /// `&self` (not `&mut self`) via interior mutability: the
-    /// underlying `UndoManager` needs `&mut` but pmacs's call sites
-    /// hold `CrdtState` by reference. `RefCell` gates this safely;
-    /// the main-thread-only constraint means there's no contention.
-    pub fn undo(&self) -> LoroResult<bool> {
-        self.undo.borrow_mut().undo()
+    /// The cross-peer undo arbiter records every forward edit as the
+    /// spans it produced: a local edit advances this doc's own peer,
+    /// a remote import advances the sending peer (and any peer whose
+    /// ops the update carried). Captured with the same
+    /// `version()` → mutate → query idiom as the wire export, so a
+    /// span names exactly the ops of one edit.
+    #[must_use]
+    pub fn spans_since(&self, from: &VersionVector) -> Vec<IdSpan> {
+        let now = self.doc.oplog_vv();
+        let mut spans: Vec<IdSpan> = now
+            .iter()
+            .filter_map(|(peer, end)| {
+                let start = from.get(peer).copied().unwrap_or(0);
+                (*end > start).then(|| IdSpan::new(*peer, start, *end))
+            })
+            .collect();
+        spans.sort_by_key(|span| span.peer);
+        spans
     }
 
-    /// T M10.4: redo the most-recently-undone change by the bound peer.
+    /// E6c: undo one op span of any peer against the foreign changes
+    /// since it, as new ops on this doc's own peer.
     ///
-    /// Symmetric to [`Self::undo`]. Returns `true` if a redo was
-    /// performed, `false` if the redo stack was empty.
-    pub fn redo(&self) -> LoroResult<bool> {
-        self.undo.borrow_mut().redo()
-    }
-
-    /// T M10.4: whether the bound peer has anything to undo.
-    pub fn can_undo(&self) -> bool {
-        self.undo.borrow().can_undo()
-    }
-
-    /// T M10.4: whether the bound peer has anything to redo.
-    pub fn can_redo(&self) -> bool {
-        self.undo.borrow().can_redo()
-    }
-
-    /// T M10.4: record an undo checkpoint.
+    /// This is loro's undo primitive, the one its `UndoManager` runs
+    /// its own stack through: the inverse of the span's ops is
+    /// computed from the op log in the coordinates the span left the
+    /// document in, then transformed against `base` --- what others
+    /// changed since --- so it removes what remains of the span's
+    /// inserts and restores what it deleted where the surrounding
+    /// text now is. Unlike the manager it is not bound to one peer:
+    /// the daemon can undo a frontend's optimistic ops here, which is
+    /// what makes the arbiter possible. The resulting ops are ordinary
+    /// local ops, exported and imported like any edit, and converge on
+    /// every replica by the same CRDT rules.
     ///
-    /// Pmacs's `apply_edit` semantics is "each successful forward edit
-    /// is its own undo unit." Loro's `UndoManager` groups ops into
-    /// undo units by merge interval; default 0 means no merging,
-    /// which matches pmacs's per-edit semantics naturally. The
-    /// explicit checkpoint method is exposed for v0.2+ batch-op
-    /// coalescing (Day 7 mitigation B) where multiple CRDT ops
-    /// should group into one undo unit.
-    pub fn record_checkpoint(&self) -> LoroResult<()> {
-        self.undo.borrow_mut().record_new_checkpoint()
-    }
-
-    /// E6.4: open an undo group. Loro merges every push after the
-    /// group's first into the group's step, so consecutive typed
-    /// self-inserts between here and [`Self::undo_group_end`] undo as
-    /// one. Any group already open is closed first, since loro refuses
-    /// a second `group_start`; a group whose manager is not yet ready
-    /// (no op recorded) is simply not opened, which leaves the edits
-    /// ungrouped rather than failing the keystroke.
-    pub fn undo_group_start(&self) {
-        let mut undo = self.undo.borrow_mut();
-        undo.group_end();
-        let _ = undo.group_start();
-    }
-
-    /// E6.4: close the open undo group, if any.
-    pub fn undo_group_end(&self) {
-        self.undo.borrow_mut().group_end();
-    }
-
-    /// Discard the bound peer's undo and redo history, keeping the
-    /// document itself untouched.
-    ///
-    /// Loro's `UndoManager` exposes no `clear`, but it does not need
-    /// one: a manager records only what happens **after** it is
-    /// constructed. [`Self::from_bytes`] already relies on exactly
-    /// that property to keep the seed insert out of undo. Replacing
-    /// the manager with a fresh one bound to the same doc therefore
-    /// leaves nothing to undo, and drops the old manager's retained
-    /// stacks with it.
-    ///
-    /// Used by [`crate::buffer::Buffer::set_generated_contents`], whose
-    /// contract is that a generated buffer accumulates no history
-    /// across refreshes. Marking the buffer read-only would stop the
-    /// history being *replayed*, but not being *retained* — a panel
-    /// refreshed on a timer would grow without bound.
-    pub fn clear_undo_history(&self) {
-        *self.undo.borrow_mut() = Self::create_undo_manager(&self.doc);
+    /// On return `base` is re-expressed in the coordinates *before*
+    /// the span (transformed by the span's inverse), which is what the
+    /// same source's next-older span needs it to be. A span whose
+    /// text is already gone produces no op; the caller reads
+    /// [`Self::spans_since`] to learn whether anything happened.
+    pub fn undo_span_against(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
+        let mut remap = loro_internal::FxHashMap::default();
+        let against = base.0.clone();
+        let commit =
+            self.doc
+                .inner()
+                .undo_internal(span, &mut remap, Some(&against), &mut |inverse| {
+                    base.0.transform(inverse, false);
+                })?;
+        drop(commit);
+        Ok(())
     }
 }
 
@@ -1255,215 +1281,198 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // T M10.4 — per-frontend undo acceptance tests.
+    // E6c — the arbiter's undo primitive, on the M10.4 scenarios.
     //
-    // Five tests covering the spec's three criteria plus two extras
-    // surfaced during the framing pass (concurrent-without-sync,
-    // region-overlap):
-    //
-    //   1. (covered elsewhere) Single-frontend identical to v0.1
-    //      — dual-mode buffer tests already verify this
-    //   2. Concurrent inserts with intervening sync: A inserts / sync
-    //      / B inserts / sync / A undoes / B's insert remains
-    //   3. Concurrent inserts WITHOUT intervening sync: A inserts /
-    //      B inserts (both unaware) / sync both ways / A undoes /
-    //      B's insert remains
-    //   4. B edits A's region: A inserts / sync / B edits within /
-    //      sync / A undoes A's insert / verify loro's region-
-    //      overlap behavior
-    //   5. Redo symmetry: each pattern with redo applied, state
-    //      returns to pre-undo
+    // M10.4 pinned these five through loro's peer-bound `UndoManager`,
+    // which the cross-peer arbiter retires. The same scenarios now pin
+    // `spans_since` + `undo_span`: what one peer's undo removes and
+    // what it leaves, with the undo issued from EITHER doc — the
+    // owning peer's own, or (the arbiter's shape) a third doc that
+    // merely imported the span. Loro's behavior is what is pinned,
+    // not ours to design: "B's edit lands on whatever surrounding
+    // text remains."
     // -----------------------------------------------------------------
 
+    /// The span one mutation produced on `state`.
+    fn span_of(state: &CrdtState, mutate: impl FnOnce(&CrdtState)) -> IdSpan {
+        let before = state.version();
+        mutate(state);
+        let spans = state.spans_since(&before);
+        assert_eq!(spans.len(), 1, "one local edit advances one peer");
+        spans[0]
+    }
+
+    /// Undo `span` against the changes `foreign` captured since it.
+    fn undo_against(state: &CrdtState, span: IdSpan, foreign: &ChangeBase) {
+        let mut base = foreign.clone();
+        state.undo_span_against(span, &mut base).expect("undo");
+    }
+
     #[test]
-    fn m10_4_concurrent_with_sync_a_undoes_b_remains() {
+    fn e6c_concurrent_with_sync_a_undoes_b_remains() {
         use loro::VersionVector;
-        // A inserts / sync / B inserts / sync / A undoes / verify
-        // B's insert remains, A's insert is gone.
         let a = CrdtState::new(1).expect("A");
         let b = CrdtState::new(2).expect("B");
-
-        // Round 1: A inserts "AA" at 0.
-        a.insert(0, "AA").expect("A insert");
-        // Sync A → B.
         let zero = VersionVector::default();
+        let a_span = span_of(&a, |s| s.insert(0, "AA").expect("A insert"));
         b.import_updates(&a.export_updates_since(&zero).unwrap())
             .unwrap();
-        assert_eq!(b.materialize_string(), "AA");
-
-        // Round 2: B inserts "BB" at end (position 2).
         b.insert(b.len_utf8(), "BB").expect("B insert");
-        // Sync B → A.
-        a.import_updates(&b.export_updates_since(&zero).unwrap())
-            .unwrap();
+        let ((), foreign) = a.capture(|| {
+            a.import_updates(&b.export_updates_since(&zero).unwrap())
+                .unwrap();
+        });
         assert_eq!(a.materialize_string(), "AABB");
-        assert_eq!(b.materialize_string(), "AABB");
 
-        // A undoes its own insert. B's "BB" must remain.
-        let undid = a.undo().expect("A undo");
-        assert!(undid);
-        let after_undo = a.materialize_string();
+        let before = a.version();
+        undo_against(&a, a_span, &foreign);
         assert_eq!(
-            after_undo, "BB",
-            "A's undo must remove only A's insert; B's must remain"
+            a.materialize_string(),
+            "BB",
+            "undoing A's span removes only A's insert; B's remains"
         );
-
-        // Sync A's undo back to B; B's projection must match A's.
+        let comp = a.spans_since(&before);
+        assert_eq!(
+            comp.len(),
+            1,
+            "the compensation is one span on A's own peer"
+        );
+        assert_eq!(comp[0].peer, 1);
         b.import_updates(&a.export_updates_since(&zero).unwrap())
             .unwrap();
         assert_eq!(b.materialize_string(), "BB");
     }
 
     #[test]
-    fn m10_4_concurrent_without_sync_a_undoes_b_remains() {
+    fn e6c_concurrent_without_sync_a_undoes_b_remains() {
         use loro::VersionVector;
-        // A inserts / B inserts (both unaware of each other) / sync
-        // bidirectionally / A undoes / verify B's insert remains.
         let a = CrdtState::new(1).expect("A");
         let b = CrdtState::new(2).expect("B");
-
-        // Both peers insert concurrently with no intervening sync.
-        a.insert(0, "AAA").expect("A insert");
+        let a_span = span_of(&a, |s| s.insert(0, "AAA").expect("A insert"));
         b.insert(0, "BBB").expect("B insert");
-
-        // Now sync bidirectionally.
         let zero = VersionVector::default();
         let a_bytes = a.export_updates_since(&zero).unwrap();
         let b_bytes = b.export_updates_since(&zero).unwrap();
-        a.import_updates(&b_bytes).unwrap();
+        let ((), foreign) = a.capture(|| a.import_updates(&b_bytes).unwrap());
         b.import_updates(&a_bytes).unwrap();
-
-        // Converged state contains both edits.
         assert_eq!(a.materialize_string(), b.materialize_string());
-        let converged = a.materialize_string();
-        assert!(converged.contains("AAA"));
-        assert!(converged.contains("BBB"));
-        assert_eq!(converged.len(), 6);
+        assert_eq!(a.materialize_string().len(), 6);
 
-        // A undoes its insert. B's "BBB" must remain.
-        a.undo().expect("A undo");
-        let after_undo = a.materialize_string();
+        undo_against(&a, a_span, &foreign);
         assert_eq!(
-            after_undo, "BBB",
-            "A's undo removes A's insert; B's BBB remains regardless of sync order"
+            a.materialize_string(),
+            "BBB",
+            "A's span undone; B's BBB remains regardless of sync order"
         );
-
-        // Sync undo to B; convergence holds.
         b.import_updates(&a.export_updates_since(&zero).unwrap())
             .unwrap();
         assert_eq!(b.materialize_string(), "BBB");
     }
 
     #[test]
-    fn m10_4_b_edits_a_region_then_a_undoes() {
+    fn e6c_b_edits_inside_a_region_then_a_undoes() {
         use loro::VersionVector;
-        // A inserts "hello" / sync / B edits within (inserts "X" at
-        // position 2, between "he" and "llo") / sync / A undoes /
-        // verify loro's behavior for region-overlap undo.
-        //
-        // Loro's UndoManager produces an inverse op that removes the
-        // bytes A originally inserted. B's "X" insert was at a
-        // position WITHIN A's "hello" block; after A's undo, what
-        // happens to B's "X"?
-        //
-        // CRDT semantics: B's "X" insert referenced A's "hello" block
-        // structurally (insert-between-codepoints). When A's hello is
-        // removed, B's X has no anchor — but it persists because
-        // loro's tombstone preserves the insertion point.
-        //
-        // This test PINS whatever behavior loro produces; the spec
-        // language "B's edit lands on whatever surrounding text
-        // remains" is loro's intrinsic behavior, not ours to design.
+        // B's "X" lands inside A's "hello"; undoing A's span removes
+        // the five bytes A inserted and leaves B's X on what remains.
         let a = CrdtState::new(1).expect("A");
         let b = CrdtState::new(2).expect("B");
-
-        a.insert(0, "hello").expect("A insert");
         let zero = VersionVector::default();
+        let a_span = span_of(&a, |s| s.insert(0, "hello").expect("A insert"));
         b.import_updates(&a.export_updates_since(&zero).unwrap())
             .unwrap();
-        assert_eq!(b.materialize_string(), "hello");
-
-        // B inserts "X" at position 2 ("he" + "X" + "llo" -> "heXllo").
         b.insert(2, "X").expect("B insert in middle");
-        a.import_updates(&b.export_updates_since(&zero).unwrap())
-            .unwrap();
+        let ((), foreign) = a.capture(|| {
+            a.import_updates(&b.export_updates_since(&zero).unwrap())
+                .unwrap();
+        });
         assert_eq!(a.materialize_string(), "heXllo");
-        assert_eq!(b.materialize_string(), "heXllo");
 
-        // A undoes "hello". B's "X" remains; the surrounding "hello"
-        // bytes attributed to A are removed.
-        a.undo().expect("A undo");
-        let after_undo = a.materialize_string();
-        assert_eq!(
-            after_undo, "X",
-            "A's undo removes A's hello; B's X remains on surrounding text \
-             (which is now empty)"
-        );
-
-        // Sync to B; convergence holds.
+        undo_against(&a, a_span, &foreign);
+        assert_eq!(a.materialize_string(), "X");
         b.import_updates(&a.export_updates_since(&zero).unwrap())
             .unwrap();
         assert_eq!(b.materialize_string(), "X");
     }
 
     #[test]
-    fn m10_4_redo_symmetric_after_undo() {
+    fn e6c_redo_is_the_compensation_span_undone() {
         use loro::VersionVector;
-        // Verify redo correctly reverses undo across the multi-peer
-        // patterns. Same setup as test 2 (concurrent-with-sync); A
-        // undoes / verifies / A redoes / verifies state returns to
-        // pre-undo.
+        // Redo has no primitive of its own: the compensation is a span
+        // like any other, and undoing it re-applies the group. A third
+        // undo then takes the redo's span --- the arbiter puts the
+        // redo's ops on the undo stack in the original's place, since
+        // the original's text is gone for good and its inverse against
+        // a stale base would apply positionally to whatever now sits
+        // there.
         let a = CrdtState::new(1).expect("A");
         let b = CrdtState::new(2).expect("B");
-        a.insert(0, "AA").expect("A insert");
         let zero = VersionVector::default();
+        let a_span = span_of(&a, |s| s.insert(0, "AA").expect("A insert"));
         b.import_updates(&a.export_updates_since(&zero).unwrap())
             .unwrap();
         b.insert(b.len_utf8(), "BB").expect("B insert");
-        a.import_updates(&b.export_updates_since(&zero).unwrap())
-            .unwrap();
-        let pre_undo = a.materialize_string();
-        assert_eq!(pre_undo, "AABB");
+        let ((), foreign) = a.capture(|| {
+            a.import_updates(&b.export_updates_since(&zero).unwrap())
+                .unwrap();
+        });
+        assert_eq!(a.materialize_string(), "AABB");
 
-        a.undo().expect("undo");
+        let comp = span_of(&a, |s| undo_against(s, a_span, &foreign));
         assert_eq!(a.materialize_string(), "BB");
-
-        a.redo().expect("redo");
+        let none = ChangeBase::default();
+        let redo = span_of(&a, |s| undo_against(s, comp, &none));
         assert_eq!(
             a.materialize_string(),
-            pre_undo,
-            "redo must restore pre-undo state across multi-peer scenarios"
+            "AABB",
+            "redo restores the pre-undo state"
+        );
+        undo_against(&a, redo, &none);
+        assert_eq!(
+            a.materialize_string(),
+            "BB",
+            "the redo's span is what undoes next"
         );
     }
 
     #[test]
-    fn m10_4_undo_is_local_only_across_peers() {
-        // Verify that A.undo() doesn't affect B's local view.
-        // (B's view only changes when A's inverse op is synced to B
-        // via import_updates.) Pins the "local-only" undo semantics
-        // loro's UndoManager promises.
+    fn e6c_a_third_doc_undoes_an_imported_span() {
         use loro::VersionVector;
+        // The arbiter's shape: the daemon (peer 9) never typed "hello";
+        // it imported A's ops. Undoing A's span there produces daemon
+        // ops that A and B import like any edit, and all three agree.
         let a = CrdtState::new(1).expect("A");
         let b = CrdtState::new(2).expect("B");
-        a.insert(0, "hello").expect("A insert");
+        let d = CrdtState::new(9).expect("daemon");
         let zero = VersionVector::default();
-        b.import_updates(&a.export_updates_since(&zero).unwrap())
-            .unwrap();
-        assert_eq!(b.materialize_string(), "hello");
-
-        // A undoes. B's view is NOT updated until B explicitly imports.
-        a.undo().expect("A undo");
-        assert_eq!(a.materialize_string(), "");
+        let a_before = a.version();
+        a.insert(0, "hello").expect("A insert");
+        let a_bytes = a.export_updates_since(&a_before).unwrap();
+        let d_before = d.version();
+        d.import_updates(&a_bytes).unwrap();
+        let imported = d.spans_since(&d_before);
+        assert_eq!(imported.len(), 1);
         assert_eq!(
-            b.materialize_string(),
-            "hello",
-            "B's view unchanged until B imports A's inverse op"
+            imported[0].peer, 1,
+            "the imported span is A's, not the daemon's"
         );
+        b.import_updates(&a_bytes).unwrap();
+        b.insert(5, "!").expect("B appends");
+        let b_bytes = b.export_updates_since(&zero).unwrap();
+        let ((), foreign) = d.capture(|| d.import_updates(&b_bytes).unwrap());
+        a.import_updates(&b_bytes).unwrap();
+        assert_eq!(d.materialize_string(), "hello!");
 
-        // Now B imports; convergence.
-        b.import_updates(&a.export_updates_since(&zero).unwrap())
-            .unwrap();
-        assert_eq!(b.materialize_string(), "");
+        let before = d.version();
+        undo_against(&d, imported[0], &foreign);
+        assert_eq!(d.materialize_string(), "!");
+        let comp = d.spans_since(&before);
+        assert_eq!(comp.len(), 1);
+        assert_eq!(comp[0].peer, 9, "the compensation is the daemon's own ops");
+        let comp_bytes = d.export_updates_since(&before).unwrap();
+        a.import_updates(&comp_bytes).unwrap();
+        b.import_updates(&comp_bytes).unwrap();
+        assert_eq!(a.materialize_string(), "!");
+        assert_eq!(b.materialize_string(), "!");
     }
 
     #[test]
