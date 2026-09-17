@@ -1743,10 +1743,79 @@ ok` and zero `FAILED` in each, and U17's selector
 So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
 #271, nor #276 sampled on this trunk run; every count stands where the
 PR #275 sections left it, and under the rerun rule a green sample
-retires nothing. This is the last code-bearing commit on `main` at
-E7's opening and E7's base control until the U17 witness lands on
-`main` with a full matrix run of its own (its section follows when
-that run has completed).
+retires nothing. This was the last code-bearing commit on `main` at
+E7's opening; the U17 witness then landed on `main` as `7002308`, and
+its run --- E7's base control --- is the next section.
+
+### `main` at `7002308`: run 35270380496, red on three first-snapshot reads in `Test (ubuntu-latest / lua54)`, #253's third and #277
+
+The U17 witness commit, landed on `main` directly at E7.0 and E7's
+base control --- the last code-bearing commit on `main` under E7's
+branch. Read at E7's opening on 2026-09-17, from the jobs endpoint,
+the red job's log and both macOS logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 35270380496, `push`, one attempt |
+| head | `7002308`, `main` (the U17 witness: `tests/m8_1_acceptance.rs`, `AsyncRuntime::pool()`, U17's closure below) |
+| window | created 2026-09-17T20:22:09Z, updated 20:46:35Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the failure | `Test (ubuntu-latest / lua54)` (105367961691): three targets in three suites, each the first `BufferSnapshot` read after an attach timing out at 5 s --- **#253's third occurrence** (`gpu_invocation_acceptance.rs:487`) and **#277** (the two `read initial BufferSnapshot` reads) |
+
+Tally (run-35270380496-jobs): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 105367893578 | success |
+| Changed paths | 105367893802 | success |
+| Lint (luajit) | 105367893865 | success |
+| Lint (lua54) | 105367893971 | success |
+| Format | 105367894926 | success |
+| M1 Acceptance Gates | 105367961598 | success |
+| GPU Render (headless) | 105367961622 | success |
+| M10 Perf Gates (crdt) | 105367961644 | success |
+| Test (crdt) | 105367961668 | success |
+| Test (ubuntu-latest / lua54) | 105367961691 | failure |
+| M4 Perf Gates | 105367961703 | success |
+| Test (ubuntu-latest / luajit) | 105367961706 | success |
+| M5 Perf Gates | 105367961709 | success |
+| Perf budgets (debug) | 105367961716 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105367961746 | success |
+| M6 Perf Gates | 105367961769 | success |
+| Test (macos-latest / luajit) | 105367961773 | success |
+| Test (macos-latest / lua54) | 105367961787 | success |
+| Docs consistency | 105367963202 | skipped |
+
+The three reds, in the order the job ran them:
+
+Tally (run-35270380496-reds): 3 items in the list below.
+
+- `compile_mode_crdt_acceptance` `compile_run_converges_and_replica_edit_triggers_recovery`, `read initial BufferSnapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/compile_mode_crdt_acceptance.rs:33`, `test result: FAILED. 7 passed; 1 failed` in 7.56 s at 20:35:12Z --- **#277**
+- `e6_review1_gpu_route_probes` `gpu_route_plain_typing_undoes_through_the_daemon_arbiter`, the same fragment at `tests/e6_review1_gpu_route_probes.rs:35`, `5 passed; 1 failed` in 6.90 s at 20:35:36Z --- **#277**
+- `gpu_initial_target_acceptance`'s `gpu_invocation_acceptance::crdt::dedup_upgrade_publishes_the_snapshot_to_preexisting_grid_replicas`, `target snapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/gpu_invocation_acceptance.rs:487`, `20 passed; 1 failed` in 17.94 s at 20:36:55Z --- **#253's third occurrence and its first on CI**, one row of the five its local occurrences had
+
+`WouldBlock` appears exactly three times in the job, once per red,
+against 145 `test result: ok`; `did not become ready` zero times. The
+first two share one fragment and one route (both attach through
+`tests/common/daemon.rs`'s `attach_multi`, which sets a 5 s read
+timeout, then read the first `BufferSnapshot` in their own eight-line
+helper), so they are one issue, #277, filed in the `intermittent-red`
+shape with #253 named as the sibling mechanism. The third is #253's
+own first fragment at its own site and is recorded there. Not #271:
+that issue requires its `late.sock` and `m5_5` fragments as well, and
+neither appears in this job. The tree's diff against `e91ed19` is the
+U17 witness, an accessor on the async runtime and this file, none of
+which a daemon's first snapshot reads --- an argument from untouched
+files, not a measurement, and the previous code-bearing run
+(35265450358 at `25d2ce5`) ran this leg green, which is one sample.
+On both macOS legs (105367961773 luajit, 105367961787 lua54)
+`WouldBlock` and `did not become ready` appear zero times against 151
+`test result: ok` each, and U17's witness ran `ok` on both --- a green
+sample of a row closed causally below, and nothing more. So neither
+the `read Hello` family, nor #259, nor U4, nor #271, nor #276 sampled
+here; #253 moves to three and #277 opens at one. **E7's base control
+is this run, red on one ubuntu leg on rows the branch does not touch.**
 
 ### R7's seventeenth, local, on E5's tip
 
