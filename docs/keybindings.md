@@ -186,6 +186,13 @@ are not in the keymap at all.
 | `S-<up>` | `cursor.select-up` |
 | `TAB` | `buffer.tab` |
 
+### Scope: mode:diff
+
+| Key | Command |
+|---|---|
+| `n` | `diff.next-hunk` |
+| `p` | `diff.previous-hunk` |
+
 ### Scope: mode:dired
 
 | Key | Command |
