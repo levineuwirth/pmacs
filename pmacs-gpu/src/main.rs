@@ -1860,20 +1860,26 @@ fn typing_probe_observe(
 /// between a settled sample and its restore, and between the restore
 /// and the next sample, so one sample's `didChange` flush does not
 /// land inside the next. `PMACS_GPU_PROBE_WAIT_LSP_MS` waits that long
-/// for the modeline to read `LSP:ready` before the first sample, so a
-/// warm server is measured when a warm server is what was asked for;
-/// unset, the first keystroke goes as soon as the caret is placed,
-/// which is E6d.3's cold case. `PMACS_GPU_PROBE_KEY_GAPS_MS`, a
-/// comma-separated list, spaces the characters of a multi-character
-/// keystroke: the n-th gap is waited out, with the daemon's messages
-/// still applied, before the (n+1)-th character goes, so a run can
-/// pause long enough for an unconfirmed floor to release and then keep
-/// typing through the fallback (E6d.3's probe of the transition); a
-/// missing gap is zero. `PMACS_GPU_PROBE_OPEN=<path>` attaches with
-/// that file as the initial target, so the daemon opens it at attach
-/// as it does for `pmacs --gpu <file>` and the first keystroke lands on
-/// a daemon that has just opened the file (E6d.3's cold case); without
-/// it the probe types into whatever the daemon already shows.
+/// for the modeline to read `LSP:ready` before the first sample, and
+/// that is what "warm" means in every cell measured with it: the
+/// status tracker's `Ready`, the server's handshake answered, which
+/// rust-analyzer reaches some 200 ms after the daemon comes up and
+/// before its indexing begins (a `$/progress` then reads `LSP:idx`,
+/// and the probe latches the first `ready` it saw); it is not a
+/// finished index, and both arms of E6d's table ran while
+/// rust-analyzer still indexed. Unset, the first keystroke goes as
+/// soon as the caret is placed, which is E6d.3's cold case.
+/// `PMACS_GPU_PROBE_KEY_GAPS_MS`, a comma-separated list, spaces the
+/// characters of a multi-character keystroke: the n-th gap is waited
+/// out, with the daemon's messages still applied, before the (n+1)-th
+/// character goes, so a run can pause long enough for an unconfirmed
+/// floor to release and then keep typing through the fallback (E6d.3's
+/// probe of the transition); a missing gap is zero.
+/// `PMACS_GPU_PROBE_OPEN=<path>` attaches with that file as the initial
+/// target, so the daemon opens it at attach as it does for `pmacs --gpu
+/// <file>` and the first keystroke lands on a daemon that has just
+/// opened the file (E6d.3's cold case); without it the probe types into
+/// whatever the daemon already shows.
 /// `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole run.
 ///
 /// Per sample the report carries, in milliseconds after the
