@@ -114,7 +114,11 @@ fn fake_editor(dir: &Path, mode: &str, extra_env: &[(&str, &str)]) -> EditorStat
     let fake = fake_lsp_path();
     let mut env = format!("PMACS_FAKE_LSP_MODE = '{mode}'");
     for (k, v) in extra_env {
-        env.push_str(&format!(", {k} = '{v}'"));
+        env.push_str(", ");
+        env.push_str(k);
+        env.push_str(" = '");
+        env.push_str(v);
+        env.push('\'');
     }
     exec(
         &s,

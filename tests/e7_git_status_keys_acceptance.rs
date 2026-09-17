@@ -169,11 +169,7 @@ fn xy(root: &Path, rel: &str) -> String {
         let tag = fields.next().unwrap_or("");
         let rest = fields.next().unwrap_or("");
         match tag {
-            "?" | "!" => {
-                if rest == rel {
-                    return tag.repeat(2);
-                }
-            }
+            "?" | "!" if rest == rel => return tag.repeat(2),
             "1" | "u" => {
                 let code = &rest[..2];
                 if rest.rsplit(' ').next() == Some(rel) {

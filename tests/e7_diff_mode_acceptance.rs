@@ -127,7 +127,11 @@ fn write(root: &Path, rel: &str, body: &str) {
 
 /// Sixty numbered lines.
 fn numbered(n: usize) -> String {
-    (1..=n).map(|i| format!("line {i}\n")).collect()
+    use std::fmt::Write as _;
+    (1..=n).fold(String::new(), |mut out, i| {
+        let _ = writeln!(out, "line {i}");
+        out
+    })
 }
 
 /// A repository with one committed sixty-line file and a `Cargo.toml`.
