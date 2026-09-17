@@ -1238,6 +1238,19 @@ function pull_semantic_tokens_quiet(rec)
   -- ahead of the whole document's; the whole-document pull below
   -- follows and replaces everything when it lands. The store merges
   -- a range answer into the lines it covers and keeps the rest.
+  --
+  -- Not debounced, on a measurement (E6d.2, 2026-09-16, the tip's
+  -- daemon on src/editor.rs with rust-analyzer, the dispatcher loop
+  -- traced): the `buffer.after-edit` fan-out that carries the
+  -- coalesced didChange flush and this request's send cost n=526,
+  -- p50 0.09 ms, p90 0.33, max 3.07 per keystroke, and the ticks'
+  -- per-keystroke cost was the /full answer's absorption --- the LSP
+  -- tick p50 25 ms, max 125, over the 432 loops above 1.5 ms, the
+  -- async tick p50 17.6, max 105, over 465 --- which is the pull that
+  -- stays behind this one. Debouncing the range pull would delay the
+  -- visible lines' colors for no daemon-side saving; the /full
+  -- answer's cost is the scheduled item. The trace is retained beside
+  -- the phase's other runs (E6d fixes 1).
   local visible = nil
   if has_range and has_full then
     local ok, lines = pcall(pmacs.lsp._visible_lines, rec.buffer)
