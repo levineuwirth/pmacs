@@ -909,6 +909,99 @@ pmacs.hook.add("buffer.before-save", function()
   -- nil return either way: never a veto.
 end)
 
+-- E7.3: format on save, beside trim-on-save and after it in the
+-- before-save fan-out, so the formatter sees the trimmed text and
+-- saveplace's cursor record (registered later, in saveplace.lua) sees
+-- the formatted one. Default OFF like trim: rewriting bytes on save is
+-- a policy.
+--
+-- The wait is synchronous and bounded. The bound was measured before
+-- it was chosen (E7.3, 2026-09-17): `textDocument/formatting` on this
+-- repository's `src/editor.rs` (14k lines) against rust-analyzer took
+-- 203--215 ms for the first request after the handshake and 77--88 ms
+-- at the median warm, 256--274 ms at the warm maximum, over three runs
+-- of eleven requests each (`e7_3_measure_formatting_latency_on_editor_rs`).
+-- A second is four times that maximum and still short enough that a
+-- stalled formatter is a pause and not a hang; a user who formats
+-- larger files or slower servers raises it.
+--
+-- What the user sees when the formatter exceeds the bound, answers
+-- with an error, or is not running: the save proceeds with the buffer
+-- unformatted, the status line says so beside "saved" (set from the
+-- after-save hook, since the save's own message lands in between), and
+-- `*errors*` keeps the line. Never a veto, and never silent.
+pmacs.config.define {
+  name = "lsp.format-on-save",
+  description = "Ask the buffer's language server to format it before each save, waiting at most lsp.format-on-save.timeout-ms; a late or failed answer saves the buffer unformatted and says so.",
+  type = "boolean",
+  default = false,
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "lsp.format-on-save.timeout-ms",
+  description = "How long a save waits for the language server's formatting answer before proceeding unformatted.",
+  type = "integer",
+  default = 1000,
+  min = 50,
+  max = 60000,
+  mutability = "live",
+}
+
+-- The notice a save carries past its own "saved" message, set by the
+-- before-save hook and consumed by the after-save one; cleared at the
+-- next before-save so a vetoed or refused save cannot leave one behind.
+local format_on_save_notice = nil
+
+pmacs.hook.add("buffer.before-save", function()
+  format_on_save_notice = nil
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local ok, err = pcall(function()
+    if not pmacs.config.get("lsp.format-on-save", buf) then return end
+    local timeout = pmacs.config.get("lsp.format-on-save.timeout-ms", buf)
+    local outcome, detail = pmacs.lsp.format_buffer_sync(timeout)
+    if outcome == "applied" then
+      format_on_save_notice = string.format("formatted (%d edit%s)", detail, detail == 1 and "" or "s")
+    elseif outcome == "clean" then
+      format_on_save_notice = nil
+    elseif outcome == "timeout" then
+      format_on_save_notice = string.format(
+        "unformatted: the language server did not answer within %d ms", timeout)
+    elseif outcome == "failed" then
+      format_on_save_notice = "unformatted: formatting failed (" .. tostring(detail) .. ")"
+    elseif outcome == "no-server" then
+      -- A record naming a server that is not live is a formatter the
+      -- user is waiting on; no record at all is a buffer no server
+      -- serves, and silence is right there.
+      local rec = pmacs.lsp.active_attachment()
+      if rec then
+        format_on_save_notice = "unformatted: the language server is not running"
+      end
+    end
+  end)
+  if not ok then
+    format_on_save_notice = "unformatted: format-on-save failed: " .. tostring(err)
+  end
+  if format_on_save_notice and format_on_save_notice:sub(1, 11) == "unformatted" then
+    pmacs.error("format-on-save: " .. format_on_save_notice)
+  end
+  -- nil return either way: never a veto.
+end)
+
+pmacs.hook.add("buffer.after-save", function()
+  if not format_on_save_notice then return end
+  local notice = format_on_save_notice
+  format_on_save_notice = nil
+  local buf = pmacs.window.buffer()
+  local path = ""
+  if buf then
+    local ok, p = pcall(function() return buf:path() end)
+    if ok and type(p) == "string" then path = p end
+  end
+  pcall(ed.set_status, string.format("saved %s --- %s", path, notice))
+end)
+
 -- ---- bindings (Q#EC1: all verified free across builtin bind sites) --
 
 local function bind(seq, command)

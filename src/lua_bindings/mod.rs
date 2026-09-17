@@ -10802,6 +10802,31 @@ pub fn install_lsp(
     }
 
     {
+        // E7.3: `_wait_formatting(server, uri, job, timeout_ms)` ->
+        // "answered" | "failed" | "timeout". The synchronous half of
+        // format-on-save; see `LspManager::wait_for_formatting`.
+        let m = manager.clone();
+        lsp_mod.set(
+            "_wait_formatting",
+            lua.create_function(
+                move |_, (id, uri, job, timeout_ms): (LspServerIdLua, String, u64, u64)| {
+                    let outcome = m.borrow_mut().wait_for_formatting(
+                        id.0,
+                        &uri,
+                        job,
+                        std::time::Duration::from_millis(timeout_ms),
+                    );
+                    Ok(match outcome {
+                        crate::lsp::FormatWait::Answered => "answered",
+                        crate::lsp::FormatWait::Failed => "failed",
+                        crate::lsp::FormatWait::TimedOut => "timeout",
+                    })
+                },
+            )?,
+        )?;
+    }
+
+    {
         let m = manager.clone();
         lsp_mod.set(
             "_request_rename_raw",

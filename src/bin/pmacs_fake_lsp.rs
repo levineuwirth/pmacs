@@ -65,6 +65,10 @@
 //!   unreadable or unparsable plan sends no `applyEdit` at all and
 //!   reports itself through the sink, so a broken fixture cannot read
 //!   as a pass.
+//! * In every mode, `PMACS_FAKE_LSP_FORMAT_HOLD_MS` holds the
+//!   `textDocument/formatting` reply for that many milliseconds before
+//!   it is written (E7.3: a formatter that answers after a save's
+//!   bounded wait has given up).
 //! * If launched with `PMACS_FAKE_LSP_MODE=semantichold` (E6b.3): a
 //!   full-only, range-capable semantic-token server whose answers are
 //!   computed from the document it holds --- every maximal run of ASCII
@@ -977,6 +981,10 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/formatting", Some(idv)) => {
+                // E7.3: `PMACS_FAKE_LSP_FORMAT_HOLD_MS` holds the reply,
+                // so a save's bounded wait can be exceeded by a server
+                // that then answers --- the late-answer path.
+                hold_for("PMACS_FAKE_LSP_FORMAT_HOLD_MS", None);
                 // Synthetic two-edit reply: trim leading whitespace on
                 // line 0 and append a semicolon at line 3, col 7.
                 let resp = serde_json::json!({

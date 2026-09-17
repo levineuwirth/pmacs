@@ -1045,6 +1045,18 @@ struct Awaiter {
     token: CancellationToken,
 }
 
+/// What [`LspManager::wait_for_formatting`] saw (E7.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormatWait {
+    /// The response arrived and was absorbed into the formatting store.
+    Answered,
+    /// The request settled without an answer: an error response, a
+    /// cancellation, or the server going away.
+    Failed,
+    /// The deadline passed first; the request has been cancelled.
+    TimedOut,
+}
+
 /// In-flight `textDocument/*` request bound to one or more
 /// async-runtime jobs. When the JSON-RPC response is routed in
 /// [`LspManager::handle_response`] the response is absorbed into the
@@ -1653,6 +1665,61 @@ impl LspManager {
             },
         );
         job_id
+    }
+
+    /// E7.3: wait synchronously, at most `timeout`, for the formatting
+    /// request behind `job_id` on `sid` to be answered, pumping the
+    /// process supervisor and this server's frames while it waits ---
+    /// the two ticks the run loop would have taken in the same time.
+    /// The async runtime is deliberately NOT ticked: its tick hands the
+    /// settled ids to the Lua pump, and taking them here would leave
+    /// every other coroutine parked on a job that settled meanwhile.
+    ///
+    /// Returns [`FormatWait::Answered`] once the awaiter has left
+    /// `pending_external` and the formatting store holds an entry for
+    /// `uri` (the response was absorbed, edits or none);
+    /// [`FormatWait::Failed`] when the awaiter is gone and the store
+    /// has nothing (an error response, a cancelled request, the server
+    /// gone); [`FormatWait::TimedOut`] when the deadline passes first,
+    /// in which case the awaiter is cancelled so the late answer, when
+    /// it comes, is reaped by the cancellation sweep and abandoned
+    /// rather than applied to whatever the buffer holds by then.
+    pub fn wait_for_formatting(
+        &mut self,
+        sid: LspServerId,
+        uri: &str,
+        job_id: JobId,
+        timeout: Duration,
+    ) -> FormatWait {
+        let deadline = Instant::now() + timeout;
+        let key = crate::formatting::FormattingKey::new(sid.raw().to_string(), uri.to_owned());
+        loop {
+            self.supervisor.borrow_mut().tick();
+            self.drain_process_events(sid);
+            let live = self
+                .pending_external
+                .iter()
+                .any(|((s, _), p)| *s == sid && p.awaiters.iter().any(|a| a.job_id == job_id));
+            if !live {
+                let answered = self
+                    .formatting_store
+                    .lock()
+                    .expect("formatting store mutex poisoned")
+                    .get(&key)
+                    .is_some();
+                return if answered {
+                    FormatWait::Answered
+                } else {
+                    FormatWait::Failed
+                };
+            }
+            if Instant::now() >= deadline {
+                self.runtime.cancel(job_id);
+                self.drain_cancelled_externals(sid);
+                return FormatWait::TimedOut;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// T M4.5 task #8: override the per-request timeout (default 10s).
