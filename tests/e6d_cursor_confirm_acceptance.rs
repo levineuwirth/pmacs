@@ -60,7 +60,11 @@ enum SpinIn {
 fn daemon_with_slow_first_edit(spin_ms: u64, spin_in: SpinIn) -> (TestDaemon, tempfile::TempDir) {
     let fixture_dir = tempfile::TempDir::new().expect("fixture tempdir");
     let fixture = fixture_dir.path().join("a.rs");
-    let mut body = String::new();
+    // The probe types at byte 0 and its `text` metric fires when the
+    // mirror reads the typed run there, so the fixture must not begin
+    // with a byte a typed run could borrow: with `fn` first, `abcde`
+    // read as `abcdef` a keystroke early (review 1's Low 4).
+    let mut body = String::from("// e6d fixture\n");
     for i in 0..200 {
         let _ = writeln!(body, "fn f{i}() -> u32 {{\n    {i}\n}}\n");
     }
