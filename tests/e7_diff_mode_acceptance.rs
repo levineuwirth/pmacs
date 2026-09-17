@@ -8,8 +8,8 @@
 //! real `d`, a real `git diff`, and the keys.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use pmacs::editor::EditorState;
 use pmacs::cell::{Cell, CellGrid};
+use pmacs::editor::EditorState;
 use pmacs::protocol::{CellSize, FrontendId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -205,7 +205,11 @@ fn open_diff(s: &mut EditorState, path_fragment: &str) -> String {
         diff_text(s),
         status(s)
     );
-    assert_eq!(active_name(s), "*git-diff*", "the diff is the active buffer");
+    assert_eq!(
+        active_name(s),
+        "*git-diff*",
+        "the diff is the active buffer"
+    );
     assert_eq!(
         eval::<Option<String>>(s, "return pmacs.buffer.major_mode(pmacs.window.buffer())")
             .as_deref(),
@@ -264,8 +268,14 @@ fn e7_2_hunk_lines_scans_the_boundary_cases() {
     assert!(none.is_empty());
     let empty: Vec<i64> = eval(&s, "return pmacs.diffmode.hunk_lines('')");
     assert!(empty.is_empty());
-    let not_at_start: Vec<i64> = eval(&s, "return pmacs.diffmode.hunk_lines(' @@ not a hunk\\n+@@ nor this')");
-    assert!(not_at_start.is_empty(), "only a line starting with @@ is a hunk");
+    let not_at_start: Vec<i64> = eval(
+        &s,
+        "return pmacs.diffmode.hunk_lines(' @@ not a hunk\\n+@@ nor this')",
+    );
+    assert!(
+        not_at_start.is_empty(),
+        "only a line starting with @@ is a hunk"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -331,10 +341,18 @@ fn e7_2_n_and_p_walk_the_hunks_and_stop_at_the_ends() {
     // returns to the enclosing hunk's header.
     exec(&s, &format!("pmacs.editor.move_to_line({})", hunks[1] + 2));
     press(&mut s, KeyCode::Char('n'));
-    assert_eq!(cursor_line(&s), hunks[2], "n from a body crosses the boundary");
+    assert_eq!(
+        cursor_line(&s),
+        hunks[2],
+        "n from a body crosses the boundary"
+    );
     exec(&s, &format!("pmacs.editor.move_to_line({})", hunks[1] + 2));
     press(&mut s, KeyCode::Char('p'));
-    assert_eq!(cursor_line(&s), hunks[1], "p from a body goes to the enclosing header");
+    assert_eq!(
+        cursor_line(&s),
+        hunks[1],
+        "p from a body goes to the enclosing header"
+    );
 
     // From the header, p has nothing above it.
     exec(&s, "pmacs.editor.move_to_line(0)");
@@ -373,8 +391,17 @@ fn e7_2_n_drags_the_viewport_to_a_far_hunk() {
     seat_on(&mut s, "long.txt");
     let text = open_diff(&mut s, "long.txt");
     let hunks = hunk_lines(&text);
-    assert_eq!(hunks.len(), 3, "positive control: three hunks in a {}-line diff", text.lines().count());
-    assert!(hunks[2] > 24 * 4, "positive control: the third hunk is far past the first screen ({})", hunks[2]);
+    assert_eq!(
+        hunks.len(),
+        3,
+        "positive control: three hunks in a {}-line diff",
+        text.lines().count()
+    );
+    assert!(
+        hunks[2] > 24 * 4,
+        "positive control: the third hunk is far past the first screen ({})",
+        hunks[2]
+    );
     paint(&s);
     assert_eq!(eval::<i64>(&s, "return pmacs.editor.view_top()"), 0);
     press(&mut s, KeyCode::Char('n'));
@@ -414,7 +441,11 @@ fn e7_2_n_drags_the_viewport_to_a_far_hunk() {
 fn e7_2_a_single_hunk_is_reachable_and_is_both_ends() {
     let (_td, root) = tempdir();
     repo_with_long_file(&root);
-    write(&root, "long.txt", &numbered(60).replace("line 20\n", "line 20 edited\n"));
+    write(
+        &root,
+        "long.txt",
+        &numbered(60).replace("line 20\n", "line 20 edited\n"),
+    );
     let mut s = editor();
     open_panel(&mut s, &root, "Cargo.toml");
     seat_on(&mut s, "long.txt");
@@ -440,7 +471,11 @@ fn e7_2_an_empty_diff_has_no_hunk_to_move_to() {
     repo_with_long_file(&root);
     // Stage an edit, then put the worktree back: `M.` in the index,
     // `.M` in the worktree, nothing against HEAD.
-    write(&root, "long.txt", &numbered(60).replace("line 20\n", "line 20 edited\n"));
+    write(
+        &root,
+        "long.txt",
+        &numbered(60).replace("line 20\n", "line 20 edited\n"),
+    );
     git(&root, &["add", "long.txt"]);
     write(&root, "long.txt", &numbered(60));
     let mut s = editor();
@@ -471,13 +506,19 @@ fn e7_2_the_motion_refuses_outside_the_mode() {
     std::fs::write(&path, "@@ looks like a hunk\nbut this is a text file\n").unwrap();
     exec(
         &s,
-        &format!("pmacs.buffer.find_or_open({:?})", path.display().to_string()),
+        &format!(
+            "pmacs.buffer.find_or_open({:?})",
+            path.display().to_string()
+        ),
     );
     exec(&s, "pmacs.command.invoke('diff.next-hunk')");
     assert_eq!(status(&s), "diff: not a diff buffer");
     assert_eq!(cursor_line(&s), 0);
     press(&mut s, KeyCode::Char('n'));
-    let text: mlua::String = eval(&s, "local b = pmacs.window.buffer(); return b:slice(0, b:len())");
+    let text: mlua::String = eval(
+        &s,
+        "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
+    );
     assert!(
         String::from_utf8_lossy(&text.as_bytes()).starts_with("n@@"),
         "without the mode, n is self-insert"

@@ -13443,7 +13443,11 @@ pub fn install_completion_popup(lua: &Lua, core: &SharedCore) -> mlua::Result<()
                             .ok()
                             .flatten()
                             .map(std::sync::Arc::from);
-                        carry.base = row.get::<Option<u64>>("edits_base").ok().flatten().unwrap_or(0);
+                        carry.base = row
+                            .get::<Option<u64>>("edits_base")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
                         carry.unresolved = row
                             .get::<Option<bool>>("edits_unresolved")
                             .ok()

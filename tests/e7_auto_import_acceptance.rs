@@ -179,7 +179,11 @@ fn e7_4_an_import_above_the_caret_keeps_the_caret_on_the_typed_text() {
     type_to_popup(&mut s, "fn main() {\n    ".len(), "printl");
     press(&mut s, KeyCode::Enter);
     let expected = "use std::fmt;\nfn main() {\n    println!\n}\n";
-    assert_eq!(buffer_text(&s), expected, "the import and the completion both landed");
+    assert_eq!(
+        buffer_text(&s),
+        expected,
+        "the import and the completion both landed"
+    );
     assert!(!popup_visible(&s), "accept closes the popup");
     assert_eq!(
         cursor(&s),
@@ -258,7 +262,10 @@ fn e7_4_an_accept_after_the_buffer_changed_since_the_request_still_places_the_ed
     // One more letter, and no tick: the buffer has changed since the
     // answer the popup shows, and the new request is unanswered.
     type_str(&mut s, "n");
-    assert!(popup_visible(&s), "the session survives a letter that extends the prefix");
+    assert!(
+        popup_visible(&s),
+        "the session survives a letter that extends the prefix"
+    );
     let base_shown: u64 = eval(
         &s,
         "local rec = pmacs.lsp.active_attachment(); \
@@ -312,9 +319,16 @@ fn e7_4_edits_the_log_cannot_place_apply_nothing_and_say_so() {
            },
          }",
     );
-    assert!(popup_visible(&s), "positive control: the synthetic popup is showing");
+    assert!(
+        popup_visible(&s),
+        "positive control: the synthetic popup is showing"
+    );
     press(&mut s, KeyCode::Enter);
-    assert_eq!(buffer_text(&s), "abc def\ndefined", "the completion itself is inserted");
+    assert_eq!(
+        buffer_text(&s),
+        "abc def\ndefined",
+        "the completion itself is inserted"
+    );
     assert!(
         status(&s).starts_with("completion: the item's extra edits were not applied"),
         "the refusal is said: {:?}",
@@ -341,7 +355,10 @@ fn e7_4_an_unresolvable_edit_applies_none_of_the_item_s_edits() {
          end \
          return false",
     );
-    assert!(unresolved, "positive control: the item is marked unresolved");
+    assert!(
+        unresolved,
+        "positive control: the item is marked unresolved"
+    );
     press(&mut s, KeyCode::Enter);
     assert_eq!(buffer_text(&s), "fn main() {\n    println!\n}\n");
     assert!(
@@ -369,5 +386,8 @@ fn e7_4_the_carry_round_trips_through_the_driver() {
            end \
          end",
     );
-    assert_eq!((start, stop, text.as_str(), uri_ok), (0, 0, "use std::fmt;\n", true));
+    assert_eq!(
+        (start, stop, text.as_str(), uri_ok),
+        (0, 0, "use std::fmt;\n", true)
+    );
 }

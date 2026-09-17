@@ -169,16 +169,26 @@ fn save(s: &EditorState) -> Duration {
 fn e7_3_off_by_default_a_save_formats_nothing() {
     let dir = temp_dir("off");
     let mut s = fake_editor(&dir, "", &[]);
-    assert!(!eval::<bool>(&s, "return pmacs.config.get('lsp.format-on-save')"));
+    assert!(!eval::<bool>(
+        &s,
+        "return pmacs.config.get('lsp.format-on-save')"
+    ));
     assert_eq!(
-        eval::<i64>(&s, "return pmacs.config.get('lsp.format-on-save.timeout-ms')"),
+        eval::<i64>(
+            &s,
+            "return pmacs.config.get('lsp.format-on-save.timeout-ms')"
+        ),
         1000,
         "the measured default"
     );
     exec(&s, "pmacs.window.buffer():insert(0, '// touched\\n')");
     save(&s);
     tick(&mut s);
-    assert_eq!(disk(&dir), format!("// touched\n{BODY}"), "written as typed");
+    assert_eq!(
+        disk(&dir),
+        format!("// touched\n{BODY}"),
+        "written as typed"
+    );
     assert_eq!(status(&s), format!("saved {}", saved_path(&dir)));
     let n: i64 = eval(
         &s,
@@ -201,7 +211,10 @@ fn e7_3_on_the_save_writes_the_formatted_text() {
     assert_eq!(disk(&dir), FORMATTED, "the disk holds the formatted text");
     assert_eq!(buffer_text(&s), FORMATTED, "and so does the buffer");
     assert!(
-        !eval::<bool>(&s, "return pmacs.describe.buffer(pmacs.window.buffer()).modified"),
+        !eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+        ),
         "the buffer is clean after its save"
     );
     assert_eq!(
@@ -213,13 +226,22 @@ fn e7_3_on_the_save_writes_the_formatted_text() {
         "a formatted save is no error: {:?}",
         errors_text(&s)
     );
-    assert!(took < Duration::from_secs(1), "the fake answers at once: {took:?}");
+    assert!(
+        took < Duration::from_secs(1),
+        "the fake answers at once: {took:?}"
+    );
 
     // Buffer-local, global off.
     let dir2 = temp_dir("local");
     let s2 = fake_editor(&dir2, "", &[]);
-    exec(&s2, "pmacs.config.set_local(pmacs.window.buffer(), 'lsp.format-on-save', true)");
-    assert!(!eval::<bool>(&s2, "return pmacs.config.get('lsp.format-on-save')"));
+    exec(
+        &s2,
+        "pmacs.config.set_local(pmacs.window.buffer(), 'lsp.format-on-save', true)",
+    );
+    assert!(!eval::<bool>(
+        &s2,
+        "return pmacs.config.get('lsp.format-on-save')"
+    ));
     save(&s2);
     assert_eq!(disk(&dir2), FORMATTED, "the buffer-local setting formats");
 }
@@ -237,7 +259,10 @@ fn e7_3_format_runs_after_trim() {
         &s,
         "local b = pmacs.window.buffer(); local at = ('    fn main() {\\n    let a = 1;'):len(); b:insert(at, '   ')",
     );
-    assert!(buffer_text(&s).contains("let a = 1;   \n"), "positive control: blanks inserted");
+    assert!(
+        buffer_text(&s).contains("let a = 1;   \n"),
+        "positive control: blanks inserted"
+    );
     save(&s);
     assert_eq!(disk(&dir), FORMATTED, "trimmed, then formatted");
 }
@@ -270,8 +295,9 @@ fn e7_3_a_stalled_formatter_saves_unformatted_within_the_bound() {
         )
     );
     assert!(
-        errors_text(&s)
-            .contains("format-on-save: unformatted: the language server did not answer within 300 ms"),
+        errors_text(&s).contains(
+            "format-on-save: unformatted: the language server did not answer within 300 ms"
+        ),
         "*errors* keeps the line: {:?}",
         errors_text(&s)
     );
@@ -281,7 +307,10 @@ fn e7_3_a_stalled_formatter_saves_unformatted_within_the_bound() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(buffer_text(&s), BODY, "nothing arrives later");
-    assert!(!eval::<bool>(&s, "return pmacs.describe.buffer(pmacs.window.buffer()).modified"));
+    assert!(!eval::<bool>(
+        &s,
+        "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+    ));
 }
 
 /// A formatter that answers AFTER the bound: the save proceeds
@@ -299,7 +328,11 @@ fn e7_3_a_late_answer_is_never_applied() {
         "the save gives up at the bound, before the answer: {took:?}"
     );
     assert_eq!(disk(&dir), BODY, "saved unformatted");
-    assert!(status(&s).contains("did not answer within 200 ms"), "status: {:?}", status(&s));
+    assert!(
+        status(&s).contains("did not answer within 200 ms"),
+        "status: {:?}",
+        status(&s)
+    );
     // Let the held answer arrive and be processed.
     let deadline = Instant::now() + Duration::from_millis(2500);
     while Instant::now() < deadline {
@@ -308,15 +341,28 @@ fn e7_3_a_late_answer_is_never_applied() {
     }
     assert_eq!(buffer_text(&s), BODY, "the late answer touched nothing");
     assert!(
-        !eval::<bool>(&s, "return pmacs.describe.buffer(pmacs.window.buffer()).modified"),
+        !eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+        ),
         "and left the buffer clean"
     );
     assert_eq!(disk(&dir), BODY);
     // The next save, with the server now answering promptly, formats.
-    exec(&s, "pmacs.config.set('lsp.format-on-save.timeout-ms', 3000)");
-    exec(&s, "local b = pmacs.window.buffer(); b:insert(0, ' '); b:delete(0, 1)");
+    exec(
+        &s,
+        "pmacs.config.set('lsp.format-on-save.timeout-ms', 3000)",
+    );
+    exec(
+        &s,
+        "local b = pmacs.window.buffer(); b:insert(0, ' '); b:delete(0, 1)",
+    );
     save(&s);
-    assert_eq!(disk(&dir), FORMATTED, "a later save with time to spare formats");
+    assert_eq!(
+        disk(&dir),
+        FORMATTED,
+        "a later save with time to spare formats"
+    );
 }
 
 /// A formatter that answers with an error: unformatted, said.
@@ -326,7 +372,10 @@ fn e7_3_an_erroring_formatter_saves_unformatted_and_says_so() {
     let s = fake_editor(&dir, "error", &[]);
     exec(&s, "pmacs.config.set('lsp.format-on-save', true)");
     let took = save(&s);
-    assert!(took < Duration::from_millis(900), "an error answer does not wait: {took:?}");
+    assert!(
+        took < Duration::from_millis(900),
+        "an error answer does not wait: {took:?}"
+    );
     assert_eq!(disk(&dir), BODY);
     assert!(
         status(&s).starts_with(&format!(
@@ -368,7 +417,10 @@ fn e7_3_no_server_is_said_only_where_one_is_expected() {
     // A plain text buffer: no attachment, no notice.
     let txt = dir.join("notes.txt");
     std::fs::write(&txt, "notes\n").unwrap();
-    exec(&s, &format!("pmacs.buffer.find_or_open({:?})", txt.display().to_string()));
+    exec(
+        &s,
+        &format!("pmacs.buffer.find_or_open({:?})", txt.display().to_string()),
+    );
     exec(&s, "pmacs.window.buffer():insert(0, 'more ')");
     save(&s);
     assert_eq!(status(&s), format!("saved {}", txt.display()));
@@ -409,7 +461,10 @@ fn e7_3_measure_formatting_latency_on_editor_rs() {
     );
     let mut s = s;
     let handshake = Instant::now();
-    assert!(pump_lua_flag(&mut s, INITIALIZED, 120), "rust-analyzer init");
+    assert!(
+        pump_lua_flag(&mut s, INITIALIZED, 120),
+        "rust-analyzer init"
+    );
     eprintln!(
         "MEASURE handshake answered {} ms after the open",
         handshake.elapsed().as_millis()

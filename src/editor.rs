@@ -3968,9 +3968,7 @@ impl EditorState {
         };
         let placed: Option<Vec<(u64, u64, &str)>> = {
             let store = self.lsp_manager.borrow().semantic_token_store();
-            let guard = store
-                .lock()
-                .expect("semantic token store mutex poisoned");
+            let guard = store.lock().expect("semantic token store mutex poisoned");
             carry
                 .edits
                 .iter()

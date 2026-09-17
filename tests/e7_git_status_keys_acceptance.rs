@@ -396,7 +396,11 @@ fn e7_1_s_stages_the_row_under_the_cursor() {
     let mut s = editor();
     open_panel(&mut s, &root, "a1.txt");
     seat_on(&mut s, "unstaged.txt");
-    assert_eq!(xy(&root, "unstaged.txt"), ".M", "positive control: unstaged");
+    assert_eq!(
+        xy(&root, "unstaged.txt"),
+        ".M",
+        "positive control: unstaged"
+    );
 
     let text = press_and_wait_refresh(&mut s, KeyCode::Char('s'));
     assert_eq!(xy(&root, "unstaged.txt"), "M.", "s must stage the file");
@@ -441,8 +445,15 @@ fn e7_1_u_unstages_the_row_under_the_cursor() {
 
     let text = press_and_wait_refresh(&mut s, KeyCode::Char('u'));
     assert_eq!(xy(&root, "staged.txt"), ".M", "u must unstage the file");
-    assert!(text.lines().any(|l| l == ".M  staged.txt"), "panel:\n{text}");
-    assert_eq!(read(&root, "staged.txt"), before, "unstaging edits no bytes");
+    assert!(
+        text.lines().any(|l| l == ".M  staged.txt"),
+        "panel:\n{text}"
+    );
+    assert_eq!(
+        read(&root, "staged.txt"),
+        before,
+        "unstaging edits no bytes"
+    );
     assert_eq!(status(&s), "git: unstaged staged.txt");
 }
 
@@ -461,7 +472,10 @@ fn e7_1_s_then_u_round_trips_a_row() {
     seat_on(&mut s, "unstaged.txt");
     let text = press_and_wait_refresh(&mut s, KeyCode::Char('u'));
     assert_eq!(xy(&root, "unstaged.txt"), ".M", "back where it started");
-    assert!(text.lines().any(|l| l == ".M  unstaged.txt"), "panel:\n{text}");
+    assert!(
+        text.lines().any(|l| l == ".M  unstaged.txt"),
+        "panel:\n{text}"
+    );
     assert_eq!(read(&root, "unstaged.txt"), before);
 }
 
@@ -488,13 +502,20 @@ fn e7_1_s_covers_the_deleted_untracked_and_both_rows() {
     seat_on(&mut s, "both.txt");
     assert_eq!(xy(&root, "both.txt"), "MM");
     press_and_wait_refresh(&mut s, KeyCode::Char('s'));
-    assert_eq!(xy(&root, "both.txt"), "M.", "the worktree half joins the index");
+    assert_eq!(
+        xy(&root, "both.txt"),
+        "M.",
+        "the worktree half joins the index"
+    );
 
     // And `u` on the staged add makes it untracked again.
     seat_on(&mut s, "untracked.txt");
     press_and_wait_refresh(&mut s, KeyCode::Char('u'));
     assert_eq!(xy(&root, "untracked.txt"), "??");
-    assert_eq!(read(&root, "untracked.txt").as_deref(), Some("untracked body\n"));
+    assert_eq!(
+        read(&root, "untracked.txt").as_deref(),
+        Some("untracked body\n")
+    );
 }
 
 /// A rename row carries two paths and `s`/`u` move both.
@@ -505,11 +526,23 @@ fn e7_1_u_and_s_move_both_paths_of_a_rename() {
     let mut s = editor();
     open_panel(&mut s, &root, "a1.txt");
     seat_on(&mut s, "renamed_to.txt");
-    assert_eq!(xy(&root, "renamed_to.txt"), "R.", "positive control: staged rename");
+    assert_eq!(
+        xy(&root, "renamed_to.txt"),
+        "R.",
+        "positive control: staged rename"
+    );
 
     press_and_wait_refresh(&mut s, KeyCode::Char('u'));
-    assert_eq!(xy(&root, "renamed_from.txt"), ".D", "the origin's removal is unstaged");
-    assert_eq!(xy(&root, "renamed_to.txt"), "??", "the destination is untracked");
+    assert_eq!(
+        xy(&root, "renamed_from.txt"),
+        ".D",
+        "the origin's removal is unstaged"
+    );
+    assert_eq!(
+        xy(&root, "renamed_to.txt"),
+        "??",
+        "the destination is untracked"
+    );
 
     // Staging the destination alone from its `??` row re-stages the
     // add; the origin's deletion is its own row now.
@@ -553,26 +586,44 @@ fn e7_1_x_asks_a_question_that_cannot_be_skipped() {
     // An empty RET.
     press(&mut s, KeyCode::Enter);
     pump_for(&mut s, 150);
-    assert!(minibuffer_active(&s), "an empty answer must leave the question standing");
+    assert!(
+        minibuffer_active(&s),
+        "an empty answer must leave the question standing"
+    );
     assert_eq!(status(&s), "please answer y or n");
-    assert_eq!(read(&root, "unstaged.txt"), before, "nothing discarded on RET");
+    assert_eq!(
+        read(&root, "unstaged.txt"),
+        before,
+        "nothing discarded on RET"
+    );
 
     // A word that is neither.
     type_str(&mut s, "sure");
     press(&mut s, KeyCode::Enter);
     pump_for(&mut s, 150);
     assert!(minibuffer_active(&s), "an unrecognized answer must re-ask");
-    assert_eq!(read(&root, "unstaged.txt"), before, "nothing discarded on a wrong word");
+    assert_eq!(
+        read(&root, "unstaged.txt"),
+        before,
+        "nothing discarded on a wrong word"
+    );
 
     // C-g.
     ctrl(&mut s, 'g');
     pump_for(&mut s, 150);
     assert!(!minibuffer_active(&s), "C-g must close the question");
-    assert_eq!(status(&s), "Quit", "C-g's own message is what the user sees");
+    assert_eq!(
+        status(&s),
+        "Quit",
+        "C-g's own message is what the user sees"
+    );
     assert_eq!(read(&root, "unstaged.txt"), before, "C-g is a refusal");
     assert_eq!(xy(&root, "unstaged.txt"), ".M");
     let ring_after: Vec<Vec<String>> = eval(&s, "return pmacs.git._spawn_log");
-    assert_eq!(ring_after, ring_before, "no git child ran for a refused question");
+    assert_eq!(
+        ring_after, ring_before,
+        "no git child ran for a refused question"
+    );
 }
 
 /// `n` is a refusal too, and says so.
@@ -608,9 +659,15 @@ fn e7_1_x_then_y_restores_head_for_tracked_rows() {
     seat_on(&mut s, "unstaged.txt");
     press(&mut s, KeyCode::Char('x'));
     let text = answer_yes_and_wait(&mut s);
-    assert_eq!(read(&root, "unstaged.txt").as_deref(), Some("unstaged base\n"));
+    assert_eq!(
+        read(&root, "unstaged.txt").as_deref(),
+        Some("unstaged base\n")
+    );
     assert_eq!(xy(&root, "unstaged.txt"), "", "clean: absent from status");
-    assert!(!has_row(&text, "unstaged.txt"), "the row leaves the panel:\n{text}");
+    assert!(
+        !has_row(&text, "unstaged.txt"),
+        "the row leaves the panel:\n{text}"
+    );
     assert_eq!(status(&s), "git: discarded unstaged.txt");
 
     seat_on(&mut s, "both.txt");
@@ -618,7 +675,11 @@ fn e7_1_x_then_y_restores_head_for_tracked_rows() {
     assert!(minibuffer_prompt(&s).contains("Discard changes to both.txt (back to HEAD)?"));
     answer_yes_and_wait(&mut s);
     assert_eq!(read(&root, "both.txt").as_deref(), Some("both base\n"));
-    assert_eq!(xy(&root, "both.txt"), "", "index and worktree both back at HEAD");
+    assert_eq!(
+        xy(&root, "both.txt"),
+        "",
+        "index and worktree both back at HEAD"
+    );
 
     seat_on(&mut s, "deleted.txt");
     press(&mut s, KeyCode::Char('x'));
@@ -682,14 +743,16 @@ fn e7_1_x_on_a_rename_restores_the_origin_and_removes_the_destination() {
     seat_on(&mut s, "renamed_to.txt");
     press(&mut s, KeyCode::Char('x'));
     assert!(
-        minibuffer_prompt(&s)
-            .contains("Discard renamed_to.txt (back to HEAD's renamed_from.txt)?"),
+        minibuffer_prompt(&s).contains("Discard renamed_to.txt (back to HEAD's renamed_from.txt)?"),
         "prompt: {:?}",
         minibuffer_prompt(&s)
     );
     let text = answer_yes_and_wait(&mut s);
     assert!(root.join("renamed_from.txt").exists(), "the origin is back");
-    assert!(!root.join("renamed_to.txt").exists(), "the destination is gone");
+    assert!(
+        !root.join("renamed_to.txt").exists(),
+        "the destination is gone"
+    );
     assert_eq!(xy(&root, "renamed_from.txt"), "");
     assert!(
         !has_row(&text, "renamed_to.txt") && !has_row(&text, "renamed_from.txt"),
@@ -715,7 +778,11 @@ fn e7_1_unborn_u_leaves_the_file_and_x_says_delete() {
     seat_on(&mut s, "am.txt");
     assert_eq!(xy(&root, "am.txt"), "AM");
     press_and_wait_refresh(&mut s, KeyCode::Char('u'));
-    assert_eq!(xy(&root, "am.txt"), "??", "unstaged on an unborn branch is untracked");
+    assert_eq!(
+        xy(&root, "am.txt"),
+        "??",
+        "unstaged on an unborn branch is untracked"
+    );
     assert_eq!(
         read(&root, "am.txt").as_deref(),
         Some("am base\nworktree edit\n"),
@@ -766,8 +833,15 @@ fn e7_1_c_with_an_empty_message_commits_nothing() {
     assert_eq!(status(&s), "git: empty commit message; nothing committed");
     assert_eq!(head(&root), before);
     let ring_after: Vec<Vec<String>> = eval(&s, "return pmacs.git._spawn_log");
-    assert_eq!(ring_after, ring_before, "no git child ran for an empty message");
-    assert_eq!(xy(&root, "staged.txt"), "M.", "the staged row is still staged");
+    assert_eq!(
+        ring_after, ring_before,
+        "no git child ran for an empty message"
+    );
+    assert_eq!(
+        xy(&root, "staged.txt"),
+        "M.",
+        "the staged row is still staged"
+    );
 }
 
 /// A real message commits exactly what is staged: the staged rows leave
@@ -801,11 +875,22 @@ fn e7_1_c_with_a_message_commits_the_staged_rows() {
         "stage two: the panel's own commit"
     );
     assert_eq!(xy(&root, "staged.txt"), "", "committed");
-    assert_eq!(xy(&root, "renamed_to.txt"), "", "the staged rename went with it");
+    assert_eq!(
+        xy(&root, "renamed_to.txt"),
+        "",
+        "the staged rename went with it"
+    );
     assert_eq!(xy(&root, "both.txt"), ".M", "the worktree half of MM stays");
-    assert_eq!(xy(&root, "unstaged.txt"), ".M", "unstaged rows are not committed");
+    assert_eq!(
+        xy(&root, "unstaged.txt"),
+        ".M",
+        "unstaged rows are not committed"
+    );
     assert!(has_row(&panel_text(&s), "unstaged.txt"));
-    assert_eq!(status(&s), "git: committed stage two: the panel's own commit");
+    assert_eq!(
+        status(&s),
+        "git: committed stage two: the panel's own commit"
+    );
 }
 
 /// With nothing staged git refuses, and the refusal is what the user
@@ -846,7 +931,11 @@ fn e7_1_c_then_c_g_cancels() {
     ctrl(&mut s, 'g');
     pump_for(&mut s, 200);
     assert!(!minibuffer_active(&s));
-    assert_eq!(status(&s), "Quit", "C-g's own message is what the user sees");
+    assert_eq!(
+        status(&s),
+        "Quit",
+        "C-g's own message is what the user sees"
+    );
     assert_eq!(head(&root), before);
     assert_eq!(xy(&root, "staged.txt"), "M.");
 }
