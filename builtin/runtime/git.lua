@@ -6,7 +6,10 @@
 --   *git-status*  a `pmacs.listview` panel over
 --                 `git --no-optional-locks -C <root> status
 --                  --porcelain=v2 --branch -z`. RET visits the file,
---                 `d` shows its diff, `g` refreshes.
+--                 `d` shows its diff, `g` refreshes; since E7.1 `s`
+--                 stages the row, `u` unstages it, `x` discards it
+--                 behind a y-or-n question, and `c` commits what is
+--                 staged with a message typed at the minibuffer.
 --   *git-diff*    the diff for the FILE under point, in a generated
 --                 buffer rendered as plain text. There is no bundled
 --                 `diff` grammar (checked: `BUILTIN_LANGUAGES` in
@@ -592,7 +595,7 @@ local function status_header()
   end
   local n = #state.rows
   return string.format(
-    "git: %s --- %d change%s   RET visit  d diff  n/p move  g refresh  q quit",
+    "git: %s --- %d change%s   RET visit  d diff  s stage  u unstage  x discard  c commit  g refresh  q quit",
     where, n, n == 1 and "" or "s")
 end
 
@@ -669,7 +672,16 @@ local function open_status_panel(rows)
     -- is not necessarily the buffer that came back. The `keys` table
     -- binds it through the primitive's own buffer-local path, so no key
     -- is intercepted and COHERENCE.md §6 stays at six shadows.
-    keys = { d = "git.diff-file" },
+    keys = {
+      d = "git.diff-file",
+      -- E7.1: the four staging gestures, through the same buffer-local
+      -- path and for the same reason. None collides with the panel's
+      -- own surface (RET SPC n <down> p <up> TAB g q).
+      s = "git.stage",
+      u = "git.unstage",
+      x = "git.discard",
+      c = "git.commit",
+    },
     on_visit = visit_row,
     on_refresh = function() return pmacs.git._on_refresh() end,
   }
@@ -1230,5 +1242,318 @@ pmacs.command.define {
     -- nothing outside it announces.
     run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true),
       state.root, diff_requests.reserve(), pmacs.window.capture_destination())
+  end,
+}
+
+-- ---------------------------------------------------------------------
+-- The staging gestures (E7.1): s stage, u unstage, x discard, c commit
+-- ---------------------------------------------------------------------
+--
+-- Four mutations of the repository, each a git child with a purpose
+-- of its own, each followed by a status refresh so the panel shows
+-- what the tree is now rather than what it was at the keypress. They
+-- share the read-only gestures' discipline: the row, the root, the
+-- unborn flag and the destination are captured AT THE KEYPRESS and
+-- threaded through every step, and nothing reads module state from a
+-- continuation. What they do not share is the "newest wins" channel:
+-- a stage followed by an unstage are two mutations the user asked for
+-- in that order, and neither may discard the other. Each runs its
+-- steps in sequence and reserves a fresh status ticket when it is done,
+-- so the refresh after the LAST mutation is the one that renders.
+--
+-- The row keys operate on the FILE under the cursor --- the whole of
+-- the change a status row describes. Hunk-level staging needs a hunk
+-- model, which is E7.2's diff mode's and is not here.
+
+-- The row under the cursor of the live panel, or nil with the reason
+-- on the status line. The same four refusals `git.diff-file` makes,
+-- in the same words, shared by the gestures that take a row.
+local function row_under_cursor()
+  local active = pmacs.window.buffer()
+  if not (state.buffer and active and active == state.buffer) then
+    pmacs.editor.set_status("git: no *git-status* row here")
+    return nil
+  end
+  local row = state.display[pmacs.editor.cursor_line()]
+  if not (type(row) == "table" and row.path) then
+    pmacs.editor.set_status("git: no file on this line")
+    return nil
+  end
+  if not pmacs.git.is_text(row.path)
+    or (row.orig and not pmacs.git.is_text(row.orig)) then
+    refuse_unrepresentable(row)
+    return nil
+  end
+  if not git_enabled() then
+    pmacs.editor.set_status("git: disabled by the `git.enabled` setting")
+    return nil
+  end
+  if not state.root then
+    pmacs.editor.set_status("git: no repository --- run M-x git.status")
+    return nil
+  end
+  return row
+end
+
+-- Refresh the panel after a mutation under a ticket reserved NOW: the
+-- mutation has just completed, and a refresh that is newer than any
+-- still in flight is the one whose rows describe the tree.
+local function refresh_after(root, dest)
+  start_status(root, state.buffer, true, status_requests.reserve(), dest)
+end
+
+-- Run `request.steps` in order, then say `request.done` and refresh.
+-- A failing step stops the plan, says why, and refreshes anyway: a
+-- plan that half-moved the tree must show the tree it left.
+local function run_mutation(request)
+  request.index = request.index + 1
+  local step = request.steps[request.index]
+  if not step then
+    commit_ui(request.dest, "panel", function()
+      pmacs.editor.set_status(request.done)
+    end)
+    refresh_after(request.root, request.dest)
+    return
+  end
+  run_git(step.label, step.purpose, request.root, step.args, function(res)
+    if not (res.ok and res.code == 0) then
+      local reason = failure_reason(res)
+      commit_ui(request.dest, "panel", function()
+        pmacs.editor.set_status(string.format("git %s: %s", request.verb, reason))
+      end)
+      refresh_after(request.root, request.dest)
+      return
+    end
+    run_mutation(request)
+  end)
+end
+
+local function start_mutation(verb, row, steps, done)
+  run_mutation {
+    verb = verb,
+    row = row,
+    steps = steps,
+    done = done,
+    root = state.root,
+    dest = pmacs.window.capture_destination(),
+    index = 0,
+  }
+end
+
+-- The two-path rows carry both names; every other row carries one.
+local function row_paths(row)
+  if row.orig then return { row.orig, row.path } end
+  return { row.path }
+end
+
+local function with_paths(args, paths)
+  args[#args + 1] = "--"
+  for _, p in ipairs(paths) do args[#args + 1] = p end
+  return args
+end
+
+-- True when the path is not in HEAD: an index-side add (`A` in X), or
+-- an unmerged row added on either side. `restore --source=HEAD` has
+-- nothing to restore for these, so discarding them is removing them.
+local function added_not_in_head(row)
+  if row.kind == "untracked" or row.kind == "ignored" then return true end
+  return row.x == "A" or (row.kind == "unmerged" and row.y == "A")
+end
+
+--- `s`: stage the row. `git add` on a tracked path that is gone
+--- stages the removal (git 2.0's `-A` default for a pathspec), so one
+--- invocation covers the modified, the deleted, the untracked, the
+--- unmerged-now-resolved and both names of a rename.
+pmacs.command.define {
+  name = "git.stage",
+  description = "Stage the file under the cursor in *git-status*.",
+  fn = function()
+    local row = row_under_cursor()
+    if not row then return end
+    local shown = pmacs.git.display_path(row.path)
+    start_mutation("add", row, {
+      { label = "git add",
+        purpose = "staging " .. shown .. " from the *git-status* panel",
+        args = with_paths({ "add" }, row_paths(row)) },
+    }, "git: staged " .. shown)
+  end,
+}
+
+--- `u`: unstage the row. `git restore --staged` needs a HEAD to
+--- restore the index from; with an unborn HEAD the index entry is
+--- removed instead (`rm --cached`), which leaves the file where it is
+--- and makes it untracked --- the only "unstaged" an unborn tree has.
+pmacs.command.define {
+  name = "git.unstage",
+  description = "Unstage the file under the cursor in *git-status*.",
+  fn = function()
+    local row = row_under_cursor()
+    if not row then return end
+    local shown = pmacs.git.display_path(row.path)
+    if row.kind == "untracked" then
+      pmacs.editor.set_status("git: " .. shown .. " is untracked; nothing to unstage")
+      return
+    end
+    local unborn = (state.branch or {}).unborn == true
+    local args
+    if unborn then
+      -- `-f` overrides the up-to-date check that refuses an `AM` row
+      -- (staged content differing from the file); with `--cached` it
+      -- still touches nothing in the worktree.
+      args = with_paths({ "rm", "-q", "--cached", "-f", "-r" }, row_paths(row))
+    else
+      args = with_paths({ "restore", "--staged" }, row_paths(row))
+    end
+    start_mutation("unstage", row, {
+      { label = "git unstage",
+        purpose = "unstaging " .. shown .. " from the *git-status* panel",
+        args = args },
+    }, "git: unstaged " .. shown)
+  end,
+}
+
+-- What `x` will do to `row`, as steps, and the question that names it.
+-- "Discard" means: make the path what it is in HEAD. A path HEAD does
+-- not have --- an untracked file, an index-side add, anything on an
+-- unborn branch --- is therefore REMOVED, and the question says so
+-- rather than calling a deletion a discard.
+local function discard_plan(row, unborn)
+  local shown = pmacs.git.display_path(row.path)
+  if row.kind == "untracked" then
+    return {
+      question = string.format("Delete untracked %s? It is in no commit", shown),
+      steps = { { label = "git clean",
+                  purpose = "deleting untracked " .. shown .. " at the user's x in *git-status*",
+                  args = { "clean", "-q", "-f", "--", row.path } } },
+      done = "git: deleted " .. shown,
+    }
+  end
+  if unborn or added_not_in_head(row) then
+    local steps = {
+      { label = "git rm",
+        purpose = "removing " .. shown .. " from the index and the worktree at the user's x in *git-status*",
+        args = { "rm", "-q", "-f", "-r", "--", row.path } },
+    }
+    if row.orig and unborn then
+      -- An unborn rename is an ordinary add of the new path; git never
+      -- emits a `2` record there. Kept for the shape's completeness.
+      steps[1].args = { "rm", "-q", "-f", "-r", "--", row.orig, row.path }
+    end
+    return {
+      question = string.format("Delete %s? It is in no commit", shown),
+      steps = steps,
+      done = "git: removed " .. shown,
+    }
+  end
+  if row.orig then
+    -- A rename or copy: HEAD has the origin and not the destination,
+    -- so the origin is restored and the destination removed. For a
+    -- copy the origin is unchanged and the restore is a no-op.
+    return {
+      question = string.format("Discard %s (back to HEAD's %s)?",
+        shown, pmacs.git.display_path(row.orig)),
+      steps = {
+        { label = "git restore",
+          purpose = "restoring " .. pmacs.git.display_path(row.orig)
+            .. " from HEAD at the user's x in *git-status*",
+          args = { "restore", "--source=HEAD", "--staged", "--worktree", "--", row.orig } },
+        { label = "git rm",
+          purpose = "removing " .. shown .. " at the user's x in *git-status*",
+          args = { "rm", "-q", "-f", "-r", "--", row.path } },
+      },
+      done = "git: discarded " .. shown,
+    }
+  end
+  return {
+    question = string.format("Discard changes to %s (back to HEAD)?", shown),
+    steps = { { label = "git restore",
+                purpose = "restoring " .. shown .. " from HEAD at the user's x in *git-status*",
+                args = { "restore", "--source=HEAD", "--staged", "--worktree", "--", row.path } } },
+    done = "git: discarded " .. shown,
+  }
+end
+
+--- `x`: discard the row, behind E1.1's y-or-n question. The question
+--- is source-less, so RET on an empty answer re-asks, any answer but
+--- y/yes/n/no re-asks, and `C-g` is a no: there is no key that both
+--- dismisses the question and destroys the work. Everything the plan
+--- needs is captured before the question is asked; the answer arrives
+--- a keypress or more later, and by then the cursor may be elsewhere.
+pmacs.command.define {
+  name = "git.discard",
+  description = "Discard the file under the cursor in *git-status*, after asking.",
+  fn = function()
+    local row = row_under_cursor()
+    if not row then return end
+    local plan = discard_plan(row, (state.branch or {}).unborn == true)
+    local root = state.root
+    local dest = pmacs.window.capture_destination()
+    pmacs.minibuffer.y_or_n {
+      prompt = plan.question,
+      on_yes = function()
+        run_mutation {
+          verb = "discard", row = row, steps = plan.steps, done = plan.done,
+          root = root, dest = dest, index = 0,
+        }
+      end,
+      on_no = function()
+        pmacs.editor.set_status("git: kept " .. pmacs.git.display_path(row.path))
+      end,
+    }
+  end,
+}
+
+--- `c`: commit what is staged, with a message typed at the minibuffer.
+--- The prompt is `typed` under D18 --- RET commits the text as written,
+--- and there is no candidate list for a RET to take instead. An empty
+--- message commits nothing and says so; git would refuse it too, and
+--- asking git to refuse is a process for a fact already in hand.
+--- Nothing staged is git's answer ("nothing to commit"), surfaced as
+--- the failure it is, and the panel is refreshed either way.
+pmacs.command.define {
+  name = "git.commit",
+  description = "Commit the staged changes with a message typed at the minibuffer.",
+  fn = function()
+    local active = pmacs.window.buffer()
+    if not (state.buffer and active and active == state.buffer) then
+      pmacs.editor.set_status("git: no *git-status* here")
+      return
+    end
+    if not git_enabled() then
+      pmacs.editor.set_status("git: disabled by the `git.enabled` setting")
+      return
+    end
+    if not state.root then
+      pmacs.editor.set_status("git: no repository --- run M-x git.status")
+      return
+    end
+    local root = state.root
+    local dest = pmacs.window.capture_destination()
+    pmacs.minibuffer.read {
+      prompt = "Commit message: ",
+      history = "git-commit",
+      accept = "typed",
+      on_accept = function(message)
+        message = (message or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if message == "" then
+          pmacs.editor.set_status("git: empty commit message; nothing committed")
+          return
+        end
+        run_mutation {
+          verb = "commit", steps = {
+            { label = "git commit",
+              purpose = "committing the staged changes from the *git-status* panel",
+              args = { "commit", "-q", "-m", message } },
+          },
+          done = "git: committed " .. first_line(message),
+          root = root, dest = dest, index = 0,
+        }
+      end,
+      -- `C-g`'s own "Quit" lands on the status line after this; the
+      -- message is for a cancel that arrives some other way.
+      on_cancel = function()
+        pmacs.editor.set_status("git: commit cancelled")
+      end,
+    }
   end,
 }
