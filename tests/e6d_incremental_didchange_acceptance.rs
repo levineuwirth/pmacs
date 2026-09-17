@@ -327,8 +327,12 @@ fn the_same_edits_leave_every_server_holding_the_buffer_under_both_sync_kinds() 
 
 /// rust-analyzer's own reading of the document after the ranged
 /// change: the token it reports at the typed bytes is a three-unit
-/// `string` where a one-unit `number` stood, which a range applied to
-/// the wrong text could not produce. The server negotiates
+/// `string` where a one-unit `number` stood, and no `number` remains
+/// on the line. The second half is what sees a wrong delete: a delete
+/// range a byte short, or skipped, leaves the server holding `"s"1;`
+/// with the string exactly where it was typed, so the token at the
+/// typed bytes alone read `3:string` under both of review 1's bites
+/// while the fake-server row failed (Low 1). The server negotiates
 /// incremental sync, so every keystroke reached it as a range.
 ///
 /// Its diagnostics were the oracle asked for and cannot be: probed by
@@ -420,5 +424,31 @@ fn rust_analyzer_reads_the_typed_bytes_where_they_were_typed() {
         pump_lua_flag(&mut s, &format!("{token_at} == '3:string'"), 60),
         "rust-analyzer reads a three-byte string at the typed bytes; at the bytes: {:?}",
         eval::<Option<String>>(&s, &format!("return {token_at}"))
+    );
+    // The same answer, read whole for the edited line: the `1` the
+    // Backspace removed must be gone from the server's document, or a
+    // delete reported short left `"s"1;` and the string token above
+    // would still have read as typed.
+    let line_tokens = format!(
+        "(function() \
+           local rec = pmacs.lsp.active_attachment() \
+           local legend = pmacs.lsp.capabilities(rec.server).semanticTokensProvider.legend.tokenTypes \
+           local out = {{}} \
+           for _, t in ipairs(pmacs.semantic_tokens.tokens(rec.server, rec.uri)) do \
+             if t.line == {line} then \
+               out[#out + 1] = t.start .. ':' .. t.length .. ':' .. tostring(legend[t.token_type + 1]) \
+             end \
+           end \
+           return table.concat(out, ' ') \
+         end)()"
+    );
+    let on_line: String = eval(&s, &format!("return {line_tokens}"));
+    assert!(
+        on_line.contains(&format!("{col}:3:string")),
+        "the string token at the typed bytes, in the line's tokens: {on_line:?}"
+    );
+    assert!(
+        !on_line.contains(":number"),
+        "the removed `1` is gone from the server's line: no number token remains among {on_line:?}"
     );
 }
