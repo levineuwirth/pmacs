@@ -98,14 +98,14 @@ token request carries the text the server holds and its edit number, and
 the answer is resolved against that text and carried across the edits
 since, so a stale store shifts its tokens, never drops them; both merge
 sites read `positioned_tokens` and neither converts a column per frame.
-The same log feeds a ranged `didChange`; one that cannot account for the
-buffer's length sends the whole document.
+The same log feeds a ranged `didChange` and places an accepted
+completion's `additionalTextEdits` from the answer's edit number; what
+it cannot account for sends the whole document or applies none, said.
 
-LaTeX is served by `texlab`, and its root is not the repository root:
-`pmacs.lsp.config.latex` resolves the document root by an upward marker
-walk over texlab's own markers (`.texlabroot`, `texlabroot`), and `.git`
-is deliberately excluded from that walk, because a repository root is
-the wrong answer for a multi-file document, which is why it exists.
+LaTeX is served by `texlab`, whose root is not the repository root:
+`pmacs.lsp.config.latex` walks upward for texlab's own markers
+(`.texlabroot`, `texlabroot`) and deliberately never for `.git`, because
+a repository root is the wrong answer for a multi-file document.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
