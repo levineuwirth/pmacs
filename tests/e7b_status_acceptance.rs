@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;
 use pmacs::protocol::FrontendId;
@@ -58,6 +59,49 @@ fn tick(s: &mut EditorState) {
     s.tick_processes();
     s.tick_lsp();
     s.tick_async();
+}
+
+/// One keystroke through the production dispatch, as both frontends'
+/// keys arrive.
+fn press(s: &mut EditorState, code: KeyCode) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        },
+    );
+}
+
+/// Flush the coalesced `didChange` and tick for a moment so the server
+/// holds the edit before the round measures anything; returns the
+/// buffer's first sixty bytes.
+fn settle_did_change(s: &mut EditorState) -> String {
+    exec(s, "pmacs.lsp._flush_did_changes()");
+    let until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < until {
+        tick(s);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    eval(s, "local b = pmacs.window.buffer() return b:slice(0, 60)")
+}
+
+/// The open popup's candidates as `label (kind) detail`, or none. The
+/// kind and detail tell a server's item from the word source's.
+fn popup_labels(s: &EditorState) -> Vec<String> {
+    let core = s.core.borrow();
+    let popup = core.completion_popup.lock().unwrap();
+    popup
+        .as_ref()
+        .map(|p| {
+            p.candidates
+                .iter()
+                .map(|c| format!("{} ({:?}) {:?}", c.label, c.kind, c.detail))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn pump_lua_flag(s: &mut EditorState, flag: &str, secs: u64) -> bool {
@@ -463,43 +507,50 @@ fn e7b_1_measure_five_saves_keep_the_label_ready() {
             // as a file mid-edit is: rustfmt fails, the formatter
             // answers nothing, the save proceeds. Only under
             // `PMACS_E7B_MEASURE_ROOT`, since it writes the file.
+            // Typed through `dispatch_key`, as a user's edit is (C7b
+            // fix round 1): a Lua `insert` outside a command fires no
+            // `buffer.after-edit` and queues no `didChange`, so the
+            // first version of this round broke the file on disk
+            // while rust-analyzer went on holding the clean document.
             if std::env::var_os("PMACS_E7B_MEASURE_ROOT").is_none() {
                 eprintln!("MEASURE broken round skipped: not on a copy");
                 continue;
             }
-            exec(&s, "pmacs.window.buffer():insert(0, 'X')");
+            exec(&s, "pmacs.editor.goto_byte(0)");
+            press(&mut s, KeyCode::Char('X'));
+            let text = settle_did_change(&mut s);
+            eprintln!("MEASURE broken: typed and flushed; the top now reads {text:?}");
         }
         if round == "completion" {
             if std::env::var_os("PMACS_E7B_MEASURE_ROOT").is_none() {
                 eprintln!("MEASURE completion round skipped: not on a copy");
                 continue;
             }
-            // Undo the stray character, then a completion at point
-            // on a fresh line: type a prefix, ask, accept the first
-            // candidate with TAB, and save.
-            exec(
-                &s,
-                "local b = pmacs.window.buffer()
-                 b:delete(0, 1)
-                 b:insert(0, 'use std::collections::HashMa\\n')
-                 pmacs.editor.goto_byte(28)",
-            );
+            // Take the stray character back, then a completion at
+            // point on a fresh line: type the prefix, ask, accept the
+            // first candidate with TAB, and save. Every edit is a
+            // keystroke, so the server holds what the buffer holds.
+            exec(&s, "pmacs.editor.goto_byte(1)");
+            press(&mut s, KeyCode::Backspace);
+            for ch in "use std::collections::HashMa".chars() {
+                press(&mut s, KeyCode::Char(ch));
+                tick(&mut s);
+            }
+            // The auto-completion driver may have opened on `:`; an
+            // open popup would take RET as its accept.
+            if eval::<bool>(&s, "return pmacs.completion.popup_visible()") {
+                press(&mut s, KeyCode::Esc);
+            }
+            press(&mut s, KeyCode::Enter);
+            let text = settle_did_change(&mut s);
+            eprintln!("MEASURE completion: typed and flushed; the top now reads {text:?}");
+            exec(&s, "pmacs.editor.goto_byte(28)");
             exec(&s, "pmacs.command.invoke('completion.at-point')");
             let popup = pump_lua_flag(&mut s, "pmacs.completion.popup_visible()", 20);
-            eprintln!("MEASURE completion popup visible: {popup}");
+            let labels = popup_labels(&s);
+            eprintln!("MEASURE completion popup visible: {popup}; candidates {labels:?}");
             if popup {
-                use crossterm::event::{
-                    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
-                };
-                s.dispatch_key(
-                    FrontendId::LOCAL,
-                    KeyEvent {
-                        code: KeyCode::Tab,
-                        modifiers: KeyModifiers::NONE,
-                        kind: KeyEventKind::Press,
-                        state: KeyEventState::NONE,
-                    },
-                );
+                press(&mut s, KeyCode::Tab);
                 let line: String =
                     eval(&s, "local b = pmacs.window.buffer() return b:slice(0, 60)");
                 eprintln!("MEASURE completion accepted; the top now reads {line:?}");
