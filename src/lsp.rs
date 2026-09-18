@@ -1338,10 +1338,15 @@ impl LspManager {
     }
 
     /// T M4.8: short modeline label for `sid`, e.g. `"ready"`,
-    /// `"idx"`, `"crashed"`. Falls back to `"?"` for unknown ids.
+    /// `"idx"`, `"crashed"`, and since E7b.1 `"ready·check"` while a
+    /// non-indexing cycle is in flight ([`crate::lsp_status::LspStatus::modeline_text`]).
+    /// Falls back to `"?"` for unknown ids.
     #[must_use]
-    pub fn modeline_label(&self, sid: LspServerId) -> &'static str {
-        self.status_tracker.get(sid).map_or("?", |s| s.kind.label())
+    pub fn modeline_label(&self, sid: LspServerId) -> String {
+        self.status_tracker.get(sid).map_or_else(
+            || "?".to_owned(),
+            crate::lsp_status::LspStatus::modeline_text,
+        )
     }
 
     /// T M4.8: most recent error observed for `sid`, if any.
@@ -3969,6 +3974,14 @@ fn default_capabilities() -> Value {
         // the mandatory fallback every server understands.
         "general": {
             "positionEncodings": ["utf-8", "utf-16"],
+        },
+        // E7b.1: without this a server that honors the capability
+        // gate --- rust-analyzer does --- sends no `$/progress` at
+        // all, so the status tracker never saw indexing from it and
+        // the modeline said `ready` through the whole cache priming.
+        // The Lua drain answers `window/workDoneProgress/create`.
+        "window": {
+            "workDoneProgress": true,
         },
         "workspace": {
             // T M4.5 L3: pmacs applies server→client `workspace/

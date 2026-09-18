@@ -1620,6 +1620,22 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("pmacs/progress", None) => {
+                // E7b.1: a progress echo, in every mode. The client
+                // sends `pmacs/progress` with a `$/progress` payload
+                // (`token`, `value`) and the fake sends it back as the
+                // real notification, so a test drives any progress
+                // cycle --- rust-analyzer's flycheck, its cache
+                // priming, a numeric token --- through the client's
+                // own drain, with the test choosing when each begin
+                // and end arrives.
+                let notification = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "$/progress",
+                    "params": params,
+                });
+                write_frame(&mut stdout, &notification);
+            }
             _ => {}
         }
         if crashed_after_init {

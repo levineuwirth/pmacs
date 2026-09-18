@@ -11147,13 +11147,11 @@ pub fn install_lsp(
 
     {
         // T M4.8: short modeline label, e.g. "ready" / "idx" /
-        // "crashed". Stable string set.
+        // "crashed"; E7b.1 adds the busy suffix ("ready·check").
         let m = manager.clone();
         lsp_mod.set(
             "modeline_label",
-            lua.create_function(move |_, id: LspServerIdLua| {
-                Ok(m.borrow().modeline_label(id.0).to_owned())
-            })?,
+            lua.create_function(move |_, id: LspServerIdLua| Ok(m.borrow().modeline_label(id.0)))?,
         )?;
     }
 
@@ -11221,6 +11219,10 @@ pub fn install_lsp(
                 let t = lua.create_table_with_capacity(0, 7)?;
                 t.set("kind", st.kind.tag())?;
                 t.set("label", st.kind.label())?;
+                // E7b.1: the newest non-indexing cycle in flight, if any.
+                if let Some(busy) = st.busy.as_deref() {
+                    t.set("busy", busy)?;
+                }
                 t.set("restarts", st.restarts)?;
                 t.set("retry_responses", st.retry_responses)?;
                 if let crate::lsp_status::LspStatusKind::Indexing { title, percentage } = &st.kind {

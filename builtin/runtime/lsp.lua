@@ -2909,6 +2909,13 @@ local function handle_server_requests()
             pull_semantic_tokens_quiet(rec)
           end)
         elseif ev.kind == "request"
+            and ev.method == "window/workDoneProgress/create" then
+          -- E7b.1: the server announces a progress token before its
+          -- first `$/progress` on it. The tracker keys on the token
+          -- itself, so there is nothing to record here; answered so
+          -- the server's request table does not hold it forever.
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
+        elseif ev.kind == "request"
             and ev.method == "client/registerCapability" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
           pcall(register_file_watchers, sid,
