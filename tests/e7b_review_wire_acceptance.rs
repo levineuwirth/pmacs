@@ -952,49 +952,55 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
     );
 }
 
-/// #279's cost, measured: the file-watch poll's whole-tree walk
-/// (`walk_tree_blocking`, the job `lsp.lua` dispatches) over this
+/// #279's cost, measured: the file-watch poll's tree walk over this
 /// repository's root, fifteen times --- one minute at the 4 s resting
-/// cap --- with the entry count, and the same walk over the `.git`
-/// subtree alone, since the walk prunes nothing and the repository's
-/// object store is most of what it visits. Run with
+/// cap --- with the entry count, three ways: the unpruned walk the
+/// poll ran until C7b fix round 1, the same walk over the `.git`
+/// subtree alone (most of what it visited), and the walk the poll
+/// runs now, pruning `.git` and `target` as `lsp.lua` asks. Run with
 /// `cargo test --test e7b_review_wire_acceptance -- --ignored --nocapture measure_the_watch_walk`.
 #[test]
 #[ignore = "a measurement of the watch walk on this repository; run by hand and record"]
 fn measure_the_watch_walk_on_this_repository() {
-    use pmacs::fs::walk_tree_blocking;
+    use pmacs::fs::{walk_tree_blocking, walk_tree_blocking_pruning};
     use pmacs::worker::CancellationToken;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cancel = CancellationToken::new();
-    let mut whole = Vec::new();
-    let mut entries = 0;
-    for _ in 0..15 {
-        let t = Instant::now();
-        let listing = walk_tree_blocking(&root, &cancel).expect("the walk");
-        whole.push(t.elapsed().as_micros());
-        entries = listing.entries.len();
-    }
+    let prune = [".git".to_owned(), "target".to_owned()];
+    let report = |name: &str, walk: &dyn Fn() -> usize| {
+        let mut us = Vec::new();
+        let mut entries = 0;
+        for _ in 0..15 {
+            let t = Instant::now();
+            entries = walk();
+            us.push(t.elapsed().as_micros());
+        }
+        us.sort_unstable();
+        eprintln!(
+            "MEASURE {name}: {entries} entries; 15 walks min {} us, median {} us, max {} us, sum {} ms per minute at the 4 s cap",
+            us[0],
+            us[7],
+            us[14],
+            us.iter().sum::<u128>() / 1000
+        );
+    };
+    report("unpruned walk of the root", &|| {
+        walk_tree_blocking(&root, &cancel)
+            .expect("the walk")
+            .entries
+            .len()
+    });
     let git = root.join(".git");
-    let mut dot_git = Vec::new();
-    let mut git_entries = 0;
-    for _ in 0..15 {
-        let t = Instant::now();
-        let listing = walk_tree_blocking(&git, &cancel).expect("the walk");
-        dot_git.push(t.elapsed().as_micros());
-        git_entries = listing.entries.len();
-    }
-    whole.sort_unstable();
-    dot_git.sort_unstable();
-    eprintln!(
-        "MEASURE walk of {}: {entries} entries; 15 walks min {} us, median {} us, max {} us, sum {} ms",
-        root.display(),
-        whole[0],
-        whole[7],
-        whole[14],
-        whole.iter().sum::<u128>() / 1000
-    );
-    eprintln!(
-        "MEASURE walk of .git alone: {git_entries} entries; min {} us, median {} us, max {} us",
-        dot_git[0], dot_git[7], dot_git[14]
-    );
+    report("walk of .git alone", &|| {
+        walk_tree_blocking(&git, &cancel)
+            .expect("the walk")
+            .entries
+            .len()
+    });
+    report("the poll's walk now (.git and target pruned)", &|| {
+        walk_tree_blocking_pruning(&root, &cancel, &prune)
+            .expect("the walk")
+            .entries
+            .len()
+    });
 }

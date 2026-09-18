@@ -427,6 +427,12 @@ struct PendingJob {
     /// Non-optional by construction: [`JobSpec`] has no `Default`, so a
     /// dispatcher that supplies none does not compile.
     purpose: String,
+    /// Substrate cadence, not the user's work (#279): the statusline
+    /// activity indicator neither counts nor names a quiet job, while
+    /// `*workers*` lists it like any other. Set by the file-watch
+    /// poll's tree walk, which runs every few seconds for as long as a
+    /// server lives and asked for nothing a user would recognize.
+    quiet: bool,
 }
 
 /// Everything one job is born with.
@@ -456,6 +462,8 @@ struct JobSpec<'a> {
     resource: Option<ResourceOp>,
     /// What the job is doing. See [`PendingJob::purpose`].
     purpose: String,
+    /// Hidden from the activity indicator. See [`PendingJob::quiet`].
+    quiet: bool,
 }
 
 /// A settled filesystem mutation, with the paths the worker consumed
@@ -541,6 +549,9 @@ pub struct ActiveJobInfo {
     /// What this job is doing (worker identity Stage 1). Rendered by
     /// `*workers*` and by the statusline activity indicator.
     pub purpose: String,
+    /// Skipped by the activity indicator (#279); see
+    /// [`AsyncRuntime::activity_summary`].
+    pub quiet: bool,
 }
 
 /// One row in the `*workers*` buffer's "completed" section: a job
@@ -993,6 +1004,7 @@ impl AsyncRuntime {
             stream,
             resource,
             purpose,
+            quiet,
         } = spec;
         let purpose = match self.current_dispatch_name() {
             Some(name) if purpose.is_empty() => name,
@@ -1027,6 +1039,7 @@ impl AsyncRuntime {
                 dispatched_at: Instant::now(),
                 resource,
                 purpose,
+                quiet,
             },
         );
         (id, cancel)
@@ -1046,6 +1059,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: format!("sleep {}ms", ms.max(0)),
+            quiet: false,
         });
         let bus = self.workers.clone();
         let total = Duration::from_millis(ms.max(0).unsigned_abs());
@@ -1067,6 +1081,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: format!("sum 1..{n}"),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1099,6 +1114,7 @@ impl AsyncRuntime {
             stream: Some(cap),
             resource: None,
             purpose: format!("emit {count} items"),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1133,6 +1149,7 @@ impl AsyncRuntime {
             stream: Some(cap),
             resource: None,
             purpose: format!("grep {:?} in {}", spec.pattern, spec.root.display()),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1166,6 +1183,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: format!("parse {}", spec.language_name),
+            quiet: false,
         });
         let bus = self.workers.clone();
         let handoff = self.parse_handoff.clone();
@@ -1197,6 +1215,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: format!("read_dir {}", path.display()),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1213,17 +1232,30 @@ impl AsyncRuntime {
     /// [`JobKind::FsWalkTree`] still separates the two for the
     /// `*workers*` label and the purpose string. Cancellation and
     /// tolerance are [`crate::fs::walk_tree_blocking`]'s contract.
-    pub fn dispatch_fs_walk_tree(&self, base: PathBuf, supersede: Option<&str>) -> JobId {
+    ///
+    /// `prune` names directories the walk lists and does not enter,
+    /// wherever they sit under `base` (#279: the file-watch poll
+    /// passes `.git` and `target`, two thirds and the unbounded rest
+    /// of what it used to visit); `quiet` keeps the job off the
+    /// activity indicator (see [`PendingJob::quiet`]).
+    pub fn dispatch_fs_walk_tree(
+        &self,
+        base: PathBuf,
+        supersede: Option<&str>,
+        prune: Vec<String>,
+        quiet: bool,
+    ) -> JobId {
         let (id, cancel) = self.allocate(JobSpec {
             kind: JobKind::FsWalkTree,
             supersede,
             stream: None,
             resource: None,
             purpose: format!("walk_tree {}", base.display()),
+            quiet,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
-            let kind = run_fs_walk_tree(&cancel, &base);
+            let kind = run_fs_walk_tree(&cancel, &base, &prune);
             let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
         });
         id
@@ -1238,6 +1270,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: format!("stat {}", path.display()),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1261,6 +1294,7 @@ impl AsyncRuntime {
                 to: to.clone(),
             }),
             purpose: format!("rename {} -> {}", from.display(), to.display()),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1278,6 +1312,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: format!("chmod {mode:o} {}", path.display()),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1295,6 +1330,7 @@ impl AsyncRuntime {
             stream: None,
             resource: Some(ResourceOp::Remove { path: path.clone() }),
             purpose: format!("remove {}", path.display()),
+            quiet: false,
         });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
@@ -1340,6 +1376,7 @@ impl AsyncRuntime {
             stream: None,
             resource: None,
             purpose: purpose.into(),
+            quiet: false,
         })
     }
 
@@ -1572,6 +1609,7 @@ impl AsyncRuntime {
                 cancel_requested: j.cancel.is_cancelled(),
                 is_stream: j.stream_buffer.is_some(),
                 purpose: j.purpose.clone(),
+                quiet: j.quiet,
             })
             .collect();
         // Stable order: oldest first. The buffer renderer renders in
@@ -1616,7 +1654,11 @@ impl AsyncRuntime {
         let mut in_flight = 0usize;
         let mut oldest: Option<(&Instant, &str)> = None;
         for job in pending.values() {
-            if !matches!(job.state, PendingState::Running) {
+            // A quiet job (#279, the file-watch poll's walk) is
+            // substrate cadence: neither counted nor named here, so
+            // the indicator says "busy, on this" only about work a
+            // user asked for. `*workers*` still lists it.
+            if !matches!(job.state, PendingState::Running) || job.quiet {
                 continue;
             }
             in_flight += 1;
@@ -1803,8 +1845,8 @@ fn run_fs_read_dir(
     }
 }
 
-fn run_fs_walk_tree(cancel: &CancellationToken, base: &Path) -> ReplyKind {
-    match crate::fs::walk_tree_blocking(base, cancel) {
+fn run_fs_walk_tree(cancel: &CancellationToken, base: &Path, prune: &[String]) -> ReplyKind {
+    match crate::fs::walk_tree_blocking_pruning(base, cancel, prune) {
         Ok(listing) => ReplyKind::ReadDir(listing),
         Err(FsError::Cancelled) => ReplyKind::Cancelled,
         Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {
@@ -2262,6 +2304,43 @@ mod tests {
         }
     }
 
+    /// #279: a quiet job is invisible to the activity indicator and
+    /// visible in `*workers*`. Two walks over an empty directory,
+    /// dispatched without a tick between them so both sit `Running`
+    /// in the pending table: with the quiet one alone the summary is
+    /// `None`; with a loud one beside it the count is one and the
+    /// purpose is the loud one's. The snapshot lists both, the quiet
+    /// one flagged. Bitten by dropping `|| job.quiet` from
+    /// `activity_summary`: the first summary is `Some`.
+    #[test]
+    fn a_quiet_job_is_off_the_activity_indicator_and_in_the_workers_snapshot() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let rt = AsyncRuntime::with_pool_size(1);
+        let quiet = rt.dispatch_fs_walk_tree(td.path().to_path_buf(), None, vec![], true);
+        assert_eq!(
+            rt.activity_summary(),
+            None,
+            "a quiet walk alone shows nothing"
+        );
+        let loud = rt.dispatch_fs_walk_tree(td.path().to_path_buf(), None, vec![], false);
+        let summary = rt.activity_summary().expect("the loud walk shows");
+        assert_eq!(summary.in_flight, 1, "the quiet one is not counted");
+        assert!(
+            summary.oldest_purpose.starts_with("walk_tree "),
+            "{}",
+            summary.oldest_purpose
+        );
+        let snap = rt.workers_snapshot();
+        let row = |id: JobId| snap.active.iter().find(|j| j.id == id).expect("listed");
+        assert!(row(quiet).quiet, "*workers* lists the quiet job, flagged");
+        assert!(!row(loud).quiet);
+        assert_eq!(row(quiet).kind, JobKind::FsWalkTree);
+        pump_until(&rt, "both walks settle", || {
+            rt.workers_snapshot().active.is_empty()
+        });
+        assert_eq!(rt.activity_summary(), None);
+    }
+
     /// dired Stage 2a, acceptance 54 (controlled-bus layer). Allocate
     /// two resource jobs **without dispatching workers**, inject their
     /// successful replies in a chosen order, and assert
@@ -2287,6 +2366,7 @@ mod tests {
                     to: PathBuf::from("/tmp/a-to"),
                 }),
                 purpose: "rename a".to_owned(),
+                quiet: false,
             });
             let (b, _) = rt.allocate(JobSpec {
                 kind: JobKind::FsRemove,
@@ -2296,6 +2376,7 @@ mod tests {
                     path: PathBuf::from("/tmp/b-gone"),
                 }),
                 purpose: "remove b".to_owned(),
+                quiet: false,
             });
             let order = if reverse { [b, a] } else { [a, b] };
             for id in order {
@@ -2349,6 +2430,7 @@ mod tests {
                 to: PathBuf::from("/tmp/also-nope"),
             }),
             purpose: "rename nope".to_owned(),
+            quiet: false,
         });
         let (cancelled, _) = rt.allocate(JobSpec {
             kind: JobKind::FsRemove,
@@ -2358,6 +2440,7 @@ mod tests {
                 path: PathBuf::from("/tmp/never"),
             }),
             purpose: "remove never".to_owned(),
+            quiet: false,
         });
         rt.workers
             .send(

@@ -106,7 +106,7 @@ end
 
 local READ_DIR_OPTS = { supersede = true, tolerant = true }
 local STAT_OPTS = { supersede = true }
-local WALK_TREE_OPTS = { supersede = true }
+local WALK_TREE_OPTS = { supersede = true, prune = true, quiet = true }
 
 -- Two result shapes, chosen by `opts.tolerant` (dired Q#DR6):
 --
@@ -138,12 +138,38 @@ end
 -- unreadable subdirectory is skipped with its subtree; only the root
 -- failing to open fails the walk. Directory entries are included
 -- (kind "dir") --- consumers that only want files filter on kind.
+--
+-- Two more opts (#279): `prune = { "<name>", ... }` names directories
+-- the walk records and does not enter, wherever they sit under the
+-- base; `quiet = true` keeps the job off the statusline activity
+-- indicator (it still lists in `*workers*`), for a walk that is the
+-- editor's own cadence rather than something the user asked for.
 function fs.walk_tree(base, opts)
   if type(base) ~= "string" then
     error("pmacs.fs.walk_tree: base must be a string, got " .. type(base))
   end
   local key = read_opts(opts, "pmacs.fs.walk_tree", WALK_TREE_OPTS)
-  local id = async_mod._dispatch_fs_walk_tree(base, key)
+  local prune, quiet = nil, false
+  if opts ~= nil then
+    prune = opts.prune
+    if prune ~= nil then
+      if type(prune) ~= "table" then
+        error("pmacs.fs.walk_tree: opts.prune must be a table of names")
+      end
+      for i, name in ipairs(prune) do
+        if type(name) ~= "string" or name == "" or name:find("/", 1, true) then
+          error(string.format(
+            "pmacs.fs.walk_tree: opts.prune[%d] must be a bare directory name", i))
+        end
+      end
+    end
+    quiet = opts.quiet
+    if quiet ~= nil and type(quiet) ~= "boolean" then
+      error("pmacs.fs.walk_tree: opts.quiet must be a boolean")
+    end
+    quiet = quiet == true
+  end
+  local id = async_mod._dispatch_fs_walk_tree(base, key, prune, quiet)
   return build_handle(id)
 end
 

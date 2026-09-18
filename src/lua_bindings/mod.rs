@@ -7393,9 +7393,22 @@ pub fn install_async(
         let rt = runtime.clone();
         async_mod.set(
             "_dispatch_fs_walk_tree",
-            lua.create_function(move |_, (base, key): (String, Option<String>)| {
-                Ok(rt.dispatch_fs_walk_tree(std::path::PathBuf::from(base), key.as_deref()))
-            })?,
+            lua.create_function(
+                move |_,
+                      (base, key, prune, quiet): (
+                    String,
+                    Option<String>,
+                    Option<Vec<String>>,
+                    Option<bool>,
+                )| {
+                    Ok(rt.dispatch_fs_walk_tree(
+                        std::path::PathBuf::from(base),
+                        key.as_deref(),
+                        prune.unwrap_or_default(),
+                        quiet.unwrap_or(false),
+                    ))
+                },
+            )?,
         )?;
     }
 
@@ -7876,6 +7889,7 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
         row.set("cancel_requested", job.cancel_requested)?;
         row.set("is_stream", job.is_stream)?;
         row.set("purpose", job.purpose.as_str())?;
+        row.set("quiet", job.quiet)?;
         active.set(i + 1, row)?;
     }
     out.set("active", active)?;

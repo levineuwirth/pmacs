@@ -2061,7 +2061,8 @@ end
 -- subscription drives every group's cadence off
 -- `pmacs.editor.monotonic_ms` (autosave's Q#AS2 idiom). Waiting
 -- allocates no job and holds no pool thread; a due group runs ONE
--- `pmacs.fs.walk_tree` job for the whole tree, diffs in Lua, and
+-- `pmacs.fs.walk_tree` job for the whole tree (less `.git` and
+-- `target`, quiet on the indicator; #279), diffs in Lua, and
 -- routes per-file created/changed/deleted FileEvents through each
 -- member watcher's glob and WatchKind mask, deduped into one
 -- notification. Quiet scans back the interval off to a cap; any
@@ -2070,6 +2071,16 @@ end
 
 local FILE_WATCH_INTERVAL_MS = 250
 local FILE_WATCH_BACKOFF_CAP_MS = 4000
+
+-- #279: the walk lists these directories and does not enter them,
+-- wherever they sit under the base. `.git` was two thirds of what the
+-- walk visited on this repository (1012 of 1578 entries) and `target/`
+-- is cargo's build output, unbounded and never a watched subject;
+-- rust-analyzer's globs (`**/*.rs`, `**/Cargo.toml`, `**/Cargo.lock`)
+-- ask about neither. The walk is also dispatched `quiet`, so the
+-- activity indicator does not announce the editor's own cadence as
+-- the user's work. A kernel watch is the issue's next step.
+local FILE_WATCH_PRUNE = { ".git", "target" }
 
 -- file_watchers[tostring(sid)][registrationId] = list of watch records
 -- ({ cancelled, form = "relative"|"absolute", kind_mask, match_subject,
@@ -2406,7 +2417,8 @@ local function start_group_scan(group)
   for i, m in ipairs(group.members) do
     scan_members[i] = m
   end
-  local handle = pmacs.fs.walk_tree(group.base)
+  local handle = pmacs.fs.walk_tree(group.base,
+    { prune = FILE_WATCH_PRUNE, quiet = true })
   group.in_flight = {
     generation = gen,
     started_at = pmacs.editor.monotonic_ms(),
