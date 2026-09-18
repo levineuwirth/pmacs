@@ -392,9 +392,11 @@ struct EditLog {
     /// `next_seq` at the last `didOpen` / `didChange`: the server's
     /// copy of the document reflects every edit numbered below it.
     synced_seq: u64,
-    /// Edits numbered below this were forgotten (cap or clear), so a
-    /// response with an older base cannot be aligned, and an
-    /// incremental `didChange` cannot be built from them.
+    /// Edits numbered below this were forgotten (the cap, a clear, or
+    /// a token absorb's prune), so a response with an older base cannot
+    /// be aligned, an incremental `didChange` cannot be built from
+    /// them, and a completion carry from before them is refused rather
+    /// than placed against a log that no longer reaches its base.
     dropped_below: u64,
     /// Each edit with the text it inserted (empty for a delete), which
     /// is what an incremental `didChange` carries for it (E6d.1); the
@@ -534,6 +536,7 @@ impl SemanticTokenStore {
                 }
                 let keep_from = base_seq.min(log.completion_floor);
                 log.edits.retain(|(seq, ..)| *seq >= keep_from);
+                log.dropped_below = log.dropped_below.max(keep_from);
             }
         }
         self.by_key.insert(key, entry);
@@ -765,9 +768,9 @@ impl SemanticTokenStore {
     /// server, oldest first, each with the text it inserted: what an
     /// incremental `didChange` ships (E6d.1). `None` when the URI has
     /// no log, or when an edit since the last sync has been forgotten
-    /// (the cap, or a clear), in which case only the whole document
-    /// can bring the server up to date. An empty vector means the
-    /// server already holds the current text.
+    /// (the cap, a clear, or a prune), in which case only the whole
+    /// document can bring the server up to date. An empty vector means
+    /// the server already holds the current text.
     #[must_use]
     pub fn unsynced_edits(&self, uri: &str) -> Option<Vec<(DocumentEdit, Arc<str>)>> {
         let log = self.logs.get(uri)?;
@@ -788,10 +791,11 @@ impl SemanticTokenStore {
     /// the current text (E7.4: a completion item's `additionalTextEdits`
     /// at accept time, answered for the text the server held when the
     /// request went out). `None` when the URI has no log, or when an
-    /// edit since `base` has been forgotten (the cap, or a clear), in
-    /// which case nothing can place the range and a caller applies
-    /// nothing. A range's start snaps past a replacement that swallowed
-    /// it and its end keeps only what stood before one, as tokens do; an
+    /// edit since `base` has been forgotten (the cap, a clear, or a
+    /// token absorb's prune under an older answer's base), in which
+    /// case nothing can place the range and a caller applies nothing.
+    /// A range's start snaps past a replacement that swallowed it and
+    /// its end keeps only what stood before one, as tokens do; an
     /// insertion point at a pure insert moves past the inserted text.
     #[must_use]
     pub fn translate_range_since(
