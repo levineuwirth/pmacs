@@ -97,6 +97,9 @@ fn status(s: &EditorState) -> String {
     s.core.borrow().status.clone()
 }
 
+/// Read only by the Linux-gated killed-server probe; gated with it so
+/// the macOS legs, which deny warnings, see no dead helper.
+#[cfg(target_os = "linux")]
 fn errors_text(s: &EditorState) -> String {
     s.lua_host.errors_buffer_text()
 }
