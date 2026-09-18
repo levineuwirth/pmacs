@@ -317,13 +317,20 @@ cmd { name = "buffer.save-anyway",
 -- minibuffer after the callback returns.
 --
 -- `C-g` cancels, which is a "no": `on_cancel` runs `on_no`.
+-- The suffix says what the prompt takes (C7b fix round 1): "(y or n)"
+-- on the one-key question, where `y` alone answers, and "(yes or no)"
+-- on the typed one, where it does not --- Emacs's own two wordings.
+-- Before this both wore "(y or n)", so a user who had just learned
+-- that `y` answers the quit prompt pressed `y` at the overwrite
+-- question and waited.
 local function ask_yes_or_no(spec, accept)
   local prompt = spec.prompt
   local on_yes = spec.on_yes
   local on_no = spec.on_no
+  local wording = accept == "key" and "y or n" or "yes or no"
   local function ask()
     pmacs.minibuffer.read {
-      prompt = prompt .. " (y or n) ",
+      prompt = prompt .. " (" .. wording .. ") ",
       accept = accept,
       on_accept = function(value)
         local answer = string.lower(value or "")
@@ -332,7 +339,7 @@ local function ask_yes_or_no(spec, accept)
         elseif answer == "n" or answer == "no" then
           if on_no then on_no() end
         else
-          ed.set_status("please answer y or n")
+          ed.set_status("please answer " .. wording)
           ask()
         end
       end,

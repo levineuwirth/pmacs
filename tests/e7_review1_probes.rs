@@ -644,7 +644,7 @@ fn e7_review1_x_s_question_survives_two_refusals_and_then_discards_once() {
     type_str(&mut s, "sure");
     press(&mut s, KeyCode::Enter);
     pump_for(&mut s, 100);
-    assert_eq!(status(&s), "please answer y or n");
+    assert_eq!(status(&s), "please answer yes or no");
     assert_eq!(
         std::fs::read_to_string(root.join("long.txt")).unwrap(),
         "changed\n"

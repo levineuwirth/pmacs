@@ -13,9 +13,10 @@
 //! * revert-buffer on one key is right by the adopted rule only if the
 //!   revert can be taken back, which the record claims from the code's
 //!   comment; here `buffer.undo` after a `y` is the test of it.
-//! * the typed question keeps the one-key question's suffix,
-//!   "(y or n)", while a bare `y` no longer answers it; the row pins
-//!   what a user reads today, for the owner's ruling on the bare `y`.
+//! * the typed question says "(yes or no)" where the one-key question
+//!   says "(y or n)" --- the suffix names what the prompt takes (C7b
+//!   fix round 1; until then both said "(y or n)" while a bare `y`
+//!   answered only one of them) --- and re-asks with the same words.
 //!
 //! Every key goes through `dispatch_key`, as both frontends' do.
 
@@ -206,15 +207,15 @@ fn revert_on_one_key_is_taken_back_by_undo() {
     );
 }
 
-/// The typed question wears the one-key question's suffix. `C-x C-w`
-/// onto an existing file asks "... overwrite? (y or n) "; a bare `y`
-/// sits in the field and answers nothing, `y RET` overwrites. The row
-/// pins what a user reads today: the suffix that means "press y" on
-/// the quit prompt means "type y and RET" here, and Emacs's typed
-/// question says "(yes or no)". For the owner's ruling on the bare
-/// `y`; the fix, whichever way it goes, changes this row.
+/// The typed question says what it takes. `C-x C-w` onto an existing
+/// file asks "... overwrite? (yes or no) "; a bare `y` sits in the
+/// field and answers nothing, `y RET` overwrites (the bare `y` plus
+/// RET is the owner's open ruling, unchanged here). At review 1 the
+/// suffix was the one-key question's "(y or n)", so the words that
+/// mean "press y" on the quit prompt meant "type y and RET" here.
+/// Bitten by `scripts/bite HEAD^ builtin/commands/default.lua`.
 #[test]
-fn the_typed_question_still_says_y_or_n() {
+fn the_typed_question_says_yes_or_no() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut s = editor();
     visit(&s, td.path(), "alpha.txt", "alpha\n");
@@ -229,8 +230,8 @@ fn the_typed_question_still_says_y_or_n() {
     let asked = prompt(&s);
     eprintln!("PROMPT overwrite: {asked:?}");
     assert!(
-        asked.contains("exists; overwrite?") && asked.ends_with("(y or n) "),
-        "the typed question's suffix is the one-key question's: {asked:?}"
+        asked.contains("exists; overwrite?") && asked.ends_with("(yes or no) "),
+        "the typed question's suffix names the word it takes: {asked:?}"
     );
     press(&mut s, KeyCode::Char('y'));
     assert!(asking(&s), "a bare y answers nothing");

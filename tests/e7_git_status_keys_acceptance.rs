@@ -590,7 +590,7 @@ fn e7_1_x_asks_a_question_that_cannot_be_skipped() {
         minibuffer_active(&s),
         "an empty answer must leave the question standing"
     );
-    assert_eq!(status(&s), "please answer y or n");
+    assert_eq!(status(&s), "please answer yes or no");
     assert_eq!(
         read(&root, "unstaged.txt"),
         before,

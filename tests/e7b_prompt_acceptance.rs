@@ -242,7 +242,7 @@ fn e7b_2_write_file_overwrite_is_the_typed_question() {
     press(&mut s, KeyCode::Backspace);
     press(&mut s, KeyCode::Enter);
     assert!(asking(&s), "an empty RET re-asks");
-    assert_eq!(status(&s), "please answer y or n");
+    assert_eq!(status(&s), "please answer yes or no");
     type_str(&mut s, "sure");
     press(&mut s, KeyCode::Enter);
     assert!(asking(&s), "a wrong word re-asks");
