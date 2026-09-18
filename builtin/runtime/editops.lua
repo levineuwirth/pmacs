@@ -920,10 +920,12 @@ end)
 -- repository's `src/editor.rs` (14k lines) against rust-analyzer took
 -- 203--215 ms for the first request after the handshake and 77--88 ms
 -- at the median warm, 256--274 ms at the warm maximum, over three runs
--- of eleven requests each (`e7_3_measure_formatting_latency_on_editor_rs`).
--- A second is four times that maximum and still short enough that a
--- stalled formatter is a pause and not a hang; a user who formats
--- larger files or slower servers raises it.
+-- of eleven requests each (`e7_3_measure_formatting_latency_on_editor_rs`);
+-- re-measured at review 1 (2026-09-18, the per-request lines retained):
+-- cold 208--211, warm p50 83--91, warm max 277--279. A second is 3.6
+-- times the largest warm maximum seen (1000 / 279) and still short
+-- enough that a stalled formatter is a pause and not a hang; a user
+-- who formats larger files or slower servers raises it.
 --
 -- What the user sees when the formatter exceeds the bound, answers
 -- with an error, or is not running: the save proceeds with the buffer
