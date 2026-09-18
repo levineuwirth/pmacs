@@ -1816,6 +1816,69 @@ sample of a row closed causally below, and nothing more. So neither
 the `read Hello` family, nor #259, nor U4, nor #271, nor #276 sampled
 here; #253 moves to three and #277 opens at one. **E7's base control
 is this run, red on one ubuntu leg on rows the branch does not touch.**
+CORRECTED at E7's fix round 1 (2026-09-18, review 1's Low 3): "#253
+moves to three and #277 opens at one" is superseded by the section
+below --- #277 is folded into #253 as one mechanism under three
+selectors, and #253 is at five; the sentence stands where it was
+written, as this file's correction form requires.
+
+### #277 folded into #253: one mechanism under three selectors, and the opposite sign to U17
+
+Filed at E7's opening as two issues under the fragment rule (the
+`target snapshot` fragment at `gpu_invocation_acceptance.rs:487` on
+one, `read initial BufferSnapshot` at two `read_initial_snapshot`
+helpers on the other), the three reds of run 35270380496 are one
+mechanism, and review 1 showed it from the two job logs: on the red
+`Test (ubuntu-latest / lua54)` job (105367961691) against the same leg
+of the head's green run (105391445243), the three red suites each
+carry about the 5 s bound over their green time --- 7.56 vs 0.71 s,
+6.90 vs 1.39 s, 17.94 vs 9.30 s --- while their neighbors run at their
+usual speed (`compile_mode_acceptance` 39.76 vs 39.39 s) and the job
+as a whole runs slower (649 vs 433 s summed over the 141 targets both
+jobs name, a median per-target ratio of 1.36 over the 131 with a
+nonzero green time; the review's own matching read 650 vs 465 s and
+1.15, the same direction). Each is a freshly spawned daemon whose
+first `BufferSnapshot` took longer than a 5 s read timeout sized for
+an idle machine, on a runner instance that was slow throughout, and
+`--test-threads=1` on that leg means nothing in the suite competed.
+One mechanism, so one issue: #277 is closed as a duplicate on
+2026-09-18 with the fold stated on both, #253 carries the two added
+selectors and the `read initial BufferSnapshot` fragment, and the fix
+#253 already names stands (print the elapsed against the bound at the
+read sites, widen past ten times the observed, per D12).
+
+**The sign, so the two rows are never collapsed.** U17's mechanism
+was a worker finishing *too fast* for a synchronous flip --- the
+predecessor complete before the cancel took effect, `got ok` where
+`cancelled` was expected, a race a serialized or idle runner makes
+*easier* to lose. #253's is a daemon starting *too slowly* for a
+fixed bound --- a wait that runs out, a race a loaded or slow runner
+makes easier to lose. Opposite signs: load or slowness argues for
+#253 and against U17, and a red of either is not evidence about the
+other. U17 is closed causally above and #253 is open; a future red
+that fits "slow runner, bounded read" belongs here, and one that fits
+"fast worker, synchronous flip" reopens U17's question and nothing
+else.
+
+#253's occurrences, counted one per test target per run as its first
+two were (five rows of one target in one run counted once each):
+
+Tally (253): 5 items in the list below.
+
+- local, 2026-09-06, a run of the suite during the daemon-reaper work: `gpu_initial_target_acceptance`, the five `gpu_invocation_acceptance::crdt::` rows, `target snapshot: … WouldBlock` at `:487` and `raw target result: … WouldBlock` at `:542` (the issue's first occurrence)
+- local, gate `20260906T104039Z-54318`, `05-sweep.log`: the same target, the same five rows, `14 passed; 5 failed`, the sweep's only red target; the rerun `20260906T104738Z-152565` green (non-reproduction)
+- `main` at `7002308`, run 35270380496, `Test (ubuntu-latest / lua54)` (105367961691): `gpu_initial_target_acceptance`, `gpu_invocation_acceptance::crdt::dedup_upgrade_publishes_the_snapshot_to_preexisting_grid_replicas`, `target snapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/gpu_invocation_acceptance.rs:487`, `20 passed; 1 failed` in 17.94 s at 20:36:55Z --- the first on CI, one row of the five
+- the same run and job: `compile_mode_crdt_acceptance` `compile_run_converges_and_replica_edit_triggers_recovery`, `read initial BufferSnapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/compile_mode_crdt_acceptance.rs:33`, `7 passed; 1 failed` in 7.56 s at 20:35:12Z --- filed on #277, folded here
+- the same run and job: `e6_review1_gpu_route_probes` `gpu_route_plain_typing_undoes_through_the_daemon_arbiter`, the same fragment at `tests/e6_review1_gpu_route_probes.rs:35`, `5 passed; 1 failed` in 6.90 s at 20:35:36Z --- filed on #277, folded here
+
+Tally (253-fold): 5 = 3 + 2.
+
+The signature #253 now matches: selector any of the three suites'
+rows above; job any CI test leg or the local sweep; required fragment
+`WouldBlock` on the first snapshot read after an attach, spelled
+`target snapshot: …`, `raw target result: …` or `read initial
+BufferSnapshot: …`. A `WouldBlock` on a `Hello` read is the `read
+Hello` family, not this; a `late.sock` refusal with `m5_5` is #271.
 
 ### PR #278's head run 35277461945 at `0c6f8ff`, and it is GREEN
 
