@@ -184,7 +184,7 @@ are not in the keymap at all.
 | `S-<left>` | `cursor.select-left` |
 | `S-<right>` | `cursor.select-right` |
 | `S-<up>` | `cursor.select-up` |
-| `TAB` | `buffer.tab` |
+| `TAB` | `edit.indent-or-complete` |
 
 ### Scope: mode:diff
 
