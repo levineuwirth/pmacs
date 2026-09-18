@@ -18,12 +18,10 @@
 //!         │                                   ↑        │
 //!         │                                   └────────┘
 //!         │
-//!         ├── ProtocolError / response.error ─→ Degraded { reason }
-//!         │       ↑   (not the retry codes:       │
-//!         │       │    RequestCancelled,          │
-//!         │       │    ContentModified)           │
-//!         │       └─ further errors stay degraded; │ next Initialized
-//!         │                                        │ flips back to Ready
+//!         ├── ProtocolError / a server-failure  ─→ Degraded { reason }
+//!         │       ↑   response error (see below)   │
+//!         │       └─ further failures stay         │ next Initialized
+//!         │          degraded                      │ flips back to Ready
 //!         │
 //!         ├── Crashed event → Crashed { reason }
 //!         └── ShuttingDown / Stopped → Stopped
@@ -45,6 +43,35 @@
 //! `Degraded` kind is disturbed by neither; an indexing cycle that is
 //! still in flight when the degraded window closes is what the kind
 //! returns to.
+//!
+//! # Degraded means the server failed (C7b fix round 1)
+//!
+//! An error response moves the kind by its code and by nothing else.
+//! The owner's ruling partitions JSON-RPC's codes three ways:
+//!
+//! * **The server failed**: `-32603` `InternalError` and the server
+//!   error range `-32099..=-32000` (`ServerNotInitialized`,
+//!   `UnknownErrorCode` and a server's own codes in it), together with
+//!   transport loss (`ProtocolError`, `Crashed`). These set
+//!   `last_error`, enter `Degraded` for [`DEGRADED_STICKY`] and log in
+//!   `*lsp*`.
+//! * **pmacs sent something wrong**: `-32600` `InvalidRequest`,
+//!   `-32601` `MethodNotFound`, `-32602` `InvalidParams`. The server
+//!   answered; it is not unwell. These log in `*lsp*` and leave the
+//!   kind and `last_error` alone, and the Lua drain reports each one
+//!   through `pmacs.error` into `*errors*` with the method and code.
+//!   Before this, `M-x lsp.rename` on a blank line --- rust-analyzer
+//!   answers `prepareRename` there with `-32602` --- read `degraded`
+//!   on the modeline for fifteen seconds.
+//! * **The request is moot**: `-32800` `RequestCancelled` and
+//!   `-32801` `ContentModified` are counted and otherwise silent
+//!   (E6d.2).
+//!
+//! Any other code (`-32700` `ParseError`, `-32802` `ServerCancelled`,
+//! `-32803` `RequestFailed`, a code a server coins outside the range
+//! such as rust-analyzer's `-32900` for a formatter it could not run,
+//! an unknown one) logs in `*lsp*` and leaves the kind alone: nothing
+//! outside the first class is a server failure.
 //!
 //! # Why a separate module
 //!
@@ -401,6 +428,28 @@ pub const fn is_retry_code(code: i64) -> bool {
     matches!(code, REQUEST_CANCELLED | CONTENT_MODIFIED)
 }
 
+/// `InternalError` (JSON-RPC 2.0): the server failed on a request it
+/// could parse and route.
+pub const INTERNAL_ERROR: i64 = -32603;
+
+/// The JSON-RPC server-error range, `-32099..=-32000`: reserved for a
+/// server's own failures (`ServerNotInitialized` `-32002`,
+/// `UnknownErrorCode` `-32001` and the codes a server defines in it).
+pub const SERVER_ERROR_MIN: i64 = -32099;
+/// The upper end of the server-error range, inclusive.
+pub const SERVER_ERROR_MAX: i64 = -32000;
+
+/// Whether an error response says the server failed --- the one class
+/// of response that moves the kind to `Degraded` (the module doc's
+/// "Degraded means the server failed"). Everything else is either the
+/// client's own mistake, a moot request, or a request the server
+/// declined on its merits, and none of those is the server being
+/// unwell.
+#[must_use]
+pub const fn is_server_failure_code(code: i64) -> bool {
+    code == INTERNAL_ERROR || (SERVER_ERROR_MIN <= code && code <= SERVER_ERROR_MAX)
+}
+
 /// Per-manager status tracker. Holds one [`LspStatus`] per known
 /// server and folds events into it.
 #[derive(Default)]
@@ -505,18 +554,26 @@ impl LspStatusTracker {
                     st.retry_responses += 1;
                 }
                 if let Some(err) = error.as_ref().filter(|err| !is_retry_code(err.code)) {
-                    st.last_error = Some(LspStatusError::from_lsp_error(ev.at, err));
-                    st.set_kind(
-                        LspStatusKind::Degraded {
-                            reason: format!("{method}: {} (code {})", err.message, err.code),
-                        },
-                        ev.at,
-                    );
+                    // Degraded means the server failed: only a
+                    // server-failure code sets `last_error` (which is
+                    // what keeps the sticky window armed) and moves the
+                    // kind. A client-caused or declined request is
+                    // logged here and reported by the Lua drain; the
+                    // label stays what the server's health makes it.
+                    if is_server_failure_code(err.code) {
+                        st.last_error = Some(LspStatusError::from_lsp_error(ev.at, err));
+                        st.set_kind(
+                            LspStatusKind::Degraded {
+                                reason: format!("{method}: {} (code {})", err.message, err.code),
+                            },
+                            ev.at,
+                        );
+                    }
                     st.push_message(LspStatusMessage {
                         at: ev.at,
                         channel: "error",
                         summary: format!("response error: {method}"),
-                        detail: Some(err.message.clone()),
+                        detail: Some(format!("{} (code {})", err.message, err.code)),
                     });
                 }
             }
@@ -1567,7 +1624,8 @@ mod tests {
     /// E6d.2 --- a hundred keystrokes' worth of in-flight requests
     /// answered `ContentModified` (and a few `RequestCancelled`) leave
     /// a ready server ready, with no last error and nothing in the
-    /// recent messages; a real error still degrades it.
+    /// recent messages; a real error still degrades it. The row below
+    /// extends it with the owner's ruling at C7b fix round 1.
     #[test]
     fn retry_codes_are_not_degradation_and_a_real_error_still_is() {
         let mut t = LspStatusTracker::new();
@@ -1637,5 +1695,133 @@ mod tests {
         let st = t.get(sid).unwrap();
         assert!(matches!(st.kind, LspStatusKind::Degraded { .. }));
         assert_eq!(st.last_error.as_ref().unwrap().code, Some(-32603));
+    }
+
+    /// E6d.2's witness, extended at C7b fix round 1 with the owner's
+    /// ruling that degraded means the server failed: the three
+    /// client-caused codes (`-32600` `InvalidRequest`, `-32601`
+    /// `MethodNotFound`, `-32602` `InvalidParams`) each log one
+    /// `response error` line carrying the method and the code and
+    /// leave the kind `Ready` with no last error, while a code in the
+    /// server-error range (`-32002` `ServerNotInitialized`) degrades
+    /// it as `-32603` does above. Bitten by hand:
+    /// `is_server_failure_code` widened to `true` for every code fails
+    /// the first client code's kind assertion.
+    #[test]
+    fn client_codes_leave_the_kind_alone_and_a_server_range_code_degrades_it() {
+        let mut t = LspStatusTracker::new();
+        let sid = LspServerId::next();
+        let now = Instant::now();
+        t.observe(
+            &ev(
+                sid,
+                LspEventKind::Initialized {
+                    capabilities: json!({}),
+                },
+                now,
+            ),
+            None,
+        );
+        // The client-caused codes: pmacs sent something wrong, the
+        // server answered, and the server's health is unchanged. Each
+        // one is a `*lsp*` line naming the method and carrying the
+        // code, and nothing else moves.
+        for (i, (code, name, method)) in [
+            (-32600, "InvalidRequest", "textDocument/hover"),
+            (-32601, "MethodNotFound", "textDocument/prepareRename"),
+            (-32602, "InvalidParams", "textDocument/rename"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let logged = t.get(sid).unwrap().recent_messages.len();
+            t.observe(
+                &ev(
+                    sid,
+                    LspEventKind::Response {
+                        id: 500 + i as u64,
+                        result: Value::Null,
+                        error: Some(LspError {
+                            code,
+                            message: format!("{name} from the server"),
+                            data: None,
+                        }),
+                        method: method.into(),
+                    },
+                    now + Duration::from_millis(500 + i as u64),
+                ),
+                None,
+            );
+            let st = t.get(sid).unwrap();
+            assert_eq!(
+                st.kind,
+                LspStatusKind::Ready,
+                "{code} {name} is the client's, not the server's"
+            );
+            assert!(
+                st.last_error.is_none(),
+                "{code} {name} arms no sticky window"
+            );
+            assert_eq!(st.retry_responses, 0, "{code} {name} is not a retry code");
+            let last = st.recent_messages.last().unwrap();
+            assert_eq!(
+                st.recent_messages.len(),
+                logged + 1,
+                "{code} {name} logs one line"
+            );
+            assert_eq!(last.channel, "error");
+            assert_eq!(last.summary, format!("response error: {method}"));
+            assert_eq!(
+                last.detail.as_deref(),
+                Some(format!("{name} from the server (code {code})").as_str()),
+                "the line carries the code"
+            );
+        }
+        // A code in the server-error range is the server's failure.
+        t.observe(
+            &ev(
+                sid,
+                LspEventKind::Response {
+                    id: 900,
+                    result: Value::Null,
+                    error: Some(LspError {
+                        code: -32002,
+                        message: "server not initialized".into(),
+                        data: None,
+                    }),
+                    method: "textDocument/completion".into(),
+                },
+                now + Duration::from_millis(900),
+            ),
+            None,
+        );
+        let st = t.get(sid).unwrap();
+        assert!(
+            matches!(st.kind, LspStatusKind::Degraded { .. }),
+            "-32002 ServerNotInitialized degrades: {:?}",
+            st.kind
+        );
+        assert_eq!(st.last_error.as_ref().unwrap().code, Some(-32002));
+    }
+
+    /// The partition itself, code by code: the server-failure set is
+    /// exactly `-32603` and `-32099..=-32000`; the client codes, the
+    /// retry codes, `ParseError`, `ServerCancelled`, `RequestFailed`
+    /// and an unknown code are outside it.
+    #[test]
+    fn the_server_failure_set_is_internal_error_and_the_server_range() {
+        for code in [-32603, -32099, -32050, -32002, -32001, -32000] {
+            assert!(is_server_failure_code(code), "{code} is the server's");
+            assert!(!is_retry_code(code));
+        }
+        for code in [
+            -32600, -32601, -32602, -32700, -32802, -32803, -32100, -31999, 0, 1,
+        ] {
+            assert!(!is_server_failure_code(code), "{code} is not the server's");
+        }
+        for code in [REQUEST_CANCELLED, CONTENT_MODIFIED] {
+            assert!(is_retry_code(code));
+            assert!(!is_server_failure_code(code));
+        }
     }
 }

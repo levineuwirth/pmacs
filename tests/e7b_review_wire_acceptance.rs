@@ -853,17 +853,20 @@ fn measure_typing_on_editor_rs_with_the_server_warm() {
     eprintln!("MEASURE errors over the session: {errors_seen:?}");
 }
 
-/// One of the exits from `ready` a user reaches with one command: a
-/// rename asked where there is nothing to rename. rust-analyzer answers
-/// `textDocument/prepareRename` with an error (not a retry code), the
-/// tracker takes any such answer as `Degraded`, and the modeline reads
-/// `LSP:degraded` for the sticky window. The row records what the
-/// label and `*lsp*` say, so the owner's window run can tell this exit
-/// from the others by its text; whether a request the user asked for
-/// and the server declined should degrade the server at all is the
-/// question it leaves for the owner.
+/// The one exit from `ready` a user could reach with one command,
+/// closed by the owner's ruling at C7b fix round 1: a rename asked
+/// where there is nothing to rename. rust-analyzer answers
+/// `textDocument/prepareRename` with `-32602 InvalidParams`, "No
+/// references found at position" --- a client-caused code, the server
+/// answering rather than failing --- and the modeline stays
+/// `LSP:ready`; `*errors*` gains one line naming the method and the
+/// code, `*lsp*` logs the response, and `last_error` stays `nil` so no
+/// sticky window is armed. At review 1 the same command read
+/// `LSP:degraded` for fifteen seconds; bitten by `scripts/bite HEAD^
+/// src/lsp_status.rs` (the label degrades) and `scripts/bite HEAD^
+/// builtin/runtime/lsp.lua` (`*errors*` gains nothing).
 #[test]
-fn a_rename_on_whitespace_takes_the_label_off_ready() {
+fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
     if !on_path("rust-analyzer") {
         support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
         return;
@@ -876,6 +879,7 @@ fn a_rename_on_whitespace_takes_the_label_off_ready() {
     // The blank between `fn main() {` and `let`: line 1, column 0.
     exec(&s, "pmacs.editor.goto_byte(12)");
     let before = lsp_segment(&s);
+    let errors_before = s.lua_host.errors_buffer_text();
     exec(&s, "pmacs.command.invoke('lsp.rename')");
     let wire = watch_wire(&mut s, &cap, 3);
     eprintln!("WIRE before the rename: {before:?}");
@@ -898,26 +902,53 @@ fn a_rename_on_whitespace_takes_the_label_off_ready() {
          end
          return pmacs.lsp.modeline_label(rec.server), err, out",
     );
+    let errors_after = s.lua_host.errors_buffer_text();
+    let new_errors: Vec<&str> = errors_after[errors_before.len()..].lines().collect();
     eprintln!("WIRE label {label:?}, last_error {error:?}, *lsp* errors {messages:?}");
+    eprintln!("WIRE *errors* gained {new_errors:?}");
     assert_eq!(
         before.as_deref(),
         Some("LSP:ready"),
         "ready before the rename"
     );
+    // The positive control: the server did answer the request with
+    // the client-caused code (read from the whole capture, since the
+    // exchange can complete before the watch takes its baseline), and
+    // `*lsp*` holds that answer.
+    let answered = frames(&cap.from_server)
+        .iter()
+        .any(|f| f["error"]["code"].as_i64() == Some(-32602));
+    assert!(
+        answered,
+        "rust-analyzer answered it with -32602 InvalidParams"
+    );
     assert_eq!(
         lsp_segment(&s).as_deref(),
-        Some("LSP:degraded"),
-        "the declined rename degrades the server on the modeline"
+        Some("LSP:ready"),
+        "the declined rename leaves the server ready on the modeline"
     );
-    assert!(
-        error.as_deref().is_some_and(|e| e.contains("-32602")),
-        "last_error carries the server's code: {error:?}"
-    );
+    assert_eq!(label, "ready");
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("response error: textDocument/prepareRename")),
-        "and *lsp* names the request: {messages:?}"
+            .any(|m| m.contains("response error: textDocument/prepareRename")
+                && m.contains("-32602")),
+        "*lsp* names the request and the code: {messages:?}"
+    );
+    assert!(
+        error.is_none(),
+        "a client-caused code arms no sticky window: {error:?}"
+    );
+    assert_eq!(
+        new_errors.len(),
+        1,
+        "*errors* gained the one line: {new_errors:?}"
+    );
+    assert!(
+        new_errors[0].contains("textDocument/prepareRename")
+            && new_errors[0].contains("-32602 InvalidParams"),
+        "and it names the method and the code: {:?}",
+        new_errors[0]
     );
 }
 

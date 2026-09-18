@@ -2739,6 +2739,41 @@ local function dispatch_notification(sid, ev)
   end
 end
 
+-- The codes that mean pmacs sent something the server could not take
+-- (JSON-RPC 2.0's client-side errors), by the owner's ruling at C7b
+-- fix round 1 --- "Degraded means the server failed". The tracker in
+-- `src/lsp_status.rs` moves the kind only on `-32603` and the server
+-- range `-32099..-32000`; these three are the client's own mistake and
+-- are reported through `pmacs.error` into `*errors*`, with the method
+-- and the code, so a wrong request is seen where every other pmacs
+-- error is seen and the modeline says nothing about it. The retry
+-- codes (`-32800`, `-32801`) stay silent (E6d.2); every other code
+-- lists in `*lsp*` alone.
+local CLIENT_ERROR_NAMES = {
+  [-32600] = "InvalidRequest",
+  [-32601] = "MethodNotFound",
+  [-32602] = "InvalidParams",
+}
+
+local function report_client_error(sid, ev)
+  local err = ev.error
+  local name = err and CLIENT_ERROR_NAMES[err.code]
+  if not name then return end
+  local label = tostring(sid)
+  local ok, rows = pcall(pmacs.lsp.list)
+  if ok and rows then
+    for _, info in ipairs(rows) do
+      if tostring(info.id) == label then label = info.label or label end
+    end
+  end
+  -- An explicit label: this runs under the drain's `pcall`, and the
+  -- default label would name that C frame rather than this file.
+  pmacs.error(string.format(
+    "LSP: %s refused %s as a client error, %d %s: %s",
+    label, tostring(ev.method), err.code, name, tostring(err.message)),
+    "lsp")
+end
+
 local function deliver_response(sid, ev)
   local skey = tostring(sid)
   local pend = pending_responses[skey]
@@ -2929,6 +2964,9 @@ local function handle_server_requests()
         elseif ev.kind == "notification" then
           dispatch_notification(sid, ev)
         elseif ev.kind == "response" then
+          -- Before the awaiter, so the durable trace exists whether or
+          -- not a handler is still waiting for this answer.
+          pcall(report_client_error, sid, ev)
           deliver_response(sid, ev)
         elseif ev.kind == "crashed" then
           -- E5.3: a crash was consumed silently here; it is reported

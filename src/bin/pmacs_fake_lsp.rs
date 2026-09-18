@@ -87,6 +87,11 @@
 //!   ask again" code, which is what rust-analyzer answers a request
 //!   overtaken by the next `didChange`; notifications still update
 //!   the held document.
+//! * If launched with `PMACS_FAKE_LSP_MODE=clientfault` (C7b fix
+//!   round 1): every `textDocument/*` request is answered with
+//!   `InvalidParams` (-32602), the code rust-analyzer gives
+//!   `prepareRename` on a blank --- the client's own mistake, which
+//!   must reach `*errors*` and leave the modeline alone.
 //! * If launched with `PMACS_FAKE_LSP_MODE=incremental` (E6d.1): a
 //!   server that negotiates `TextDocumentSyncKind.Incremental`
 //!   (`textDocumentSync: { openClose, change: 2 }`, the object form
@@ -209,6 +214,18 @@ fn main() {
                     "jsonrpc": "2.0",
                     "id": id.clone(),
                     "error": { "code": -32801, "message": "content modified" }
+                });
+                write_frame(&mut stdout, &resp);
+                continue;
+            }
+            // `clientfault`: every request is the client's mistake by
+            // the server's word --- `InvalidParams`, as rust-analyzer
+            // answers `prepareRename` where there is nothing to rename.
+            if mode == "clientfault" && id.is_some() {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "error": { "code": -32602, "message": "no such position" }
                 });
                 write_frame(&mut stdout, &resp);
                 continue;

@@ -8,6 +8,16 @@
 //! hundred against the `error` mode, whose answers are real errors,
 //! degrade it, so the exclusion is exactly the retry codes and not
 //! error responses as a class.
+//!
+//! C7b fix round 1 adds the third class, the owner's ruling that
+//! degraded means the server failed: the same hundred against the
+//! `clientfault` mode, whose every answer is `InvalidParams`
+//! (`-32602`, the client's own mistake by the server's word), leave the
+//! label `ready` with no last error, and every such answer is one line
+//! in `*errors*` naming the method and the code. Bitten by
+//! `scripts/bite HEAD^ src/lsp_status.rs` (the label degrades) and by
+//! `scripts/bite HEAD^ builtin/runtime/lsp.lua` (`*errors*` stays
+//! empty).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -200,4 +210,58 @@ fn a_hundred_keystrokes_answered_with_a_real_error_still_degrade_it() {
         "a real error response degrades the status; labels seen: {labels:?}"
     );
     assert!(errored, "and the last error is held");
+}
+
+/// A hundred keystrokes answered `InvalidParams` (`-32602`): pmacs sent
+/// something the server could not take, the server is not unwell, and
+/// the user is told where every pmacs error is told.
+#[test]
+fn a_hundred_keystrokes_answered_invalid_params_leave_the_label_ready_and_fill_errors() {
+    let dir = temp_dir("cf");
+    let mut s = editor_with_fake(&dir, "clientfault");
+    let before = s.lua_host.errors_buffer_text();
+    let (labels, errored) = type_a_hundred(&mut s);
+    assert!(
+        !labels.iter().any(|l| l == "degraded"),
+        "a client-caused code never degrades the modeline; labels seen: {labels:?}"
+    );
+    assert!(!errored, "and arms no sticky window: no last error");
+    assert_eq!(label_and_error(&s).0, "ready");
+    let errors = s.lua_host.errors_buffer_text();
+    let new_lines: Vec<&str> = errors[before.len()..].lines().collect();
+    eprintln!(
+        "ERRORS {} lines after the typing; the first: {:?}",
+        new_lines.len(),
+        new_lines.first()
+    );
+    // The positive control: the typing raised requests and the fake
+    // answered every one with -32602; each answer is one line naming
+    // the method and the code.
+    assert!(
+        new_lines.len() >= 30,
+        "the typing raised requests the fake refused as the client's: {}",
+        new_lines.len()
+    );
+    assert!(
+        new_lines
+            .iter()
+            .all(|l| l.contains("-32602 InvalidParams") && l.contains("textDocument/")),
+        "every line names the code and the method: {new_lines:?}"
+    );
+    // And `*lsp*` keeps its own log of the answers.
+    let logged: Vec<String> = eval(
+        &s,
+        "local out = {}
+         local rec = pmacs.lsp.active_attachment()
+         for _, m in ipairs(pmacs.lsp.recent_messages(rec.server)) do
+           if m.channel == 'error' then out[#out + 1] = m.summary end
+         end
+         return out",
+    );
+    assert!(
+        logged
+            .iter()
+            .any(|m| m.starts_with("response error: textDocument/")),
+        "*lsp* names the request: {logged:?}"
+    );
 }

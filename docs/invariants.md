@@ -116,14 +116,14 @@ The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 UTF-8 units), `sighelp`, `prepare`, `preprefuse`, `rename`, `inlaybounds`,
 `inlayrefresh`, `semantictokensrefresh`, `applyeditplan`, `resourceops`,
 `posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`. Failure
-shapes: `crash`, `error`, `contentmodified`, `garbage`, `silent`. File
-watchers: `filewatch` (a `RelativePattern` `**/*.txt`), `filewatchabs` (an
-absolute plain glob), `filewatchflat` (a `RelativePattern` with no leading
-`**/`), `filewatchbare` (a bare relative string), `filewatchrereg` (the
-same id twice with no unregister), `filewatchjoin`, `filewatchretire`. Use
-these for capability-matrix tests, never a real server; the list is
-enumerated from the binary, and a stale copy covers the shape next to the
-defect.
+shapes: `crash`, `error`, `contentmodified`, `clientfault`, `garbage`,
+`silent`. File watchers: `filewatch` (a `RelativePattern` `**/*.txt`),
+`filewatchabs` (an absolute plain glob), `filewatchflat` (a
+`RelativePattern` with no leading `**/`), `filewatchbare` (a bare relative
+string), `filewatchrereg` (the same id twice with no unregister),
+`filewatchjoin`, `filewatchretire`. Use these for capability-matrix tests,
+never a real server; the list is enumerated from the binary, and a stale
+copy covers the shape next to the defect.
 
 ## Persistence
 
