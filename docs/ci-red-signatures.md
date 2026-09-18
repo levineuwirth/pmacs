@@ -2020,6 +2020,45 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### `main` after E7: run 35375379539 at `e190f80`, and it is GREEN
+
+Read at E7b's opening on 2026-09-18, from the jobs endpoint and all
+six test legs' logs; not re-run. `e190f80` is code-bearing (E7's
+squash), so it is E7b's base control itself.
+
+| field | value |
+|---|---|
+| run | 35375379539, `push`, one attempt |
+| head | `e190f80`, E7's squash merge (PR #278 at `c68409d`, `--match-head-commit`) |
+| window | created 2026-09-18T17:36:52Z, updated 17:57:18Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+| the six test legs | `Test (crdt)` 154 `test result: ok`, the two ubuntu luajit legs and the lua54 leg 155 each, both macOS legs 156 each; `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; U17's witness `ok` on every leg |
+
+Tally (run-35375379539-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105698717570 | success |
+| Lint (luajit) | 105698717984 | success |
+| Format | 105698718038 | success |
+| Lint (lua54) | 105698718177 | success |
+| Commit attribution (D9) | 105698718213 | success |
+| M6 Perf Gates | 105698764938 | success |
+| M1 Acceptance Gates | 105698764945 | success |
+| GPU Render (headless) | 105698764964 | success |
+| M4 Perf Gates | 105698765046 | success |
+| M5 Perf Gates | 105698765058 | success |
+| Perf budgets (debug) | 105698765064 | success |
+| Test (crdt) | 105698765107 | success |
+| M10 Perf Gates (crdt) | 105698765147 | success |
+| Test (ubuntu-latest / luajit) | 105698765196 | success |
+| Test (macos-latest / luajit) | 105698765206 | success |
+| Test (ubuntu-latest / lua54) | 105698765229 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105698765262 | success |
+| Test (macos-latest / lua54) | 105698765374 | success |
+| Docs consistency | 105698766180 | skipped |
+
 ### PR #278's fix-round-1 head run 35366530302 at `c68409d`, and it is GREEN
 
 E7's fix-round-1 tip (`e7/git-and-lsp-affordances`, base `7002308`;
