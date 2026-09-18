@@ -533,7 +533,15 @@ jobs:
       - run: cargo build --workspace
       # Serial for the same reason the `test` job is: these suites spawn
       # real daemons and real PTYs, and this job adds MORE of them.
-      - run: cargo test --all-targets -- --test-threads=1
+      #
+      # `--no-fail-fast`, as the matrix legs have carried since E0 and
+      # this job did not: without it one failing target ends the step
+      # and every target after it reports nothing, so a red here said
+      # nothing about the rest of the corpus --- at E7's review round 1
+      # this job stopped at the 49th of ~150 targets on the review's own
+      # probe, U17's witness among the unrun. Any earlier red in this
+      # job may have hidden more than it reported.
+      - run: cargo test --all-targets --no-fail-fast -- --test-threads=1
         env:
           PMACS_REQUIRE_GPU: "1"
           PMACS_REQUIRE_SETSID: "1"
