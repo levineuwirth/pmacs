@@ -2020,6 +2020,45 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #280's head run 35381362669 at `a78e480`, and it is GREEN
+
+Read at C7b's close on 2026-09-18, from the jobs endpoint and all six
+test legs' logs; not re-run. The branch is E7b (`e7b/status-prompt-keys`,
+base `e190f80`), four commits.
+
+| field | value |
+|---|---|
+| run | 35381362669, `pull_request`, one attempt |
+| head | `a78e480`, PR #280 |
+| window | created 2026-09-18T18:38:30Z, updated 19:02:08Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the six test legs | `Test (crdt)` 158 `test result: ok`, the three ubuntu legs 159 each, both macOS legs 160 each; `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; U17's witness `ok` on every leg; the phase's 22 `e7b_` rows `ok` on every leg, the GPU chord probe among them on both macOS legs (a wgpu adapter present, not skipped) |
+
+Tally (run-35381362669-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105718037333 | success |
+| Commit attribution (D9) | 105718037550 | success |
+| Lint (lua54) | 105718037580 | success |
+| Format | 105718037602 | success |
+| Lint (luajit) | 105718037620 | success |
+| GPU Render (headless) | 105718105198 | success |
+| Test (crdt) | 105718105204 | success |
+| M6 Perf Gates | 105718105297 | success |
+| M4 Perf Gates | 105718105308 | success |
+| M10 Perf Gates (crdt) | 105718105313 | success |
+| Perf budgets (debug) | 105718105324 | success |
+| M5 Perf Gates | 105718105326 | success |
+| Test (ubuntu-latest / lua54) | 105718105359 | success |
+| Test (ubuntu-latest / luajit) | 105718105362 | success |
+| Test (macos-latest / lua54) | 105718105369 | success |
+| Test (macos-latest / luajit) | 105718105383 | success |
+| M1 Acceptance Gates | 105718105385 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105718105552 | success |
+| Docs consistency | 105718106590 | skipped |
+
 ### `main` after E7: run 35375379539 at `e190f80`, and it is GREEN
 
 Read at E7b's opening on 2026-09-18, from the jobs endpoint and all
