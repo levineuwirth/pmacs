@@ -336,7 +336,7 @@ from/to prompts, `find-file`, etc.:
 
 | Key | Action |
 |---|---|
-| `RET` / `C-m` | accept: the selected candidate or the typed text, by the prompt's accept policy (D18) |
+| `RET` / `C-m` | accept: the selected candidate or the typed text, by the prompt's accept policy (D18); under the `key` policy (E7b.2, `pmacs.minibuffer.y_or_n`) the first printable key is the answer and RET commits only what was typed |
 | `C-j` | accept the typed text as written, whatever is selected |
 | `C-g` | cancel |
 | `TAB` / `C-i` | complete the candidates' common prefix; then the selected candidate; a second `TAB` on a directory in a files prompt descends into it (E6.3) |

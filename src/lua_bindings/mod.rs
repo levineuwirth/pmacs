@@ -14556,14 +14556,15 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
             // D18 (E6.1): what RET commits. `candidate` is the
             // default so a prompt that says nothing keeps the picker
             // semantics it always had; the open-set prompts name
-            // `typed` themselves.
+            // `typed` themselves; `key` (E7b.2) is the one-keypress
+            // answer of `y_or_n`.
             let accept = match spec.get::<Value>("accept")? {
                 Value::Nil => crate::minibuffer::AcceptPolicy::Candidate,
                 Value::String(s) => {
                     let name = s.to_str()?;
                     crate::minibuffer::AcceptPolicy::parse(&name).ok_or_else(|| {
                         mlua::Error::runtime(format!(
-                            "pmacs.minibuffer.read: accept must be \"candidate\" or \"typed\", got {:?}",
+                            "pmacs.minibuffer.read: accept must be \"candidate\", \"typed\" or \"key\", got {:?}",
                             name.as_ref()
                         ))
                     })?

@@ -1477,12 +1477,15 @@ local function discard_plan(row, unborn)
   }
 end
 
---- `x`: discard the row, behind E1.1's y-or-n question. The question
---- is source-less, so RET on an empty answer re-asks, any answer but
---- y/yes/n/no re-asks, and `C-g` is a no: there is no key that both
---- dismisses the question and destroys the work. Everything the plan
---- needs is captured before the question is asked; the answer arrives
---- a keypress or more later, and by then the cursor may be elsewhere.
+--- `x`: discard the row, behind the TYPED question (E7b.2's
+--- `yes_or_no`, which is exactly the prompt E1.1's `y_or_n` was before
+--- E7b.2 made that one answer on a single key). The question is
+--- source-less, so RET on an empty answer re-asks, any answer but
+--- y/yes/n/no re-asks, a bare `y` without RET answers nothing, and
+--- `C-g` is a no: there is no key that both dismisses the question
+--- and destroys the work. Everything the plan needs is captured before
+--- the question is asked; the answer arrives a keypress or more later,
+--- and by then the cursor may be elsewhere.
 pmacs.command.define {
   name = "git.discard",
   description = "Discard the file under the cursor in *git-status*, after asking.",
@@ -1492,7 +1495,7 @@ pmacs.command.define {
     local plan = discard_plan(row, (state.branch or {}).unborn == true)
     local root = state.root
     local dest = pmacs.window.capture_destination()
-    pmacs.minibuffer.y_or_n {
+    pmacs.minibuffer.yes_or_no {
       prompt = plan.question,
       on_yes = function()
         run_mutation {

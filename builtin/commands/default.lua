@@ -286,31 +286,45 @@ cmd { name = "buffer.save-anyway",
         end
       end }
 
--- Yes-or-no prompts (E1.1) ---------------------------------------------------
+-- Yes-or-no prompts (E1.1, E7b.2) ---------------------------------------------
 --
 -- `pmacs.minibuffer.read` had no yes-or-no idiom, so every destructive
 -- command either asked nothing or would have grown its own answer
--- parser. This is the one idiom, and it is deliberately built on a
--- SOURCE-LESS read: `resolve_accepted_value` returns the typed text
--- only when the source is `none` (src/minibuffer.rs), so with a
--- candidate list RET would take a selection the user never typed --- a
--- one-key "yes" to a question about losing work.
+-- parser. These are the two idioms, Emacs's pair, adopted at E7b.2:
+--
+--   * `y_or_n`: ONE KEYPRESS answers, for a choice the user can take
+--     back --- `y` (or `Y`) is yes, `n` (or `N`) is no, `C-g` is no,
+--     and any other key re-asks. The prompt runs under the minibuffer's
+--     `key` accept policy, so the first printable key is the whole
+--     answer and nothing waits for RET. Emacs's `y-or-n-p`.
+--   * `yes_or_no`: a TYPED answer and RET, for a choice that destroys
+--     work --- discarding a file's changes, overwriting a file on
+--     disk. Exactly the prompt `y_or_n` was before E7b.2: RET on an
+--     empty answer re-asks, any word but y/yes/n/no re-asks, `C-g` is
+--     no. Emacs's `yes-or-no-p`, one letter more lenient.
+--
+-- Both are deliberately built on a SOURCE-LESS read:
+-- `resolve_accepted_value` returns the typed text only when the source
+-- is `none` (src/minibuffer.rs), so with a candidate list RET would
+-- take a selection the user never typed --- a one-key "yes" to a
+-- question about losing work.
 --
 -- An unrecognized answer re-prompts rather than being read as "no".
 -- Guessing is safe in one direction and destructive in the other, and
--- the callers here are exactly the commands that destroy work. Beginning
+-- the callers here are exactly the commands that lose work. Beginning
 -- a session from inside `on_accept` is sound: `Minibuffer::accept` has
 -- already taken the old session, and neither accept path touches the
 -- minibuffer after the callback returns.
 --
 -- `C-g` cancels, which is a "no": `on_cancel` runs `on_no`.
-function pmacs.minibuffer.y_or_n(spec)
+local function ask_yes_or_no(spec, accept)
   local prompt = spec.prompt
   local on_yes = spec.on_yes
   local on_no = spec.on_no
   local function ask()
     pmacs.minibuffer.read {
       prompt = prompt .. " (y or n) ",
+      accept = accept,
       on_accept = function(value)
         local answer = string.lower(value or "")
         if answer == "y" or answer == "yes" then
@@ -326,6 +340,14 @@ function pmacs.minibuffer.y_or_n(spec)
     }
   end
   ask()
+end
+
+function pmacs.minibuffer.y_or_n(spec)
+  ask_yes_or_no(spec, "key")
+end
+
+function pmacs.minibuffer.yes_or_no(spec)
+  ask_yes_or_no(spec, "candidate")
 end
 
 -- Names of the modified buffers, in registry order. Used by the quit
@@ -822,7 +844,11 @@ cmd { name = "buffer.write-file",
               ed.set_status("write-file: " .. tostring(reason))
               return
             end
-            pmacs.minibuffer.y_or_n {
+            -- E7b.2: overwriting another file's bytes on disk is not
+            -- something an undo gets back, so this is the typed-word
+            -- question, not the one-key one. (Emacs asks `y-or-n-p`
+            -- here; the rule the owner adopted puts it the other way.)
+            pmacs.minibuffer.yes_or_no {
               prompt = string.format("%s exists; overwrite?", path),
               on_yes = function()
                 local wrote, why = ed.write_file(path, true)
