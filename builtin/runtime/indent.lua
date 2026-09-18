@@ -150,6 +150,14 @@ pmacs.command.define {
 -- the next TAB, does completion open. With an active region the key
 -- keeps the CUA type-over it had (`buffer.tab`): indenting a region
 -- needs the engine E1.6 owns.
+--
+-- One fallback past Emacs's rule (C7b fix round 1): when there is
+-- nothing to complete --- nothing but whitespace, or the line's start,
+-- immediately before point --- TAB is the indent alone. Without it an
+-- empty first line, at its indentation by definition, opened the
+-- popup with an empty prefix on the first TAB and the second TAB, the
+-- popup's accept, inserted whatever the server listed first. A word
+-- or a symbol before point (`prin`, `self.`) still completes.
 
 -- The byte after the last character of the line holding `pos`: the
 -- position of its newline, or the buffer's length on the last line.
@@ -181,6 +189,15 @@ local function indent_wanted(buf, line_start)
     p = prev_start
   end
   return ""
+end
+
+-- Whether point has nothing before it on its line but whitespace:
+-- the buffer's start, a newline, a space or a tab.
+local function nothing_to_complete_before(buf, cursor)
+  if cursor <= 0 then return true end
+  local ok, ch = pcall(function() return buf:slice(cursor - 1, cursor) end)
+  if not ok or type(ch) ~= "string" then return true end
+  return ch == "\n" or ch == " " or ch == "\t"
 end
 
 function pmacs.indent.tab()
@@ -222,12 +239,15 @@ function pmacs.indent.tab()
     ed.goto_byte(indent_end)
     return true
   end
+  if nothing_to_complete_before(buf, cursor) then
+    return true
+  end
   pmacs.command.invoke("completion.at-point")
   return true
 end
 
 pmacs.command.define {
   name = "edit.indent-or-complete",
-  description = "Indent the line to the line above's indentation; if it already is, complete at point.",
+  description = "Indent the line to the line above's indentation; if it already is and a word or symbol is before point, complete at point.",
   fn = function() pmacs.indent.tab() end,
 }

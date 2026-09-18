@@ -7,9 +7,12 @@
 //! these are the rest of the lines a user's TAB lands on:
 //!
 //! * an empty line at the top of a file --- nothing above it, so
-//!   nothing to indent, so TAB completes with an empty prefix; and a
-//!   second TAB, with the popup open, is the popup's accept. What lands
-//!   is whatever the server put first, pinned as read.
+//!   nothing to indent, and nothing before point, so nothing to
+//!   complete: TAB, and a second TAB, do nothing at all (C7b fix round
+//!   1's indent-only fallback; at review 1 the first TAB opened the
+//!   popup with an empty prefix and the second, the popup's accept,
+//!   inserted whatever the server listed first). The same after a
+//!   space mid-line; a symbol before point still completes.
 //! * an empty line under an indented line gains the indentation; a
 //!   whitespace-only line under it is corrected to the same.
 //! * a listview panel's TAB (`*buffer-list*`) is `listview.toggle`,
@@ -177,13 +180,15 @@ fn text_editor(dir: &Path, body: &str) -> EditorState {
 }
 
 /// The top line of a file is at its indentation by definition (there
-/// is nothing above it), so TAB there completes at point with an empty
-/// prefix, and with the popup open a second TAB is the popup's accept:
-/// the first candidate the server offered lands in the buffer. Pinned
-/// as read, since a user who presses TAB twice on an empty first line
-/// expecting a tab or an indent gets a completion instead.
+/// is nothing above it), and an empty line has nothing before point,
+/// so there is nothing to complete either: TAB does nothing, and a
+/// second TAB does nothing --- no popup, no insertion, point where it
+/// was. Then the positive control that the server answers: `pr` typed
+/// on the line and TAB opens the popup. Bitten by `scripts/bite HEAD^
+/// builtin/runtime/indent.lua`: the first TAB opens the popup with an
+/// empty prefix and the second inserts its first candidate.
 #[test]
-fn tab_twice_on_an_empty_first_line_accepts_the_servers_first_candidate() {
+fn tab_twice_on_an_empty_first_line_completes_nothing() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut s = rust_editor(td.path(), "\nfn main() {}\n");
     goto(&s, 0);
@@ -194,19 +199,58 @@ fn tab_twice_on_an_empty_first_line_accepts_the_servers_first_candidate() {
         "the first TAB inserts nothing"
     );
     assert_eq!(cursor(&s), 0, "and moves nothing");
-    let opened = pump_until(&mut s, 10_000, popup_visible);
-    assert!(opened, "the first TAB opens the popup with an empty prefix");
-    let labels = popup_labels(&s);
-    eprintln!("TAB popup on the empty first line: {labels:?}");
-    assert!(!labels.is_empty());
-    tab(&mut s);
-    assert!(!popup_visible(&s), "the second TAB is the popup's accept");
-    let after = text(&s);
-    eprintln!("TAB after the second TAB the file reads {after:?}");
     assert!(
-        after.starts_with(labels[0].as_str()),
-        "the first candidate landed: {after:?}"
+        !pump_until(&mut s, 300, popup_visible),
+        "and opens no popup: there is nothing to complete"
     );
+    tab(&mut s);
+    assert!(
+        !pump_until(&mut s, 300, popup_visible),
+        "the second TAB opens nothing either"
+    );
+    assert_eq!(text(&s), "\nfn main() {}\n", "and inserts nothing");
+    assert_eq!(cursor(&s), 0);
+    // The positive control: with a prefix before point the same key
+    // completes, so the quiet above is the fallback's and not the
+    // server's silence.
+    press(&mut s, KeyCode::Char('p'));
+    press(&mut s, KeyCode::Char('r'));
+    tab(&mut s);
+    assert!(
+        pump_until(&mut s, 10_000, popup_visible),
+        "TAB after a word completes"
+    );
+    let labels = popup_labels(&s);
+    eprintln!("TAB popup after `pr`: {labels:?}");
+    assert!(!labels.is_empty());
+}
+
+/// The boundary of "nothing to complete": whitespace before point
+/// mid-line is nothing (`let a = |` --- TAB is inert), a symbol before
+/// point is something (`a.|` --- TAB completes).
+#[test]
+fn tab_after_a_space_is_inert_and_after_a_symbol_completes() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = rust_editor(
+        td.path(),
+        "fn main() {\n    let b = 1;\n    let a = \n    a.\n}\n",
+    );
+    goto(&s, 39); // after `let a = ` (the trailing space)
+    let before = text(&s);
+    tab(&mut s);
+    assert!(
+        !pump_until(&mut s, 300, popup_visible),
+        "a space before point: nothing to complete"
+    );
+    assert_eq!(text(&s), before);
+    assert_eq!(cursor(&s), 39);
+    goto(&s, 46); // after `a.`
+    tab(&mut s);
+    assert!(
+        pump_until(&mut s, 10_000, popup_visible),
+        "a symbol before point: TAB completes"
+    );
+    assert_eq!(text(&s), before, "and inserts nothing on its own");
 }
 
 /// An empty line under an indented one gains that indentation, and a
