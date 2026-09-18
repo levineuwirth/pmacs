@@ -1045,6 +1045,15 @@ impl EditorState {
                 include_str!("../builtin/runtime/linewrap.lua"),
             )
             .expect("load linewrap builtin chunk");
+        // E7.2: the `diff` major mode (hunk motion on `n`/`p`), a mode
+        // keymap like dired's. Loaded before `git.lua`, which gives
+        // `*git-diff*` the mode when it creates the buffer.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/diffmode.lua"),
+                include_str!("../builtin/runtime/diffmode.lua"),
+            )
+            .expect("load diffmode builtin chunk");
         // Git integration Stage 1 (docs/archive/framings/git-integration-framing.md):
         // `*git-status*` and `*git-diff*`. Loaded after `listview.lua`,
         // whose `open` (and whose new optional `keys` table) it drives,
@@ -3904,13 +3913,113 @@ impl EditorState {
                     core.rotate_command(fid, "completion.accept");
                 }
                 let pre_revision = self.active_buffer_revision();
-                self.core.borrow_mut().completion_popup_accept();
+                // E7.4: the accept's replace and the item's extra
+                // edits are one command and one undo step.
+                let (fid, buffer_id) = {
+                    let core = self.core.borrow();
+                    (core.active_frontend, core.active_buffer_id())
+                };
+                self.core.borrow_mut().command_group_begin(fid, buffer_id);
+                let accepted = self.core.borrow_mut().completion_popup_accept_edits();
+                if let Some(accepted) = accepted {
+                    self.apply_completion_additional_edits(&accepted);
+                }
+                self.core.borrow_mut().command_group_collapse(buffer_id);
                 if pre_revision != self.active_buffer_revision() {
                     self.lua_host
                         .run_hook("buffer.after-edit", mlua::MultiValue::new());
                 }
             }
         }
+    }
+
+    /// E7.4: apply an accepted candidate's `additionalTextEdits` --- an
+    /// auto-import, typically --- inside the accept's own command, so
+    /// they undo with it. The edits are bytes of the text the server
+    /// answered for; each range is carried across every edit recorded
+    /// since (the typing after the request, the accept's own replace)
+    /// through the semantic-token store's log, never read against the
+    /// current text. A range the log cannot place --- no log for the
+    /// document, an edit since forgotten, a position outside the
+    /// answered-for text --- applies nothing at all and says so: a part
+    /// of an import is worse than none. Edits above the caret move it by
+    /// what they added; the caret stays at the end of the inserted text.
+    fn apply_completion_additional_edits(
+        &mut self,
+        accepted: &crate::editor_core::AcceptedCompletion,
+    ) {
+        let carry = &accepted.carry;
+        if carry.edits.is_empty() && !carry.unresolved {
+            return;
+        }
+        let refuse = |core: &mut EditorCore, why: &str| {
+            core.status = format!("completion: the item's extra edits were not applied ({why})");
+        };
+        if carry.unresolved {
+            refuse(
+                &mut self.core.borrow_mut(),
+                "a position lies outside the text the server answered for",
+            );
+            return;
+        }
+        let Some(uri) = carry.uri.as_deref() else {
+            refuse(&mut self.core.borrow_mut(), "no document to place them in");
+            return;
+        };
+        let placed: Option<Vec<(u64, u64, &str)>> = {
+            let store = self.lsp_manager.borrow().semantic_token_store();
+            let guard = store.lock().expect("semantic token store mutex poisoned");
+            carry
+                .edits
+                .iter()
+                .map(|e| {
+                    guard
+                        .translate_range_since(uri, carry.base, e.start, e.end)
+                        .map(|(s, t)| (s, t, e.new_text.as_str()))
+                })
+                .collect()
+        };
+        let Some(mut edits) = placed else {
+            refuse(
+                &mut self.core.borrow_mut(),
+                "the document's edit log no longer reaches the server's answer",
+            );
+            return;
+        };
+        // Highest first, so each application leaves the lower ranges
+        // where the translation put them.
+        edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+        let mut caret = accepted.anchor + accepted.inserted;
+        let mut core = self.core.borrow_mut();
+        for (start, end, text) in edits {
+            let range = crate::rope::Range { start, end };
+            let result = if start < end {
+                if text.is_empty() {
+                    core.apply_active_edit(crate::buffer::EditOp::Delete { range })
+                } else {
+                    core.apply_active_edit(crate::buffer::EditOp::Replace {
+                        range,
+                        bytes: text.as_bytes(),
+                    })
+                }
+            } else {
+                core.apply_active_edit(crate::buffer::EditOp::Insert {
+                    pos: start,
+                    bytes: text.as_bytes(),
+                })
+            };
+            if let Err(e) = result {
+                core.status = format!("completion: an extra edit failed: {e}");
+                break;
+            }
+            let added = text.len() as u64;
+            if end <= caret {
+                caret = caret - (end - start) + added;
+            } else if start < caret {
+                caret = start + added;
+            }
+        }
+        core.set_cursor_byte(caret);
     }
 
     /// Drive an active query-replace from a keystroke (Arc 2, Q#QR6).

@@ -10802,6 +10802,31 @@ pub fn install_lsp(
     }
 
     {
+        // E7.3: `_wait_formatting(server, uri, job, timeout_ms)` ->
+        // "answered" | "failed" | "timeout". The synchronous half of
+        // format-on-save; see `LspManager::wait_for_formatting`.
+        let m = manager.clone();
+        lsp_mod.set(
+            "_wait_formatting",
+            lua.create_function(
+                move |_, (id, uri, job, timeout_ms): (LspServerIdLua, String, u64, u64)| {
+                    let outcome = m.borrow_mut().wait_for_formatting(
+                        id.0,
+                        &uri,
+                        job,
+                        std::time::Duration::from_millis(timeout_ms),
+                    );
+                    Ok(match outcome {
+                        crate::lsp::FormatWait::Answered => "answered",
+                        crate::lsp::FormatWait::Failed => "failed",
+                        crate::lsp::FormatWait::TimedOut => "timeout",
+                    })
+                },
+            )?,
+        )?;
+    }
+
+    {
         let m = manager.clone();
         lsp_mod.set(
             "_request_rename_raw",
@@ -12949,6 +12974,7 @@ fn lua_table_to_completion_item(t: &Table) -> mlua::Result<crate::completion::Co
         insert_text,
         sort_text,
         filter_text,
+        carry: crate::completion::CompletionEditsCarry::default(),
     })
 }
 
@@ -13059,6 +13085,26 @@ fn candidate_to_lua(lua: &Lua, c: &CompletionCandidate) -> mlua::Result<Table> {
     t.set("source", c.source.as_str())?;
     t.set("priority", c.priority)?;
     t.set("score", c.score)?;
+    // E7.4: the item's `additionalTextEdits` as resolved bytes of the
+    // answered-for text, with the document and edit number they are
+    // relative to, so the driver can hand them back to `popup_show`
+    // unchanged and the accept can carry them across the edits since.
+    if !c.item.carry.edits.is_empty() || c.item.carry.unresolved {
+        let edits = lua.create_table_with_capacity(c.item.carry.edits.len(), 0)?;
+        for (i, e) in c.item.carry.edits.iter().enumerate() {
+            let row = lua.create_table_with_capacity(0, 3)?;
+            row.set("start", e.start)?;
+            row.set("stop", e.end)?;
+            row.set("text", e.new_text.as_str())?;
+            edits.set(i + 1, row)?;
+        }
+        t.set("additional_edits", edits)?;
+        if let Some(uri) = &c.item.carry.uri {
+            t.set("edits_uri", &**uri)?;
+        }
+        t.set("edits_base", c.item.carry.base)?;
+        t.set("edits_unresolved", c.item.carry.unresolved)?;
+    }
     Ok(t)
 }
 
@@ -13380,11 +13426,40 @@ pub fn install_completion_popup(lua: &Lua, core: &SharedCore) -> mlua::Result<()
                     let detail: Option<String> = row.get::<Option<String>>("detail").ok().flatten();
                     let insert_text: Option<String> =
                         row.get::<Option<String>>("insert_text").ok().flatten();
+                    // E7.4: the carry, in the shape `candidate_to_lua`
+                    // emits; absent for a candidate without extra edits.
+                    let mut carry = crate::completion::CompletionEditsCarry::default();
+                    if let Ok(Some(edits)) = row.get::<Option<Table>>("additional_edits") {
+                        for e in edits.sequence_values::<Table>() {
+                            let e = e?;
+                            carry.edits.push(crate::completion::AdditionalEdit {
+                                start: e.get("start")?,
+                                end: e.get("stop")?,
+                                new_text: e.get::<Option<String>>("text")?.unwrap_or_default(),
+                            });
+                        }
+                        carry.uri = row
+                            .get::<Option<String>>("edits_uri")
+                            .ok()
+                            .flatten()
+                            .map(std::sync::Arc::from);
+                        carry.base = row
+                            .get::<Option<u64>>("edits_base")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        carry.unresolved = row
+                            .get::<Option<bool>>("edits_unresolved")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(false);
+                    }
                     candidates.push(crate::completion::PopupCandidate {
                         insert_text: insert_text.unwrap_or_else(|| label.clone()),
                         label,
                         kind,
                         detail,
+                        carry,
                     });
                 }
                 let total: usize = spec

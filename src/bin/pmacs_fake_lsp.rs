@@ -65,6 +65,10 @@
 //!   unreadable or unparsable plan sends no `applyEdit` at all and
 //!   reports itself through the sink, so a broken fixture cannot read
 //!   as a pass.
+//! * In every mode, `PMACS_FAKE_LSP_FORMAT_HOLD_MS` holds the
+//!   `textDocument/formatting` reply for that many milliseconds before
+//!   it is written (E7.3: a formatter that answers after a save's
+//!   bounded wait has given up).
 //! * If launched with `PMACS_FAKE_LSP_MODE=semantichold` (E6b.3): a
 //!   full-only, range-capable semantic-token server whose answers are
 //!   computed from the document it holds --- every maximal run of ASCII
@@ -587,7 +591,26 @@ fn main() {
             }
             ("exit", _) => return,
             ("textDocument/completion", Some(idv)) => {
-                let resp = serde_json::json!({
+                // E7.4: `PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT=line:col:text`
+                // gives every item one `additionalTextEdits` entry
+                // inserting `text` (with `\n` spelled `\\n`) at that
+                // position --- an auto-import's shape.
+                let extra = std::env::var("PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT")
+                    .ok()
+                    .and_then(|spec| {
+                        let mut parts = spec.splitn(3, ':');
+                        let line: u32 = parts.next()?.parse().ok()?;
+                        let col: u32 = parts.next()?.parse().ok()?;
+                        let text = parts.next()?.replace("\\n", "\n");
+                        Some(serde_json::json!([{
+                            "range": {
+                                "start": { "line": line, "character": col },
+                                "end": { "line": line, "character": col }
+                            },
+                            "newText": text
+                        }]))
+                    });
+                let mut resp = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": idv,
                     "result": {
@@ -618,6 +641,16 @@ fn main() {
                         ]
                     }
                 });
+                if let Some(extra) = extra
+                    && let Some(items) = resp
+                        .get_mut("result")
+                        .and_then(|r| r.get_mut("items"))
+                        .and_then(serde_json::Value::as_array_mut)
+                {
+                    for item in items {
+                        item["additionalTextEdits"] = extra.clone();
+                    }
+                }
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/hover", Some(idv)) => {
@@ -977,6 +1010,10 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/formatting", Some(idv)) => {
+                // E7.3: `PMACS_FAKE_LSP_FORMAT_HOLD_MS` holds the reply,
+                // so a save's bounded wait can be exceeded by a server
+                // that then answers --- the late-answer path.
+                hold_for("PMACS_FAKE_LSP_FORMAT_HOLD_MS", None);
                 // Synthetic two-edit reply: trim leading whitespace on
                 // line 0 and append a semicolon at line 3, col 7.
                 let resp = serde_json::json!({

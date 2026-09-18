@@ -549,6 +549,37 @@ fn resolve_config_section(settings: &Value, section: Option<&str>) -> Value {
 /// collapsed to 0, so its coordinates are not corrupted. A trailing
 /// `\r` (CRLF) stays in the slice; both the pmacs byte offset and the
 /// server `character` are line-relative so the `\r` cancels out.
+/// Byte offset of every line's first byte in `text`, line 0 first.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    starts
+}
+
+/// The byte offset in `text` of LSP position `(line, character)` in
+/// `enc`, with `starts` from [`line_starts`]: `None` past the last
+/// line, except the position one line past a trailing newline at
+/// column 0, which is the end of the text. E7.4.
+fn position_to_byte(
+    text: &str,
+    starts: &[usize],
+    line: u32,
+    character: u32,
+    enc: PositionEncoding,
+) -> Option<usize> {
+    let line_idx = line as usize;
+    match starts.get(line_idx) {
+        Some(&start) => {
+            let line_text = nth_line(text, line)?;
+            Some(start + char_to_byte(line_text, character, enc))
+        }
+        None if line_idx == starts.len() && character == 0 && text.ends_with('\n') => {
+            Some(text.len())
+        }
+        None => None,
+    }
+}
+
 fn nth_line(text: &str, line: u32) -> Option<&str> {
     text.split('\n').nth(line as usize)
 }
@@ -895,8 +926,15 @@ pub struct LspManager {
 #[derive(Clone, Debug)]
 enum ResponseRoute {
     /// Absorb response into [`crate::completion::CompletionStore`] at
-    /// `(server, uri)`.
-    Completion { uri: String },
+    /// `(server, uri)`, with every item's `additionalTextEdits`
+    /// resolved against `anchor`, the text the server answers for, and
+    /// stamped with `base_seq`, the edit number that text is current at
+    /// (E7.4).
+    Completion {
+        uri: String,
+        anchor: std::sync::Arc<str>,
+        base_seq: u64,
+    },
     /// Absorb response into [`crate::hover::HoverStore`] at
     /// `(server, uri)`.
     Hover { uri: String },
@@ -996,7 +1034,7 @@ impl ResponseRoute {
     /// response able to repopulate a forgotten key.
     fn scoped_uri(&self) -> Option<&str> {
         match self {
-            ResponseRoute::Completion { uri }
+            ResponseRoute::Completion { uri, .. }
             | ResponseRoute::Hover { uri }
             | ResponseRoute::Signature { uri }
             | ResponseRoute::Definition { uri }
@@ -1043,6 +1081,18 @@ struct Awaiter {
     /// [`LspManager::drain_cancelled_externals`] sweep observes it.
     /// Mirrors `mcp.rs`'s `Awaiter::token`.
     token: CancellationToken,
+}
+
+/// What [`LspManager::wait_for_formatting`] saw (E7.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormatWait {
+    /// The response arrived and was absorbed into the formatting store.
+    Answered,
+    /// The request settled without an answer: an error response, a
+    /// cancellation, or the server going away.
+    Failed,
+    /// The deadline passed first; the request has been cancelled.
+    TimedOut,
 }
 
 /// In-flight `textDocument/*` request bound to one or more
@@ -1655,6 +1705,61 @@ impl LspManager {
         job_id
     }
 
+    /// E7.3: wait synchronously, at most `timeout`, for the formatting
+    /// request behind `job_id` on `sid` to be answered, pumping the
+    /// process supervisor and this server's frames while it waits ---
+    /// the two ticks the run loop would have taken in the same time.
+    /// The async runtime is deliberately NOT ticked: its tick hands the
+    /// settled ids to the Lua pump, and taking them here would leave
+    /// every other coroutine parked on a job that settled meanwhile.
+    ///
+    /// Returns [`FormatWait::Answered`] once the awaiter has left
+    /// `pending_external` and the formatting store holds an entry for
+    /// `uri` (the response was absorbed, edits or none);
+    /// [`FormatWait::Failed`] when the awaiter is gone and the store
+    /// has nothing (an error response, a cancelled request, the server
+    /// gone); [`FormatWait::TimedOut`] when the deadline passes first,
+    /// in which case the awaiter is cancelled so the late answer, when
+    /// it comes, is reaped by the cancellation sweep and abandoned
+    /// rather than applied to whatever the buffer holds by then.
+    pub fn wait_for_formatting(
+        &mut self,
+        sid: LspServerId,
+        uri: &str,
+        job_id: JobId,
+        timeout: Duration,
+    ) -> FormatWait {
+        let deadline = Instant::now() + timeout;
+        let key = crate::formatting::FormattingKey::new(sid.raw().to_string(), uri.to_owned());
+        loop {
+            self.supervisor.borrow_mut().tick();
+            self.drain_process_events(sid);
+            let live = self
+                .pending_external
+                .iter()
+                .any(|((s, _), p)| *s == sid && p.awaiters.iter().any(|a| a.job_id == job_id));
+            if !live {
+                let answered = self
+                    .formatting_store
+                    .lock()
+                    .expect("formatting store mutex poisoned")
+                    .get(&key)
+                    .is_some();
+                return if answered {
+                    FormatWait::Answered
+                } else {
+                    FormatWait::Failed
+                };
+            }
+            if Instant::now() >= deadline {
+                self.runtime.cancel(job_id);
+                self.drain_cancelled_externals(sid);
+                return FormatWait::TimedOut;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// T M4.5 task #8: override the per-request timeout (default 10s).
     /// Exposed to Lua as `pmacs.lsp.set_request_timeout_ms` and used
     /// by the await-path tests to force fast timeouts.
@@ -1813,8 +1918,19 @@ impl LspManager {
         });
         let req_id = self.send_request(sid, "textDocument/completion", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/completion", &uri);
-        self.pending_routes
-            .insert((sid, req_id), ResponseRoute::Completion { uri });
+        // E7.4: the text the server answers for and its edit number,
+        // captured as a semantic-token request captures them, so an
+        // item's `additionalTextEdits` resolve against that text and
+        // are carried across the edits since at accept time.
+        let (anchor, base_seq) = self.semantic_token_anchor(sid, &uri);
+        self.pending_routes.insert(
+            (sid, req_id),
+            ResponseRoute::Completion {
+                uri,
+                anchor,
+                base_seq,
+            },
+        );
         Ok(job_id)
     }
 
@@ -2829,8 +2945,37 @@ impl LspManager {
         let result = &converted;
         let server_key = sid.raw().to_string();
         match route {
-            ResponseRoute::Completion { uri } => {
-                let resp = crate::completion::CompletionResponse::from_lsp_value(result);
+            ResponseRoute::Completion {
+                uri,
+                anchor,
+                base_seq,
+            } => {
+                let mut resp = crate::completion::CompletionResponse::from_lsp_value(result);
+                self.semantic_token_store
+                    .lock()
+                    .expect("semantic token store mutex poisoned")
+                    .note_completion_base(uri, *base_seq);
+                if resp.items.iter().any(|i| !i.carry.raw.is_empty()) {
+                    let encoding = self.position_encoding(sid);
+                    let starts = line_starts(anchor);
+                    resp.resolve_additional_edits(uri, *base_seq, |edit| {
+                        let start = position_to_byte(
+                            anchor,
+                            &starts,
+                            edit.start_line,
+                            edit.start_col,
+                            encoding,
+                        )?;
+                        let end = position_to_byte(
+                            anchor,
+                            &starts,
+                            edit.end_line,
+                            edit.end_col,
+                            encoding,
+                        )?;
+                        (start <= end).then_some((start as u64, end as u64))
+                    });
+                }
                 let key = crate::completion::CompletionKey::new(server_key, uri.clone());
                 let mut guard = self
                     .completion_store

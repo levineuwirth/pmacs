@@ -3416,6 +3416,42 @@ function pmacs.lsp.format_buffer()
   end)
 end
 
+--- Format the active buffer synchronously, waiting at most
+--- `timeout_ms` for the server's answer (E7.3, the mechanism under
+--- `lsp.format-on-save`). Returns one of:
+---
+---   "applied", n   the server's edits were applied to the buffer
+---   "clean"        the server answered with no edits
+---   "no-server"    no live attachment for the buffer
+---   "timeout"      no answer within `timeout_ms`; nothing applied, and
+---                  the request is cancelled so a late answer is never
+---                  applied either
+---   "failed", why  the server answered with an error, or went away
+---
+--- The request goes out only after the pending `didChange` has been
+--- flushed (`attachment_for_request`), so the server formats the text
+--- the buffer holds. The wait pumps the supervisor and the server's
+--- frames and nothing else; see `LspManager::wait_for_formatting`.
+function pmacs.lsp.format_buffer_sync(timeout_ms)
+  local rec = pmacs.lsp.attachment_for_request()
+  if not rec then return "no-server" end
+  pmacs.formatting.clear(rec.server, rec.uri)
+  local ok, job = pcall(pmacs.lsp._request_formatting_raw, rec.server, rec.uri, 4, true)
+  if not ok then
+    -- The dispatch refusal's first line ("server ... is not ready for
+    -- requests (state: shutting-down)"), without the traceback.
+    return "failed", (tostring(job):match("^[^\n]*") or tostring(job))
+  end
+  local outcome = pmacs.lsp._wait_formatting(rec.server, rec.uri, job, timeout_ms)
+  if outcome == "timeout" then return "timeout" end
+  if outcome ~= "answered" then
+    return "failed", "the server did not answer the request"
+  end
+  local edits = pmacs.formatting.edits(rec.server, rec.uri)
+  if not edits or #edits == 0 then return "clean" end
+  return "applied", apply_text_edits(edits)
+end
+
 -- T M4.5 — rename the symbol under the cursor.
 --
 -- When the server advertises `renameProvider.prepareProvider`, a

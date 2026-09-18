@@ -153,6 +153,43 @@ impl CompletionItemKind {
     }
 }
 
+/// One of a completion item's `additionalTextEdits` (E7.4), resolved
+/// to byte coordinates of the text the server answered for --- the
+/// document as it stood at the edit number the carry names --- and
+/// translated across the edits recorded since before it is applied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdditionalEdit {
+    /// First byte of the replaced range in the answered-for text.
+    pub start: u64,
+    /// One past the last replaced byte; equal to `start` for an insert.
+    pub end: u64,
+    /// Replacement text; empty for a deletion.
+    pub new_text: String,
+}
+
+/// What an item carries to its accept besides its insert text (E7.4):
+/// its `additionalTextEdits`, raw as parsed and resolved to bytes of the
+/// answered-for text, the document they address and the edit number
+/// that text was current at, so the accept can carry them across every
+/// edit since through the semantic-token store's log rather than trust
+/// the server's offsets against the current text.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompletionEditsCarry {
+    /// The edits as the server sent them (LSP positions).
+    pub raw: Vec<crate::formatting::TextEdit>,
+    /// The edits resolved to bytes of the answered-for text; empty
+    /// until [`CompletionResponse::resolve_additional_edits`] runs.
+    pub edits: Vec<AdditionalEdit>,
+    /// The document the edits address.
+    pub uri: Option<std::sync::Arc<str>>,
+    /// The edit number the answered-for text was current at.
+    pub base: u64,
+    /// A raw edit named a position outside the answered-for text, so
+    /// `edits` is not the whole of `raw`; the accept applies nothing
+    /// and says so rather than apply a part.
+    pub unresolved: bool,
+}
+
 /// One completion candidate, parsed from `textDocument/completion`.
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
@@ -171,6 +208,9 @@ pub struct CompletionItem {
     pub sort_text: Option<String>,
     /// `filterText` LSP field; receiver may filter by typed prefix.
     pub filter_text: Option<String>,
+    /// The item's `additionalTextEdits` and what the accept needs to
+    /// apply them (E7.4).
+    pub carry: CompletionEditsCarry,
 }
 
 impl CompletionItem {
@@ -190,6 +230,15 @@ impl CompletionItem {
             .get("filterText")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let raw = v
+            .get("additionalTextEdits")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(crate::formatting::TextEdit::from_lsp_value)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Some(Self {
             label,
             kind,
@@ -198,6 +247,10 @@ impl CompletionItem {
             insert_text,
             sort_text,
             filter_text,
+            carry: CompletionEditsCarry {
+                raw,
+                ..CompletionEditsCarry::default()
+            },
         })
     }
 
@@ -270,6 +323,45 @@ impl CompletionResponse {
         Self {
             items,
             is_incomplete,
+        }
+    }
+}
+
+impl CompletionResponse {
+    /// Resolve every item's raw `additionalTextEdits` to bytes of the
+    /// text the server answered for, through `resolve` (the manager's
+    /// position codec against that text), and stamp each item with the
+    /// document and the edit number `base` that text was current at
+    /// (E7.4). An edit `resolve` cannot place marks the item
+    /// `unresolved` and leaves its `edits` short, which the accept
+    /// treats as "apply nothing and say so".
+    pub fn resolve_additional_edits(
+        &mut self,
+        uri: &str,
+        base: u64,
+        resolve: impl Fn(&crate::formatting::TextEdit) -> Option<(u64, u64)>,
+    ) {
+        let uri: std::sync::Arc<str> = std::sync::Arc::from(uri);
+        for item in &mut self.items {
+            if item.carry.raw.is_empty() {
+                continue;
+            }
+            let mut edits = Vec::with_capacity(item.carry.raw.len());
+            let mut unresolved = false;
+            for raw in &item.carry.raw {
+                match resolve(raw) {
+                    Some((start, end)) => edits.push(AdditionalEdit {
+                        start,
+                        end,
+                        new_text: raw.new_text.clone(),
+                    }),
+                    None => unresolved = true,
+                }
+            }
+            item.carry.edits = edits;
+            item.carry.uri = Some(std::sync::Arc::clone(&uri));
+            item.carry.base = base;
+            item.carry.unresolved = unresolved;
         }
     }
 }
@@ -473,6 +565,9 @@ pub struct PopupCandidate {
     pub detail: Option<String>,
     /// Text that replaces `[anchor .. cursor]` on accept.
     pub insert_text: String,
+    /// The item's `additionalTextEdits` and how to place them (E7.4);
+    /// empty for a candidate without any.
+    pub carry: CompletionEditsCarry,
 }
 
 /// Live state of the in-buffer completion popup (Q#C2). Frontend-
@@ -1061,6 +1156,7 @@ mod tests {
 
     fn cand(label: &str) -> PopupCandidate {
         PopupCandidate {
+            carry: CompletionEditsCarry::default(),
             label: label.to_owned(),
             kind: CompletionItemKind::Text,
             detail: None,

@@ -420,6 +420,7 @@ impl Snippet {
             insert_text: Some(self.body.clone()),
             sort_text: None,
             filter_text: Some(self.prefix.clone()),
+            carry: crate::completion::CompletionEditsCarry::default(),
         }
     }
 }
@@ -539,6 +540,7 @@ pub fn dabbrev_provider() -> ProviderFn {
                 insert_text: None,
                 sort_text: None,
                 filter_text: None,
+                carry: crate::completion::CompletionEditsCarry::default(),
             });
             if out.len() >= 64 {
                 break;
@@ -595,6 +597,7 @@ pub fn project_symbols_provider(indexer: crate::lua_bindings::SharedProjectIndex
                     insert_text: None,
                     sort_text: None,
                     filter_text: None,
+                    carry: crate::completion::CompletionEditsCarry::default(),
                 }
             })
             .collect()
@@ -683,6 +686,7 @@ mod tests {
             insert_text: None,
             sort_text: None,
             filter_text: None,
+            carry: crate::completion::CompletionEditsCarry::default(),
         }
     }
 
@@ -931,6 +935,7 @@ mod tests {
                 insert_text: None,
                 sort_text: None,
                 filter_text: None,
+                carry: crate::completion::CompletionEditsCarry::default(),
             }]
         });
         let mut reg = CompletionRegistry::new();
