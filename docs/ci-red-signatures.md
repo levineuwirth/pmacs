@@ -1931,6 +1931,154 @@ Hello` family, nor #259, nor U4, nor #271, nor #276, nor #253, nor
 #277 sampled on this run; every count stands where the section above
 left it. **The head is green**, stated at the moment of writing.
 
+### PR #278's review-round-1 runs at `4717415` and `024b548`: red by design on the review's own probe
+
+Review round 1 (2026-09-18) committed its six behavioral probes as
+`4717415` (`tests/e7_review1_probes.rs`) and gated one helper as
+`024b548`; the suite's prune probe was red until the fix round's line
+landed, so both runs are red on the branch's own row and on nothing
+else. Read at the fix round's close from the jobs endpoint and the
+review's copies of the twelve test-leg logs; not re-run.
+
+| field | value |
+|---|---|
+| run | 35342121854, `pull_request`, one attempt |
+| head | `4717415`, the review's witness commit |
+| window | created 2026-09-18T11:56:47Z, updated 12:12:38Z |
+| verdict | 19 jobs: **12 success, 1 skipped, 6 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the failures | the four ubuntu legs on `e7_review1_probes` `10 passed; 1 failed` (9 and 1 without `crdt`), the prune probe alone, with 48, 152, 152 and 152 `test result: ok` beside it; both macOS legs red at compile (`errors_text` a dead helper under `-D warnings`, its only reader the Linux-only killed-server probe), zero tests run, 417 and 410 log lines |
+
+Tally (run-35342121854-jobs): 19 = 12 + 1 + 6.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 105590178946 | success |
+| Format | 105590179105 | success |
+| Lint (lua54) | 105590179119 | success |
+| Lint (luajit) | 105590179158 | success |
+| Changed paths | 105590179186 | success |
+| Test (crdt) | 105590219321 | failure |
+| GPU Render (headless) | 105590219350 | success |
+| M6 Perf Gates | 105590219370 | success |
+| M1 Acceptance Gates | 105590219396 | success |
+| Test (ubuntu-latest / lua54) | 105590219416 | failure |
+| Test (ubuntu-latest / luajit) | 105590219417 | failure |
+| M10 Perf Gates (crdt) | 105590219435 | success |
+| M5 Perf Gates | 105590219443 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105590219460 | failure |
+| Test (macos-latest / luajit) | 105590219480 | failure |
+| M4 Perf Gates | 105590219496 | success |
+| Test (macos-latest / lua54) | 105590219511 | failure |
+| Perf budgets (debug) | 105590219518 | success |
+| Docs consistency | 105590221010 | skipped |
+
+| field | value |
+|---|---|
+| run | 35343712597, `pull_request`, one attempt |
+| head | `024b548`, the helper gated with its consumer |
+| window | created 2026-09-18T12:15:31Z, updated 12:36:17Z |
+| verdict | 19 jobs: **12 success, 1 skipped, 6 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the failures | every test leg on `e7_review1_probes` `10 passed; 1 failed` (9 and 1 where a probe is compiled out), `e7_review1_the_prune_misleads_an_older_completion_carry` alone, with 48, 152, 152, 152, 153 and 153 `test result: ok` beside it; the macOS legs now compiling and running the suite |
+
+Tally (run-35343712597-jobs): 19 = 12 + 1 + 6.
+
+| job | id | result |
+|---|---|---|
+| Format | 105595264786 | success |
+| Commit attribution (D9) | 105595264900 | success |
+| Lint (luajit) | 105595265009 | success |
+| Changed paths | 105595265085 | success |
+| Lint (lua54) | 105595265122 | success |
+| Test (crdt) | 105595305219 | failure |
+| M4 Perf Gates | 105595305263 | success |
+| GPU Render (headless) | 105595305271 | success |
+| M6 Perf Gates | 105595305274 | success |
+| M1 Acceptance Gates | 105595305283 | success |
+| Test (macos-latest / luajit) | 105595305312 | failure |
+| Test (ubuntu-latest / lua54) | 105595305350 | failure |
+| M10 Perf Gates (crdt) | 105595305391 | success |
+| Test (ubuntu-latest / luajit) | 105595305437 | failure |
+| Perf budgets (debug) | 105595305469 | success |
+| Test (macos-latest / lua54) | 105595305491 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 105595305509 | failure |
+| M5 Perf Gates | 105595305616 | success |
+| Docs consistency | 105595306518 | skipped |
+
+`WouldBlock`, `got ok` and `did not become ready` appear zero times
+in all twelve logs; U17's witness ran `ok` on the five legs of the
+second run that reached it. The 48 on `Test (crdt)` in both runs is
+that job stopping at `e7_review1_probes`, the 49th target, because it
+ran without `--no-fail-fast` (`ci.yml:536` at these heads; the matrix
+legs have carried the flag since E0): every target sorted after the
+probe suite, `m8_1_acceptance` among them, ran nothing and said
+nothing there. The fix round adds the flag (`c68409d`, review 1's
+Low 4) and the next section shows the job at its whole corpus. So
+neither the `read Hello` family, nor #259, nor U4, nor #271, nor
+#276, nor #253 sampled on either run; every count stands. Both heads
+are not green, on the review's probe and by design, stated at the
+moment of writing; the line that turns it green is the fix round's.
+
+### PR #278's fix-round-1 head run 35366530302 at `c68409d`, and it is GREEN
+
+E7's fix-round-1 tip (`e7/git-and-lsp-affordances`, base `7002308`;
+`024b548` plus Medium 1's line `2aa9486`, the bound's comment
+`f081e50` and the `Test (crdt)` flag `c68409d`), read at the round's
+close on 2026-09-18 from the jobs endpoint and all six test legs'
+logs after the run had completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35366530302, `pull_request`, one attempt |
+| head | `c68409d`, PR #278's fix-round-1 head |
+| window | created 2026-09-18T16:07:02Z, updated 16:28:28Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35366530302-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105670232609 | success |
+| Lint (luajit) | 105670232771 | success |
+| Lint (lua54) | 105670232776 | success |
+| Format | 105670232825 | success |
+| Commit attribution (D9) | 105670232945 | success |
+| M5 Perf Gates | 105670297624 | success |
+| M1 Acceptance Gates | 105670297685 | success |
+| GPU Render (headless) | 105670297719 | success |
+| M4 Perf Gates | 105670297722 | success |
+| M6 Perf Gates | 105670297785 | success |
+| Test (crdt) | 105670297805 | success |
+| M10 Perf Gates (crdt) | 105670297831 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105670297845 | success |
+| Test (macos-latest / lua54) | 105670297848 | success |
+| Test (macos-latest / luajit) | 105670297937 | success |
+| Perf budgets (debug) | 105670297984 | success |
+| Test (ubuntu-latest / luajit) | 105670298030 | success |
+| Test (ubuntu-latest / lua54) | 105670298175 | success |
+| Docs consistency | 105670299161 | skipped |
+
+On all six test legs `WouldBlock`, `got ok` and `did not become
+ready` appear zero times and `FAILED` zero times: `Test (crdt)`
+(105670297805) 154 `test result: ok`, the ubuntu matrix legs
+(105670298175 lua54, 105670298030 luajit, 105670297845 luajit without
+`crdt`) 155 each, both macOS legs (105670297937 luajit, 105670297848
+lua54) 156 each. `e7_review1_probes` is `11 passed` on the three
+`crdt` ubuntu legs and `10 passed` where one probe is compiled out
+(the GPU-route probe without `crdt`; the killed-server probe off
+Linux), the prune probe `ok` on every leg --- the review's Medium 1
+closed on CI as well as locally. **`Test (crdt)` at 154 against 48
+at the two runs above is the `--no-fail-fast` flag doing what it
+says**: the job now runs its whole corpus, U17's witness `ok` on it
+and on the other five legs. The three first-snapshot reads of #253
+(#277 folded into it above) did not recur on `Test (ubuntu-latest /
+lua54)`, a green sample and nothing more. So neither the `read Hello`
+family, nor #259, nor U4, nor #271, nor #276, nor #253 sampled on
+this run; every count stands where the sections above left it. **The
+head is green**, stated at the moment of writing.
+
 ### R7's seventeenth, local, on E5's tip
 
 `scripts/gate` at `66195b5`, log `20260910T203556Z-1854124`, step
