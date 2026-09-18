@@ -2020,6 +2020,46 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #280's head run 35390705543 at `c4c0dfb`, and it is GREEN
+
+Read at E7b review 1's close on 2026-09-18, from the jobs endpoint and
+all six test legs' logs; not re-run. The head is the review's witness
+commit on E7b (`e7b/status-prompt-keys`, base `e190f80`): three test
+suites on top of the reviewed `a78e480`, no code.
+
+| field | value |
+|---|---|
+| run | 35390705543, `pull_request`, one attempt |
+| head | `c4c0dfb`, PR #280 |
+| window | created 2026-09-18T20:18:14Z, updated 20:40:37Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed tests |
+| the six test legs | `Test (crdt)` 161 `test result: ok`, the three ubuntu legs 162 each, both macOS legs 163 each (the reviewed head's 158 / 159 / 160 plus the three suites); `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; U17's witness `ok` on every leg; the review's ten rows `ok` on every leg, the four rust-analyzer rows running on the four Linux legs under `PMACS_REQUIRE_LSP=1` and skipping on macOS, where the server is not installed |
+
+Tally (run-35390705543-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 105748135722 | success |
+| Lint (luajit) | 105748135886 | success |
+| Lint (lua54) | 105748136037 | success |
+| Changed paths | 105748136080 | success |
+| Format | 105748136167 | success |
+| M1 Acceptance Gates | 105748184799 | success |
+| GPU Render (headless) | 105748184801 | success |
+| M10 Perf Gates (crdt) | 105748184837 | success |
+| M6 Perf Gates | 105748184838 | success |
+| Test (crdt) | 105748184857 | success |
+| M4 Perf Gates | 105748184861 | success |
+| Test (ubuntu-latest / luajit) | 105748184878 | success |
+| Perf budgets (debug) | 105748184885 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105748184896 | success |
+| M5 Perf Gates | 105748184903 | success |
+| Test (macos-latest / lua54) | 105748184933 | success |
+| Test (ubuntu-latest / lua54) | 105748184942 | success |
+| Test (macos-latest / luajit) | 105748184949 | success |
+| Docs consistency | 105748186851 | skipped |
+
 ### PR #280's head run 35381362669 at `a78e480`, and it is GREEN
 
 Read at C7b's close on 2026-09-18, from the jobs endpoint and all six
