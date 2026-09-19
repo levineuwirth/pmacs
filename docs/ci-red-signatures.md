@@ -2020,6 +2020,100 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### `main` after E7b: run 35437135435 at `361bb3b`, red on two rows of its own suites, filed as #282 and #283
+
+E7b merged as `361bb3b` (squash of `c0230bf`, PR #280,
+`--match-head-commit`) on 2026-09-19, and its post-merge `push` run
+is **35437135435**: 19 jobs on one attempt, **16 green, 1 skipped, 2
+red**. Read at E7c's opening on 2026-09-19 from the jobs endpoint and
+all six test legs' logs after the run completed; not re-run. The head
+of PR #280, the same tree but for `main`'s registry commits, was green
+on every leg (35432322590, the section below), so both reds are
+first samples of their fragments on a tree whose code CI had already
+run green once.
+
+| field | value |
+|---|---|
+| run | 35437135435, `push`, one attempt |
+| head | `361bb3b`, E7b's squash merge (PR #280 at `c0230bf`, `--match-head-commit`) |
+| window | created 2026-09-19T10:20:32Z, updated 10:42:03Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+
+Tally (run-35437135435-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Format | 105881606071 | success |
+| Changed paths | 105881606110 | success |
+| Lint (lua54) | 105881606121 | success |
+| Commit attribution (D9) | 105881606122 | success |
+| Lint (luajit) | 105881606143 | success |
+| GPU Render (headless) | 105881622691 | success |
+| M10 Perf Gates (crdt) | 105881622693 | success |
+| M4 Perf Gates | 105881622695 | success |
+| M5 Perf Gates | 105881622706 | success |
+| Perf budgets (debug) | 105881622722 | success |
+| Test (macos-latest / luajit) | 105881622730 | success |
+| Test (ubuntu-latest / luajit) | 105881622732 | failure |
+| M1 Acceptance Gates | 105881622741 | success |
+| Test (macos-latest / lua54) | 105881622751 | failure |
+| Test (crdt) | 105881622760 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105881622767 | success |
+| Test (ubuntu-latest / lua54) | 105881622825 | success |
+| M6 Perf Gates | 105881622849 | success |
+| Docs consistency | 105881623490 | skipped |
+
+Tally (run-35437135435-failures): 2 rows of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (crdt)` 162 `test result: ok`,
+`Test (ubuntu-latest / lua54)` 163, `Test (ubuntu-latest / luajit, no
+crdt)` 163, `Test (macos-latest / luajit)` 164, each with zero
+`FAILED`; `Test (ubuntu-latest / luajit)` 160 `ok` and one `FAILED`;
+`Test (macos-latest / lua54)` 161 `ok` and one `FAILED`. `WouldBlock`,
+`did not become ready` and `got ok` appear zero times on every leg, and
+U17's selector `read_dir_supersede_cancels_in_flight_predecessor` ran
+`ok` on all six. So neither the `read Hello` family, nor #259, nor U4,
+nor U17, nor #271, nor #276 sampled here, and every count stands where
+the PR #280 sections left it. The two reds are each the job's only
+failure, each a first sample of its fragments, each on a row a review
+round wrote, and each filed as its own issue under the registry's
+template rather than re-run:
+
+- **#282**, `Test (ubuntu-latest / luajit)` 105881622732:
+  `a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`
+  (`tests/e7b_review_wire_acceptance.rs`, C7b review 1's row, retried on
+  `-32801` at fix round 1) failed at its `*lsp*` read --- `*lsp* names
+  the request and the code: []` --- with the label `ready`, `last_error`
+  `None` and `*errors*` holding its one line, `test result: FAILED. 3
+  passed; 1 failed; 2 ignored`. The candidate mechanism is in the
+  row's own trace: `*lsp*` is a 64-entry ring and rust-analyzer
+  re-primed its cache inside the three-second window after the rename
+  (`LSP:idx` twice, 104 `$/progress` frames, 84 of them `cachePriming`
+  reports with a message, each a push), so the `response error:
+  textDocument/prepareRename` line was evicted before the read. The
+  product's surfaces under the fix-round ruling (the label and
+  `*errors*`) were correct; the row reads a capped log after a window
+  the server can overflow. Not a product defect that this run shows.
+- **#283**, `Test (macos-latest / lua54)` 105881622751:
+  `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`
+  (`tests/e7_review1_probes.rs`, C7 review 1's probe) --- `pump timeout
+  waiting for the accept and its import`, the replica's text
+  `"fn main() {\n    println\n    \n}\n// tail\n"` with `popup_rows=0
+  anchor=None`, `test result: FAILED. 9 passed; 1 failed; 0 ignored`,
+  `finished in 12.43s`. RET reached the daemon as a newline with its
+  auto-indent, which is what RET does with no popup open, so the
+  fake's completion answer had not opened the popup when the probe's
+  fixed 1500 ms settle window closed and RET went out; the row ran
+  `ok` on the five other legs. A fixed window on the leg the registry
+  measures as slowest, not a wait on the popup; not a product defect
+  that this run shows (E7.4's accept arm passed on every other leg).
+
+The base control for E7c is `361bb3b`, the last code-bearing commit on
+`main`; its own run is this one, red on two fixture rows neither of
+which is on E7c's path, and PR #280's head run at `c0230bf` on the same
+code is green on every leg.
+
 ### PR #280's fix-round-1 head run 35432322590 at `c0230bf`, and it is GREEN
 
 Read at C7b fix round 1's close on 2026-09-19, from the jobs endpoint
