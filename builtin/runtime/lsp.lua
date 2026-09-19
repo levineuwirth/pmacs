@@ -28,7 +28,11 @@ pmacs.lsp = pmacs.lsp or {}
 --   command       (string)  required — server binary
 --   args          (list)    argv after command
 --   env           (table)   extra environment
---   init_options  (table)   `initializationOptions`
+--   init_options  (table|function) `initializationOptions`; a
+--                           `function(root) -> table` is called at
+--                           spawn with the resolved project root (or
+--                           nil), so one init.lua can configure each
+--                           project differently (E7c.2)
 --   settings      (table)   answered to `workspace/configuration`
 --   root  (string|function) optional explicit project root; overrides
 --                           the `pmacs.project.detect` marker walk used
@@ -41,12 +45,36 @@ pmacs.lsp.config = pmacs.lsp.config or {}
 
 -- Default rust-analyzer config. Users replace any field from init.lua
 -- before any rust file opens.
+--
+-- The check rust-analyzer runs on every save (E7c.1 sends the save):
+-- `cargo check` over the workspace with its default features, which is
+-- what `cargo check` itself does and rust-analyzer's own default. Not
+-- `cargo.allFeatures`, which the config shipped until E7c.2: a
+-- workspace whose features exclude each other --- this one's Lua
+-- bindings --- cannot be built with all of them on, so every check of
+-- pmacs itself failed before it checked anything (#281). `checkOnSave`
+-- is a boolean and the command lives under `check` since 2023; the
+-- older `checkOnSave = { command }` shape is refused on every start.
+--
+-- A project that wants something else --- clippy, a feature set, one
+-- target --- replaces the field from init.lua, or gives `init_options`
+-- as a `function(root)` returning the table for that project root:
+--
+--   pmacs.lsp.config.rust.init_options = function(root)
+--     local opts = { checkOnSave = true, check = { command = "check" },
+--                    procMacro = { enable = true } }
+--     if root and root:match("/pmacs$") then
+--       opts.check.command = "clippy"
+--       opts.cargo = { features = { "luajit", "crdt" } }
+--     end
+--     return opts
+--   end
 pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
   command = "rust-analyzer",
   args = {},
   init_options = {
-    cargo = { allFeatures = true },
-    checkOnSave = { command = "clippy" },
+    checkOnSave = true,
+    check = { command = "check" },
     procMacro = { enable = true },
   },
 }
@@ -1073,6 +1101,20 @@ local function ensure_server(language, path)
       note_dead_server(info.id, kind)
     end
   end
+  -- E7c.2: `init_options` may be a function of the project root, so
+  -- one init.lua configures each project it opens differently (the
+  -- features to check, the check command). Called once per spawn.
+  local init_options = cfg.init_options
+  if type(init_options) == "function" then
+    local ok_opts, resolved = pcall(init_options, root)
+    if ok_opts then
+      init_options = resolved
+    else
+      pmacs.error(string.format("LSP: init_options for %s raised: %s",
+        language, tostring(resolved)), "lsp")
+      init_options = nil
+    end
+  end
   local ok, sid = pcall(pmacs.lsp.spawn, {
     label = "default-" .. language,
     language_id = language,
@@ -1082,7 +1124,7 @@ local function ensure_server(language, path)
     -- E5.3: forwarded so a config may say `restart = "never"`; nil keeps
     -- the spawner's default.
     restart = cfg.restart,
-    init_options = cfg.init_options,
+    init_options = init_options,
     settings = cfg.settings,
     cwd = root,
     root_uri = key_uri,

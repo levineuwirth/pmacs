@@ -113,6 +113,8 @@
 //!   title `cargo check` --- which is what rust-analyzer does with a
 //!   save. Every other mode declares no `save`, and a conforming
 //!   client sends it nothing on save.
+//! * If `PMACS_FAKE_LSP_INIT_SINK` names a file (any mode): the
+//!   `initializationOptions` the client sent, as JSON (E7c.2).
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
 //!   one `{"method", "text", "ranged"}` JSON line per received didOpen
 //!   / didChange --- `text` the document as the server holds it after
@@ -378,6 +380,16 @@ fn main() {
                         .and_then(|v| v.as_str())
                         .unwrap_or("<null>");
                     let _ = std::fs::write(&sink, recorded);
+                }
+                // E7c.2: record the `initializationOptions` the client
+                // sent, in any mode (env `PMACS_FAKE_LSP_INIT_SINK`), so
+                // a test can prove what a config resolved to at spawn.
+                if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_INIT_SINK") {
+                    let recorded = params
+                        .get("initializationOptions")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let _ = std::fs::write(&sink, recorded.to_string());
                 }
                 write_frame(&mut stdout, &resp);
                 if mode == "crash" {
