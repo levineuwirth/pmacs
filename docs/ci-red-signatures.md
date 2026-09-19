@@ -2021,6 +2021,93 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #284's fix-round-2 head run 35474631618 at `09798eb`: #283's third and a new row of the branch's own, #285
+
+E7c's head after fix round 2 (the diagnostic-drop rule, switch-buffer's
+accept policy, a mode-line measurement). Read at the round's close on
+2026-09-20 from the jobs endpoint and all six test legs' logs after the
+run had completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35474631618, `pull_request`, one attempt |
+| head | `09798eb`, PR #284 |
+| window | created 2026-09-19T22:54:20Z, updated 23:15:48Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35474631618-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Format | 105981637327 | success |
+| Commit attribution (D9) | 105981637534 | success |
+| Changed paths | 105981637550 | success |
+| Lint (lua54) | 105981637564 | success |
+| Lint (luajit) | 105981637592 | success |
+| M4 Perf Gates | 105981654303 | success |
+| GPU Render (headless) | 105981654310 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105981654350 | success |
+| Test (macos-latest / luajit) | 105981654353 | success |
+| M6 Perf Gates | 105981654358 | success |
+| Test (ubuntu-latest / luajit) | 105981654361 | failure |
+| M5 Perf Gates | 105981654379 | success |
+| Test (ubuntu-latest / lua54) | 105981654386 | success |
+| Perf budgets (debug) | 105981654410 | success |
+| M10 Perf Gates (crdt) | 105981654415 | success |
+| M1 Acceptance Gates | 105981654420 | success |
+| Test (macos-latest / lua54) | 105981654430 | failure |
+| Test (crdt) | 105981654438 | success |
+| Docs consistency | 105981654766 | skipped |
+
+Tally (run-35474631618-failures): 2 rows of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (crdt)` 165 `test result: ok`,
+`Test (ubuntu-latest / lua54)` 166, `Test (ubuntu-latest / luajit, no
+crdt)` 166, `Test (macos-latest / luajit)` 167, each with zero
+`FAILED`; `Test (ubuntu-latest / luajit)` 163 `ok` and one `FAILED`;
+`Test (macos-latest / lua54)` 164 `ok` and one `FAILED`; every log's
+`running N tests` lines paired one to one with its result lines.
+`WouldBlock`, `did not become ready` and `got ok` appear zero times on
+every leg; U17's witness `ok` on all six; the phase's twenty `e7c_`
+rows (the fourteen of C7c, the round's four acceptance rows, the two
+wire unit rows) `ok` on every leg, the round's switch-buffer row too.
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276, nor #253, nor #282 sampled here. The two reds are each
+the job's only failure:
+
+- **#283's third occurrence**, `Test (macos-latest / lua54)`
+  105981654430: `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`
+  (`tests/e7_review1_probes.rs`, C7 review 1's probe) --- `pump timeout
+  waiting for the accept and its import`, `text="fn main() {\n
+  println\n    \n}\n// tail\n" popup_rows=0 anchor=None`, `test
+  result: FAILED. 9 passed; 1 failed; 0 ignored`, `finished in 12.32s`
+  --- all three fragments, on the leg of its first; commented on the
+  issue. Off the branch's path (`src/daemon.rs` untouched; nothing on
+  the accept arm).
+- **#285, first occurrence, the branch's own row**, `Test
+  (ubuntu-latest / luajit)` 105981654361:
+  `a_save_sends_did_save_and_rust_analyzer_flychecks_on_it`
+  (`tests/e7b_review_wire_acceptance.rs`, E7c.1's row) --- `one didSave
+  for one save:` with `("textDocument/didSave", 2)` in the histogram,
+  `left: 2` / `right: 1`, `test result: FAILED. 3 passed; 1 failed; 2
+  ignored`, `finished in 39.88s`. The wire it prints: the `didSave` at
+  3 ms, the server's first frame of any kind at 1198 ms, the retry's
+  resend at 1509 ms with no begin yet seen, a `rustAnalyzer/Fetching`
+  reload at 1978 ms, the first flycheck's begin at 2052 ms and the
+  resent save's at 2246 ms. The check was not lost: the server was
+  slow to begin it, E7c.1's 1.5 s timer outran the server, and the
+  resend cost a second `didSave` and a second check, which the row
+  counts as a failure. Filed rather than re-run, with the mechanism and
+  the ruling it bears on (the resend's trigger, the owner's since fix
+  round 1: the event in place of the timer would have sent nothing
+  here, no `didChange` having followed the save). Not fixed in the
+  round, whose brief left the trigger to the owner; the row's claim is
+  E7c.1's to change under that ruling.
+
+The head is not green, on the branch's own row and by the retry's
+timer, stated at the moment of writing.
+
 ### PR #284's fix-round-1 head run 35464890800 at `28413d0`, and it is GREEN
 
 Read at C7c fix round 1's close on 2026-09-19, from the jobs endpoint
@@ -2919,9 +3006,9 @@ resemblance.
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 18 = 12 + 6.
+Tally (R7): 19 = 12 + 7.
 
-Tally (R7-held): 6 items in the list below.
+Tally (R7-held): 7 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -2929,6 +3016,7 @@ Tally (R7-held): 6 items in the list below.
 - sixteenth: gate log `20260907T185321Z-604527`, step `06-sweep-luajit`, the same result line, `attach.rs:1889`
 - seventeenth: gate log `20260910T203556Z-1854124`, step `05-sweep` of E5's tip gate, `attach.rs:1958`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
 - eighteenth: gate log `20260917T001151Z-3116741`, step `05-sweep` on E6d's branch, `attach.rs:1971`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
+- nineteenth: gate log `20260919T224133Z-2027161`, step `05-sweep` on E7c's branch at `09798eb` (fix round 2's tip), load average 18, `attach.rs:1971`, `test result: FAILED. 366 passed; 1 failed`, all three fragments; the next run on the same tree (`20260919T224739Z-2089471`) six of six, non-reproduction and nothing more
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
