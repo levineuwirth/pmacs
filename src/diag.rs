@@ -1267,6 +1267,95 @@ mod tests {
         );
     }
 
+    /// E7c.3 on the grid: a diagnostic whose span the recorder keeps
+    /// current underlines its text after a line is typed above it,
+    /// where the published line and column would underline the typed
+    /// line. The buffer's recorder is the production one, attached as
+    /// `_track_edits` attaches it; a logged store is never stale.
+    #[test]
+    fn diagnostic_view_underlines_the_carried_span_after_an_edit_above_it() {
+        use crate::cell::{Cell, CellSize, UnderlineStyle};
+
+        let store = make_shared_store();
+        let tokens = crate::semantic_tokens::make_shared_store();
+        let inlay = crate::inlay_hint::make_shared_store();
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/e7c.rs"));
+        tokens.lock().expect("token store").open_log(&uri);
+        store.lock().expect("diag store").note_logged(&uri);
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "e7c.rs");
+        buf.set_file_path(Some(std::path::PathBuf::from("/tmp/e7c.rs")));
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"abc\nde\n",
+        })
+        .expect("seed buffer");
+        buf.attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
+            tokens,
+            store.clone(),
+            inlay,
+        )));
+        {
+            let mut d = diag(1, DiagnosticSeverity::Error, "on de");
+            d.end_col = 2;
+            d.span = Some((4, 6));
+            store.lock().expect("diag store").set(&uri, vec![d]);
+        }
+        let underlined = |buf: &Buffer, store: &SharedDiagStore| -> Vec<(u32, u32)> {
+            let mut view = DiagnosticView::new(uri.clone(), store.clone(), None);
+            let mut backing = vec![Cell::default(); 30];
+            let mut grid = CellGrid {
+                cells: &mut backing,
+                stride: 10,
+                size: CellSize::new(3, 10),
+            };
+            view.render(
+                buf,
+                Viewport {
+                    buffer_start: 0,
+                    buffer_end: buf.len(),
+                    cell_origin: CellCoord::new(0, 0),
+                    cell_size: CellSize::new(3, 10),
+                    gutter_w: 0,
+                    folds: None,
+                    wrap: WrapMode::Truncate,
+                    view_left: 0,
+                },
+                &mut grid,
+            );
+            let mut out = Vec::new();
+            for row in 0..3 {
+                for col in 0..10 {
+                    if grid.get(CellCoord::new(row, col)).style.underline != UnderlineStyle::None {
+                        out.push((row, col));
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            underlined(&buf, &store),
+            vec![(1, 0), (1, 1)],
+            "`de` on row 1"
+        );
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"// c\n",
+        })
+        .expect("typed line");
+        store.lock().expect("diag store").mark_stale(&uri);
+        assert!(!store.lock().expect("diag store").is_stale(&uri));
+        assert_eq!(
+            underlined(&buf, &store),
+            vec![(2, 0), (2, 1)],
+            "`de` moved to row 2 and the underline with it"
+        );
+        assert_eq!(
+            store.lock().expect("diag store").for_uri(&uri)[0].start_line,
+            1,
+            "the published line is untouched"
+        );
+    }
+
     #[test]
     fn column_zero_marker_shows_most_severe_diagnostic_per_line() {
         use crate::cell::{Cell, CellSize, Glyph, UnderlineStyle};
