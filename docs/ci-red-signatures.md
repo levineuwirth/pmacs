@@ -2020,6 +2020,47 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #280's fix-round-1 head run 35432322590 at `c0230bf`, and it is GREEN
+
+Read at C7b fix round 1's close on 2026-09-19, from the jobs endpoint
+and all six test legs' logs after the run had completed; not re-run.
+The head is the round's tip (`e7b/status-prompt-keys`, base
+`e190f80`): the review's `c4c0dfb` plus seven commits, the last two
+closing the two reds of the previous section.
+
+| field | value |
+|---|---|
+| run | 35432322590, `pull_request`, one attempt |
+| head | `c0230bf`, PR #280 |
+| window | created 2026-09-19T08:33:37Z, updated 08:56:24Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the six test legs | `Test (crdt)` 162 `test result: ok`, the three ubuntu legs 163 each, both macOS legs 164 each (the reviewed head's 161 / 162 / 163 plus the round's one suite); `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; U17's witness `ok` on every leg; the round's eleven rows `ok` on every leg, the rename row running on the four Linux legs under `PMACS_REQUIRE_LSP=1` and skipping on macOS; the two reds of `ab8e488` did not recur, and the `clientfault` row on both lua54 legs is the reading of `6bcae0c` |
+
+Tally (run-35432322590-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105869005401 | success |
+| Lint (lua54) | 105869005594 | success |
+| Lint (luajit) | 105869005617 | success |
+| Commit attribution (D9) | 105869005618 | success |
+| Format | 105869005727 | success |
+| Test (crdt) | 105869028699 | success |
+| M1 Acceptance Gates | 105869028781 | success |
+| M10 Perf Gates (crdt) | 105869028782 | success |
+| GPU Render (headless) | 105869028792 | success |
+| M5 Perf Gates | 105869028796 | success |
+| Test (macos-latest / lua54) | 105869028809 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105869028824 | success |
+| Perf budgets (debug) | 105869028828 | success |
+| M4 Perf Gates | 105869028836 | success |
+| Test (macos-latest / luajit) | 105869028841 | success |
+| Test (ubuntu-latest / luajit) | 105869028855 | success |
+| Test (ubuntu-latest / lua54) | 105869028862 | success |
+| M6 Perf Gates | 105869028903 | success |
+| Docs consistency | 105869029526 | skipped |
+
 ### PR #280's fix-round-1 run 35399864211 at `ab8e488`: red on two of the round's own rows, both closed causally on the branch
 
 Read at C7b fix round 1 on 2026-09-19, from the jobs endpoint and all
