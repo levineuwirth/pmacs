@@ -702,6 +702,24 @@ fn rewrite_positions_to_bytes(value: &mut Value, doc: &str, enc: PositionEncodin
     }
 }
 
+/// The `includeText` a server's `textDocumentSync.save` asks for:
+/// `Some(true)` for `{ includeText: true }`, `Some(false)` for `true`
+/// or an options object without it, `None` when `save` is absent,
+/// `false`, or the sync is a bare kind (E7c.1).
+fn save_include_text(caps: &Value) -> Option<bool> {
+    let save = caps.get("textDocumentSync")?.get("save")?;
+    match save {
+        Value::Bool(true) => Some(false),
+        Value::Object(options) => Some(
+            options
+                .get("includeText")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ),
+        _ => None,
+    }
+}
+
 /// One managed LSP server: process + JSON-RPC framing + state
 /// machine. Owned by [`LspManager`]; the supervisor handles process
 /// I/O underneath.
@@ -3687,6 +3705,44 @@ impl LspManager {
             })
     }
 
+    /// E7c.1 --- whether `sid` asked for `textDocument/didSave`, and
+    /// with what: `textDocumentSync` in its options form carries
+    /// `save`, either `true` or `{ includeText }`, and the spec has the
+    /// client send the notification only when it is present. `Some`
+    /// carries `includeText` (`false` for the bare `true`, which is
+    /// how rust-analyzer declares it); `None` for a server that
+    /// declared no `save` --- a bare sync kind, `false`, or no
+    /// capabilities yet --- and then no `didSave` is sent.
+    #[must_use]
+    pub fn save_negotiated(&self, sid: LspServerId) -> Option<bool> {
+        self.capabilities(sid).and_then(save_include_text)
+    }
+
+    /// E7c.1 --- send `textDocument/didSave` for `uri` to `sid` after
+    /// the buffer was written, with `text` in the notification when the
+    /// server negotiated `includeText` and without it otherwise. The
+    /// caller flushes the pending `didChange` first, so the document
+    /// the server holds is the one on disk. Returns `Ok(false)`, having
+    /// sent nothing, when the server declared no `save` capability.
+    pub fn did_save(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<bool, String> {
+        let Some(include_text) = self.save_negotiated(sid) else {
+            return Ok(false);
+        };
+        let uri = uri.into();
+        let text = text.into();
+        let mut params = json!({ "textDocument": { "uri": uri } });
+        if include_text {
+            params["text"] = Value::from(text);
+        }
+        self.send_notification(sid, "textDocument/didSave", params)?;
+        Ok(true)
+    }
+
     /// E6d.1 --- send `textDocument/didChange` to `sid` carrying only
     /// the edits `uri` has taken since its text was last sent, as
     /// ranged `contentChanges` in the server's negotiated encoding,
@@ -4385,6 +4441,68 @@ mod tests {
         assert_eq!(
             PositionEncoding::from_negotiated(Some("utf-32")),
             PositionEncoding::Utf16
+        );
+    }
+
+    /// E7c.1: `save` is read in every shape the spec allows, and a
+    /// server that declared none gets no `didSave`. Bitten by making
+    /// `save_include_text` answer `Some(false)` for a bare kind.
+    #[test]
+    fn did_save_follows_the_negotiated_save_capability() {
+        let with = |sync: Value| json!({ "textDocumentSync": sync });
+        assert_eq!(save_include_text(&with(json!(1))), None, "a bare kind");
+        assert_eq!(save_include_text(&with(json!(2))), None);
+        assert_eq!(
+            save_include_text(&with(json!({ "openClose": true, "change": 2 }))),
+            None,
+            "options without save"
+        );
+        assert_eq!(
+            save_include_text(&with(json!({ "change": 2, "save": false }))),
+            None,
+            "save declined"
+        );
+        assert_eq!(
+            save_include_text(&with(json!({ "change": 2, "save": true }))),
+            Some(false),
+            "save asked for, no text"
+        );
+        assert_eq!(
+            save_include_text(&with(json!({ "change": 2, "save": {} }))),
+            Some(false),
+            "options without includeText"
+        );
+        assert_eq!(
+            save_include_text(&with(
+                json!({ "change": 2, "save": { "includeText": false } })
+            )),
+            Some(false),
+            "rust-analyzer's shape"
+        );
+        assert_eq!(
+            save_include_text(&with(
+                json!({ "change": 1, "save": { "includeText": true } })
+            )),
+            Some(true)
+        );
+        assert_eq!(save_include_text(&json!({})), None, "no sync at all");
+
+        let sup = std::rc::Rc::new(std::cell::RefCell::new(
+            crate::process::ProcessSupervisor::new(),
+        ));
+        let runtime = std::rc::Rc::new(crate::async_runtime::AsyncRuntime::with_pool_size(1));
+        let mut mgr = LspManager::new(sup, runtime);
+        let bare = mgr.insert_initialized_test_client(with(json!(1)), PositionEncoding::Utf16);
+        let asked = mgr.insert_initialized_test_client(
+            with(json!({ "openClose": true, "change": 2, "save": { "includeText": true } })),
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(mgr.save_negotiated(bare), None);
+        assert_eq!(mgr.save_negotiated(asked), Some(true));
+        assert_eq!(
+            mgr.did_save(bare, "file:///a.rs", "fn main() {}\n"),
+            Ok(false),
+            "nothing is sent to a server that declared no save"
         );
     }
 

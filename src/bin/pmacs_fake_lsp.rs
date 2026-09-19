@@ -102,6 +102,17 @@
 //!   exercised. A change carrying no `range` replaces the document.
 //!   Every other mode negotiates full sync (`textDocumentSync: 1`),
 //!   which is what the client must fall back to.
+//! * If launched with `PMACS_FAKE_LSP_MODE=didsave` (E7c.1): full sync
+//!   in the options form with `save: { includeText: true }`, and
+//!   `didsavenotext` the same with `save: true`, so a client sends
+//!   `textDocument/didSave` with the text and without it. Each
+//!   `didSave` received is appended to `PMACS_FAKE_LSP_SAVE_SINK` as
+//!   one `{"uri", "text"}` JSON line (`text` null when the
+//!   notification carried none) and answered with a flycheck cycle
+//!   --- `$/progress` begin and end on `rust-analyzer/flycheck/<n>`,
+//!   title `cargo check` --- which is what rust-analyzer does with a
+//!   save. Every other mode declares no `save`, and a conforming
+//!   client sends it nothing on save.
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
 //!   one `{"method", "text", "ranged"}` JSON line per received didOpen
 //!   / didChange --- `text` the document as the server holds it after
@@ -130,6 +141,8 @@ fn main() {
     let mut open_docs: HashMap<String, String> = HashMap::new();
     // `filewatchjoin` / `filewatchretire` mid-session triggers.
     let mut didchange_count: u32 = 0;
+    // E7c.1: flycheck cycles echoed for `didsave` modes, one token each.
+    let mut didsave_count: u32 = 0;
     // `fullonly` observability: counts /full responses (rid-1, rid-2…).
     let mut full_count: u32 = 0;
     loop {
@@ -323,6 +336,20 @@ fn main() {
                         resp["result"]["capabilities"]["positionEncoding"] =
                             serde_json::Value::from("utf-8");
                     }
+                }
+                // `didsave` / `didsavenotext` (E7c.1): the options form
+                // with `save`, as rust-analyzer declares it (`save:
+                // { includeText: false }` there); every other mode
+                // declares no `save`, so the client must send no
+                // `didSave` to it.
+                if mode == "didsave" {
+                    resp["result"]["capabilities"]["textDocumentSync"] = serde_json::json!({
+                        "openClose": true, "change": 1, "save": { "includeText": true }
+                    });
+                }
+                if mode == "didsavenotext" {
+                    resp["result"]["capabilities"]["textDocumentSync"] =
+                        serde_json::json!({ "openClose": true, "change": 1, "save": true });
                 }
                 // Arc 1d: advertise signature help only in `sighelp`, so
                 // every other mode keeps the no-auto-trigger path (the
@@ -1636,6 +1663,41 @@ fn main() {
                     "result": { "echo": params, "method": method }
                 });
                 write_frame(&mut stdout, &resp);
+            }
+            ("textDocument/didSave", None) => {
+                // E7c.1: record what the save carried, then run the
+                // flycheck cycle rust-analyzer runs on a save --- a
+                // `$/progress` begin and end on its flycheck token,
+                // which E7b.1 renders as a suffix on `ready`.
+                if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_SAVE_SINK") {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&sink)
+                    {
+                        let line = serde_json::json!({
+                            "uri": params["textDocument"]["uri"],
+                            "text": params.get("text").cloned().unwrap_or(serde_json::Value::Null),
+                        });
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
+                if mode.starts_with("didsave") {
+                    let token = format!("rust-analyzer/flycheck/{didsave_count}");
+                    didsave_count += 1;
+                    for value in [
+                        serde_json::json!({ "kind": "begin", "title": "cargo check" }),
+                        serde_json::json!({ "kind": "end" }),
+                    ] {
+                        let notification = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "$/progress",
+                            "params": { "token": token, "value": value },
+                        });
+                        write_frame(&mut stdout, &notification);
+                    }
+                }
             }
             ("pmacs/progress", None) => {
                 // E7b.1: a progress echo, in every mode. The client

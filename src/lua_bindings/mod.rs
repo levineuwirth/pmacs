@@ -10553,6 +10553,37 @@ pub fn install_lsp(
     }
 
     {
+        // E7c.1: what `sid` negotiated for saves --- `true` (send the
+        // text), `false` (send the notification alone) or nil (send
+        // nothing); the after-save hook does not read it, the manager
+        // applies it, and tests read it as the positive control.
+        let m = manager.clone();
+        lsp_mod.set(
+            "save_negotiated",
+            lua.create_function(move |_, id: LspServerIdLua| Ok(m.borrow().save_negotiated(id.0)))?,
+        )?;
+    }
+
+    {
+        // E7c.1: `textDocument/didSave` after a save, with the text
+        // when the server negotiated `includeText`; `false` when the
+        // server declared no `save` and nothing was sent. The caller
+        // (the after-save hook in `builtin/runtime/lsp.lua`) flushes
+        // the pending didChange first.
+        let m = manager.clone();
+        lsp_mod.set(
+            "did_save",
+            lua.create_function(
+                move |_, (id, uri, text): (LspServerIdLua, String, String)| {
+                    m.borrow_mut()
+                        .did_save(id.0, uri, text)
+                        .map_err(mlua::Error::external)
+                },
+            )?,
+        )?;
+    }
+
+    {
         // Mark `uri`'s cached LSP render families (diagnostics,
         // semantic tokens, inlay hints) stale without sending
         // anything. The didChange-debounce glue in

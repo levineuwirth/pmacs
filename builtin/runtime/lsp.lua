@@ -1622,6 +1622,25 @@ local function signature_help_quiet(rec)
   end)
 end
 
+-- E7c.1: `textDocument/didSave` after every save of an attached
+-- buffer. The pending didChange goes first, so the document the server
+-- holds is the one just written; the manager sends the notification
+-- only when the server asked for it (`textDocumentSync.save`) and
+-- carries the text only when it asked for that too. rust-analyzer runs
+-- its check on this notification and on nothing else pmacs sends, so
+-- until it was sent no save ever produced a cargo-check diagnostic.
+pmacs.hook.add("buffer.after-save", function()
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local key = tostring(buf)
+  local rec = attachments[key]
+  if not rec or not server_is_live(rec.server) then return end
+  flush_did_change(key)
+  local ok, text = pcall(buffer_text, buf)
+  if not ok then return end
+  pcall(pmacs.lsp.did_save, rec.server, rec.uri, text)
+end)
+
 pmacs.hook.add("buffer.after-edit", function()
   local buf = pmacs.window.buffer()
   if not buf then return end
