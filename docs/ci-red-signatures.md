@@ -2021,6 +2021,47 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #284's fix-round-1 head run 35464890800 at `28413d0`, and it is GREEN
+
+Read at C7c fix round 1's close on 2026-09-19, from the jobs endpoint
+and all six test legs' logs after the run had completed; not re-run.
+The head is the round's tip (`e7c/cargo-check-diagnostics`, base
+`cbac12b`): C7c's eight commits plus one that changes three comments
+in `builtin/runtime/lsp.lua` and no line of code.
+
+| field | value |
+|---|---|
+| run | 35464890800, `pull_request`, one attempt |
+| head | `28413d0`, PR #284 |
+| window | created 2026-09-19T19:36:58Z, updated 19:58:04Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the six test legs | `Test (crdt)` 165 `test result: ok` (the 164 targets of the previous head plus the job's `cargo test --doc` step, which runs only after a green `--all-targets` step and so was absent from that head's 163 + 1), `Test (ubuntu-latest / lua54)` 166, `Test (ubuntu-latest / luajit)` 166, the no-crdt leg 166, `Test (macos-latest / lua54)` 167, `Test (macos-latest / luajit)` 167; every log's `running N tests` lines paired one to one with its result lines; `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; U17's witness `ok` on every leg; the phase's fourteen `e7c_` rows `ok` on every leg; the previous head's two reds (#253's sixth on `Test (crdt)`, #283's second on macOS luajit) did not recur, which is non-reproduction and nothing more |
+
+Tally (run-35464890800-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 105955311279 | success |
+| Format | 105955311282 | success |
+| Lint (luajit) | 105955311323 | success |
+| Changed paths | 105955311346 | success |
+| Commit attribution (D9) | 105955311348 | success |
+| M4 Perf Gates | 105955335861 | success |
+| M6 Perf Gates | 105955335864 | success |
+| M5 Perf Gates | 105955335869 | success |
+| M10 Perf Gates (crdt) | 105955335877 | success |
+| Test (crdt) | 105955335890 | success |
+| M1 Acceptance Gates | 105955335902 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105955335914 | success |
+| Test (ubuntu-latest / luajit) | 105955335925 | success |
+| Test (macos-latest / lua54) | 105955335930 | success |
+| GPU Render (headless) | 105955335935 | success |
+| Perf budgets (debug) | 105955335937 | success |
+| Test (macos-latest / luajit) | 105955335953 | success |
+| Test (ubuntu-latest / lua54) | 105955335963 | success |
+| Docs consistency | 105955336760 | skipped |
+
 ### PR #284's head run 35455311600 at `1847805`: #253's sixth and #283's second, neither the branch's
 
 E7c's head after the control row's fix. Read at C7c's close on
