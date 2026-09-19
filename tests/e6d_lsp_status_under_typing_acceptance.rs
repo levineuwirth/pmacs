@@ -242,11 +242,17 @@ fn a_hundred_keystrokes_answered_invalid_params_leave_the_label_ready_and_fill_e
         "the typing raised requests the fake refused as the client's: {}",
         new_lines.len()
     );
+    // Strict on purpose: any other error landing in `*errors*` while
+    // the flood runs is a defect this row is the first to see (CI's
+    // macOS lua54 leg caught the syntax tick's insert-during-traversal
+    // this way at C7b fix round 1).
+    let strangers: Vec<&&str> = new_lines
+        .iter()
+        .filter(|l| !(l.contains("-32602 InvalidParams") && l.contains("textDocument/")))
+        .collect();
     assert!(
-        new_lines
-            .iter()
-            .all(|l| l.contains("-32602 InvalidParams") && l.contains("textDocument/")),
-        "every line names the code and the method: {new_lines:?}"
+        strangers.is_empty(),
+        "every line names the code and the method; these do not: {strangers:?}"
     );
     // And `*lsp*` keeps its own log of the answers.
     let logged: Vec<String> = eval(
