@@ -356,25 +356,26 @@ fn e7c_3_without_check_sources_the_republished_check_error_lands_a_line_too_high
         "the check's error arrived: {:?}",
         positions(&s)
     );
-    let uri: String = eval(&s, "return pmacs.lsp.active_attachment().uri");
-    let epoch = |s: &EditorState| -> u64 {
-        let store = s.lsp_manager.borrow().diag_store();
-        let guard = store.lock().unwrap();
-        guard.epoch_for(&uri)
-    };
-    let before = epoch(&s);
-    assert!(wait(&mut s, 5, |s| epoch(s) > before));
+    // The typed line's last `didChange` is answered with the check's
+    // set at its old line beside a fresh native set. Taken for the
+    // typed text, the check's line 1 is now `fn main() {`, eleven
+    // bytes long, so its columns clamp to the line's end: one line too
+    // high and on no text at all. A flush that leaves mid-word (the
+    // completion driver flushes as it asks) republishes once more on
+    // the way, with a base the carry still reaches, so the miss is
+    // waited for rather than read off the first republish (CI's
+    // no-crdt leg read that intermediate one at `fcd1248`).
+    assert!(
+        wait(&mut s, 5, |s| positions(s)
+            .iter()
+            .any(|p| p.starts_with("rustc error 1:"))),
+        "the check's set is taken for the typed text and misses: {:?}",
+        positions(&s)
+    );
     let republished = positions(&s);
     eprintln!(
         "POS control after the republish: {republished:?} covering {:?}",
         covered(&s)
-    );
-    // Taken for the typed text, the check's line 1 is now `fn main()
-    // {`, eleven bytes long, so its columns clamp to the line's end:
-    // one line too high and on no text at all.
-    assert!(
-        republished.iter().any(|p| p.starts_with("rustc error 1:")),
-        "the check's set is taken for the typed text and misses: {republished:?}"
     );
     assert!(
         republished.contains(&"pmacs-fake-lsp warning 2:12-2:19".to_owned()),
