@@ -21,14 +21,23 @@
 //!   check's diagnostics land, from which source, at which position,
 //!   and what `*diagnostics*` shows; then remove them, save, and print
 //!   the clear. Run by hand and recorded in the phase's handoff.
+//! * A second `#[ignore]`d measurement (E7c fix round 2): the mode line
+//!   frame by frame while typing after a save --- the first keystroke
+//!   50 ms after the save, then one every 150 ms for five seconds ---
+//!   on both frontends' composition, with the wire beside it, so what
+//!   the owner saw change "for the duration of the typing" is named
+//!   from the frames.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use pmacs::cell::{Cell, CellGrid, CellSize, Glyph};
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;
-use pmacs::protocol::FrontendId;
+use pmacs::protocol::{ByteRange, FrontendId, InstanceMessage};
+use pmacs::semantic_render::SemanticRenderState;
 use pmacs::statusline::{
     StatuslineEvaluationOutcome, StatuslineEvaluationTarget, evaluate_statusline,
 };
@@ -766,5 +775,387 @@ fn measure_the_check_on_this_workspace() {
         "the copy is as it was"
     );
     assert!(landed, "the check's diagnostic landed");
+    assert!(cleared, "and cleared once the probe was gone");
+}
+
+// ---------------------------------------------------------------------------
+// The mode line while typing after a save, by hand
+// ---------------------------------------------------------------------------
+
+/// The grid frontend's mode line for the document's window, painted
+/// through `paint_frame` at the frame geometry the fixture declared
+/// (40 x 100): the text of the row carrying the LSP segment.
+fn grid_modeline(s: &EditorState) -> String {
+    let (rows, cols) = (40u32, 100u32);
+    let size = CellSize::new(rows, cols);
+    let mut cells = vec![Cell::default(); (rows * cols) as usize];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: cols,
+        size,
+    };
+    pmacs::editor::paint_frame(s, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
+    let text_of = |row: u32| -> String {
+        (0..cols)
+            .map(|col| match &cells[(row * cols + col) as usize].glyph {
+                Glyph::Char(c) => *c,
+                _ => ' ',
+            })
+            .collect()
+    };
+    // One window in the frame: its mode line is the row above the
+    // status row. Read by position, since what is on it is the
+    // question: a segment wide enough to push the rest off the row
+    // must be seen doing so, not searched for.
+    let row = text_of(rows - 2);
+    assert!(
+        row.contains(":C"),
+        "the row above the status row is the mode line (its cursor readout): {row:?}; the frame: {:?}",
+        (0..rows).map(text_of).collect::<Vec<_>>()
+    );
+    row
+}
+
+/// What a semantic frontend composes its right group from, as the
+/// last `StatuslineSegments` and `StatusFacts` it received say (both
+/// are suppressed while unchanged, so the last is carried): the custom
+/// right segments in order, then `E:`/`W:` as `compose_status_runs`
+/// appends them, then the modified flag and the transient message.
+#[derive(Default, Clone, PartialEq, Eq)]
+struct WireModeline {
+    right: Vec<String>,
+    left: Vec<String>,
+    errors: u32,
+    warnings: u32,
+    modified: bool,
+    message: Option<String>,
+}
+
+impl WireModeline {
+    fn absorb(&mut self, frame: &[InstanceMessage]) {
+        for m in frame {
+            match m {
+                InstanceMessage::StatuslineSegments { left, right, .. } => {
+                    self.left = left.iter().map(|seg| seg.text.clone()).collect();
+                    self.right = right.iter().map(|seg| seg.text.clone()).collect();
+                }
+                InstanceMessage::StatusFacts {
+                    modified,
+                    diag_errors,
+                    diag_warnings,
+                    message,
+                    ..
+                } => {
+                    self.modified = *modified;
+                    self.errors = *diag_errors;
+                    self.warnings = *diag_warnings;
+                    self.message.clone_from(message);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut right = self.right.clone();
+        if self.errors > 0 {
+            right.push(format!("E:{}", self.errors));
+        }
+        if self.warnings > 0 {
+            right.push(format!("W:{}", self.warnings));
+        }
+        format!(
+            "left={:?} right={:?} modified={} message={:?}",
+            self.left, right, self.modified, self.message
+        )
+    }
+}
+
+const UNUSED_PROBE: &str = "\nfn e7c_probe_unused() {\n    let unused_e7c = 1;\n}\n";
+
+/// The owner's sequence, driven: with the `unused_e7c` warning on its
+/// line from an earlier save, save again and type a comment above the
+/// warning --- the first keystroke 50 ms after the save, then one every
+/// 150 ms for five seconds --- and print the mode line every time it
+/// changes, on the grid (the painted row) and on the wire (the segments
+/// and facts a semantic frontend composes its own from), with the
+/// wire's frames and each keystroke's millisecond beside them; then
+/// keep reading until the label has been `LSP:ready` for three seconds
+/// past the typing, so a suffix that outlives the typing is seen going.
+/// Then the typed text and the probe are removed, saved, and the clear
+/// waited for, so the copy is as it was. Run with
+/// `PMACS_E7C_MEASURE_ROOT=<copy> cargo test --test e7c_check_acceptance -- --ignored --nocapture measure_the_modeline`.
+#[test]
+#[ignore = "a measurement against rust-analyzer on a copy of this repository; run by hand and record"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear measurement session, printed as it goes"
+)]
+fn measure_the_modeline_while_typing_after_a_save() {
+    if !on_path("rust-analyzer") {
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+        return;
+    }
+    assert!(
+        std::env::var_os("PMACS_E7C_MEASURE_ROOT").is_some(),
+        "point PMACS_E7C_MEASURE_ROOT at a copy of the repository; the round edits src/lsp.rs"
+    );
+    let (mut s, target, cap) = lsp_rs_with_rust_analyzer("modeline");
+    let original = std::fs::read_to_string(&target).unwrap();
+    let uri: String = eval(&s, "return pmacs.lsp.active_attachment().uri");
+    let buffer_id = s.core.borrow().active_window().buffer_id;
+    // A semantic frontend's view of the top of the file, the forty
+    // rows a window shows and not the whole document: the frame's
+    // style spans are computed for the viewport, and a viewport of
+    // the whole 200 KB file made every frame cost seconds, which
+    // starved the keystroke cadence the measurement is about.
+    let mut r = SemanticRenderState::new(FrontendId::LOCAL);
+    r.set_viewport(
+        buffer_id,
+        ByteRange {
+            start: 0,
+            end: 4096,
+        },
+        0,
+    );
+    let mut wire_modeline = WireModeline::default();
+    let t0 = Instant::now();
+    let trace = wait_warm(&mut s, 900, Duration::from_secs(3));
+    eprintln!(
+        "MODELINE warm after {} ms; label transitions: {trace:?}",
+        t0.elapsed().as_millis()
+    );
+    assert!(
+        diagnostics_of(&s, &uri).is_empty(),
+        "the copy is not clean; restore it before measuring: {:?}",
+        diagnostics_of(&s, &uri)
+    );
+
+    // The warning first: the probe typed at the end and saved, its
+    // check's warning landed and the label back at ready.
+    exec(
+        &s,
+        "pmacs.editor.goto_byte(pmacs.window.buffer():len())
+         _G.__e7c_saved = false
+         pmacs.hook.add('buffer.after-save', function() _G.__e7c_saved = true end)",
+    );
+    for ch in UNUSED_PROBE.chars() {
+        press(
+            &mut s,
+            if ch == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            },
+        );
+    }
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    assert!(
+        pump_lua_flag(&mut s, "_G.__e7c_saved", 10),
+        "saved the probe"
+    );
+    let with_probe = std::fs::read_to_string(&target).unwrap();
+    let (landed, first, trace) = wait_check_diagnostic(&mut s, &uri, 90, true);
+    eprintln!(
+        "MODELINE the probe's check: landed={landed}, first in the store at {first:?} ms after the save; label transitions: {trace:?}; diagnostics {:?}",
+        diagnostics_of(&s, &uri)
+    );
+    assert!(landed, "the unused_e7c warning landed");
+    let settled = wait_warm(&mut s, 60, Duration::from_secs(3));
+    eprintln!("MODELINE settled: {settled:?}");
+    wire_modeline.absorb(&r.render_frame(&s));
+    eprintln!("MODELINE grid before the save: {:?}", grid_modeline(&s));
+    eprintln!("MODELINE wire before the save: {}", wire_modeline.text());
+
+    // The sequence. A comment opener at the top so the buffer is
+    // modified and the save writes; the save; the first keystroke at
+    // 50 ms; then one every 150 ms for five seconds; every frame
+    // read on both frontends, logged when either changes.
+    // `PMACS_E7C_ACTIVITY=off` turns the activity indicator off for the
+    // sequence, so the busy suffix's own effect on the mode line can
+    // be read apart from the indicator's.
+    if std::env::var("PMACS_E7C_ACTIVITY").as_deref() == Ok("off") {
+        exec(&s, "pmacs.config.set('ui.activity-indicator', false)");
+        eprintln!("MODELINE the activity indicator is OFF for this run");
+    }
+    exec(&s, "pmacs.editor.goto_byte(0)\n_G.__e7c_saved = false");
+    for ch in "//".chars() {
+        press(&mut s, KeyCode::Char(ch));
+    }
+    let (mut to, mut from) = (
+        support::wire_tee::Tap::new(&cap.to_server),
+        support::wire_tee::Tap::new(&cap.from_server),
+    );
+    to.new_frames();
+    from.new_frames();
+    let t_save = Instant::now();
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    let mut log: Vec<String> = Vec::new();
+    let ms = |t_save: Instant| t_save.elapsed().as_millis();
+    log.push(format!("{} = save command returned", ms(t_save)));
+    // Thirty-four keystrokes: the first at 50 ms, then one every 150
+    // ms, five seconds of typing at the cadence asked for --- as early
+    // as the loop can dispatch each, since a tick on this file costs
+    // what it costs and the daemon would take the keystrokes in the
+    // same order at the same pace.
+    let typing: Vec<char> = " e7c typing a comment above the warning, "
+        .chars()
+        .take(34)
+        .collect();
+    let mut next_key_at = Duration::from_millis(50);
+    let mut typed = 0usize;
+    let mut last_grid = String::new();
+    let mut last_wire = String::new();
+    let mut keystrokes: Vec<u128> = Vec::new();
+    let mut quiet_since: Option<Instant> = None;
+    let deadline = t_save + Duration::from_secs(90);
+    // The instrument's own cost, so a slipped cadence can be read
+    // against it: the slowest tick, grid paint and wire frame.
+    let mut slowest = [(0u128, "tick"), (0u128, "grid"), (0u128, "wire")];
+    let note = |slot: usize, began: Instant, slowest: &mut [(u128, &str); 3]| {
+        let took = began.elapsed().as_millis();
+        if took > slowest[slot].0 {
+            slowest[slot].0 = took;
+        }
+        took
+    };
+    loop {
+        let now = t_save.elapsed();
+        if typed < typing.len() && now >= next_key_at {
+            press(&mut s, KeyCode::Char(typing[typed]));
+            typed += 1;
+            keystrokes.push(ms(t_save));
+            log.push(format!("{} k {:?}", ms(t_save), typing[typed - 1]));
+            next_key_at += Duration::from_millis(150);
+        }
+        let began = Instant::now();
+        tick(&mut s);
+        let took = note(0, began, &mut slowest);
+        if took > 100 {
+            log.push(format!("{} = a tick took {took} ms", ms(t_save)));
+        }
+        for f in to.new_frames() {
+            log.push(format!(
+                "{} > {}",
+                ms(t_save),
+                support::wire_tee::describe(&f)
+            ));
+        }
+        for f in from.new_frames() {
+            let d = support::wire_tee::describe(&f);
+            // The server's answers to the per-keystroke pulls are the
+            // bulk of the traffic and say nothing about the mode line.
+            if !d.starts_with("<response") {
+                log.push(format!("{} < {d}", ms(t_save)));
+            }
+        }
+        let began = Instant::now();
+        let grid = grid_modeline(&s);
+        let took = note(1, began, &mut slowest);
+        if took > 100 {
+            log.push(format!("{} = a grid paint took {took} ms", ms(t_save)));
+        }
+        if grid != last_grid {
+            log.push(format!("{} G {grid:?}", ms(t_save)));
+            last_grid = grid;
+        }
+        let began = Instant::now();
+        wire_modeline.absorb(&r.render_frame(&s));
+        let took = note(2, began, &mut slowest);
+        if took > 100 {
+            log.push(format!("{} = a wire frame took {took} ms", ms(t_save)));
+        }
+        let wire = wire_modeline.text();
+        if wire != last_wire {
+            log.push(format!("{} W {wire}", ms(t_save)));
+            last_wire = wire;
+        }
+        // After the last keystroke: read on until the label has been
+        // `LSP:ready` and nothing transient (`⋯`, the activity
+        // indicator) has been on either mode line for three seconds,
+        // so whatever the typing brought is seen going.
+        let label = lsp_segment(&s).unwrap_or_default();
+        if typed >= typing.len() {
+            if label == "LSP:ready" && !last_grid.contains('⋯') && !last_wire.contains('⋯') {
+                let since = *quiet_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_secs(3) {
+                    break;
+                }
+            } else {
+                quiet_since = None;
+            }
+        }
+        if Instant::now() >= deadline {
+            log.push(format!("{} = deadline", ms(t_save)));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    eprintln!(
+        "MODELINE keystrokes at (ms after the save, {} of them): {keystrokes:?}",
+        keystrokes.len()
+    );
+    eprintln!(
+        "MODELINE the frames (ms after the save; k a keystroke, > client to server, < server to client, G the grid's mode line row, W the wire's segments and facts):"
+    );
+    for line in &log {
+        eprintln!("MODELINE   {line}");
+    }
+    let gaps: Vec<u128> = keystrokes.windows(2).map(|w| w[1] - w[0]).collect();
+    eprintln!(
+        "MODELINE keystroke gaps: min {:?} max {:?} ms; first at {:?} ms; the instrument's slowest calls: {slowest:?}",
+        gaps.iter().min(),
+        gaps.iter().max(),
+        keystrokes.first()
+    );
+
+    // Back to the original: the typed line removed, the probe removed,
+    // saved, the clear waited for.
+    let in_buffer: String = eval(
+        &s,
+        "local b = pmacs.window.buffer() return b:slice(0, b:len())",
+    );
+    // What was typed at the top is the buffer's excess over the file
+    // as the probe's save wrote it (the probe went through auto-indent,
+    // so its length on disk is read, not assumed).
+    let typed_len = in_buffer.len().saturating_sub(with_probe.len());
+    exec(&s, &format!("pmacs.editor.goto_byte({typed_len})"));
+    for _ in 0..typed_len {
+        press(&mut s, KeyCode::Backspace);
+    }
+    exec(&s, "pmacs.editor.goto_byte(pmacs.window.buffer():len())");
+    loop {
+        let now: String = eval(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())",
+        );
+        if now == original {
+            break;
+        }
+        assert!(
+            now.len() > original.len(),
+            "overshot the original: {:?}",
+            &now[now.len().saturating_sub(60)..]
+        );
+        press(&mut s, KeyCode::Backspace);
+    }
+    exec(
+        &s,
+        "_G.__e7c_saved = false\npmacs.command.invoke('buffer.save')",
+    );
+    assert!(
+        pump_lua_flag(&mut s, "_G.__e7c_saved", 10),
+        "saved the original"
+    );
+    let (cleared, first, trace) = wait_check_diagnostic(&mut s, &uri, 600, false);
+    eprintln!(
+        "MODELINE after the revert's save: cleared={cleared}, first at {first:?} ms; label transitions: {trace:?}; diagnostics now {:?}",
+        diagnostics_of(&s, &uri)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        original,
+        "the copy is as it was"
+    );
     assert!(cleared, "and cleared once the probe was gone");
 }
