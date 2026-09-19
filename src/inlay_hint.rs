@@ -68,6 +68,13 @@ pub struct InlayHint {
     /// Plain-text tooltip, if any (`MarkupContent` is flattened to
     /// its `value`).
     pub tooltip: Option<String>,
+    /// E7c.3: the byte the hint sits at in the document's current
+    /// text --- resolved against the text the request was answered
+    /// for and carried across every edit since, as a token is --- or
+    /// `None` when the document has no edit log or the edits since
+    /// that text are no longer held; then `line` and `col` are what a
+    /// consumer has, describing the text as answered.
+    pub at: Option<u64>,
 }
 
 /// Parsed `textDocument/inlayHint` response.
@@ -146,6 +153,7 @@ fn parse_hint(v: &Value) -> Option<InlayHint> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         tooltip: v.get("tooltip").and_then(parse_tooltip),
+        at: None,
     })
 }
 
@@ -154,6 +162,10 @@ fn parse_hint(v: &Value) -> Option<InlayHint> {
 pub struct InlayHintStore {
     by_key: HashMap<InlayHintKey, InlayHintResponse>,
     stale_uris: HashSet<String>,
+    /// URIs whose hints carry byte anchors an edit recorder keeps
+    /// current (E7c.3): `mark_stale` is a no-op for them and
+    /// `is_stale` false, since a stale set is shifted, not hidden.
+    logged_uris: HashSet<String>,
 }
 
 /// Key into [`InlayHintStore`].
@@ -202,7 +214,41 @@ impl InlayHintStore {
     /// `textDocument/didChange` is sent so renderers do not paint
     /// zero-width adornments at byte anchors from pre-edit text.
     pub fn mark_stale(&mut self, uri: impl Into<String>) {
-        self.stale_uris.insert(uri.into());
+        let uri = uri.into();
+        if self.logged_uris.contains(&uri) {
+            return;
+        }
+        self.stale_uris.insert(uri);
+    }
+
+    /// Declare that an edit recorder reports `uri`'s edits to this
+    /// store (E7c.3): from here its hints are carried, never hidden,
+    /// and `mark_stale` is a no-op for it. Idempotent.
+    pub fn note_logged(&mut self, uri: impl Into<String>) {
+        let uri = uri.into();
+        self.stale_uris.remove(&uri);
+        self.logged_uris.insert(uri);
+    }
+
+    /// Carry every hint anchor held for `uri` across `edit` (E7c.3),
+    /// called by the recorder on every edit the buffer takes. An
+    /// anchor moves as a range end does: text typed exactly at it
+    /// goes before it, so a type hint stays after the identifier it
+    /// annotates as the identifier grows.
+    pub fn translate_edit(&mut self, uri: &str, edit: crate::semantic_tokens::DocumentEdit) {
+        if edit.old_end == edit.start && edit.inserted_len == 0 {
+            return;
+        }
+        for (key, resp) in &mut self.by_key {
+            if key.uri != uri {
+                continue;
+            }
+            for h in &mut resp.hints {
+                if let Some(at) = h.at {
+                    h.at = Some(edit.translate_end(at));
+                }
+            }
+        }
     }
 
     /// `true` iff `uri` has inlay-hint data that should not be
@@ -326,6 +372,7 @@ mod tests {
                     padding_left: false,
                     padding_right: false,
                     tooltip: None,
+                    at: None,
                 }],
             },
         );
@@ -347,6 +394,7 @@ mod tests {
                 padding_left: false,
                 padding_right: false,
                 tooltip: None,
+                at: None,
             }],
         };
 
@@ -379,6 +427,7 @@ mod tests {
                 padding_left: false,
                 padding_right: false,
                 tooltip: None,
+                at: None,
             }],
         };
         let mut s = InlayHintStore::new();
@@ -391,5 +440,73 @@ mod tests {
         assert_eq!(s.for_uri("file:///a").unwrap().hints[0].label, "s9");
         assert_eq!(s.for_uri("file:///b").unwrap().hints[0].label, "s2");
         assert!(s.for_uri("file:///nope").is_none());
+    }
+
+    /// E7c.3: a hint's anchor moves as a range end does --- shifted by
+    /// an insert before it, carried past text typed exactly at it, kept
+    /// by an edit after it --- and a logged URI is never stale.
+    #[test]
+    fn anchors_are_carried_across_edits() {
+        use crate::semantic_tokens::DocumentEdit;
+        let mut s = InlayHintStore::new();
+        let key = InlayHintKey::new("1", "file:///a");
+        let mut hint = InlayHint {
+            line: 0,
+            col: 5,
+            label: ": i32".into(),
+            kind: Some(InlayHintKind::Type),
+            padding_left: false,
+            padding_right: false,
+            tooltip: None,
+            at: Some(5),
+        };
+        s.note_logged("file:///a");
+        s.set(
+            key.clone(),
+            InlayHintResponse {
+                hints: vec![hint.clone()],
+            },
+        );
+        let at = |s: &InlayHintStore| s.get(&key).unwrap().hints[0].at;
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 0,
+                old_end: 0,
+                inserted_len: 3,
+            },
+        );
+        assert_eq!(at(&s), Some(8), "an insert before it shifts it");
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 8,
+                old_end: 8,
+                inserted_len: 2,
+            },
+        );
+        assert_eq!(at(&s), Some(10), "text typed at it goes before it");
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 11,
+                old_end: 12,
+                inserted_len: 0,
+            },
+        );
+        assert_eq!(at(&s), Some(10), "an edit after it leaves it");
+        s.mark_stale("file:///a");
+        assert!(!s.is_stale("file:///a"), "shifted, not hidden");
+        hint.at = None;
+        s.set(key.clone(), InlayHintResponse { hints: vec![hint] });
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 0,
+                old_end: 0,
+                inserted_len: 3,
+            },
+        );
+        assert_eq!(at(&s), None, "no anchor, nothing to carry");
     }
 }

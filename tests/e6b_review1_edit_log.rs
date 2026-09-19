@@ -247,21 +247,31 @@ fn c6b_recorder_covers_typing_delete_selection_paste_undo_and_request_anchor() {
     lua(&state, "pmacs.window.buffer():insert(0, 'é')");
     assert_eq!(store.lock().unwrap().next_seq(&uri), 5);
     assert_eq!(store.lock().unwrap().synced_seq(&uri), 4);
+    // The absorb is read off the tokens: the anchored full response
+    // resolves against the sent text and shifts by the two bytes of
+    // the scripted edit. Since E7c.3 the log keeps every edit back to
+    // the disk anchor --- the open here, until a save --- so the
+    // absorb prunes none of the five acknowledged edits (before E7c.3
+    // this waited for the prune to leave one).
+    let expected = Some(vec![(2, 4), (5, 9), (14, 19), (20, 24)]);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         tick(&mut state);
-        if store.lock().unwrap().pending_edits(&uri).len() == 1 {
+        if positioned(&state, &uri) == expected {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the anchored full response never pruned the acknowledged edits"
+            "the anchored full response never resolved and shifted: {:?}",
+            positioned(&state, &uri)
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert_eq!(positioned(&state, &uri), expected);
     assert_eq!(
-        positioned(&state, &uri),
-        Some(vec![(2, 4), (5, 9), (14, 19), (20, 24)])
+        store.lock().unwrap().pending_edits(&uri).len(),
+        5,
+        "the log keeps the acknowledged edits back to the disk anchor (E7c.3)"
     );
     assert!(
         store_is_stale(&state, &uri),

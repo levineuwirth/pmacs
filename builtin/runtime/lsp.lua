@@ -28,8 +28,25 @@ pmacs.lsp = pmacs.lsp or {}
 --   command       (string)  required — server binary
 --   args          (list)    argv after command
 --   env           (table)   extra environment
---   init_options  (table)   `initializationOptions`
+--   init_options  (table|function) `initializationOptions`; a
+--                           `function(root) -> table` is called at
+--                           spawn with the resolved project root (or
+--                           nil), so one init.lua can configure each
+--                           project differently (E7c.2)
 --   settings      (table)   answered to `workspace/configuration`
+--   check_sources (list)    diagnostic `source` values the server
+--                           computes from the file on disk rather than
+--                           from the text it holds (rust-analyzer's
+--                           `rustc` and `clippy`, its check on a save);
+--                           they are placed against the text last
+--                           saved or opened and carried to the current
+--                           text from there (E7c.3)
+--   save_retry    (bool)    send `didSave` again, up to three times
+--                           1.5 s apart, while no `$/progress` cycle
+--                           has begun since the save: rust-analyzer
+--                           drops the check a save asks for when a
+--                           write lands while its trigger runs, and
+--                           never retries (E7c.1)
 --   root  (string|function) optional explicit project root; overrides
 --                           the `pmacs.project.detect` marker walk used
 --                           to set `rootUri`/`cwd`. A `function(path) ->
@@ -41,14 +58,45 @@ pmacs.lsp.config = pmacs.lsp.config or {}
 
 -- Default rust-analyzer config. Users replace any field from init.lua
 -- before any rust file opens.
+--
+-- The check rust-analyzer runs on every save (E7c.1 sends the save):
+-- `cargo check` over the workspace with its default features, which is
+-- what `cargo check` itself does and rust-analyzer's own default. Not
+-- `cargo.allFeatures`, which the config shipped until E7c.2: a
+-- workspace whose features exclude each other --- this one's Lua
+-- bindings --- cannot be built with all of them on, so every check of
+-- pmacs itself failed before it checked anything (#281). `checkOnSave`
+-- is a boolean and the command lives under `check` since 2023; the
+-- older `checkOnSave = { command }` shape is refused on every start.
+--
+-- A project that wants something else --- clippy, a feature set, one
+-- target --- replaces the field from init.lua, or gives `init_options`
+-- as a `function(root)` returning the table for that project root:
+--
+--   pmacs.lsp.config.rust.init_options = function(root)
+--     local opts = { checkOnSave = true, check = { command = "check" },
+--                    procMacro = { enable = true } }
+--     if root and root:match("/pmacs$") then
+--       opts.check.command = "clippy"
+--       opts.cargo = { features = { "luajit", "crdt" } }
+--     end
+--     return opts
+--   end
 pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
   command = "rust-analyzer",
   args = {},
   init_options = {
-    cargo = { allFeatures = true },
-    checkOnSave = { command = "clippy" },
+    checkOnSave = true,
+    check = { command = "check" },
     procMacro = { enable = true },
   },
+  -- The check's diagnostics describe the file on disk, not the text
+  -- rust-analyzer holds (E7c.3).
+  check_sources = { "rustc", "clippy" },
+  -- A save followed within its trigger's window by a keystroke runs
+  -- no check at all, measured on this workspace; the save is sent
+  -- again while no cycle has begun (E7c.1).
+  save_retry = true,
 }
 
 -- Default Python config: basedpyright (an MIT fork of pyright that
@@ -711,6 +759,62 @@ local function flush_due_did_changes()
   end
 end
 
+-- E7c.1: a save whose check never began is announced again. Measured
+-- on this workspace against rust-analyzer: a save followed within its
+-- check trigger's window (up to about 1.5 s here, longer the busier
+-- the server) by a keystroke ran no check at all, no `$/progress`
+-- begin and no diagnostics for ninety seconds, while the same save
+-- followed by the keystroke 2.9 s later checked normally; driven
+-- directly, idle or under a request burst, the loss did not reproduce,
+-- so the mechanism is stated as observed, not explained. The retry is
+-- per language (`save_retry`), armed by the after-save hook when a
+-- `didSave` went out, disarmed by the first `$/progress` begin from
+-- that server, and fires from the async tick while the buffer has no
+-- unsent edit: `SAVE_RETRY_MS` after the save and again after each
+-- retry, `SAVE_RETRY_MAX` times, with the text the manager kept at the
+-- save, never the buffer's.
+local SAVE_RETRY_MS = 1500
+local SAVE_RETRY_MAX = 3
+-- sid string -> whether the language's config asks for the retry.
+local save_retry_servers = {}
+-- attachment record -> { at = monotonic ms of the last send, sent = n }
+local save_watches = {}
+
+local function arm_save_watch(rec, now)
+  if not save_retry_servers[tostring(rec.server)] then return end
+  save_watches[rec] = { at = now, sent = 1 }
+end
+
+local function retry_due_saves()
+  if next(save_watches) == nil then return end
+  local now = pmacs.editor.monotonic_ms()
+  for rec, watch in pairs(save_watches) do
+    if attachments[tostring(rec.buffer)] ~= rec then
+      save_watches[rec] = nil
+    elseif now - watch.at >= SAVE_RETRY_MS
+        and pending_did_change[tostring(rec.buffer)] == nil then
+      if watch.sent > SAVE_RETRY_MAX then
+        save_watches[rec] = nil
+      else
+        local ok, sent = pcall(pmacs.lsp._resend_did_save, rec.server, rec.uri)
+        if ok and sent then
+          watch.at = now
+          watch.sent = watch.sent + 1
+        else
+          save_watches[rec] = nil
+        end
+      end
+    end
+  end
+end
+
+-- Exposed for tests: the watches in flight, as `{ [uri] = sent }`.
+function pmacs.lsp._save_watches()
+  local out = {}
+  for rec, watch in pairs(save_watches) do out[rec.uri] = watch.sent end
+  return out
+end
+
 -- Exposed for tests and for glue that must synchronize the server's
 -- document view before an out-of-band operation (e.g. a save hook).
 function pmacs.lsp._flush_did_changes()
@@ -1073,6 +1177,20 @@ local function ensure_server(language, path)
       note_dead_server(info.id, kind)
     end
   end
+  -- E7c.2: `init_options` may be a function of the project root, so
+  -- one init.lua configures each project it opens differently (the
+  -- features to check, the check command). Called once per spawn.
+  local init_options = cfg.init_options
+  if type(init_options) == "function" then
+    local ok_opts, resolved = pcall(init_options, root)
+    if ok_opts then
+      init_options = resolved
+    else
+      pmacs.error(string.format("LSP: init_options for %s raised: %s",
+        language, tostring(resolved)), "lsp")
+      init_options = nil
+    end
+  end
   local ok, sid = pcall(pmacs.lsp.spawn, {
     label = "default-" .. language,
     language_id = language,
@@ -1082,13 +1200,15 @@ local function ensure_server(language, path)
     -- E5.3: forwarded so a config may say `restart = "never"`; nil keeps
     -- the spawner's default.
     restart = cfg.restart,
-    init_options = cfg.init_options,
+    init_options = init_options,
     settings = cfg.settings,
+    check_sources = cfg.check_sources,
     cwd = root,
     root_uri = key_uri,
   })
   if ok then
     default_servers[tostring(sid)] = language
+    save_retry_servers[tostring(sid)] = cfg.save_retry == true
     clear_failure(affinity_key(language, key_uri))
     return sid
   end
@@ -1366,6 +1486,15 @@ local function attach_buffer(buf)
   -- did_open is a notification; the manager queues it cleanly even
   -- while the server is in `starting` / `initializing`.
   pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
+  -- E7c.3: `did_open` keeps the text it sent as the file's text, which
+  -- a check reports against; a buffer already modified when its server
+  -- attached (a re-attach after a crash, a file typed into before the
+  -- server was ready) holds something else, said here so the check's
+  -- diagnostics fall back to the text last sent until the next save.
+  local ok_mod, modified = pcall(function() return buf:is_modified() end)
+  if ok_mod and modified then
+    pcall(pmacs.lsp._document_off_disk, sid, uri)
+  end
   -- M_B3: dual-authority styling. Always push the LSP style overlay
   -- when an LSP server is up — whether or not the buffer has a
   -- bundled tree-sitter grammar. When the grammar exists too,
@@ -1621,6 +1750,30 @@ local function signature_help_quiet(rec)
     end
   end)
 end
+
+-- E7c.1: `textDocument/didSave` after every save of an attached
+-- buffer. The pending didChange goes first, so the document the server
+-- holds is the one just written; the manager sends the notification
+-- only when the server asked for it (`textDocumentSync.save`) and
+-- carries the text only when it asked for that too. rust-analyzer runs
+-- its check on this notification and on nothing else pmacs sends, so
+-- until it was sent no save ever produced a cargo-check diagnostic.
+pmacs.hook.add("buffer.after-save", function()
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local key = tostring(buf)
+  local rec = attachments[key]
+  if not rec or not server_is_live(rec.server) then return end
+  flush_did_change(key)
+  local ok, text = pcall(buffer_text, buf)
+  if not ok then return end
+  local ok_send, sent = pcall(pmacs.lsp.did_save, rec.server, rec.uri, text)
+  save_watches[rec] = nil
+  if ok_send and sent then
+    arm_save_watch(rec, pmacs.editor.monotonic_ms())
+  end
+end)
+
 
 pmacs.hook.add("buffer.after-edit", function()
   local buf = pmacs.window.buffer()
@@ -2710,6 +2863,36 @@ function pmacs.lsp.on_notification(method, fn)
   subs[#subs + 1] = fn
 end
 
+-- E7c.4: `window/showMessage` is the server asking for the user's
+-- eyes (a refused config, a failed build script); an error or a
+-- warning goes on the status line with the server's label, and every
+-- level is in `*lsp*` from the tracker. Until now it reached nothing.
+pmacs.lsp.on_notification("window/showMessage", function(sid, params)
+  if type(params) ~= "table" or type(params.message) ~= "string" then return end
+  local kind = params.type
+  if kind ~= 1 and kind ~= 2 then return end
+  local label = tostring(sid)
+  local ok, rows = pcall(pmacs.lsp.list)
+  if ok and rows then
+    for _, info in ipairs(rows) do
+      if tostring(info.id) == label then label = info.label or label end
+    end
+  end
+  local first = params.message:match("^[^\n]*")
+  pmacs.editor.set_status(string.format("LSP: %s says: %s", tostring(label), first))
+end)
+
+-- E7c.1: the first `$/progress` begin from a server after a save is
+-- the check (or whatever work the save started); the retry stands
+-- down for that server's attachments.
+pmacs.lsp.on_notification("$/progress", function(sid, params)
+  local value = type(params) == "table" and params.value
+  if type(value) ~= "table" or value.kind ~= "begin" then return end
+  for rec in pairs(save_watches) do
+    if rec.server == sid then save_watches[rec] = nil end
+  end
+end)
+
 -- fn(result, err); ONE-SHOT, keyed to the exact request.
 -- `request_id` is what `pmacs.lsp.send_request` returned.
 --
@@ -3013,6 +3196,7 @@ if pmacs._async and pmacs._async.tick then
     -- same pass when the server died right after answering.
     pcall(purge_dead_pending)
     pcall(flush_due_did_changes)
+    pcall(retry_due_saves)
     return ret
   end
 end

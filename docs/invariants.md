@@ -68,10 +68,9 @@ undoes locally, and a compensation is never recorded as a group.
 `buf:insert`, `buf:delete` and `buf:replace` return the post-intercept
 `(start, end, inserted_len)`. A caller that cares (the kill ring, comment
 toggling) compares exactly against what it requested; length-delta and
-text-at-position checks are documented defeated patterns. Every mutator
-call is wrapped in `pcall`: a rejecting intercept must report, not throw
-through, and a failed op must leave no state behind (kill chains, yank
-sessions).
+text-at-position checks are defeated patterns. Every mutator call is
+wrapped in `pcall`: a rejecting intercept must report, not throw through,
+and a failed op must leave no state behind (kill chains, yank sessions).
 
 ## Kill ring
 
@@ -83,10 +82,10 @@ authenticated source, never by a `frontend_id` carried in the payload.
 
 ## LSP
 
-Every `Position` and `Range` builder in `src/lsp.rs` converts byte
-offsets to the negotiated encoding, and a new one must too, or UTF-16
-servers reject non-ASCII columns: a request uses `outbound_position` on
-the text the server holds, and a `didChange` ranged by negotiation uses
+Every `Position` and `Range` builder in `src/lsp.rs` converts byte offsets
+to the negotiated encoding, and a new one must too, or UTF-16 servers
+reject non-ASCII columns: a request uses `outbound_position` on the text
+the server holds, and a `didChange` ranged by negotiation uses
 `byte_to_position` on a mirror carried across the edits, since its ranges
 address the text as each previous change left it. Semantic tokens `full`,
 `full.delta` and `range` are three capabilities, gated one by one.
@@ -97,12 +96,16 @@ logging each edit it broadcasts, a token request carries the text the
 server holds and its edit number, and the answer is resolved against that
 text and carried across the edits since, so a stale store shifts its
 tokens, never drops them; both merge sites read `positioned_tokens` and
-neither converts a column per frame.
-The same log feeds a ranged `didChange` and places an accepted
-completion's `additionalTextEdits` from the answer's edit number; what
-it cannot account for sends the whole document or applies none, said.
-Busy is not a state: only `INDEXING_TOKENS` (`src/lsp_status.rs`) move
-the kind to `Indexing`; any other `$/progress` is a suffix on `ready`.
+neither converts a column per frame. The same log feeds a ranged
+`didChange`, places an accepted completion's `additionalTextEdits` from
+the answer's edit number, and carries diagnostics and inlay hints from the
+text they were computed for (the file on disk for a `check_sources`
+source, else the text last sent); what the log cannot account for sends
+the whole document, applies none, or paints the published position, said.
+Busy is not a state: only `INDEXING_TOKENS` (`src/lsp_status.rs`) move the
+kind to `Indexing`; other `$/progress` is a suffix on `ready`. A save
+sends `didSave` as the server's `save` asks, after the `didChange`, and
+that runs its check.
 
 LaTeX is served by `texlab`; `pmacs.lsp.config.latex` walks up for its
 own markers (`.texlabroot`, `texlabroot`) and never for `.git`, because
@@ -110,20 +113,17 @@ a multi-file document's root is not its repository's.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
-`rangeonly16` (UTF-16 with fail-closed bounds validation), `semantichold`
-(document-derived tokens, held for `PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`),
-`incremental` and `incremental8` (ranged `didChange` applied in UTF-16 and
-UTF-8 units), `sighelp`, `prepare`, `preprefuse`, `rename`, `inlaybounds`,
-`inlayrefresh`, `semantictokensrefresh`, `applyeditplan`, `resourceops`,
-`posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`. Failure
-shapes: `crash`, `error`, `contentmodified`, `clientfault`, `garbage`,
-`silent`. File watchers: `filewatch` (a `RelativePattern` `**/*.txt`),
-`filewatchabs` (an absolute plain glob), `filewatchflat` (a
-`RelativePattern` with no leading `**/`), `filewatchbare` (a bare relative
-string), `filewatchrereg` (the same id twice with no unregister),
-`filewatchjoin`, `filewatchretire`. Use these for capability-matrix tests,
-never a real server; the list is enumerated from the binary, and a stale
-copy covers the shape next to the defect.
+`rangeonly16`, `semantichold`, `incremental`, `incremental8`, `didsave`,
+`didsavenotext`, `sighelp`, `prepare`, `preprefuse`, `rename`,
+`inlaybounds`, `inlayrefresh`, `semantictokensrefresh`, `applyeditplan`,
+`resourceops`, `posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`.
+Failure shapes: `crash`, `error`, `contentmodified`, `clientfault`,
+`garbage`, `silent`. File watchers: `filewatch` (a `RelativePattern`
+`**/*.txt`), `filewatchabs` (an absolute plain glob), `filewatchflat` (no
+leading `**/`), `filewatchbare` (a bare relative string), `filewatchrereg`
+(the same id twice), `filewatchjoin`, `filewatchretire`. Use these, never
+a real server; the binary documents each shape, and a stale copy here
+covers the shape next to the defect.
 
 ## Persistence
 

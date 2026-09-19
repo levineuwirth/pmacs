@@ -131,6 +131,14 @@ pub struct Diagnostic {
     pub source: Option<String>,
     /// Optional `code` field (e.g. `"E0308"`, `"unused-imports"`).
     pub code: Option<String>,
+    /// E7c.3: the range in the document's current bytes --- resolved
+    /// against the text the diagnostic was computed for and carried
+    /// across every edit recorded since, as a semantic token is ---
+    /// or `None` when the document has no edit log (a file open in no
+    /// buffer) or the edits since that text are no longer held; then
+    /// the line and column above are all a consumer has, and they
+    /// describe the text as published.
+    pub span: Option<(u64, u64)>,
 }
 
 impl Diagnostic {
@@ -163,6 +171,7 @@ impl Diagnostic {
             message,
             source,
             code,
+            span: None,
         })
     }
 
@@ -172,6 +181,19 @@ impl Diagnostic {
         self.start_line
             .cmp(&other.start_line)
             .then(self.start_col.cmp(&other.start_col))
+    }
+
+    /// Carry the span across one edit (E7c.3): the start as a range
+    /// start, the end as a range end, so an insert before it shifts
+    /// it, an insert inside it grows it, a delete over it leaves it
+    /// zero-width where the text was. The published line and column
+    /// are left as they are.
+    fn translate(&mut self, edit: crate::semantic_tokens::DocumentEdit) {
+        if let Some((lo, hi)) = self.span {
+            let lo = edit.translate_start(lo);
+            let hi = edit.translate_end(hi).max(lo);
+            self.span = Some((lo, hi));
+        }
     }
 }
 
@@ -212,6 +234,10 @@ pub struct DiagnosticStore {
     /// producer's) additionally key on this to know a republish
     /// happened (T M4.6 GPU parity).
     epochs: HashMap<String, u64>,
+    /// URIs whose diagnostics carry spans an edit recorder keeps
+    /// current (E7c.3): `mark_stale` is a no-op for them and
+    /// `is_stale` false, since a stale set is shifted, not hidden.
+    logged_uris: std::collections::HashSet<String>,
 }
 
 fn count_severities(diags: &[Diagnostic]) -> (u32, u32, u32, u32) {
@@ -243,7 +269,13 @@ impl DiagnosticStore {
     /// diagnostics imply the LSP has caught up to the current
     /// document state.
     pub fn set(&mut self, uri: impl Into<String>, mut diags: Vec<Diagnostic>) {
-        diags.sort_by(Diagnostic::compare_by_position);
+        // By current bytes where every entry has them, else by the
+        // published position; a set is all one or all the other.
+        if diags.iter().all(|d| d.span.is_some()) {
+            diags.sort_by_key(|d| d.span);
+        } else {
+            diags.sort_by(Diagnostic::compare_by_position);
+        }
         let uri = uri.into();
         let counts = count_severities(&diags);
         self.stale_uris.remove(&uri);
@@ -297,7 +329,57 @@ impl DiagnosticStore {
     /// LSP-re-analysis gap. The next [`Self::set`] (or
     /// [`Self::clear`]) clears the flag.
     pub fn mark_stale(&mut self, uri: impl Into<String>) {
-        self.stale_uris.insert(uri.into());
+        let uri = uri.into();
+        if self.logged_uris.contains(&uri) {
+            return;
+        }
+        self.stale_uris.insert(uri);
+    }
+
+    /// Declare that an edit recorder reports `uri`'s edits to this
+    /// store (E7c.3): from here its diagnostics are carried, never
+    /// hidden, and `mark_stale` is a no-op for it. Idempotent.
+    pub fn note_logged(&mut self, uri: impl Into<String>) {
+        let uri = uri.into();
+        self.stale_uris.remove(&uri);
+        self.logged_uris.insert(uri);
+    }
+
+    /// Carry every span held for `uri` across `edit` (E7c.3), called
+    /// by the recorder on every edit the buffer takes. A URI with no
+    /// entry is nothing to carry.
+    pub fn translate_edit(&mut self, uri: &str, edit: crate::semantic_tokens::DocumentEdit) {
+        if edit.old_end == edit.start && edit.inserted_len == 0 {
+            return;
+        }
+        if let Some(diags) = self.by_uri.get_mut(uri) {
+            for d in diags.iter_mut() {
+                d.translate(edit);
+            }
+        }
+    }
+
+    /// First diagnostic in `uri` whose current span starts strictly
+    /// past `byte`, by the spans the recorder keeps current (E7c.3);
+    /// entries without a span never match.
+    #[must_use]
+    pub fn next_after_byte(&self, uri: &str, byte: u64) -> Option<&Diagnostic> {
+        self.by_uri
+            .get(uri)?
+            .iter()
+            .filter(|d| d.span.is_some_and(|(lo, _)| lo > byte))
+            .min_by_key(|d| d.span)
+    }
+
+    /// Last diagnostic in `uri` whose current span starts strictly
+    /// before `byte`; entries without a span never match.
+    #[must_use]
+    pub fn previous_before_byte(&self, uri: &str, byte: u64) -> Option<&Diagnostic> {
+        self.by_uri
+            .get(uri)?
+            .iter()
+            .filter(|d| d.span.is_some_and(|(lo, _)| lo < byte))
+            .max_by_key(|d| d.span)
     }
 
     /// `true` iff the URI's stored diagnostics are stale (the
@@ -570,16 +652,18 @@ impl View for DiagnosticView {
 
         for diag in &diags {
             let style = style_for(diag.severity, severity_color(theme.as_ref(), diag.severity));
+            let (start_line, start_col, end_line, end_col) =
+                current_position(diag, &line_offsets, source.len() as u32);
             // Apply to each line the diagnostic touches. LSP ranges
             // are half-open at the end position; if end_col == 0
             // the diagnostic stops at the start of `end_line` so
             // we don't paint that line.
-            let last_line = if diag.end_col == 0 && diag.end_line > diag.start_line {
-                diag.end_line - 1
+            let last_line = if end_col == 0 && end_line > start_line {
+                end_line - 1
             } else {
-                diag.end_line
+                end_line
             };
-            for line in diag.start_line..=last_line {
+            for line in start_line..=last_line {
                 if line >= total_lines {
                     break;
                 }
@@ -616,13 +700,13 @@ impl View for DiagnosticView {
                 let line_byte_len = line_bytes.len() as u32;
 
                 // Resolve (start_col, end_col) within this line.
-                let byte_start = if line == diag.start_line {
-                    diag.start_col.min(line_byte_len)
+                let byte_start = if line == start_line {
+                    start_col.min(line_byte_len)
                 } else {
                     0
                 };
-                let byte_end = if line == diag.end_line {
-                    diag.end_col.min(line_byte_len)
+                let byte_end = if line == end_line {
+                    end_col.min(line_byte_len)
                 } else {
                     line_byte_len
                 };
@@ -727,6 +811,32 @@ pub(crate) fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
     out
 }
 
+/// E7c.3: where a diagnostic is now --- its span, which the recorder
+/// keeps current, resolved to lines and byte columns of the text as it
+/// is (`line_offsets` from `compute_line_offsets`, `source_len` its
+/// length); the published line and column when the document has none.
+fn current_position(
+    diag: &Diagnostic,
+    line_offsets: &[u32],
+    source_len: u32,
+) -> (u32, u32, u32, u32) {
+    match diag.span {
+        Some((lo, hi)) => {
+            let lo = (lo.min(u64::from(source_len))) as u32;
+            let hi = (hi.min(u64::from(source_len))) as u32;
+            let sl = line_at_offset(line_offsets, lo);
+            let el = line_at_offset(line_offsets, hi);
+            (
+                sl,
+                lo - line_offsets[sl as usize],
+                el,
+                hi - line_offsets[el as usize],
+            )
+        }
+        None => (diag.start_line, diag.start_col, diag.end_line, diag.end_col),
+    }
+}
+
 pub(crate) fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
     match line_offsets.binary_search(&offset) {
         Ok(i) => i as u32,
@@ -773,6 +883,7 @@ mod tests {
             message: msg.to_owned(),
             source: Some("test".to_owned()),
             code: None,
+            span: None,
         }
     }
 
@@ -1156,6 +1267,95 @@ mod tests {
         );
     }
 
+    /// E7c.3 on the grid: a diagnostic whose span the recorder keeps
+    /// current underlines its text after a line is typed above it,
+    /// where the published line and column would underline the typed
+    /// line. The buffer's recorder is the production one, attached as
+    /// `_track_edits` attaches it; a logged store is never stale.
+    #[test]
+    fn diagnostic_view_underlines_the_carried_span_after_an_edit_above_it() {
+        use crate::cell::{Cell, CellSize, UnderlineStyle};
+
+        let store = make_shared_store();
+        let tokens = crate::semantic_tokens::make_shared_store();
+        let inlay = crate::inlay_hint::make_shared_store();
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/e7c.rs"));
+        tokens.lock().expect("token store").open_log(&uri);
+        store.lock().expect("diag store").note_logged(&uri);
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "e7c.rs");
+        buf.set_file_path(Some(std::path::PathBuf::from("/tmp/e7c.rs")));
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"abc\nde\n",
+        })
+        .expect("seed buffer");
+        buf.attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
+            tokens,
+            store.clone(),
+            inlay,
+        )));
+        {
+            let mut d = diag(1, DiagnosticSeverity::Error, "on de");
+            d.end_col = 2;
+            d.span = Some((4, 6));
+            store.lock().expect("diag store").set(&uri, vec![d]);
+        }
+        let underlined = |buf: &Buffer, store: &SharedDiagStore| -> Vec<(u32, u32)> {
+            let mut view = DiagnosticView::new(uri.clone(), store.clone(), None);
+            let mut backing = vec![Cell::default(); 30];
+            let mut grid = CellGrid {
+                cells: &mut backing,
+                stride: 10,
+                size: CellSize::new(3, 10),
+            };
+            view.render(
+                buf,
+                Viewport {
+                    buffer_start: 0,
+                    buffer_end: buf.len(),
+                    cell_origin: CellCoord::new(0, 0),
+                    cell_size: CellSize::new(3, 10),
+                    gutter_w: 0,
+                    folds: None,
+                    wrap: WrapMode::Truncate,
+                    view_left: 0,
+                },
+                &mut grid,
+            );
+            let mut out = Vec::new();
+            for row in 0..3 {
+                for col in 0..10 {
+                    if grid.get(CellCoord::new(row, col)).style.underline != UnderlineStyle::None {
+                        out.push((row, col));
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            underlined(&buf, &store),
+            vec![(1, 0), (1, 1)],
+            "`de` on row 1"
+        );
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"// c\n",
+        })
+        .expect("typed line");
+        store.lock().expect("diag store").mark_stale(&uri);
+        assert!(!store.lock().expect("diag store").is_stale(&uri));
+        assert_eq!(
+            underlined(&buf, &store),
+            vec![(2, 0), (2, 1)],
+            "`de` moved to row 2 and the underline with it"
+        );
+        assert_eq!(
+            store.lock().expect("diag store").for_uri(&uri)[0].start_line,
+            1,
+            "the published line is untouched"
+        );
+    }
+
     #[test]
     fn column_zero_marker_shows_most_severe_diagnostic_per_line() {
         use crate::cell::{Cell, CellSize, Glyph, UnderlineStyle};
@@ -1180,6 +1380,7 @@ mod tests {
                         message: "w".to_owned(),
                         source: None,
                         code: None,
+                        span: None,
                     },
                 ],
             );
@@ -1258,6 +1459,7 @@ mod tests {
                         message: "w".to_owned(),
                         source: None,
                         code: None,
+                        span: None,
                     },
                 ],
             );
@@ -1333,6 +1535,7 @@ mod tests {
                 message: "expected COMMA".to_owned(),
                 source: None,
                 code: None,
+                span: None,
             }],
         );
 
@@ -1378,5 +1581,92 @@ mod tests {
             grid.get(CellCoord::new(0, 6)).style.underline,
             UnderlineStyle::None
         );
+    }
+
+    /// E7c.3: a span is carried across an edit as a token's range is
+    /// --- shifted by an insert before it, grown by one inside it, left
+    /// zero-width by a delete over it --- and the published line and
+    /// column are untouched; navigation by byte follows the spans.
+    #[test]
+    fn spans_are_carried_across_edits_and_navigated_by_byte() {
+        use crate::semantic_tokens::DocumentEdit;
+        let d = |lo: u64, hi: u64, line: u32| Diagnostic {
+            start_line: line,
+            start_col: 0,
+            end_line: line,
+            end_col: 3,
+            severity: DiagnosticSeverity::Error,
+            message: "m".into(),
+            source: Some("rustc".into()),
+            code: None,
+            span: Some((lo, hi)),
+        };
+        let mut s = DiagnosticStore::new();
+        s.note_logged("file:///a");
+        s.set("file:///a", vec![d(20, 25, 1), d(5, 8, 0)]);
+        // Sorted by span, not by the published line.
+        let spans = |s: &DiagnosticStore| -> Vec<Option<(u64, u64)>> {
+            s.for_uri("file:///a").iter().map(|d| d.span).collect()
+        };
+        assert_eq!(spans(&s), vec![Some((5, 8)), Some((20, 25))]);
+        // An insert of 4 bytes at 0: both shift.
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 0,
+                old_end: 0,
+                inserted_len: 4,
+            },
+        );
+        assert_eq!(spans(&s), vec![Some((9, 12)), Some((24, 29))]);
+        // An insert inside the second: it grows.
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 26,
+                old_end: 26,
+                inserted_len: 2,
+            },
+        );
+        assert_eq!(spans(&s), vec![Some((9, 12)), Some((24, 31))]);
+        // A delete over the first: zero-width where it was.
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 8,
+                old_end: 14,
+                inserted_len: 0,
+            },
+        );
+        assert_eq!(spans(&s), vec![Some((8, 8)), Some((18, 25))]);
+        // The published line and column never moved.
+        assert_eq!(s.for_uri("file:///a")[0].start_line, 0);
+        assert_eq!(s.for_uri("file:///a")[1].start_line, 1);
+        // Navigation by byte.
+        assert_eq!(
+            s.next_after_byte("file:///a", 8).unwrap().span,
+            Some((18, 25))
+        );
+        assert!(s.next_after_byte("file:///a", 18).is_none());
+        assert_eq!(
+            s.previous_before_byte("file:///a", 18).unwrap().span,
+            Some((8, 8))
+        );
+        assert!(s.previous_before_byte("file:///a", 8).is_none());
+        // A logged URI is never stale: shifted, not hidden.
+        s.mark_stale("file:///a");
+        assert!(!s.is_stale("file:///a"));
+        s.mark_stale("file:///b");
+        assert!(s.is_stale("file:///b"));
+        // A no-op edit changes nothing.
+        s.translate_edit(
+            "file:///a",
+            DocumentEdit {
+                start: 3,
+                old_end: 3,
+                inserted_len: 0,
+            },
+        );
+        assert_eq!(spans(&s), vec![Some((8, 8)), Some((18, 25))]);
     }
 }

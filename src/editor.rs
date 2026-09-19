@@ -12906,6 +12906,7 @@ mod tests {
             message: "boom".into(),
             source: None,
             code: None,
+            span: None,
         }
     }
 

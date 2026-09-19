@@ -418,6 +418,7 @@ fn diag_on(
         message: "boom".into(),
         source: None,
         code: None,
+        span: None,
     }
 }
 

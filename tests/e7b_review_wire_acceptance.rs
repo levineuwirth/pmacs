@@ -16,13 +16,14 @@
 //!   e7b_review_wire_acceptance -- declares_progress`: against the
 //!   pre-branch client the capability is absent and the server sends
 //!   no progress, which is the premise measured rather than read.
-//! * A save sends no `textDocument/didSave`, while the edit before it
-//!   sent `textDocument/didChange` and the open sent
-//!   `textDocument/didOpen` through the same capture --- the positive
-//!   control that the absence is the client's and not the tee's. This
-//!   row holds on both sides of the branch; it pins the record's
-//!   sentence, and the day pmacs sends `didSave` it is the row to
-//!   rewrite.
+//! * A save sends one `textDocument/didSave`, shaped as the server's
+//!   `save` capability asks (rust-analyzer: `includeText: false`, so
+//!   no text), after the edit's `didChange`, and rust-analyzer runs
+//!   its flycheck on it --- `$/progress` begin and end on a
+//!   `rust-analyzer/flycheck/<n>` token --- with the label reading
+//!   `ready·check` in between and never `idx` on its account (E7c.1;
+//!   until then this row pinned that no `didSave` was ever sent).
+//!   Bitten by removing the after-save hook in `lsp.lua`.
 //!
 //! Needs `rust-analyzer`, `cargo`, `sh` and `tee` on `PATH`; skips
 //! otherwise unless `PMACS_REQUIRE_LSP` is set.
@@ -299,12 +300,16 @@ fn open_with_captured_rust_analyzer(tag: &str) -> (EditorState, Capture) {
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host.lua().set_app_data(StateDir(dir.clone()));
     // The default rust config with only the command replaced, so the
-    // init options (`checkOnSave`, `allFeatures`) are the shipped ones.
+    // init options are the shipped ones; the check a save now runs
+    // (E7c.1) builds under the project's own `target`, not the
+    // ambient `CARGO_TARGET_DIR` a gate or a shell exports.
     exec(
         &s,
         &format!(
-            "pmacs.lsp.config.rust.command = {:?}",
-            wrapper.display().to_string()
+            "pmacs.lsp.config.rust.command = {:?}
+             pmacs.lsp.config.rust.env = {{ CARGO_TARGET_DIR = {:?} }}",
+            wrapper.display().to_string(),
+            dir.join("target").display().to_string()
         ),
     );
     exec(
@@ -512,12 +517,22 @@ fn the_client_declares_progress_and_rust_analyzer_sends_it() {
 /// the save, read from the same capture after the same point, and the
 /// save's own after-save hook and bytes on disk.
 #[test]
-fn a_save_sends_no_did_save_while_the_edit_before_it_sent_did_change() {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one save read on the wire from the edit before it to the check after it"
+)]
+fn a_save_sends_did_save_and_rust_analyzer_flychecks_on_it() {
     if !on_path("rust-analyzer") {
         support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
         return;
     }
     let (mut s, cap) = open_with_captured_rust_analyzer("save");
+    // Warm: priming done and the server's own first check over, so the
+    // flycheck the save starts is the one the watch attributes to it.
+    assert!(
+        wait_warm(&mut s, 90),
+        "the label reads exactly ready for two seconds"
+    );
     exec(
         &s,
         "_G.__e7b_saved = false
@@ -541,6 +556,10 @@ fn a_save_sends_no_did_save_while_the_edit_before_it_sent_did_change() {
         "the typed edit reaches the server as didChange"
     );
     let before_save = frames(&cap.to_server).len();
+    let flychecks_before = frames(&cap.from_server)
+        .iter()
+        .filter(|f| is_flycheck_begin(f))
+        .count();
     exec(&s, "pmacs.command.invoke('buffer.save')");
     assert!(
         pump_lua_flag(&mut s, "_G.__e7b_saved", 10),
@@ -552,19 +571,15 @@ fn a_save_sends_no_did_save_while_the_edit_before_it_sent_did_change() {
         on_disk.starts_with("// a line the review typed\n"),
         "the save wrote the edit: {on_disk:?}"
     );
-    // Six seconds for anything the save might have queued to leave,
-    // and for what the server does with what the client sent.
-    let wire = watch_wire(&mut s, &cap, 6);
+    // Ten seconds for the check to start and finish on a one-file
+    // project, the label sampled every few milliseconds.
+    let wire = watch_wire(&mut s, &cap, 10);
     eprintln!("WIRE after the save, by the millisecond:");
     for line in &wire {
         eprintln!("WIRE   {line}");
     }
     let sent = frames(&cap.to_server);
     let after_save: Vec<&Value> = sent[before_save..].iter().collect();
-    eprintln!(
-        "WIRE client->server histogram, whole session: {:?}",
-        histogram(&sent)
-    );
     eprintln!(
         "WIRE client->server after the save: {:?}",
         after_save
@@ -577,21 +592,104 @@ fn a_save_sends_no_did_save_while_the_edit_before_it_sent_did_change() {
         1,
         "one didOpen"
     );
+    let saves: Vec<&Value> = sent
+        .iter()
+        .filter(|f| method_of(f) == Some("textDocument/didSave"))
+        .collect();
+    assert_eq!(
+        saves.len(),
+        1,
+        "one didSave for one save: {:?}",
+        histogram(&sent)
+    );
     assert!(
-        count_method(&sent, "textDocument/didChange") >= 1,
-        "the edit's didChange is in the capture"
+        after_save
+            .iter()
+            .any(|f| method_of(f) == Some("textDocument/didSave")),
+        "and it went out after the save command"
+    );
+    // The shape the server asked for: rust-analyzer declares
+    // `save: { includeText: false }`, read from its own initialize
+    // answer in the capture rather than assumed.
+    let include_text = frames(&cap.from_server)
+        .iter()
+        .find_map(|f| {
+            f["result"]["capabilities"]["textDocumentSync"]["save"]
+                .as_object()
+                .map(|save| {
+                    save.get("includeText")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+        })
+        .expect("rust-analyzer's initialize answer declares save");
+    eprintln!("WIRE rust-analyzer negotiated includeText = {include_text}");
+    assert_eq!(
+        saves[0]["params"].get("text").is_some(),
+        include_text,
+        "the text rides only when asked: {:?}",
+        saves[0]["params"]
     );
     assert_eq!(
-        count_method(&sent, "textDocument/didSave"),
-        0,
-        "no didSave, before or after the save: {:?}",
-        histogram(&sent)
+        saves[0]["params"]["textDocument"]["uri"],
+        sent.iter()
+            .find(|f| method_of(f) == Some("textDocument/didOpen"))
+            .map(|f| f["params"]["textDocument"]["uri"].clone())
+            .unwrap(),
+        "the saved document is the opened one"
+    );
+    // The flycheck: a begin and an end on the token, after the save.
+    let from = frames(&cap.from_server);
+    let flychecks_after = from.iter().filter(|f| is_flycheck_begin(f)).count();
+    assert!(
+        flychecks_after > flychecks_before,
+        "a flycheck began after the save ({flychecks_before} before, {flychecks_after} after)"
+    );
+    let token = from
+        .iter()
+        .rev()
+        .find(|f| is_flycheck_begin(f))
+        .map(|f| f["params"]["token"].as_str().unwrap().to_owned())
+        .unwrap();
+    assert!(
+        from.iter().any(|f| method_of(f) == Some("$/progress")
+            && f["params"]["token"].as_str() == Some(token.as_str())
+            && f["params"]["value"]["kind"].as_str() == Some("end")),
+        "and ended on {token}"
+    );
+    // The label: the suffix while the check ran, and `ready` on its
+    // own account throughout --- a `$/progress` cycle on a flycheck
+    // token never reads `idx` (E7b.1).
+    let seen: Vec<&String> = wire.iter().filter(|l| l.contains(" = ")).collect();
+    eprintln!("WIRE labels after the save: {seen:?}");
+    assert!(
+        seen.iter()
+            .any(|l| l.ends_with("= LSP:ready·check") || l.ends_with("= LSP:ready·clippy")),
+        "the check showed as a suffix on ready: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|l| l.ends_with("= LSP:degraded")),
+        "and never as degraded: {seen:?}"
+    );
+    assert_eq!(
+        lsp_segment(&s).as_deref(),
+        Some("LSP:ready"),
+        "ready once the check ended"
     );
     let clean: bool = eval(
         &s,
         "return pmacs.lsp.status_summary(pmacs.lsp.active_attachment().server).last_error == nil",
     );
     assert!(clean, "no error response during the sequence");
+}
+
+/// A `$/progress` `begin` on rust-analyzer's flycheck token.
+fn is_flycheck_begin(f: &Value) -> bool {
+    method_of(f) == Some("$/progress")
+        && f["params"]["token"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("rust-analyzer/flycheck/"))
+        && f["params"]["value"]["kind"].as_str() == Some("begin")
 }
 
 /// The measurement's instrument, pinned: an edit made from Lua outside

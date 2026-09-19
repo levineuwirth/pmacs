@@ -539,6 +539,21 @@ impl LspStatusTracker {
                         summary: text,
                         detail: None,
                     });
+                } else if method == "window/showMessage" {
+                    // E7c.4: a message the server asks the client to
+                    // show reaches `*lsp*` like a log line, marked as
+                    // the server's own words; until now it reached
+                    // nothing, and rust-analyzer's refusal of the
+                    // shipped config (#281) was said on every start to
+                    // no one. The Lua drain puts the error and warning
+                    // ones on the status line as well.
+                    let (channel, text) = parse_log_message(params);
+                    st.push_message(LspStatusMessage {
+                        at: ev.at,
+                        channel,
+                        summary: format!("server says: {text}"),
+                        detail: None,
+                    });
                 }
             }
             LspEventKind::Request { method, .. } => {
