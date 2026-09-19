@@ -315,6 +315,27 @@ fn e7c_3_a_check_diagnostic_lands_on_the_error_after_typing_above_it() {
         "the check's set, published at line 1 for the saved text, is placed against that text and carried to line 2"
     );
     assert_eq!(covered(&s), vec!["CHECKME", "CHECKME"]);
+
+    // And an edit after the answer landed moves what is held, before
+    // any republish: the recorder carries the spans on every edit, not
+    // only the absorb's replay. Read without a tick, so no didChange
+    // has gone out and nothing new has arrived.
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    type_str(&mut s, "// more\n");
+    let moved = positions(&s);
+    eprintln!(
+        "POS after a second typed line, before any republish: {moved:?} covering {:?}",
+        covered(&s)
+    );
+    assert_eq!(
+        moved,
+        vec![
+            "rustc error 3:12-3:19".to_owned(),
+            "pmacs-fake-lsp warning 3:12-3:19".to_owned()
+        ],
+        "both carried across the edit as it was typed"
+    );
+    assert_eq!(covered(&s), vec!["CHECKME", "CHECKME"]);
 }
 
 /// Without `check_sources` the check's republished set is placed
