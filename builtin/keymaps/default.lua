@@ -55,7 +55,10 @@ bind("BS",  "buffer.delete-backward")
 bind("DEL", "buffer.delete-forward")
 bind("C-d", "buffer.delete-forward")
 bind("RET", "edit.newline-and-indent")
-bind("TAB", "buffer.tab")
+-- E7b.4: TAB indents, and completes at point when there is nothing to
+-- indent (`tab-always-indent` `complete`); `buffer.tab` stays as the
+-- literal-tab command, reachable by M-x and by a rebinding.
+bind("TAB", "edit.indent-or-complete")
 
 -- Incremental search ---------------------------------------------------------
 --

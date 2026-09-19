@@ -7393,9 +7393,22 @@ pub fn install_async(
         let rt = runtime.clone();
         async_mod.set(
             "_dispatch_fs_walk_tree",
-            lua.create_function(move |_, (base, key): (String, Option<String>)| {
-                Ok(rt.dispatch_fs_walk_tree(std::path::PathBuf::from(base), key.as_deref()))
-            })?,
+            lua.create_function(
+                move |_,
+                      (base, key, prune, quiet): (
+                    String,
+                    Option<String>,
+                    Option<Vec<String>>,
+                    Option<bool>,
+                )| {
+                    Ok(rt.dispatch_fs_walk_tree(
+                        std::path::PathBuf::from(base),
+                        key.as_deref(),
+                        prune.unwrap_or_default(),
+                        quiet.unwrap_or(false),
+                    ))
+                },
+            )?,
         )?;
     }
 
@@ -7876,6 +7889,7 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
         row.set("cancel_requested", job.cancel_requested)?;
         row.set("is_stream", job.is_stream)?;
         row.set("purpose", job.purpose.as_str())?;
+        row.set("quiet", job.quiet)?;
         active.set(i + 1, row)?;
     }
     out.set("active", active)?;
@@ -11147,13 +11161,11 @@ pub fn install_lsp(
 
     {
         // T M4.8: short modeline label, e.g. "ready" / "idx" /
-        // "crashed". Stable string set.
+        // "crashed"; E7b.1 adds the busy suffix ("ready·check").
         let m = manager.clone();
         lsp_mod.set(
             "modeline_label",
-            lua.create_function(move |_, id: LspServerIdLua| {
-                Ok(m.borrow().modeline_label(id.0).to_owned())
-            })?,
+            lua.create_function(move |_, id: LspServerIdLua| Ok(m.borrow().modeline_label(id.0)))?,
         )?;
     }
 
@@ -11221,6 +11233,10 @@ pub fn install_lsp(
                 let t = lua.create_table_with_capacity(0, 7)?;
                 t.set("kind", st.kind.tag())?;
                 t.set("label", st.kind.label())?;
+                // E7b.1: the newest non-indexing cycle in flight, if any.
+                if let Some(busy) = st.busy.as_deref() {
+                    t.set("busy", busy)?;
+                }
                 t.set("restarts", st.restarts)?;
                 t.set("retry_responses", st.retry_responses)?;
                 if let crate::lsp_status::LspStatusKind::Indexing { title, percentage } = &st.kind {
@@ -14554,14 +14570,15 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
             // D18 (E6.1): what RET commits. `candidate` is the
             // default so a prompt that says nothing keeps the picker
             // semantics it always had; the open-set prompts name
-            // `typed` themselves.
+            // `typed` themselves; `key` (E7b.2) is the one-keypress
+            // answer of `y_or_n`.
             let accept = match spec.get::<Value>("accept")? {
                 Value::Nil => crate::minibuffer::AcceptPolicy::Candidate,
                 Value::String(s) => {
                     let name = s.to_str()?;
                     crate::minibuffer::AcceptPolicy::parse(&name).ok_or_else(|| {
                         mlua::Error::runtime(format!(
-                            "pmacs.minibuffer.read: accept must be \"candidate\" or \"typed\", got {:?}",
+                            "pmacs.minibuffer.read: accept must be \"candidate\", \"typed\" or \"key\", got {:?}",
                             name.as_ref()
                         ))
                     })?

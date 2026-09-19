@@ -128,3 +128,126 @@ pmacs.command.define {
   description = "Insert a newline carrying the current line's indentation.",
   fn = function() pmacs.indent.newline() end,
 }
+
+-- TAB (E7b.4): Emacs's `tab-always-indent` set to `complete`. TAB
+-- indents the line, and when the line is already at the indentation
+-- TAB would produce, TAB completes at point instead.
+--
+-- The indent function is the one this file already has: a line's
+-- indentation is the leading whitespace of the nearest non-blank line
+-- above it, copied byte for byte, and nothing at the top. Language
+-- knows nothing here, deliberately --- E1.6's clause asks for
+-- language-aware indentation and stays the owner's; this settles what
+-- the TAB key does on both frontends, and nothing about what the right
+-- indentation is.
+--
+-- The decision follows Emacs's exactly: TAB completes only when the
+-- indent command changed neither the buffer nor point. So a line
+-- whose indentation is wrong is re-indented (point inside the old
+-- indentation lands after the new one; point past it keeps its
+-- distance from the text); a line whose indentation is right with
+-- point inside it moves point to the indentation, and only then, on
+-- the next TAB, does completion open. With an active region the key
+-- keeps the CUA type-over it had (`buffer.tab`): indenting a region
+-- needs the engine E1.6 owns.
+--
+-- One fallback past Emacs's rule (C7b fix round 1): when there is
+-- nothing to complete --- nothing but whitespace, or the line's start,
+-- immediately before point --- TAB is the indent alone. Without it an
+-- empty first line, at its indentation by definition, opened the
+-- popup with an empty prefix on the first TAB and the second TAB, the
+-- popup's accept, inserted whatever the server listed first. A word
+-- or a symbol before point (`prin`, `self.`) still completes.
+
+-- The byte after the last character of the line holding `pos`: the
+-- position of its newline, or the buffer's length on the last line.
+-- Chunked forward scan, like `indent_before`.
+local function line_end_after(buf, pos)
+  local len = buf:len()
+  local p = pos
+  while p < len do
+    local chunk_to = math.min(p + 4096, len)
+    local chunk = buf:slice(p, chunk_to)
+    local nl = chunk:find("\n", 1, true)
+    if nl then return p + nl - 1 end
+    p = chunk_to
+  end
+  return len
+end
+
+-- The indentation TAB would give the line starting at `line_start`:
+-- the leading whitespace of the nearest non-blank line above it, ""
+-- when there is none.
+local function indent_wanted(buf, line_start)
+  local p = line_start
+  while p > 0 do
+    local prev_start = line_start_before(buf, p - 1)
+    local line = buf:slice(prev_start, p - 1)
+    if line:match("[^ \t\r]") then
+      return line:match("^[ \t]*")
+    end
+    p = prev_start
+  end
+  return ""
+end
+
+-- Whether point has nothing before it on its line but whitespace:
+-- the buffer's start, a newline, a space or a tab.
+local function nothing_to_complete_before(buf, cursor)
+  if cursor <= 0 then return true end
+  local ok, ch = pcall(function() return buf:slice(cursor - 1, cursor) end)
+  if not ok or type(ch) ~= "string" then return true end
+  return ch == "\n" or ch == " " or ch == "\t"
+end
+
+function pmacs.indent.tab()
+  local buf = pmacs.window.buffer()
+  if not buf then
+    ed.set_status("no buffer")
+    return false
+  end
+  local region = ed.region()
+  if region ~= nil and region["end"] > region.start then
+    ed.insert_char_over_region(9)
+    return true
+  end
+  local cursor = ed.cursor()
+  local start = line_start_before(buf, cursor)
+  local stop = line_end_after(buf, cursor)
+  local have = indent_before(buf, stop)
+  local want = indent_wanted(buf, start)
+  local indent_end = start + #have
+  if have ~= want then
+    local ok, estart, estop, einserted = pcall(function()
+      return buf:replace(start, indent_end, want)
+    end)
+    if not ok then
+      ed.set_status("indent rejected by buffer intercept")
+      return false
+    end
+    -- Point inside the old indentation lands after the new one; point
+    -- past it keeps its distance from the text. One formula, through
+    -- the effective edit, as `newline` does.
+    if cursor <= indent_end then
+      ed.goto_byte(estart + einserted)
+    else
+      ed.goto_byte(translate(cursor, estart, estop, einserted))
+    end
+    return true
+  end
+  if cursor < indent_end then
+    ed.goto_byte(indent_end)
+    return true
+  end
+  if nothing_to_complete_before(buf, cursor) then
+    return true
+  end
+  pmacs.command.invoke("completion.at-point")
+  return true
+end
+
+pmacs.command.define {
+  name = "edit.indent-or-complete",
+  description = "Indent the line to the line above's indentation; if it already is and a word or symbol is before point, complete at point.",
+  fn = function() pmacs.indent.tab() end,
+}

@@ -616,32 +616,48 @@ end
 -- Extension hook on top of the async runtime's tick rather than a
 -- Rust-side tick callback because the install path is policy
 -- (which view to install into), not mechanism.
+--
+-- The settled ids are collected first and installed after the
+-- traversal (C7b fix round 1). Installing inside the `pairs` loop ran
+-- `dispatch_follow_up_if_dirty`, whose `pmacs.parse._dispatch` adds a
+-- NEW key to `pending_parse_jobs` --- the table being traversed ---
+-- which the Lua manual leaves undefined and Lua 5.4 answers with
+-- "invalid key to 'next'" once the removed key's node is reused. LuaJIT
+-- tolerated it, so the default sweep never saw it; CI's macOS lua54
+-- leg did, under a row that floods `*errors*` while a buffer is
+-- being typed into (every append fires `buffer.after-edit`, which
+-- re-requests the active buffer's parse, so many settles dispatched a
+-- follow-up mid-traversal).
 local prior_tick = pmacs._async.tick
 pmacs._async.tick = function(...)
   local ret = prior_tick(...)
+  local settled = {}
   for job_id in pairs(pending_parse_jobs) do
     if pmacs._async._is_complete(job_id) then
-      local key = parse_job_buffer_keys[job_id]
-      pmacs.parse._install_settled(job_id)
-      -- Surface the injection layer backstop (Q#IJ3) once per buffer rather
-      -- than dropping embedded regions silently. Best-effort: a missing
-      -- buffer or error here must not stall the settle loop.
-      local capped_buf = key and parse_buffer_by_key[key]
-      if capped_buf and pmacs.parse._injection_capped(capped_buf) then
-        if not injection_cap_warned[key] then
-          injection_cap_warned[key] = true
-          pmacs.error(
-            "syntax: injection layer cap reached; some embedded regions are unhighlighted")
-        end
-      elseif key then
-        injection_cap_warned[key] = nil
+      settled[#settled + 1] = job_id
+    end
+  end
+  for _, job_id in ipairs(settled) do
+    local key = parse_job_buffer_keys[job_id]
+    pmacs.parse._install_settled(job_id)
+    -- Surface the injection layer backstop (Q#IJ3) once per buffer rather
+    -- than dropping embedded regions silently. Best-effort: a missing
+    -- buffer or error here must not stall the settle loop.
+    local capped_buf = key and parse_buffer_by_key[key]
+    if capped_buf and pmacs.parse._injection_capped(capped_buf) then
+      if not injection_cap_warned[key] then
+        injection_cap_warned[key] = true
+        pmacs.error(
+          "syntax: injection layer cap reached; some embedded regions are unhighlighted")
       end
-      pending_parse_jobs[job_id] = nil
-      parse_job_buffer_keys[job_id] = nil
-      if key and inflight_parse_by_buffer[key] == job_id then
-        inflight_parse_by_buffer[key] = nil
-        dispatch_follow_up_if_dirty(key)
-      end
+    elseif key then
+      injection_cap_warned[key] = nil
+    end
+    pending_parse_jobs[job_id] = nil
+    parse_job_buffer_keys[job_id] = nil
+    if key and inflight_parse_by_buffer[key] == job_id then
+      inflight_parse_by_buffer[key] = nil
+      dispatch_follow_up_if_dirty(key)
     end
   end
   return ret

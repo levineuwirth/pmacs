@@ -145,8 +145,12 @@ fn killing_a_modified_buffer_asks_and_a_refusal_keeps_it() {
         "the question must name the buffer at stake; got {asked:?}"
     );
 
+    // E7b.2: one key answers; no RET.
     type_str(&mut s, "n");
-    press(&mut s, KeyCode::Enter);
+    assert!(
+        !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "`n` alone must answer the question"
+    );
     assert!(
         buffer_names(&s).contains(&path),
         "`n` must keep the buffer; buffers are {:?}",
@@ -165,10 +169,9 @@ fn killing_a_modified_buffer_proceeds_on_yes() {
 
     m_x(&mut s, "buffer.kill-this");
     type_str(&mut s, "y");
-    press(&mut s, KeyCode::Enter);
     assert!(
         !buffer_names(&s).contains(&path),
-        "`y` must kill the buffer; buffers are {:?}",
+        "`y` alone must kill the buffer; buffers are {:?}",
         buffer_names(&s)
     );
 }
@@ -195,6 +198,10 @@ fn killing_an_unmodified_buffer_asks_nothing() {
 
 /// An answer that is neither yes nor no re-asks rather than being read
 /// as either. Guessing is safe one way and destructive the other.
+/// Since E7b.2 the prompt answers on one key, so each key is judged on
+/// its own: `m`, `q` and `x` each re-ask, and so does RET on the empty
+/// field. (A typed word is no longer a way to answer: "maybe" would
+/// say yes at its `y`, as it does in Emacs.)
 #[test]
 fn an_unrecognized_answer_re_asks() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -203,7 +210,7 @@ fn an_unrecognized_answer_re_asks() {
     type_str(&mut s, "X");
 
     m_x(&mut s, "buffer.kill-this");
-    type_str(&mut s, "maybe");
+    type_str(&mut s, "mqx");
     press(&mut s, KeyCode::Enter);
     assert!(
         eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
@@ -772,7 +779,6 @@ fn revert_buffer_asks_then_reloads_from_disk() {
     );
 
     type_str(&mut s, "y");
-    press(&mut s, KeyCode::Enter);
     assert_eq!(
         eval::<String>(
             &s,

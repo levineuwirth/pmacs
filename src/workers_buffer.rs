@@ -327,6 +327,7 @@ mod tests {
                 cancel_requested: false,
                 is_stream: true,
                 purpose: "grep pattern".to_string(),
+                quiet: false,
             }],
             vec![],
         );
@@ -350,6 +351,7 @@ mod tests {
                 cancel_requested: true,
                 is_stream: false,
                 purpose: "grep pattern".to_string(),
+                quiet: false,
             }],
             vec![],
         );
@@ -411,6 +413,7 @@ mod tests {
                 cancel_requested: false,
                 is_stream: true,
                 purpose: "grep pattern".to_string(),
+                quiet: false,
             }],
             vec![],
         );

@@ -401,9 +401,29 @@ pub fn read_dir_blocking(
 /// Directory entries appear in the listing (kind `dir`) so a consumer
 /// can see structure; the watcher filters them out when building
 /// signatures, as its Lua walk always did.
+///
+/// Prunes nothing; [`walk_tree_blocking_pruning`] is the same walk
+/// with a list of directory names it does not enter.
 pub fn walk_tree_blocking(
     base: &Path,
     cancel: &CancellationToken,
+) -> Result<FsDirListing, FsError> {
+    walk_tree_blocking_pruning(base, cancel, &[])
+}
+
+/// [`walk_tree_blocking`] with `prune`: a directory whose name is in
+/// the list is recorded (kind `dir`) and not entered, wherever it sits
+/// under `base`. #279: the file-watch poll walks a project every few
+/// seconds for as long as a server lives, and on this repository
+/// `.git` was 1012 of the 1578 entries it visited while `target/`
+/// --- cargo's default, absent here only because the machine exports
+/// `CARGO_TARGET_DIR` --- is the subtree the walk cannot be cheap on;
+/// neither holds anything a server's `didChangeWatchedFiles` globs
+/// ask about. The names are the caller's: the walk knows no project.
+pub fn walk_tree_blocking_pruning(
+    base: &Path,
+    cancel: &CancellationToken,
+    prune: &[String],
 ) -> Result<FsDirListing, FsError> {
     // Checked BEFORE opening and again before returning, not only
     // inside the entry loops: an empty tree never enters a loop, so a
@@ -424,7 +444,7 @@ pub fn walk_tree_blocking(
     // base-relative prefixes. LIFO order --- traversal order is not
     // part of the contract; the consumer diffs a map.
     let mut pending: Vec<(std::path::PathBuf, String)> = Vec::new();
-    walk_one_dir(root, "", cancel, &mut out, &mut pending)?;
+    walk_one_dir(root, "", cancel, prune, &mut out, &mut pending)?;
     while let Some((dir, prefix)) = pending.pop() {
         if cancel.is_cancelled() {
             return Err(FsError::Cancelled);
@@ -433,7 +453,7 @@ pub fn walk_tree_blocking(
         let Ok(iter) = std::fs::read_dir(&dir) else {
             continue;
         };
-        walk_one_dir(iter, &prefix, cancel, &mut out, &mut pending)?;
+        walk_one_dir(iter, &prefix, cancel, prune, &mut out, &mut pending)?;
     }
     if cancel.is_cancelled() {
         return Err(FsError::Cancelled);
@@ -460,12 +480,14 @@ thread_local! {
 
 /// One directory's worth of [`walk_tree_blocking`]: record every
 /// representable entry under its base-relative name and queue child
-/// directories. Only cancellation propagates as an error --- every
+/// directories, except those named in `prune`, which are recorded
+/// and not queued. Only cancellation propagates as an error --- every
 /// per-entry failure is a skip, per the walk's tolerance contract.
 fn walk_one_dir(
     iter: std::fs::ReadDir,
     prefix: &str,
     cancel: &CancellationToken,
+    prune: &[String],
     out: &mut Vec<FsDirEntry>,
     pending: &mut Vec<(std::path::PathBuf, String)>,
 ) -> Result<(), FsError> {
@@ -477,6 +499,7 @@ fn walk_one_dir(
         let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
             continue;
         };
+        let pruned = prune.contains(&name);
         let rel = if prefix.is_empty() {
             name
         } else {
@@ -487,7 +510,7 @@ fn walk_one_dir(
             continue;
         };
         let kind = classify(&metadata);
-        if matches!(kind, FsEntryKind::Dir) {
+        if matches!(kind, FsEntryKind::Dir) && !pruned {
             pending.push((entry_path.clone(), rel.clone()));
         }
         let mut symlink_target = None;
@@ -1067,6 +1090,56 @@ mod tests {
             }
             other => panic!("expected NonUtf8Path, got {other:?}"),
         }
+    }
+
+    /// #279: a pruned name is listed as a directory and not entered,
+    /// at the root and below it; a name that is a file, or a
+    /// directory whose name merely contains the pruned one, is
+    /// untouched; the unpruned walk still visits everything.
+    #[test]
+    fn walk_tree_pruning_lists_the_named_directory_and_does_not_enter_it() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mk = |rel: &str| {
+            let p = td.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).expect("mkdir");
+            std::fs::write(p, b"x").expect("write");
+        };
+        mk("a.rs");
+        mk(".git/objects/aa/blob");
+        mk("target/debug/build.rs");
+        mk("crates/x/target/release/y.rs");
+        mk("crates/x/src/lib.rs");
+        mk("targets/z.rs"); // a name that only contains `target`
+        mk("sub/target"); // a FILE named target
+        let prune = [".git".to_owned(), "target".to_owned()];
+        let listing = walk_tree_blocking_pruning(td.path(), &token(), &prune).expect("walk");
+        let mut names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                ".git",
+                "a.rs",
+                "crates",
+                "crates/x",
+                "crates/x/src",
+                "crates/x/src/lib.rs",
+                "crates/x/target",
+                "sub",
+                "sub/target",
+                "target",
+                "targets",
+                "targets/z.rs",
+            ]
+        );
+        let all = walk_tree_blocking(td.path(), &token()).expect("walk");
+        assert_eq!(all.entries.len(), 19, "the unpruned walk visits everything");
+        assert!(all.entries.iter().any(|e| e.name == ".git/objects/aa/blob"));
+        assert!(
+            all.entries
+                .iter()
+                .any(|e| e.name == "crates/x/target/release/y.rs")
+        );
     }
 
     #[test]

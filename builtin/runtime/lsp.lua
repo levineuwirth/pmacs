@@ -2061,7 +2061,8 @@ end
 -- subscription drives every group's cadence off
 -- `pmacs.editor.monotonic_ms` (autosave's Q#AS2 idiom). Waiting
 -- allocates no job and holds no pool thread; a due group runs ONE
--- `pmacs.fs.walk_tree` job for the whole tree, diffs in Lua, and
+-- `pmacs.fs.walk_tree` job for the whole tree (less `.git` and
+-- `target`, quiet on the indicator; #279), diffs in Lua, and
 -- routes per-file created/changed/deleted FileEvents through each
 -- member watcher's glob and WatchKind mask, deduped into one
 -- notification. Quiet scans back the interval off to a cap; any
@@ -2070,6 +2071,16 @@ end
 
 local FILE_WATCH_INTERVAL_MS = 250
 local FILE_WATCH_BACKOFF_CAP_MS = 4000
+
+-- #279: the walk lists these directories and does not enter them,
+-- wherever they sit under the base. `.git` was two thirds of what the
+-- walk visited on this repository (1012 of 1578 entries) and `target/`
+-- is cargo's build output, unbounded and never a watched subject;
+-- rust-analyzer's globs (`**/*.rs`, `**/Cargo.toml`, `**/Cargo.lock`)
+-- ask about neither. The walk is also dispatched `quiet`, so the
+-- activity indicator does not announce the editor's own cadence as
+-- the user's work. A kernel watch is the issue's next step.
+local FILE_WATCH_PRUNE = { ".git", "target" }
 
 -- file_watchers[tostring(sid)][registrationId] = list of watch records
 -- ({ cancelled, form = "relative"|"absolute", kind_mask, match_subject,
@@ -2406,7 +2417,8 @@ local function start_group_scan(group)
   for i, m in ipairs(group.members) do
     scan_members[i] = m
   end
-  local handle = pmacs.fs.walk_tree(group.base)
+  local handle = pmacs.fs.walk_tree(group.base,
+    { prune = FILE_WATCH_PRUNE, quiet = true })
   group.in_flight = {
     generation = gen,
     started_at = pmacs.editor.monotonic_ms(),
@@ -2739,6 +2751,41 @@ local function dispatch_notification(sid, ev)
   end
 end
 
+-- The codes that mean pmacs sent something the server could not take
+-- (JSON-RPC 2.0's client-side errors), by the owner's ruling at C7b
+-- fix round 1 --- "Degraded means the server failed". The tracker in
+-- `src/lsp_status.rs` moves the kind only on `-32603` and the server
+-- range `-32099..-32000`; these three are the client's own mistake and
+-- are reported through `pmacs.error` into `*errors*`, with the method
+-- and the code, so a wrong request is seen where every other pmacs
+-- error is seen and the modeline says nothing about it. The retry
+-- codes (`-32800`, `-32801`) stay silent (E6d.2); every other code
+-- lists in `*lsp*` alone.
+local CLIENT_ERROR_NAMES = {
+  [-32600] = "InvalidRequest",
+  [-32601] = "MethodNotFound",
+  [-32602] = "InvalidParams",
+}
+
+local function report_client_error(sid, ev)
+  local err = ev.error
+  local name = err and CLIENT_ERROR_NAMES[err.code]
+  if not name then return end
+  local label = tostring(sid)
+  local ok, rows = pcall(pmacs.lsp.list)
+  if ok and rows then
+    for _, info in ipairs(rows) do
+      if tostring(info.id) == label then label = info.label or label end
+    end
+  end
+  -- An explicit label: this runs under the drain's `pcall`, and the
+  -- default label would name that C frame rather than this file.
+  pmacs.error(string.format(
+    "LSP: %s refused %s as a client error, %d %s: %s",
+    label, tostring(ev.method), err.code, name, tostring(err.message)),
+    "lsp")
+end
+
 local function deliver_response(sid, ev)
   local skey = tostring(sid)
   local pend = pending_responses[skey]
@@ -2909,6 +2956,13 @@ local function handle_server_requests()
             pull_semantic_tokens_quiet(rec)
           end)
         elseif ev.kind == "request"
+            and ev.method == "window/workDoneProgress/create" then
+          -- E7b.1: the server announces a progress token before its
+          -- first `$/progress` on it. The tracker keys on the token
+          -- itself, so there is nothing to record here; answered so
+          -- the server's request table does not hold it forever.
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
+        elseif ev.kind == "request"
             and ev.method == "client/registerCapability" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
           pcall(register_file_watchers, sid,
@@ -2922,6 +2976,9 @@ local function handle_server_requests()
         elseif ev.kind == "notification" then
           dispatch_notification(sid, ev)
         elseif ev.kind == "response" then
+          -- Before the awaiter, so the durable trace exists whether or
+          -- not a handler is still waiting for this answer.
+          pcall(report_client_error, sid, ev)
           deliver_response(sid, ev)
         elseif ev.kind == "crashed" then
           -- E5.3: a crash was consumed silently here; it is reported

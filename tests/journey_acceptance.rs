@@ -1293,8 +1293,9 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
 /// Step 5 is "edit immediately"; an editor that discards the edit on
 /// `C-x C-c` without a word has not kept that promise, it has only
 /// postponed breaking it. Driven as keys end to end: the prefix, the
-/// quit chord, the answer, and RET — `editor.quit` invoked
-/// programmatically would pass with the binding gone.
+/// quit chord, and the answer, which since E7b.2 is one key with no
+/// RET after it — `editor.quit` invoked programmatically would pass
+/// with the binding gone.
 ///
 /// The negative half is asserted BEFORE the answer: after `y` the flag
 /// is set either way, so a test that only looked afterwards would pass
@@ -1339,8 +1340,7 @@ fn journey_step5_quitting_with_unsaved_work_prompts_first() {
     );
 
     type_char(&mut s, 'y');
-    press(&mut s, KeyCode::Enter);
-    assert!(s.core.borrow().quit, "`y` must exit");
+    assert!(s.core.borrow().quit, "`y` alone must exit");
 }
 
 /// **N** (E1.1) — the answer is read, not assumed.

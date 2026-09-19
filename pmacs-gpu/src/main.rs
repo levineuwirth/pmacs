@@ -1555,9 +1555,173 @@ fn run_probe(socket: &Path, report: &Path) -> i32 {
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "latency") => {
             run_latency_probe(socket, report, &text)
         }
+        Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "chord") => {
+            run_chord_probe(socket, report, &text)
+        }
         Some(text) => run_typing_probe(socket, report, &text),
         None => run_headless_probe(socket, report),
     }
+}
+
+/// E7b.3 --- one keypress with Ctrl and Alt held, through the
+/// production `App` dispatch against a real daemon, and what the
+/// session holds a moment later. `PMACS_GPU_PROBE_TYPE_TEXT` is the
+/// text winit would report for the press and `PMACS_GPU_PROBE_CHORD_KEY`
+/// the key's own character with every modifier ignored --- `i`/`i` for
+/// `C-M-i` on a US layout, `€`/`e` for `AltGr`-e on a layout that yields
+/// the euro sign. The report says whether the completion popup opened
+/// (`completion.at-point` is what the daemon binds `C-M-i` to) and
+/// what the mirror's text became, and asserts nothing.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-press-observe session, reported line by line"
+)]
+fn run_chord_probe(socket: &Path, report: &Path, text: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    let unmodified = std::env::var("PMACS_GPU_PROBE_CHORD_KEY").unwrap_or_default();
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+
+    let started = std::time::Instant::now();
+    let ms = |t: std::time::Instant| {
+        u64::try_from(t.duration_since(started).as_millis()).unwrap_or(u64::MAX)
+    };
+    let deadline = started
+        + std::time::Duration::from_millis(
+            std::env::var("PMACS_GPU_PROBE_DEADLINE_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30_000),
+        );
+    let quiet = std::time::Duration::from_millis(1500);
+
+    let mut snapshot_seen = false;
+    let mut pressed_at: Option<std::time::Instant> = None;
+    let mut text_before = String::new();
+    let mut popup_open_at: Option<std::time::Instant> = None;
+    let mut disconnect: Option<String> = None;
+
+    while std::time::Instant::now() < deadline {
+        let now = std::time::Instant::now();
+        let current = app
+            .state
+            .as_ref()
+            .map(|s| s.current_text.clone())
+            .unwrap_or_default();
+        let idle = app.state.as_ref().is_some_and(|s| s.dispatch_idle);
+        let popup = app
+            .state
+            .as_ref()
+            .is_some_and(State::completion_open_for_current_buffer);
+        if popup {
+            popup_open_at.get_or_insert(now);
+        }
+        match pressed_at {
+            None => {
+                if snapshot_seen
+                    && idle
+                    && app.state.as_ref().is_some_and(|s| s.own_cursor.is_some())
+                {
+                    text_before.clone_from(&current);
+                    let own = Key::Character(unmodified.as_str().into());
+                    app.modifiers = winit::keyboard::ModifiersState::CONTROL
+                        | winit::keyboard::ModifiersState::ALT;
+                    app.apply_keyboard(&Key::Character(text.into()), Some(text), Some(&own));
+                    app.modifiers = winit::keyboard::ModifiersState::empty();
+                    pressed_at = Some(now);
+                }
+            }
+            Some(t) => {
+                if now.duration_since(t) >= quiet {
+                    break;
+                }
+            }
+        }
+        let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) else {
+            continue;
+        };
+        let (is_snapshot, is_disconnect) = match &event {
+            AttachEvent::Message(msg) => (
+                matches!(msg.as_ref(), InstanceMessage::BufferSnapshot { .. }),
+                false,
+            ),
+            AttachEvent::Disconnected(reason) => {
+                disconnect = Some(reason.clone());
+                (false, true)
+            }
+        };
+        app.dispatch_app_event(AppEvent::Attach(event));
+        snapshot_seen |= is_snapshot;
+        if is_disconnect {
+            break;
+        }
+    }
+
+    let final_text = app
+        .state
+        .as_ref()
+        .map(|s| s.current_text.clone())
+        .unwrap_or_default();
+    let popup_now = app
+        .state
+        .as_ref()
+        .is_some_and(State::completion_open_for_current_buffer);
+    let mut out = String::new();
+    let _ = writeln!(out, "chord_text={text}");
+    let _ = writeln!(out, "chord_key={unmodified}");
+    let _ = writeln!(
+        out,
+        "pressed_at_ms={}",
+        pressed_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(out, "text_before={text_before:?}");
+    let _ = writeln!(out, "text_after={final_text:?}");
+    let _ = writeln!(
+        out,
+        "popup_open_at_ms={}",
+        popup_open_at.map_or(String::from("none"), |t| ms(t).to_string())
+    );
+    let _ = writeln!(out, "popup_open={popup_now}");
+    let _ = writeln!(out, "disconnect={}", disconnect.unwrap_or_default());
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!(
+            "pmacs-gpu probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
+    0
 }
 
 /// E6c.3 --- type text through the production `App` dispatch, the way
@@ -1676,7 +1840,7 @@ fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     for ch in text.chars() {
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
-                        app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                        app.apply_keyboard(&Key::Character(s.into()), Some(s), None);
                     }
                     typed_at = Some(now);
                     text_after_typing = app
@@ -1694,7 +1858,7 @@ fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 if typed_at.is_some_and(|t| now.duration_since(t) >= quiet) {
                     text_before_chord.clone_from(&current);
                     app.modifiers = winit::keyboard::ModifiersState::CONTROL;
-                    app.apply_keyboard(&Key::Character("x".into()), None);
+                    app.apply_keyboard(&Key::Character("x".into()), None, None);
                     app.modifiers = winit::keyboard::ModifiersState::empty();
                     phase = Phase::PrefixSent;
                 }
@@ -1703,7 +1867,7 @@ fn run_undo_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 if !idle {
                     prefix_pending_at = Some(now);
                     app.modifiers = winit::keyboard::ModifiersState::SHIFT;
-                    app.apply_keyboard(&Key::Character("U".into()), Some("U"));
+                    app.apply_keyboard(&Key::Character("U".into()), Some("U"), None);
                     app.modifiers = winit::keyboard::ModifiersState::empty();
                     undo_sent_at = Some(now);
                     phase = Phase::UndoSent;
@@ -2128,19 +2292,19 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     }
                     sample = Sample::default();
                     if is_enter {
-                        app.apply_keyboard(&Key::Named(NamedKey::Enter), None);
+                        app.apply_keyboard(&Key::Named(NamedKey::Enter), None, None);
                     } else if key_gaps.is_empty() {
                         for ch in text.chars() {
                             let mut buf = [0u8; 4];
                             let s = ch.encode_utf8(&mut buf);
-                            app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                            app.apply_keyboard(&Key::Character(s.into()), Some(s), None);
                         }
                     } else {
                         let mut chars = text.chars();
                         if let Some(first) = chars.next() {
                             let mut buf = [0u8; 4];
                             let s = first.encode_utf8(&mut buf);
-                            app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                            app.apply_keyboard(&Key::Character(s.into()), Some(s), None);
                         }
                         pending_chars = chars.rev().collect();
                         next_char_at = std::time::Instant::now()
@@ -2164,7 +2328,7 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     pending_chars.pop();
                     let mut buf = [0u8; 4];
                     let s = ch.encode_utf8(&mut buf);
-                    app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                    app.apply_keyboard(&Key::Character(s.into()), Some(s), None);
                     let typed_so_far = text.chars().count() - pending_chars.len();
                     next_char_at =
                         now + key_gaps.get(typed_so_far - 1).copied().unwrap_or_default();
@@ -2251,10 +2415,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     let before = caret.saturating_sub(at).min(inserted);
                     let after = inserted.saturating_sub(before);
                     for _ in 0..after {
-                        app.apply_keyboard(&Key::Named(NamedKey::Delete), None);
+                        app.apply_keyboard(&Key::Named(NamedKey::Delete), None, None);
                     }
                     for _ in 0..before {
-                        app.apply_keyboard(&Key::Named(NamedKey::Backspace), None);
+                        app.apply_keyboard(&Key::Named(NamedKey::Backspace), None, None);
                     }
                     phase = Phase::Restoring;
                     phase_since = now;
@@ -2302,7 +2466,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             let mut ready = false;
             let mut degraded = false;
             for t in texts {
-                ready |= t == "LSP:ready";
+                // E7b.1: the label carries a busy suffix while the
+                // server flychecks (`LSP:ready·check`); the server is
+                // ready either way.
+                ready |= t.starts_with("LSP:ready");
                 degraded |= t.contains("degraded");
             }
             if ready {
@@ -2634,8 +2801,8 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             }
             typed_at_byte = cursor.byte;
             match action.as_str() {
-                "delete" => app.apply_keyboard(&Key::Named(NamedKey::Delete), None),
-                "backspace" => app.apply_keyboard(&Key::Named(NamedKey::Backspace), None),
+                "delete" => app.apply_keyboard(&Key::Named(NamedKey::Delete), None, None),
+                "backspace" => app.apply_keyboard(&Key::Named(NamedKey::Backspace), None, None),
                 "paste" => {
                     if let Some(client) = app.attach_client.as_ref() {
                         let _ = client.send_paste(text.as_bytes().to_vec());
@@ -2645,7 +2812,7 @@ fn run_typing_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     for ch in text.chars() {
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
-                        app.apply_keyboard(&Key::Character(s.into()), Some(s));
+                        app.apply_keyboard(&Key::Character(s.into()), Some(s), None);
                     }
                 }
             }
@@ -5738,7 +5905,11 @@ impl App {
             Route::Keyboard {
                 action: KeyAction::Press,
                 key,
-            } => self.apply_keyboard(&key.logical_key, key.text.as_deref()),
+            } => {
+                use winit::platform::modifier_supplement::KeyEventExtModifierSupplement as _;
+                let unmodified = key.key_without_modifiers();
+                self.apply_keyboard(&key.logical_key, key.text.as_deref(), Some(&unmodified));
+            }
             Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
             Route::Pointer(PointerRoute::Left(button_state)) => {
                 self.apply_left_button(button_state);
@@ -5777,8 +5948,12 @@ impl App {
     /// The router arm remains unwitnessable — it still cannot be handed
     /// a `WindowEvent::KeyboardInput` — so 1-pre's structural exception
     /// narrows to that one pattern arm rather than disappearing.
+    ///
+    /// `unmodified` is the key with every modifier ignored (winit's
+    /// `key_without_modifiers`), which the `AltGr` rule reads (E7b.3);
+    /// a headless caller that types plain text passes `None`.
     #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
-    fn apply_keyboard(&mut self, logical: &Key, text: Option<&str>) {
+    fn apply_keyboard(&mut self, logical: &Key, text: Option<&str>, unmodified: Option<&Key>) {
         // While the daemon is intercepting keystrokes — an active
         // incremental search (Q#SR5), or a minibuffer / pending
         // prefix — every key belongs to its handler, not the
@@ -5837,14 +6012,17 @@ impl App {
         // AltGr / international text (audit F-004). winit reports
         // the text a keypress produces; when a keypress yields
         // printable text *while both Ctrl and Alt* are held — the
-        // AltGr signature on Windows (LCtrl+RAlt) — it's text
-        // input, not a command chord. Strip those modifiers (keep
-        // Shift) so it inserts (through the plain-text path, or the
-        // daemon's SelfInsert while a prompt is open) instead of
-        // being routed to the keymap. Alt alone is left intact so
-        // macOS Option-as-Meta still reaches the keymap; on layouts
-        // where AltGr isn't Ctrl+Alt this is a no-op.
-        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(text, pmods) {
+        // AltGr signature on Windows (LCtrl+RAlt) — AND that text is
+        // not the key's own character (E7b.3: `C-M-i` produces `i`
+        // from `i` and is a chord; AltGr-e produces `€` from `e` and
+        // is text), it's text input, not a command chord. Strip
+        // those modifiers (keep Shift) so it inserts (through the
+        // plain-text path, or the daemon's SelfInsert while a prompt
+        // is open) instead of being routed to the keymap. Alt alone
+        // is left intact so macOS Option-as-Meta still reaches the
+        // keymap; on layouts where AltGr isn't Ctrl+Alt this is a
+        // no-op.
+        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(text, unmodified, pmods) {
             pmods = if pmods.contains(Modifiers::SHIFT) {
                 Modifiers::SHIFT
             } else {
@@ -6480,8 +6658,20 @@ impl EffectHarness {
     /// pattern arm; the BODY is reachable, and the body is where 1a's
     /// placement defect lived.
     fn feed_keyboard(&mut self, logical: &Key, text: Option<&str>) -> Step {
+        self.feed_keyboard_from(logical, text, None)
+    }
+
+    /// As [`Self::feed_keyboard`], naming the key's own character with
+    /// every modifier ignored --- what the production route reads from
+    /// `key_without_modifiers` (E7b.3).
+    fn feed_keyboard_from(
+        &mut self,
+        logical: &Key,
+        text: Option<&str>,
+        unmodified: Option<&Key>,
+    ) -> Step {
         let before = self.snapshot();
-        self.app.apply_keyboard(logical, text);
+        self.app.apply_keyboard(logical, text, unmodified);
         let after = self.snapshot();
         Step {
             local: Self::diff(&before, &after, EventOutcome::Continue),
@@ -7164,6 +7354,43 @@ mod input_routing_tests {
                 [pmacs_protocol::FrontendEvent::Paste { data, .. }] if data == b"pasted"
             ),
             "Cmd-V is the OS paste, as C-v is: {:?}",
+            step.outbound
+        );
+    }
+
+    /// E7b.3 — through the production dispatch: `C-M-i` on a US layout
+    /// (the text `i` from the key `i`) leaves as the chord `C-M-i`, and
+    /// `AltGr`-e on a layout that yields `€` (the text `€` from the key
+    /// `e`, Ctrl+Alt held as Windows reports `AltGr`) leaves as the plain
+    /// character. Bitten by reverting `is_layout_text` to the text-only
+    /// rule: the first row then leaves as a bare `i`.
+    #[test]
+    fn c_m_i_is_a_chord_and_altgr_e_is_the_euro_sign() {
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | ModifiersState::ALT;
+
+        let step = h.feed_keyboard_from(
+            &Key::Character("i".into()),
+            Some("i"),
+            Some(&Key::Character("i".into())),
+        );
+        assert!(
+            matches!(step.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == ProtocolKey::Char('i') && k.mods == (Modifiers::CTRL | Modifiers::ALT)),
+            "C-M-i must leave as the chord C-M-i: {:?}",
+            step.outbound
+        );
+
+        let step = h.feed_keyboard_from(
+            &Key::Character("€".into()),
+            Some("€"),
+            Some(&Key::Character("e".into())),
+        );
+        assert!(
+            matches!(step.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == ProtocolKey::Char('€') && k.mods == Modifiers::NONE),
+            "AltGr-e must leave as the plain €: {:?}",
             step.outbound
         );
     }
@@ -17745,11 +17972,12 @@ fn is_command_chord(key: ProtocolKey, mods: Modifiers) -> bool {
 }
 
 /// Whether a keypress is **`AltGr` layout text** (audit F-004): winit
-/// produced printable `text` while **both `Ctrl` and `Alt`** are held.
-/// `AltGr` is `Ctrl+Alt` on Windows (the OS synthesizes LCtrl+RAlt), and
-/// on such layouts the produced character (`@`, `€`, `{`, …) would
-/// otherwise be misclassified as a command chord; when this is true the
-/// caller strips the command modifiers so it inserts.
+/// produced printable `text` while **both `Ctrl` and `Alt`** are held,
+/// **and that text is not the key's own character** (E7b.3). `AltGr` is
+/// `Ctrl+Alt` on Windows (the OS synthesizes LCtrl+RAlt), and on such
+/// layouts the produced character (`@`, `€`, `{`, …) would otherwise be
+/// misclassified as a command chord; when this is true the caller
+/// strips the command modifiers so it inserts.
 ///
 /// The gate is deliberately `Ctrl+Alt`, **not** "any command modifier":
 /// `Alt` alone is *not* `AltGr`. On macOS the `Option` key is reported as
@@ -17760,10 +17988,27 @@ fn is_command_chord(key: ProtocolKey, mods: Modifiers) -> bool {
 /// (macOS `Option`, plain `Meta`) to forward as command chords. Returns
 /// `false` for genuine command chords (no text, or a control char) and
 /// for plain text (no command modifier — already handled).
-fn is_layout_text(text: Option<&str>, mods: Modifiers) -> bool {
-    mods.contains(Modifiers::CTRL)
-        && mods.contains(Modifiers::ALT)
-        && text.is_some_and(|t| !t.is_empty() && t.chars().all(|c| !c.is_control()))
+///
+/// `unmodified` is the key's own character with every modifier ignored
+/// (winit's `key_without_modifiers`): `e` under the `€`, `i` under `i`.
+/// A `C-M-i` on a US layout produces the text `i` from the key `i`, and
+/// before E7b.3 that satisfied the rule and arrived at the daemon as the
+/// letter; `AltGr`'s `€` from `e` differs from its key, which is what
+/// layout text means. Case is not a layout level (Shift is carried
+/// separately), so the comparison ignores it. A caller that cannot name
+/// the key --- `None`, on a platform without the supplement --- gets the
+/// old rule.
+fn is_layout_text(text: Option<&str>, unmodified: Option<&Key>, mods: Modifiers) -> bool {
+    if !(mods.contains(Modifiers::CTRL) && mods.contains(Modifiers::ALT)) {
+        return false;
+    }
+    let Some(text) = text.filter(|t| !t.is_empty() && t.chars().all(|c| !c.is_control())) else {
+        return false;
+    };
+    match unmodified {
+        Some(Key::Character(own)) => text.to_lowercase() != own.to_lowercase(),
+        _ => true,
+    }
 }
 
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {
@@ -20358,24 +20603,47 @@ mod tests {
         // Audit F-004 — AltGr (Ctrl+Alt on Windows) produces printable
         // text; that's text input, so the caller strips the modifiers.
         let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
-        assert!(is_layout_text(Some("@"), ctrl_alt));
-        assert!(is_layout_text(Some("{"), ctrl_alt));
-        assert!(is_layout_text(Some("€"), ctrl_alt)); // AltGr+e on many layouts
+        let own = |c: &str| Key::Character(c.into());
+        assert!(is_layout_text(Some("@"), Some(&own("q")), ctrl_alt)); // AltGr+q, German
+        assert!(is_layout_text(Some("{"), Some(&own("7")), ctrl_alt));
+        assert!(is_layout_text(Some("€"), Some(&own("e")), ctrl_alt)); // AltGr+e on many layouts
+        // E7b.3 — the produced text IS the key's own character: a
+        // chord, not layout text. `C-M-i` on a US layout produces `i`
+        // from `i`, and arrived at the daemon as the letter before.
+        assert!(!is_layout_text(Some("i"), Some(&own("i")), ctrl_alt));
+        assert!(!is_layout_text(Some("I"), Some(&own("i")), ctrl_alt)); // C-M-S-i: Shift is not a layout level
+        assert!(!is_layout_text(Some("é"), Some(&own("é")), ctrl_alt)); // a non-ASCII key, its own text
+        // Without the key's own character to compare against (a caller
+        // that cannot name it), the old rule stands.
+        assert!(is_layout_text(Some("i"), None, ctrl_alt));
+        assert!(is_layout_text(
+            Some("€"),
+            Some(&Key::Named(NamedKey::Space)),
+            ctrl_alt
+        ));
         // Alt ALONE is not AltGr. On macOS the Option key is Alt and emits
         // printable text (Option+x → "≈"), but Option-as-Meta is how the
         // GUI reaches M-x / M-f — leave it intact so it forwards as a
         // command chord instead of self-inserting the symbol.
-        assert!(!is_layout_text(Some("≈"), Modifiers::ALT)); // macOS Option+x → M-x
-        assert!(!is_layout_text(Some("€"), Modifiers::ALT));
+        assert!(!is_layout_text(Some("≈"), Some(&own("x")), Modifiers::ALT)); // macOS Option+x → M-x
+        assert!(!is_layout_text(Some("€"), Some(&own("e")), Modifiers::ALT));
         // Genuine command chords produce no text (or a control char) —
         // not layout text, so they still route to the keymap.
-        assert!(!is_layout_text(None, Modifiers::CTRL)); // C-a etc.
-        assert!(!is_layout_text(Some("\u{1}"), Modifiers::CTRL)); // Ctrl+A control char
-        assert!(!is_layout_text(Some(""), ctrl_alt)); // no text
+        assert!(!is_layout_text(None, Some(&own("a")), Modifiers::CTRL)); // C-a etc.
+        assert!(!is_layout_text(
+            Some("\u{1}"),
+            Some(&own("a")),
+            Modifiers::CTRL
+        )); // Ctrl+A control char
+        assert!(!is_layout_text(Some(""), Some(&own("e")), ctrl_alt)); // no text
         // Plain text has no command modifier, so it's already handled and
         // needs no stripping.
-        assert!(!is_layout_text(Some("a"), Modifiers::NONE));
-        assert!(!is_layout_text(Some("A"), Modifiers::SHIFT));
+        assert!(!is_layout_text(Some("a"), Some(&own("a")), Modifiers::NONE));
+        assert!(!is_layout_text(
+            Some("A"),
+            Some(&own("a")),
+            Modifiers::SHIFT
+        ));
     }
 
     #[test]

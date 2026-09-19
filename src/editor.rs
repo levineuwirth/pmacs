@@ -3850,6 +3850,16 @@ impl EditorState {
             MinibufferAction::LineEnd => self.with_minibuffer(Minibuffer::move_line_end),
             MinibufferAction::SelfInsert(ch) => {
                 self.with_minibuffer(|m| m.insert_char(ch));
+                // E7b.2: under the `key` policy the key is the answer.
+                // The character lands in the field first so the accept
+                // reads it as typed text, and the callback decides what
+                // it means (`y_or_n` re-asks on anything but y and n).
+                if self.core.borrow().minibuffer.accept_policy()
+                    == Some(crate::minibuffer::AcceptPolicy::Key)
+                {
+                    self.minibuffer_accept(frontend_id, true);
+                    return;
+                }
                 self.recompute_minibuffer_candidates();
             }
             MinibufferAction::Ignore => {

@@ -590,7 +590,7 @@ fn e7_1_x_asks_a_question_that_cannot_be_skipped() {
         minibuffer_active(&s),
         "an empty answer must leave the question standing"
     );
-    assert_eq!(status(&s), "please answer y or n");
+    assert_eq!(status(&s), "please answer yes or no");
     assert_eq!(
         read(&root, "unstaged.txt"),
         before,
@@ -624,6 +624,54 @@ fn e7_1_x_asks_a_question_that_cannot_be_skipped() {
         ring_after, ring_before,
         "no git child ran for a refused question"
     );
+}
+
+/// E7b.2: `x`'s question is the typed one. A bare `y` --- the key that
+/// answers the quit prompt since E7b.2 --- answers nothing here: the
+/// question stands with the letter in its field, the file and the
+/// index are untouched, and only RET after it discards. Bitten by
+/// asking through `pmacs.minibuffer.y_or_n` instead of `yes_or_no`.
+#[test]
+fn e7b_2_x_s_question_is_not_answered_by_one_key() {
+    let (_td, root) = tempdir();
+    mixed_repo(&root);
+    let mut s = editor();
+    open_panel(&mut s, &root, "a1.txt");
+    seat_on(&mut s, "unstaged.txt");
+    let before = read(&root, "unstaged.txt");
+    let ring_before: Vec<Vec<String>> = eval(&s, "return pmacs.git._spawn_log");
+
+    press(&mut s, KeyCode::Char('x'));
+    assert!(minibuffer_active(&s), "x must ask before it discards");
+    press(&mut s, KeyCode::Char('y'));
+    pump_for(&mut s, 150);
+    assert!(
+        minibuffer_active(&s),
+        "a bare y must not answer the typed question"
+    );
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.minibuffer.contents()"),
+        "y",
+        "the letter is in the field, waiting for RET"
+    );
+    assert_eq!(
+        read(&root, "unstaged.txt"),
+        before,
+        "nothing discarded on y"
+    );
+    let ring_mid: Vec<Vec<String>> = eval(&s, "return pmacs.git._spawn_log");
+    assert_eq!(ring_mid, ring_before, "no git child ran on a bare y");
+
+    let panel_before = panel_text(&s);
+    press(&mut s, KeyCode::Enter);
+    assert!(
+        pump_until(&mut s, 15_000, |s| {
+            let now = panel_text(s);
+            now != panel_before && !now.contains("(refreshing...)")
+        }),
+        "RET after y discards and the panel refreshes"
+    );
+    assert_ne!(read(&root, "unstaged.txt"), before, "y RET discards");
 }
 
 /// `n` is a refusal too, and says so.

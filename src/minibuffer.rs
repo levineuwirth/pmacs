@@ -112,6 +112,12 @@ impl Minibuffer {
         self.session.is_some()
     }
 
+    /// The active session's accept policy, if a session is active.
+    #[must_use]
+    pub fn accept_policy(&self) -> Option<AcceptPolicy> {
+        self.session.as_ref().map(|s| s.accept)
+    }
+
     /// Open a prompt session. Replaces any existing session, replacing
     /// the buffer contents with `initial` and seeding history from
     /// disk if a history bucket is named.
@@ -506,7 +512,8 @@ pub struct MinibufferSession {
     pub accept: AcceptPolicy,
 }
 
-/// What RET commits: the selected candidate or the typed text (D18).
+/// What RET commits: the selected candidate or the typed text (D18);
+/// or, under [`Self::Key`], what one printable key commits (E7b.2).
 ///
 /// Every prompt names its policy because the two are different
 /// contracts. A picker over a closed set --- `M-x`, `where-is` --- wants
@@ -517,7 +524,10 @@ pub struct MinibufferSession {
 /// opens the existing entry (`C-x C-f nots RET` opened `notes.md`; audit
 /// §3.1). Under either policy `C-j` takes the typed text and TAB
 /// completes to the selection, so the policy decides only what RET
-/// means.
+/// means. `Key` is the third contract, Emacs's `y-or-n-p`: the first
+/// printable key IS the answer and the prompt closes on it, with RET
+/// committing whatever was typed (nothing, for a prompt nobody typed
+/// into) and `C-g` cancelling as everywhere.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AcceptPolicy {
     /// RET takes the selected candidate when one exists, else the
@@ -527,6 +537,10 @@ pub enum AcceptPolicy {
     Candidate,
     /// RET takes the typed text as written, whatever is selected.
     Typed,
+    /// A printable key commits itself, at once, as the typed text
+    /// (E7b.2, `pmacs.minibuffer.y_or_n`). The prompt has no
+    /// candidates to select, so the key is the whole answer.
+    Key,
 }
 
 impl AcceptPolicy {
@@ -536,6 +550,7 @@ impl AcceptPolicy {
         match name {
             "candidate" => Some(Self::Candidate),
             "typed" => Some(Self::Typed),
+            "key" => Some(Self::Key),
             _ => None,
         }
     }
@@ -691,7 +706,9 @@ impl CompletionSource {
 }
 
 fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
-    if matches!(session.source, CompletionSource::None) || session.accept == AcceptPolicy::Typed {
+    if matches!(session.source, CompletionSource::None)
+        || matches!(session.accept, AcceptPolicy::Typed | AcceptPolicy::Key)
+    {
         return typed.to_owned();
     }
     if let Some(idx) = session.selected
