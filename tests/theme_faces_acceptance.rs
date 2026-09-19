@@ -217,6 +217,7 @@ fn diag(severity: pmacs::diag::DiagnosticSeverity) -> pmacs::diag::Diagnostic {
         message: "boom".into(),
         source: None,
         code: None,
+        span: None,
     }
 }
 
@@ -575,6 +576,7 @@ fn diag_faces_recolor_squiggle_and_marker_with_inheritance_and_empty_child_reset
                 message: "warn".into(),
                 source: None,
                 code: None,
+                span: None,
             },
         ],
     );

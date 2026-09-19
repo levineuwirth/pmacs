@@ -112,7 +112,15 @@
 //!   --- `$/progress` begin and end on `rust-analyzer/flycheck/<n>`,
 //!   title `cargo check` --- which is what rust-analyzer does with a
 //!   save. Every other mode declares no `save`, and a conforming
-//!   client sends it nothing on save.
+//!   client sends it nothing on save. In `didsave` (the text arrives)
+//!   the cycle also publishes what a check would (E7c.3): one
+//!   `rustc`-sourced error covering each `CHECKME` in the saved text,
+//!   positioned in the saved text, published after the cycle's end
+//!   --- and every `didChange` publishes one `pmacs-fake-lsp`-sourced
+//!   warning covering each `CHECKME` in the text it holds, as a
+//!   server's own analysis does; both sets go out under the same
+//!   URI, the check's kept from the last save, so the client sees
+//!   the two bases rust-analyzer mixes in one notification.
 //! * If `PMACS_FAKE_LSP_INIT_SINK` names a file (any mode): the
 //!   `initializationOptions` the client sent, as JSON (E7c.2).
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
@@ -145,6 +153,10 @@ fn main() {
     let mut didchange_count: u32 = 0;
     // E7c.1: flycheck cycles echoed for `didsave` modes, one token each.
     let mut didsave_count: u32 = 0;
+    // E7c.3: `didsave` mode's two diagnostic sets, the check's (from
+    // the last saved text) and the server's own (from the text held).
+    let mut check_diagnostics: Vec<serde_json::Value> = Vec::new();
+    let mut native_diagnostics: Vec<serde_json::Value> = Vec::new();
     // `fullonly` observability: counts /full responses (rid-1, rid-2…).
     let mut full_count: u32 = 0;
     loop {
@@ -890,6 +902,22 @@ fn main() {
                 if let (Some(uri_s), Some(text)) = (uri.as_str(), text.as_deref()) {
                     open_docs.insert(uri_s.to_owned(), text.to_owned());
                 }
+                // E7c.3, `didsave` mode: the server's own analysis of
+                // the text it now holds, published with the check's
+                // last set --- rust-analyzer's mix.
+                if mode == "didsave"
+                    && let Some(text) = text.as_deref()
+                {
+                    native_diagnostics = marker_diagnostics(text, "pmacs-fake-lsp", 2, "e7c: held");
+                    let mut all = check_diagnostics.clone();
+                    all.extend(native_diagnostics.iter().cloned());
+                    let notification = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": { "uri": uri, "diagnostics": all },
+                    });
+                    write_frame(&mut stdout, &notification);
+                }
                 // Auto-pairing Q#AP7: the ordering observable is "the
                 // FIRST didChange after `(` carries `()`" — provable
                 // only from what the server actually received, in
@@ -942,8 +970,10 @@ fn main() {
                 }
                 // Also push a synthetic `publishDiagnostics`
                 // notification with two entries (one Error, one
-                // Warning) so M4.6 tests can exercise the store.
-                if uri.is_string() {
+                // Warning) so M4.6 tests can exercise the store ---
+                // except in `didsave`, whose two marker sets are the
+                // whole of what it publishes (E7c.3).
+                if uri.is_string() && mode != "didsave" {
                     let diags = serde_json::json!({
                         "jsonrpc": "2.0",
                         "method": "textDocument/publishDiagnostics",
@@ -1709,6 +1739,21 @@ fn main() {
                         });
                         write_frame(&mut stdout, &notification);
                     }
+                    // E7c.3: the check's diagnostics, computed for the
+                    // saved text and published after the cycle, beside
+                    // the server's own for the text it holds.
+                    if let Some(saved) = params.get("text").and_then(|t| t.as_str()) {
+                        check_diagnostics = marker_diagnostics(saved, "rustc", 1, "e7c: check");
+                        let uri = params["textDocument"]["uri"].clone();
+                        let mut all = check_diagnostics.clone();
+                        all.extend(native_diagnostics.iter().cloned());
+                        let notification = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": { "uri": uri, "diagnostics": all },
+                        });
+                        write_frame(&mut stdout, &notification);
+                    }
                 }
             }
             ("pmacs/progress", None) => {
@@ -1780,6 +1825,37 @@ fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut body = vec![0u8; n];
     r.read_exact(&mut body)?;
     Ok(Some(body))
+}
+
+/// E7c.3: one diagnostic per `CHECKME` in `text`, covering the word,
+/// positioned in `text` (UTF-16 columns, which are byte columns for
+/// this ASCII marker), with the given `source`, `severity` and
+/// `message` --- what a check or an analysis of that text would say.
+fn marker_diagnostics(
+    text: &str,
+    source: &str,
+    severity: u32,
+    message: &str,
+) -> Vec<serde_json::Value> {
+    const MARKER: &str = "CHECKME";
+    let mut out = Vec::new();
+    for (line_no, line) in text.split('\n').enumerate() {
+        let mut from = 0;
+        while let Some(i) = line[from..].find(MARKER) {
+            let col = from + i;
+            out.push(serde_json::json!({
+                "range": {
+                    "start": { "line": line_no, "character": col },
+                    "end": { "line": line_no, "character": col + MARKER.len() },
+                },
+                "severity": severity,
+                "source": source,
+                "message": message,
+            }));
+            from = col + MARKER.len();
+        }
+    }
+    out
 }
 
 fn write_frame<W: Write>(w: &mut W, body: &serde_json::Value) {

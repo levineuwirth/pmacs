@@ -141,6 +141,12 @@ pub struct LspServerSpec {
     /// Restart policy for the server. Mirrors
     /// [`crate::process::RestartPolicy`].
     pub restart: LspRestartPolicy,
+    /// E7c.3: the `source` values of diagnostics the server computes
+    /// from the file on disk rather than from the text it holds ---
+    /// rust-analyzer's `rustc` and `clippy`, its check on a save. They
+    /// are placed against the text last saved or opened and carried
+    /// from there; every other source against the text last sent.
+    pub check_sources: Vec<String>,
 }
 
 impl LspServerSpec {
@@ -163,6 +169,7 @@ impl LspServerSpec {
             settings: None,
             capabilities: None,
             restart: LspRestartPolicy::OnCrash,
+            check_sources: Vec::new(),
         }
     }
 
@@ -887,6 +894,13 @@ pub struct LspManager {
     /// (E6b.1: the answer is resolved against that text, not against
     /// whatever the document has become by the time it lands).
     documents: HashMap<(LspServerId, String), std::sync::Arc<str>>,
+    /// E7c.3: per `(server, uri)`, the text on disk as the editor last
+    /// read or wrote it --- the `didOpen` of an unmodified buffer, or
+    /// the save --- and the edit number it is current at. A check the
+    /// server runs on the file (`check_sources`) reports against this
+    /// text, not the one it holds, and its diagnostics are placed
+    /// against it and carried to the current text from that number.
+    disk_documents: HashMap<(LspServerId, String), (std::sync::Arc<str>, u64)>,
     /// Async runtime handle. The bridge between the supervisor
     /// reader-thread response delivery and Lua-side `Handle:await()`
     /// resumption; mirrors [`crate::mcp::McpManager`]'s `runtime`.
@@ -976,8 +990,15 @@ enum ResponseRoute {
     /// [`crate::code_action::CodeActionStore`] at `(server, uri)`.
     CodeAction { uri: String },
     /// Absorb a `textDocument/inlayHint` response into
-    /// [`crate::inlay_hint::InlayHintStore`] at `(server, uri)`.
-    InlayHint { uri: String },
+    /// [`crate::inlay_hint::InlayHintStore`] at `(server, uri)`, each
+    /// hint's position resolved against `anchor`, the text the server
+    /// answers for, and carried from `base_seq`, the edit number that
+    /// text is current at (E7c.3).
+    InlayHint {
+        uri: String,
+        anchor: std::sync::Arc<str>,
+        base_seq: u64,
+    },
     /// Absorb a `textDocument/semanticTokens/full` (or `/range`)
     /// response into [`crate::semantic_tokens::SemanticTokenStore`]
     /// at `(server, uri)`, resolved against `anchor` --- the document
@@ -1060,7 +1081,7 @@ impl ResponseRoute {
             | ResponseRoute::Rename { uri }
             | ResponseRoute::PrepareRename { uri }
             | ResponseRoute::CodeAction { uri }
-            | ResponseRoute::InlayHint { uri }
+            | ResponseRoute::InlayHint { uri, .. }
             | ResponseRoute::SemanticTokens { uri, .. }
             | ResponseRoute::SemanticTokensDelta { uri, .. }
             | ResponseRoute::Locations { uri, .. }
@@ -1173,6 +1194,7 @@ impl LspManager {
             pending: HashMap::new(),
             pending_external: HashMap::new(),
             documents: HashMap::new(),
+            disk_documents: HashMap::new(),
             request_timeout: Duration::from_secs(10),
             restart_backoff: Duration::from_millis(500),
             diag_store: crate::diag::make_shared_store(),
@@ -1505,6 +1527,7 @@ impl LspManager {
         // T M4.5 Option B: drop cached docs; the fresh server gets a
         // new `did_open` from the editor's reattach path.
         self.documents.retain(|(s, _), _| *s != id);
+        self.disk_documents.retain(|(s, _), _| *s != id);
         // dired Stage 2a §5 — the tombstone is generation-scoped: this
         // generation's forgotten pairs go, every other server's stay.
         // The reattach path re-`did_open`s whatever it still holds.
@@ -2322,10 +2345,17 @@ impl LspManager {
                 "end": self.outbound_position(sid, &uri, end_line, end_col),
             },
         });
+        let (anchor, base_seq) = self.semantic_token_anchor(sid, &uri);
         let req_id = self.send_request(sid, "textDocument/inlayHint", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/inlayHint", &uri);
-        self.pending_routes
-            .insert((sid, req_id), ResponseRoute::InlayHint { uri });
+        self.pending_routes.insert(
+            (sid, req_id),
+            ResponseRoute::InlayHint {
+                uri,
+                anchor,
+                base_seq,
+            },
+        );
         Ok(job_id)
     }
 
@@ -2683,6 +2713,7 @@ impl LspManager {
         // may never come under `LspRestartPolicy::Never`.
         self.drain_external_cancelled(sid);
         self.documents.retain(|(s, _), _| *s != sid);
+        self.disk_documents.retain(|(s, _), _| *s != sid);
         if was_shutdown {
             self.push_event(sid, at, LspEventKind::Stopped);
         } else {
@@ -2964,6 +2995,7 @@ impl LspManager {
         // to pmacs byte offsets *before* the typed store parses it, so
         // the completion popup, diagnostics gutter, and lsp.lua all
         // stay byte-uniform with zero per-consumer changes.
+        let raw = result;
         let converted = self.inbound_converted(sid, route.uri(), result);
         let result = &converted;
         let server_key = sid.raw().to_string();
@@ -3111,8 +3143,35 @@ impl LspManager {
                     .expect("code action store mutex poisoned");
                 guard.set(key, resp);
             }
-            ResponseRoute::InlayHint { uri } => {
-                let resp = crate::inlay_hint::InlayHintResponse::from_lsp_value(result);
+            ResponseRoute::InlayHint {
+                uri,
+                anchor,
+                base_seq,
+            } => {
+                // E7c.3: positions against the text the request was
+                // answered for, not the mirror as it stands now, then
+                // carried to the current text by the edit log.
+                let mut resp = crate::inlay_hint::InlayHintResponse::from_lsp_value(raw);
+                let enc = self.position_encoding(sid);
+                let starts = line_starts(anchor);
+                let store = self
+                    .semantic_token_store
+                    .lock()
+                    .expect("semantic token store mutex poisoned");
+                let has_log = store.has_log(uri);
+                for h in &mut resp.hints {
+                    if let Some(byte) = position_to_byte(anchor, &starts, h.line, h.col, enc) {
+                        if let Some(&ls) = starts.get(h.line as usize) {
+                            h.col = byte.saturating_sub(ls) as u32;
+                        }
+                        if has_log {
+                            h.at = store
+                                .translate_range_since(uri, *base_seq, byte as u64, byte as u64)
+                                .map(|(at, _)| at);
+                        }
+                    }
+                }
+                drop(store);
                 let key = crate::inlay_hint::InlayHintKey::new(server_key, uri.clone());
                 let mut guard = self
                     .inlay_hint_store
@@ -3255,17 +3314,61 @@ impl LspManager {
         if self.forgotten_documents.contains(&(sid, uri.clone())) {
             return;
         }
-        // T M4.5 Option B: byte-normalise diagnostic ranges before the
-        // store parses them, so the gutter renders correct spans on
-        // non-ASCII lines.
-        let converted = self.inbound_converted(sid, &uri, params);
-        let Some(arr) = converted.get("diagnostics").and_then(Value::as_array) else {
+        let Some(arr) = params.get("diagnostics").and_then(Value::as_array) else {
             return;
         };
-        let parsed: Vec<crate::diag::Diagnostic> = arr
-            .iter()
-            .filter_map(crate::diag::Diagnostic::from_lsp_value)
-            .collect();
+        // E7c.3: each diagnostic is placed against the text it was
+        // computed for --- the file on disk for a check source, the
+        // text last sent for the server's own analysis --- as bytes,
+        // then carried across the edits recorded since that text to
+        // the document's current bytes, as a token is. The published
+        // line and column keep their line and get a byte column, as
+        // `inbound_converted` gave them before this.
+        let enc = self.position_encoding(sid);
+        let check_sources: &[String] = self
+            .clients
+            .get(&sid)
+            .map_or(&[], |c| c.spec.check_sources.as_slice());
+        let synced = self.documents.get(&(sid, uri.clone())).cloned();
+        let disk = self.disk_documents.get(&(sid, uri.clone())).cloned();
+        let store = self
+            .semantic_token_store
+            .lock()
+            .expect("semantic token store mutex poisoned");
+        let synced_seq = store.synced_seq(&uri);
+        let has_log = store.has_log(&uri);
+        let synced_starts = synced.as_deref().map(line_starts);
+        let disk_starts = disk.as_ref().map(|(t, _)| line_starts(t));
+        let mut parsed: Vec<crate::diag::Diagnostic> = Vec::with_capacity(arr.len());
+        for raw in arr {
+            let Some(mut d) = crate::diag::Diagnostic::from_lsp_value(raw) else {
+                continue;
+            };
+            let is_check = d
+                .source
+                .as_deref()
+                .is_some_and(|src| check_sources.iter().any(|c| c == src));
+            let anchor = match (is_check, &disk, &synced) {
+                (true, Some((text, seq)), _) => Some((text, disk_starts.as_deref(), *seq)),
+                (_, _, Some(text)) => Some((text, synced_starts.as_deref(), synced_seq)),
+                _ => None,
+            };
+            if let Some((text, Some(starts), base)) = anchor {
+                let lo = position_to_byte(text, starts, d.start_line, d.start_col, enc);
+                let hi = position_to_byte(text, starts, d.end_line, d.end_col, enc);
+                if let (Some(lo), Some(&ls)) = (lo, starts.get(d.start_line as usize)) {
+                    d.start_col = lo.saturating_sub(ls) as u32;
+                }
+                if let (Some(hi), Some(&ls)) = (hi, starts.get(d.end_line as usize)) {
+                    d.end_col = hi.saturating_sub(ls) as u32;
+                }
+                if has_log && let (Some(lo), Some(hi)) = (lo, hi) {
+                    d.span = store.translate_range_since(&uri, base, lo as u64, hi as u64);
+                }
+            }
+            parsed.push(d);
+        }
+        drop(store);
         let mut guard = self.diag_store.lock().expect("diag store mutex poisoned");
         guard.set(uri, parsed);
     }
@@ -3385,6 +3488,7 @@ impl LspManager {
         // between exit and forget. Idempotent.
         self.drain_external_cancelled(sid);
         self.documents.retain(|(s, _), _| *s != sid);
+        self.disk_documents.retain(|(s, _), _| *s != sid);
         // dired Stage 2a §5 — terminal removal drops every tombstone
         // this server owned; other servers' pairs are retained.
         self.forgotten_documents.retain(|(s, _)| *s != sid);
@@ -3603,6 +3707,7 @@ impl LspManager {
                 uri: uri.to_owned(),
             });
         self.documents.remove(&(sid, uri.to_owned()));
+        self.disk_documents.remove(&(sid, uri.to_owned()));
         Ok(())
     }
 
@@ -3649,6 +3754,10 @@ impl LspManager {
         self.documents
             .insert((sid, uri.clone()), std::sync::Arc::from(text.as_str()));
         self.note_document_synced(&uri);
+        // E7c.3: an opened buffer holds the file's text unless it was
+        // modified before its server attached, which the Lua attach
+        // says with `_document_off_disk` right after this.
+        self.note_disk_anchor(sid, &uri, &text);
         let params = json!({
             "textDocument": {
                 "uri": uri,
@@ -3730,17 +3839,51 @@ impl LspManager {
         uri: impl Into<String>,
         text: impl Into<String>,
     ) -> Result<bool, String> {
+        let uri = uri.into();
+        let text = text.into();
+        // E7c.3: the saved text is the text on disk from here, whether
+        // or not the server wants to hear about the save.
+        self.note_disk_anchor(sid, &uri, &text);
         let Some(include_text) = self.save_negotiated(sid) else {
             return Ok(false);
         };
-        let uri = uri.into();
-        let text = text.into();
         let mut params = json!({ "textDocument": { "uri": uri } });
         if include_text {
             params["text"] = Value::from(text);
         }
         self.send_notification(sid, "textDocument/didSave", params)?;
         Ok(true)
+    }
+
+    /// E7c.3 --- `text` is the file's text for `(sid, uri)` from now:
+    /// kept as the anchor a check's diagnostics are placed against,
+    /// stamped with the edit number the document is at, which the edit
+    /// log keeps from so those diagnostics can be carried to the
+    /// current text however long the check takes.
+    fn note_disk_anchor(&mut self, sid: LspServerId, uri: &str, text: &str) {
+        let seq = {
+            let mut store = self
+                .semantic_token_store
+                .lock()
+                .expect("semantic token store mutex poisoned");
+            let seq = store.next_seq(uri);
+            store.note_disk_floor(uri, seq);
+            seq
+        };
+        self.disk_documents
+            .insert((sid, uri.to_owned()), (std::sync::Arc::from(text), seq));
+    }
+
+    /// E7c.3 --- the text the editor holds for `(sid, uri)` is not the
+    /// file's (a buffer modified before its server attached): drop the
+    /// anchor, so a check's diagnostics fall back to the text last sent
+    /// until a save writes one.
+    pub fn document_off_disk(&mut self, sid: LspServerId, uri: &str) {
+        self.disk_documents.remove(&(sid, uri.to_owned()));
+        self.semantic_token_store
+            .lock()
+            .expect("semantic token store mutex poisoned")
+            .note_disk_floor(uri, u64::MAX);
     }
 
     /// E6d.1 --- send `textDocument/didChange` to `sid` carrying only
@@ -3921,6 +4064,7 @@ impl LspManager {
     pub fn did_close(&mut self, sid: LspServerId, uri: impl Into<String>) -> Result<(), String> {
         let uri = uri.into();
         self.documents.remove(&(sid, uri.clone()));
+        self.disk_documents.remove(&(sid, uri.clone()));
         let params = json!({
             "textDocument": { "uri": uri },
         });

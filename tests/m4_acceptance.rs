@@ -1822,6 +1822,7 @@ fn m4_6_navigate_next_diagnostic_wraps() {
         message: msg.to_owned(),
         source: Some("pmacs-test".to_owned()),
         code: None,
+        span: None,
     };
     store.set(
         "file:///x.rs",

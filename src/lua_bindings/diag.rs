@@ -10,7 +10,62 @@ use super::{BufferIdLua, SharedCore};
 use crate::diag::{Diagnostic, DiagnosticSeverity};
 use crate::lsp::SharedLspManager;
 
-fn diagnostic_to_lua(lua: &Lua, d: &Diagnostic) -> mlua::Result<Table> {
+/// The line starts of the buffer that holds `uri`'s file, when one is
+/// open (E7c.3): what turns a diagnostic's current byte span back into
+/// the line and column the Lua surface speaks. `None` when no buffer
+/// holds the path, and then the published position is what there is.
+fn line_starts_for_uri(lua: &Lua, uri: &str) -> Option<Vec<u64>> {
+    let path = crate::project_index::uri_to_path(uri)?;
+    let core = lua.app_data_ref::<SharedCore>()?;
+    let core = core.borrow();
+    let registry = core.registry.clone();
+    let reg = registry.borrow();
+    let id = reg.find_by_path(&path)?;
+    let buf = reg.get(id).ok()?;
+    let len = buf.len();
+    let mut bytes = vec![0u8; len as usize];
+    if !bytes.is_empty() {
+        buf.snapshot_rope().slice(0, len, &mut bytes);
+    }
+    let mut starts = vec![0u64];
+    starts.extend(
+        bytes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| (*b == b'\n').then_some(i as u64 + 1)),
+    );
+    Some(starts)
+}
+
+/// `(line, col)` of `byte` against `starts`.
+fn line_col_of(starts: &[u64], byte: u64) -> (u32, u32) {
+    let line = starts.partition_point(|&s| s <= byte).saturating_sub(1);
+    (line as u32, (byte - starts[line]) as u32)
+}
+
+/// The byte of `(line, col)` against `starts`, clamped to the line.
+fn byte_of(starts: &[u64], line: u32, col: u32) -> u64 {
+    let Some(&start) = starts.get(line as usize) else {
+        return u64::MAX;
+    };
+    start + u64::from(col)
+}
+
+/// The position a diagnostic has now: its current span turned into
+/// lines and columns of the buffer (`starts`), or the published one.
+fn current_position(d: &Diagnostic, starts: Option<&[u64]>) -> (u32, u32, u32, u32) {
+    match (d.span, starts) {
+        (Some((lo, hi)), Some(starts)) => {
+            let (sl, sc) = line_col_of(starts, lo);
+            let (el, ec) = line_col_of(starts, hi.max(lo));
+            (sl, sc, el, ec)
+        }
+        _ => (d.start_line, d.start_col, d.end_line, d.end_col),
+    }
+}
+
+fn diagnostic_to_lua(lua: &Lua, d: &Diagnostic, starts: Option<&[u64]>) -> mlua::Result<Table> {
+    let (start_line, start_col, end_line, end_col) = current_position(d, starts);
     let t = lua.create_table_with_capacity(0, 8)?;
     t.set("severity", d.severity.label())?;
     t.set("severity_code", d.severity as i64)?;
@@ -23,18 +78,18 @@ fn diagnostic_to_lua(lua: &Lua, d: &Diagnostic) -> mlua::Result<Table> {
     }
     let range = lua.create_table_with_capacity(0, 4)?;
     let start = lua.create_table_with_capacity(0, 2)?;
-    start.set("line", d.start_line)?;
-    start.set("character", d.start_col)?;
+    start.set("line", start_line)?;
+    start.set("character", start_col)?;
     let end = lua.create_table_with_capacity(0, 2)?;
-    end.set("line", d.end_line)?;
-    end.set("character", d.end_col)?;
+    end.set("line", end_line)?;
+    end.set("character", end_col)?;
     range.set("start", start)?;
     range.set("end", end)?;
     t.set("range", range)?;
-    t.set("start_line", d.start_line)?;
-    t.set("start_col", d.start_col)?;
-    t.set("end_line", d.end_line)?;
-    t.set("end_col", d.end_col)?;
+    t.set("start_line", start_line)?;
+    t.set("start_col", start_col)?;
+    t.set("end_line", end_line)?;
+    t.set("end_col", end_col)?;
     Ok(t)
 }
 
@@ -56,12 +111,13 @@ pub fn install_diag(
         diag_mod.set(
             "list",
             lua.create_function(move |lua, uri: String| {
+                let starts = line_starts_for_uri(lua, &uri);
                 let store_handle = m.borrow().diag_store();
                 let guard = store_handle.lock().expect("diag store mutex poisoned");
                 let diags = guard.for_uri(&uri);
                 let out = lua.create_table_with_capacity(diags.len(), 0)?;
                 for (i, d) in diags.iter().enumerate() {
-                    out.set(i + 1, diagnostic_to_lua(lua, d)?)?;
+                    out.set(i + 1, diagnostic_to_lua(lua, d, starts.as_deref())?)?;
                 }
                 Ok(out)
             })?,
@@ -110,17 +166,33 @@ pub fn install_diag(
             "next",
             lua.create_function(
                 move |lua, (uri, line, col, wrap): (String, u32, u32, Option<bool>)| {
+                    let starts = line_starts_for_uri(lua, &uri);
                     let store_handle = m.borrow().diag_store();
                     let guard = store_handle.lock().expect("diag store mutex poisoned");
-                    let found = guard.next_after(&uri, line, col).or_else(|| {
+                    // E7c.3: by current bytes when the document's
+                    // diagnostics carry them, else by published position.
+                    let carried = starts.is_some()
+                        && !guard.for_uri(&uri).is_empty()
+                        && guard.for_uri(&uri).iter().all(|d| d.span.is_some());
+                    let found = if carried {
+                        let byte = byte_of(starts.as_deref().unwrap_or(&[]), line, col);
+                        guard.next_after_byte(&uri, byte)
+                    } else {
+                        guard.next_after(&uri, line, col)
+                    }
+                    .or_else(|| {
                         if wrap.unwrap_or(true) {
-                            guard.first_for(&uri)
+                            if carried {
+                                guard.for_uri(&uri).iter().min_by_key(|d| d.span)
+                            } else {
+                                guard.first_for(&uri)
+                            }
                         } else {
                             None
                         }
                     });
                     match found {
-                        Some(d) => Ok(Value::Table(diagnostic_to_lua(lua, d)?)),
+                        Some(d) => Ok(Value::Table(diagnostic_to_lua(lua, d, starts.as_deref())?)),
                         None => Ok(Value::Nil),
                     }
                 },
@@ -134,17 +206,31 @@ pub fn install_diag(
             "previous",
             lua.create_function(
                 move |lua, (uri, line, col, wrap): (String, u32, u32, Option<bool>)| {
+                    let starts = line_starts_for_uri(lua, &uri);
                     let store_handle = m.borrow().diag_store();
                     let guard = store_handle.lock().expect("diag store mutex poisoned");
-                    let found = guard.previous_before(&uri, line, col).or_else(|| {
+                    let carried = starts.is_some()
+                        && !guard.for_uri(&uri).is_empty()
+                        && guard.for_uri(&uri).iter().all(|d| d.span.is_some());
+                    let found = if carried {
+                        let byte = byte_of(starts.as_deref().unwrap_or(&[]), line, col);
+                        guard.previous_before_byte(&uri, byte)
+                    } else {
+                        guard.previous_before(&uri, line, col)
+                    }
+                    .or_else(|| {
                         if wrap.unwrap_or(true) {
-                            guard.last_for(&uri)
+                            if carried {
+                                guard.for_uri(&uri).iter().max_by_key(|d| d.span)
+                            } else {
+                                guard.last_for(&uri)
+                            }
                         } else {
                             None
                         }
                     });
                     match found {
-                        Some(d) => Ok(Value::Table(diagnostic_to_lua(lua, d)?)),
+                        Some(d) => Ok(Value::Table(diagnostic_to_lua(lua, d, starts.as_deref())?)),
                         None => Ok(Value::Nil),
                     }
                 },

@@ -34,6 +34,13 @@ pmacs.lsp = pmacs.lsp or {}
 --                           nil), so one init.lua can configure each
 --                           project differently (E7c.2)
 --   settings      (table)   answered to `workspace/configuration`
+--   check_sources (list)    diagnostic `source` values the server
+--                           computes from the file on disk rather than
+--                           from the text it holds (rust-analyzer's
+--                           `rustc` and `clippy`, its check on a save);
+--                           they are placed against the text last
+--                           saved or opened and carried to the current
+--                           text from there (E7c.3)
 --   root  (string|function) optional explicit project root; overrides
 --                           the `pmacs.project.detect` marker walk used
 --                           to set `rootUri`/`cwd`. A `function(path) ->
@@ -77,6 +84,9 @@ pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
     check = { command = "check" },
     procMacro = { enable = true },
   },
+  -- The check's diagnostics describe the file on disk, not the text
+  -- rust-analyzer holds (E7c.3).
+  check_sources = { "rustc", "clippy" },
 }
 
 -- Default Python config: basedpyright (an MIT fork of pyright that
@@ -1126,6 +1136,7 @@ local function ensure_server(language, path)
     restart = cfg.restart,
     init_options = init_options,
     settings = cfg.settings,
+    check_sources = cfg.check_sources,
     cwd = root,
     root_uri = key_uri,
   })
@@ -1408,6 +1419,15 @@ local function attach_buffer(buf)
   -- did_open is a notification; the manager queues it cleanly even
   -- while the server is in `starting` / `initializing`.
   pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
+  -- E7c.3: `did_open` keeps the text it sent as the file's text, which
+  -- a check reports against; a buffer already modified when its server
+  -- attached (a re-attach after a crash, a file typed into before the
+  -- server was ready) holds something else, said here so the check's
+  -- diagnostics fall back to the text last sent until the next save.
+  local ok_mod, modified = pcall(function() return buf:is_modified() end)
+  if ok_mod and modified then
+    pcall(pmacs.lsp._document_off_disk, sid, uri)
+  end
   -- M_B3: dual-authority styling. Always push the LSP style overlay
   -- when an LSP server is up — whether or not the buffer has a
   -- bundled tree-sitter grammar. When the grammar exists too,

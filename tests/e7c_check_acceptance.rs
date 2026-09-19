@@ -282,15 +282,23 @@ fn e7c_2_an_init_options_function_that_raises_is_reported_and_the_server_still_s
 
 /// Open `src/lsp.rs` of the repository at `PMACS_E7C_MEASURE_ROOT` (a
 /// copy; the round edits it) with the shipped rust config and
-/// rust-analyzer, and wait for the handshake.
-fn lsp_rs_with_rust_analyzer(tag: &str) -> (EditorState, PathBuf) {
+/// rust-analyzer behind a wire tee, and wait for the handshake.
+fn lsp_rs_with_rust_analyzer(tag: &str) -> (EditorState, PathBuf, support::wire_tee::Capture) {
     let manifest = std::env::var_os("PMACS_E7C_MEASURE_ROOT")
         .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
     let target = manifest.join("src").join("lsp.rs");
     let dir = temp_dir(tag);
+    let cap = support::wire_tee::install(&dir, "rust-analyzer");
     let s = EditorState::new_with_roots(&iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host.lua().set_app_data(StateDir(dir));
+    exec(
+        &s,
+        &format!(
+            "pmacs.lsp.config.rust.command = {:?}",
+            cap.wrapper.display().to_string()
+        ),
+    );
     // `PMACS_E7C_MEASURE_TARGET` is the cargo target directory the
     // check builds under (the shipped config inherits the editor's
     // environment, as the deployed daemon does), so a measurement can
@@ -321,7 +329,49 @@ fn lsp_rs_with_rust_analyzer(tag: &str) -> (EditorState, PathBuf) {
         "MEASURE handshake answered {} ms after the open",
         t0.elapsed().as_millis()
     );
-    (s, target)
+    (s, target, cap)
+}
+
+/// Tick for `secs`, logging every frame on the wire with the
+/// millisecond it was first seen (`>` client to server, `<` the
+/// reverse) and the label's transitions, and stop early once `until`
+/// holds.
+fn watch_wire(
+    s: &mut EditorState,
+    cap: &support::wire_tee::Capture,
+    secs: u64,
+    until: impl Fn(&EditorState) -> bool,
+) -> Vec<String> {
+    let t0 = Instant::now();
+    let deadline = t0 + Duration::from_secs(secs);
+    let (mut to, mut from) = (
+        support::wire_tee::Tap::new(&cap.to_server),
+        support::wire_tee::Tap::new(&cap.from_server),
+    );
+    to.new_frames();
+    from.new_frames();
+    let mut log = Vec::new();
+    let mut last_label = String::new();
+    while Instant::now() < deadline {
+        tick(s);
+        let ms = t0.elapsed().as_millis();
+        for f in to.new_frames() {
+            log.push(format!("{ms} > {}", support::wire_tee::describe(&f)));
+        }
+        for f in from.new_frames() {
+            log.push(format!("{ms} < {}", support::wire_tee::describe(&f)));
+        }
+        let label = lsp_segment(s).unwrap_or_default();
+        if label != last_label {
+            log.push(format!("{ms} = {label}"));
+            last_label = label;
+        }
+        if until(s) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    log
 }
 
 /// Tick until the label has read exactly `LSP:ready` for `quiet`, or
@@ -455,7 +505,7 @@ fn measure_the_check_on_this_workspace() {
         std::env::var_os("PMACS_E7C_MEASURE_ROOT").is_some(),
         "point PMACS_E7C_MEASURE_ROOT at a copy of the repository; the round edits src/lsp.rs"
     );
-    let (mut s, target) = lsp_rs_with_rust_analyzer("measure");
+    let (mut s, target, cap) = lsp_rs_with_rust_analyzer("measure");
     let original = std::fs::read_to_string(&target).unwrap();
     let uri: String = eval(&s, "return pmacs.lsp.active_attachment().uri");
     let t0 = Instant::now();
@@ -506,26 +556,107 @@ fn measure_the_check_on_this_workspace() {
     let t_save = Instant::now();
     exec(&s, "pmacs.command.invoke('buffer.save')");
     assert!(pump_lua_flag(&mut s, "_G.__e7c_saved", 10), "saved");
+    // The save's own wire, before anything else happens: the negotiated
+    // save capability, whether the notification went out, and the
+    // capture files, kept for reading.
+    let negotiated: Option<bool> = eval(
+        &s,
+        "local rec = pmacs.lsp.active_attachment()
+         return rec and pmacs.lsp.save_negotiated(rec.server) or nil",
+    );
+    let sent_now = support::wire_tee::frames(&cap.to_server)
+        .iter()
+        .filter(|f| support::wire_tee::method_of(f) == Some("textDocument/didSave"))
+        .count();
+    eprintln!(
+        "MEASURE after the save command: save negotiated {negotiated:?}, didSave frames in the capture so far {sent_now}; captures at {} and {}",
+        cap.to_server.display(),
+        cap.from_server.display()
+    );
     let on_disk = std::fs::read_to_string(&target).unwrap();
     eprintln!(
         "MEASURE saved; the tail of the file as written:\n{}",
         &on_disk[original.len().min(on_disk.len())..]
     );
-    let (landed, first, trace) = wait_check_diagnostic(&mut s, &uri, 600, true);
+    // E7c.3's witness on the real server: before the check's answer
+    // lands, type a line at the top of the file, so every position the
+    // check reports is one line and thirteen bytes stale by the time
+    // it arrives; the store must carry it to the text as it is now.
+    // `PMACS_E7C_TYPE_AFTER_MS` delays the typing (0: at once); the
+    // wire around the save is printed either way, since a save
+    // followed at once by typing was seen to run no check at all.
+    let type_after: u64 = std::env::var("PMACS_E7C_TYPE_AFTER_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut wire = Vec::new();
+    if type_after > 0 {
+        let until = Instant::now() + Duration::from_millis(type_after);
+        wire.extend(watch_wire(&mut s, &cap, 60, |_| Instant::now() >= until));
+    }
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    for ch in "//0123456789\n".chars() {
+        press(
+            &mut s,
+            if ch == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            },
+        );
+    }
+    let typed_at = t_save.elapsed().as_millis();
+    wire.push(format!("{typed_at} = (typed a line at the top)"));
+    // Eight seconds of wire after the typing, or until the check's
+    // diagnostics are in the store.
+    wire.extend(watch_wire(&mut s, &cap, 8, |s| {
+        diagnostics_of(s, &uri)
+            .iter()
+            .any(|d| !d.starts_with("rust-analyzer "))
+    }));
     eprintln!(
-        "MEASURE check diagnostic {}, the label ready again {} ms after the save; label transitions: {trace:?}",
+        "MEASURE the wire from the save on (ms after the typing's watch began; the first block, when present, precedes the typing):"
+    );
+    for line in &wire {
+        eprintln!("MEASURE   {line}");
+    }
+    let (landed, first, trace) = wait_check_diagnostic(&mut s, &uri, 90, true);
+    eprintln!(
+        "MEASURE a line typed at the top {typed_at} ms after the save; check diagnostic {}, the label ready again {} ms after the save; label transitions: {trace:?}",
         first.map_or("never landed".to_owned(), |ms| format!(
             "first in the store {ms} ms"
         )),
         t_save.elapsed().as_millis()
     );
     let found = diagnostics_of(&s, &uri);
+    let in_buffer: String = eval(
+        &s,
+        "local b = pmacs.window.buffer() return b:slice(0, b:len())",
+    );
+    assert!(
+        in_buffer.starts_with("//0123456789\n"),
+        "the typed line is at the top: {:?}",
+        &in_buffer[..40.min(in_buffer.len())]
+    );
     eprintln!(
-        "MEASURE diagnostics for src/lsp.rs after the save (probe starts at line {probe_line}), each with the text its range covers in the file as written:"
+        "MEASURE diagnostics for src/lsp.rs after the save (probe starts at line {} in the buffer as it is now), each with the text its range covers in the BUFFER, the typed line above it:",
+        probe_line + 1
     );
     for d in &found {
-        eprintln!("MEASURE   {d:?} -> {}", covered(&on_disk, d));
+        eprintln!("MEASURE   {d:?} -> {}", covered(&in_buffer, d));
     }
+    let errors: Vec<&String> = found
+        .iter()
+        .filter(|d| d.starts_with("rustc error"))
+        .collect();
+    assert_eq!(errors.len(), 2, "two errors: {found:?}");
+    assert!(
+        errors.iter().all(|d| {
+            let text = covered(&in_buffer, d);
+            text == "\"y\"" || text == "\"s\""
+        }),
+        "each error covers the identifier it names, in the buffer as it is now: {errors:?}"
+    );
     // What `*diagnostics*` shows.
     exec(&s, "pmacs.command.invoke('lsp.diagnostics')");
     for _ in 0..20 {
@@ -547,8 +678,12 @@ fn measure_the_check_on_this_workspace() {
             target.display().to_string()
         ),
     );
-    // Remove the probe as a user would, one Backspace per byte typed
-    // (the probe is ASCII), save, and wait for the clear.
+    // Remove the typed line and the probe as a user would, one
+    // Backspace per byte (both are ASCII), save, and wait for the clear.
+    exec(&s, "pmacs.editor.goto_byte(13)");
+    for _ in 0..13 {
+        press(&mut s, KeyCode::Backspace);
+    }
     exec(
         &s,
         "pmacs.editor.goto_byte(pmacs.window.buffer():len())

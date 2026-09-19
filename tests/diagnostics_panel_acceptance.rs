@@ -364,7 +364,7 @@ fn review3_diagnostics_at_the_same_position_can_open() {
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
     let file = fx.write(
         "proj/src/main.rs",
-        "fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n",
+        "fn main() {}\nlet x = 1;\nlet y = 2;\n// duplicate\n",
     );
     let mut state = review3_editor(&fx);
     open(&state, &file);
@@ -397,7 +397,7 @@ fn review3_duplicate_positions_do_not_freeze_an_open_panel() {
         r"
         REVIEW_PUBLISH = false
         pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
-        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n')
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {}\nlet x = 1;\nlet y = 2;\n// duplicate\n')
     ",
     );
     ready::tick_until(
@@ -427,7 +427,7 @@ fn review3_duplicate_republish_keeps_selection_on_the_same_row() {
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
     let file = fx.write(
         "proj/src/main.rs",
-        "fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n",
+        "fn main() {}\nlet x = 1;\nlet y = 2;\n// duplicate\n",
     );
     let mut state = review3_editor(&fx);
     open(&state, &file);
@@ -443,7 +443,7 @@ fn review3_duplicate_republish_keeps_selection_on_the_same_row() {
         r"
         REVIEW_PUBLISH = false
         pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
-        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // duplicate\nlet x = 1;\nlet y = 2;\n')
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {}\nlet x = 1;\nlet y = 2;\n// duplicate\n')
     ",
     );
     ready::tick_until(&mut state, "same-set republication", ready::DEADLINE, |s| {
@@ -482,7 +482,7 @@ fn review3_publish_inserting_a_row_preserves_the_selected_diagnostic() {
         r"
         REVIEW_PUBLISH = false
         pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
-        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // insert\nlet x = 1;\nlet y = 2;\n')
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {}\nlet x = 1;\nlet y = 2;\n// insert\n')
     ",
     );
     ready::tick_until(
@@ -568,7 +568,7 @@ fn review3_background_publish_keeps_the_panel_selection_and_leaves_the_document_
         r"
         REVIEW_PUBLISH = false
         pmacs.lsp.on_notification('textDocument/publishDiagnostics', function() REVIEW_PUBLISH = true end)
-        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {} // insert\nlet x = 1;\nlet y = 2;\n')
+        pmacs.lsp.did_open(REVIEW_ATTACHMENT.server, REVIEW_ATTACHMENT.uri, 2, 'fn main() {}\nlet x = 1;\nlet y = 2;\n// insert\n')
     ",
     );
     ready::tick_until(
@@ -648,6 +648,13 @@ fn focus_next(state: &mut EditorState) {
     press(state, KeyCode::Char('o'), KeyModifiers::NONE);
 }
 
+// The fake picks its diagnostic set by a marker word in the text it
+// is sent; the marker rides on a trailing line the buffer does not
+// have, so the three lines the diagnostics fall on are byte for byte
+// the buffer's --- since E7c.3 a diagnostic is placed against the text
+// the server holds and carried in the buffer's bytes, and a server
+// copy whose lines differ from the buffer's would put every row on
+// the wrong line, as it would for a real server.
 fn republish(state: &mut EditorState, text: &str) {
     state
         .lua_host
@@ -723,7 +730,7 @@ fn review4_background_publish_preserves_selection_after_navigation_and_blur() {
 fn review4_exact_duplicate_diagnostics_open_and_republish() {
     let fx = Fixture::new();
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
-    let content = "fn main() {} // exactduplicate\nlet x = 1;\nlet y = 2;\n";
+    let content = "fn main() {}\nlet x = 1;\nlet y = 2;\n// exactduplicate\n";
     let file = fx.write("proj/src/main.rs", content);
     let mut state = review3_editor(&fx);
     open(&state, &file);
