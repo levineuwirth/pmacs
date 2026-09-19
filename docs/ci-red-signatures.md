@@ -2020,6 +2020,92 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #280's fix-round-1 run 35399864211 at `ab8e488`: red on two of the round's own rows, both closed causally on the branch
+
+Read at C7b fix round 1 on 2026-09-19, from the jobs endpoint and all
+six test legs' logs after the run had completed; not re-run. The head
+is the round's first push (`c4c0dfb` plus five fix commits); the next
+push, `c0230bf`, carries the two fixes and is recorded in its own
+section.
+
+| field | value |
+|---|---|
+| run | 35399864211, `pull_request`, one attempt |
+| head | `ab8e488`, PR #280 |
+| window | created 2026-09-18T22:04:26Z, updated 22:28:41Z |
+| verdict | 19 jobs: **15 success, 1 skipped, 3 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+| the six test legs | `Test (crdt)` 162 `test result: ok`; `Test (ubuntu-latest / luajit, no crdt)` 163; `Test (macos-latest / luajit)` 164 --- green. `Test (ubuntu-latest / lua54)` and `Test (ubuntu-latest / luajit)` 160 `ok` and 1 `FAILED` each; `Test (macos-latest / lua54)` 161 `ok` and 1 `FAILED`. `WouldBlock`, `did not become ready` and `got ok` zero on every leg; U17's witness `ok` on every leg |
+
+Tally (run-35399864211-jobs): 19 = 15 + 1 + 3.
+
+**Red 1, the two ubuntu legs** (`e7b_review_wire_acceptance`,
+`a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`,
+`tests/e7b_review_wire_acceptance.rs:921`, "rust-analyzer answered it
+with -32602 InvalidParams"): the row's positive control. CI's
+rust-analyzer answered the first `textDocument/prepareRename` after
+warm-up with `-32801 content modified` (the status line read `LSP: LSP
+textDocument/prepareRename error -32801: content modified`), which is
+its dispatcher's not-ready arm for a request landing while its VFS is
+mid-load; under the round's ruling a retry code is a moot request and
+silent, so the label stayed `ready` and `*errors*` gained nothing ---
+the verdict the row asserts --- and the control that the server had
+answered on the merits failed. The other two Linux legs answered
+`-32602` first time. Not a product defect: the row's control asked
+for one answer and the server gave a different, correct one. Closed
+by `c0230bf` on the branch: the row asks up to six times, a second
+apart, until the answer is not a retry code, and names the last status
+when it never is.
+
+**Red 2, the macOS lua54 leg** (`e6d_lsp_status_under_typing_acceptance`,
+`a_hundred_keystrokes_answered_invalid_params_leave_the_label_ready_and_fill_errors`,
+`tests/e6d_lsp_status_under_typing_acceptance.rs:245`, "every line
+names the code and the method"): among the 682 `*errors*` lines the
+row's flood produced, one was not the fake's --- `[@pmacs/runtime/async.lua:tick]
+runtime error: invalid key to 'next'` with a traceback through
+`builtin/runtime/syntax.lua:622`, the parse-settle step's `pairs`
+loop over `pending_parse_jobs`. **A product defect, latent since the
+loop was written**: installing a settled job inside the loop ran
+`dispatch_follow_up_if_dirty`, whose `pmacs.parse._dispatch` inserts a
+new key into the table being traversed, which the Lua manual leaves
+undefined and Lua 5.4 answers with this error once the removed key's
+node is reused; LuaJIT tolerates it, so the default sweep (luajit)
+never saw it, and the two lua54 legs had not either until a row
+appended to `*errors*` hundreds of times while a buffer was being typed
+into (every append fires `buffer.after-edit`, which re-requests the
+active buffer's parse, so many settles dispatched a follow-up
+mid-traversal). Five local runs of the row under `--features
+lua54,crdt` against the old file did not reproduce it; the leg is the
+witness. Closed causally by `6bcae0c` on the branch: the settled ids
+are collected first and installed after the walk, so nothing is
+inserted during a traversal.
+
+Required fragments, should either recur: red 1 `error -32801: content
+modified` with `prepareRename` in the same status line; red 2 `invalid
+key to 'next'` with `syntax.lua` in the traceback.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 105777052171 | success |
+| Format | 105777052317 | success |
+| Lint (luajit) | 105777052354 | success |
+| Lint (lua54) | 105777052377 | success |
+| Commit attribution (D9) | 105777052458 | success |
+| M4 Perf Gates | 105777087578 | success |
+| M1 Acceptance Gates | 105777087580 | success |
+| GPU Render (headless) | 105777087644 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105777087671 | success |
+| Perf budgets (debug) | 105777087680 | success |
+| Test (macos-latest / luajit) | 105777087698 | success |
+| M6 Perf Gates | 105777087700 | success |
+| Test (crdt) | 105777087717 | success |
+| M10 Perf Gates (crdt) | 105777087728 | success |
+| M5 Perf Gates | 105777087737 | success |
+| Test (ubuntu-latest / lua54) | 105777087794 | failure |
+| Test (ubuntu-latest / luajit) | 105777087802 | failure |
+| Test (macos-latest / lua54) | 105777087825 | failure |
+| Docs consistency | 105777089231 | skipped |
+
 ### PR #280's head run 35390705543 at `c4c0dfb`, and it is GREEN
 
 Read at E7b review 1's close on 2026-09-18, from the jobs endpoint and
