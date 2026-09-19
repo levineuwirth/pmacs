@@ -880,14 +880,32 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
     exec(&s, "pmacs.editor.goto_byte(12)");
     let before = lsp_segment(&s);
     let errors_before = s.lua_host.errors_buffer_text();
-    exec(&s, "pmacs.command.invoke('lsp.rename')");
-    let wire = watch_wire(&mut s, &cap, 3);
-    eprintln!("WIRE before the rename: {before:?}");
-    for line in &wire {
-        eprintln!("WIRE   {line}");
+    // rust-analyzer answers a request that lands while its VFS is
+    // mid-load with `-32801 content modified` (its dispatcher's
+    // not-ready arm), which under the ruling is a moot request and
+    // silent --- CI's Linux legs met it once, at `ab8e488`, on the
+    // first rename after warm-up. Ask again until the server answers
+    // on the merits; a retry answer is the wrong positive control,
+    // not the wrong verdict.
+    let mut status = String::new();
+    for attempt in 1..=6 {
+        exec(&s, "pmacs.command.invoke('lsp.rename')");
+        let wire = watch_wire(&mut s, &cap, 3);
+        eprintln!("WIRE before the rename: {before:?}");
+        for line in &wire {
+            eprintln!("WIRE   {line}");
+        }
+        status = s.core.borrow().status.clone();
+        eprintln!("WIRE attempt {attempt}: status after the rename: {status:?}");
+        if !(status.contains("error -32801") || status.contains("error -32800")) {
+            break;
+        }
+        let until = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < until {
+            tick(&mut s);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
-    let status = s.core.borrow().status.clone();
-    eprintln!("WIRE status after the rename: {status:?}");
     let (label, error, messages): (String, Option<String>, Vec<String>) = eval(
         &s,
         "local rec = pmacs.lsp.active_attachment()
@@ -920,7 +938,7 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
         .any(|f| f["error"]["code"].as_i64() == Some(-32602));
     assert!(
         answered,
-        "rust-analyzer answered it with -32602 InvalidParams"
+        "rust-analyzer answered it with -32602 InvalidParams; the last status: {status:?}"
     );
     assert_eq!(
         lsp_segment(&s).as_deref(),
