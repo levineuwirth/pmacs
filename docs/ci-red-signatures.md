@@ -1863,13 +1863,14 @@ else.
 #253's occurrences, counted one per test target per run as its first
 two were (five rows of one target in one run counted once each):
 
-Tally (253): 5 items in the list below.
+Tally (253): 6 items in the list below.
 
 - local, 2026-09-06, a run of the suite during the daemon-reaper work: `gpu_initial_target_acceptance`, the five `gpu_invocation_acceptance::crdt::` rows, `target snapshot: … WouldBlock` at `:487` and `raw target result: … WouldBlock` at `:542` (the issue's first occurrence)
 - local, gate `20260906T104039Z-54318`, `05-sweep.log`: the same target, the same five rows, `14 passed; 5 failed`, the sweep's only red target; the rerun `20260906T104738Z-152565` green (non-reproduction)
 - `main` at `7002308`, run 35270380496, `Test (ubuntu-latest / lua54)` (105367961691): `gpu_initial_target_acceptance`, `gpu_invocation_acceptance::crdt::dedup_upgrade_publishes_the_snapshot_to_preexisting_grid_replicas`, `target snapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/gpu_invocation_acceptance.rs:487`, `20 passed; 1 failed` in 17.94 s at 20:36:55Z --- the first on CI, one row of the five
 - the same run and job: `compile_mode_crdt_acceptance` `compile_run_converges_and_replica_edit_triggers_recovery`, `read initial BufferSnapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/compile_mode_crdt_acceptance.rs:33`, `7 passed; 1 failed` in 7.56 s at 20:35:12Z --- filed on #277, folded here
 - the same run and job: `e6_review1_gpu_route_probes` `gpu_route_plain_typing_undoes_through_the_daemon_arbiter`, the same fragment at `tests/e6_review1_gpu_route_probes.rs:35`, `5 passed; 1 failed` in 6.90 s at 20:35:36Z --- filed on #277, folded here
+- PR #284 at `1847805`, run 35455311600, `Test (crdt)` (105929452599): `undo_across_peers_acceptance` `a_command_after_optimistic_typing_is_its_own_undo_step`, `read initial BufferSnapshot: Io(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" })` at `tests/undo_across_peers_acceptance.rs:34`, `18 passed; 1 failed` in 15.17 s at 16:50:23Z --- a fourth selector under the same fragment (E7c's close, 2026-09-19)
 
 Tally (253-fold): 5 = 3 + 2.
 
@@ -2019,6 +2020,73 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 #276, nor #253 sampled on either run; every count stands. Both heads
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
+
+### PR #284's head run 35455311600 at `1847805`: #253's sixth and #283's second, neither the branch's
+
+E7c's head after the control row's fix. Read at C7c's close on
+2026-09-19 from the jobs endpoint and all six test legs' logs after
+the run completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35455311600, `pull_request`, one attempt |
+| head | `1847805`, `e7c/cargo-check-diagnostics` (base `cbac12b`) |
+| window | created 2026-09-19T16:32:56Z, updated 16:54:24Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35455311600-jobs): 19 = 16 + 1 + 2.
+
+Tally (run-35455311600-test-legs): 6 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Test (crdt) | 105929452599 | failure |
+| Test (ubuntu-latest / lua54) | 105929452692 | success |
+| Test (ubuntu-latest / luajit) | 105929452733 | success |
+| Test (macos-latest / luajit) | 105929452757 | failure |
+| Test (macos-latest / lua54) | 105929452772 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105929452786 | success |
+
+Tally (run-35455311600-test-failures): 2 rows of the table above with `result` = `failure`.
+
+The thirteen other jobs --- the five lint, format, attribution and
+changed-paths jobs, the six perf and acceptance gates, the headless
+GPU render, and `Docs consistency` skipped --- are the sixteen
+successes and the skip with the four green legs above. Every test
+leg's log read: `Test (ubuntu-latest / lua54)` 166 `test result: ok`,
+`Test (ubuntu-latest / luajit)` 166, the no-crdt leg 166, `Test
+(macos-latest / lua54)` 167, each with zero `FAILED`; `Test (crdt)`
+163 `ok` and one `FAILED`; `Test (macos-latest / luajit)` 164 and one.
+`did not become ready` and `got ok` zero on every leg; `WouldBlock`
+once, on `Test (crdt)`, the red read itself; U17's selector `ok` on
+all six; the phase's fourteen `e7c_` rows `ok` on every leg, the
+control row fixed at `1847805` among them. The two reds are each the
+job's only failure and neither is on this branch's path:
+
+- **#253's sixth occurrence**, `Test (crdt)`:
+  `undo_across_peers_acceptance`
+  `a_command_after_optimistic_typing_is_its_own_undo_step`, `read
+  initial BufferSnapshot: Io(Os { code: 11, kind: WouldBlock, message:
+  "Resource temporarily unavailable" })` at
+  `tests/undo_across_peers_acceptance.rs:34`, `18 passed; 1 failed` in
+  15.17 s at 16:50:23Z --- the row's required fragment on a fourth
+  suite's own `read_initial_snapshot` helper, the same shape as the
+  two folded from #277, on the serialized leg; the row's sign (a slow,
+  bounded read). Counted on the row above.
+- **#283's second occurrence**, `Test (macos-latest / luajit)`:
+  `e7_review1_probes`
+  `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`,
+  `pump timeout waiting for the accept and its import`, `popup_rows=0
+  anchor=None`, `9 passed; 1 failed` in 13.36 s at 16:44:25Z --- all
+  three fragments, the same text to the byte as the first occurrence
+  (lua54, `main` at `361bb3b`); the fixed settle window now seen on
+  both macOS flavors in two consecutive runs of two trees.
+
+So the head is **not green**, on two rows that predate the branch and
+have issues, and no row of the branch's own is red; the E7c.3 control
+row that reddened the first head ran `ok` on all six legs. Both
+occurrences are commented on their issues; no rerun was taken.
 
 ### PR #284's head run 35453990704 at `fcd1248`: red on one of the branch's own rows, closed on the branch
 
