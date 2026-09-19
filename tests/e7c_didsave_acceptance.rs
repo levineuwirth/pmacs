@@ -125,6 +125,12 @@ struct Fixture {
 }
 
 fn open_with_fake(tag: &str, mode: &str) -> Fixture {
+    open_with_fake_config(tag, mode, "", "")
+}
+
+/// `open_with_fake` with extra config fields (Lua source after the
+/// command) and extra environment for the fake.
+fn open_with_fake_config(tag: &str, mode: &str, fields: &str, env: &str) -> Fixture {
     let dir = temp_dir(tag);
     let s = EditorState::new_with_roots(&iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
@@ -136,7 +142,8 @@ fn open_with_fake(tag: &str, mode: &str) -> Fixture {
         &format!(
             "pmacs.lsp.config.rust = {{
                command = {:?},
-               env = {{ PMACS_FAKE_LSP_MODE = {mode:?}, PMACS_FAKE_LSP_SAVE_SINK = {:?} }},
+               env = {{ PMACS_FAKE_LSP_MODE = {mode:?}, PMACS_FAKE_LSP_SAVE_SINK = {:?}{env} }},
+               {fields}
              }}",
             fake_lsp_path(),
             sink.display().to_string()
@@ -348,4 +355,93 @@ fn e7c_1_the_flycheck_a_save_starts_is_a_suffix_on_ready() {
         lsp_segment(s).as_deref() == Some("LSP:ready")
     });
     assert!(back, "ready without a suffix once every cycle ended");
+}
+
+/// E7c.1's retry: a save whose check never begins is announced again
+/// 1.5 s later, and again, until a `$/progress` begin arrives or three
+/// retries are spent. The fake drops the first save --- records it,
+/// runs no cycle, publishes nothing, as rust-analyzer was seen to do
+/// when a keystroke followed a save inside its trigger's window ---
+/// and answers the second with the cycle and the check's diagnostics.
+/// Bitten by removing `retry_due_saves` from the async tick.
+#[test]
+fn e7c_1_a_save_whose_check_never_began_is_sent_again() {
+    let mut f = open_with_fake_config(
+        "retry",
+        "didsave",
+        "save_retry = true, check_sources = { 'rustc' },",
+        ", PMACS_FAKE_LSP_DROP_SAVES = '1'",
+    );
+    let t0 = Instant::now();
+    type_and_save(&mut f, "// CHECKME");
+    let sink = f.sink.clone();
+    let watches = |s: &EditorState| -> Vec<(String, u32)> {
+        let t: std::collections::HashMap<String, u32> = eval(s, "return pmacs.lsp._save_watches()");
+        t.into_iter().collect()
+    };
+    assert_eq!(
+        watches(&f.s).len(),
+        1,
+        "the save armed a watch: {:?}",
+        watches(&f.s)
+    );
+    // Nothing for a second: the dropped save produced no cycle.
+    let (seen, _) = watch(&mut f.s, 1, |_| false);
+    assert_eq!(saves(&f.sink).len(), 1, "one didSave so far");
+    assert!(seen.iter().all(|t| t == "LSP:ready"), "no cycle: {seen:?}");
+    // The retry, its cycle, and the check's diagnostic on the marker.
+    let (seen, _) = watch(&mut f.s, 4, |_| saves(&sink).len() >= 2);
+    let lines = saves(&f.sink);
+    eprintln!(
+        "SAVE retry: {} didSaves {} ms after the save, labels {seen:?}",
+        lines.len(),
+        t0.elapsed().as_millis()
+    );
+    assert_eq!(lines.len(), 2, "the save was sent again: {lines:?}");
+    assert_eq!(lines[0]["dropped"], serde_json::json!(true));
+    assert_eq!(lines[1]["dropped"], serde_json::json!(false));
+    assert_eq!(
+        lines[1]["text"], lines[0]["text"],
+        "the retry carries the text saved, not the buffer's"
+    );
+    let (_, cycled) = watch(&mut f.s, 3, |s| {
+        lsp_segment(s).as_deref() == Some("LSP:ready·check")
+            || eval::<Vec<String>>(
+                s,
+                "local rec = pmacs.lsp.active_attachment()
+                 local out = {}
+                 for _, d in ipairs(pmacs.diag.list(rec.uri)) do out[#out + 1] = tostring(d.source) end
+                 return out",
+            )
+            .contains(&"rustc".to_owned())
+    });
+    assert!(cycled, "the retry's check ran and its diagnostic landed");
+    assert!(
+        watch(&mut f.s, 2, |s| watches(s).is_empty()).1,
+        "the watch stood down on the cycle's begin: {:?}",
+        watches(&f.s)
+    );
+    assert_eq!(saves(&f.sink).len(), 2, "and no third save followed");
+}
+
+/// Without `save_retry` a dropped save stays dropped: one didSave and
+/// no cycle, however long the wait --- the control for the row above.
+#[test]
+fn e7c_1_without_save_retry_a_dropped_save_is_not_sent_again() {
+    let mut f = open_with_fake_config(
+        "noretry",
+        "didsave",
+        "check_sources = { 'rustc' },",
+        ", PMACS_FAKE_LSP_DROP_SAVES = '1'",
+    );
+    type_and_save(&mut f, "// CHECKME");
+    let watches: std::collections::HashMap<String, u32> =
+        eval(&f.s, "return pmacs.lsp._save_watches()");
+    assert!(
+        watches.is_empty(),
+        "no watch without save_retry: {watches:?}"
+    );
+    let (seen, _) = watch(&mut f.s, 4, |_| false);
+    assert_eq!(saves(&f.sink).len(), 1, "one didSave, never repeated");
+    assert!(seen.iter().all(|t| t == "LSP:ready"), "no cycle: {seen:?}");
 }

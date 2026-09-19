@@ -3855,6 +3855,27 @@ impl LspManager {
         Ok(true)
     }
 
+    /// E7c.1 --- send `textDocument/didSave` for `uri` again, with the
+    /// text on disk as the last save or open left it: what a client
+    /// does when a save's check never began (rust-analyzer drops the
+    /// check a save asks for when a write lands while its trigger runs,
+    /// and never retries). Nothing is re-anchored. `Ok(false)` when the
+    /// server declared no `save` or no on-disk text is held.
+    pub fn resend_did_save(&mut self, sid: LspServerId, uri: &str) -> Result<bool, String> {
+        let Some(include_text) = self.save_negotiated(sid) else {
+            return Ok(false);
+        };
+        let Some((text, _)) = self.disk_documents.get(&(sid, uri.to_owned())).cloned() else {
+            return Ok(false);
+        };
+        let mut params = json!({ "textDocument": { "uri": uri } });
+        if include_text {
+            params["text"] = Value::from(text.as_ref());
+        }
+        self.send_notification(sid, "textDocument/didSave", params)?;
+        Ok(true)
+    }
+
     /// E7c.3 --- `text` is the file's text for `(sid, uri)` from now:
     /// kept as the anchor a check's diagnostics are placed against,
     /// stamped with the edit number the document is at, which the edit

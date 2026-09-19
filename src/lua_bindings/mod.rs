@@ -10613,6 +10613,21 @@ pub fn install_lsp(
     }
 
     {
+        // E7c.1: `textDocument/didSave` again, with the saved text the
+        // manager holds, when a save's check never began; `false` when
+        // nothing was sent.
+        let m = manager.clone();
+        lsp_mod.set(
+            "_resend_did_save",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                m.borrow_mut()
+                    .resend_did_save(id.0, &uri)
+                    .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+
+    {
         // E7c.3: the buffer was modified when its document was opened
         // on the server, so the text sent is not the text on disk and
         // a check's diagnostics cannot be placed against it; the

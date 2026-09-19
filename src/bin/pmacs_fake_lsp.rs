@@ -120,7 +120,9 @@
 //!   warning covering each `CHECKME` in the text it holds, as a
 //!   server's own analysis does; both sets go out under the same
 //!   URI, the check's kept from the last save, so the client sees
-//!   the two bases rust-analyzer mixes in one notification.
+//!   the two bases rust-analyzer mixes in one notification. With
+//!   `PMACS_FAKE_LSP_DROP_SAVES=n` the first n `didSave`s are recorded
+//!   (`dropped: true`) and otherwise ignored.
 //! * If `PMACS_FAKE_LSP_INIT_SINK` names a file (any mode): the
 //!   `initializationOptions` the client sent, as JSON (E7c.2).
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
@@ -153,6 +155,7 @@ fn main() {
     let mut didchange_count: u32 = 0;
     // E7c.1: flycheck cycles echoed for `didsave` modes, one token each.
     let mut didsave_count: u32 = 0;
+    let mut didsave_seen: u32 = 0;
     // E7c.3: `didsave` mode's two diagnostic sets, the check's (from
     // the last saved text) and the server's own (from the text held).
     let mut check_diagnostics: Vec<serde_json::Value> = Vec::new();
@@ -1711,6 +1714,15 @@ fn main() {
                 // flycheck cycle rust-analyzer runs on a save --- a
                 // `$/progress` begin and end on its flycheck token,
                 // which E7b.1 renders as a suffix on `ready`.
+                // `PMACS_FAKE_LSP_DROP_SAVES=n` drops the first n saves
+                // after recording them: no cycle, no publish, as
+                // rust-analyzer does with a save whose check trigger a
+                // write cancelled (E7c.1's retry).
+                didsave_seen += 1;
+                let dropped = std::env::var("PMACS_FAKE_LSP_DROP_SAVES")
+                    .ok()
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .is_some_and(|n| didsave_seen <= n);
                 if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_SAVE_SINK") {
                     use std::io::Write as _;
                     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1721,11 +1733,12 @@ fn main() {
                         let line = serde_json::json!({
                             "uri": params["textDocument"]["uri"],
                             "text": params.get("text").cloned().unwrap_or(serde_json::Value::Null),
+                            "dropped": dropped,
                         });
                         let _ = writeln!(f, "{line}");
                     }
                 }
-                if mode.starts_with("didsave") {
+                if mode.starts_with("didsave") && !dropped {
                     let token = format!("rust-analyzer/flycheck/{didsave_count}");
                     didsave_count += 1;
                     for value in [
