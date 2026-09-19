@@ -45,8 +45,9 @@ pmacs.lsp = pmacs.lsp or {}
 --                           1.5 s apart, while no `$/progress` cycle
 --                           has begun since the save: rust-analyzer
 --                           drops the check a save asks for when a
---                           write lands while its trigger runs, and
---                           never retries (E7c.1)
+--                           `didChange` reaches it while it is still
+--                           deciding what to check, and never
+--                           retries (E7c.1)
 --   root  (string|function) optional explicit project root; overrides
 --                           the `pmacs.project.detect` marker walk used
 --                           to set `rootUri`/`cwd`. A `function(path) ->
@@ -93,8 +94,9 @@ pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
   -- The check's diagnostics describe the file on disk, not the text
   -- rust-analyzer holds (E7c.3).
   check_sources = { "rustc", "clippy" },
-  -- A save followed within its trigger's window by a keystroke runs
-  -- no check at all, measured on this workspace; the save is sent
+  -- A keystroke's `didChange` reaching rust-analyzer while it is
+  -- still scheduling the check a save asked for cancels that
+  -- schedule, and it is dropped without a retry; the save is sent
   -- again while no cycle has begun (E7c.1).
   save_retry = true,
 }
@@ -759,20 +761,29 @@ local function flush_due_did_changes()
   end
 end
 
--- E7c.1: a save whose check never began is announced again. Measured
--- on this workspace against rust-analyzer: a save followed within its
--- check trigger's window (up to about 1.5 s here, longer the busier
--- the server) by a keystroke ran no check at all, no `$/progress`
--- begin and no diagnostics for ninety seconds, while the same save
--- followed by the keystroke 2.9 s later checked normally; driven
--- directly, idle or under a request burst, the loss did not reproduce,
--- so the mechanism is stated as observed, not explained. The retry is
--- per language (`save_retry`), armed by the after-save hook when a
--- `didSave` went out, disarmed by the first `$/progress` begin from
--- that server, and fires from the async tick while the buffer has no
--- unsent edit: `SAVE_RETRY_MS` after the save and again after each
--- retry, `SAVE_RETRY_MAX` times, with the text the manager kept at the
--- save, never the buffer's.
+-- E7c.1: a save whose check never began is announced again. The
+-- check a `didSave` asks for is rust-analyzer's to lose: its
+-- `run_flycheck` (handlers/notification.rs:214, :356 at 9074e9b4c6)
+-- spawns a worker task that runs salsa queries to decide what to
+-- check before it restarts the flycheck; a `didChange` runs
+-- `process_changes`, which cancels every query in flight
+-- (global_state.rs:362); the task returns `Err(Cancelled)`, which
+-- the spawn wrapper's `catch_unwind` (notification.rs:525) discards,
+-- so no check runs and nothing retries. Reproduced directly on this
+-- workspace: a `didChange` 0 or 50 ms after the save loses the check,
+-- 120 ms or later keeps it; in the editor a keystroke at 350 ms lost
+-- it and one at 2.9 s did not, the check's begin arriving 1.6--1.9 s
+-- after a save, so the window here is wider than the driver's and
+-- closes before the begin. The retry is per language
+-- (`save_retry`), armed by the after-save hook when a `didSave` went
+-- out, disarmed by the first `$/progress` begin from that server, and
+-- fires from the async tick while the buffer has no unsent edit:
+-- `SAVE_RETRY_MS` after the save and again after each retry,
+-- `SAVE_RETRY_MAX` times, with the text the manager kept at the save,
+-- never the buffer's. The delay outlasts the editor's window; the
+-- condition keeps the resend clear of a `didChange` already queued
+-- behind it, not of one typed after it, which loses the resent check
+-- the same way and is what the next send is for.
 local SAVE_RETRY_MS = 1500
 local SAVE_RETRY_MAX = 3
 -- sid string -> whether the language's config asks for the retry.
