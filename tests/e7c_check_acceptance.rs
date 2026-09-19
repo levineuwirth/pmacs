@@ -290,6 +290,9 @@ fn lsp_rs_with_rust_analyzer(tag: &str) -> (EditorState, PathBuf, support::wire_
     let dir = temp_dir(tag);
     let cap = support::wire_tee::install(&dir, "rust-analyzer");
     let s = EditorState::new_with_roots(&iso::roots());
+    // A frame, so the bottom panel `*diagnostics*` opens in has rows
+    // to take and the focus it takes is observable.
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host.lua().set_app_data(StateDir(dir));
     exec(
@@ -480,11 +483,13 @@ fn covered(text: &str, line: &str) -> String {
     }
 }
 
-const PROBE: &str = "\nfn e7c_probe_lifetime<'a>(x: &'a str, y: &str) -> &'a str {\n    let _ = x;\n    y\n}\n\nfn e7c_probe_move() {\n    let s = String::new();\n    let t = s;\n    let _ = s.len();\n    let _ = t;\n}\n";
+const PROBE: &str = "\nfn e7c_probe_lifetime<'a>(x: &'a str, y: &str) -> &'a str {\n    let _ = x;\n    y\n}\n\nfn e7c_probe_move() {\n    let s = String::new();\n    let t = s;\n    let _ = s.len();\n    let _ = t;\n}\n\nfn e7c_probe_types() {\n    let _z: i32 = 1.5;\n}\n";
 
 /// E7c.2's witness against the real server on this workspace: warm,
 /// then two errors rust-analyzer's native analysis does not report ---
-/// a lifetime error (E0621) and a use after move (E0382) --- appended
+/// a lifetime error (E0621) and a use after move (E0382) --- and one
+/// both report (a mismatched type, E0308), so the record can say how
+/// the two sources show side by side (E7c.4), appended
 /// through the production dispatch and saved; the check's diagnostics
 /// land in the store with their source and position, and
 /// `*diagnostics*` lists them; then the probe is deleted and saved and
@@ -649,13 +654,21 @@ fn measure_the_check_on_this_workspace() {
         .iter()
         .filter(|d| d.starts_with("rustc error"))
         .collect();
-    assert_eq!(errors.len(), 2, "two errors: {found:?}");
+    assert_eq!(errors.len(), 3, "three rustc errors: {found:?}");
     assert!(
         errors.iter().all(|d| {
             let text = covered(&in_buffer, d);
-            text == "\"y\"" || text == "\"s\""
+            text == "\"y\"" || text == "\"s\"" || text == "\"1.5\""
         }),
-        "each error covers the identifier it names, in the buffer as it is now: {errors:?}"
+        "each error covers the expression it names, in the buffer as it is now: {errors:?}"
+    );
+    let native: Vec<&String> = found
+        .iter()
+        .filter(|d| d.starts_with("rust-analyzer "))
+        .collect();
+    eprintln!(
+        "MEASURE the server's own analysis reports {} of these beside rustc's: {native:?}",
+        native.len()
     );
     // What `*diagnostics*` shows.
     exec(&s, "pmacs.command.invoke('lsp.diagnostics')");
@@ -670,6 +683,44 @@ fn measure_the_check_on_this_workspace() {
          return '<no panel>'",
     );
     eprintln!("MEASURE *diagnostics*:\n{panel}");
+    // RET on the panel's first error visits it where it is now (E7c.4):
+    // the panel opens on the first row under the buffer's label; `n`
+    // walks the rows, the errors are the rows whose text says `error`.
+    let mut visited = Vec::new();
+    for _ in 0..12 {
+        let row: String = eval(
+            &s,
+            "local b = pmacs.window.buffer()
+             local l = pmacs.editor.cursor_line()
+             local text = b:slice(0, b:len())
+             local lines = {}
+             for ln in (text .. '\\n'):gmatch('(.-)\\n') do lines[#lines + 1] = ln end
+             return lines[l + 1] or ''",
+        );
+        if row.contains("  error  ") {
+            press(&mut s, KeyCode::Enter);
+            for _ in 0..5 {
+                tick(&mut s);
+            }
+            let (name, line, col, under): (String, u32, u32, String) = eval(
+                &s,
+                "local b = pmacs.window.buffer()
+                 local at = pmacs.editor.cursor()
+                 return b:name(), pmacs.editor.cursor_line(), pmacs.editor.cursor_col(), b:slice(at, math.min(at + 3, b:len()))",
+            );
+            visited.push(format!("{row:?} -> {name} {line}:{col} at {under:?}"));
+            break;
+        }
+        press(&mut s, KeyCode::Char('n'));
+    }
+    eprintln!("MEASURE RET from the panel: {visited:?}");
+    assert_eq!(visited.len(), 1, "RET visited one error");
+    assert!(
+        visited[0].contains("at \"y")
+            || visited[0].contains("at \"1.5")
+            || visited[0].contains("at \"s"),
+        "the cursor landed on the expression the error names: {visited:?}"
+    );
     // Back to the document: the panel took the focus.
     exec(
         &s,

@@ -2863,6 +2863,25 @@ function pmacs.lsp.on_notification(method, fn)
   subs[#subs + 1] = fn
 end
 
+-- E7c.4: `window/showMessage` is the server asking for the user's
+-- eyes (a refused config, a failed build script); an error or a
+-- warning goes on the status line with the server's label, and every
+-- level is in `*lsp*` from the tracker. Until now it reached nothing.
+pmacs.lsp.on_notification("window/showMessage", function(sid, params)
+  if type(params) ~= "table" or type(params.message) ~= "string" then return end
+  local kind = params.type
+  if kind ~= 1 and kind ~= 2 then return end
+  local label = tostring(sid)
+  local ok, rows = pcall(pmacs.lsp.list)
+  if ok and rows then
+    for _, info in ipairs(rows) do
+      if tostring(info.id) == label then label = info.label or label end
+    end
+  end
+  local first = params.message:match("^[^\n]*")
+  pmacs.editor.set_status(string.format("LSP: %s says: %s", tostring(label), first))
+end)
+
 -- E7c.1: the first `$/progress` begin from a server after a save is
 -- the check (or whatever work the save started); the retry stands
 -- down for that server's attachments.

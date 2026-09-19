@@ -163,9 +163,13 @@ fn open_with_fake_config(tag: &str, mode: &str, fields: &str, env: &str) -> Fixt
     Fixture { s, file, sink }
 }
 
+/// The sink's complete lines: the fake appends one JSON line per
+/// save, and a read can land while a line is half written, so only
+/// lines the file has finished (ended by a newline) are parsed.
 fn saves(sink: &Path) -> Vec<Value> {
-    std::fs::read_to_string(sink)
-        .unwrap_or_default()
+    let text = std::fs::read_to_string(sink).unwrap_or_default();
+    let complete = text.rsplit_once('\n').map_or("", |(done, _)| done);
+    complete
         .lines()
         .map(|l| serde_json::from_str(l).expect("a JSON line per save"))
         .collect()
@@ -444,4 +448,62 @@ fn e7c_1_without_save_retry_a_dropped_save_is_not_sent_again() {
     let (seen, _) = watch(&mut f.s, 4, |_| false);
     assert_eq!(saves(&f.sink).len(), 1, "one didSave, never repeated");
     assert!(seen.iter().all(|t| t == "LSP:ready"), "no cycle: {seen:?}");
+}
+
+/// E7c.4: a `window/showMessage` from the server reaches `*lsp*` as
+/// the server's own words, and an error or warning the status line
+/// too; until this phase it reached nothing, which is how
+/// rust-analyzer's refusal of the shipped config (#281) stayed unseen.
+#[test]
+fn e7c_4_a_server_message_reaches_the_log_and_the_status_line() {
+    let mut f = open_with_fake("showmessage", "didsave");
+    exec(
+        &f.s,
+        "local rec = pmacs.lsp.active_attachment()
+         pmacs.lsp.send_notification(rec.server, 'pmacs/showMessage',
+           { type = 2, message = 'invalid config value: /checkOnSave: invalid type: map, expected a boolean' })",
+    );
+    let (_, shown) = watch(&mut f.s, 3, |s| {
+        s.core
+            .borrow()
+            .status
+            .contains("says: invalid config value")
+    });
+    let status = f.s.core.borrow().status.clone();
+    assert!(shown, "the warning is on the status line: {status:?}");
+    assert!(status.starts_with("LSP: "), "{status:?}");
+    let logged: Vec<String> = eval(
+        &f.s,
+        "local rec = pmacs.lsp.active_attachment()
+         local out = {}
+         for _, m in ipairs(pmacs.lsp.recent_messages(rec.server)) do
+           if m.summary:find('server says', 1, true) then out[#out + 1] = m.channel .. ' ' .. m.summary end
+         end
+         return out",
+    );
+    assert_eq!(
+        logged,
+        vec![
+            "warn server says: invalid config value: /checkOnSave: invalid type: map, expected a boolean"
+        ]
+    );
+    // An informational message stays out of the status line.
+    exec(
+        &f.s,
+        "pmacs.editor.set_status('untouched')
+         local rec = pmacs.lsp.active_attachment()
+         pmacs.lsp.send_notification(rec.server, 'pmacs/showMessage', { type = 3, message = 'loaded' })",
+    );
+    let (_, logged_info) = watch(&mut f.s, 3, |s| {
+        eval::<bool>(
+            s,
+            "local rec = pmacs.lsp.active_attachment()
+             for _, m in ipairs(pmacs.lsp.recent_messages(rec.server)) do
+               if m.summary == 'server says: loaded' then return true end
+             end
+             return false",
+        )
+    });
+    assert!(logged_info, "the info message is in *lsp*");
+    assert_eq!(f.s.core.borrow().status, "untouched");
 }

@@ -1769,6 +1769,17 @@ fn main() {
                     }
                 }
             }
+            ("pmacs/showMessage", None) => {
+                // E7c.4: a `window/showMessage` echo, in every mode:
+                // the client sends the notification's params and the
+                // fake sends them back as the real thing.
+                let notification = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "window/showMessage",
+                    "params": params,
+                });
+                write_frame(&mut stdout, &notification);
+            }
             ("pmacs/progress", None) => {
                 // E7b.1: a progress echo, in every mode. The client
                 // sends `pmacs/progress` with a `$/progress` payload
