@@ -299,6 +299,40 @@ impl DocumentEdit {
         pos.saturating_sub(self.old_end - self.start)
             .saturating_add(self.inserted_len)
     }
+
+    /// Whether this edit removes the whole of the pre-edit range
+    /// `[lo, hi)`: the replaced text covers it, or, for an empty range,
+    /// has its position strictly inside. A pure insert deletes nothing,
+    /// and a range the replaced text only overlaps is not deleted ---
+    /// what stood outside the edit is still there to carry. E7c fix 2:
+    /// a diagnostic or an inlay hint about text an edit deleted is
+    /// dropped rather than left as a zero-width mark where the text
+    /// was.
+    pub(crate) fn deletes(self, lo: u64, hi: u64) -> bool {
+        if self.old_end == self.start {
+            return false;
+        }
+        if lo < hi {
+            self.start <= lo && hi <= self.old_end
+        } else {
+            self.start < lo && lo < self.old_end
+        }
+    }
+}
+
+/// Where a byte range of the text at some edit number stands in the
+/// document's current text, once carried across the edits since
+/// (E7c fix 2): the range, or the reason there is none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CarriedRange {
+    /// The range in the current bytes.
+    At(u64, u64),
+    /// An edit since deleted the whole of it: no text in the document
+    /// is what it described.
+    Deleted,
+    /// An edit since is no longer held (the URI has no log, or the log
+    /// forgot an edit past the base): nothing can place it.
+    Unalignable,
 }
 
 /// A semantic token resolved to byte coordinates of the text it now
@@ -843,6 +877,34 @@ impl SemanticTokenStore {
             }
         }
         Some((start, end.max(start)))
+    }
+
+    /// Carry a byte range as [`Self::translate_range_since`] does, but
+    /// say when an edit since `base` deleted the whole of it instead of
+    /// snapping it to a zero-width range where the text was (E7c fix
+    /// 2): the placement a diagnostic's span or an inlay hint's anchor
+    /// takes at absorb, so a check's answer republished after the text
+    /// it names was deleted lands nowhere, as the recorder's carry of a
+    /// held span across the same edit would.
+    #[must_use]
+    pub fn carry_range_since(&self, uri: &str, base: u64, start: u64, end: u64) -> CarriedRange {
+        let Some(log) = self.logs.get(uri) else {
+            return CarriedRange::Unalignable;
+        };
+        if log.dropped_below > base {
+            return CarriedRange::Unalignable;
+        }
+        let (mut start, mut end) = (start, end);
+        for (seq, edit, _) in &log.edits {
+            if *seq >= base {
+                if edit.deletes(start, end) {
+                    return CarriedRange::Deleted;
+                }
+                start = edit.translate_start(start);
+                end = edit.translate_end(end);
+            }
+        }
+        CarriedRange::At(start, end.max(start))
     }
 
     /// Declare `uri`'s tokens stale without saying where the edit was.

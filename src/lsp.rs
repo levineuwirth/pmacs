@@ -3159,18 +3159,33 @@ impl LspManager {
                     .lock()
                     .expect("semantic token store mutex poisoned");
                 let has_log = store.has_log(uri);
-                for h in &mut resp.hints {
+                let mut placed = Vec::with_capacity(resp.hints.len());
+                for mut h in resp.hints.drain(..) {
                     if let Some(byte) = position_to_byte(anchor, &starts, h.line, h.col, enc) {
                         if let Some(&ls) = starts.get(h.line as usize) {
                             h.col = byte.saturating_sub(ls) as u32;
                         }
                         if has_log {
-                            h.at = store
-                                .translate_range_since(uri, *base_seq, byte as u64, byte as u64)
-                                .map(|(at, _)| at);
+                            use crate::semantic_tokens::CarriedRange;
+                            h.at = match store.carry_range_since(
+                                uri,
+                                *base_seq,
+                                byte as u64,
+                                byte as u64,
+                            ) {
+                                CarriedRange::At(at, _) => Some(at),
+                                // E7c fix 2: the anchor was deleted
+                                // since the text the answer is for;
+                                // the hint is dropped, as a held one
+                                // is when the recorder sees that edit.
+                                CarriedRange::Deleted => continue,
+                                CarriedRange::Unalignable => None,
+                            };
                         }
                     }
+                    placed.push(h);
                 }
+                resp.hints = placed;
                 drop(store);
                 let key = crate::inlay_hint::InlayHintKey::new(server_key, uri.clone());
                 let mut guard = self
@@ -3363,7 +3378,17 @@ impl LspManager {
                     d.end_col = hi.saturating_sub(ls) as u32;
                 }
                 if has_log && let (Some(lo), Some(hi)) = (lo, hi) {
-                    d.span = store.translate_range_since(&uri, base, lo as u64, hi as u64);
+                    use crate::semantic_tokens::CarriedRange;
+                    d.span = match store.carry_range_since(&uri, base, lo as u64, hi as u64) {
+                        CarriedRange::At(lo, hi) => Some((lo, hi)),
+                        // E7c fix 2: the text it names was deleted
+                        // since the text it was computed for; there
+                        // is nothing in the document to mark, so it
+                        // is dropped until a publish computed for a
+                        // text that has it.
+                        CarriedRange::Deleted => continue,
+                        CarriedRange::Unalignable => None,
+                    };
                 }
             }
             parsed.push(d);

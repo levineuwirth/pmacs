@@ -4685,32 +4685,7 @@ mod tests {
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         seed_diagnostic(&state, buffer_id);
-        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
-        // The recorder on the buffer, and the stores told the document
-        // is logged, as `pmacs.lsp._track_edits` does at attach.
-        let (tokens, diagnostics, inlay_hints) = {
-            let m = state.lsp_manager.borrow();
-            (
-                m.semantic_token_store(),
-                m.diag_store(),
-                m.inlay_hint_store(),
-            )
-        };
-        tokens.lock().expect("token store").open_log(&uri);
-        diagnostics.lock().expect("diag store").note_logged(&uri);
-        inlay_hints.lock().expect("inlay store").note_logged(&uri);
-        {
-            let registry = state.core.borrow().registry.clone();
-            registry
-                .borrow_mut()
-                .get_mut(buffer_id)
-                .expect("buffer")
-                .attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
-                    tokens,
-                    diagnostics.clone(),
-                    inlay_hints,
-                )));
-        }
+        let (uri, diagnostics) = record_edits(&state, buffer_id);
         // The warning on `de`, bytes 4..6, placed as the absorb would
         // place a published diagnostic: a span in the current text.
         diagnostics.lock().expect("diag store").set(
@@ -4785,6 +4760,158 @@ mod tests {
                 .expect("delete");
         }
         assert_eq!(warnings(&s.render_frame(&state)), vec![(4, 6)]);
+    }
+
+    /// E7c fix 2 on the wire, which is what the GPU paints: a warning
+    /// on `de` whose whole line is deleted is gone from the next
+    /// frame's decorations and from `StatusFacts`' count before any
+    /// publish, where it used to sit as a zero-width mark at the
+    /// deletion point (widened to a cell) with the count still `1`;
+    /// a delete of half the word keeps the decoration on what remains.
+    /// The recorder is the production one; the edits go through the
+    /// buffer's edit path as typing does. Bitten by restoring the
+    /// zero-width carry in `DiagnosticStore::translate_edit`.
+    #[test]
+    fn e7c_fix_2_a_deleted_diagnostic_leaves_the_wire_and_the_count_and_a_cut_one_stays() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        seed_diagnostic(&state, buffer_id);
+        let (uri, diagnostics) = record_edits(&state, buffer_id);
+        let warning = |span: (u64, u64)| crate::diag::Diagnostic {
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 2,
+            severity: crate::diag::DiagnosticSeverity::Warning,
+            message: "x".into(),
+            source: None,
+            code: None,
+            span: Some(span),
+        };
+        diagnostics
+            .lock()
+            .expect("diag store")
+            .set(&uri, vec![warning((4, 6))]);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let warnings = |msgs: &[InstanceMessage]| -> Vec<(u64, u64)> {
+            decorations_of(msgs)
+                .map(|(_, decos)| {
+                    decos
+                        .iter()
+                        .filter(|d| d.kind == DecorationKind::DiagnosticWarning)
+                        .map(|d| (d.range.start, d.range.end))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let delete = |start: u64, end: u64| {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("buffer")
+                .apply_edit(crate::buffer::EditOp::Delete {
+                    range: crate::rope::Range { start, end },
+                })
+                .expect("delete");
+        };
+        // `StatusFacts` is suppressed while unchanged, so the count a
+        // frame implies is the last one shipped.
+        let mut shipped = (u32::MAX, u32::MAX);
+        let mut counts = |frame: &[InstanceMessage]| -> (u32, u32) {
+            if let Some(f) = facts_of(frame) {
+                shipped = (f.2, f.3);
+            }
+            shipped
+        };
+        let frame = s.render_frame(&state);
+        assert_eq!(warnings(&frame), vec![(4, 6)]);
+        assert_eq!(counts(&frame), (0, 1), "W:1 before the deletion");
+
+        // The whole of `\nde` --- the line that carried the warning ---
+        // deleted, as `C-k` at its end and Backspace would: nothing on
+        // the wire, and the count at zero, on the next frame.
+        delete(3, 6);
+        let frame = s.render_frame(&state);
+        assert!(
+            warnings(&frame).is_empty(),
+            "no decoration for deleted text: {:?}",
+            warnings(&frame)
+        );
+        assert_eq!(
+            counts(&frame),
+            (0, 0),
+            "the count follows without a publish"
+        );
+        assert_eq!(
+            diagnostics.lock().expect("diag store").count_for(&uri),
+            0,
+            "dropped from the store"
+        );
+
+        // The same warning again, and half the word deleted instead:
+        // the decoration stays on the `d` that remains.
+        {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 3,
+                    bytes: b"\nde",
+                })
+                .expect("restore");
+        }
+        diagnostics
+            .lock()
+            .expect("diag store")
+            .set(&uri, vec![warning((4, 6))]);
+        let frame = s.render_frame(&state);
+        assert_eq!(warnings(&frame), vec![(4, 6)]);
+        assert_eq!(counts(&frame), (0, 1));
+        delete(5, 6);
+        let frame = s.render_frame(&state);
+        assert_eq!(
+            warnings(&frame),
+            vec![(4, 5)],
+            "the decoration on what remains of the word"
+        );
+        assert_eq!(counts(&frame), (0, 1), "still counted");
+    }
+
+    /// The production recorder on `buffer_id`'s buffer (the one at
+    /// `/tmp/m114.rs`), and the three stores told the document is
+    /// logged, as `pmacs.lsp._track_edits` does at attach; the URI and
+    /// the diagnostic store, for the rows to write and read.
+    fn record_edits(
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> (String, crate::diag::SharedDiagStore) {
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
+        let (tokens, diagnostics, inlay_hints) = {
+            let m = state.lsp_manager.borrow();
+            (
+                m.semantic_token_store(),
+                m.diag_store(),
+                m.inlay_hint_store(),
+            )
+        };
+        tokens.lock().expect("token store").open_log(&uri);
+        diagnostics.lock().expect("diag store").note_logged(&uri);
+        inlay_hints.lock().expect("inlay store").note_logged(&uri);
+        let registry = state.core.borrow().registry.clone();
+        registry
+            .borrow_mut()
+            .get_mut(buffer_id)
+            .expect("buffer")
+            .attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
+                tokens,
+                diagnostics.clone(),
+                inlay_hints,
+            )));
+        (uri, diagnostics)
     }
 
     fn seed_diagnostic(state: &EditorState, buffer_id: BufferId) {

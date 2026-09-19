@@ -6598,8 +6598,9 @@ fn paint_local_selection(
 /// hints stay off the mode line). Empty when the buffer has no file
 /// path, no diagnostics, or the stored diagnostics are stale — the
 /// document was edited since the last `publishDiagnostics`, so the
-/// counts would describe text that no longer exists (T M4.6).
-fn diag_mode_line_summary(
+/// counts would describe text that no longer exists (T M4.6). Crate
+/// visible so `diag`'s grid rows read the count the mode line shows.
+pub(crate) fn diag_mode_line_summary(
     store: &crate::diag::DiagnosticStore,
     buf: &crate::buffer::Buffer,
 ) -> String {

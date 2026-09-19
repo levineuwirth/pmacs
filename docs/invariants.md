@@ -85,9 +85,9 @@ authenticated source, never by a `frontend_id` carried in the payload.
 Every `Position` and `Range` builder in `src/lsp.rs` converts byte offsets
 to the negotiated encoding, and a new one must too, or UTF-16 servers
 reject non-ASCII columns: a request uses `outbound_position` on the text
-the server holds, and a `didChange` ranged by negotiation uses
+the server holds; a `didChange` ranged by negotiation uses
 `byte_to_position` on a mirror carried across the edits, since its ranges
-address the text as each previous change left it. Semantic tokens `full`,
+address the text as each change left it. Semantic tokens `full`,
 `full.delta` and `range` are three capabilities, gated one by one.
 
 The semantic-token store answers in the document's current bytes, never
@@ -100,16 +100,19 @@ neither converts a column per frame. The same log feeds a ranged
 `didChange`, places an accepted completion's `additionalTextEdits` from
 the answer's edit number, and carries diagnostics and inlay hints from the
 text they were computed for (the file on disk for a `check_sources`
-source, else the text last sent); what the log cannot account for sends
-the whole document, applies none, or paints the published position, said.
-Busy is not a state: only `INDEXING_TOKENS` (`src/lsp_status.rs`) move the
-kind to `Indexing`; other `$/progress` is a suffix on `ready`. A save
-sends `didSave` as the server's `save` asks, after the `didChange`, and
-that runs its check.
+source, else the text last sent); an edit deleting the whole of a
+diagnostic's text or a hint's anchor drops it until the next publish
+(`DocumentEdit::deletes`, at the recorder and the absorb alike), one
+that overlaps it keeps what stood outside; what the log cannot account
+for sends the whole document, applies none, or paints the published
+position, said. Busy is not a state: only `INDEXING_TOKENS`
+(`src/lsp_status.rs`) move the kind to `Indexing`; other `$/progress` is
+a suffix on `ready`. A save sends `didSave` as the server's `save` asks,
+after the `didChange`, and that runs its check.
 
 LaTeX is served by `texlab`; `pmacs.lsp.config.latex` walks up for its
-own markers (`.texlabroot`, `texlabroot`) and never for `.git`, because
-a multi-file document's root is not its repository's.
+own markers (`.texlabroot`, `texlabroot`), never for `.git`: a multi-file
+document's root is not its repository's.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
@@ -157,8 +160,7 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   variant needs a literal byte fixture, because a round-trip with the
   same types freezes nothing.
 - The close message of a surface uses the same variant family as its
-  open, or a session closed by the other family leaves the surface on
-  screen.
+  open, or a session closed by the other family leaves it on screen.
 - New wire surface means a version bump, support in both frontends, and
   an acceptance test. A wire-bearing change runs alone in its own phase.
 - `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`. The one
@@ -204,8 +206,7 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   a buffer-effective frontend fact and cache invalidation, not a scalar
   setting.
 - A daemon-side change is not deployed until the daemon restarts from a
-  binary that contains it; `pmacs --gpu` attaches to whatever owns the
-  socket.
+  binary containing it; `pmacs --gpu` attaches to whatever owns the socket.
 - The GPU frontend lays out in logical pixels and meets the physical
   surface exactly once. `State::layout` is the surface over
   `State::scale`; every hit test, wrap, cell-grid declaration and quad
@@ -223,9 +224,8 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   optional, one test omits it.
 - A contract two mechanisms must honor is as strong as the weaker one.
   Listview ids are compared with `==` by selection and used as raw table
-  keys by collapse state; the contract is narrowed to what both honor
-  and enforced where the data enters, never generalized to the stronger
-  half.
+  keys by collapse state; the contract is narrowed to what both honor and
+  enforced where the data enters, never generalized to the stronger half.
 - Acceptance fixtures that open `.rs` or `.py` files empty
   `pmacs.lsp.config` first, or the after-load hook spawns real servers.
   A scratch buffer has no path and therefore no language.

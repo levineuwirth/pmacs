@@ -4227,7 +4227,30 @@ pmacs.command.define {
 -- Refresh on publish: a subscriber for every server, at module load, so
 -- the panel follows the store wherever the panel is shown. Cheap when
 -- the panel is not open: `rerender` finds no live panel and returns.
-pmacs.lsp.on_notification("textDocument/publishDiagnostics", function()
+-- And on an edit that changed the store without a publish (E7c fix 2):
+-- deleting a diagnostic's whole text drops it from the store as the
+-- edit is recorded, and the store's epoch moves; the after-edit hook
+-- re-renders when the active document's epoch is not the one the panel
+-- last rendered for, which the publish subscriber records too --- the
+-- epoch moves on a publish as well, and the drop can be the first
+-- edit after one.
+local diagnostics_epoch_rendered = {}
+
+pmacs.lsp.on_notification("textDocument/publishDiagnostics", function(_sid, params)
+  local uri = type(params) == "table" and params.uri or nil
+  if type(uri) == "string" then
+    local ok, epoch = pcall(pmacs.diag.epoch, uri)
+    if ok then diagnostics_epoch_rendered[uri] = epoch end
+  end
+  pcall(pmacs.listview.rerender, DIAGNOSTICS_PANEL)
+end)
+
+pmacs.hook.add("buffer.after-edit", function()
+  local uri = active_buffer_uri()
+  if not uri then return end
+  local ok, epoch = pcall(pmacs.diag.epoch, uri)
+  if not ok or diagnostics_epoch_rendered[uri] == epoch then return end
+  diagnostics_epoch_rendered[uri] = epoch
   pcall(pmacs.listview.rerender, DIAGNOSTICS_PANEL)
 end)
 

@@ -234,7 +234,10 @@ impl InlayHintStore {
     /// called by the recorder on every edit the buffer takes. An
     /// anchor moves as a range end does: text typed exactly at it
     /// goes before it, so a type hint stays after the identifier it
-    /// annotates as the identifier grows.
+    /// annotates as the identifier grows. A hint whose anchor the edit
+    /// deleted --- strictly inside the replaced text --- is dropped
+    /// until the next answer (E7c fix 2), as a diagnostic about deleted
+    /// text is; one at either end of the deletion is kept and shifted.
     pub fn translate_edit(&mut self, uri: &str, edit: crate::semantic_tokens::DocumentEdit) {
         if edit.old_end == edit.start && edit.inserted_len == 0 {
             return;
@@ -243,6 +246,8 @@ impl InlayHintStore {
             if key.uri != uri {
                 continue;
             }
+            resp.hints
+                .retain(|h| !h.at.is_some_and(|at| edit.deletes(at, at)));
             for h in &mut resp.hints {
                 if let Some(at) = h.at {
                     h.at = Some(edit.translate_end(at));
@@ -508,5 +513,52 @@ mod tests {
             },
         );
         assert_eq!(at(&s), None, "no anchor, nothing to carry");
+    }
+
+    /// E7c fix 2: a delete ending at the anchor moves it and a delete
+    /// starting at it leaves it; one that has it strictly inside drops
+    /// the hint until the next answer, as a diagnostic about deleted
+    /// text is dropped.
+    #[test]
+    fn a_hint_whose_anchor_is_inside_a_deleted_range_is_dropped() {
+        use crate::semantic_tokens::DocumentEdit;
+        let mut s = InlayHintStore::new();
+        let key = InlayHintKey::new("1", "file:///a");
+        let hint = InlayHint {
+            line: 0,
+            col: 10,
+            label: ": i32".into(),
+            kind: Some(InlayHintKind::Type),
+            padding_left: false,
+            padding_right: false,
+            tooltip: None,
+            at: Some(10),
+        };
+        s.note_logged("file:///a");
+        s.set(key.clone(), InlayHintResponse { hints: vec![hint] });
+        let at = |s: &InlayHintStore| s.get(&key).unwrap().hints.first().and_then(|h| h.at);
+        let del = |s: &mut InlayHintStore, start: u64, old_end: u64| {
+            s.translate_edit(
+                "file:///a",
+                DocumentEdit {
+                    start,
+                    old_end,
+                    inserted_len: 0,
+                },
+            );
+        };
+        del(&mut s, 8, 10);
+        assert_eq!(
+            at(&s),
+            Some(8),
+            "the identifier before it deleted: kept, shifted"
+        );
+        del(&mut s, 8, 12);
+        assert_eq!(at(&s), Some(8), "the text after it deleted: kept");
+        del(&mut s, 4, 12);
+        assert!(
+            s.get(&key).unwrap().hints.is_empty(),
+            "the line it sat on deleted: dropped"
+        );
     }
 }

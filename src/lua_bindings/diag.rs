@@ -143,6 +143,22 @@ pub fn install_diag(
     }
 
     {
+        // E7c fix 2: the store's per-URI change counter, which moves on
+        // a publish, a clear, and on an edit that dropped a diagnostic
+        // about text it deleted; `*diagnostics*` follows it from the
+        // after-edit hook, where no publish tells it to re-render.
+        let m = manager.clone();
+        diag_mod.set(
+            "epoch",
+            lua.create_function(move |_, uri: String| {
+                let store_handle = m.borrow().diag_store();
+                let guard = store_handle.lock().expect("diag store mutex poisoned");
+                Ok(guard.epoch_for(&uri))
+            })?,
+        )?;
+    }
+
+    {
         let mgr = manager.clone();
         diag_mod.set(
             "totals",

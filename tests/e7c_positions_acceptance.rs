@@ -26,15 +26,24 @@
 //!   `check_sources`: it then lands one line too high);
 //! * an inlay hint answered for the text before a typed line sits at
 //!   its byte after it;
-//! * `M-g n` visits the marker where it is now.
+//! * `M-g n` visits the marker where it is now;
+//! * (E7c fix 2) deleting the whole line the marker is on drops both
+//!   diagnostics before any save or publish --- from the store, the
+//!   grid's underlines and mode line, the wire's decorations and
+//!   `StatusFacts` --- and the republish the deletion's own `didChange`
+//!   draws, the check's set at its old line, lands nothing; deleting
+//!   half the marker instead keeps both on what remains.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use pmacs::cell::{Cell, CellGrid, CellSize, Glyph, UnderlineStyle};
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;
-use pmacs::protocol::FrontendId;
+use pmacs::protocol::{ByteRange, DecorationKind, FrontendId, InstanceMessage};
+use pmacs::semantic_render::SemanticRenderState;
 
 #[path = "common/iso.rs"]
 mod iso;
@@ -473,5 +482,419 @@ fn e7c_3_diag_next_visits_the_carried_position() {
     assert!(
         status.contains("e7c"),
         "the status names the diagnostic: {status:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E7c fix 2: a diagnostic about deleted text is dropped
+// ---------------------------------------------------------------------------
+
+fn ctrl(s: &mut EditorState, c: char) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        },
+    );
+}
+
+/// The grid frontend's frame at 8 x 120: the text under every
+/// underlined cell of the window, in grid order, and the mode line's
+/// text (the row carrying the LSP segment), which carries the
+/// `E:`/`W:` count.
+fn grid(s: &EditorState) -> (String, String) {
+    let (rows, cols) = (8u32, 120u32);
+    let size = CellSize::new(rows, cols);
+    let mut cells = vec![Cell::default(); (rows * cols) as usize];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: cols,
+        size,
+    };
+    pmacs::editor::paint_frame(s, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
+    let text_of = |row: u32| -> String {
+        (0..cols)
+            .map(|col| match &cells[(row * cols + col) as usize].glyph {
+                Glyph::Char(c) => *c,
+                _ => ' ',
+            })
+            .collect()
+    };
+    let all: Vec<String> = (0..rows).map(text_of).collect();
+    let modeline = all
+        .iter()
+        .find(|t| t.contains("LSP:"))
+        .unwrap_or_else(|| panic!("a mode line with the LSP segment: {all:?}"))
+        .clone();
+    let underlined: String = (0..rows * cols)
+        .filter(|i| cells[*i as usize].style.underline != UnderlineStyle::None)
+        .map(|i| match &cells[i as usize].glyph {
+            Glyph::Char(c) => *c,
+            _ => ' ',
+        })
+        .collect();
+    (underlined, modeline)
+}
+
+/// A semantic frontend's frame: the text under every diagnostic
+/// decoration, and the `(errors, warnings)` its `StatusFacts` carries
+/// (the message is suppressed while unchanged, so `last` is carried
+/// forward and updated).
+fn wire(s: &EditorState, r: &mut SemanticRenderState, last: &mut (u32, u32)) -> Vec<String> {
+    let text = buffer_text(s);
+    let mut out = Vec::new();
+    for m in r.render_frame(s) {
+        match m {
+            InstanceMessage::Decorations { segments, .. } => {
+                for d in segments.iter().flat_map(|seg| seg.decorations.iter()) {
+                    if matches!(
+                        d.kind,
+                        DecorationKind::DiagnosticError | DecorationKind::DiagnosticWarning
+                    ) {
+                        let (lo, hi) = (d.range.start as usize, d.range.end as usize);
+                        out.push(format!(
+                            "{:?} {:?}",
+                            d.kind,
+                            &text[lo.min(text.len())..hi.min(text.len())]
+                        ));
+                    }
+                }
+            }
+            InstanceMessage::StatusFacts {
+                diag_errors,
+                diag_warnings,
+                ..
+            } => *last = (diag_errors, diag_warnings),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Save with the marker on line 1 so both diagnostics --- the check's
+/// error for the saved text and the native warning --- are on it, and
+/// the semantic frontend attached, showing them.
+fn both_on_the_marker(tag: &str) -> (EditorState, SemanticRenderState, (u32, u32)) {
+    let (mut s, _file) = open_with_fake(tag, "{ 'rustc' }");
+    assert!(
+        wait(&mut s, 5, |s| positions(s).len() == 1),
+        "the open's warning arrived: {:?}",
+        positions(&s)
+    );
+    exec(
+        &s,
+        "_G.__e7c_saved = false
+         pmacs.hook.add('buffer.after-save', function() _G.__e7c_saved = true end)
+         pmacs.command.invoke('buffer.save')",
+    );
+    assert!(pump_lua_flag(&mut s, "_G.__e7c_saved", 10), "saved");
+    assert!(
+        wait(&mut s, 5, |s| positions(s).len() == 2),
+        "the check's error arrived beside the warning: {:?}",
+        positions(&s)
+    );
+    assert_eq!(covered(&s), vec!["CHECKME", "CHECKME"]);
+    // Every tick's arrivals drained, so what follows is the deletion's
+    // doing and nothing in flight.
+    for _ in 0..20 {
+        tick(&mut s);
+    }
+    assert_eq!(positions(&s).len(), 2, "settled: {:?}", positions(&s));
+    let buffer_id = s.core.borrow().active_window().buffer_id;
+    let mut r = SemanticRenderState::new(FrontendId::LOCAL);
+    r.set_viewport(
+        buffer_id,
+        ByteRange {
+            start: 0,
+            end: 1 << 20,
+        },
+        0,
+    );
+    let mut facts = (u32::MAX, u32::MAX);
+    let decorated = wire(&s, &mut r, &mut facts);
+    assert_eq!(
+        decorated,
+        vec![
+            "DiagnosticError \"CHECKME\"".to_owned(),
+            "DiagnosticWarning \"CHECKME\"".to_owned()
+        ],
+        "both on the wire"
+    );
+    assert_eq!(facts, (1, 1), "E:1 W:1 on the wire");
+    let (underlined, modeline) = grid(&s);
+    assert_eq!(underlined, "CHECKME", "underlined on the grid");
+    assert!(
+        modeline.contains("E:1 W:1"),
+        "the grid's mode line: {modeline:?}"
+    );
+    (s, r, facts)
+}
+
+/// The witness the owner's run asked for: with the check's warning on
+/// its line, delete the whole line, and the squiggle and the count are
+/// gone before any save --- on the grid and on the wire --- and stay
+/// gone through the republish the deletion draws, the check's set at
+/// its old line carried across the deletion. Bitten by restoring the
+/// zero-width carry in `DiagnosticStore::translate_edit` and the
+/// snapping carry at the absorb: the first leaves a mark at the
+/// deletion point until the republish, the second brings it back.
+#[test]
+fn e7c_fix_2_deleting_the_line_drops_its_diagnostics_before_any_save() {
+    let (mut s, mut r, mut facts) = both_on_the_marker("dropline");
+    let marker = buffer_text(&s).find("CHECKME").expect("the marker");
+    // The whole of `    let x = CHECKME;\n`: to its start, `C-k` the
+    // text and `C-k` the newline, through the production dispatch.
+    let line_start = buffer_text(&s)[..marker].rfind('\n').expect("line 0") + 1;
+    exec(&s, &format!("pmacs.editor.goto_byte({line_start})"));
+    ctrl(&mut s, 'k');
+    ctrl(&mut s, 'k');
+    assert_eq!(buffer_text(&s), "fn main() {\n}\n", "the line is gone");
+    // Before any tick: nothing in flight has landed, no didChange has
+    // gone out, no save.
+    assert_eq!(
+        positions(&s),
+        Vec::<String>::new(),
+        "dropped from the store as the edit was recorded"
+    );
+    let decorated = wire(&s, &mut r, &mut facts);
+    assert_eq!(decorated, Vec::<String>::new(), "nothing on the wire");
+    assert_eq!(facts, (0, 0), "the wire's count at zero");
+    let (underlined, modeline) = grid(&s);
+    assert_eq!(underlined, "", "nothing underlined on the grid");
+    assert!(
+        !modeline.contains("E:") && !modeline.contains("W:"),
+        "the grid's mode line shows no count: {modeline:?}"
+    );
+    // The deletion's didChange goes out on the quiet timer and the
+    // fake republishes: the native set for the new text (no marker,
+    // so none) beside the check's set at its old line, computed for
+    // the saved text and carried across the deletion --- which drops
+    // it again at the absorb. Wait for that republish and read.
+    let uri: String = eval(&s, "return pmacs.lsp.active_attachment().uri");
+    let epoch = |s: &EditorState| -> u64 {
+        let store = s.lsp_manager.borrow().diag_store();
+        let guard = store.lock().unwrap();
+        guard.epoch_for(&uri)
+    };
+    let before = epoch(&s);
+    assert!(
+        wait(&mut s, 5, |s| epoch(s) > before),
+        "the didChange was answered with a republish"
+    );
+    for _ in 0..20 {
+        tick(&mut s);
+    }
+    assert_eq!(
+        positions(&s),
+        Vec::<String>::new(),
+        "the check's set, republished for the saved text, lands nothing on text that is gone"
+    );
+    let decorated = wire(&s, &mut r, &mut facts);
+    assert_eq!(decorated, Vec::<String>::new());
+    assert_eq!(facts, (0, 0));
+    let (underlined, _) = grid(&s);
+    assert_eq!(underlined, "");
+}
+
+/// The control: delete half the marker instead, and both diagnostics
+/// stay on what remains --- `KME` --- on the grid and on the wire, before
+/// the republish; after it the check's set, carried across the cut, is
+/// still on `KME`, and the native set, computed for the cut text, has
+/// no marker to report.
+#[test]
+fn e7c_fix_2_deleting_half_the_word_keeps_its_diagnostics_on_what_remains() {
+    let (mut s, mut r, mut facts) = both_on_the_marker("cutword");
+    let marker = buffer_text(&s).find("CHECKME").expect("the marker");
+    exec(&s, &format!("pmacs.editor.goto_byte({marker})"));
+    for _ in 0..4 {
+        ctrl(&mut s, 'd');
+    }
+    assert_eq!(
+        buffer_text(&s),
+        "fn main() {\n    let x = KME;\n}\n",
+        "half the marker is gone"
+    );
+    assert_eq!(covered(&s), vec!["KME", "KME"], "both kept on what remains");
+    let decorated = wire(&s, &mut r, &mut facts);
+    assert_eq!(
+        decorated,
+        vec![
+            "DiagnosticError \"KME\"".to_owned(),
+            "DiagnosticWarning \"KME\"".to_owned()
+        ]
+    );
+    assert_eq!(facts, (1, 1), "still counted on the wire");
+    let (underlined, modeline) = grid(&s);
+    assert_eq!(underlined, "KME", "the underline on what remains");
+    assert!(modeline.contains("E:1 W:1"), "{modeline:?}");
+    let uri: String = eval(&s, "return pmacs.lsp.active_attachment().uri");
+    let epoch = |s: &EditorState| -> u64 {
+        let store = s.lsp_manager.borrow().diag_store();
+        let guard = store.lock().unwrap();
+        guard.epoch_for(&uri)
+    };
+    let before = epoch(&s);
+    assert!(
+        wait(&mut s, 5, |s| epoch(s) > before),
+        "the didChange was answered with a republish"
+    );
+    for _ in 0..20 {
+        tick(&mut s);
+    }
+    assert_eq!(
+        positions(&s),
+        vec!["rustc error 1:12-1:15".to_owned()],
+        "the check's set carried across the cut; the native set has no marker in the cut text"
+    );
+    assert_eq!(covered(&s), vec!["KME"]);
+    let decorated = wire(&s, &mut r, &mut facts);
+    assert_eq!(decorated, vec!["DiagnosticError \"KME\"".to_owned()]);
+    assert_eq!(facts, (1, 0));
+}
+
+/// `*diagnostics*` follows the drop without a publish: open on the
+/// two rows, then the line deleted from the document, and the panel
+/// reads `This buffer (0):` before any tick. The store's epoch moved
+/// with the drop and the after-edit hook re-rendered on it. Bitten by
+/// removing that hook from `lsp.lua`: the panel then still lists both
+/// until the republish.
+#[test]
+fn e7c_fix_2_the_panel_follows_the_drop_before_any_publish() {
+    let (mut s, _r, _facts) = both_on_the_marker("panel");
+    exec(&s, "pmacs.command.invoke('lsp.diagnostics')");
+    let panel = |s: &EditorState| -> String {
+        eval(
+            s,
+            "for _, b in ipairs(pmacs.buffer.list()) do
+               if b:name() == '*diagnostics*' then return b:slice(0, b:len()) end
+             end
+             return '<no panel>'",
+        )
+    };
+    let opened = panel(&s);
+    assert!(
+        opened.contains("This buffer (2):"),
+        "the panel lists both: {opened:?}"
+    );
+    // Back to the document (the panel took the focus), and the line
+    // deleted as in the row above.
+    let file: String = eval(
+        &s,
+        "return pmacs.lsp.path_for_uri(pmacs.lsp.active_attachment() and pmacs.lsp.active_attachment().uri or '') or ''",
+    );
+    let file = if file.is_empty() {
+        let names: Vec<String> = eval(
+            &s,
+            "local out = {} for _, b in ipairs(pmacs.buffer.list()) do local p = b:path() if p then out[#out+1] = p end end return out",
+        );
+        names
+            .into_iter()
+            .find(|p| p.ends_with("a.rs"))
+            .expect("the document")
+    } else {
+        file
+    };
+    exec(
+        &s,
+        &format!("pmacs.window.display_file({file:?}, {{ select = true }})"),
+    );
+    assert!(
+        buffer_text(&s).contains("CHECKME"),
+        "the document is active again"
+    );
+    let marker = buffer_text(&s).find("CHECKME").expect("the marker");
+    let line_start = buffer_text(&s)[..marker].rfind('\n').expect("line 0") + 1;
+    exec(&s, &format!("pmacs.editor.goto_byte({line_start})"));
+    ctrl(&mut s, 'k');
+    ctrl(&mut s, 'k');
+    assert_eq!(buffer_text(&s), "fn main() {\n}\n", "the line is gone");
+    let after = panel(&s);
+    assert!(
+        after.contains("This buffer (0):") && !after.contains("CHECKME"),
+        "the panel followed the drop before any tick: {after:?}"
+    );
+}
+
+/// An inlay hint answered for a line that was deleted before the
+/// answer was drained is dropped at the absorb, as a held one is by
+/// the recorder. The fake answers two hints for whatever it holds: a
+/// type hint at line 0 column 9 and a parameter hint at line 1 column
+/// 4. The open's answer is held at bytes 9 and 16; the first line is
+/// deleted through the production dispatch and the held type hint goes
+/// at once while the parameter hint moves to byte 4; the answer in
+/// flight for the old text --- sent before the deletion, answered in
+/// order on the one pipe before the deletion's own `didChange` is ---
+/// lands the same way, its type hint nowhere, where the snapping carry
+/// put it at byte 0; the fresh answer for the new text is placed as
+/// answered. Bitten by snapping at the absorb: `at: Some(0)` then
+/// shows until the fresh answer lands.
+#[test]
+fn e7c_fix_2_an_inlay_hint_answered_for_a_deleted_line_is_dropped() {
+    let (mut s, _file) = open_with_fake("inlaydrop", "{ 'rustc' }");
+    assert!(
+        wait(&mut s, 5, |s| positions(s).len() == 1),
+        "the open's warning arrived: {:?}",
+        positions(&s)
+    );
+    let uri: String = eval(&s, "return pmacs.lsp.active_attachment().uri");
+    let hints = |s: &EditorState| -> Vec<(u32, u32, Option<u64>)> {
+        let store = s.lsp_manager.borrow().inlay_hint_store();
+        let guard = store.lock().unwrap();
+        guard
+            .for_uri(&uri)
+            .map(|r| r.hints.iter().map(|h| (h.line, h.col, h.at)).collect())
+            .unwrap_or_default()
+    };
+    assert!(
+        wait(&mut s, 5, |s| !hints(s).is_empty()),
+        "the open's inlay hints arrived"
+    );
+    assert_eq!(hints(&s), vec![(0, 9, Some(9)), (1, 4, Some(16))]);
+    // Ask again, and delete the line the type hint is on before the
+    // answer is drained: `fn main() {\n`, bytes 0..12, with the hint
+    // at 9 strictly inside and the parameter hint's 16 past it.
+    exec(
+        &s,
+        "local rec = pmacs.lsp.active_attachment()
+         pmacs.lsp.request_inlay_hint(rec.server, rec.uri, 0, 0, 3, 0)",
+    );
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    ctrl(&mut s, 'k');
+    ctrl(&mut s, 'k');
+    assert!(
+        buffer_text(&s).starts_with("    let x = CHECKME;\n"),
+        "the first line is gone: {:?}",
+        buffer_text(&s)
+    );
+    assert_eq!(
+        hints(&s),
+        vec![(1, 4, Some(4))],
+        "the held type hint went with its line; the parameter hint moved up"
+    );
+    let mut seen: Vec<Vec<(u32, u32, Option<u64>)>> = vec![hints(&s)];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        tick(&mut s);
+        let now = hints(&s);
+        if seen.last() != Some(&now) {
+            seen.push(now.clone());
+        }
+        if now.first() == Some(&(0, 9, Some(9))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    eprintln!("POS inlay states after the deleted line: {seen:?}");
+    assert_eq!(
+        hints(&s).first(),
+        Some(&(0, 9, Some(9))),
+        "the fresh answer for the new text is placed as answered: {seen:?}"
+    );
+    assert!(
+        !seen.iter().flatten().any(|&(_, _, at)| at == Some(0)),
+        "the answer for the deleted line never showed at the deletion point: {seen:?}"
     );
 }
