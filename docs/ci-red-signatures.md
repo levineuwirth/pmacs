@@ -2020,6 +2020,71 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #284's head run 35453990704 at `fcd1248`: red on one of the branch's own rows, closed on the branch
+
+E7c's checkpoint push. Read at C7c's close on 2026-09-19 from the jobs
+endpoint and all six test legs' logs after the run completed; not
+re-run --- the row was fixed and a new head pushed.
+
+| field | value |
+|---|---|
+| run | 35453990704, `pull_request`, one attempt |
+| head | `fcd1248`, `e7c/cargo-check-diagnostics` (base `cbac12b`) |
+| window | created 2026-09-19T16:08:20Z, updated 16:30:46Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35453990704-jobs): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 105925941944 | success |
+| Lint (lua54) | 105925942072 | success |
+| Format | 105925942078 | success |
+| Lint (luajit) | 105925942109 | success |
+| Changed paths | 105925942155 | success |
+| M4 Perf Gates | 105925962905 | success |
+| M5 Perf Gates | 105925962907 | success |
+| GPU Render (headless) | 105925962912 | success |
+| Test (ubuntu-latest / luajit) | 105925962929 | success |
+| Perf budgets (debug) | 105925962950 | success |
+| M1 Acceptance Gates | 105925962960 | success |
+| M6 Perf Gates | 105925962961 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 105925962972 | failure |
+| Test (macos-latest / luajit) | 105925962974 | success |
+| M10 Perf Gates (crdt) | 105925962982 | success |
+| Test (crdt) | 105925962987 | success |
+| Test (ubuntu-latest / lua54) | 105925962994 | success |
+| Test (macos-latest / lua54) | 105925963004 | success |
+| Docs consistency | 105925963512 | skipped |
+
+Tally (run-35453990704-failures): 1 row of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (crdt)` 165 `test result: ok`,
+`Test (ubuntu-latest / luajit)` 166, `Test (ubuntu-latest / lua54)`
+166, both macOS legs 167, each with zero `FAILED`; `Test
+(ubuntu-latest / luajit, no crdt)` 163 `ok` and one `FAILED`.
+`WouldBlock`, `did not become ready` and `got ok` appear zero times on
+every leg; U17's selector `ok` on all six; the phase's fourteen `e7c_`
+rows `ok` on five legs and thirteen of them on the sixth. So no
+registered row and neither #282 nor #283 sampled here, and every count
+stands. The one red is the branch's own:
+`e7c_3_without_check_sources_the_republished_check_error_lands_a_line_too_high`
+(`tests/e7c_positions_acceptance.rs`, E7c.3's control row, the one
+that shows what `check_sources` buys by leaving it empty), `the
+check's set is taken for the typed text and misses: ["rustc error
+2:12-2:19", "pmacs-fake-lsp warning 2:12-2:19"]`, `test result:
+FAILED. 3 passed; 1 failed`, at 16:18:02Z. The row waited for the
+store's next epoch after the typed line and read that republish as
+the final one; the completion driver flushes a `didChange` mid-word as
+the line is typed, the fake answers it with the check's set at a base
+the carry still reaches, and that intermediate republish put the
+error on its text. Closed on the branch as `1847805`: the row waits
+for the state it demonstrates, the check's error one line too high
+once the last `didChange` is answered. A fixture race in a row this
+phase wrote, not a product defect; the same row was `ok` on the other
+five legs and in five local runs before and after the fix.
+
 ### `main` after E7b: run 35437135435 at `361bb3b`, red on two rows of its own suites, filed as #282 and #283
 
 E7b merged as `361bb3b` (squash of `c0230bf`, PR #280,
