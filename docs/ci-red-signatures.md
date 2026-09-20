@@ -2108,6 +2108,269 @@ the job's only failure:
 The head is not green, on the branch's own row and by the retry's
 timer, stated at the moment of writing.
 
+### PR #284's fix-round-3 head run 35504020999 at `0a287d6`: two witness rows of the round's own, and #283's fourth
+
+E7c's head after fix round 3's two ruling commits (the save retry's
+trigger moved from the 1.5 s timer to the `didChange` that goes out
+before the check begins, closing #285; the activity indicator's 300 ms
+threshold, method-only label, fixed width and leftmost slot, the busy
+suffix's fixed slot). Read at the round's close on 2026-09-20 from the
+jobs endpoint and all six test legs' logs after the run had completed;
+not re-run --- the two rows of the round's own were fixed and pushed
+as a new head, whose run has its own section below.
+
+| field | value |
+|---|---|
+| run | 35504020999, `pull_request`, one attempt |
+| head | `0a287d6`, PR #284 |
+| window | created 2026-09-20T10:04:08Z, updated 10:29:32Z |
+| verdict | 19 jobs: **15 success, 1 skipped, 3 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35504020999-jobs): 19 = 15 + 1 + 3.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 106060648312 | success |
+| Format | 106060648374 | success |
+| Changed paths | 106060648393 | success |
+| Lint (lua54) | 106060648403 | success |
+| Lint (luajit) | 106060648479 | success |
+| Perf budgets (debug) | 106060744295 | success |
+| M10 Perf Gates (crdt) | 106060744299 | success |
+| M1 Acceptance Gates | 106060744303 | success |
+| GPU Render (headless) | 106060744311 | success |
+| M6 Perf Gates | 106060744316 | success |
+| M4 Perf Gates | 106060744319 | success |
+| Test (ubuntu-latest / luajit) | 106060744323 | success |
+| Test (macos-latest / lua54) | 106060744338 | failure |
+| M5 Perf Gates | 106060744343 | success |
+| Test (ubuntu-latest / lua54) | 106060744346 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 106060744347 | failure |
+| Test (crdt) | 106060744382 | success |
+| Test (macos-latest / luajit) | 106060744424 | failure |
+| Docs consistency | 106060744865 | skipped |
+
+Tally (run-35504020999-failures): 3 rows of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (ubuntu-latest / luajit)` 167 `test
+result: ok`, `Test (ubuntu-latest / lua54)` 167, `Test (crdt)` 166,
+each with zero `FAILED`; `Test (macos-latest / lua54)` 165 `ok` and
+one `FAILED`; `Test (ubuntu-latest / luajit, no crdt)` 164 and one;
+`Test (macos-latest / luajit)` 165 and one; every log's `running N
+tests` lines paired one to one with its result lines. `WouldBlock`,
+`did not become ready` and `got ok` appear zero times on every leg;
+U17's witness `ok` on all six; the two wire rows against
+rust-analyzer (`a_save_sends_did_save_and_rust_analyzer_flychecks_on_it`,
+#285's, and the round's `a_keystroke_after_the_save_resends_it_behind_the_did_change`)
+`ok` on all six. The three reds:
+
+- `Test (macos-latest / lua54)`: **#283's fourth occurrence** ---
+  `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`,
+  `pump timeout waiting for the accept and its import`, `popup_rows=0
+  anchor=None`, `9 passed; 1 failed`, all three fragments, the leg of
+  its first and third; off the branch's path; commented on the issue.
+- `Test (ubuntu-latest / luajit, no crdt)`: **the round's own**,
+  `e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered`
+  --- "and in the wire's right group at 300 ms: [`LSP:ready         `]":
+  the row read the wire's `StatuslineSegments` a few milliseconds before
+  the evaluator at the threshold's edge, and asserted both carried the
+  indicator on the same frame; a witness race on the `--test-threads=1`
+  leg, not a product defect (the indicator was on the evaluator, the
+  grid and the wire on the following frames). Fixed on the branch as
+  `9eb89c1`: the row asserts each surface carried the method at the
+  width on some shown frame.
+- `Test (macos-latest / luajit)`: **the round's own**,
+  `a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label`
+  (`statusline_segments_acceptance`) --- `left: "⋯1 parse rust
+  "`, `right: "LSP:?"`: the row read `right[0]` as the LSP segment,
+  and since `0a287d6` the activity indicator is the leftmost right
+  segment whenever a job has been in flight past its threshold, which a
+  `parse rust` job was on that runner; a witness assumption about the
+  right group's order, not a product defect. Fixed on the branch as
+  `9eb89c1`: the row finds the LSP segment by face.
+
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276, nor #253 sampled; #283 moves to four. The base control
+is `361bb3b`, the last code-bearing commit on `main` (run 35437135435,
+19 = 16 + 1 + 2 on #282 and #283, recorded as `cbac12b`). The head is
+not green, on two witness rows of its own and by #283, stated at the
+moment of writing; the next head's run is the one below.
+
+### PR #284's fix-round-3 second head run 35505799659 at `9eb89c1`: two more witness rows of the round's own, and #283's fifth
+
+E7c's head after the first witness fix (`9eb89c1`, the LSP segment
+read by face and the indicator's wire read on any shown frame). Read
+at the round's close on 2026-09-20 from the jobs endpoint and all six
+test legs' logs after the run had completed; not re-run --- the two
+rows of the round's own were fixed and pushed as a new head, whose run
+has its own section below.
+
+| field | value |
+|---|---|
+| run | 35505799659, `pull_request`, one attempt |
+| head | `9eb89c1`, PR #284 |
+| window | created 2026-09-20T10:42:05Z, updated 11:02:15Z |
+| verdict | 19 jobs: **15 success, 1 skipped, 3 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35505799659-jobs): 19 = 15 + 1 + 3.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 106065289108 | success |
+| Format | 106065289176 | success |
+| Commit attribution (D9) | 106065289213 | success |
+| Lint (lua54) | 106065289214 | success |
+| Lint (luajit) | 106065289240 | success |
+| M10 Perf Gates (crdt) | 106065308683 | success |
+| M4 Perf Gates | 106065308706 | success |
+| GPU Render (headless) | 106065308725 | success |
+| M5 Perf Gates | 106065308728 | success |
+| Perf budgets (debug) | 106065308732 | success |
+| M6 Perf Gates | 106065308735 | success |
+| M1 Acceptance Gates | 106065308755 | success |
+| Test (macos-latest / luajit) | 106065308768 | failure |
+| Test (ubuntu-latest / luajit) | 106065308774 | success |
+| Test (crdt) | 106065308776 | success |
+| Test (ubuntu-latest / lua54) | 106065308785 | failure |
+| Test (macos-latest / lua54) | 106065308799 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 106065308856 | failure |
+| Docs consistency | 106065309529 | skipped |
+
+Tally (run-35505799659-failures): 3 rows of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (ubuntu-latest / luajit)` 167 `test
+result: ok`, `Test (macos-latest / lua54)` 168, `Test (crdt)` 166,
+each with zero `FAILED`; `Test (macos-latest / luajit)` 165 `ok` and
+one `FAILED`; `Test (ubuntu-latest / lua54)` 164 and one; `Test
+(ubuntu-latest / luajit, no crdt)` 164 and one; every log's `running
+N tests` lines paired one to one with its result lines. `WouldBlock`,
+`did not become ready` and `got ok` appear zero times on every leg;
+U17's witness `ok` on all six; the resend row
+`a_keystroke_after_the_save_resends_it_behind_the_did_change` `ok` on
+all six, and the previous run's two rows (`a12_…`, the slow-request
+row's wire read) `ok` on every leg they ran. The three reds:
+
+- `Test (macos-latest / luajit)`: **#283's fifth occurrence**, the leg
+  of its second ---
+  `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`,
+  `pump timeout waiting for the accept and its import`, `popup_rows=0
+  anchor=None`, `9 passed; 1 failed`, all three fragments; off the
+  branch's path; commented on the issue. Two occurrences in two
+  consecutive runs of the branch, forty minutes apart, one per macOS
+  leg.
+- `Test (ubuntu-latest / lua54)`: **the round's own, and E7c.1's row**
+  `a_save_sends_did_save_and_rust_analyzer_flychecks_on_it` (#285's) ---
+  "the check showed as a suffix on ready: [`5 = LSP:idx`, `1104 =
+  LSP:ready`, `3054 = LSP:idx`, `4562 = LSP:ready`]": the server's
+  cache priming restarted with the typed edit and the label read `idx`
+  from the save to past the check, which masks the busy suffix by
+  E7b.1's own rule (the kind wins); the `didSave` count --- the row's
+  claim and #285's --- held at one, the assertion that failed being
+  the later one on the label. A witness assumption that the check runs
+  under `ready`, not a product defect. Fixed on the branch as
+  `3de1e1f`: the watch logs the tracker's busy title beside the label
+  and the row accepts the check's title there when the label hid it.
+- `Test (ubuntu-latest / luajit, no crdt)`: **the round's own**,
+  `e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered`
+  --- "it appeared after the threshold and before the answer: 299 ms":
+  a frame's stamp precedes its three reads by a few milliseconds on the
+  `--test-threads=1` leg, so a frame whose evaluator read was past 300
+  ms carried a 299 ms stamp; not a product defect. Fixed on the branch
+  as `3de1e1f`: the edge is judged with the 250 ms slack the row's
+  early check already uses.
+
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276, nor #253 sampled; #283 moves to five. The base control
+is `361bb3b` (run 35437135435, recorded as `cbac12b`). The head is
+not green, on two witness rows of its own and by #283, stated at the
+moment of writing; the next head's run is the one below.
+
+### PR #284's fix-round-3 tip run 35507517448 at `3de1e1f`: #283's sixth and #282's second, neither the branch's
+
+E7c's head at fix round 3's close (`3de1e1f`, the second witness fix:
+the one-save row reading the check on the tracker under a reload, the
+indicator row's edge with slack). Read at the round's close on
+2026-09-20 from the jobs endpoint and all six test legs' logs after
+the run had completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 35507517448, `pull_request`, one attempt |
+| head | `3de1e1f`, PR #284 |
+| window | created 2026-09-20T11:19:45Z, updated 11:39:26Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-35507517448-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Format | 106069729614 | success |
+| Changed paths | 106069729687 | success |
+| Lint (luajit) | 106069729696 | success |
+| Lint (lua54) | 106069729707 | success |
+| Commit attribution (D9) | 106069729713 | success |
+| M1 Acceptance Gates | 106069747046 | success |
+| Test (crdt) | 106069747051 | success |
+| GPU Render (headless) | 106069747074 | success |
+| M4 Perf Gates | 106069747076 | success |
+| Test (macos-latest / luajit) | 106069747083 | failure |
+| M5 Perf Gates | 106069747091 | success |
+| Perf budgets (debug) | 106069747093 | success |
+| M10 Perf Gates (crdt) | 106069747108 | success |
+| Test (ubuntu-latest / luajit) | 106069747112 | success |
+| M6 Perf Gates | 106069747131 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 106069747153 | failure |
+| Test (ubuntu-latest / lua54) | 106069747174 | success |
+| Test (macos-latest / lua54) | 106069747183 | success |
+| Docs consistency | 106069747561 | skipped |
+
+Tally (run-35507517448-failures): 2 rows of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (crdt)` 166 `test result: ok`,
+`Test (ubuntu-latest / luajit)` 167, `Test (ubuntu-latest / lua54)`
+167, `Test (macos-latest / lua54)` 168, each with zero `FAILED`;
+`Test (macos-latest / luajit)` 165 `ok` and one `FAILED`; `Test
+(ubuntu-latest / luajit, no crdt)` 164 and one; every log's `running
+N tests` lines paired one to one with its result lines. `WouldBlock`,
+`did not become ready` and `got ok` appear zero times on every leg;
+U17's witness `ok` on all six; the round's twenty-five `e7c_` rows
+(fix round 2's twenty, the five indicator rows), the two wire rows
+against rust-analyzer (the one-save row, #285's, and the resend row)
+and the four witness rows the two earlier heads corrected `ok` on
+every leg. The two reds:
+
+- `Test (macos-latest / luajit)`: **#283's sixth occurrence** ---
+  `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`,
+  `pump timeout waiting for the accept and its import`, `popup_rows=0
+  anchor=None`, `9 passed; 1 failed`, all three fragments; off the
+  branch's path; commented on the issue. Three occurrences in this
+  branch's three consecutive runs of the day.
+- `Test (ubuntu-latest / luajit, no crdt)`: **#282's second
+  occurrence**, on the ubuntu luajit flavor's no-crdt leg ---
+  `a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`,
+  `*lsp* names the request and the code: []`, `WIRE *errors* gained
+  ["[lsp] LSP: default-rust refused textDocument/prepareRename as a
+  client error, -32602 InvalidParams: …"]`, `WIRE label "ready",
+  last_error None`; the result line `4 passed; 1 failed; 2 ignored`
+  where the first occurrence read `3 passed`, the suite having gained
+  a row this round, so that count moves with the suite. The trace
+  shows the filed mechanism: a `rustAnalyzer/cachePriming` cycle ran
+  through the rename and its reports pushed the error line out of
+  `*lsp*`'s 64-entry ring. Not the branch's: the round touched this
+  suite's label helper and its watch's busy logging, neither writing
+  to `*lsp*`; commented on the issue.
+
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276, nor #253 sampled; #283 moves to six and #282 to two.
+The base control is `361bb3b` (run 35437135435, 19 = 16 + 1 + 2 on
+#282's first and #283's first, recorded as `cbac12b`): the two rows
+red on the base control are the two rows red here. The head is not
+green, on two registered rows off its path, stated at the moment of
+writing; the disposition is the owner's, in D33's form.
+
 ### PR #284's fix-round-1 head run 35464890800 at `28413d0`, and it is GREEN
 
 Read at C7c fix round 1's close on 2026-09-19, from the jobs endpoint
@@ -3002,13 +3265,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least eighteen, 2026-08-07 to 2026-09-17, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the six since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least twenty, 2026-08-07 to 2026-09-20, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the eight since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 19 = 12 + 7.
+Tally (R7): 20 = 12 + 8.
 
-Tally (R7-held): 7 items in the list below.
+Tally (R7-held): 8 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -3017,6 +3280,7 @@ Tally (R7-held): 7 items in the list below.
 - seventeenth: gate log `20260910T203556Z-1854124`, step `05-sweep` of E5's tip gate, `attach.rs:1958`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
 - eighteenth: gate log `20260917T001151Z-3116741`, step `05-sweep` on E6d's branch, `attach.rs:1971`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
 - nineteenth: gate log `20260919T224133Z-2027161`, step `05-sweep` on E7c's branch at `09798eb` (fix round 2's tip), load average 18, `attach.rs:1971`, `test result: FAILED. 366 passed; 1 failed`, all three fragments; the next run on the same tree (`20260919T224739Z-2089471`) six of six, non-reproduction and nothing more
+- twentieth: gate log `20260920T110710Z-2592202`, step `05-sweep` on E7c's branch at `3de1e1f` (fix round 3's tip), the fifteen-minute load average 17 (the round's own bites and builds), `attach.rs:1971`, `test result: FAILED. 366 passed; 1 failed`, all three fragments; the next run on the same tree (`20260920T111455Z-2678460`) six of six, non-reproduction and nothing more
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
