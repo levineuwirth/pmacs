@@ -731,18 +731,6 @@ fn e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered() {
         );
         assert!(!text.contains("file://"), "never the URI: {text:?}");
         assert_eq!(cells(&text), width, "at the fixed width: {text:?}");
-        assert!(
-            fr.grid.contains("⋯1 textDocument/rename"),
-            "and on the grid row at {} ms: {:?}",
-            fr.at_ms,
-            fr.grid.trim_end()
-        );
-        assert!(
-            fr.wire_right.iter().any(|t| t == &text),
-            "and in the wire's right group at {} ms: {:?}",
-            fr.at_ms,
-            fr.wire_right
-        );
         let c = grid_columns(&fr.grid);
         assert_eq!(
             (c.lsp, c.protected),
@@ -750,6 +738,32 @@ fn e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered() {
             "the LSP segment and the cursor group did not move while the indicator showed, at {} ms: {:?}",
             fr.at_ms,
             fr.grid.trim_end()
+        );
+    }
+    // Both compositions carried it. A frame reads the wire, then the
+    // grid, then the evaluator, a few milliseconds apart, so at the
+    // threshold's edge the wire can trail the evaluator by one read
+    // (CI's `--test-threads=1` leg read exactly that at 300 ms); the
+    // claim is that each surface showed the method at the width, not
+    // that they crossed the edge in the same read.
+    let shown_text = activity_of(shown[0]).unwrap();
+    assert!(
+        shown
+            .iter()
+            .any(|fr| fr.grid.contains("⋯1 textDocument/rename")),
+        "the grid row carried the indicator while it showed"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|fr| fr.wire_right.iter().any(|t| t == &shown_text)),
+        "the wire's right group carried the indicator at the width while it showed"
+    );
+    for fr in &frames {
+        assert!(
+            !fr.grid.contains("file://") && !fr.wire_right.iter().any(|t| t.contains("file://")),
+            "never the URI on either composition at {} ms",
+            fr.at_ms
         );
     }
     let last_shown = shown.last().unwrap().at_ms;

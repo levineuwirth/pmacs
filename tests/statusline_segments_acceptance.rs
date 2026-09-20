@@ -109,6 +109,18 @@ fn segments_of(
     })
 }
 
+/// The LSP segment of a right group, by face rather than by index: since
+/// C7c fix round 3 the activity indicator is the leftmost right segment
+/// whenever a job has been in flight past its threshold (a `parse rust`
+/// job on a slow runner), so `right[0]` is not always the LSP segment.
+/// The `ready` family's fixed slot is trimmed; the label is the question.
+fn lsp_text_of(right: &[StatuslineSegment]) -> Option<String> {
+    right
+        .iter()
+        .find(|seg| seg.face == "ui.modeline.lsp")
+        .map(|seg| seg.text.trim_end().to_owned())
+}
+
 fn theme_faces_of(messages: &[InstanceMessage]) -> Option<Vec<pmacs::protocol::ThemeFace>> {
     messages.iter().find_map(|message| match message {
         InstanceMessage::ThemeFacts { faces } => Some(faces.clone()),
@@ -728,7 +740,7 @@ fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
     );
     let first = render.render_frame(&state);
     let (_, _, right) = segments_of(&first).expect("first LSP statusline payload");
-    assert_eq!(right[0].text, "LSP:init");
+    assert_eq!(lsp_text_of(&right).as_deref(), Some("LSP:init"));
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut ready = false;
@@ -736,7 +748,8 @@ fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
         state.tick_processes();
         state.tick_lsp();
         let frame = render.render_frame(&state);
-        if segments_of(&frame).is_some_and(|(_, _, right)| right[0].text.trim_end() == "LSP:ready")
+        if segments_of(&frame)
+            .is_some_and(|(_, _, right)| lsp_text_of(&right).as_deref() == Some("LSP:ready"))
         {
             ready = true;
             break;
@@ -786,7 +799,7 @@ fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
     assert!(forgotten, "stopped fake server never became forgettable");
     let unknown = render.render_frame(&state);
     let (_, _, right) = segments_of(&unknown).expect("forgotten server update");
-    assert_eq!(right[0].text, "LSP:?");
+    assert_eq!(lsp_text_of(&right).as_deref(), Some("LSP:?"));
 }
 
 // Acceptance 13-17 and 26: protocol placement/version, authoritative first
