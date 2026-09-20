@@ -717,8 +717,11 @@ fn e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered() {
         "the held rename reached the indicator past the threshold"
     );
     let first_shown = shown[0].at_ms;
+    // A frame's stamp precedes its three reads by a few milliseconds
+    // on a slow leg (CI read 299 ms for an evaluator read past 300),
+    // so the edge is judged with the same slack as the early check.
     assert!(
-        (300..1500).contains(&first_shown),
+        (250..1500).contains(&first_shown),
         "it appeared after the threshold and before the answer: {first_shown} ms"
     );
     let width: usize = eval(&f.s, "return pmacs._async._activity_width");

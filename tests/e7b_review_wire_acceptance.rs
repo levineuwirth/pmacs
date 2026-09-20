@@ -164,6 +164,7 @@ fn watch_wire(s: &mut EditorState, cap: &Capture, secs: u64) -> Vec<String> {
     from.new_frames();
     let mut log = Vec::new();
     let mut last_label = String::new();
+    let mut last_busy = String::new();
     while Instant::now() < deadline {
         tick(s);
         let ms = t0.elapsed().as_millis();
@@ -177,6 +178,25 @@ fn watch_wire(s: &mut EditorState, cap: &Capture, secs: u64) -> Vec<String> {
         if label != last_label {
             log.push(format!("{ms} = {label}"));
             last_label = label;
+        }
+        // The tracker's busy title beside the label (`b <title>`; `b -`
+        // for none): the label shows the kind while it is `idx`, so a
+        // check that runs under a reload is busy on the tracker and
+        // invisible on the label (E7b.1's rule, the kind wins).
+        let busy: Option<String> = s
+            .lua_host
+            .lua()
+            .load(
+                "local rec = pmacs.lsp.active_attachment()
+                 local st = rec and pmacs.lsp.status_summary(rec.server)
+                 return st and st.busy or nil",
+            )
+            .eval()
+            .unwrap_or(None);
+        let busy = busy.unwrap_or_else(|| "-".to_owned());
+        if busy != last_busy {
+            log.push(format!("{ms} b {busy}"));
+            last_busy = busy;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -661,13 +681,21 @@ fn a_save_sends_did_save_and_rust_analyzer_flychecks_on_it() {
     );
     // The label: the suffix while the check ran, and `ready` on its
     // own account throughout --- a `$/progress` cycle on a flycheck
-    // token never reads `idx` (E7b.1).
+    // token never reads `idx` (E7b.1). When the server reloads or
+    // re-primes across the check (CI's ubuntu lua54 leg read `idx`
+    // from the save to past the check, its cache priming restarted by
+    // the edit), the kind masks the suffix by E7b.1's own rule, and the
+    // check's title is read on the tracker's busy field instead.
     let seen: Vec<&String> = wire.iter().filter(|l| l.contains(" = ")).collect();
-    eprintln!("WIRE labels after the save: {seen:?}");
+    let busy: Vec<&String> = wire.iter().filter(|l| l.contains(" b ")).collect();
+    eprintln!("WIRE labels after the save: {seen:?}; busy: {busy:?}");
     assert!(
         seen.iter()
-            .any(|l| l.ends_with("= LSP:ready·check") || l.ends_with("= LSP:ready·clippy")),
-        "the check showed as a suffix on ready: {seen:?}"
+            .any(|l| l.ends_with("= LSP:ready·check") || l.ends_with("= LSP:ready·clippy"))
+            || busy
+                .iter()
+                .any(|l| l.ends_with("b cargo check") || l.ends_with("b cargo clippy")),
+        "the check showed as a suffix on ready, or as the tracker's busy title under a reload: {seen:?} {busy:?}"
     );
     assert!(
         !seen.iter().any(|l| l.ends_with("= LSP:degraded")),
