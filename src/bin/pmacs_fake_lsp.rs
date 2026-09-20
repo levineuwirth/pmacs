@@ -107,8 +107,9 @@
 //!   `didsavenotext` the same with `save: true`, so a client sends
 //!   `textDocument/didSave` with the text and without it. Each
 //!   `didSave` received is appended to `PMACS_FAKE_LSP_SAVE_SINK` as
-//!   one `{"uri", "text"}` JSON line (`text` null when the
-//!   notification carried none) and answered with a flycheck cycle
+//!   one `{"uri", "text", "dropped", "changes_seen"}` JSON line
+//!   (`text` null when the notification carried none, `changes_seen`
+//!   the `didChange`s read before it) and answered with a flycheck cycle
 //!   --- `$/progress` begin and end on `rust-analyzer/flycheck/<n>`,
 //!   title `cargo check` --- which is what rust-analyzer does with a
 //!   save. Every other mode declares no `save`, and a conforming
@@ -122,7 +123,13 @@
 //!   URI, the check's kept from the last save, so the client sees
 //!   the two bases rust-analyzer mixes in one notification. With
 //!   `PMACS_FAKE_LSP_DROP_SAVES=n` the first n `didSave`s are recorded
-//!   (`dropped: true`) and otherwise ignored.
+//!   (`dropped: true`) and otherwise ignored. With
+//!   `PMACS_FAKE_LSP_SAVE_HOLD_MS=ms` the fake sleeps that long after
+//!   recording a save it answers, before its cycle and reading anything
+//!   further: a server whose first frame after a save is late (#285's
+//!   shape, 1.2 s on a CI runner), so a client that resends a save on a
+//!   clock is told apart from one that resends behind its own
+//!   `didChange` (E7c fix round 3).
 //! * If `PMACS_FAKE_LSP_INIT_SINK` names a file (any mode): the
 //!   `initializationOptions` the client sent, as JSON (E7c.2).
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
@@ -1730,15 +1737,24 @@ fn main() {
                         .append(true)
                         .open(&sink)
                     {
+                        // `changes_seen`: how many `didChange`s the
+                        // fake had read when this save arrived, so a
+                        // test can say a resent save came behind the
+                        // change and not before it (E7c fix round 3).
                         let line = serde_json::json!({
                             "uri": params["textDocument"]["uri"],
                             "text": params.get("text").cloned().unwrap_or(serde_json::Value::Null),
                             "dropped": dropped,
+                            "changes_seen": didchange_count,
                         });
                         let _ = writeln!(f, "{line}");
                     }
                 }
                 if mode.starts_with("didsave") && !dropped {
+                    // A late first frame: nothing is read or written
+                    // while the hold lasts, as a busy server's main
+                    // loop answers nothing.
+                    hold_for("PMACS_FAKE_LSP_SAVE_HOLD_MS", None);
                     let token = format!("rust-analyzer/flycheck/{didsave_count}");
                     didsave_count += 1;
                     for value in [

@@ -108,11 +108,12 @@ for sends the whole document, applies none, or paints the published
 position, said. Busy is not a state: only `INDEXING_TOKENS`
 (`src/lsp_status.rs`) move the kind to `Indexing`; other `$/progress` is
 a suffix on `ready`. A save sends `didSave` as the server's `save` asks,
-after the `didChange`, and that runs its check.
-
-LaTeX is served by `texlab`; `pmacs.lsp.config.latex` walks up for its
-own markers (`.texlabroot`, `texlabroot`), never for `.git`: a multi-file
-document's root is not its repository's.
+after the `didChange`, and that runs its check; while the flycheck
+token's begin has not come, a `didChange` going out sends the save again
+behind it, at most three times, never on a clock (`save_retry`). LaTeX is
+served by `texlab`; `pmacs.lsp.config.latex` walks up for its own markers
+(`.texlabroot`, `texlabroot`), never `.git`: a multi-file document's root
+is not its repository's.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
@@ -121,12 +122,11 @@ The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `inlaybounds`, `inlayrefresh`, `semantictokensrefresh`, `applyeditplan`,
 `resourceops`, `posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`.
 Failure shapes: `crash`, `error`, `contentmodified`, `clientfault`,
-`garbage`, `silent`. File watchers: `filewatch` (a `RelativePattern`
-`**/*.txt`), `filewatchabs` (an absolute plain glob), `filewatchflat` (no
-leading `**/`), `filewatchbare` (a bare relative string), `filewatchrereg`
-(the same id twice), `filewatchjoin`, `filewatchretire`. Use these, never
-a real server; the binary documents each shape, and a stale copy here
-covers the shape next to the defect.
+`garbage`, `silent`. Watchers: `filewatch` (`RelativePattern` `**/*.txt`),
+`filewatchabs` (absolute glob), `filewatchflat` (no `**/`), `filewatchbare`
+(bare relative), `filewatchrereg` (one id twice), `filewatchjoin`,
+`filewatchretire`. Use these, never a real server; the binary documents
+each shape, and a stale copy here covers the shape next to the defect.
 
 ## Persistence
 

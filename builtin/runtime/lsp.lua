@@ -41,13 +41,14 @@ pmacs.lsp = pmacs.lsp or {}
 --                           they are placed against the text last
 --                           saved or opened and carried to the current
 --                           text from there (E7c.3)
---   save_retry    (bool)    send `didSave` again, up to three times
---                           1.5 s apart, while no `$/progress` cycle
---                           has begun since the save: rust-analyzer
+--   save_retry    (bool)    send `didSave` again behind a `didChange`
+--                           that goes out while the save's check has
+--                           not begun, up to three times: rust-analyzer
 --                           drops the check a save asks for when a
 --                           `didChange` reaches it while it is still
---                           deciding what to check, and never
---                           retries (E7c.1)
+--                           deciding what to check, and never retries;
+--                           the flycheck token's `$/progress` begin
+--                           stands the watch down (E7c.1)
 --   root  (string|function) optional explicit project root; overrides
 --                           the `pmacs.project.detect` marker walk used
 --                           to set `rootUri`/`cwd`. A `function(path) ->
@@ -97,7 +98,8 @@ pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
   -- A keystroke's `didChange` reaching rust-analyzer while it is
   -- still scheduling the check a save asked for cancels that
   -- schedule, and it is dropped without a retry; the save is sent
-  -- again while no cycle has begun (E7c.1).
+  -- again behind the `didChange` that goes out while no flycheck has
+  -- begun on it (E7c.1).
   save_retry = true,
 }
 
@@ -704,6 +706,9 @@ local pull_inlay_hints_quiet
 -- Same, for semantic tokens (Arc 1c). They are pull-model too, and
 -- nothing was pulling them.
 local pull_semantic_tokens_quiet
+-- And the save retry's resend behind a `didChange` (E7c.1), defined
+-- with the watch it reads.
+local resend_save_behind_change
 
 local function flush_did_change(key)
   local pending = pending_did_change[key]
@@ -728,6 +733,9 @@ local function flush_did_change(key)
     if not ok then return end
     pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, text)
   end
+  -- E7c.1: a save whose check has not begun goes again behind this
+  -- change (the watch and the reason are with `SAVE_RETRY_MAX`).
+  resend_save_behind_change(rec)
   -- Inlay hints are pull-model: the store's stale flag (set per edit)
   -- only clears on a fresh `textDocument/inlayHint` response, and the
   -- server never volunteers one. Re-request at flush cadence so
@@ -773,50 +781,57 @@ end
 -- workspace: a `didChange` 0 or 50 ms after the save loses the check,
 -- 120 ms or later keeps it; in the editor a keystroke at 350 ms lost
 -- it and one at 2.9 s did not, the check's begin arriving 1.6--1.9 s
--- after a save, so the window here is wider than the driver's and
--- closes before the begin. The retry is per language
+-- after a save.
+--
+-- The trigger is the mechanism's, not a clock's (the owner's ruling
+-- at C7c fix round 3; until then a 1.5 s timer resent the save, and
+-- on a server slow to begin its check the timer outran the server and
+-- cost a second check, #285). The retry is per language
 -- (`save_retry`), armed by the after-save hook when a `didSave` went
--- out, disarmed by the first `$/progress` begin from that server, and
--- fires from the async tick while the buffer has no unsent edit:
--- `SAVE_RETRY_MS` after the save and again after each retry,
--- `SAVE_RETRY_MAX` times, with the text the manager kept at the save,
--- never the buffer's. The delay outlasts the editor's window; the
--- condition keeps the resend clear of a `didChange` already queued
--- behind it, not of one typed after it, which loses the resent check
--- the same way and is what the next send is for.
-local SAVE_RETRY_MS = 1500
+-- out, and fires from `flush_did_change`: when a `didChange` goes out
+-- for the document while the watch is armed, the `didSave` is sent
+-- again immediately behind it, with the text the manager kept at the
+-- save, never the buffer's. rust-analyzer's main loop applies a
+-- change at the end of its own turn, so the resent save's task can be
+-- cancelled only by the next change --- which sends the save again,
+-- `SAVE_RETRY_MAX` times in all. The watch stands down on the
+-- flycheck token's `$/progress` begin (`FLYCHECK_TOKEN_PREFIX`), not
+-- on any progress: a workspace reload's begin says nothing about the
+-- check. A save nothing is typed after is sent once, however long the
+-- server takes to begin.
 local SAVE_RETRY_MAX = 3
+local FLYCHECK_TOKEN_PREFIX = "rust-analyzer/flycheck/"
 -- sid string -> whether the language's config asks for the retry.
 local save_retry_servers = {}
--- attachment record -> { at = monotonic ms of the last send, sent = n }
+-- attachment record -> { sent = n } while the save's check has not begun.
 local save_watches = {}
 
-local function arm_save_watch(rec, now)
+local function arm_save_watch(rec)
   if not save_retry_servers[tostring(rec.server)] then return end
-  save_watches[rec] = { at = now, sent = 1 }
+  save_watches[rec] = { sent = 1 }
 end
 
-local function retry_due_saves()
-  if next(save_watches) == nil then return end
-  local now = pmacs.editor.monotonic_ms()
-  for rec, watch in pairs(save_watches) do
-    if attachments[tostring(rec.buffer)] ~= rec then
-      save_watches[rec] = nil
-    elseif now - watch.at >= SAVE_RETRY_MS
-        and pending_did_change[tostring(rec.buffer)] == nil then
-      if watch.sent > SAVE_RETRY_MAX then
-        save_watches[rec] = nil
-      else
-        local ok, sent = pcall(pmacs.lsp._resend_did_save, rec.server, rec.uri)
-        if ok and sent then
-          watch.at = now
-          watch.sent = watch.sent + 1
-        else
-          save_watches[rec] = nil
-        end
-      end
-    end
+-- A `didChange` for `rec` just went out: if the save's watch is
+-- armed, the save goes again right behind it. Assigns the
+-- forward-declared local above `flush_did_change`.
+function resend_save_behind_change(rec)
+  local watch = save_watches[rec]
+  if not watch then return end
+  if watch.sent > SAVE_RETRY_MAX then
+    save_watches[rec] = nil
+    return
   end
+  local ok, sent = pcall(pmacs.lsp._resend_did_save, rec.server, rec.uri)
+  if ok and sent then
+    watch.sent = watch.sent + 1
+  else
+    save_watches[rec] = nil
+  end
+end
+
+local function is_flycheck_token(token)
+  return type(token) == "string"
+    and token:sub(1, #FLYCHECK_TOKEN_PREFIX) == FLYCHECK_TOKEN_PREFIX
 end
 
 -- Exposed for tests: the watches in flight, as `{ [uri] = sent }`.
@@ -1781,7 +1796,7 @@ pmacs.hook.add("buffer.after-save", function()
   local ok_send, sent = pcall(pmacs.lsp.did_save, rec.server, rec.uri, text)
   save_watches[rec] = nil
   if ok_send and sent then
-    arm_save_watch(rec, pmacs.editor.monotonic_ms())
+    arm_save_watch(rec)
   end
 end)
 
@@ -2893,12 +2908,16 @@ pmacs.lsp.on_notification("window/showMessage", function(sid, params)
   pmacs.editor.set_status(string.format("LSP: %s says: %s", tostring(label), first))
 end)
 
--- E7c.1: the first `$/progress` begin from a server after a save is
--- the check (or whatever work the save started); the retry stands
--- down for that server's attachments.
+-- E7c.1: a `$/progress` begin on the flycheck token from a server
+-- after a save is the check the save asked for; the retry stands down
+-- for that server's attachments. A begin on any other token --- a
+-- workspace reload, cache priming --- leaves the watch armed (the
+-- owner's ruling at C7c fix round 3).
 pmacs.lsp.on_notification("$/progress", function(sid, params)
-  local value = type(params) == "table" and params.value
+  if type(params) ~= "table" then return end
+  local value = params.value
   if type(value) ~= "table" or value.kind ~= "begin" then return end
+  if not is_flycheck_token(params.token) then return end
   for rec in pairs(save_watches) do
     if rec.server == sid then save_watches[rec] = nil end
   end
@@ -3207,7 +3226,6 @@ if pmacs._async and pmacs._async.tick then
     -- same pass when the server died right after answering.
     pcall(purge_dead_pending)
     pcall(flush_due_did_changes)
-    pcall(retry_due_saves)
     return ret
   end
 end

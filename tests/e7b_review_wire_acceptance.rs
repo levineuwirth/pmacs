@@ -692,6 +692,147 @@ fn is_flycheck_begin(f: &Value) -> bool {
         && f["params"]["value"]["kind"].as_str() == Some("begin")
 }
 
+/// E7c.1's retry on the trigger the owner ruled at fix round 3, against
+/// the real server: a save followed at once by a keystroke sends the
+/// save again right behind the keystroke's `didChange` --- two
+/// `didSave` for one save, the second the frame after a `didChange`
+/// --- and a check runs on it. On this one-file project rust-analyzer
+/// begins the save's check about 70 ms after the `didSave`, and the
+/// coalesced flush would put a plain keystroke's `didChange` 75 ms
+/// behind the key, after the begin had stood the watch down; so the
+/// key is `(`, one of rust-analyzer's signature-help triggers, whose
+/// after-edit hook flushes the `didChange` in the keystroke itself,
+/// and it is pressed the moment the save command returns --- the
+/// `didChange` a few milliseconds behind the `didSave`, inside the
+/// window review 1 measured (6--54 ms lost, 126 ms and later kept).
+/// How many checks begin is then the server's: one when the first was
+/// lost, two when it was not; the count is printed and at least one is
+/// asserted. No third `didSave` follows, the flycheck's begin having
+/// stood the watch down. The row above, a save with nothing typed
+/// after it, counts one `didSave` however late the server begins
+/// (#285's case, closed by this trigger). Bitten by removing the
+/// resend from `flush_did_change`.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one save and one keystroke read on the wire from the edit before them to the check after"
+)]
+fn a_keystroke_after_the_save_resends_it_behind_the_did_change() {
+    if !on_path("rust-analyzer") {
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+        return;
+    }
+    let (mut s, cap) = open_with_captured_rust_analyzer("resend");
+    assert!(
+        wait_warm(&mut s, 90),
+        "the label reads exactly ready for two seconds"
+    );
+    exec(
+        &s,
+        "_G.__e7b_saved = false
+         pmacs.hook.add('buffer.after-save', function() _G.__e7b_saved = true end)
+         pmacs.editor.goto_byte(0)",
+    );
+    type_str(&mut s, "// a line typed before the save");
+    let mut labels = Vec::new();
+    pump_labels(&mut s, 1, &mut labels);
+    if popup_snapshot(&s).is_some() {
+        press(&mut s, KeyCode::Esc);
+    }
+    press(&mut s, KeyCode::Enter);
+    assert!(
+        wait_sent(&mut s, &cap, "textDocument/didChange", 1, 10),
+        "the typed edit reaches the server as didChange"
+    );
+    let before_save = frames(&cap.to_server).len();
+    let flychecks_before = frames(&cap.from_server)
+        .iter()
+        .filter(|f| is_flycheck_begin(f))
+        .count();
+    let t_save = Instant::now();
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    // The keystroke the moment the save command returns (the save is
+    // synchronous: the file written, the after-save hook fired and the
+    // `didSave` sent inside it), on the line below the typed one; `(`
+    // flushes its own `didChange`.
+    press(&mut s, KeyCode::Char('('));
+    let typed_at = t_save.elapsed().as_millis();
+    let saved: bool = eval(&s, "return _G.__e7b_saved == true");
+    assert!(
+        saved,
+        "buffer.after-save fired inside the save command; status {:?}",
+        s.core.borrow().status
+    );
+    let wire = watch_wire(&mut s, &cap, 10);
+    eprintln!(
+        "WIRE the keystroke went in {typed_at} ms after the save; after the save, by the millisecond:"
+    );
+    for line in &wire {
+        eprintln!("WIRE   {line}");
+    }
+    let sent = frames(&cap.to_server);
+    let after_save: Vec<&Value> = sent[before_save..].iter().collect();
+    let methods: Vec<&str> = after_save.iter().filter_map(|f| method_of(f)).collect();
+    eprintln!("WIRE client->server after the save: {methods:?}");
+    let save_positions: Vec<usize> = methods
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| **m == "textDocument/didSave")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        save_positions.len(),
+        2,
+        "two didSave for one save and one keystroke: {methods:?}"
+    );
+    let (first, second) = (save_positions[0], save_positions[1]);
+    assert!(
+        methods[second - 1] == "textDocument/didChange",
+        "the second didSave is the frame after the keystroke's didChange: {methods:?}"
+    );
+    // The `didChange` before the first `didSave` is the save's own
+    // flush of the typed line; between the save and its resend there
+    // is the keystroke's alone.
+    assert!(
+        methods[first..second]
+            .iter()
+            .filter(|m| **m == "textDocument/didChange")
+            .count()
+            == 1,
+        "one didChange between the save and its resend: {methods:?}"
+    );
+    let from = frames(&cap.from_server);
+    let begins = from.iter().filter(|f| is_flycheck_begin(f)).count() - flychecks_before;
+    eprintln!("WIRE flycheck begins after the save: {begins}");
+    assert!(
+        begins >= 1,
+        "a check began on the save or on its resend ({flychecks_before} before)"
+    );
+    let token = from
+        .iter()
+        .rev()
+        .find(|f| is_flycheck_begin(f))
+        .map(|f| f["params"]["token"].as_str().unwrap().to_owned())
+        .unwrap();
+    assert!(
+        from.iter().any(|f| method_of(f) == Some("$/progress")
+            && f["params"]["token"].as_str() == Some(token.as_str())
+            && f["params"]["value"]["kind"].as_str() == Some("end")),
+        "and the last check ended on {token}"
+    );
+    let watches: std::collections::HashMap<String, u32> =
+        eval(&s, "return pmacs.lsp._save_watches()");
+    assert!(
+        watches.is_empty(),
+        "the watch stood down on the check's begin: {watches:?}"
+    );
+    let clean: bool = eval(
+        &s,
+        "return pmacs.lsp.status_summary(pmacs.lsp.active_attachment().server).last_error == nil",
+    );
+    assert!(clean, "no error response during the sequence");
+}
+
 /// The measurement's instrument, pinned: an edit made from Lua outside
 /// any command --- `buf:insert` from a test's `exec`, which is how the
 /// handoff's "broken" and "completion" rounds put their text into
