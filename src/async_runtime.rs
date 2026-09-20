@@ -433,6 +433,13 @@ struct PendingJob {
     /// poll's tree walk, which runs every few seconds for as long as a
     /// server lives and asked for nothing a user would recognize.
     quiet: bool,
+    /// What the activity indicator names this job as, when that is not
+    /// the whole purpose: an LSP request's purpose carries the method
+    /// and the document's URI for `*workers*`, and the indicator shows
+    /// the method alone (the owner's ruling at C7c fix round 3: ninety
+    /// characters of URI on the mode line for the duration of any
+    /// typing). `None` means the purpose itself.
+    indicator: Option<String>,
 }
 
 /// Everything one job is born with.
@@ -1040,6 +1047,7 @@ impl AsyncRuntime {
                 resource,
                 purpose,
                 quiet,
+                indicator: None,
             },
         );
         (id, cancel)
@@ -1380,6 +1388,25 @@ impl AsyncRuntime {
         })
     }
 
+    /// [`Self::register_external`] with a second, shorter account for
+    /// the activity indicator: `purpose` is what `*workers*` lists and
+    /// `indicator` what the mode line shows (see
+    /// [`PendingJob::indicator`]). The LSP manager registers a request
+    /// as `lsp <method> <uri>` and shows it as the method alone.
+    pub fn register_external_shown_as(
+        &self,
+        kind: JobKind,
+        supersede: Option<&str>,
+        purpose: impl Into<String>,
+        indicator: impl Into<String>,
+    ) -> (JobId, CancellationToken) {
+        let (id, token) = self.register_external(kind, supersede, purpose);
+        if let Some(job) = self.pending.borrow_mut().get_mut(&id) {
+            job.indicator = Some(indicator.into());
+        }
+        (id, token)
+    }
+
     /// Settle an externally-registered job with a JSON value. Wakes
     /// any coroutine parked on the corresponding `Handle:await()`
     /// on the next [`Self::tick`].
@@ -1637,20 +1664,27 @@ impl AsyncRuntime {
     }
 
     /// What the statusline activity indicator shows, or `None` when
-    /// nothing is in flight (worker identity Stage 1, Q#W-3).
+    /// nothing has been in flight for `min_age` yet (worker identity
+    /// Stage 1, Q#W-3; the threshold the owner's ruling at C7c fix
+    /// round 3, `ui.activity-indicator-threshold-ms`).
     ///
     /// `None` at zero is the contract, not an optimization: the
     /// indicator renders **no segment at all** when idle, because a
     /// statusline element that is always present costs modeline width
-    /// forever to say "nothing is happening".
+    /// forever to say "nothing is happening". A job younger than
+    /// `min_age` is not in flight for this purpose: the indicator shows
+    /// slow work, not housekeeping --- the semantic-token and inlay-hint
+    /// pulls a keystroke draws answer in tens of milliseconds and were
+    /// on the mode line for the duration of any typing.
     ///
     /// Scans the pending table rather than reusing
     /// [`Self::workers_snapshot`]: this runs once per visible window per
     /// frame, and a snapshot would clone the whole completed ring that
     /// the indicator never reads.
     #[must_use]
-    pub fn activity_summary(&self) -> Option<ActivitySummary> {
+    pub fn activity_summary(&self, min_age: Duration) -> Option<ActivitySummary> {
         let pending = self.pending.borrow();
+        let now = Instant::now();
         let mut in_flight = 0usize;
         let mut oldest: Option<(&Instant, &str)> = None;
         for job in pending.values() {
@@ -1661,6 +1695,9 @@ impl AsyncRuntime {
             if !matches!(job.state, PendingState::Running) || job.quiet {
                 continue;
             }
+            if now.saturating_duration_since(job.dispatched_at) < min_age {
+                continue;
+            }
             in_flight += 1;
             // Strictly-earlier wins, so the first job seen holds the
             // slot against later ties. `HashMap` iteration order is
@@ -1668,7 +1705,10 @@ impl AsyncRuntime {
             // resolve arbitrarily — a tie between simultaneous jobs has
             // no right answer to lose.
             if oldest.is_none_or(|(seen, _)| job.dispatched_at < *seen) {
-                oldest = Some((&job.dispatched_at, job.purpose.as_str()));
+                oldest = Some((
+                    &job.dispatched_at,
+                    job.indicator.as_deref().unwrap_or(job.purpose.as_str()),
+                ));
             }
         }
         let (_, purpose) = oldest?;
@@ -2318,12 +2358,14 @@ mod tests {
         let rt = AsyncRuntime::with_pool_size(1);
         let quiet = rt.dispatch_fs_walk_tree(td.path().to_path_buf(), None, vec![], true);
         assert_eq!(
-            rt.activity_summary(),
+            rt.activity_summary(Duration::ZERO),
             None,
             "a quiet walk alone shows nothing"
         );
         let loud = rt.dispatch_fs_walk_tree(td.path().to_path_buf(), None, vec![], false);
-        let summary = rt.activity_summary().expect("the loud walk shows");
+        let summary = rt
+            .activity_summary(Duration::ZERO)
+            .expect("the loud walk shows");
         assert_eq!(summary.in_flight, 1, "the quiet one is not counted");
         assert!(
             summary.oldest_purpose.starts_with("walk_tree "),
@@ -2338,7 +2380,49 @@ mod tests {
         pump_until(&rt, "both walks settle", || {
             rt.workers_snapshot().active.is_empty()
         });
-        assert_eq!(rt.activity_summary(), None);
+        assert_eq!(rt.activity_summary(Duration::ZERO), None);
+    }
+
+    /// C7c fix round 3: the indicator shows slow work. A job younger
+    /// than the threshold is neither counted nor named; once it has
+    /// been in flight that long it is both; and a job registered with
+    /// an indicator label is named by the label, its purpose staying
+    /// whole for `*workers*`. Bitten by dropping the age test, or by
+    /// naming the purpose instead of the label.
+    #[test]
+    fn a_job_reaches_the_indicator_only_past_the_threshold_and_as_its_label() {
+        let rt = AsyncRuntime::with_pool_size(1);
+        let (id, _token) = rt.register_external_shown_as(
+            JobKind::LspRequest,
+            None,
+            "lsp textDocument/rename file:///tmp/x.rs",
+            "textDocument/rename",
+        );
+        assert_eq!(
+            rt.activity_summary(Duration::from_secs(90)),
+            None,
+            "a job younger than the threshold is not in flight for the indicator"
+        );
+        let shown = rt
+            .activity_summary(Duration::ZERO)
+            .expect("the same job at a zero threshold");
+        assert_eq!(shown.in_flight, 1);
+        assert_eq!(
+            shown.oldest_purpose, "textDocument/rename",
+            "the label, not the URI"
+        );
+        let snap = rt.workers_snapshot();
+        let row = snap.active.iter().find(|j| j.id == id).expect("listed");
+        assert_eq!(
+            row.purpose, "lsp textDocument/rename file:///tmp/x.rs",
+            "*workers* keeps the whole purpose"
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        let shown = rt
+            .activity_summary(Duration::from_millis(20))
+            .expect("past the threshold it shows");
+        assert_eq!(shown.in_flight, 1);
+        rt.complete_external_cancelled(id);
     }
 
     /// dired Stage 2a, acceptance 54 (controlled-bus layer). Allocate

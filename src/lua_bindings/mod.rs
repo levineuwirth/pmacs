@@ -7700,13 +7700,17 @@ pub fn install_async(
 
     // The statusline activity indicator's read surface (Q#W-3). Returns
     // `nil` when nothing is in flight — the indicator renders no segment
-    // at all when idle, so "absent" has to be representable.
+    // at all when idle, so "absent" has to be representable. The
+    // optional argument is the threshold in milliseconds a job must
+    // have been in flight for to count (C7c fix round 3); absent or
+    // zero, every running job counts.
     {
         let rt = runtime.clone();
         async_mod.set(
             "_activity_summary",
-            lua.create_function(move |lua, ()| {
-                let Some(summary) = rt.activity_summary() else {
+            lua.create_function(move |lua, threshold_ms: Option<u64>| {
+                let min_age = std::time::Duration::from_millis(threshold_ms.unwrap_or(0));
+                let Some(summary) = rt.activity_summary(min_age) else {
                     return Ok(mlua::Value::Nil);
                 };
                 let t = lua.create_table_with_capacity(0, 2)?;

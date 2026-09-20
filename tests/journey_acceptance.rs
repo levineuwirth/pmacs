@@ -2472,7 +2472,9 @@ fn lsp_segment(s: &EditorState) -> Option<String> {
         .into_iter()
         .flat_map(|w| w.right)
         .find(|seg| seg.face == "ui.modeline.lsp")
-        .map(|seg| seg.text)
+        // The `ready` family carries a fixed slot for the busy suffix
+        // (C7c fix round 3); the label is what these rows read.
+        .map(|seg| seg.text.trim_end().to_owned())
 }
 
 /// **N** — step 6: when language intelligence cannot start, the user is

@@ -736,7 +736,8 @@ fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
         state.tick_processes();
         state.tick_lsp();
         let frame = render.render_frame(&state);
-        if segments_of(&frame).is_some_and(|(_, _, right)| right[0].text == "LSP:ready") {
+        if segments_of(&frame).is_some_and(|(_, _, right)| right[0].text.trim_end() == "LSP:ready")
+        {
             ready = true;
             break;
         }

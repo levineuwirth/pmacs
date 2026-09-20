@@ -1735,11 +1735,16 @@ impl LspManager {
         // worker pool, so its `JobKind` is the undifferentiated
         // `LspRequest` for every method. The method and the document are
         // the only thing that makes one row distinguishable from another
-        // in `*workers*`.
+        // in `*workers*`. The activity indicator shows the method alone
+        // (C7c fix round 3): the URI is ninety characters on a mode line
+        // row, and the document is the one the user is typing in.
         let purpose = format!("lsp {method} {uri}");
-        let (job_id, token) =
-            self.runtime
-                .register_external(JobKind::LspRequest, Some(&supersede), purpose);
+        let (job_id, token) = self.runtime.register_external_shown_as(
+            JobKind::LspRequest,
+            Some(&supersede),
+            purpose,
+            method,
+        );
         self.pending_external.insert(
             (sid, req_id),
             PendingExternal {

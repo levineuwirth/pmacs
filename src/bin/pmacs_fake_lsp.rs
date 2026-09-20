@@ -65,6 +65,8 @@
 //!   unreadable or unparsable plan sends no `applyEdit` at all and
 //!   reports itself through the sink, so a broken fixture cannot read
 //!   as a pass.
+//! * In every mode, `PMACS_FAKE_LSP_RENAME_HOLD_MS` holds the answer
+//!   to `textDocument/rename` that many milliseconds (C7c fix round 3).
 //! * In every mode, `PMACS_FAKE_LSP_FORMAT_HOLD_MS` holds the
 //!   `textDocument/formatting` reply for that many milliseconds before
 //!   it is written (E7.3: a formatter that answers after a save's
@@ -1171,6 +1173,10 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/rename", Some(idv)) => {
+                // `PMACS_FAKE_LSP_RENAME_HOLD_MS` holds the answer (a
+                // slow request for the activity indicator's rows, C7c
+                // fix round 3); nothing is read while it lasts.
+                hold_for("PMACS_FAKE_LSP_RENAME_HOLD_MS", None);
                 // Same UTF-16 validation as prepareRename: rename and
                 // prepareRename both carry a single Position.
                 if mode == "posecho"

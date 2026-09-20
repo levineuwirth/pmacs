@@ -1623,6 +1623,23 @@ end
 -- per-buffer attachment map directly so passive split windows report their
 -- own buffer instead of the focused window.  It never attaches, flushes
 -- didChange, or issues a request.
+--
+-- C7c fix round 3 (the owner's ruling): the busy suffix E7b.1 puts on
+-- `ready` (`ready·check` while a flycheck runs) takes a fixed slot, so
+-- the segment is as wide with the suffix as without it and its left
+-- edge does not move when a check begins or ends --- the mode line's
+-- right group is laid out from the right, so a segment that grows
+-- moves its own label leftward on every check. The slot is `ready`,
+-- the dot and an eight-character suffix, the suffix's own cap;
+-- `idx`, `degraded` and `!` are state changes and take their own
+-- width.
+local READY_SLOT_CELLS = 14
+
+local function lsp_label_cells(s)
+  local _, n = s:gsub("[^\128-\191]", "")
+  return n
+end
+
 pmacs.statusline.register {
   name = "lsp",
   side = "right",
@@ -1635,7 +1652,14 @@ pmacs.statusline.register {
       -- E5.3: a crashed server is `LSP:!`, the same mark a server that
       -- never started gets, rather than the state's own label.
       if server_state_kind(rec.server) == "crashed" then return "LSP:!" end
-      return "LSP:" .. pmacs.lsp.modeline_label(rec.server)
+      local label = pmacs.lsp.modeline_label(rec.server)
+      if label:sub(1, 5) == "ready" then
+        local n = lsp_label_cells(label)
+        if n < READY_SLOT_CELLS then
+          label = label .. string.rep(" ", READY_SLOT_CELLS - n)
+        end
+      end
+      return "LSP:" .. label
     end
     -- Journey Stage 1b-2. A plain map lookup, deliberately: deriving an
     -- affinity key here would run root resolvers and project detection

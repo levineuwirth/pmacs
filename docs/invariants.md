@@ -24,9 +24,8 @@ setter, is the primitive, for three reasons:
   intercept-only "read-only" buffer is emptied by `M-x buffer.undo`.
   Rebinding the undo chords buffer-locally does not close this; only
   rope-level `read_only` does.
-- A bare `set_read_only` would refuse the owner's own refresh, which is
-  the operation such buffers exist for. There is deliberately no Lua
-  `set_read_only`.
+- A bare `set_read_only` would refuse the owner's own refresh, the
+  operation such buffers exist for; there is deliberately no Lua one.
 - A rope write is half of an edit. The returned `Edit` must be fanned out
   through `notify_buffer_edit_to_windows`, which also queues the
   daemon-origin CRDT op. Skipping it leaves a displaying window with a
@@ -107,13 +106,16 @@ that overlaps it keeps what stood outside; what the log cannot account
 for sends the whole document, applies none, or paints the published
 position, said. Busy is not a state: only `INDEXING_TOKENS`
 (`src/lsp_status.rs`) move the kind to `Indexing`; other `$/progress` is
-a suffix on `ready`. A save sends `didSave` as the server's `save` asks,
-after the `didChange`, and that runs its check; while the flycheck
-token's begin has not come, a `didChange` going out sends the save again
-behind it, at most three times, never on a clock (`save_retry`). LaTeX is
-served by `texlab`; `pmacs.lsp.config.latex` walks up for its own markers
-(`.texlabroot`, `texlabroot`), never `.git`: a multi-file document's root
-is not its repository's.
+a suffix on `ready` in a fixed slot. The activity indicator names a job
+only after `ui.activity-indicator-threshold-ms` in flight, an LSP request
+as its method alone, at a fixed width, leftmost of the right group. A
+save sends `didSave` as the server's `save` asks, after the `didChange`,
+and that runs its check; while the flycheck token's begin has not come, a
+`didChange` going out sends the save again behind it, at most three
+times, never on a clock (`save_retry`). LaTeX is served by `texlab`;
+`pmacs.lsp.config.latex` walks up for its own markers (`.texlabroot`,
+`texlabroot`), never `.git`: a multi-file document's root is not its
+repository's.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
@@ -200,11 +202,10 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   ambient view and its fallback is what makes the function total. The
   acting frontend can name a frontend with no registered view, and no
   runtime caller `pcall`s this function.
-- Tab width is a rendering semantic, not a configuration gap: the width
-  is fixed at eight columns, shared through `pmacs-protocol`, and
-  expanded only in each display projection. A configurable width needs
-  a buffer-effective frontend fact and cache invalidation, not a scalar
-  setting.
+- Tab width is a rendering semantic, not a configuration gap: fixed at
+  eight columns, shared through `pmacs-protocol`, expanded only in each
+  display projection; a configurable width needs a buffer-effective
+  frontend fact and cache invalidation, not a scalar setting.
 - A daemon-side change is not deployed until the daemon restarts from a
   binary containing it; `pmacs --gpu` attaches to whatever owns the socket.
 - The GPU frontend lays out in logical pixels and meets the physical
@@ -241,11 +242,10 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   parts agree with the fixture and nothing more; the acceptance drives
   the real handshake, outbox, writer and view through
   `attach::connect_with_sink` and the frontend's `--headless-probe`.
-- Bite against every pre-image a fix could plausibly have taken. A
+- Bite against every pre-image a fix could plausibly have taken: a
   narrower guard can remove the symptom and silently drop what the
-  skipped path also did, and a revert-only bite scores it complete; the
-  pin that catches it passes before the fix and fails against the wrong
-  one.
+  skipped path also did, a revert-only bite scores it complete, and the
+  pin that catches it passes before the fix and fails against the wrong one.
 - A test that skips on a missing precondition reports `ok`. Tool-gated
   suites are armed with the matching `PMACS_REQUIRE_*` variable where
   the tool is installed, and otherwise judged by elapsed time.

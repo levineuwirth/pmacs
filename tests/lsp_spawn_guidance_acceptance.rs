@@ -121,7 +121,9 @@ fn lsp_segment(state: &EditorState) -> Option<String> {
         .into_iter()
         .flat_map(|w| w.right)
         .find(|s| s.face == "ui.modeline.lsp")
-        .map(|s| s.text)
+        // The `ready` family carries a fixed slot for the busy suffix
+        // (C7c fix round 3); the label is what these rows read.
+        .map(|s| s.text.trim_end().to_owned())
 }
 
 fn clear_status(state: &EditorState) {
