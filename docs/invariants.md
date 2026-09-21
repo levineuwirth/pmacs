@@ -24,9 +24,8 @@ setter, is the primitive, for three reasons:
   intercept-only "read-only" buffer is emptied by `M-x buffer.undo`.
   Rebinding the undo chords buffer-locally does not close this; only
   rope-level `read_only` does.
-- A bare `set_read_only` would refuse the owner's own refresh, which is
-  the operation such buffers exist for. There is deliberately no Lua
-  `set_read_only`.
+- A bare `set_read_only` would refuse the owner's own refresh, the
+  operation such buffers exist for; there is deliberately no Lua one.
 - A rope write is half of an edit. The returned `Edit` must be fanned out
   through `notify_buffer_edit_to_windows`, which also queues the
   daemon-origin CRDT op. Skipping it leaves a displaying window with a
@@ -68,10 +67,9 @@ undoes locally, and a compensation is never recorded as a group.
 `buf:insert`, `buf:delete` and `buf:replace` return the post-intercept
 `(start, end, inserted_len)`. A caller that cares (the kill ring, comment
 toggling) compares exactly against what it requested; length-delta and
-text-at-position checks are documented defeated patterns. Every mutator
-call is wrapped in `pcall`: a rejecting intercept must report, not throw
-through, and a failed op must leave no state behind (kill chains, yank
-sessions).
+text-at-position checks are defeated patterns. Every mutator call is
+wrapped in `pcall`: a rejecting intercept must report, not throw through,
+and a failed op must leave no state behind (kill chains, yank sessions).
 
 ## Kill ring
 
@@ -83,12 +81,12 @@ authenticated source, never by a `frontend_id` carried in the payload.
 
 ## LSP
 
-Every `Position` and `Range` builder in `src/lsp.rs` converts byte
-offsets to the negotiated encoding, and a new one must too, or UTF-16
-servers reject non-ASCII columns: a request uses `outbound_position` on
-the text the server holds, and a `didChange` ranged by negotiation uses
+Every `Position` and `Range` builder in `src/lsp.rs` converts byte offsets
+to the negotiated encoding, and a new one must too, or UTF-16 servers
+reject non-ASCII columns: a request uses `outbound_position` on the text
+the server holds; a `didChange` ranged by negotiation uses
 `byte_to_position` on a mirror carried across the edits, since its ranges
-address the text as each previous change left it. Semantic tokens `full`,
+address the text as each change left it. Semantic tokens `full`,
 `full.delta` and `range` are three capabilities, gated one by one.
 
 The semantic-token store answers in the document's current bytes, never
@@ -97,33 +95,40 @@ logging each edit it broadcasts, a token request carries the text the
 server holds and its edit number, and the answer is resolved against that
 text and carried across the edits since, so a stale store shifts its
 tokens, never drops them; both merge sites read `positioned_tokens` and
-neither converts a column per frame.
-The same log feeds a ranged `didChange` and places an accepted
-completion's `additionalTextEdits` from the answer's edit number; what
-it cannot account for sends the whole document or applies none, said.
-Busy is not a state: only `INDEXING_TOKENS` (`src/lsp_status.rs`) move
-the kind to `Indexing`; any other `$/progress` is a suffix on `ready`.
-
-LaTeX is served by `texlab`; `pmacs.lsp.config.latex` walks up for its
-own markers (`.texlabroot`, `texlabroot`) and never for `.git`, because
-a multi-file document's root is not its repository's.
+neither converts a column per frame. The same log feeds a ranged
+`didChange`, places an accepted completion's `additionalTextEdits` from
+the answer's edit number, and carries diagnostics and inlay hints from the
+text they were computed for (the file on disk for a `check_sources`
+source, else the text last sent); an edit deleting the whole of a
+diagnostic's text or a hint's anchor drops it until the next publish
+(`DocumentEdit::deletes`, at the recorder and the absorb alike), one
+that overlaps it keeps what stood outside; what the log cannot account
+for sends the whole document, applies none, or paints the published
+position, said. Busy is not a state: only `INDEXING_TOKENS`
+(`src/lsp_status.rs`) move the kind to `Indexing`; other `$/progress` is
+a suffix on `ready` in a fixed slot. The activity indicator names a job
+only after `ui.activity-indicator-threshold-ms` in flight, an LSP request
+as its method alone, at a fixed width, leftmost of the right group. A
+save sends `didSave` as the server's `save` asks, after the `didChange`,
+and that runs its check; while the flycheck token's begin has not come, a
+`didChange` going out sends the save again behind it, at most three
+times, never on a clock (`save_retry`). LaTeX is served by `texlab`;
+`pmacs.lsp.config.latex` walks up for its own markers (`.texlabroot`,
+`texlabroot`), never `.git`: a multi-file document's root is not its
+repository's.
 
 The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
-`rangeonly16` (UTF-16 with fail-closed bounds validation), `semantichold`
-(document-derived tokens, held for `PMACS_FAKE_LSP_SEMANTIC_HOLD_MS`),
-`incremental` and `incremental8` (ranged `didChange` applied in UTF-16 and
-UTF-8 units), `sighelp`, `prepare`, `preprefuse`, `rename`, `inlaybounds`,
-`inlayrefresh`, `semantictokensrefresh`, `applyeditplan`, `resourceops`,
-`posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`. Failure
-shapes: `crash`, `error`, `contentmodified`, `clientfault`, `garbage`,
-`silent`. File watchers: `filewatch` (a `RelativePattern` `**/*.txt`),
-`filewatchabs` (an absolute plain glob), `filewatchflat` (a
-`RelativePattern` with no leading `**/`), `filewatchbare` (a bare relative
-string), `filewatchrereg` (the same id twice with no unregister),
-`filewatchjoin`, `filewatchretire`. Use these for capability-matrix tests,
-never a real server; the list is enumerated from the binary, and a stale
-copy covers the shape next to the defect.
+`rangeonly16`, `semantichold`, `incremental`, `incremental8`, `didsave`,
+`didsavenotext`, `sighelp`, `prepare`, `preprefuse`, `rename`,
+`inlaybounds`, `inlayrefresh`, `semantictokensrefresh`, `applyeditplan`,
+`resourceops`, `posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`.
+Failure shapes: `crash`, `error`, `contentmodified`, `clientfault`,
+`garbage`, `silent`. Watchers: `filewatch` (`RelativePattern` `**/*.txt`),
+`filewatchabs` (absolute glob), `filewatchflat` (no `**/`), `filewatchbare`
+(bare relative), `filewatchrereg` (one id twice), `filewatchjoin`,
+`filewatchretire`. Use these, never a real server; the binary documents
+each shape, and a stale copy here covers the shape next to the defect.
 
 ## Persistence
 
@@ -157,8 +162,7 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   variant needs a literal byte fixture, because a round-trip with the
   same types freezes nothing.
 - The close message of a surface uses the same variant family as its
-  open, or a session closed by the other family leaves the surface on
-  screen.
+  open, or a session closed by the other family leaves it on screen.
 - New wire surface means a version bump, support in both frontends, and
   an acceptance test. A wire-bearing change runs alone in its own phase.
 - `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`. The one
@@ -198,14 +202,12 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   ambient view and its fallback is what makes the function total. The
   acting frontend can name a frontend with no registered view, and no
   runtime caller `pcall`s this function.
-- Tab width is a rendering semantic, not a configuration gap: the width
-  is fixed at eight columns, shared through `pmacs-protocol`, and
-  expanded only in each display projection. A configurable width needs
-  a buffer-effective frontend fact and cache invalidation, not a scalar
-  setting.
+- Tab width is a rendering semantic, not a configuration gap: fixed at
+  eight columns, shared through `pmacs-protocol`, expanded only in each
+  display projection; a configurable width needs a buffer-effective
+  frontend fact and cache invalidation, not a scalar setting.
 - A daemon-side change is not deployed until the daemon restarts from a
-  binary that contains it; `pmacs --gpu` attaches to whatever owns the
-  socket.
+  binary containing it; `pmacs --gpu` attaches to whatever owns the socket.
 - The GPU frontend lays out in logical pixels and meets the physical
   surface exactly once. `State::layout` is the surface over
   `State::scale`; every hit test, wrap, cell-grid declaration and quad
@@ -223,9 +225,8 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   optional, one test omits it.
 - A contract two mechanisms must honor is as strong as the weaker one.
   Listview ids are compared with `==` by selection and used as raw table
-  keys by collapse state; the contract is narrowed to what both honor
-  and enforced where the data enters, never generalized to the stronger
-  half.
+  keys by collapse state; the contract is narrowed to what both honor and
+  enforced where the data enters, never generalized to the stronger half.
 - Acceptance fixtures that open `.rs` or `.py` files empty
   `pmacs.lsp.config` first, or the after-load hook spawns real servers.
   A scratch buffer has no path and therefore no language.
@@ -241,11 +242,10 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   parts agree with the fixture and nothing more; the acceptance drives
   the real handshake, outbox, writer and view through
   `attach::connect_with_sink` and the frontend's `--headless-probe`.
-- Bite against every pre-image a fix could plausibly have taken. A
+- Bite against every pre-image a fix could plausibly have taken: a
   narrower guard can remove the symptom and silently drop what the
-  skipped path also did, and a revert-only bite scores it complete; the
-  pin that catches it passes before the fix and fails against the wrong
-  one.
+  skipped path also did, a revert-only bite scores it complete, and the
+  pin that catches it passes before the fix and fails against the wrong one.
 - A test that skips on a missing precondition reports `ok`. Tool-gated
   suites are armed with the matching `PMACS_REQUIRE_*` variable where
   the tool is installed, and otherwise judged by elapsed time.

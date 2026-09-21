@@ -155,7 +155,9 @@ fn segment(s: &EditorState, face: &str) -> Option<String> {
         .into_iter()
         .flat_map(|w| w.right)
         .find(|seg| seg.face == face)
-        .map(|seg| seg.text)
+        // The `ready` family carries a fixed slot for the busy suffix
+        // (C7c fix round 3); the label is what these rows read.
+        .map(|seg| seg.text.trim_end().to_owned())
 }
 
 fn lsp_segment(s: &EditorState) -> Option<String> {

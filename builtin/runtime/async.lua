@@ -732,27 +732,94 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- The indicator shows slow work, not housekeeping (the owner's ruling at
+-- C7c fix round 3, from the mode line measured while typing after a
+-- save: the semantic-token and inlay-hint pulls a keystroke draws, each
+-- answered in tens of milliseconds, kept the indicator on the mode line
+-- for the duration of any typing, wearing the document's URI). A job
+-- counts and is named only once it has been in flight this long.
+pmacs.config.define {
+  name = "ui.activity-indicator-threshold-ms",
+  description = "Milliseconds a background job must have been in flight before the activity indicator counts or names it; work that answers sooner never shows.",
+  type = "integer",
+  default = 300,
+  min = 0,
+  mutability = "live",
+}
+
+-- The segment's width in cells, fixed (the same ruling): `⋯N ` and the
+-- purpose fitted into the rest --- padded with spaces when shorter,
+-- and when longer its tail kept behind `…`, since an LSP method's own
+-- name is its last component and a purpose's later words are the
+-- load-bearing ones. A segment whose width follows its text reflows
+-- everything beside it on every frame.
+local ACTIVITY_WIDTH = 32
+
+-- Cells of `s`: every glyph the indicator carries is one cell wide, so
+-- the count is of codepoints, which LuaJIT and Lua 5.4 both give by
+-- counting the bytes that are not continuation bytes.
+local function activity_cells(s)
+  local _, n = s:gsub("[^\128-\191]", "")
+  return n
+end
+
+-- The last `k` codepoints of `s`.
+local function activity_tail(s, k)
+  if k <= 0 then return "" end
+  local i, seen = #s, 0
+  while i > 0 do
+    local b = s:byte(i)
+    if b < 128 or b >= 192 then
+      seen = seen + 1
+      if seen == k then break end
+    end
+    i = i - 1
+  end
+  return s:sub(i)
+end
+
+-- `head` (the count) and `purpose` fitted to `ACTIVITY_WIDTH` cells.
+local function activity_fit(head, purpose)
+  local room = ACTIVITY_WIDTH - activity_cells(head)
+  if room <= 1 then return head end
+  local n = activity_cells(purpose)
+  if n > room then
+    purpose = "…" .. activity_tail(purpose, room - 1)
+  elseif n < room then
+    purpose = purpose .. string.rep(" ", room - n)
+  end
+  return head .. purpose
+end
+
+-- Exposed for the tests that pin the width.
+async_mod._activity_width = ACTIVITY_WIDTH
+
 pmacs.statusline.register {
   name = "activity",
   side = "right",
-  -- Above `terminal` (10) and `lsp` (0): when the modeline is too narrow
-  -- for everything, "the editor is busy, on this" is the segment worth
-  -- keeping. Right-side display order is priority-ascending, so it also
-  -- lands nearest the protected cursor/scroll group.
-  priority = 20,
+  -- Leftmost of the right side (right-side display order is
+  -- priority-ascending), so that appearing and vanishing moves nothing:
+  -- the LSP segment and the protected cursor group keep their columns
+  -- and the indicator takes and gives back the free space between the
+  -- two groups. Until C7c fix round 3 this was 20, nearest the cursor
+  -- group, and every appearance shifted the LSP segment by its width.
+  -- The price is survival: when the row is too narrow for everything
+  -- the leftmost right segment is the first clipped.
+  priority = -10,
   face = "ui.modeline.activity",
   fn = function(_ctx)
     if pmacs.config.get("ui.activity-indicator") ~= true then return nil end
     -- `_activity_summary` rather than `pmacs.workers.snapshot()`: this
     -- runs once per visible window per frame, and a snapshot would clone
     -- the whole 64-entry completed ring that the indicator never reads.
-    local summary = async_mod._activity_summary()
+    local threshold = pmacs.config.get("ui.activity-indicator-threshold-ms")
+    local summary = async_mod._activity_summary(threshold)
     -- nil, not "" and not "0 jobs": the evaluator treats an empty string
     -- as "no segment" too, but a zero-count string would be a segment
     -- that costs width forever to say nothing is happening. Absence is
     -- the design (Q#W-3), so absence is what this returns.
     if summary == nil then return nil end
-    return "⋯" .. tostring(summary.in_flight) .. " " .. summary.purpose
+    return activity_fit("⋯" .. tostring(summary.in_flight) .. " ", summary.purpose)
   end,
 }
 

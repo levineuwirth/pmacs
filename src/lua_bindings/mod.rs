@@ -7700,13 +7700,17 @@ pub fn install_async(
 
     // The statusline activity indicator's read surface (Q#W-3). Returns
     // `nil` when nothing is in flight — the indicator renders no segment
-    // at all when idle, so "absent" has to be representable.
+    // at all when idle, so "absent" has to be representable. The
+    // optional argument is the threshold in milliseconds a job must
+    // have been in flight for to count (C7c fix round 3); absent or
+    // zero, every running job counts.
     {
         let rt = runtime.clone();
         async_mod.set(
             "_activity_summary",
-            lua.create_function(move |lua, ()| {
-                let Some(summary) = rt.activity_summary() else {
+            lua.create_function(move |lua, threshold_ms: Option<u64>| {
+                let min_age = std::time::Duration::from_millis(threshold_ms.unwrap_or(0));
+                let Some(summary) = rt.activity_summary(min_age) else {
                     return Ok(mlua::Value::Nil);
                 };
                 let t = lua.create_table_with_capacity(0, 2)?;
@@ -10238,6 +10242,10 @@ fn lua_to_lsp_spec(t: &Table) -> mlua::Result<LspServerSpec> {
         Some(s) => parse_lsp_restart(&s)?,
         None => LspRestartPolicy::OnCrash,
     };
+    // E7c.3: the diagnostic sources that report against the file on
+    // disk rather than the text the server holds (rust-analyzer's
+    // `rustc` and `clippy`, the check it runs on a save).
+    let check_sources: Vec<String> = t.get("check_sources").unwrap_or_default();
     Ok(LspServerSpec {
         label,
         language_id,
@@ -10250,6 +10258,7 @@ fn lua_to_lsp_spec(t: &Table) -> mlua::Result<LspServerSpec> {
         settings,
         capabilities,
         restart,
+        check_sources,
     })
 }
 
@@ -10553,6 +10562,37 @@ pub fn install_lsp(
     }
 
     {
+        // E7c.1: what `sid` negotiated for saves --- `true` (send the
+        // text), `false` (send the notification alone) or nil (send
+        // nothing); the after-save hook does not read it, the manager
+        // applies it, and tests read it as the positive control.
+        let m = manager.clone();
+        lsp_mod.set(
+            "save_negotiated",
+            lua.create_function(move |_, id: LspServerIdLua| Ok(m.borrow().save_negotiated(id.0)))?,
+        )?;
+    }
+
+    {
+        // E7c.1: `textDocument/didSave` after a save, with the text
+        // when the server negotiated `includeText`; `false` when the
+        // server declared no `save` and nothing was sent. The caller
+        // (the after-save hook in `builtin/runtime/lsp.lua`) flushes
+        // the pending didChange first.
+        let m = manager.clone();
+        lsp_mod.set(
+            "did_save",
+            lua.create_function(
+                move |_, (id, uri, text): (LspServerIdLua, String, String)| {
+                    m.borrow_mut()
+                        .did_save(id.0, uri, text)
+                        .map_err(mlua::Error::external)
+                },
+            )?,
+        )?;
+    }
+
+    {
         // Mark `uri`'s cached LSP render families (diagnostics,
         // semantic tokens, inlay hints) stale without sending
         // anything. The didChange-debounce glue in
@@ -10571,6 +10611,36 @@ pub fn install_lsp(
             "_mark_document_stale",
             lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
                 m.borrow().mark_document_stale(id.0, &uri);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        // E7c.1: `textDocument/didSave` again, with the saved text the
+        // manager holds, when a save's check never began; `false` when
+        // nothing was sent.
+        let m = manager.clone();
+        lsp_mod.set(
+            "_resend_did_save",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                m.borrow_mut()
+                    .resend_did_save(id.0, &uri)
+                    .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+
+    {
+        // E7c.3: the buffer was modified when its document was opened
+        // on the server, so the text sent is not the text on disk and
+        // a check's diagnostics cannot be placed against it; the
+        // anchor is dropped until the next save writes one.
+        let m = manager.clone();
+        lsp_mod.set(
+            "_document_off_disk",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                m.borrow_mut().document_off_disk(id.0, &uri);
                 Ok(())
             })?,
         )?;
@@ -11334,7 +11404,20 @@ pub fn install_lsp(
                 store
                     .lock()
                     .expect("semantic token store mutex poisoned")
-                    .open_log(uri);
+                    .open_log(uri.clone());
+                // E7c.3: the diagnostic and inlay-hint stores are
+                // carried across the same edits by the same recorder,
+                // and stop hiding a stale set for this document.
+                let diagnostics = m.borrow().diag_store();
+                diagnostics
+                    .lock()
+                    .expect("diag store mutex poisoned")
+                    .note_logged(uri.clone());
+                let inlay_hints = m.borrow().inlay_hint_store();
+                inlay_hints
+                    .lock()
+                    .expect("inlay hint store mutex poisoned")
+                    .note_logged(uri);
                 let core = lua
                     .app_data_ref::<SharedCore>()
                     .ok_or_else(|| mlua::Error::external("editor core not yet installed"))?;
@@ -11349,6 +11432,8 @@ pub fn install_lsp(
                 {
                     buf.attach_view(Box::new(crate::semantic_tokens::SemanticEditRecorder::new(
                         store,
+                        diagnostics,
+                        inlay_hints,
                     )));
                 }
                 Ok(true)

@@ -69,6 +69,15 @@ fn eval<T: mlua::FromLuaMulti>(state: &EditorState, source: &str) -> T {
 fn editor() -> EditorState {
     let state = EditorState::new_with_roots(&iso::roots());
     exec(&state, "pmacs.lsp.config = {}");
+    // These rows are about the indicator's mechanics --- count, oldest
+    // purpose, the setting, the one-row boundary --- on jobs that live
+    // tens of milliseconds; the threshold that keeps such work off the
+    // mode line (C7c fix round 3) has its own rows in
+    // `e7c_indicator_acceptance`, and is zero here.
+    exec(
+        &state,
+        "pmacs.config.set('ui.activity-indicator-threshold-ms', 0)",
+    );
     state
 }
 
@@ -1037,7 +1046,7 @@ fn the_indicator_shows_a_count_and_the_oldest_purpose_in_a_painted_frame() {
     // And the same value reaches the evaluator's segment vector, which is
     // what the semantic frontend ships.
     assert_eq!(
-        activity_segment(&state).as_deref(),
+        activity_segment(&state).as_deref().map(str::trim_end),
         Some("⋯2 sleep 50ms"),
         "the segment and the painted row must agree"
     );
@@ -1214,7 +1223,8 @@ fn a_purpose_that_spans_lines_reaches_the_modeline_as_one_line() {
         "a modeline segment is ONE line: {segment:?}"
     );
     assert_eq!(
-        segment, "⋯1 lsp didOpen\\nfile:///tmp/x.rs",
+        segment.trim_end(),
+        "⋯1 lsp didOpen\\nfile:///tmp/x.rs",
         "and the break is escaped in place, not clipped away"
     );
 
@@ -1236,10 +1246,13 @@ fn a_purpose_that_spans_lines_reaches_the_modeline_as_one_line() {
 /// backslash (which a JSON-style escaper would double, and which is
 /// deliberately NOT escaped here — no number of backslashes produces a
 /// second row), a `\v` that is text rather than a vertical tab, quotes,
-/// and a non-ASCII character.
+/// and a non-ASCII character. It is short enough to sit whole in the
+/// indicator's fixed width (C7c fix round 3): a longer purpose keeps
+/// its tail there by design, and `*workers*` is the surface that
+/// carries every byte.
 #[test]
 fn a_purpose_with_no_control_characters_is_unchanged_by_the_boundary() {
-    const PURPOSE: &str = r#"grep "fn \d+" in /tmp/pro—ject\v2"#;
+    const PURPOSE: &str = r#"grep "fn \d+" in /tmp/pr—j\v2"#;
 
     let mut state = editor();
     let (job_id, _token) =
@@ -1255,7 +1268,7 @@ fn a_purpose_with_no_control_characters_is_unchanged_by_the_boundary() {
     );
 
     assert_eq!(
-        activity_segment(&state).as_deref(),
+        activity_segment(&state).as_deref().map(str::trim_end),
         Some(format!("⋯1 {PURPOSE}").as_str()),
         "and so must the modeline segment"
     );

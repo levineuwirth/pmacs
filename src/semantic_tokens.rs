@@ -256,7 +256,7 @@ impl DocumentEdit {
     /// Map a pre-edit position that begins a range: a position inside
     /// the replaced text snaps to the replacement's end, so the range
     /// keeps its bytes past the edit and claims none of the new text.
-    fn translate_start(self, pos: u64) -> u64 {
+    pub(crate) fn translate_start(self, pos: u64) -> u64 {
         if self.old_end == self.start {
             if pos >= self.start {
                 pos.saturating_add(self.inserted_len)
@@ -279,7 +279,7 @@ impl DocumentEdit {
     /// character inheriting the token's color is what keeps it from
     /// blinking); a range cut by a replace keeps only what stood before
     /// the replaced text.
-    fn translate_end(self, pos: u64) -> u64 {
+    pub(crate) fn translate_end(self, pos: u64) -> u64 {
         if self.old_end == self.start {
             if pos >= self.start {
                 pos.saturating_add(self.inserted_len)
@@ -299,6 +299,40 @@ impl DocumentEdit {
         pos.saturating_sub(self.old_end - self.start)
             .saturating_add(self.inserted_len)
     }
+
+    /// Whether this edit removes the whole of the pre-edit range
+    /// `[lo, hi)`: the replaced text covers it, or, for an empty range,
+    /// has its position strictly inside. A pure insert deletes nothing,
+    /// and a range the replaced text only overlaps is not deleted ---
+    /// what stood outside the edit is still there to carry. E7c fix 2:
+    /// a diagnostic or an inlay hint about text an edit deleted is
+    /// dropped rather than left as a zero-width mark where the text
+    /// was.
+    pub(crate) fn deletes(self, lo: u64, hi: u64) -> bool {
+        if self.old_end == self.start {
+            return false;
+        }
+        if lo < hi {
+            self.start <= lo && hi <= self.old_end
+        } else {
+            self.start < lo && lo < self.old_end
+        }
+    }
+}
+
+/// Where a byte range of the text at some edit number stands in the
+/// document's current text, once carried across the edits since
+/// (E7c fix 2): the range, or the reason there is none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CarriedRange {
+    /// The range in the current bytes.
+    At(u64, u64),
+    /// An edit since deleted the whole of it: no text in the document
+    /// is what it described.
+    Deleted,
+    /// An edit since is no longer held (the URI has no log, or the log
+    /// forgot an edit past the base): nothing can place it.
+    Unalignable,
 }
 
 /// A semantic token resolved to byte coordinates of the text it now
@@ -410,6 +444,12 @@ struct EditLog {
     /// this number, so the prune keeps everything from here on while
     /// an answer is held. `u64::MAX` when none is.
     completion_floor: u64,
+    /// The edit number of the text on disk --- the open, or the last
+    /// save (E7c.3). A check the server runs on the file reports
+    /// against that text, so a token absorb's prune keeps the log from
+    /// here on and a check diagnostic arriving seconds later can still
+    /// be carried to the current text. `u64::MAX` when no anchor is.
+    disk_floor: u64,
 }
 
 impl Default for EditLog {
@@ -420,6 +460,7 @@ impl Default for EditLog {
             dropped_below: 0,
             edits: VecDeque::new(),
             completion_floor: u64::MAX,
+            disk_floor: u64::MAX,
         }
     }
 }
@@ -534,7 +575,7 @@ impl SemanticTokenStore {
                         entry.pending += 1;
                     }
                 }
-                let keep_from = base_seq.min(log.completion_floor);
+                let keep_from = base_seq.min(log.completion_floor).min(log.disk_floor);
                 log.edits.retain(|(seq, ..)| *seq >= keep_from);
                 log.dropped_below = log.dropped_below.max(keep_from);
             }
@@ -731,6 +772,25 @@ impl SemanticTokenStore {
         }
     }
 
+    /// Note that the text on disk for `uri` is the document at edit
+    /// number `seq` (E7c.3: the open, or a save): the log keeps every
+    /// edit from there on, so a diagnostic a check computed for the
+    /// file can be carried to the current text however long the check
+    /// took. Nothing to note for a URI with no log.
+    pub fn note_disk_floor(&mut self, uri: &str, seq: u64) {
+        if let Some(log) = self.logs.get_mut(uri) {
+            log.disk_floor = seq;
+        }
+    }
+
+    /// Whether `uri` has an edit log --- a recorder reports its edits
+    /// --- so a position carried across them is what the document's
+    /// current bytes mean by it.
+    #[must_use]
+    pub fn has_log(&self, uri: &str) -> bool {
+        self.logs.contains_key(uri)
+    }
+
     /// Note that the document's current text has just been sent to the
     /// server (`didOpen` / `didChange`): a response to a request sent
     /// from now on reflects every edit recorded so far. Nothing to note
@@ -817,6 +877,34 @@ impl SemanticTokenStore {
             }
         }
         Some((start, end.max(start)))
+    }
+
+    /// Carry a byte range as [`Self::translate_range_since`] does, but
+    /// say when an edit since `base` deleted the whole of it instead of
+    /// snapping it to a zero-width range where the text was (E7c fix
+    /// 2): the placement a diagnostic's span or an inlay hint's anchor
+    /// takes at absorb, so a check's answer republished after the text
+    /// it names was deleted lands nowhere, as the recorder's carry of a
+    /// held span across the same edit would.
+    #[must_use]
+    pub fn carry_range_since(&self, uri: &str, base: u64, start: u64, end: u64) -> CarriedRange {
+        let Some(log) = self.logs.get(uri) else {
+            return CarriedRange::Unalignable;
+        };
+        if log.dropped_below > base {
+            return CarriedRange::Unalignable;
+        }
+        let (mut start, mut end) = (start, end);
+        for (seq, edit, _) in &log.edits {
+            if *seq >= base {
+                if edit.deletes(start, end) {
+                    return CarriedRange::Deleted;
+                }
+                start = edit.translate_start(start);
+                end = edit.translate_end(end);
+            }
+        }
+        CarriedRange::At(start, end.max(start))
     }
 
     /// Declare `uri`'s tokens stale without saying where the edit was.
@@ -948,6 +1036,11 @@ fn server_sort_key(server: &str) -> (u64, &str) {
 /// recorder being told.
 pub struct SemanticEditRecorder {
     store: SharedSemanticTokenStore,
+    /// E7c.3: the diagnostic and inlay-hint stores carry their byte
+    /// positions across the same edits, so a squiggle or a hint stays
+    /// on its text while the server catches up, as a token does.
+    diagnostics: crate::diag::SharedDiagStore,
+    inlay_hints: crate::inlay_hint::SharedInlayHintStore,
 }
 
 impl SemanticEditRecorder {
@@ -955,10 +1048,19 @@ impl SemanticEditRecorder {
     /// most once per buffer.
     pub const KIND: &'static str = "semantic-edit-recorder";
 
-    /// A recorder feeding `store`.
+    /// A recorder feeding `store`, and carrying `diagnostics` and
+    /// `inlay_hints` across the same edits.
     #[must_use]
-    pub fn new(store: SharedSemanticTokenStore) -> Self {
-        Self { store }
+    pub fn new(
+        store: SharedSemanticTokenStore,
+        diagnostics: crate::diag::SharedDiagStore,
+        inlay_hints: crate::inlay_hint::SharedInlayHintStore,
+    ) -> Self {
+        Self {
+            store,
+            diagnostics,
+            inlay_hints,
+        }
     }
 }
 
@@ -990,18 +1092,25 @@ impl crate::view::View for SemanticEditRecorder {
             );
         }
         let inserted = String::from_utf8_lossy(&inserted);
+        let edit = DocumentEdit {
+            start: edit.range.start,
+            old_end: edit.range.end,
+            inserted_len: edit.inserted_len,
+        };
         self.store
             .lock()
             .expect("semantic token store mutex poisoned")
-            .record_edit(
-                &uri,
-                DocumentEdit {
-                    start: edit.range.start,
-                    old_end: edit.range.end,
-                    inserted_len: edit.inserted_len,
-                },
-                &inserted,
-            );
+            .record_edit(&uri, edit, &inserted);
+        // The other two stores after, never while the token store is
+        // held: nothing locks two of them at once.
+        self.diagnostics
+            .lock()
+            .expect("diag store mutex poisoned")
+            .translate_edit(&uri, edit);
+        self.inlay_hints
+            .lock()
+            .expect("inlay hint store mutex poisoned")
+            .translate_edit(&uri, edit);
         Ok(())
     }
 }

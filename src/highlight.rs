@@ -1226,7 +1226,11 @@ mod tests {
             .borrow_mut()
             .get_mut(buffer_id)
             .expect("buffer")
-            .attach_view(Box::new(SemanticEditRecorder::new(store.clone())));
+            .attach_view(Box::new(SemanticEditRecorder::new(
+                store.clone(),
+                crate::diag::make_shared_store(),
+                crate::inlay_hint::make_shared_store(),
+            )));
 
         let render = |state: &EditorState| -> Vec<bool> {
             let mut view = LspStyleView::new(

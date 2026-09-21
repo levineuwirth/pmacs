@@ -672,8 +672,13 @@ cmd { name = "editor.switch-buffer",
           prompt = "Switch to buffer: ",
           source = "buffers",
           history = "buffer",
-          -- D18: the name as written; TAB completes to the selection.
-          accept = "typed",
+          -- D18 as amended at E7c fix round 2 (the owner's ruling):
+          -- RET takes the selection, so `C-x b lsp RET` reaches `*lsp*`
+          -- and `C-x b scr RET` reaches `*scratch*`; a name that
+          -- matches nothing is looked up as typed and refused below.
+          -- find-file and write-file keep `typed`, since there the
+          -- typed name may be a file to create.
+          accept = "candidate",
           on_accept = function(name)
             if name == nil or name == "" then return end
             for _, id in ipairs(pmacs.buffer.list()) do

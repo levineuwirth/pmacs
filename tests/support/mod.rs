@@ -21,6 +21,10 @@
 
 #![allow(dead_code)]
 
+/// E7c: a wire tee around a language server, for the measurements.
+#[path = "wire_tee.rs"]
+pub mod wire_tee;
+
 /// Report a missing external tool, and turn the skip into a HARD
 /// FAILURE when the environment has promised the tool is present.
 ///

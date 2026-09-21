@@ -3,8 +3,10 @@
 //! The minibuffer's accept policy through the keys a user presses:
 //! `M-x hel RET` runs `help` under `candidate`; `C-j` takes the typed
 //! text under either policy; a `typed` prompt gives `on_accept` the
-//! field as written whatever is selected; `switch-buffer` and
-//! `write-file` carry the policy the roadmap names for them.
+//! field as written whatever is selected; `write-file` carries the
+//! policy the roadmap names for it, and `switch-buffer` the one D18's
+//! amendment names (E7c fix round 2): `candidate`, so a subsequence of
+//! a buffer's name switches on RET.
 //!
 //! Dispatch-driven throughout, for the reason `find_file_acceptance`
 //! gives: the Lua lifecycle `minibuffer.accept()` bypasses the path
@@ -262,11 +264,17 @@ fn accept_defaults_to_candidate_and_rejects_other_values() {
     assert!(!active(&s), "a refused read opens no session");
 }
 
-/// Probe: `switch-buffer` passes `typed`, so a subsequence of an
-/// existing name no longer switches by itself --- RET reports the name
-/// as typed, and TAB then RET switches.
+/// D18 as amended (E7c fix round 2, the owner's ruling): `switch-buffer`
+/// passes `candidate`, so a subsequence of an existing name switches on
+/// RET by itself --- `C-x b nts RET` reaches `notes.txt` --- where under
+/// `typed` it reported `no buffer: nts` and switched nothing; TAB then
+/// RET still switches. The felt case: `C-c l` opens `*lsp*`, and
+/// `C-x b lsp RET` reaches it and `C-x b scr RET` reaches `*scratch*`.
+/// A name matching nothing is looked up as typed and refused as
+/// before: `C-x b zzz RET` says `no buffer: zzz` and switches nothing.
+/// Bitten by restoring `accept = "typed"` on the command.
 #[test]
-fn switch_buffer_ret_takes_the_typed_name_and_tab_completes_it() {
+fn switch_buffer_ret_takes_the_selected_buffer_so_a_subsequence_switches() {
     let td = tempfile::tempdir().expect("tempdir");
     let notes = td.path().join("notes.txt");
     std::fs::write(&notes, b"n\n").expect("write");
@@ -305,13 +313,16 @@ fn switch_buffer_ret_takes_the_typed_name_and_tab_completes_it() {
         candidates(&s)
     );
     press(&mut s, KeyCode::Enter);
+    assert!(!active(&s), "RET closed the prompt");
     assert_eq!(
-        status(&s),
-        "no buffer: nts",
-        "typed wins: the name as written is what switch-buffer looked up"
+        active_name(&s),
+        notes_name,
+        "the selection wins: `nts RET` switched to the notes buffer"
     );
-    assert_eq!(active_name(&s), scratch, "nothing switched");
+    assert_ne!(status(&s), "no buffer: nts");
 
+    // TAB then RET still switches.
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[1])");
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('b'));
     type_str(&mut s, "nts");
@@ -319,6 +330,46 @@ fn switch_buffer_ret_takes_the_typed_name_and_tab_completes_it() {
     assert_eq!(contents(&s), notes_name, "TAB completes to the selection");
     press(&mut s, KeyCode::Enter);
     assert_eq!(active_name(&s), notes_name, "TAB then RET switches");
+
+    // The felt case: `*lsp*` opened by `C-c l` (a bottom panel, which
+    // needs a frame with rows to take), then reached by its
+    // subsequence, and `*scratch*` by its own.
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    ctrl(&mut s, 'c');
+    press(&mut s, KeyCode::Char('l'));
+    assert_eq!(active_name(&s), "*lsp*", "C-c l opens *lsp*");
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[1])");
+    assert_eq!(active_name(&s), scratch);
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('b'));
+    type_str(&mut s, "lsp");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(active_name(&s), "*lsp*", "C-x b lsp RET reaches *lsp*");
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('b'));
+    type_str(&mut s, "scr");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        active_name(&s),
+        "*scratch*",
+        "C-x b scr RET reaches *scratch*"
+    );
+
+    // No match: refused as typed, nothing switched.
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('b'));
+    type_str(&mut s, "zzz");
+    assert!(
+        candidates(&s).is_empty(),
+        "fixture premise: nothing matches `zzz`"
+    );
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        status(&s),
+        "no buffer: zzz",
+        "the no-match behavior is as it was"
+    );
+    assert_eq!(active_name(&s), "*scratch*", "nothing switched");
 }
 
 /// Probe: `write-file` roots its field where `find-file` does, prefilled
