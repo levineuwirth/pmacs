@@ -709,6 +709,34 @@ const CURRENT_LINE_WASH_ALPHA: f32 = 0.22;
 /// agrees with cosmic-text's UAX #14 on spaced Latin prose and not
 /// everywhere, as `docs/divergences.md`'s Line wrap entry states.
 const DOCUMENT_WRAP: Wrap = Wrap::WordOrGlyph;
+
+/// Where a popup of `size` goes beside an anchor inside a window of
+/// `area` (both in logical pixels), as its top-left corner --- the one
+/// placement rule for popups (E7d.3, the shape E8.3 specifies for the
+/// hover popup: *"positioned above or below the caret by available
+/// space"*).
+///
+/// `anchor` is `(x, top, bottom)`: a click is a point, so its top and
+/// bottom coincide; a caret is its line's top and bottom. The popup goes
+/// below the anchor when it fits there, else above it when it fits
+/// there, else on the roomier side, and is then clamped into the window
+/// on both axes; horizontally it starts at the anchor and is pulled left
+/// until its right edge is inside. A popup larger than the window keeps
+/// its top-left corner inside it, so its first row and left edge stay
+/// on screen and the rest is clipped.
+fn place_popup(anchor: (f32, f32, f32), size: (f32, f32), area: (f32, f32)) -> (f32, f32) {
+    let (ax, top, bottom) = anchor;
+    let (w, h) = size;
+    let (width, height) = area;
+    let x = ax.min(width - w).max(0.0);
+    let room_below = height - bottom;
+    let room_above = top;
+    // Above only when it fits there and not below, or when it fits
+    // neither side and above is roomier; the clamp settles the rest.
+    let above = h > room_below && (h <= room_above || room_above > room_below);
+    let y = if above { top - h } else { bottom };
+    (x, y.min(height - h).max(0.0))
+}
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -7854,6 +7882,150 @@ mod input_routing_tests {
         }
     }
 
+    /// E7d.3 — the placement rule itself: below when it fits, above
+    /// when only that fits, the roomier side when neither does, and
+    /// clamped into the window on both axes.
+    #[test]
+    fn e7d_3_place_popup_flips_and_clamps() {
+        let area = (640.0, 480.0);
+        assert_eq!(
+            place_popup((100.0, 50.0, 50.0), (200.0, 120.0), area),
+            (100.0, 50.0),
+            "below"
+        );
+        assert_eq!(
+            place_popup((100.0, 440.0, 440.0), (200.0, 120.0), area),
+            (100.0, 320.0),
+            "no room below: above, its bottom edge on the click"
+        );
+        assert_eq!(
+            place_popup((600.0, 50.0, 50.0), (200.0, 120.0), area),
+            (440.0, 50.0),
+            "no room right: pulled left to the window's edge"
+        );
+        assert_eq!(
+            place_popup((100.0, 20.0, 40.0), (200.0, 450.0), area),
+            (100.0, 30.0),
+            "room on neither side: the roomier (below), clamped up into the window"
+        );
+        assert_eq!(
+            place_popup((100.0, 200.0, 200.0), (800.0, 900.0), area),
+            (0.0, 0.0),
+            "larger than the window: the corner stays on screen"
+        );
+    }
+
+    /// Right-click at `(x, y)` through the production dispatch, answer
+    /// with the daemon's menu of `rows` entries through the app's own
+    /// inbound path, and return the placed menu's rectangle.
+    fn e7d_3_right_click_menu(
+        h: &mut EffectHarness,
+        x: f64,
+        y: f64,
+        rows: usize,
+    ) -> (f32, f32, f32, f32) {
+        let _ = h.feed(&cursor_moved(x, y));
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Right));
+        assert!(
+            step.outbound
+                .iter()
+                .any(|event| format!("{event:?}").contains("Context")),
+            "the right-press reached the daemon as a context pointer: {:?}",
+            step.outbound
+        );
+        let buffer_id = h
+            .app
+            .state
+            .as_ref()
+            .expect("state")
+            .current_buffer_id
+            .expect("buffer");
+        h.app
+            .dispatch_app_event(AppEvent::Attach(AttachEvent::Message(Box::new(
+                InstanceMessage::MenuPrompt {
+                    buffer_id,
+                    rows: (0..rows)
+                        .map(|i| MenuPromptRow {
+                            label: format!("entry {i}"),
+                            separator: false,
+                        })
+                        .collect(),
+                    active: None,
+                },
+            ))));
+        let state = h.app.state.as_ref().expect("state");
+        let menu = state.menu.as_ref().expect("the menu opened");
+        let (mx, my) = state.menu_origin_px(menu);
+        let w = State::menu_width_px(menu, state.fm);
+        let mh = rows as f32 * state.fm.menu_row_height();
+        (mx, my, w, mh)
+    }
+
+    /// E7d.3 — a right-click near the window's bottom edge opens the
+    /// menu ABOVE the click, whole, and its last entry is hit where it
+    /// is drawn. The owner's screenshot had it below the click with its
+    /// last entry cut off.
+    ///
+    /// *Mutation: `menu_origin_px` returning the raw anchor → the menu's
+    /// bottom is past the window and the last entry's hit misses.*
+    #[test]
+    fn e7d_3_a_menu_opened_near_the_bottom_flips_above_the_click() {
+        let mut h = EffectHarness::new();
+        let (width, height, text_bottom) = {
+            let state = h.app.state.as_ref().expect("state");
+            (
+                state.layout.width as f32,
+                state.layout.height as f32,
+                document_text_bottom(state.layout.height, state.fm, state.band_inset()),
+            )
+        };
+        let y = f64::from(text_bottom) - 4.0;
+        let rows = 8;
+        let (mx, my, w, mh) = e7d_3_right_click_menu(&mut h, 100.0, y, rows);
+        assert!(
+            my + mh <= height && my >= 0.0,
+            "the whole menu is inside the window: {my}..{} of {height}",
+            my + mh
+        );
+        assert!(
+            (my + mh - y as f32).abs() < 0.5,
+            "flipped: its bottom edge on the click at {y}, not below it at {my}"
+        );
+        assert!(mx + w <= width);
+        let state = h.app.state.as_ref().expect("state");
+        let last = f64::from(my + mh) - f64::from(state.fm.menu_row_height()) / 2.0;
+        assert_eq!(
+            state.menu_hit(f64::from(mx) + 4.0, last),
+            Some((rows as u32 - 1, true)),
+            "the last entry is hit where it is drawn"
+        );
+    }
+
+    /// E7d.3 — a right-click near the right edge keeps the menu inside
+    /// the window horizontally, still below the click.
+    #[test]
+    fn e7d_3_a_menu_opened_near_the_right_edge_is_pulled_inside() {
+        let mut h = EffectHarness::new();
+        let width = h.app.state.as_ref().expect("state").layout.width as f32;
+        let x = f64::from(width) - 3.0;
+        let (mx, my, w, _) = e7d_3_right_click_menu(&mut h, x, 60.0, 4);
+        assert!(
+            mx + w <= width && mx >= 0.0,
+            "the menu's right edge {} is inside the window's {width}",
+            mx + w
+        );
+        assert!(
+            (my - 60.0).abs() < 0.5,
+            "room below: it stays below the click"
+        );
+        let state = h.app.state.as_ref().expect("state");
+        assert_eq!(
+            state.menu_hit(f64::from(mx + w) - 4.0, f64::from(my) + 4.0),
+            Some((0, true)),
+            "its first entry is hit at its drawn right end"
+        );
+    }
+
     /// The fixture's scrollbar, read from the production geometry.
     /// Asserted rather than assumed: a fixture that stopped overflowing
     /// its surface has no thumb, and every row below would then pass on
@@ -13162,12 +13334,30 @@ impl State {
             .clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
     }
 
+    /// Where the open menu's top-left corner is drawn (E7d.3): below
+    /// and right of the click, flipped above when the window has no
+    /// room below, and pulled left when it has none to the right ---
+    /// [`place_popup`], the rule E8.3's hover popup takes too. The
+    /// painter, the glyph layer and the hit-test all read this, so the
+    /// menu is clicked where it is drawn.
+    fn menu_origin_px(&self, menu: &MenuLocal) -> (f32, f32) {
+        let w = Self::menu_width_px(menu, self.fm);
+        let h = menu.rows.len() as f32 * self.fm.menu_row_height();
+        let (x, y) = (menu.anchor_px.0 as f32, menu.anchor_px.1 as f32);
+        place_popup(
+            (x, y, y),
+            (w, h),
+            (self.layout.width as f32, self.layout.height as f32),
+        )
+    }
+
     /// Hit-test a pixel against the open popup (Q#CM1). Returns
     /// `(row_index, is_item)` when inside the popup rectangle, or `None`
     /// when outside (or no menu open).
     fn menu_hit(&self, x: f64, y: f64) -> Option<(u32, bool)> {
         let menu = self.menu.as_ref()?;
-        let (ax, ay) = menu.anchor_px;
+        let (ax, ay) = self.menu_origin_px(menu);
+        let (ax, ay) = (f64::from(ax), f64::from(ay));
         let w = f64::from(Self::menu_width_px(menu, self.fm));
         let h = menu.rows.len() as f64 * f64::from(self.fm.menu_row_height());
         if x < ax || x >= ax + w || y < ay || y >= ay + h {
@@ -14004,8 +14194,7 @@ impl State {
         let Some(menu) = self.menu.as_ref() else {
             return Vec::new();
         };
-        let ax = menu.anchor_px.0 as f32;
-        let ay = menu.anchor_px.1 as f32;
+        let (ax, ay) = self.menu_origin_px(menu);
         let w = Self::menu_width_px(menu, self.fm);
         let mut rects = vec![MinimapRect {
             x: ax,
@@ -15549,27 +15738,25 @@ impl State {
 
         // Q#CM1 — prepare the menu glyphs in their own layer (empty when
         // closed, so the renderer draws nothing).
+        let menu_origin = self.menu.as_ref().map(|menu| self.menu_origin_px(menu));
         let menu_areas: Vec<TextArea> = self
             .menu
             .as_ref()
-            .map(|menu| {
-                let ax = menu.anchor_px.0 as f32;
-                let ay = menu.anchor_px.1 as f32;
-                TextArea {
-                    buffer: &self.menu_buffer,
-                    left: ax + MENU_PAD_X,
-                    top: ay + 2.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: ax as i32,
-                        top: ay as i32,
-                        right: (ax + Self::menu_width_px(menu, self.fm)).round() as i32,
-                        bottom: (ay + menu.rows.len() as f32 * self.fm.menu_row_height()).round()
-                            as i32,
-                    },
-                    default_color: Color::rgb(232, 232, 238),
-                    custom_glyphs: &[],
-                }
+            .zip(menu_origin)
+            .map(|(menu, (ax, ay))| TextArea {
+                buffer: &self.menu_buffer,
+                left: ax + MENU_PAD_X,
+                top: ay + 2.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: ax as i32,
+                    top: ay as i32,
+                    right: (ax + Self::menu_width_px(menu, self.fm)).round() as i32,
+                    bottom: (ay + menu.rows.len() as f32 * self.fm.menu_row_height()).round()
+                        as i32,
+                },
+                default_color: Color::rgb(232, 232, 238),
+                custom_glyphs: &[],
             })
             .into_iter()
             .collect();
@@ -25442,8 +25629,12 @@ mod tests {
         });
         let px = state.render_offscreen();
         assert_eq!(px.len(), (WIDTH * HEIGHT * 4) as usize);
+        // Larger than the window, the menu keeps its corner on screen
+        // (E7d.3's `place_popup`) and is clipped below.
+        let (ox, oy) = state.menu_origin_px(state.menu.as_ref().expect("menu"));
+        assert!(ox >= 0.0 && oy >= 0.0);
         assert_eq!(
-            state.menu_hit(205.0, 305.0),
+            state.menu_hit(f64::from(ox) + 5.0, f64::from(oy) + 5.0),
             Some((0, true)),
             "hit geometry stays coherent on the deliberately clipped popup"
         );
