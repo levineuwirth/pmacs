@@ -163,25 +163,37 @@ impl TextView {
         out
     }
 
-    /// Which visual row of `line` holds byte `within` (relative to the
-    /// line's start), at `max_cols` columns under character wrap.
-    ///
-    /// Total: any offset is legal, and one past the line's end lands on
-    /// its last row. `max_cols == 0` yields row 0 rather than looping.
     /// Which visual row of `line` holds byte `within`, discarding the
     /// column. Thin wrapper over [`Self::place_of_byte`].
     fn row_of_byte(&self, buf: &Buffer, line: usize, within: u64, max_cols: u32) -> u32 {
         self.place_of_byte(buf, line, within, max_cols).0
     }
 
+    /// How many visual rows `line` occupies under `ctx`: one when not
+    /// wrapping, else the row its end-of-line position sits on, plus
+    /// one --- the count [`Self::paint_line`] returns for it, so a
+    /// caller reckoning screen rows from the top of the viewport lands
+    /// on the row the painter used.
+    #[must_use]
+    pub fn line_rows(&self, buf: &Buffer, line: usize, ctx: LayoutCtx) -> u32 {
+        if !ctx.wrapping() {
+            return 1;
+        }
+        let len = self.line_len(buf, line).unwrap_or(0);
+        self.row_of_byte(buf, line, len, ctx.cols) + 1
+    }
+
     /// Where byte `within` (relative to `line`'s start) sits under
-    /// character wrap, as `(visual row, column)`.
+    /// word wrap, as `(visual row, column)`.
     ///
-    /// Total: any offset is legal, and one past the line's end lands
-    /// just after its last character. A byte **inside** a multi-byte
-    /// codepoint yields that codepoint's own place — the same
-    /// projection `valid_prefix_width` performs on the unwrapped path,
-    /// so the interior-byte contract is unchanged by wrapping.
+    /// A character's position is where the character is drawn, which
+    /// under word wrap is not where the previous one ended: a word that
+    /// moved to the next row leaves the end of the row behind it. Total:
+    /// any offset is legal, and one past the line's end lands just after
+    /// its last character. A byte **inside** a multi-byte codepoint
+    /// yields that codepoint's own place — the same projection
+    /// `valid_prefix_width` performs on the unwrapped path, so the
+    /// interior-byte contract is unchanged by wrapping.
     fn place_of_byte(&self, buf: &Buffer, line: usize, within: u64, max_cols: u32) -> (u32, u32) {
         if max_cols == 0 {
             return (0, 0);
@@ -190,26 +202,25 @@ impl TextView {
         let Ok(s) = std::str::from_utf8(&bytes) else {
             return (0, 0);
         };
-        let (mut row, mut col, mut seen) = (0u32, 0u32, 0u64);
-        for ch in s.chars() {
-            if seen >= within {
-                break;
+        let (mut row, mut col) = (0u32, 0u32);
+        let mut found = None;
+        walk_line(s, max_cols, true, |p| {
+            // `within` is this character's start, or falls inside it:
+            // project to where the character is drawn.
+            if (p.idx + p.ch.len_utf8()) as u64 > within {
+                found = Some((p.start_row, p.start_col));
+                return false;
             }
-            let (start_row, start_col, end_row, end_col) =
-                advance_wrapped(row, col, ch, max_cols, true);
-            seen += ch.len_utf8() as u64;
-            if seen > within {
-                // `within` fell inside this character: project to the
-                // character's own start, which is where it is drawn.
-                return (start_row, start_col);
-            }
-            row = end_row;
-            col = end_col;
-        }
-        // A position that lands exactly on a row boundary belongs to
-        // column 0 of the NEXT row, not one past the end of the last
-        // one (framing §7: the wrap position is owned downstream). The
-        // downstream cell always exists; `(row, max_cols)` does not.
+            row = p.end_row;
+            col = p.end_col;
+            true
+        });
+        let (row, col) = found.unwrap_or((row, col));
+        // A position at or past the row's right edge --- the end of a
+        // full row, or a space hanging past it --- belongs to column 0 of
+        // the NEXT row (framing §7: the wrap position is owned
+        // downstream). The downstream cell always exists; `(row,
+        // max_cols)` does not.
         if col >= max_cols {
             (row.saturating_add(1), 0)
         } else {
@@ -264,13 +275,16 @@ impl TextView {
     }
 
     /// Byte offset (relative to `line`'s start) at visual row `sub_row`,
-    /// column `col`, under character wrap — the inverse of
+    /// column `col`, under word wrap — the inverse of
     /// [`Self::place_of_byte`].
     ///
     /// Rounds forward to the next character boundary when the column
-    /// lands inside a wide glyph, matching the unwrapped
-    /// `display_to_pos`. A row past the line's height clamps to the
-    /// line's end.
+    /// lands inside a wide glyph or a tab, matching the unwrapped
+    /// `display_to_pos`. A column past the last character of a row the
+    /// line continues from takes that character. A row past the line's
+    /// height clamps to the line's end. A space hanging past the edge
+    /// is never the answer, so its own place does not round-trip: it
+    /// shows at the next row's column 0, which is the next word's.
     fn byte_at_place(
         &self,
         buf: &Buffer,
@@ -286,18 +300,36 @@ impl TextView {
         if max_cols == 0 {
             return 0;
         }
-        let (mut row, mut c, mut walked) = (0u32, 0u32, 0u64);
-        for ch in s.chars() {
-            let (start_row, start_col, end_row, end_col) =
-                advance_wrapped(row, c, ch, max_cols, true);
-            if start_row > sub_row || (start_row == sub_row && start_col >= col) {
-                return walked;
+        let mut found = None;
+        // The last character drawn on `sub_row` and the column after it.
+        let mut last_on_row: Option<(u64, u32)> = None;
+        walk_line(s, max_cols, true, |p| {
+            // A space hanging past the edge has no cell to be found at.
+            if p.start_col >= max_cols {
+                return true;
             }
-            walked += ch.len_utf8() as u64;
-            row = end_row;
-            c = end_col;
-        }
-        walked
+            if p.start_row > sub_row {
+                // Past the end of a row the line continues from: the
+                // row's last character, where Emacs puts a click there,
+                // rather than the next row's first --- which under word
+                // wrap is drawn a row below the column asked for. Inside
+                // that last glyph still rounds forward.
+                found = Some(match last_on_row {
+                    Some((idx, end)) if col >= end => idx,
+                    _ => p.idx as u64,
+                });
+                return false;
+            }
+            if p.start_row == sub_row {
+                if p.start_col >= col {
+                    found = Some(p.idx as u64);
+                    return false;
+                }
+                last_on_row = Some((p.idx as u64, p.end_col));
+            }
+            true
+        });
+        found.unwrap_or(bytes.len() as u64)
     }
 
     /// Paint one source line and report how many grid rows it used.
@@ -374,15 +406,21 @@ impl TextView {
         };
 
         let (mut sub_row, mut col) = (0u32, 0u32);
-        for ch in s.chars() {
+        walk_line(s, max_cols, wrapping, |p| {
+            let Placed {
+                ch,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } = p;
             if !wrapping && col >= max_cols.saturating_add(left) {
-                break;
+                return false;
             }
-            let (start_row, start_col, end_row, end_col) =
-                advance_wrapped(sub_row, col, ch, max_cols, wrapping);
             if start_row >= skip_rows && grid_row(start_row).is_none() {
                 sub_row = start_row;
-                break;
+                return false;
             }
             if ch == '\t' {
                 for c in start_col..end_col {
@@ -411,7 +449,8 @@ impl TextView {
             }
             sub_row = end_row;
             col = end_col;
-        }
+            true
+        });
 
         // The head of a collapsed region carries a trailing ellipsis in
         // the CONTENT area (Q#FD13/FD20): the authoritative,
@@ -432,6 +471,13 @@ impl TextView {
                 put(cells, sub_row, col, Glyph::Char(marker));
                 col += 1;
             }
+        } else if wrapping && col >= max_cols {
+            // The line ends at or past the edge --- a full last row, or
+            // spaces hanging --- so its end-of-line caret sits at column
+            // 0 of the row below (`place_of_byte`), and that row is the
+            // line's own. Counting it here is what keeps the next line
+            // off the caret's cell; `line_rows` counts the same row.
+            sub_row += 1;
         }
 
         sub_row.saturating_sub(skip_rows) + 1
@@ -450,16 +496,121 @@ struct LinePlacement {
     is_fold_head: bool,
 }
 
-/// Where a character is drawn, and where it leaves the cursor, under
-/// character wrap.
+/// One character's place in a line's layout, as [`walk_line`] reports it.
+#[derive(Copy, Clone, Debug)]
+struct Placed {
+    /// Byte index of the character within the line.
+    idx: usize,
+    ch: char,
+    /// Where the character itself goes. A space hanging past the edge
+    /// has `start_col >= max_cols` and no cell.
+    start_row: u32,
+    start_col: u32,
+    /// Where the following character resumes.
+    end_row: u32,
+    end_col: u32,
+}
+
+/// A space: the one character that hangs past the right edge rather than
+/// breaking, as cosmic-text's blank word does on the GPU (D35).
+fn is_blank(ch: char) -> bool {
+    ch == ' '
+}
+
+/// A character a line may break after: hyphen, en and em dash, slash.
+/// With spaces, tabs and double-width characters these are the grid's
+/// word boundaries --- a space-and-punctuation break, as Emacs's
+/// `word-wrap` makes, and deliberately not UAX #14 (D35).
+fn breaks_after(ch: char) -> bool {
+    matches!(ch, '-' | '\u{2013}' | '\u{2014}' | '/')
+}
+
+/// The width of the word starting at byte `from` of `s`, placed from
+/// column `col`, and the byte index where it ends.
 ///
-/// **This is the wrap rule and it exists exactly once.** Both
-/// [`TextView::row_of_byte`] and [`TextView::paint_line`] go through it,
-/// because they must agree perfectly: the first decides which visual row
-/// the viewport's byte anchor sits on, the second decides which row the
-/// text is drawn on. Two copies that drifted by one row would scroll the
-/// buffer to a position it does not render — a defect with no local
-/// symptom, and the exact shape this lane keeps finding.
+/// A word runs until a space or tab (excluded), through a hyphen, dash
+/// or slash (included), and stops on either side of a double-width
+/// character, which is a word of its own.
+fn measure_word(s: &str, from: usize, col: u32) -> (u32, usize) {
+    let mut c = col;
+    for (i, ch) in s[from..].char_indices() {
+        let at = from + i;
+        if is_blank(ch) || ch == '\t' {
+            return (c - col, at);
+        }
+        let next = advance_char(c, ch);
+        if next - c == 2 {
+            return if at == from {
+                (2, at + ch.len_utf8())
+            } else {
+                (c - col, at)
+            };
+        }
+        c = next;
+        if breaks_after(ch) {
+            return (c - col, at + ch.len_utf8());
+        }
+    }
+    (c - col, s.len())
+}
+
+/// Lay out one line and hand each character's place to `visit`, which
+/// returns `false` to stop the walk.
+///
+/// **This is the wrap rule and it exists exactly once.**
+/// [`TextView::place_of_byte`], [`TextView::byte_at_place`] and
+/// [`TextView::paint_line`] all go through it, because they must agree
+/// perfectly: the first two decide where the caret and a click are,
+/// the third where the text is drawn. Two copies that drifted by one row
+/// would put the caret on a row the text is not on --- a defect with no
+/// local symptom, and the exact shape the long-lines lane kept finding.
+///
+/// Under `wrapping` the break is at word boundaries (D35): a word that
+/// does not fit the rest of the row starts the next one; a word wider
+/// than the whole row starts a fresh row and breaks by glyph
+/// ([`advance_wrapped`]), so every character still gets a cell; a run
+/// of spaces hangs past the edge instead of opening a row with blanks.
+/// Without it this is the pre-wrap walk, character by character.
+fn walk_line(s: &str, max_cols: u32, wrapping: bool, mut visit: impl FnMut(Placed) -> bool) {
+    let (mut row, mut col) = (0u32, 0u32);
+    // The byte where the current word's fit decision stops applying.
+    let mut word_end = 0usize;
+    for (idx, ch) in s.char_indices() {
+        let (start_row, start_col, end_row, end_col) = if !wrapping {
+            advance_wrapped(row, col, ch, max_cols, false)
+        } else if is_blank(ch) {
+            // Never breaks. Past a full row it hangs, with no cell, and
+            // the next word breaks because it cannot fit after it.
+            (row, col, row, col + 1)
+        } else {
+            if ch != '\t' && idx >= word_end {
+                let (width, end) = measure_word(s, idx, col);
+                word_end = end;
+                if col > 0 && col + width > max_cols {
+                    row += 1;
+                    col = 0;
+                }
+            }
+            advance_wrapped(row, col, ch, max_cols, true)
+        };
+        if !visit(Placed {
+            idx,
+            ch,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        }) {
+            return;
+        }
+        row = end_row;
+        col = end_col;
+    }
+}
+
+/// Where a character is drawn, and where it leaves the cursor, under
+/// character wrap --- the glyph rule [`walk_line`] falls back to inside
+/// a word wider than the row.
 ///
 /// Returns `(start_row, start_col, end_row, end_col)`: where the
 /// character itself goes (it may already have moved to the next row),

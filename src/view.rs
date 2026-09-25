@@ -247,9 +247,13 @@ pub enum WrapMode {
     Truncate,
     /// A line longer than the viewport continues on the following rows.
     ///
-    /// Character wrap, not word wrap (framing Q#LL5): it matches
-    /// Emacs's default, and it is the only break rule both frontends
-    /// can implement identically without pulling UAX #14 into the grid.
+    /// Word wrap, with a glyph break inside a word wider than the row
+    /// (D35, which reverses framing Q#LL5's character wrap for prose):
+    /// the GPU runs cosmic-text's `WordOrGlyph`, the grid breaks at
+    /// spaces, tabs, a hyphen, dash or slash, and around a double-width
+    /// character (`text_view::walk_line`). The two break sets agree on
+    /// spaced Latin text and not everywhere; `docs/divergences.md`
+    /// states where.
     Wrap,
 }
 

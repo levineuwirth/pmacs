@@ -30,10 +30,12 @@ pmacs.config.define {
   -- this sentence shrinks back when it lands.
   description = "How a line wider than the window is shown: wrap onto following rows, or truncate at the edge. Truncated text is reachable by moving the cursor past the edge in the terminal UI; in the GUI it is not yet reachable at all.",
   -- A closed set, so an unknown value is impossible rather than
-  -- handled. Adding "word" later is a clean additive change --- which
-  -- is the plan, since character wrap is what both frontends can do
-  -- identically today (Q#LL5) and word wrap is a deliberate future
-  -- choice rather than an inherited library default.
+  -- handled. `wrap` breaks at word boundaries on both frontends (D35,
+  -- the deliberate choice Q#LL5 deferred, made for prose): cosmic-text's
+  -- `WordOrGlyph` on the GPU, spaces and a few punctuation marks on the
+  -- grid, a glyph break inside a word wider than the row. A character
+  -- wrap brought back beside it would be a third value, and a wire
+  -- change, since `LineWrapFacts.wrap` is a boolean.
   type = "enum",
   choices = { "wrap", "truncate" },
   -- `wrap` is the only value that leaves every character reachable

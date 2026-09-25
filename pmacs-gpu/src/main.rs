@@ -697,6 +697,18 @@ const SCROLLBAR_THUMB_FILL: [f32; 4] = [0.72, 0.72, 0.84, 0.42];
 /// for the same shape, so an own line and a peer's line read as the
 /// same kind of mark.
 const CURRENT_LINE_WASH_ALPHA: f32 = 0.22;
+
+/// The document buffer's break rule under `ui.line-wrap = "wrap"`:
+/// cosmic-text's word wrap, falling back to a glyph break for a word
+/// wider than the row (D35). The document buffer alone; the status,
+/// menu, minibuffer and completion buffers are `Wrap::None`.
+///
+/// Q#LL5 set this to `Wrap::Glyph` so the two frontends would break at
+/// the same characters; D35 makes both break at words instead, the grid
+/// by a space-and-punctuation rule (`pmacs::text_view::walk_line`) that
+/// agrees with cosmic-text's UAX #14 on spaced Latin prose and not
+/// everywhere, as `docs/divergences.md`'s Line wrap entry states.
+const DOCUMENT_WRAP: Wrap = Wrap::WordOrGlyph;
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -9631,20 +9643,17 @@ impl State {
             Metrics::new(fm.code_font_size(), fm.code_line_height()),
         );
         // Declare the document's wrap mode instead of inheriting
-        // cosmic-text's constructor default (`Wrap::WordOrGlyph`).
+        // cosmic-text's constructor default.
         //
-        // `Glyph`, not `None`: `ui.line-wrap` defaults to `wrap`, so a
-        // frontend that has not yet been told anything — or is talking
-        // to a pre-v22 daemon that never will be — should already be in
-        // the default mode. What changes versus the inherited default is
-        // only the break rule, word to character, which is the
-        // cross-frontend parity this stage buys.
-        //
-        // Declaring it is load-bearing rather than tidy: without it the
-        // document runs on `WordOrGlyph` until some message happens to
-        // change it, so a frontend talking to a pre-v22 daemon word
-        // wraps forever while the grid renderer character wraps.
-        buffer.set_wrap(&mut font_system, Wrap::Glyph);
+        // `DOCUMENT_WRAP`, not `None`: `ui.line-wrap` defaults to
+        // `wrap`, so a frontend that has not yet been told anything ---
+        // or is talking to a pre-v22 daemon that never will be --- should
+        // already be in the default mode. The value happens to equal the
+        // constructor's default since D35, and is declared anyway: word
+        // wrap here is a choice the grid made too, not a library default
+        // one frontend inherited, and D32 held that it arrive that way
+        // and never by deleting this line.
+        buffer.set_wrap(&mut font_system, DOCUMENT_WRAP);
         buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
@@ -14638,14 +14647,10 @@ impl State {
 
     /// Honor a wrap mode for `buffer_id` (protocol v22).
     ///
-    /// The document buffer has never set a wrap mode, so it has been
-    /// running on cosmic-text's constructor default,
-    /// `Wrap::WordOrGlyph` — word wrap that nobody chose. This makes the
-    /// mode explicit in both directions and settles it on
-    /// **`Wrap::Glyph`**: character wrap is what the grid renderer can
-    /// implement identically without pulling UAX #14 into it, and it is
-    /// what Emacs does by default. GUI users lose word wrap; that is a
-    /// deliberate, documented trade for the two frontends agreeing.
+    /// `wrap` is [`DOCUMENT_WRAP`], word wrap with a glyph break inside a
+    /// word wider than the row, which the grid renderer does too (D35);
+    /// `truncate` is `Wrap::None`. The mode is explicit in both
+    /// directions, never cosmic-text's constructor default by omission.
     ///
     /// Changing wrap reflows the whole document, exactly like a font
     /// change, so the retained scroll anchor is repaired through
@@ -14659,7 +14664,7 @@ impl State {
         if self.current_buffer_id != Some(buffer_id) {
             return;
         }
-        let want = if wrap { Wrap::Glyph } else { Wrap::None };
+        let want = if wrap { DOCUMENT_WRAP } else { Wrap::None };
         // Compare against the BUFFER, not a shadow field. A cached copy
         // can disagree with what cosmic-text actually holds — and when
         // it does, the short-circuit turns a real mode change into a
@@ -25444,36 +25449,226 @@ mod tests {
         );
     }
 
-    /// Acceptance 11 — a caret painted on a wrapped visual run
-    /// survives 16px → 72px → 6px re-wraps, with the normalized
-    /// A fresh frontend must already be CHARACTER wrapping, not word
-    /// wrapping.
+    /// E7d.1 (D35) — a fresh frontend already WORD wraps, and the
+    /// daemon's `wrap` keeps it there.
     ///
-    /// The subtle failure this catches: `apply_line_wrap` short-circuits
-    /// when the request matches `code_wrap`, so if the field said
-    /// `Glyph` while the buffer was still on cosmic-text's inherited
-    /// `WordOrGlyph`, the first `wrap: true` message would be a no-op
-    /// and the document would keep **word** wrapping — the exact
-    /// divergence from the grid renderer that framing Q#LL5 exists to
-    /// close, surviving invisibly.
-    ///
-    /// Wrap-versus-truncate cannot see it, because both modes differ
-    /// from each other either way. Word-versus-character can: with
-    /// character wrap, spaces are just glyphs, so a spaced line and an
-    /// unspaced line of the same length occupy the same number of rows.
-    /// Word wrap breaks early at the spaces and needs more.
+    /// The short-circuit in `apply_line_wrap` compares against the
+    /// buffer, so a construction-time mode that disagreed with the
+    /// `wrap: true` answer would be corrected only on the first message;
+    /// this pins both to [`DOCUMENT_WRAP`]. The behavioral leg is
+    /// [`e7d_1_a_paragraph_of_prose_wraps_at_the_spaces`].
     #[test]
-    fn a_fresh_frontend_wraps_by_character_not_by_word() {
-        let Some(state) = headless_or_skip(320, 400, "hello world\n") else {
+    fn a_fresh_frontend_wraps_by_word() {
+        let Some(mut state) = headless_or_skip(320, 400, "hello world\n") else {
             return;
         };
         assert_eq!(
             state.buffer.wrap(),
-            Wrap::Glyph,
-            "a frontend told nothing must already be in the DEFAULT mode \
-             and wrapping by CHARACTER. Inheriting cosmic-text's \
-             WordOrGlyph would word-wrap the document forever against a \
-             pre-v22 daemon, diverging from the grid renderer"
+            Wrap::WordOrGlyph,
+            "a frontend told nothing is already in the default mode, and \
+             that mode breaks at words (D35)"
+        );
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+            buffer_id: bid,
+            wrap: true,
+        });
+        assert_eq!(state.buffer.wrap(), Wrap::WordOrGlyph);
+    }
+
+    /// Words of prose, each distinct, so a run's text names its break.
+    const E7D_PROSE: &str = "the quick brown fox jumps over the lazy dog and then \
+        sleeps under a wide old tree beside the river until the evening comes";
+
+    /// The text of each laid-out visual run, first glyph to last.
+    fn e7d_run_texts(state: &State) -> Vec<String> {
+        state
+            .buffer
+            .layout_runs()
+            .map(|run| match (run.glyphs.first(), run.glyphs.last()) {
+                (Some(first), Some(last)) => run.text[first.start..last.end].to_owned(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    /// A document told `wrap` by the daemon, the own caret on it.
+    fn e7d_wrapped(width: u32, height: u32, text: &str) -> Option<(State, BufferId)> {
+        let mut state = headless_or_skip(width, height, text)?;
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+            buffer_id: bid,
+            wrap: true,
+        });
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 0,
+        });
+        Some((state, bid))
+    }
+
+    /// E7d.1 — a paragraph of prose wraps at the spaces: every visual
+    /// run holds whole words. `Wrap::Glyph`, Q#LL5's rule, cuts a word
+    /// at the edge of some run of this paragraph at this width.
+    ///
+    /// *Mutation: `DOCUMENT_WRAP = Wrap::Glyph` → a run ends inside a
+    /// word and this fails.*
+    #[test]
+    fn e7d_1_a_paragraph_of_prose_wraps_at_the_spaces() {
+        let Some((state, _)) = e7d_wrapped(320, 400, &format!("{E7D_PROSE}\n")) else {
+            return;
+        };
+        let runs = e7d_run_texts(&state);
+        assert!(
+            runs.len() >= 3,
+            "precondition: the paragraph wraps: {runs:?}"
+        );
+        let words: Vec<&str> = E7D_PROSE.split(' ').collect();
+        for run in &runs {
+            for word in run.split_whitespace() {
+                assert!(
+                    words.contains(&word),
+                    "{word:?} is a cut word in run {run:?} of {runs:?}"
+                );
+            }
+        }
+    }
+
+    /// E7d.1 — a code line wraps between its arguments, never inside an
+    /// identifier.
+    #[test]
+    fn e7d_1_a_long_line_of_code_wraps_between_its_arguments() {
+        let line = "let result = compute(first_argument, second_argument, third_argument, fourth);";
+        let Some((state, _)) = e7d_wrapped(320, 400, &format!("{line}\n")) else {
+            return;
+        };
+        let runs = e7d_run_texts(&state);
+        assert!(runs.len() >= 2, "precondition: the line wraps: {runs:?}");
+        let tokens: Vec<&str> = line.split(' ').collect();
+        for run in &runs {
+            for token in run.split_whitespace() {
+                assert!(tokens.contains(&token), "{token:?} is cut in {runs:?}");
+            }
+        }
+    }
+
+    /// E7d.1 — the 200-character word: wider than any row, it starts a
+    /// fresh row and breaks by glyph, and the caret the daemon puts on
+    /// any of its characters paints inside the code area, on rows that
+    /// only go down as the byte goes up --- every character reachable.
+    #[test]
+    fn e7d_1_a_two_hundred_character_word_wraps_and_every_character_is_reachable() {
+        let word: String = (0..200u8).map(|i| char::from(b'a' + i % 26)).collect();
+        let Some((mut state, bid)) = e7d_wrapped(320, 600, &format!("see {word} end\n")) else {
+            return;
+        };
+        let runs = e7d_run_texts(&state);
+        assert_eq!(
+            runs[0].trim_end(),
+            "see",
+            "the word starts a fresh row: {runs:?}"
+        );
+        assert!(
+            runs.len() >= 4,
+            "and breaks by glyph over several: {runs:?}"
+        );
+        let mut last_top = f32::MIN;
+        let mut tops = Vec::new();
+        for i in 0..200u64 {
+            let byte = 4 + i;
+            let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+                buffer_id: bid,
+                byte_pos: byte,
+            });
+            assert!(
+                state.caret_painted_in_code_clip(),
+                "the caret on character {i} of the word paints in the code area"
+            );
+            let (_, top, _) = state.code_byte_px(byte).expect("laid out");
+            assert!(
+                top >= last_top,
+                "character {i} is on a row above the one before it"
+            );
+            if top > last_top {
+                tops.push(top);
+            }
+            last_top = top;
+        }
+        assert!(
+            tops.len() >= 4,
+            "the caret walked down the wrapped rows: {tops:?}"
+        );
+    }
+
+    /// E7d.1 — on a wrapped paragraph the caret at the line's start (`C-a`)
+    /// is on its first run's left edge and at its end (`C-e`) on its last
+    /// run, and the current-line wash covers every run of that source
+    /// line and no run of another.
+    #[test]
+    fn e7d_1_c_a_c_e_and_the_wash_follow_the_wrapped_rows() {
+        let doc = format!("first\n{E7D_PROSE}\nlast\n");
+        let Some((mut state, bid)) = e7d_wrapped(320, 400, &doc) else {
+            return;
+        };
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts {
+            faces: vec![theme_face(
+                "ui.current-line",
+                CellStyle {
+                    bg: CellColor::Rgb(40, 60, 90),
+                    ..CellStyle::default()
+                },
+            )],
+        });
+        let para_start = 6u64;
+        let para_end = para_start + E7D_PROSE.len() as u64;
+        let para_tops: Vec<f32> = state
+            .buffer
+            .layout_runs()
+            .filter(|run| run.line_i == 1)
+            .map(|run| run.line_top)
+            .collect();
+        assert!(para_tops.len() >= 3, "precondition: the paragraph wraps");
+        let first_row = para_tops[0];
+        let last_row = *para_tops.last().expect("runs");
+
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: para_start,
+        });
+        let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+        let scrolled = state.buffer.scroll().vertical;
+        let (x, top, _) = state.code_byte_px(para_start).expect("C-a");
+        assert!(
+            near(x, 0.0) && near(top, first_row - scrolled),
+            "C-a: the first run's left edge, not ({x}, {top})"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: para_end,
+        });
+        assert!(state.caret_painted_in_code_clip(), "C-e: the caret paints");
+        let (x, top, _) = state.code_byte_px(para_end).expect("C-e");
+        assert!(
+            near(top, last_row - state.buffer.scroll().vertical),
+            "C-e: on the last run, not at {top}"
+        );
+        assert!(x > 0.0, "C-e: past the last word, not at the row's start");
+
+        let (vstart, vend) = state.view_range;
+        let slice = &state.current_text[vstart as usize..vend as usize];
+        let line_offsets = line_byte_offsets(slice);
+        let mut rects = Vec::new();
+        state.collect_own_current_line_rects(&mut rects, &line_offsets, vstart, vend);
+        let mut washed: Vec<f32> = rects.iter().map(|r| r.y).collect();
+        washed.dedup();
+        assert_eq!(
+            washed.len(),
+            para_tops.len(),
+            "one wash per visual row of the caret's line, none on `first` or `last`: \
+             {washed:?} against runs at {para_tops:?}"
         );
     }
 

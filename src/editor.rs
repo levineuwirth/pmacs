@@ -3632,15 +3632,19 @@ impl EditorState {
         let buffer_id = window.buffer_id;
         let view_top = window.view_top;
         let folds = core.fold_map_for_window(win_id);
-        let display_row = match folds.as_ref() {
-            Some(map) => map.nth_visible_from(view_top, coord.row as usize),
-            None => view_top.saturating_add(coord.row as usize),
-        };
-        let display_row = u32::try_from(display_row).ok()?;
-        let target = crate::view::DisplayCoord::new(display_row, coord.col);
         let registry = core.registry.clone();
         let reg = registry.borrow();
         let buf = reg.get(buffer_id).ok()?;
+        let target = if window.layout_ctx().wrapping() {
+            let (line, sub) = wrapped_row_at(window, buf, folds.as_ref(), coord.row as usize);
+            crate::view::DisplayCoord::wrapped(u32::try_from(line).ok()?, sub, coord.col)
+        } else {
+            let display_row = match folds.as_ref() {
+                Some(map) => map.nth_visible_from(view_top, coord.row as usize),
+                None => view_top.saturating_add(coord.row as usize),
+            };
+            crate::view::DisplayCoord::new(u32::try_from(display_row).ok()?, coord.col)
+        };
         core.windows[&win_id]
             .text_view
             .display_to_pos(buf, target, core.layout_ctx(win_id))
@@ -4927,21 +4931,32 @@ impl EditorState {
         // the CLICKED window's (round-3 F1), not the previously active
         // one's.
         let folds = core.fold_map_for_window(win_id);
-        let display_row = match folds.as_ref() {
-            Some(map) => map.nth_visible_from(view_top, local_row as usize),
-            None => view_top.saturating_add(local_row as usize),
-        };
-        let Ok(display_row) = u32::try_from(display_row) else {
-            return;
-        };
-        let target = crate::view::DisplayCoord::new(display_row, local_col);
         let pos = {
             let registry = core.registry.clone();
             let reg = registry.borrow();
             let Ok(buf) = reg.get(buffer_id) else {
                 return;
             };
-            core.windows[&win_id]
+            let window = &core.windows[&win_id];
+            let target = if window.layout_ctx().wrapping() {
+                // Under wrap a screen row is not a line (D35): walk the
+                // rows the painter drew from `view_top` down.
+                let (line, sub) = wrapped_row_at(window, buf, folds.as_ref(), local_row as usize);
+                let Ok(line) = u32::try_from(line) else {
+                    return;
+                };
+                crate::view::DisplayCoord::wrapped(line, sub, local_col)
+            } else {
+                let display_row = match folds.as_ref() {
+                    Some(map) => map.nth_visible_from(view_top, local_row as usize),
+                    None => view_top.saturating_add(local_row as usize),
+                };
+                let Ok(display_row) = u32::try_from(display_row) else {
+                    return;
+                };
+                crate::view::DisplayCoord::new(display_row, local_col)
+            };
+            window
                 .text_view
                 .display_to_pos(buf, target, core.layout_ctx(win_id))
         };
@@ -5708,6 +5723,10 @@ fn prepare_window_cursor_visible(
             .saturating_sub(window.last_content_cols)
     });
     horizontal_follow(window, coord.map_or(0, |d| d.col), max_left);
+    if window.layout_ctx().wrapping() && inner_rows > 0 {
+        follow_wrapped(window, buf, inner_rows as usize, folds, cursor_row, coord);
+        return;
+    }
     match folds {
         // The logical cursor may sit on a hidden line (a shared fold, or
         // goto-line into one); the row that actually renders — and so
@@ -5732,6 +5751,115 @@ fn prepare_window_cursor_visible(
                 window.view_top = cursor_row + 1 - inner_rows as usize;
             }
         }
+    }
+}
+
+/// The vertical half of [`prepare_window_cursor_visible`] under wrap,
+/// reckoned in **screen rows** rather than lines (D35).
+///
+/// `view_top` stays a line, and the caret's row is every row the lines
+/// from it down to the caret's line occupy, plus the caret's own visual
+/// row within its line. Reckoned in lines, as the unwrapped rule does,
+/// a caret below a few wrapped paragraphs sat off the bottom of the
+/// window while the window thought it visible --- which is what prose,
+/// one paragraph to a line, meets on its first screen.
+///
+/// A line taller than the window cannot be followed past its last
+/// visible row with a line-valued `view_top`; the caret is then off
+/// screen until it leaves that line, and the painter says so by drawing
+/// no caret rather than a wrong one.
+fn follow_wrapped(
+    window: &mut crate::window::Window,
+    buf: &crate::buffer::Buffer,
+    inner_rows: usize,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
+    cursor_row: usize,
+    coord: Option<crate::view::DisplayCoord>,
+) {
+    let (line, sub) = match folds {
+        Some(map) => {
+            let head = map.visible_head_of(cursor_row);
+            // A cursor on a hidden line renders on its head's first row.
+            let sub = if head == cursor_row {
+                coord.map_or(0, |d| d.sub_row as usize)
+            } else {
+                0
+            };
+            (head, sub)
+        }
+        None => (cursor_row, coord.map_or(0, |d| d.sub_row as usize)),
+    };
+    let mut top = folds.map_or(window.view_top, |m| m.clamp_view_top(window.view_top));
+    if line <= top {
+        window.view_top = line;
+        return;
+    }
+    // Every line takes at least one row, so a line more than a window
+    // above the caret's cannot share the screen with it; start there
+    // rather than laying out everything in between.
+    let lines_between = folds.map_or(line - top, |m| m.visible_rows_between(top, line));
+    if lines_between > inner_rows {
+        top = folds.map_or(line - inner_rows, |m| m.nth_visible_back(line, inner_rows));
+    }
+    let next = |l: usize| folds.map_or(l + 1, |m| m.next_visible(l));
+    let ctx = window.layout_ctx();
+    let mut above = 0usize;
+    let mut l = top;
+    while l < line {
+        above += window.text_view.line_rows(buf, l, ctx) as usize;
+        l = next(l);
+    }
+    while top < line && above + sub >= inner_rows {
+        above -= window.text_view.line_rows(buf, top, ctx) as usize;
+        top = next(top);
+    }
+    window.view_top = top;
+}
+
+/// Screen rows between the first row of `top` and the first row of
+/// `line` under the window's wrap, counting visible lines only, and
+/// stopping once the count reaches `limit`.
+fn wrapped_rows_before(
+    window: &crate::window::Window,
+    buf: &crate::buffer::Buffer,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
+    top: usize,
+    line: usize,
+    limit: usize,
+) -> usize {
+    let ctx = window.layout_ctx();
+    let mut rows = 0usize;
+    let mut l = top;
+    while l < line && rows < limit {
+        rows += window.text_view.line_rows(buf, l, ctx) as usize;
+        l = folds.map_or(l + 1, |m| m.next_visible(l));
+    }
+    rows
+}
+
+/// The source line and visual row within it that screen row `row` of a
+/// wrapped window shows, walking from `view_top` --- the inverse of the
+/// caret's reckoning in [`window_cursor_cell`]. Past the buffer's last
+/// row it answers the last line's last row, so a click below the text
+/// lands at the end as it does unwrapped.
+fn wrapped_row_at(
+    window: &crate::window::Window,
+    buf: &crate::buffer::Buffer,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
+    row: usize,
+) -> (usize, u32) {
+    let ctx = window.layout_ctx();
+    let count = window.text_view.line_count();
+    let mut l = folds.map_or(window.view_top, |m| m.clamp_view_top(window.view_top));
+    let mut left = row;
+    loop {
+        let rows = window.text_view.line_rows(buf, l, ctx) as usize;
+        let next = folds.map_or(l + 1, |m| m.next_visible(l));
+        if left < rows || next >= count {
+            return (l, u32::try_from(left.min(rows - 1)).unwrap_or(u32::MAX));
+        }
+        left -= rows;
+        l = next;
     }
 }
 
@@ -6222,16 +6350,29 @@ fn window_cursor_cell(
     let disp = window
         .text_view
         .pos_to_display(buf, cursor, window.layout_ctx())?;
-    let row_offset = match folds {
-        Some(map) => {
-            let top = map.clamp_view_top(window.view_top);
-            let row = disp.row as usize;
-            if row < top {
-                return None;
-            }
-            map.visible_rows_between(top, row)
+    let row_offset = if window.layout_ctx().wrapping() {
+        // Under wrap a screen row is not a line: the caret sits below
+        // every row the lines above it occupy, on its own visual row
+        // (D35; `follow_wrapped` scrolls by the same count).
+        let top = folds.map_or(window.view_top, |m| m.clamp_view_top(window.view_top));
+        let line = disp.row as usize;
+        if line < top {
+            return None;
         }
-        None => (disp.row as usize).checked_sub(window.view_top)?,
+        wrapped_rows_before(window, buf, folds, top, line, inner_rows as usize)
+            + disp.sub_row as usize
+    } else {
+        match folds {
+            Some(map) => {
+                let top = map.clamp_view_top(window.view_top);
+                let row = disp.row as usize;
+                if row < top {
+                    return None;
+                }
+                map.visible_rows_between(top, row)
+            }
+            None => (disp.row as usize).checked_sub(window.view_top)?,
+        }
     };
     if row_offset >= inner_rows as usize {
         return None;
