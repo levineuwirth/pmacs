@@ -2021,6 +2021,50 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### `main` after E7c: run 35588597754 at `ff4aa18`, and it is GREEN
+
+Read at E7d's opening on 2026-09-25, from the jobs endpoint and all
+six test legs' logs; not re-run. `ff4aa18` is code-bearing (E7c's
+squash), so it is E7d's base control itself.
+
+| field | value |
+|---|---|
+| run | 35588597754, `push`, one attempt |
+| head | `ff4aa18`, E7c's squash merge (PR #284 at `3de1e1f`) |
+| window | created 2026-09-21T10:24:45Z, updated 10:48:12Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+| the six test legs | `Test (crdt)` 166 `test result: ok`, `Test (ubuntu-latest / luajit)`, `Test (ubuntu-latest / lua54)` and `Test (ubuntu-latest / luajit, no crdt)` 167 each, both macOS legs 168 each; `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; every log's `running N tests` lines paired one to one with its result lines (the macOS legs' one extra match is the adapter step's own `grep -q 'running 1 test'` echoed into the log); #282's selector `ok` on all six legs and #283's on the five that build it; the twenty-seven `e7c_` rows `ok` on every leg |
+
+Tally (run-35588597754-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 106297625942 | success |
+| Changed paths | 106297626239 | success |
+| Format | 106297626251 | success |
+| Lint (lua54) | 106297626402 | success |
+| Lint (luajit) | 106297626537 | success |
+| M5 Perf Gates | 106297688270 | success |
+| GPU Render (headless) | 106297688282 | success |
+| M4 Perf Gates | 106297688288 | success |
+| Test (crdt) | 106297688301 | success |
+| Test (ubuntu-latest / lua54) | 106297688335 | success |
+| M1 Acceptance Gates | 106297688340 | success |
+| Test (macos-latest / luajit) | 106297688341 | success |
+| M6 Perf Gates | 106297688347 | success |
+| M10 Perf Gates (crdt) | 106297688362 | success |
+| Test (ubuntu-latest / luajit) | 106297688393 | success |
+| Perf budgets (debug) | 106297688427 | success |
+| Test (macos-latest / lua54) | 106297688454 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 106297688544 | success |
+| Docs consistency | 106297689953 | skipped |
+
+Nothing sampled: #282 and #283, red on the base control `361bb3b` and
+on E7c's tip run, did not recur here, which is non-reproduction and
+nothing more; every count stands. The head is green, stated at the
+moment of writing.
+
 ### PR #284's fix-round-2 head run 35474631618 at `09798eb`: #283's third and a new row of the branch's own, #285
 
 E7c's head after fix round 2 (the diagnostic-drop rule, switch-buffer's
