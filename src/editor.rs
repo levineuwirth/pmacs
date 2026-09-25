@@ -6272,7 +6272,16 @@ pub fn paint_frame(
         }
     }
 
-    paint_status_line(grid, core, &state.lua_host, dispatcher, term_size, &theme);
+    let at_point = diagnostic_at_point(core, &diag_store, active);
+    paint_status_line(
+        grid,
+        core,
+        &state.lua_host,
+        dispatcher,
+        at_point.as_deref(),
+        term_size,
+        &theme,
+    );
 
     // An active isearch owns the bottom row (its prompt + match
     // readout), but the terminal cursor stays in the buffer at the
@@ -6454,10 +6463,11 @@ fn paint_status_line(
     core: &EditorCore,
     lua_host: &LuaHost,
     dispatcher: &KeyDispatcher,
+    at_point: Option<&str>,
     term_size: crate::cell::CellSize,
     theme: &crate::highlight::Theme,
 ) {
-    let status = build_status_line(core, lua_host, dispatcher, term_size.cols);
+    let status = build_status_line(core, lua_host, dispatcher, at_point, term_size.cols);
     let row = term_size.rows - 1;
     // Themes Q#TH5: a set `ui.statusline` face owns the row within its
     // {fg} mask (surface resets to plain); unset keeps reverse video.
@@ -7329,26 +7339,54 @@ fn paint_search_prompt(
     }
 }
 
+/// E7d.2 — the status text for the diagnostic under `window_id`'s
+/// caret, or `None` when the caret is inside none (or the window shows
+/// no file). Derived every frame and never stored, so leaving the range
+/// clears it with nothing to reset, and it never overwrites a
+/// command's text. Both status producers read it: the grid's
+/// [`build_status_line`] and the semantic `StatusFacts`.
+pub(crate) fn diagnostic_at_point(
+    core: &EditorCore,
+    store: &crate::diag::SharedDiagStore,
+    window_id: crate::window::WindowId,
+) -> Option<String> {
+    let window = core.windows.get(&window_id)?;
+    let reg = core.registry.borrow();
+    let buf = reg.get(window.buffer_id).ok()?;
+    let uri = crate::lsp::path_to_file_uri(buf.file_path()?);
+    let guard = store.lock().ok()?;
+    guard
+        .at_byte(&uri, window.cursor)
+        .map(crate::diag::Diagnostic::status_text)
+}
+
 /// Build the global status (echo area) row: pure ephemeral state.
 ///
 /// Per-window facts (buffer name, modified marker, cursor coord,
 /// scroll indicator) live on each window's mode line — see
 /// [`paint_mode_line`]. The status row is reserved for things that
 /// don't belong to any window in particular: command result text
-/// (`core.status`), captured Lua errors, and the in-flight key
-/// prefix when a multi-chord sequence is open.
+/// (`core.status`), the diagnostic at point (E7d.2, `at_point`),
+/// captured Lua errors, and the in-flight key prefix when a
+/// multi-chord sequence is open. A command's text outranks the
+/// diagnostic, which outranks an unread error: the caret's diagnostic
+/// is what the user is looking at, and the error returns when the
+/// caret leaves it.
 ///
-/// When all three are empty, the returned string is empty and the
-/// row renders as blanks.
+/// When all are empty, the returned string is empty and the row renders
+/// as blanks.
 fn build_status_line(
     core: &EditorCore,
     lua_host: &LuaHost,
     dispatcher: &KeyDispatcher,
+    at_point: Option<&str>,
     cols: u32,
 ) -> String {
     let mut line = String::new();
     if !core.status.is_empty() {
         line.push_str(&sanitize_single_line(&core.status));
+    } else if let Some(diagnostic) = at_point {
+        line.push_str(&sanitize_single_line(diagnostic));
     } else if let Some(msg) = lua_host.unread_error_status_message() {
         // E5.1: the last error shows while it is unread, and stops once
         // a window has shown `*errors*` --- a transient trace, where it
@@ -8725,7 +8763,13 @@ mod tests {
     #[test]
     fn empty_status_row_is_blank() {
         let s = fresh_with(b"hello\n");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 80);
+        let line = build_status_line(
+            &s.core.borrow(),
+            &s.lua_host,
+            &KeyDispatcher::new(),
+            None,
+            80,
+        );
         assert_eq!(line, "", "status row should be empty when nothing to say");
     }
 
@@ -8733,7 +8777,13 @@ mod tests {
     fn captured_lua_error_appears_in_status_line() {
         let mut s = fresh_with(b"");
         let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
+        let line = build_status_line(
+            &s.core.borrow(),
+            &s.lua_host,
+            &KeyDispatcher::new(),
+            None,
+            200,
+        );
         assert!(line.contains("lua: "), "status line: {line}");
         assert!(line.contains("kapow"), "status line: {line}");
     }
@@ -8748,7 +8798,13 @@ mod tests {
         let s = fresh_with(b"");
         s.core.borrow_mut().status =
             "M-x error: command \"foo\" not found\nstack traceback:\n\t[C]: in ?".into();
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
+        let line = build_status_line(
+            &s.core.borrow(),
+            &s.lua_host,
+            &KeyDispatcher::new(),
+            None,
+            200,
+        );
         assert!(!line.contains('\n'), "status line leaked newline: {line:?}");
         assert!(!line.contains('\r'), "status line leaked CR: {line:?}");
         assert!(
@@ -8767,7 +8823,13 @@ mod tests {
         let _ = s
             .lua_host
             .eval(Some("usercfg"), "error('boom\\nlots\\nof\\nlines')");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
+        let line = build_status_line(
+            &s.core.borrow(),
+            &s.lua_host,
+            &KeyDispatcher::new(),
+            None,
+            200,
+        );
         assert!(!line.contains('\n'), "status line leaked newline: {line:?}");
         assert!(line.contains("lua: "), "status line: {line}");
     }
@@ -8777,7 +8839,13 @@ mod tests {
         let mut s = fresh_with(b"");
         let _ = s.lua_host.eval(None, "error('latent')");
         s.core.borrow_mut().status = "saved foo".into();
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
+        let line = build_status_line(
+            &s.core.borrow(),
+            &s.lua_host,
+            &KeyDispatcher::new(),
+            None,
+            200,
+        );
         assert!(line.contains("saved foo"));
         assert!(!line.contains("lua: "));
     }
@@ -9642,7 +9710,13 @@ mod tests {
             "raw status leaked newline: {raw:?} (default.lua should take first line)"
         );
         assert!(raw.starts_with("M-x error: "), "raw status: {raw}");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
+        let line = build_status_line(
+            &s.core.borrow(),
+            &s.lua_host,
+            &KeyDispatcher::new(),
+            None,
+            200,
+        );
         assert!(
             !line.contains('\n'),
             "rendered status line leaked newline: {line:?} (raw: {raw:?})"

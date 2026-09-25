@@ -142,6 +142,15 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// The status line's text for the diagnostic at point (E7d.2):
+    /// the severity and the first line of the message, `error:
+    /// mismatched types`.
+    #[must_use]
+    pub fn status_text(&self) -> String {
+        let first = self.message.lines().next().unwrap_or_default().trim_end();
+        format!("{}: {first}", self.severity.label())
+    }
+
     /// Parse a single diagnostic from an LSP JSON object. Returns
     /// `None` for objects that don't have the minimum required
     /// fields (range, message).
@@ -401,6 +410,24 @@ impl DiagnosticStore {
             .iter()
             .filter(|d| d.span.is_some_and(|(lo, _)| lo < byte))
             .max_by_key(|d| d.span)
+    }
+
+    /// The diagnostic the caret at `byte` is inside (E7d.2): among
+    /// those whose current span holds the character at `byte` ---
+    /// `lo <= byte < hi`, or `byte == lo` for an empty span --- the most
+    /// severe, then the innermost, then the earliest. Entries without a
+    /// span never match, as in [`Self::next_after_byte`].
+    #[must_use]
+    pub fn at_byte(&self, uri: &str, byte: u64) -> Option<&Diagnostic> {
+        self.by_uri
+            .get(uri)?
+            .iter()
+            .filter_map(|d| {
+                let (lo, hi) = d.span?;
+                (lo <= byte && (byte < hi || (lo == hi && byte == lo))).then_some((d, lo, hi))
+            })
+            .min_by_key(|&(d, lo, hi)| (d.severity, hi - lo, lo))
+            .map(|(d, _, _)| d)
     }
 
     /// `true` iff the URI's stored diagnostics are stale (the
@@ -1924,5 +1951,66 @@ mod tests {
             vec![Some((10, 10))],
             "at the deletion's end: kept, shifted"
         );
+    }
+
+    /// E7d.2 — the diagnostic at point: the character under the caret
+    /// is in the span (the end is outside, an empty span matches at its
+    /// byte); the most severe wins, then the innermost; a spanless entry
+    /// never matches; the status text is the severity and the message's
+    /// first line.
+    #[test]
+    fn at_byte_takes_the_most_severe_then_the_innermost() {
+        let d = |lo: u64, hi: u64, severity: DiagnosticSeverity, message: &str| Diagnostic {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
+            severity,
+            message: message.into(),
+            source: None,
+            code: None,
+            span: Some((lo, hi)),
+        };
+        let mut s = DiagnosticStore::new();
+        s.note_logged("file:///a");
+        let mut spanless = d(0, 0, DiagnosticSeverity::Error, "no span");
+        spanless.span = None;
+        s.set(
+            "file:///a",
+            vec![
+                d(0, 40, DiagnosticSeverity::Warning, "outer warning"),
+                d(10, 20, DiagnosticSeverity::Warning, "inner warning"),
+                d(12, 14, DiagnosticSeverity::Hint, "innermost hint"),
+                d(
+                    30,
+                    35,
+                    DiagnosticSeverity::Error,
+                    "an error\nnote: second line",
+                ),
+                d(50, 50, DiagnosticSeverity::Information, "at a point"),
+                spanless,
+            ],
+        );
+        let at = |b: u64| s.at_byte("file:///a", b).map(Diagnostic::status_text);
+        assert_eq!(at(5).as_deref(), Some("warning: outer warning"));
+        assert_eq!(
+            at(13).as_deref(),
+            Some("warning: inner warning"),
+            "the warning outranks the innermost hint; of the two warnings, the inner"
+        );
+        assert_eq!(
+            at(20).as_deref(),
+            Some("warning: outer warning"),
+            "20 is past the inner"
+        );
+        assert_eq!(
+            at(32).as_deref(),
+            Some("error: an error"),
+            "the error outranks the enclosing warning, and only the first line shows"
+        );
+        assert_eq!(at(40), None, "a span's end is outside it");
+        assert_eq!(at(50).as_deref(), Some("info: at a point"));
+        assert_eq!(at(51), None);
+        assert_eq!(s.at_byte("file:///b", 5).map(|d| d.message.clone()), None);
     }
 }
