@@ -852,8 +852,19 @@ fn review4_grid_reads_errors_in_an_inactive_document_split() {
     exec(&state, "pmacs.error('visible in the other grid split')");
     let cells = paint(&state, 40, 100);
     assert_eq!(state.lua_host.unread_errors(), 0);
+    // Read across rows: under word wrap (D35) the entry breaks at a
+    // space, here between `visible` and `in`, where character wrap put
+    // the whole phrase on one row by the chance of the trace's length.
+    // The other split is blank beside those rows, so the grid's text
+    // with its runs of blanks collapsed is the entry's.
+    let text = (0..40)
+        .map(|row| row_text(&cells, 100, row))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        (0..40).any(|row| row_text(&cells, 100, row).contains("visible in the other grid split"))
+        text.contains("visible in the other grid split"),
+        "the entry is on the grid: {text:?}"
     );
 }
 
