@@ -503,6 +503,83 @@ pmacs.lsp.config.latex = pmacs.lsp.config.latex or {
   root = latex_root_for,
 }
 
+-- Haskell via haskell-language-server, started through its wrapper
+-- (aside E7e). `--lsp` is the stdio transport; without it the wrapper
+-- type-checks the files it is given and exits. It sits here rather than
+-- beside `lua` because its root walk reuses the two path helpers above.
+--
+-- What HLS needs to be useful is a component, and it takes it from the
+-- root it is started in, not from the file: rooted where a `.cabal` file
+-- or `cabal.project` is, it asks `cabal` (or `stack`) for the flags and
+-- knows the package's dependencies; rooted anywhere else it falls back
+-- to bare `ghc`. With `cabal init`'s layout (the module in `app/`, no
+-- `.git`) the marker walk would hand it `app/`, and it did exactly that
+-- fallback. So the root is the innermost ancestor holding `hie.yaml`,
+-- `cabal.project`, `stack.yaml`, `package.yaml` or a `.cabal` file named
+-- after its directory (a listing is not available synchronously here,
+-- so `foo/bar.cabal` is not seen; a `.git` beside it still is, by the
+-- marker walk this falls through to).
+--
+-- Outside a project it still attaches and the modeline reads
+-- `LSP:ready`, but bare `ghc` knows only what ships with GHC: a
+-- one-module file importing `base` or `containers` type-checks, and an
+-- import of anything from Hackage is `Could not find module`. That is
+-- the fix a `.cabal` file (or `cabal init`) makes, not a pmacs fault.
+--
+-- The server must also be built against the GHC the project compiles
+-- with. When it is not, it attaches, the modeline reads `LSP:ready`, and
+-- the one diagnostic is an error on the file's first line, `ghcide
+-- compiled against GHC <x> but currently using <y>`; the fix is a
+-- matching server, or a `with-compiler:` line in `cabal.project` naming
+-- a GHC it was built against. No `settings`. Users override from
+-- init.lua before a `.hs` file opens.
+local HASKELL_ROOT_MARKERS = { "hie.yaml", "cabal.project", "stack.yaml", "package.yaml" }
+
+-- The same existence test as `latex_marker_in`: a directory opens but
+-- reads an error, an empty file reads nil with none.
+local function haskell_file_in(base, name)
+  local f = io.open(base .. "/" .. name, "r")
+  if not f then return false end
+  local _, err = f:read(1)
+  f:close()
+  return err == nil
+end
+
+local function haskell_marker_in(dir)
+  local base = (dir == "/") and "" or dir
+  for _, name in ipairs(HASKELL_ROOT_MARKERS) do
+    if haskell_file_in(base, name) then return true end
+  end
+  local own = dir:match("([^/]+)$")
+  return own ~= nil and haskell_file_in(base, own .. ".cabal")
+end
+
+-- Innermost marked ancestor, canonical (#161's affinity key), inside the
+-- search boundary; nil to fall through to the marker walk.
+local function haskell_root_for(path)
+  if type(path) ~= "string" then return nil end
+  local dir = path:match("^(.*)/[^/]*$")
+  if not dir then return nil end
+  if dir == "" then dir = "/" end
+  dir = pmacs.fs.canonicalize(dir)
+  if not dir then return nil end
+  local boundary
+  local ok, b = pcall(pmacs.project.search_boundary)
+  if ok then boundary = b end
+  local cur = dir
+  while cur and latex_within_boundary(cur, boundary) do
+    if haskell_marker_in(cur) then return cur end
+    cur = latex_parent_of(cur)
+  end
+  return nil
+end
+
+pmacs.lsp.config.haskell = pmacs.lsp.config.haskell or {
+  command = "haskell-language-server-wrapper",
+  args = { "--lsp" },
+  root = haskell_root_for,
+}
+
 -- LSP-side extension → language map, deliberately independent of the
 -- tree-sitter detection in `pmacs.parse`. Consulted only when
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a

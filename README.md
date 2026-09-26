@@ -85,7 +85,8 @@ providers keep chrome and modelines runtime-configurable. Saves are atomic
 rename with `prepareRename`, cross-file definitions, hover, signature help,
 references, document symbols, code actions, formatting, semantic tokens, and
 inline inlay hints. Preconfigured servers cover Rust, C/C++, Python, Go,
-JavaScript/TypeScript, Lua, Bash, TOML, Zig, Dockerfile, CMake, JSON, and YAML.
+JavaScript/TypeScript, Lua, Bash, TOML, Zig, Dockerfile, CMake, JSON, YAML,
+and Haskell.
 Bundled tree-sitter grammars include those languages plus Markdown, Make, and
 CUDA; nested Markdown fences and frontmatter use multi-language injections,
 and locals-query processing distinguishes shadowed builtins. Bounded Emacs
