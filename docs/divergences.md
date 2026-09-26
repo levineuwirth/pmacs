@@ -22,16 +22,25 @@ whole. Under one cap a growing register squeezes the rules.
   identity of its own; until then the acceptance asserts equality only
   where the credential exists, and prints both colors where it does not.
 - **Line wrap.** Under `ui.line-wrap = "wrap"` both frontends wrap at
-  the character. The GPU frontend could wrap by word through
-  cosmic-text's Unicode line breaking (UAX #14) and the grid frontend
-  cannot match those breaks without a UAX #14 dependency, so a grid
-  whitespace wrap would give approximate parity, which is worse than an
-  honest difference; the ruling chose character wrap on both and
-  accepted that GPU users lose word wrap. Under `"truncate"`, text past
-  the edge is reachable by moving the cursor in the grid frontend and
-  not yet reachable in the GPU frontend. Removed when a word-wrap mode
-  ships on both frontends with the difference in breaking rules stated,
-  and horizontal reach of truncated text exists on the GPU.
+  word boundaries (D35, reversing Q#LL5's character wrap for prose),
+  and a word wider than the row breaks by glyph on both, so every
+  character stays reachable. They do not break at the same places
+  everywhere. The GPU frontend runs cosmic-text's `WordOrGlyph`, which
+  breaks by Unicode line breaking (UAX #14); the grid breaks after a run
+  of spaces, a tab, a hyphen, an en or em dash and a slash, and on
+  either side of a double-width character (`text_view::walk_line`), with
+  no UAX #14 dependency. On spaced Latin prose and code the two agree.
+  They differ where UAX #14 has a rule the grid lacks: the grid breaks
+  after a hyphen or slash before a digit (`-5`, `1/2`), never before an
+  em dash, and before closing CJK punctuation that UAX #14 keeps with
+  the character it follows. A space hanging past the edge draws its
+  caret past the edge on the GPU and at the next row's first cell on the
+  grid, where the line's end also owns a row of its own when it falls at
+  or past the edge. Under `"truncate"`, text past the edge is reachable
+  by moving the cursor in the grid frontend and not yet reachable in the
+  GPU frontend. The break half is removed when the grid adopts UAX #14
+  or the GPU adopts the grid's break set; the truncate half when
+  horizontal reach of truncated text exists on the GPU.
 - **Zoom chords, Ctrl+wheel and the macOS Cmd chords (D22).** `C-+`
   and `C-=` zoom in,
   `C--` out and `C-0` resets, as **global** bindings, so a grid frontend
