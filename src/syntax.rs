@@ -257,6 +257,8 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         // entry name. `lean4-mode` does the equivalent through
         // `markdown-code-lang-modes`.
         ("lean", "lean4"),
+        // A ```hs fence is as common as ```haskell, which needs no alias.
+        ("hs", "haskell"),
     ]
     .into_iter()
     .map(|(a, b)| (a.to_owned(), b.to_owned()))
@@ -835,6 +837,23 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
         locals_query: &[tree_sitter_lua::LOCALS_QUERY],
         injections_query: &[],
+    },
+    // Haskell (aside E7e). The crate exports all three query constants, in
+    // the plural rust/lua idiom. Its injections inject quasiquote bodies by
+    // quoter (`[hamlet|…|]` -> html, `[aesonQQ|…|]` -> json, `[sql|…|]`) and
+    // tag comments as `comment`; a language this table does not register
+    // resolves to nothing and is skipped. `.lhs` is deliberately unclaimed:
+    // literate Haskell is prose with code in Bird tracks (`> `) or
+    // `\begin{code}` blocks, which needs an unliterate pass this grammar does
+    // not have, and it parses both as errors
+    // (`lhs_is_not_haskell_to_this_grammar` pins it).
+    LanguageEntry {
+        name: "haskell",
+        extensions: &["hs"],
+        loader: || tree_sitter_haskell::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_haskell::HIGHLIGHTS_QUERY],
+        locals_query: &[tree_sitter_haskell::LOCALS_QUERY],
+        injections_query: &[tree_sitter_haskell::INJECTIONS_QUERY],
     },
     // T M9.7: markdown block grammar (`tree_sitter_md::LANGUAGE`) — headers,
     // lists, fenced code blocks, blockquotes. Its `injections.scm` (framing
@@ -2566,6 +2585,160 @@ mod tests {
                 reg.language_name_for_path(unclaimed).as_deref(),
                 Some("lean4"),
                 "{unclaimed} must not resolve to lean4"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_languages_include_haskell() {
+        // Aside E7e. The crate's three query constants, `.hs` only.
+        let hs = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "haskell")
+            .expect("`haskell` language entry must be present");
+        assert_eq!(
+            hs.extensions,
+            &["hs"],
+            "`haskell` claims `.hs` and not `.lhs`"
+        );
+        assert_eq!(
+            hs.highlights_query,
+            &[tree_sitter_haskell::HIGHLIGHTS_QUERY]
+        );
+        assert_eq!(hs.locals_query, &[tree_sitter_haskell::LOCALS_QUERY]);
+        assert_eq!(
+            hs.injections_query,
+            &[tree_sitter_haskell::INJECTIONS_QUERY]
+        );
+    }
+
+    #[test]
+    fn haskell_grammar_loads_and_parses() {
+        // The crate rides `tree-sitter-language 0.1`, so `LANGUAGE.into()`
+        // must yield a language our 0.26 core accepts. The fixture leans on
+        // the external scanner (layout: `where` and `do` blocks close by
+        // indentation, not braces), which a misbuilt scanner shreds.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("haskell")
+            .expect("`haskell` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("Main.hs");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: "module Main (main) where\n\
+                    \n\
+                    import qualified Data.Map as Map\n\
+                    \n\
+                    -- | A greeting.\n\
+                    greet :: String -> String\n\
+                    greet name = \"hello, \" ++ name\n\
+                    \n\
+                    main :: IO ()\n\
+                    main = do\n\
+                    \x20 let m = Map.fromList [(1 :: Int, 'a')]\n\
+                    \x20 putStrLn (greet \"world\")\n\
+                    \x20 print (Map.size m)\n"
+                .as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "haskell".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        let root = bundle.root_tree().root_node();
+        let sexp = root.to_sexp();
+        assert_eq!(root.kind(), "haskell", "Haskell grammar roots at haskell");
+        assert!(
+            !root.has_error(),
+            "the fixture parses without error; got {sexp}"
+        );
+        for expected in ["(header ", "(import ", "(signature ", "(function ", "(do "] {
+            assert!(
+                sexp.contains(expected),
+                "expected `{expected}` in the tree; got {sexp}"
+            );
+        }
+    }
+
+    #[test]
+    fn haskell_highlights_locals_and_injections_resolve() {
+        // All three crate queries must compile against the grammar they ship
+        // with; the highlights use supertype patterns (`decl/function`) that
+        // an older core would refuse.
+        let reg = SyntaxRegistry::new();
+        let query = reg
+            .highlights_query("haskell")
+            .expect("haskell highlights compile against the grammar");
+        let names = query.capture_names();
+        for expected in ["keyword", "type", "string", "comment", "function"] {
+            assert!(
+                names.contains(&expected),
+                "haskell query uses `@{expected}`; got {names:?}"
+            );
+        }
+        assert!(
+            reg.locals_query("haskell").is_some(),
+            "haskell locals compile"
+        );
+        let language = reg.language("haskell").expect("grammar loads");
+        tree_sitter::Query::new(&language, tree_sitter_haskell::INJECTIONS_QUERY)
+            .expect("haskell injections compile");
+    }
+
+    #[test]
+    fn language_for_path_resolves_hs_and_not_lhs() {
+        let reg = SyntaxRegistry::new();
+        assert_eq!(
+            reg.language_name_for_path("app/Main.hs").as_deref(),
+            Some("haskell"),
+            "`.hs` resolves to the haskell grammar"
+        );
+        assert_ne!(
+            reg.language_name_for_path("app/Main.lhs").as_deref(),
+            Some("haskell"),
+            "`.lhs` must not resolve to haskell"
+        );
+    }
+
+    #[test]
+    fn lhs_is_not_haskell_to_this_grammar() {
+        // Why `.lhs` is unclaimed. Literate Haskell is prose; the code is
+        // either Bird-tracked (`> ` at column 0) or between `\begin{code}` and
+        // `\end{code}`. GHC unliterates before it lexes; this grammar has no
+        // such pass, so both styles parse as errors. If a grammar bump makes
+        // either parse clean, this fails and `.lhs` is worth revisiting.
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("haskell").expect("grammar loads");
+        for (style, src) in [
+            (
+                "Bird tracks",
+                "A literate module.\n\n> module Main where\n> main :: IO ()\n> main = pure ()\n",
+            ),
+            (
+                "LaTeX style",
+                "\\documentclass{article}\n\\begin{document}\n\\begin{code}\nmain :: IO ()\nmain = pure ()\n\\end{code}\n\\end{document}\n",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&language).unwrap();
+            let tree = parser.parse(src, None).expect("parse");
+            assert!(
+                tree.root_node().has_error(),
+                "{style} literate source parsed clean: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
+
+    #[test]
+    fn a_hs_fence_in_markdown_injects_haskell() {
+        let reg = SyntaxRegistry::new();
+        for fence in ["hs", "haskell"] {
+            let src = format!("```{fence}\nmain = pure ()\n```\n");
+            let bundle = parse_layered(&reg, "markdown", src.as_bytes());
+            assert!(
+                bundle.layers.iter().any(|l| l.language_name == "haskell"),
+                "fence ```{fence} resolves to haskell"
             );
         }
     }

@@ -262,6 +262,17 @@ tree-sitter-css = "0.25"
 # `crate::syntax::BUILTIN_LANGUAGES` reads `arborium_lean::language().into()`
 # rather than the `LANGUAGE.into()` every other entry uses.
 arborium-lean = "2.18"
+# Haskell (`.hs`) — aside E7e. The official tree-sitter-org grammar:
+# `tree-sitter-language 0.1` as its sole runtime dep (`tree-sitter`
+# dev-only, no second core in the graph) and `LANGUAGE` /
+# `HIGHLIGHTS_QUERY` / `INJECTIONS_QUERY` / `LOCALS_QUERY` constants, the
+# rust/lua idiom. Its generated `parser.c` is 19 MB, third after latex's
+# (42 MB) and cuda's (20 MB); under the dev profile its build script runs
+# in about 3 s beside the rest of a cold build and adds about 4 MB to the
+# debug `pmacs`. `.lhs` is NOT claimed: literate Haskell needs an
+# unliterate pass the grammar does not have, and it parses both Bird-track
+# and `\begin{code}` sources as errors.
+tree-sitter-haskell = "0.23"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low. `poll` feeds the
 # compile-mode group readers (cancellable poll-based reads, Q#CM3).
