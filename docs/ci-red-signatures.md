@@ -2021,6 +2021,94 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### PR #287's head run 36145942251 at `ac61f97`: #288, a first sample on an E7c witness row, not the branch's
+
+E7d's head at C7d (word wrap on both frontends, the diagnostic at
+point, the menu on screen, and one fixture). Read on 2026-09-26 from
+the jobs endpoint and all six test legs' logs after the run had
+completed; not re-run.
+
+| field | value |
+|---|---|
+| run | 36145942251, `pull_request`, one attempt |
+| head | `ac61f97`, PR #287 |
+| window | created 2026-09-25T14:12:35Z, updated 14:37:50Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+Tally (run-36145942251-jobs): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Format | 108107019777 | success |
+| Changed paths | 108107019947 | success |
+| Lint (lua54) | 108107020018 | success |
+| Lint (luajit) | 108107020171 | success |
+| Commit attribution (D9) | 108107020196 | success |
+| M6 Perf Gates | 108107100988 | success |
+| M4 Perf Gates | 108107100993 | success |
+| Perf budgets (debug) | 108107101108 | success |
+| GPU Render (headless) | 108107101115 | success |
+| Test (crdt) | 108107101138 | success |
+| Test (ubuntu-latest / luajit) | 108107101158 | success |
+| Test (macos-latest / lua54) | 108107101160 | success |
+| Test (ubuntu-latest / lua54) | 108107101164 | failure |
+| M5 Perf Gates | 108107101219 | success |
+| M1 Acceptance Gates | 108107101266 | success |
+| Test (macos-latest / luajit) | 108107101332 | success |
+| M10 Perf Gates (crdt) | 108107101338 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 108107101350 | success |
+| Docs consistency | 108107102880 | skipped |
+
+Tally (run-36145942251-failures): 1 row of the table above with `result` = `failure`.
+
+Every test leg's log read: `Test (crdt)` 168 `test result: ok`,
+`Test (ubuntu-latest / luajit)` 169, `Test (ubuntu-latest / luajit,
+no crdt)` 169, both macOS legs 170, each with zero `FAILED`; `Test
+(ubuntu-latest / lua54)` 166 `ok` and one `FAILED`; every log's
+`running N tests` lines paired one to one with its result lines (the
+macOS legs' one extra match is the adapter step's own `grep -q
+'running 1 test'`). `WouldBlock`, `did not become ready` and `got ok`
+appear zero times on every leg; the branch's eight word-wrap rows,
+three diagnostic-at-point rows and its store row `ok` on every leg,
+its eight GPU rows `ok` in `GPU Render (headless)` (pmacs-gpu 374/0),
+the fixture it corrected `ok` on every leg, and #286's selector `ok`
+on the five legs that build it. The red:
+
+- `Test (ubuntu-latest / lua54)`: **#288's first occurrence** ---
+  `e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line`,
+  `the check's diagnostic landed: ["pmacs-fake-lsp"]`, `4 passed; 1
+  failed; 0 ignored`, the job's only failure. E7c fix round 3's
+  witness: its `settle` returns at the first tick with no LSP request
+  in flight and the label `ready`, a predicate weaker than the
+  assertion after it (the save's check diagnostic in the store). Not
+  the branch's: E7d touches neither the suite, the fake nor the save
+  path; the row was `ok` on all six legs of the base control's run
+  35588597754; 30 of 30 alone and 15 of 15 in its suite locally under
+  `lua54,crdt` at `ac61f97`, non-reproduction and nothing more.
+
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276, nor #253, nor #282, nor #283 sampled; #288 is at one.
+The base control is `ff4aa18` (run 35588597754, green, recorded as
+`807f8e3`). The head is not green, on one row off its path, stated at
+the moment of writing; the disposition is the owner's, in D33's form.
+
+### #286's first sample, local, on E7d's branch
+
+`scripts/gate` on `e7d/prose` at `df516bc`, log
+`20260925T132215Z-324100`, step `05-sweep`:
+`m5_5_acceptance::m10_10_f14_production_path_keystroke_flows_to_broadcast`,
+`F14: B must receive A's CrdtOp broadcast end-to-end` after its 2 s
+deadline, `test result: FAILED. 40 passed; 1 failed` in 2.26 s, under
+the default sweep's load, beside one fixture of the branch's own
+(fixed as `ac61f97`). No row matched: #271's missed broadcast is
+another selector (`m5_5_acceptance.rs:1169`) on a CI leg with two
+other fragment groups, so this is filed alone as **#286**, #271 not
+moved. The row passed alone three times, in its suite (41/0) and in
+the next gate at `ac61f97` (`20260925T140322Z-413145`, six of six, 171
+targets 5083/0/59), and on the five CI legs of the head run above that
+build it: green samples, which retire nothing. #286 is at one.
+
 ### `main` after E7c: run 35588597754 at `ff4aa18`, and it is GREEN
 
 Read at E7d's opening on 2026-09-25, from the jobs endpoint and all
