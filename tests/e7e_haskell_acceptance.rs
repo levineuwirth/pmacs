@@ -1,8 +1,11 @@
-// tests/e7e_haskell_acceptance.rs --- aside E7e, Haskell.
+// tests/e7e_haskell_acceptance.rs --- aside E7e, Haskell; E7g, its grammar
+// unshipped.
 
-//! Haskell is three registrations: the `tree-sitter-haskell` grammar in
-//! `BUILTIN_LANGUAGES` claiming `.hs`, and `pmacs.lsp.config.haskell`
-//! running `haskell-language-server-wrapper --lsp`. The grammar rows run
+//! Haskell was three registrations; since E7g it is two. The
+//! `tree-sitter-haskell` grammar is gone (its scanner corrupts the heap,
+//! `e7g_tree_sitter_haskell_stays_unshipped`), `pmacs.lsp.filetypes.hs`
+//! names a `.hs` buffer `haskell`, and `pmacs.lsp.config.haskell` runs
+//! `haskell-language-server-wrapper --lsp`. The no-grammar rows run
 //! everywhere and spawn nothing (the LSP table is emptied first); the
 //! server row runs against the real HLS inside a cabal project and is
 //! gated by `PMACS_REQUIRE_HLS`.
@@ -152,59 +155,79 @@ const MAIN_HS: &str = "module Main (main) where\n\
                        main :: IO ()\n\
                        main = putStrLn greeting\n";
 
+/// The file E7g reduced the owner's abort to: two `LANGUAGE` pragmas, the
+/// most ordinary opening a Haskell module has.
+const TWO_PRAGMAS: &str = "{-# LANGUAGE OverloadedStrings #-}\n\
+                           {-# LANGUAGE ScopedTypeVariables #-}\n";
+
 #[test]
-fn e7e_a_hs_file_is_haskell_and_the_grid_paints_its_syntax() {
+fn e7g_tree_sitter_haskell_stays_unshipped() {
+    // tree-sitter-haskell 0.23.1, the newest release, aborted the editor on
+    // TWO_PRAGMAS: the release pmacs opening it as `.hs` dies with glibc's
+    // `corrupted size vs. prev_size` (SIGABRT), the same bytes as `.txt` do
+    // not. Under AddressSanitizer the first parse of those bytes is a
+    // heap-buffer-overflow, a 4-byte WRITE in the scanner's `advance` (via
+    // `consume_pragma`) into the lookahead buffer `advance`'s own
+    // `array_push` had just reallocated and freed. The grammar vendors an old
+    // `tree_sitter/array.h` whose `array_push` grows through an `(Array *)`
+    // cast, a strict-aliasing violation GCC at -O2 and -O3 compiles into a
+    // write through the stale pointer; -O1, `-fno-strict-aliasing` and clang
+    // are clean, which is why a debug build never shows it. In daemon mode
+    // the abort takes every buffer the daemon holds.
+    //
+    // Re-adding the crate needs a release whose scanner is clean under
+    // `scripts/fuzz-grammars` built as it ships; delete this row in the
+    // commit that re-adds it, with the fuzz report cited.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    assert!(
+        lock.contains("name = \"tree-sitter-rust\""),
+        "control: the lock lists the grammars pmacs ships"
+    );
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    for (file, text) in [("Cargo.lock", &lock), ("Cargo.toml", &manifest)] {
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("tree-sitter-haskell")
+                    || l == "name = \"tree-sitter-haskell\""),
+            "{file} names tree-sitter-haskell again. Its 0.23.1 scanner \
+             corrupts the heap on {TWO_PRAGMAS:?} and aborted the editor \
+             (E7g); see this row's comment before shipping it"
+        );
+    }
+}
+
+#[test]
+fn e7g_a_hs_file_is_haskell_with_no_grammar_and_paints_plain() {
+    // What E7g left: the buffer is still `haskell`, now through the LSP
+    // filetype map, so the server attaches; no tree ever settles, and the
+    // grid paints the text in the default face.
     let dir = temp_dir("grammar");
     let s = editor_in(&dir);
     exec(&s, "pmacs.lsp.config = {}");
     let file = dir.join("Main.hs");
-    std::fs::write(&file, MAIN_HS).unwrap();
+    std::fs::write(&file, format!("{TWO_PRAGMAS}{MAIN_HS}")).unwrap();
     open(&s, &file);
     let mut s = s;
     assert_eq!(buffer_language(&s).as_deref(), Some("haskell"));
-    assert!(
-        wait(&mut s, 10, |s| tree_language(s).as_deref()
-            == Some("haskell")),
-        "a haskell parse settles"
-    );
-    let mut painted = Vec::new();
-    assert!(
-        wait(&mut s, 10, |s| {
-            painted = frame(s);
-            fg_of(&painted, "module Main", "module") == Some(Color::Indexed(5))
-        }),
-        "`module` paints the keyword style; frame:\n{}",
-        painted
-            .iter()
-            .map(|r| text_of(r))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    let f = &painted;
     assert_eq!(
-        fg_of(f, "(main) where", "where"),
-        Some(Color::Indexed(5)),
-        "`where`"
+        eval::<Option<String>>(&s, "return pmacs.parse.language_for_path('Main.hs')"),
+        None,
+        "no grammar claims `.hs`"
+    );
+    wait(&mut s, 1, |_| false);
+    assert_eq!(tree_language(&s), None, "no parse tree for a `.hs` file");
+    let painted = frame(&s);
+    assert_eq!(
+        fg_of(&painted, "module Main", "module"),
+        Some(Color::Default),
+        "`module` paints plain"
     );
     assert_eq!(
-        fg_of(f, "greeting :: String", "String"),
-        Some(Color::Indexed(3)),
-        "a type"
-    );
-    assert_eq!(
-        fg_of(f, "greeting = \"hello\"", "\"hello\""),
-        Some(Color::Indexed(2)),
-        "a string"
-    );
-    assert_eq!(
-        fg_of(f, "-- said once", "--"),
-        Some(Color::Indexed(8)),
-        "a comment"
-    );
-    assert_eq!(
-        fg_of(f, "main :: IO ()", "::"),
-        Some(Color::Indexed(6)),
-        "`::`"
+        fg_of(&painted, "{-# LANGUAGE OverloadedStrings", "LANGUAGE"),
+        Some(Color::Default),
+        "the pragma paints plain"
     );
 }
 
