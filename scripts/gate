@@ -381,6 +381,7 @@ PMACS_REQUIRE_CARGO_BUILD cargo
 PMACS_REQUIRE_LSP rust-analyzer clangd gopls vscode-json-language-server yaml-language-server
 PMACS_REQUIRE_SHELLS bash zsh fish sleep false
 PMACS_REQUIRE_LUA lua
+PMACS_REQUIRE_HLS haskell-language-server-wrapper cabal ghc
 EOF
 }
 

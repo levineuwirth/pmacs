@@ -1979,6 +1979,40 @@ mod tests {
     }
 
     #[test]
+    fn haskell_grid_paints_keyword_type_string_comment_number_and_constructor() {
+        // Aside E7e: the crate query reaches painted cells through the
+        // existing theme, with no entry added for Haskell. Its dotted
+        // captures fall back a segment (`keyword.import` -> `keyword`).
+        use pmacs_protocol::cell::Color;
+
+        let at = |src: &str, col: u32| painted_fg_at("haskell", "Main.hs", src, col);
+        assert_eq!(at("module Main where\n", 0), Color::Indexed(5), "`module`");
+        assert_eq!(at("module Main where\n", 12), Color::Indexed(5), "`where`");
+        assert_eq!(
+            at("import Data.List (sort)\n", 0),
+            Color::Indexed(5),
+            "`import`"
+        );
+        assert_eq!(at("f :: Int -> Int\n", 2), Color::Indexed(6), "`::`");
+        assert_eq!(at("f :: Int -> Int\n", 5), Color::Indexed(3), "a type name");
+        assert_eq!(at("x = \"hi\" -- note\n", 4), Color::Indexed(2), "a string");
+        let comment = painted_style_at("haskell", "Main.hs", "x = \"hi\" -- note\n", 9);
+        assert_eq!(comment.fg, Color::Indexed(8), "a line comment");
+        assert!(comment.italic, "a line comment is italic");
+        assert_eq!(at("n = 42\n", 4), Color::Indexed(1), "a numeric literal");
+        assert_eq!(
+            at("y = Just 1\n", 4),
+            Color::Indexed(11),
+            "a data constructor"
+        );
+        assert_eq!(
+            at("g x = if x then 1 else 0\n", 6),
+            Color::Indexed(13),
+            "`if` takes keyword.conditional's style"
+        );
+    }
+
+    #[test]
     fn web_grid_paints_html_tag_and_attribute() {
         // Q#WEB4 acceptance: the two capture entries this lane adds (`tag`,
         // `attribute`) actually reach painted cells. The attribute assertion is
