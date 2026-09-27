@@ -1959,7 +1959,7 @@ mod tests {
         // the one a fixture happened to exercise.
         const ADDED: [&str; 4] = ["constructor", "character", "keyword.conditional", "warning"];
         for language in [
-            "markdown", "json", "yaml", "html", "css", "c", "cpp", "go", "toml", "bash",
+            "markdown", "json", "html", "css", "c", "cpp", "go", "toml", "bash",
         ] {
             for capture in ADDED {
                 assert!(

@@ -8436,8 +8436,6 @@ fn m4_gap_grammars_align_with_lsp_configs() {
         ("Cargo.toml", "toml"),
         ("build.zig", "zig"),
         ("tsconfig.json", "json"),
-        ("config.yaml", "yaml"),
-        ("ci.yml", "yaml"),
     ] {
         let (grammar, has_cfg): (Option<String>, bool) = s
             .lua_host
@@ -8457,6 +8455,25 @@ fn m4_gap_grammars_align_with_lsp_configs() {
             has_cfg,
             "{id} has an LSP config the grammar name aligns with"
         );
+    }
+    // YAML has no grammar since E7g (tree-sitter-yaml aborts the editor on
+    // a file nested 254 levels deep); the LSP filetype map names it, so the
+    // server's config still aligns.
+    for path in ["config.yaml", "ci.yml"] {
+        let (grammar, by_map, has_cfg): (Option<String>, Option<String>, bool) = s
+            .lua_host
+            .lua()
+            .load(format!(
+                "return pmacs.parse.language_for_path('{path}'),
+                        pmacs.lsp.filetypes['{}'],
+                        pmacs.lsp.config.yaml ~= nil",
+                path.rsplit('.').next().unwrap()
+            ))
+            .eval()
+            .unwrap_or_else(|e| panic!("probe {path}: {e}"));
+        assert_eq!(grammar, None, "{path} has no grammar");
+        assert_eq!(by_map.as_deref(), Some("yaml"), "{path} maps to yaml");
+        assert!(has_cfg, "yaml has an LSP config the map aligns with");
     }
 }
 

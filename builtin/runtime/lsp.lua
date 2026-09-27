@@ -648,8 +648,11 @@ pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
 -- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
 pmacs.lsp.filetypes.zig = pmacs.lsp.filetypes.zig or "zig"
 pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
--- JSON / YAML. Both ship grammars, so `language_for_path` already resolves
--- these and the map is the stable-id fallback (same role as `lua`/`cuda`).
+-- JSON / YAML. JSON ships a grammar, so `language_for_path` resolves it
+-- and the map is the stable-id fallback (same role as `lua`/`cuda`). YAML
+-- has none since E7g (tree-sitter-yaml 0.7.2 aborts the editor on a file
+-- nested 254 levels deep), so these entries are what name a `.yaml`
+-- buffer `yaml`, and yaml-language-server attaches uncolored.
 pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
 pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
 pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
