@@ -2,7 +2,7 @@
 # grammar's own real sources (E7g). One row per BUILTIN_LANGUAGES entry;
 # tests/e7g_grammar_fuzz_acceptance.rs holds the rows to that table and
 # each crate@version to Cargo.lock, so adding or bumping a grammar means
-# editing this file.
+# editing this file, and editing it runs the fuzz job.
 #
 # kind: `corpus` is a tree-sitter test corpus (headers, source, `---`,
 # tree), fetched at `commit`, the commit behind the crate's release tag

@@ -819,6 +819,11 @@ pub struct LanguageEntry {
 /// 3. (Done.) The Lua side picks up the new grammar through the
 ///    `buffer.after-load` hook automatically and the highlight
 ///    overlay attaches in the same step.
+/// 4. Give it a row in `fuzz/corpora.tsv` (its upstream corpus, or real
+///    files) and run `scripts/fuzz-grammars --grammar foo --seconds 600`
+///    clean before it ships; CLAUDE.md states the rule and E7g why: a
+///    grammar is C, and tree-sitter-haskell's aborted the editor on a
+///    real file its author's test file never reached.
 pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     LanguageEntry {
         name: "rust",

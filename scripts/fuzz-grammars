@@ -10,7 +10,8 @@
 # shipped tree-sitter-haskell 0.23.1 because its author's test file
 # parsed; the owner's real file, two `{-# LANGUAGE #-}` pragmas, aborted
 # the editor within minutes. So a grammar ships only after this has run
-# over it.
+# over it, and CI runs it (.github/workflows/grammar-fuzz.yml) whenever
+# the grammar set can have changed.
 #
 # What it does:
 #

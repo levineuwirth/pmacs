@@ -2,12 +2,14 @@
 // condition of shipping it.
 
 //! A bundled grammar ships only once `scripts/fuzz-grammars` has run over
-//! it. These rows keep that from being a memory: every grammar in
+//! it, and CI's `Grammar fuzz` job runs whenever the grammar set can have
+//! changed. These rows keep that from being a memory: every grammar in
 //! `BUILTIN_LANGUAGES` has a row in `fuzz/corpora.tsv` naming its real
 //! sources, pinned to the crate version `Cargo.lock` resolves, so adding
 //! or bumping a grammar edits that file; the harness drives every grammar
-//! in the table; and the `fuzz` profile compiles the C the way the
-//! release does, since the miscompile E7g found is invisible at -O0.
+//! in the table; the workflow runs on every path that can change the set;
+//! and the `fuzz` profile compiles the C the way the release does, since
+//! the miscompile E7g found is invisible at -O0.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -86,6 +88,34 @@ fn e7g_every_bundled_grammar_has_real_sources_pinned_to_its_locked_crate() {
             other => panic!("{}: unknown kind {other}", r.grammar),
         }
     }
+}
+
+#[test]
+fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
+    let wf = read(".github/workflows/grammar-fuzz.yml");
+    for path in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "src/syntax.rs",
+        "src/bin/pmacs_grammar_fuzz.rs",
+        "scripts/fuzz-grammars",
+        "fuzz/**",
+        ".github/workflows/grammar-fuzz.yml",
+    ] {
+        let listed = wf.matches(&format!("      - {path}\n")).count();
+        assert_eq!(
+            listed, 2,
+            "{path} triggers the job on pull requests and on main"
+        );
+    }
+    assert!(
+        wf.contains("workflow_dispatch:"),
+        "the long form is dispatchable"
+    );
+    assert!(
+        wf.contains("scripts/fuzz-grammars"),
+        "the job runs the script"
+    );
 }
 
 #[test]
