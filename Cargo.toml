@@ -346,6 +346,17 @@ codegen-units = 1
 debug = "line-tables-only"
 strip = "debuginfo"
 
+# E7g: `scripts/fuzz-grammars` builds `pmacs_grammar_fuzz` here. It
+# inherits `release` so the grammars' C is compiled at -O3, as it ships:
+# the tree-sitter-haskell overflow is a miscompile at -O2 and above that
+# a debug build never shows. LTO and one codegen unit buy a fuzzer
+# nothing and cost minutes; symbols stay for the sanitizer's reports.
+[profile.fuzz]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "none"
+
 [profile.bench]
 opt-level = 3
 lto = "thin"
