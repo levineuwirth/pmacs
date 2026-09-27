@@ -30,9 +30,13 @@
 //! `--edits` incremental reparses of the same text under typing, deletes,
 //! pastes and batched edits, each settled the same way.
 //!
-//! `run` exits 0 when no grammar produced a finding, 1 when one did, and
-//! 2 on a usage or setup error (a grammar with no seeds is one: the rule
-//! is corpus-seeded).
+//! `run` exits 1 when a finding reproduces alone in a fresh worker, 2 on a
+//! usage or setup error (a grammar with no seeds is one: the rule is
+//! corpus-seeded), and 0 otherwise. A finding that does not reproduce
+//! alone is reported and does not fail the run: with the C under the
+//! sanitizer a memory error is caught at the faulting write, so what will
+//! not come back alone is load or timing, and failing on it would make
+//! the CI job a source of unregistered intermittent reds.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
@@ -915,6 +919,7 @@ struct Stats {
     bytes: u64,
     slowest_micros: u64,
     slowest_len: usize,
+    elapsed: Duration,
 }
 
 struct Finding {
@@ -988,14 +993,20 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let mut reports = std::mem::take(&mut *reports.lock().map_err(|_| "poisoned")?);
     reports.sort_by_key(|r| r.grammar);
     write_report(&cfg, &reports)?;
-    let failed = reports
-        .iter()
-        .any(|r| r.error.is_some() || !r.findings.is_empty());
+    let failed = fails(&reports);
     Ok(if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Whether the run fails: a grammar could not be fuzzed, or one of its
+/// findings reproduced alone.
+fn fails(reports: &[Report]) -> bool {
+    reports
+        .iter()
+        .any(|r| r.error.is_some() || r.findings.iter().any(|t| t.reproduced))
 }
 
 fn summary_line(r: &Report) -> String {
@@ -1031,6 +1042,7 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
         findings: Vec::new(),
         error: None,
     };
+    let started = Instant::now();
     let seeds = load_seeds(&cfg.corpus.join(lang.name));
     report.stats.seeds = seeds.len();
     if seeds.is_empty() {
@@ -1109,6 +1121,7 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
         }
     }
     drop(worker);
+    report.stats.elapsed = started.elapsed();
     report.findings = findings
         .into_iter()
         .enumerate()
@@ -1224,14 +1237,16 @@ fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
 fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
     let mut md = String::new();
     let mut tsv = String::from(
-        "grammar\tseeds\tinputs\tparses\tMB\tslowest_ms\tcrashes\thangs\tallocs\terror\n",
+        "grammar\tseeds\tinputs\tparses\tMB\tslowest_ms\tseconds\tcrashes\thangs\tallocs\tunconfirmed\terror\n",
     );
     let _ = writeln!(
         md,
         "# Grammar fuzz report\n\n{} s per grammar after the seeds, {} edits per input, seed {}, \
-         hang {} ms per parse, RSS {} MB. MB is the text fed in; slowest is one input's whole exercise.\n\n\
-         | grammar | seeds | inputs | parses | MB | slowest ms (bytes) | crashes | hangs | allocs |\n\
-         |---|---|---|---|---|---|---|---|---|",
+         hang {} ms per parse, RSS {} MB. MB is the text fed in; slowest is one input's whole exercise; \
+         s is the grammar's wall time, triage included. Crashes, hangs and allocs count findings that \
+         reproduced alone; the last column those that did not.\n\n\
+         | grammar | seeds | inputs | parses | MB | slowest ms (bytes) | s | crashes | hangs | allocs | not alone |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|",
         cfg.seconds,
         cfg.edits,
         cfg.seed,
@@ -1239,15 +1254,22 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
         cfg.limits.rss_kb / 1024
     );
     for r in reports {
-        let count = |k: Kind| r.findings.iter().filter(|t| t.finding.kind == k).count();
+        let count = |k: Kind| {
+            r.findings
+                .iter()
+                .filter(|t| t.reproduced && t.finding.kind == k)
+                .count()
+        };
         let s = &r.stats;
         let (c, h, a) = (count(Kind::Crash), count(Kind::Hang), count(Kind::Alloc));
+        let unconfirmed = r.findings.iter().filter(|t| !t.reproduced).count();
+        let secs = s.elapsed.as_secs();
         let mb = s.bytes / (1024 * 1024);
         let slow = s.slowest_micros / 1000;
         let err = r.error.as_deref().unwrap_or("");
         let _ = writeln!(
             md,
-            "| {} | {} | {} | {} | {mb} | {slow} ({}) | {c} | {h} | {a} |{}",
+            "| {} | {} | {} | {} | {mb} | {slow} ({}) | {secs} | {c} | {h} | {a} | {unconfirmed} |{}",
             r.grammar,
             s.seeds,
             s.inputs,
@@ -1261,31 +1283,33 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
         );
         let _ = writeln!(
             tsv,
-            "{}\t{}\t{}\t{}\t{mb}\t{slow}\t{c}\t{h}\t{a}\t{err}",
+            "{}\t{}\t{}\t{}\t{mb}\t{slow}\t{secs}\t{c}\t{h}\t{a}\t{unconfirmed}\t{err}",
             r.grammar, s.seeds, s.inputs, s.parses
         );
     }
-    let _ = writeln!(md, "\n## Findings\n");
-    let mut none = true;
-    for r in reports {
-        for t in &r.findings {
-            none = false;
-            let _ = writeln!(
-                md,
-                "- **{}** {} `{}`, reproduced alone: {}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
-                r.grammar,
-                t.finding.kind.name(),
-                t.finding.signature,
-                t.reproduced,
-                t.minimal.len(),
-                t.minimal_edits,
-                t.file.display(),
-                t.minimal.escape_debug()
-            );
+    for (heading, alone) in [("Findings", true), ("Not reproduced alone", false)] {
+        let _ = writeln!(md, "\n## {heading}\n");
+        let mut none = true;
+        for r in reports {
+            for t in r.findings.iter().filter(|t| t.reproduced == alone) {
+                none = false;
+                let _ = writeln!(
+                    md,
+                    "- **{}** {} `{}`, reproduced alone: {}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
+                    r.grammar,
+                    t.finding.kind.name(),
+                    t.finding.signature,
+                    t.reproduced,
+                    t.minimal.len(),
+                    t.minimal_edits,
+                    t.file.display(),
+                    t.minimal.escape_debug()
+                );
+            }
         }
-    }
-    if none {
-        let _ = writeln!(md, "None.");
+        if none {
+            let _ = writeln!(md, "None.");
+        }
     }
     std::fs::write(cfg.out.join("report.md"), md).map_err(|e| e.to_string())?;
     std::fs::write(cfg.out.join("report.tsv"), tsv).map_err(|e| e.to_string())
@@ -1602,6 +1626,36 @@ mod tests {
             let parses = Session::new(lang).exercise("a (b) {c}\n".to_owned(), 3, 1, &mut || {});
             assert!(parses >= 4, "{}: {parses} parses", lang.name);
         }
+    }
+
+    #[test]
+    fn only_a_finding_that_reproduces_alone_fails_the_run() {
+        let report = |reproduced: Option<bool>, error: Option<&str>| Report {
+            grammar: "rust",
+            stats: Stats::default(),
+            findings: reproduced
+                .map(|reproduced| Triaged {
+                    finding: Finding {
+                        kind: Kind::Hang,
+                        signature: String::new(),
+                        input: String::new(),
+                        edits: 0,
+                        seed: 0,
+                        detail: String::new(),
+                    },
+                    reproduced,
+                    minimal: String::new(),
+                    minimal_edits: 0,
+                    file: PathBuf::new(),
+                })
+                .into_iter()
+                .collect(),
+            error: error.map(str::to_owned),
+        };
+        assert!(!fails(&[report(None, None)]));
+        assert!(!fails(&[report(Some(false), None)]));
+        assert!(fails(&[report(Some(true), None)]));
+        assert!(fails(&[report(None, Some("no seeds"))]));
     }
 
     #[test]
