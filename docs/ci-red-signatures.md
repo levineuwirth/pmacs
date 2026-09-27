@@ -2021,6 +2021,125 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### `main` after E7e: run 36315238338 at `0b72108`, #288's second occurrence
+
+Read at E7g's opening on 2026-09-27, from the jobs endpoint and all
+six test legs' logs; not re-run. `0b72108` is code-bearing (E7e's
+squash), so it is E7g's base control itself.
+
+| field | value |
+|---|---|
+| run | 36315238338, `push`, one attempt |
+| head | `0b72108`, E7e's squash merge (PR #290 at `10cd443`) |
+| window | created 2026-09-27T11:17:10Z, updated 11:40:28Z |
+| verdict | 19 jobs: **17 success, 1 skipped, 1 failure** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+| the six test legs | `Test (crdt)` 169 `test result: ok`, `Test (ubuntu-latest / luajit)` 167 and one `FAILED`, `Test (ubuntu-latest / lua54)` and `Test (ubuntu-latest / luajit, no crdt)` 170 each, both macOS legs 171 each; every log's `running N tests` lines paired one to one with its result lines; `WouldBlock`, `did not become ready` and `got ok` zero on every leg; E7e's four `e7e_` rows `ok` on every leg, the HLS row by skipping (CI installs no HLS); #289's selector `ok` on all six legs and #286's on the five that build it |
+
+Tally (run-36315238338-jobs): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Format | 108608591763 | success |
+| Lint (lua54) | 108608591819 | success |
+| Lint (luajit) | 108608591867 | success |
+| Commit attribution (D9) | 108608591880 | success |
+| Changed paths | 108608591905 | success |
+| GPU Render (headless) | 108608614221 | success |
+| Test (crdt) | 108608614226 | success |
+| M5 Perf Gates | 108608614264 | success |
+| Test (ubuntu-latest / luajit) | 108608614267 | failure |
+| Test (ubuntu-latest / lua54) | 108608614268 | success |
+| M10 Perf Gates (crdt) | 108608614271 | success |
+| M4 Perf Gates | 108608614273 | success |
+| M1 Acceptance Gates | 108608614279 | success |
+| Perf budgets (debug) | 108608614286 | success |
+| Test (macos-latest / lua54) | 108608614296 | success |
+| M6 Perf Gates | 108608614306 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 108608614315 | success |
+| Test (macos-latest / luajit) | 108608614317 | success |
+| Docs consistency | 108608614905 | skipped |
+
+The red:
+
+- `Test (ubuntu-latest / luajit)` (108608614267): **#288's second
+  occurrence** and its first on this leg ---
+  `e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line`,
+  `the check's diagnostic landed: ["pmacs-fake-lsp"]`, `test result:
+  FAILED. 4 passed; 1 failed; 0 ignored` (`finished in 3.77s`), at
+  11:29:08Z, the job's only failure. Both required fragments present,
+  so it matches; the candidate stands as the row's `settle` returning
+  at the first quiet tick before the save's check diagnostic lands, a
+  wait weaker than its assertion. E7e touched neither the suite, the
+  fake nor the save path. The same row ran `ok` on the other five legs.
+  Log:
+  https://github.com/levineuwirth/pmacs/actions/runs/36315238338/job/108608614267
+
+So neither the `read Hello` family, nor #259, nor U4, nor U17, nor
+#271, nor #276, nor #253, nor #282, nor #283, nor #286, nor #289
+sampled; #288 is at two. The head is not green, on one row off E7e's
+path, stated at the moment of writing.
+
+### `main` after E7d: run 36262456503 at `dd2ccdb`, and it is GREEN
+
+Owed since E7e, which read this run by its jobs' conclusions only;
+read here on 2026-09-27 from the jobs endpoint and all six test legs'
+logs; not re-run. `dd2ccdb` was E7e's base control.
+
+| field | value |
+|---|---|
+| run | 36262456503, `push`, one attempt |
+| head | `dd2ccdb`, E7d's squash merge (PR #287 at `ac61f97`) |
+| window | created 2026-09-26T18:24:58Z, updated 18:46:26Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+| the six test legs | `Test (crdt)` 168 `test result: ok`, `Test (ubuntu-latest / luajit)`, `Test (ubuntu-latest / lua54)` and `Test (ubuntu-latest / luajit, no crdt)` 169 each, both macOS legs 170 each; `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; every log's `running N tests` lines paired one to one with its result lines; #288's selector `ok` on all six legs |
+
+Tally (run-36262456503-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 108460751198 | success |
+| Format | 108460751395 | success |
+| Lint (lua54) | 108460751410 | success |
+| Lint (luajit) | 108460751429 | success |
+| Commit attribution (D9) | 108460751459 | success |
+| Test (crdt) | 108460775686 | success |
+| GPU Render (headless) | 108460775707 | success |
+| M1 Acceptance Gates | 108460775722 | success |
+| M5 Perf Gates | 108460775732 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 108460775744 | success |
+| M4 Perf Gates | 108460775752 | success |
+| Perf budgets (debug) | 108460775760 | success |
+| Test (macos-latest / lua54) | 108460775767 | success |
+| Test (macos-latest / luajit) | 108460775776 | success |
+| M6 Perf Gates | 108460775787 | success |
+| Test (ubuntu-latest / luajit) | 108460775798 | success |
+| M10 Perf Gates (crdt) | 108460775816 | success |
+| Test (ubuntu-latest / lua54) | 108460775874 | success |
+| Docs consistency | 108460776693 | skipped |
+
+Nothing sampled: #288, red on PR #287's head run, did not recur here,
+which is non-reproduction and nothing more; every count stands. The
+head is green, stated at the moment of writing.
+
+### #291's first sample, local, on E7g's branch
+
+`scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, log
+`20260927T124215Z-1010709`, step `05-sweep`:
+`e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`,
+`HLS reports the type error; store []` with a trace that reaches
+`LSP:ready·setting` and never `LSP:ready·processi`, `test result:
+FAILED. 4 passed; 1 failed; 0 ignored` in 125.85 s, the stage's only
+failure (174 targets, 5096 passed, 1 failed, 59 ignored). The row is
+armed by `PMACS_REQUIRE_HLS` and runs only on this laptop, never on
+CI. No row matched; filed as **#291**. Measured before filing, alone
+in the gate's environment: 1 in 8 at `549d1c5`, then 16 interleaved
+pairs, `0b72108` 2 of 16 and `549d1c5` 1 of 16, every failure with
+the same fragments and every pass (36) through `processi`. So E7e's
+row was intermittent before E7g removed the Haskell grammar; not the
+branch's. #291 is at one.
+
 ### PR #287's head run 36145942251 at `ac61f97`: #288, a first sample on an E7c witness row, not the branch's
 
 E7d's head at C7d (word wrap on both frontends, the diagnostic at
