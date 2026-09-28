@@ -3,7 +3,8 @@
 # way it ships (E7g).
 #
 #   scripts/fuzz-grammars [--seconds N] [--jobs N] [--grammar NAME]...
-#                         [--from [LABEL=]DIR]... [--out DIR] [--plain]
+#                         [--from [LABEL=]DIR]... [--max-files N]
+#                         [--out DIR] [--plain]
 #
 # The grammars are C beside a `#![forbid(unsafe_code)]` editor, and in
 # daemon mode one bad parse takes every buffer the daemon holds. E7e
@@ -27,7 +28,10 @@
 #      fuzz/corpora.tsv pins: its upstream test corpus, or real files
 #      where it ships none.
 #   3. Collects seeds from those, from this tree, and from each --from
-#      directory (a git repository contributes its tracked files only).
+#      directory (a git repository contributes its tracked files only),
+#      at most --max-files per grammar from each source (default 400; the
+#      PR smoke takes 100, since Zig's standard library alone is otherwise
+#      twenty minutes of seeds).
 #   4. Runs the harness: every seed, then mutations until --seconds pass,
 #      per grammar, --jobs grammars at a time, and writes report.md and
 #      report.tsv with a minimized reproduction per finding.
@@ -43,6 +47,7 @@ die() { echo "fuzz-grammars: $*" >&2; exit 2; }
 
 seconds=60
 jobs=4
+max_files=400
 plain=0
 out=
 grammars=
@@ -53,6 +58,7 @@ while [ $# -gt 0 ]; do
         --jobs) jobs=${2:?}; shift 2 ;;
         --grammar) grammars="$grammars --grammar ${2:?}"; shift 2 ;;
         --from) froms="$froms --from ${2:?}"; shift 2 ;;
+        --max-files) max_files=${2:?}; shift 2 ;;
         --out) out=${2:?}; shift 2 ;;
         --plain) plain=1; shift ;;
         -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -139,7 +145,7 @@ done < fuzz/corpora.tsv
 # --- 3. seeds ------------------------------------------------------------
 rm -rf "$work/corpus"
 # shellcheck disable=SC2086
-fuzz collect --out "$work/corpus" --from "pmacs=$root" $froms $corpora
+fuzz collect --out "$work/corpus" --max-files "$max_files" --from "pmacs=$root" $froms $corpora
 cp "$work/corpus/MANIFEST.tsv" "$out/seeds.tsv"
 
 # --- 4. run --------------------------------------------------------------
