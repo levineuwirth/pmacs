@@ -181,11 +181,9 @@ impl Theme {
             // retro-painted rust/lua/yaml) and it is deliberate, not
             // incidental:
             //
-            //   * `constructor` reaches SEVEN entries — rust, lua, python,
-            //     javascript, and (because `tree_sitter_javascript::
-            //     HIGHLIGHT_QUERY` is concatenated base-first into them)
-            //     javascriptreact, typescript, typescriptreact. Its shape is
-            //     not "constructors": rust/python/javascript tag every
+            //   * `constructor` reaches rust, lua and python (seven entries
+            //     until E7g unshipped the JavaScript family). Its shape is
+            //     not "constructors": rust and python tag every
             //     capitalized identifier (`#match? "^[A-Z]"`), and lua tags
             //     every table-constructor brace. So this recolors `Some`,
             //     `None`, `Ok`, `Err`, every class-cased name, and every Lua
@@ -1877,26 +1875,12 @@ mod tests {
     }
 
     #[test]
-    fn lean4_constructor_capture_retro_paints_the_whole_javascript_family() {
+    fn lean4_constructor_capture_retro_paints_every_grammar_that_emits_it() {
         // Framing acceptance 7 (Q#LN4), the breadth half. `constructor` was
-        // added for Lean, but four crates emit it — and because
-        // `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
-        // base-first into the react/typescript entries
-        // (`src/syntax.rs`), it reaches SEVEN language entries, not four.
-        //
-        // Asserted at the query level rather than per-fixture precisely
-        // because the composition is the fragile part: if someone stops
-        // concatenating the JS base query into `typescript`, this fails
-        // while any single-language fixture would still pass.
-        for language in [
-            "rust",
-            "lua",
-            "python",
-            "javascript",
-            "javascriptreact",
-            "typescript",
-            "typescriptreact",
-        ] {
+        // added for Lean, but other bundled grammars emit it too: rust, lua
+        // and python since E7g unshipped the JavaScript family, which made
+        // seven entries of it through its concatenated base query.
+        for language in ["rust", "lua", "python"] {
             assert!(
                 query_uses_capture(language, "constructor"),
                 "`{language}` emits @constructor, so Q#LN4's entry retro-paints it"
@@ -2043,11 +2027,12 @@ mod tests {
     }
 
     #[test]
-    fn html_injects_css_and_js() {
+    fn html_injects_css_and_leaves_script_plain() {
         // The payoff (Q#WEB acceptance 5): HTML's INJECTIONS_QUERY parses
-        // <style> as CSS and <script> as JavaScript, and the child layers paint
-        // INSIDE the embedded regions — styling only the injected grammars can
-        // produce. `css` is resolvable only because this lane registered it.
+        // <style> as CSS, and the child layer paints INSIDE the embedded
+        // region — styling only the injected grammar can produce. `css` is
+        // resolvable only because this lane registered it. <script> injects
+        // JavaScript, which E7g unshipped, so a script body stays plain.
         use crate::buffer::{Buffer, BufferId, EditOp};
         use crate::cell::{Cell, CellSize};
         use crate::syntax::{ParseView, SyntaxRegistry};
@@ -2096,11 +2081,17 @@ mod tests {
             Cell::default().style,
             "the CSS `color` property paints inside the <style> injection"
         );
-        // Inside <script>: the JS `let` keyword paints bold — proves the
-        // <script> -> javascript injection resolved and parsed.
+        // Inside <script>: no JavaScript layer, so `let` is not a keyword.
         assert!(
-            grid.get(CellCoord::new(1, 8)).style.bold,
-            "the JS `let` keyword paints (bold) inside the <script> injection"
+            bundle
+                .layers
+                .iter()
+                .all(|l| l.language_name != "javascript"),
+            "no javascript layer"
+        );
+        assert!(
+            !grid.get(CellCoord::new(1, 8)).style.bold,
+            "`let` inside <script> paints plain"
         );
     }
 }

@@ -6130,6 +6130,14 @@ mod tests {
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         let source = b"console;\nfunction f(console) { console; }\n";
+        // JavaScript is a test fixture since E7g unshipped it: the one
+        // grammar whose highlights use `local` predicates.
+        state.syntax_registry.register_fixture(
+            "javascript",
+            tree_sitter_javascript::LANGUAGE.into(),
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        );
         seed_parse_view(&state, buffer_id, source, "javascript", "/tmp/locals.js");
         state.syntax_registry.theme().lock().expect("theme").insert(
             "variable.builtin",

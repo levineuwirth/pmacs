@@ -233,10 +233,6 @@ const MAX_INJECTION_LAYERS: usize = 4096;
 #[must_use]
 pub fn default_injection_aliases() -> HashMap<String, String> {
     [
-        ("js", "javascript"),
-        ("jsx", "javascriptreact"),
-        ("ts", "typescript"),
-        ("tsx", "typescriptreact"),
         ("py", "python"),
         ("py3", "python"),
         ("python3", "python"),
@@ -1008,62 +1004,11 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
-    // JavaScript / TypeScript. One `tree-sitter-javascript` grammar parses
-    // both `.js` and `.jsx`; `tree-sitter-typescript` ships two grammars
-    // (`LANGUAGE_TYPESCRIPT`, `LANGUAGE_TSX`). Highlights inherit: the TS
-    // query is a ~5-capture delta over JavaScript, and JSX is a further
-    // `JSX_HIGHLIGHT_QUERY` delta — so the `*react` and `typescript*`
-    // entries compose base-first (js → jsx → ts), the same pattern as
-    // `cuda` over C/C++. The four names mirror the LSP filetype map
-    // (typescriptreact/javascriptreact) so tsserver enables the JSX parser.
-    LanguageEntry {
-        name: "javascript",
-        extensions: &["js", "mjs", "cjs"],
-        loader: || tree_sitter_javascript::LANGUAGE.into(),
-        highlights_query: &[tree_sitter_javascript::HIGHLIGHT_QUERY],
-        locals_query: &[tree_sitter_javascript::LOCALS_QUERY],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "javascriptreact",
-        extensions: &["jsx"],
-        loader: || tree_sitter_javascript::LANGUAGE.into(),
-        highlights_query: &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-        ],
-        locals_query: &[tree_sitter_javascript::LOCALS_QUERY],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "typescript",
-        extensions: &["ts", "mts", "cts"],
-        loader: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        highlights_query: &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ],
-        locals_query: &[
-            tree_sitter_javascript::LOCALS_QUERY,
-            tree_sitter_typescript::LOCALS_QUERY,
-        ],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "typescriptreact",
-        extensions: &["tsx"],
-        loader: || tree_sitter_typescript::LANGUAGE_TSX.into(),
-        highlights_query: &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ],
-        locals_query: &[
-            tree_sitter_javascript::LOCALS_QUERY,
-            tree_sitter_typescript::LOCALS_QUERY,
-        ],
-        injections_query: &[],
-    },
+    // No JavaScript or TypeScript (E7g): `tree-sitter-javascript` 0.25.0
+    // never returns from a 24-byte file of unclosed brackets and grows
+    // without bound while it tries, and the TypeScript and TSX grammars do
+    // the same on it (`javascript_family_is_not_bundled`). The four
+    // languages reach tsserver through `pmacs.lsp.filetypes`, uncolored.
     LanguageEntry {
         name: "toml",
         extensions: &["toml"],
@@ -1113,9 +1058,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     },
     // HTML + CSS (framing `docs/archive/framings/web-grammars-html-css-framing.md`). Both crates
     // export their query constants (no overlay). HTML's `INJECTIONS_QUERY`
-    // wires `<script>` -> javascript (already registered) and `<style>` -> css
-    // (below), riding the #122 injection engine; `css` must be registered here
-    // for that injection to resolve. The `tag`/`attribute` captures these
+    // wires `<style>` -> css (below), riding the #122 injection engine; `css`
+    // must be registered here for that injection to resolve. Its `<script>`
+    // -> javascript injection resolves to nothing since E7g unshipped
+    // JavaScript, so script bodies stay plain. The `tag`/`attribute` captures these
     // queries use are taught to the highlighter in `crate::highlight` (Q#WEB4).
     LanguageEntry {
         name: "html",
@@ -1396,6 +1342,27 @@ impl SyntaxRegistry {
             .borrow_mut()
             .insert(lang_name.to_owned(), compiled);
         result
+    }
+
+    /// Test-only: register a grammar the table does not ship, with its
+    /// highlights and locals queries, as `name`.
+    #[cfg(test)]
+    pub(crate) fn register_fixture(
+        &self,
+        name: &str,
+        language: tree_sitter::Language,
+        highlights: &str,
+        locals: &str,
+    ) {
+        let compile = |src: &str| {
+            tree_sitter::Query::new(&language, src)
+                .map(Arc::new)
+                .map_err(|e| format!("{e:?}"))
+        };
+        let (h, l) = (compile(highlights), compile(locals));
+        self.queries.borrow_mut().insert(name.to_owned(), h);
+        self.local_queries.borrow_mut().insert(name.to_owned(), l);
+        self.register_language(name, language);
     }
 
     /// Lazy-compile and cache the bundled `locals.scm` query for
@@ -1909,7 +1876,7 @@ mod tests {
         // Framing acceptance #4: case-folded alias resolution + graceful
         // skip of an unknown fence language.
         let reg = SyntaxRegistry::new();
-        for (fence, lang) in [("py", "python"), ("rs", "rust"), ("JS", "javascript")] {
+        for (fence, lang) in [("py", "python"), ("rs", "rust"), ("SH", "bash")] {
             let src = format!("```{fence}\nvalue\n```\n");
             let bundle = parse_layered(&reg, "markdown", src.as_bytes());
             assert!(
@@ -2986,15 +2953,52 @@ mod tests {
         }
     }
 
+    /// A registry holding JavaScript as a test fixture: the local-facts
+    /// machinery's witnesses parse fixed JavaScript, the one grammar whose
+    /// highlights use `local` predicates, which E7g unshipped.
+    fn javascript_fixture() -> SyntaxRegistry {
+        let registry = SyntaxRegistry::new();
+        registry.register_fixture(
+            "javascript",
+            tree_sitter_javascript::LANGUAGE.into(),
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        );
+        registry
+    }
+
+    #[test]
+    fn javascript_family_is_not_bundled() {
+        // E7g. tree-sitter-javascript 0.25.0 never returns from a 24-byte
+        // file of unclosed brackets, and the TypeScript and TSX grammars do
+        // the same on it; `e7g_the_javascript_family_stays_unshipped` in
+        // tests/e7g_grammar_fuzz_acceptance.rs names it. No entry, no
+        // extension, no fence alias brings them back unfuzzed.
+        let family = [
+            "javascript",
+            "javascriptreact",
+            "typescript",
+            "typescriptreact",
+        ];
+        assert!(BUILTIN_LANGUAGES.iter().all(|l| !family.contains(&l.name)));
+        let reg = SyntaxRegistry::new();
+        for path in [
+            "a.js", "a.mjs", "a.cjs", "a.jsx", "a.ts", "a.mts", "a.cts", "a.tsx",
+        ] {
+            assert_eq!(reg.language_name_for_path(path), None, "{path}");
+        }
+        assert!(
+            default_injection_aliases()
+                .values()
+                .all(|lang| !family.contains(&lang.as_str()))
+        );
+    }
+
     #[test]
     fn builtin_languages_include_gap_grammars() {
         for (name, exts) in [
             ("python", &["py", "pyi"][..]),
             ("go", &["go"][..]),
-            ("javascript", &["js", "mjs", "cjs"][..]),
-            ("javascriptreact", &["jsx"][..]),
-            ("typescript", &["ts", "mts", "cts"][..]),
-            ("typescriptreact", &["tsx"][..]),
             ("toml", &["toml"][..]),
             ("zig", &["zig", "zon"][..]),
         ] {
@@ -3016,19 +3020,11 @@ mod tests {
     fn gap_grammars_load_and_parse() {
         // ABI acceptance for each new grammar (set_language succeeds at
         // runtime) + a snippet that parses without error at the expected
-        // root. Covers both `tree-sitter-typescript` grammars.
+        // root.
         let reg = SyntaxRegistry::new();
         let cases: &[(&str, &str, &[u8])] = &[
             ("python", "module", b"def f(x):\n    return x + 1\n"),
             ("go", "source_file", b"package main\nfunc main() {}\n"),
-            ("javascript", "program", b"const x = 1;\nlet y = [x];\n"),
-            (
-                "javascriptreact",
-                "program",
-                b"const e = <div id=\"a\"/>;\n",
-            ),
-            ("typescript", "program", b"const x: number = 1;\n"),
-            ("typescriptreact", "program", b"const e = <div/>;\n"),
             ("toml", "document", b"[pkg]\nname = \"x\"\n"),
             ("zig", "source_file", b"const std = @import(\"std\");\n"),
         ];
@@ -3051,25 +3047,6 @@ mod tests {
             assert!(
                 !bundle.root_tree().root_node().has_error(),
                 "`{lang}` parses its snippet without error"
-            );
-        }
-    }
-
-    #[test]
-    fn typescript_highlights_compose_the_javascript_base() {
-        // The bundled TypeScript highlights are a ~5-capture delta over
-        // JavaScript; the entries prepend the JS query (and JSX for tsx).
-        // Assert the COMPILED query resolves far more than the delta — the
-        // JS base is really there, not just the ts-specific captures.
-        let reg = SyntaxRegistry::new();
-        for lang in ["typescript", "typescriptreact"] {
-            let query = reg
-                .highlights_query(lang)
-                .unwrap_or_else(|| panic!("`{lang}` highlights compile"));
-            assert!(
-                query.capture_names().len() >= 15,
-                "`{lang}` composes the JavaScript base (got {} captures, delta alone is ~5)",
-                query.capture_names().len()
             );
         }
     }
@@ -3102,7 +3079,7 @@ mod tests {
 
     #[test]
     fn javascript_local_predicates_distinguish_lexical_scope() {
-        let registry = SyntaxRegistry::new();
+        let registry = javascript_fixture();
         let source = b"console.log('outer');\n\
                        require('outer');\n\
                        function f(console, require) {\n\
@@ -3172,7 +3149,7 @@ mod tests {
 
     #[test]
     fn positive_and_capture_qualified_local_predicates_use_resolved_facts() {
-        let registry = SyntaxRegistry::new();
+        let registry = javascript_fixture();
         let source = b"let f = () => {};\nf();\ng();\n";
         let bundle = parse_layered(&registry, "javascript", source);
         let language = registry.language("javascript").expect("javascript loads");
@@ -3240,7 +3217,7 @@ mod tests {
 
     #[test]
     fn local_definition_value_and_scope_inheritance_control_resolution() {
-        let registry = SyntaxRegistry::new();
+        let registry = javascript_fixture();
         let language = registry.language("javascript").expect("javascript loads");
 
         let value_source = b"let x = x;\nx;\n";
@@ -3312,76 +3289,12 @@ mod tests {
     }
 
     #[test]
-    fn typescript_locals_compose_javascript_scopes_and_parameter_delta() {
-        let registry = SyntaxRegistry::new();
-        for (language_name, source) in [
-            (
-                "typescript",
-                &b"function f(console: string) { console.log('x'); }\n\
-                   window.alert('x');\n"[..],
-            ),
-            (
-                "typescriptreact",
-                &b"function F(console: string) { return <div>{console}</div>; }\n\
-                   window.alert('x');\n"[..],
-            ),
-        ] {
-            let locals = registry
-                .locals_query(language_name)
-                .unwrap_or_else(|| panic!("{language_name} locals compile"));
-            assert!(
-                locals.capture_index_for_name("local.scope").is_some()
-                    && locals.capture_index_for_name("local.definition").is_some()
-                    && locals.capture_index_for_name("local.reference").is_some(),
-                "{language_name} includes JavaScript's scopes and references"
-            );
-
-            let bundle = parse_layered(&registry, language_name, source);
-            let layer = &bundle.layers[0];
-            let query = layer
-                .highlight_query
-                .as_deref()
-                .expect("highlights compile");
-            let spans = compute_highlight_spans(query, &bundle);
-            let names = query.capture_names();
-            let text = std::str::from_utf8(source).expect("fixture is UTF-8");
-            for (position, _) in text.match_indices("console") {
-                assert!(
-                    spans
-                        .iter()
-                        .filter(|span| {
-                            span.start_byte == position as u32
-                                && span.end_byte == (position + "console".len()) as u32
-                        })
-                        .all(|span| !names[span.capture_index as usize].ends_with(".builtin")),
-                    "{language_name} parameter/reference `console` is local"
-                );
-            }
-            let window = text.find("window").expect("window fixture");
-            assert!(
-                spans.iter().any(|span| {
-                    span.start_byte == window as u32
-                        && span.end_byte == (window + "window".len()) as u32
-                        && names[span.capture_index as usize] == "variable.builtin"
-                }),
-                "{language_name} unresolved `window` remains builtin"
-            );
-        }
-    }
-
-    #[test]
     fn gap_grammar_extensions_resolve() {
         let reg = SyntaxRegistry::new();
         for (path, lang) in [
             ("main.py", "python"),
             ("stub.pyi", "python"),
             ("server.go", "go"),
-            ("app.js", "javascript"),
-            ("mod.mjs", "javascript"),
-            ("view.jsx", "javascriptreact"),
-            ("index.ts", "typescript"),
-            ("types.mts", "typescript"),
-            ("App.tsx", "typescriptreact"),
             ("Cargo.toml", "toml"),
             ("build.zig", "zig"),
             ("config.zon", "zig"),

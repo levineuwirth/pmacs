@@ -191,18 +191,18 @@ tree-sitter-containerfile = "0.9"
 tree-sitter-make = "1.1"
 tree-sitter-cmake = "0.7"
 # Grammar-gap languages: these already have LSP configs (basedpyright /
-# gopls / tsserver / taplo / zls) but shipped no tree-sitter grammar, so
-# they rendered with no lexical color. Fill the gap. All ride
+# gopls / taplo / zls) but shipped no tree-sitter grammar, so they
+# rendered with no lexical color. Fill the gap. All ride
 # `tree-sitter-language 0.1` (tree-sitter dev-only) and export
-# `LANGUAGE`/`HIGHLIGHTS_QUERY`. TypeScript is special: one crate ships
-# TWO grammars (`LANGUAGE_TYPESCRIPT`/`LANGUAGE_TSX`) and its highlights
-# inherit JavaScript, so the `typescript*` entries compose the JS query
-# ahead of the TS one (see `crate::syntax::BUILTIN_LANGUAGES`). JavaScript
-# parses both `.js` and `.jsx`.
+# `LANGUAGE`/`HIGHLIGHTS_QUERY`. No JavaScript or TypeScript grammar
+# (E7g): `tree-sitter-javascript` 0.25.0 never returns from a 24-byte
+# file of unclosed brackets (`[t,t[t`, `[at`, `[ ,at`, `[ ,5 ];` on four
+# lines) and grows without bound while it tries, and the TypeScript and
+# TSX grammars do the same on it; tree-sitter 0.27.0 too. `.js`, `.jsx`,
+# `.ts` and `.tsx` reach tsserver through `pmacs.lsp.filetypes`;
+# `tests/e7g_grammar_fuzz_acceptance.rs` pins the absence.
 tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
-tree-sitter-javascript = "0.25"
-tree-sitter-typescript = "0.23"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-zig = "1.1"
 # JSON — a config format + the honest gate on the Jupyter path. ABI-current
@@ -333,6 +333,11 @@ loro-internal = { version = "=1.12.0", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# The local-facts machinery's witnesses in `src/syntax.rs` and
+# `src/semantic_render.rs` parse fixed JavaScript fixtures, the grammar
+# whose highlights use `local` predicates. Test-only since E7g unshipped
+# it: nothing here reaches a build of pmacs.
+tree-sitter-javascript = "0.25"
 tempfile = "3"
 # T M10.2 Day 7 perf bench (tests/m10_2_perf.rs) — seeded RNG plus
 # log-normal op-size distribution matching the M10.1 methodology.

@@ -9,8 +9,9 @@
 //! or bumping a grammar edits that file; the harness drives every grammar
 //! in the table; the workflow runs on every path that can change the set;
 //! and the `fuzz` profile compiles the C the way the release does, since
-//! the miscompile E7g found is invisible at -O0. Two rows pin the grammar
-//! the fuzz run itself found aborting the editor, YAML, out of the tree.
+//! the miscompile E7g found is invisible at -O0. The last rows pin out of
+//! the tree what the fuzz run itself found taking the editor down: YAML,
+//! which aborts, and the JavaScript family, which never returns.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -250,3 +251,75 @@ fn e7g_a_yaml_file_nested_254_deep_opens_as_yaml_with_no_grammar() {
         .unwrap();
     assert_eq!(tree, None, "no grammar parses a `.yaml` file");
 }
+
+#[test]
+fn e7g_the_javascript_family_stays_unshipped() {
+    // tree-sitter-javascript 0.25.0 never returns from JS_HANG, 24 bytes of
+    // unclosed brackets across four lines, and its RSS climbs about 17 MB a
+    // second while it tries; the TypeScript and TSX grammars of
+    // tree-sitter-typescript 0.23.2 do the same on it, and TSX alone on
+    // TSX_HANG. tree-sitter 0.27.0's runtime does too. In the editor one
+    // parse worker spins until the daemon restarts, or memory runs out.
+    //
+    // JavaScript stays as a dev-dependency for the local-facts witnesses'
+    // fixed fixtures; re-shipping either crate needs a release clean under
+    // `scripts/fuzz-grammars`, and this row deleted in that commit.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    assert!(
+        !lock.contains("name = \"tree-sitter-typescript\""),
+        "Cargo.lock names tree-sitter-typescript again; see this row's comment"
+    );
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let deps = manifest
+        .split("\n[dependencies]\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n[").next())
+        .expect("a [dependencies] table");
+    for krate in ["tree-sitter-javascript", "tree-sitter-typescript"] {
+        assert!(
+            !deps.lines().any(|l| l.starts_with(krate)),
+            "{krate} is a dependency again. It never returns from {JS_HANG:?} \
+             (E7g); see this row's comment"
+        );
+    }
+    let dir = std::env::temp_dir().join(format!("pmacs-e7g-js-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = EditorState::new_with_roots(&iso::roots());
+    s.lua_host.lua().remove_app_data::<StateDir>();
+    s.lua_host.lua().set_app_data(StateDir(dir.clone()));
+    s.lua_host
+        .lua()
+        .load("pmacs.lsp.config = {}")
+        .exec()
+        .unwrap();
+    for (name, text, id) in [
+        ("hang.js", JS_HANG, "javascript"),
+        ("hang.tsx", TSX_HANG, "typescriptreact"),
+    ] {
+        let file = dir.join(name);
+        std::fs::write(&file, text).unwrap();
+        let (grammar, language): (Option<String>, Option<String>) = s
+            .lua_host
+            .lua()
+            .load(format!(
+                "pmacs.buffer.find_or_open({:?})
+                 return pmacs.parse.language_for_path({name:?}),
+                        pmacs.parse.buffer_language(pmacs.window.buffer())",
+                file.display().to_string()
+            ))
+            .eval()
+            .unwrap();
+        assert_eq!(grammar, None, "no grammar claims {name}");
+        assert_eq!(language.as_deref(), Some(id), "{name} is {id} by filetype");
+    }
+}
+
+/// The fuzz run's JavaScript hang, as found: never returns under the
+/// javascript, typescript and tsx grammars.
+const JS_HANG: &str = "[t,t[t\n[at\n[ ,at\n[ ,5 ];";
+
+/// TSX alone never returns on an open paren, thirty newlines and a close
+/// bracket; twenty-nine parse in a tenth of a millisecond.
+const TSX_HANG: &str = "(\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n]";

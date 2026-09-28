@@ -610,7 +610,10 @@ pmacs.lsp.filetypes.cuh = pmacs.lsp.filetypes.cuh or "cuda"
 -- Go.
 pmacs.lsp.filetypes.go = pmacs.lsp.filetypes.go or "go"
 -- Tier 1 single-binary servers. TypeScript / JavaScript distinguish
--- the JSX variants so the server enables the JSX parser.
+-- the JSX variants so the server enables the JSX parser. No grammar ships
+-- for any of the four since E7g (tree-sitter-javascript and -typescript
+-- never return from a 24-byte file of unclosed brackets), so these
+-- entries are what name the buffers and attach tsserver, uncolored.
 for _, ext in ipairs({ "ts", "mts", "cts" }) do
   pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "typescript"
 end
