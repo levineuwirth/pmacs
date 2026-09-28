@@ -233,10 +233,6 @@ const MAX_INJECTION_LAYERS: usize = 4096;
 #[must_use]
 pub fn default_injection_aliases() -> HashMap<String, String> {
     [
-        ("js", "javascript"),
-        ("jsx", "javascriptreact"),
-        ("ts", "typescript"),
-        ("tsx", "typescriptreact"),
         ("py", "python"),
         ("py3", "python"),
         ("python3", "python"),
@@ -249,7 +245,6 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         ("cxx", "cpp"),
         ("cc", "cpp"),
         ("golang", "go"),
-        ("yml", "yaml"),
         ("md", "markdown"),
         // Lean 4 (framing Q#LN17). A ```lean fence is overwhelmingly Lean 4
         // in practice, so the Lean 3 spelling is deliberately mapped forward
@@ -257,8 +252,6 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         // entry name. `lean4-mode` does the equivalent through
         // `markdown-code-lang-modes`.
         ("lean", "lean4"),
-        // A ```hs fence is as common as ```haskell, which needs no alias.
-        ("hs", "haskell"),
     ]
     .into_iter()
     .map(|(a, b)| (a.to_owned(), b.to_owned()))
@@ -821,6 +814,11 @@ pub struct LanguageEntry {
 /// 3. (Done.) The Lua side picks up the new grammar through the
 ///    `buffer.after-load` hook automatically and the highlight
 ///    overlay attaches in the same step.
+/// 4. Give it a row in `fuzz/corpora.tsv` (its upstream corpus, or real
+///    files) and run `scripts/fuzz-grammars --grammar foo --seconds 600`
+///    clean before it ships; CLAUDE.md states the rule and E7g why: a
+///    grammar is C, and tree-sitter-haskell's aborted the editor on a
+///    real file its author's test file never reached.
 pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     LanguageEntry {
         name: "rust",
@@ -837,23 +835,6 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
         locals_query: &[tree_sitter_lua::LOCALS_QUERY],
         injections_query: &[],
-    },
-    // Haskell (aside E7e). The crate exports all three query constants, in
-    // the plural rust/lua idiom. Its injections inject quasiquote bodies by
-    // quoter (`[hamlet|…|]` -> html, `[aesonQQ|…|]` -> json, `[sql|…|]`) and
-    // tag comments as `comment`; a language this table does not register
-    // resolves to nothing and is skipped. `.lhs` is deliberately unclaimed:
-    // literate Haskell is prose with code in Bird tracks (`> `) or
-    // `\begin{code}` blocks, which needs an unliterate pass this grammar does
-    // not have, and it parses both as errors
-    // (`lhs_is_not_haskell_to_this_grammar` pins it).
-    LanguageEntry {
-        name: "haskell",
-        extensions: &["hs"],
-        loader: || tree_sitter_haskell::LANGUAGE.into(),
-        highlights_query: &[tree_sitter_haskell::HIGHLIGHTS_QUERY],
-        locals_query: &[tree_sitter_haskell::LOCALS_QUERY],
-        injections_query: &[tree_sitter_haskell::INJECTIONS_QUERY],
     },
     // T M9.7: markdown block grammar (`tree_sitter_md::LANGUAGE`) — headers,
     // lists, fenced code blocks, blockquotes. Its `injections.scm` (framing
@@ -1023,62 +1004,11 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
-    // JavaScript / TypeScript. One `tree-sitter-javascript` grammar parses
-    // both `.js` and `.jsx`; `tree-sitter-typescript` ships two grammars
-    // (`LANGUAGE_TYPESCRIPT`, `LANGUAGE_TSX`). Highlights inherit: the TS
-    // query is a ~5-capture delta over JavaScript, and JSX is a further
-    // `JSX_HIGHLIGHT_QUERY` delta — so the `*react` and `typescript*`
-    // entries compose base-first (js → jsx → ts), the same pattern as
-    // `cuda` over C/C++. The four names mirror the LSP filetype map
-    // (typescriptreact/javascriptreact) so tsserver enables the JSX parser.
-    LanguageEntry {
-        name: "javascript",
-        extensions: &["js", "mjs", "cjs"],
-        loader: || tree_sitter_javascript::LANGUAGE.into(),
-        highlights_query: &[tree_sitter_javascript::HIGHLIGHT_QUERY],
-        locals_query: &[tree_sitter_javascript::LOCALS_QUERY],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "javascriptreact",
-        extensions: &["jsx"],
-        loader: || tree_sitter_javascript::LANGUAGE.into(),
-        highlights_query: &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-        ],
-        locals_query: &[tree_sitter_javascript::LOCALS_QUERY],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "typescript",
-        extensions: &["ts", "mts", "cts"],
-        loader: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        highlights_query: &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ],
-        locals_query: &[
-            tree_sitter_javascript::LOCALS_QUERY,
-            tree_sitter_typescript::LOCALS_QUERY,
-        ],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "typescriptreact",
-        extensions: &["tsx"],
-        loader: || tree_sitter_typescript::LANGUAGE_TSX.into(),
-        highlights_query: &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ],
-        locals_query: &[
-            tree_sitter_javascript::LOCALS_QUERY,
-            tree_sitter_typescript::LOCALS_QUERY,
-        ],
-        injections_query: &[],
-    },
+    // No JavaScript or TypeScript (E7g): `tree-sitter-javascript` 0.25.0
+    // never returns from a 24-byte file of unclosed brackets and grows
+    // without bound while it tries, and the TypeScript and TSX grammars do
+    // the same on it (`javascript_family_is_not_bundled`). The four
+    // languages reach tsserver through `pmacs.lsp.filetypes`, uncolored.
     LanguageEntry {
         name: "toml",
         extensions: &["toml"],
@@ -1095,26 +1025,19 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
-    // JSON + YAML — config formats, both self-contained highlights and no
-    // injections of their own. Registering `yaml` also lights up markdown
-    // `---` frontmatter via the #122 injection engine (the markdown block
-    // injection query sets `injection.language "yaml"` for `minus_metadata`;
-    // `+++` TOML frontmatter already works). Root kinds: json `document`,
-    // yaml `stream`. `.jsonc`/`.json5` (comments / trailing commas) are a
-    // deferred variant — the plain JSON grammar rejects them.
+    // JSON — a config format with self-contained highlights and no
+    // injections of its own; root kind `document`. `.jsonc`/`.json5`
+    // (comments / trailing commas) are a deferred variant — the plain JSON
+    // grammar rejects them. YAML is not bundled (E7g): tree-sitter-yaml
+    // 0.7.2's scanner overflows the runtime's 1024-byte serialization
+    // buffer at 254 levels of nesting and the runtime's assert aborts the
+    // editor (`yaml_is_not_bundled`); markdown `---` frontmatter stays
+    // plain for it, `+++` TOML frontmatter still injects.
     LanguageEntry {
         name: "json",
         extensions: &["json"],
         loader: || tree_sitter_json::LANGUAGE.into(),
         highlights_query: &[tree_sitter_json::HIGHLIGHTS_QUERY],
-        locals_query: &[],
-        injections_query: &[],
-    },
-    LanguageEntry {
-        name: "yaml",
-        extensions: &["yaml", "yml"],
-        loader: || tree_sitter_yaml::LANGUAGE.into(),
-        highlights_query: &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
         locals_query: &[],
         injections_query: &[],
     },
@@ -1135,9 +1058,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     },
     // HTML + CSS (framing `docs/archive/framings/web-grammars-html-css-framing.md`). Both crates
     // export their query constants (no overlay). HTML's `INJECTIONS_QUERY`
-    // wires `<script>` -> javascript (already registered) and `<style>` -> css
-    // (below), riding the #122 injection engine; `css` must be registered here
-    // for that injection to resolve. The `tag`/`attribute` captures these
+    // wires `<style>` -> css (below), riding the #122 injection engine; `css`
+    // must be registered here for that injection to resolve. Its `<script>`
+    // -> javascript injection resolves to nothing since E7g unshipped
+    // JavaScript, so script bodies stay plain. The `tag`/`attribute` captures these
     // queries use are taught to the highlighter in `crate::highlight` (Q#WEB4).
     LanguageEntry {
         name: "html",
@@ -1418,6 +1342,27 @@ impl SyntaxRegistry {
             .borrow_mut()
             .insert(lang_name.to_owned(), compiled);
         result
+    }
+
+    /// Test-only: register a grammar the table does not ship, with its
+    /// highlights and locals queries, as `name`.
+    #[cfg(test)]
+    pub(crate) fn register_fixture(
+        &self,
+        name: &str,
+        language: tree_sitter::Language,
+        highlights: &str,
+        locals: &str,
+    ) {
+        let compile = |src: &str| {
+            tree_sitter::Query::new(&language, src)
+                .map(Arc::new)
+                .map_err(|e| format!("{e:?}"))
+        };
+        let (h, l) = (compile(highlights), compile(locals));
+        self.queries.borrow_mut().insert(name.to_owned(), h);
+        self.local_queries.borrow_mut().insert(name.to_owned(), l);
+        self.register_language(name, language);
     }
 
     /// Lazy-compile and cache the bundled `locals.scm` query for
@@ -1931,7 +1876,7 @@ mod tests {
         // Framing acceptance #4: case-folded alias resolution + graceful
         // skip of an unknown fence language.
         let reg = SyntaxRegistry::new();
-        for (fence, lang) in [("py", "python"), ("rs", "rust"), ("JS", "javascript")] {
+        for (fence, lang) in [("py", "python"), ("rs", "rust"), ("SH", "bash")] {
             let src = format!("```{fence}\nvalue\n```\n");
             let bundle = parse_layered(&reg, "markdown", src.as_bytes());
             assert!(
@@ -2590,157 +2535,19 @@ mod tests {
     }
 
     #[test]
-    fn builtin_languages_include_haskell() {
-        // Aside E7e. The crate's three query constants, `.hs` only.
-        let hs = BUILTIN_LANGUAGES
-            .iter()
-            .find(|l| l.name == "haskell")
-            .expect("`haskell` language entry must be present");
-        assert_eq!(
-            hs.extensions,
-            &["hs"],
-            "`haskell` claims `.hs` and not `.lhs`"
-        );
-        assert_eq!(
-            hs.highlights_query,
-            &[tree_sitter_haskell::HIGHLIGHTS_QUERY]
-        );
-        assert_eq!(hs.locals_query, &[tree_sitter_haskell::LOCALS_QUERY]);
-        assert_eq!(
-            hs.injections_query,
-            &[tree_sitter_haskell::INJECTIONS_QUERY]
-        );
-    }
-
-    #[test]
-    fn haskell_grammar_loads_and_parses() {
-        // The crate rides `tree-sitter-language 0.1`, so `LANGUAGE.into()`
-        // must yield a language our 0.26 core accepts. The fixture leans on
-        // the external scanner (layout: `where` and `do` blocks close by
-        // indentation, not braces), which a misbuilt scanner shreds.
+    fn haskell_is_not_bundled() {
+        // E7g. tree-sitter-haskell 0.23.1 aborts the editor on a two-line
+        // file of `{-# LANGUAGE #-}` pragmas; `e7g_tree_sitter_haskell_stays_
+        // unshipped` in tests/e7e_haskell_acceptance.rs names the crash. No
+        // entry, no extension and no fence alias may bring it back unfuzzed.
+        assert!(BUILTIN_LANGUAGES.iter().all(|l| l.name != "haskell"));
         let reg = SyntaxRegistry::new();
-        let language = reg
-            .language("haskell")
-            .expect("`haskell` language loads from BUILTIN_LANGUAGES");
-        let mut buf = fresh_buffer("Main.hs");
-        buf.apply_edit(EditOp::Insert {
-            pos: 0,
-            bytes: "module Main (main) where\n\
-                    \n\
-                    import qualified Data.Map as Map\n\
-                    \n\
-                    -- | A greeting.\n\
-                    greet :: String -> String\n\
-                    greet name = \"hello, \" ++ name\n\
-                    \n\
-                    main :: IO ()\n\
-                    main = do\n\
-                    \x20 let m = Map.fromList [(1 :: Int, 'a')]\n\
-                    \x20 putStrLn (greet \"world\")\n\
-                    \x20 print (Map.size m)\n"
-                .as_bytes(),
-        })
-        .unwrap();
-        let view = ParseView::new(&buf, language, "haskell".to_owned());
-        let handle = view.handle();
-        let _vid = buf.attach_view(Box::new(view));
-        let bundle = parse_synchronously(&handle);
-        let root = bundle.root_tree().root_node();
-        let sexp = root.to_sexp();
-        assert_eq!(root.kind(), "haskell", "Haskell grammar roots at haskell");
+        assert_eq!(reg.language_name_for_path("app/Main.hs"), None);
         assert!(
-            !root.has_error(),
-            "the fixture parses without error; got {sexp}"
+            default_injection_aliases()
+                .values()
+                .all(|lang| lang != "haskell")
         );
-        for expected in ["(header ", "(import ", "(signature ", "(function ", "(do "] {
-            assert!(
-                sexp.contains(expected),
-                "expected `{expected}` in the tree; got {sexp}"
-            );
-        }
-    }
-
-    #[test]
-    fn haskell_highlights_locals_and_injections_resolve() {
-        // All three crate queries must compile against the grammar they ship
-        // with; the highlights use supertype patterns (`decl/function`) that
-        // an older core would refuse.
-        let reg = SyntaxRegistry::new();
-        let query = reg
-            .highlights_query("haskell")
-            .expect("haskell highlights compile against the grammar");
-        let names = query.capture_names();
-        for expected in ["keyword", "type", "string", "comment", "function"] {
-            assert!(
-                names.contains(&expected),
-                "haskell query uses `@{expected}`; got {names:?}"
-            );
-        }
-        assert!(
-            reg.locals_query("haskell").is_some(),
-            "haskell locals compile"
-        );
-        let language = reg.language("haskell").expect("grammar loads");
-        tree_sitter::Query::new(&language, tree_sitter_haskell::INJECTIONS_QUERY)
-            .expect("haskell injections compile");
-    }
-
-    #[test]
-    fn language_for_path_resolves_hs_and_not_lhs() {
-        let reg = SyntaxRegistry::new();
-        assert_eq!(
-            reg.language_name_for_path("app/Main.hs").as_deref(),
-            Some("haskell"),
-            "`.hs` resolves to the haskell grammar"
-        );
-        assert_ne!(
-            reg.language_name_for_path("app/Main.lhs").as_deref(),
-            Some("haskell"),
-            "`.lhs` must not resolve to haskell"
-        );
-    }
-
-    #[test]
-    fn lhs_is_not_haskell_to_this_grammar() {
-        // Why `.lhs` is unclaimed. Literate Haskell is prose; the code is
-        // either Bird-tracked (`> ` at column 0) or between `\begin{code}` and
-        // `\end{code}`. GHC unliterates before it lexes; this grammar has no
-        // such pass, so both styles parse as errors. If a grammar bump makes
-        // either parse clean, this fails and `.lhs` is worth revisiting.
-        let reg = SyntaxRegistry::new();
-        let language = reg.language("haskell").expect("grammar loads");
-        for (style, src) in [
-            (
-                "Bird tracks",
-                "A literate module.\n\n> module Main where\n> main :: IO ()\n> main = pure ()\n",
-            ),
-            (
-                "LaTeX style",
-                "\\documentclass{article}\n\\begin{document}\n\\begin{code}\nmain :: IO ()\nmain = pure ()\n\\end{code}\n\\end{document}\n",
-            ),
-        ] {
-            let mut parser = tree_sitter::Parser::new();
-            parser.set_language(&language).unwrap();
-            let tree = parser.parse(src, None).expect("parse");
-            assert!(
-                tree.root_node().has_error(),
-                "{style} literate source parsed clean: {}",
-                tree.root_node().to_sexp()
-            );
-        }
-    }
-
-    #[test]
-    fn a_hs_fence_in_markdown_injects_haskell() {
-        let reg = SyntaxRegistry::new();
-        for fence in ["hs", "haskell"] {
-            let src = format!("```{fence}\nmain = pure ()\n```\n");
-            let bundle = parse_layered(&reg, "markdown", src.as_bytes());
-            assert!(
-                bundle.layers.iter().any(|l| l.language_name == "haskell"),
-                "fence ```{fence} resolves to haskell"
-            );
-        }
     }
 
     #[test]
@@ -2954,22 +2761,15 @@ mod tests {
     }
 
     #[test]
-    fn builtin_languages_include_json_and_yaml() {
-        // Framing acceptance #1: both entries present, claim their
-        // extensions, ship non-empty highlights.
+    fn builtin_languages_include_json() {
+        // Framing acceptance #1: the entry is present, claims its
+        // extension, ships non-empty highlights.
         let json = BUILTIN_LANGUAGES
             .iter()
             .find(|l| l.name == "json")
             .expect("`json` entry present");
         assert!(json.extensions.contains(&"json"), "`json` claims `.json`");
         assert!(!json.highlights_query.is_empty(), "`json` ships highlights");
-        let yaml = BUILTIN_LANGUAGES
-            .iter()
-            .find(|l| l.name == "yaml")
-            .expect("`yaml` entry present");
-        assert!(yaml.extensions.contains(&"yaml"), "`yaml` claims `.yaml`");
-        assert!(yaml.extensions.contains(&"yml"), "`yaml` claims `.yml`");
-        assert!(!yaml.highlights_query.is_empty(), "`yaml` ships highlights");
     }
 
     #[test]
@@ -3001,36 +2801,9 @@ mod tests {
     }
 
     #[test]
-    fn yaml_grammar_loads_and_parses() {
-        // Framing acceptance #3 / ABI pin: `tree-sitter-yaml` 0.7 loads and
-        // a YAML mapping parses to a `stream` root without error.
-        let reg = SyntaxRegistry::new();
-        let language = reg.language("yaml").expect("`yaml` loads");
-        let mut buf = fresh_buffer("config.yaml");
-        buf.apply_edit(EditOp::Insert {
-            pos: 0,
-            bytes: b"name: pmacs\nversion: 1\ntags:\n  - a\n  - b\n",
-        })
-        .unwrap();
-        let view = ParseView::new(&buf, language, "yaml".to_owned());
-        let handle = view.handle();
-        let _vid = buf.attach_view(Box::new(view));
-        let bundle = parse_synchronously(&handle);
-        assert_eq!(
-            bundle.root_tree().root_node().kind(),
-            "stream",
-            "yaml grammar roots at `stream`"
-        );
-        assert!(
-            !bundle.root_tree().root_node().has_error(),
-            "yaml grammar parses a mapping without error"
-        );
-    }
-
-    #[test]
-    fn json_yaml_highlights_compile() {
-        // Framing acceptance #4: both highlights queries compile against
-        // their grammars and resolve capture classes.
+    fn json_highlights_compile() {
+        // Framing acceptance #4: the highlights query compiles against its
+        // grammar and resolves capture classes.
         let reg = SyntaxRegistry::new();
         let json = reg
             .highlights_query("json")
@@ -3040,65 +2813,40 @@ mod tests {
             "json highlights resolve capture classes; got {}",
             json.capture_names().len()
         );
-        let yaml = reg
-            .highlights_query("yaml")
-            .expect("yaml highlights compile");
-        assert!(
-            yaml.capture_names().len() >= 3,
-            "yaml highlights resolve capture classes; got {}",
-            yaml.capture_names().len()
-        );
     }
 
     #[test]
-    fn language_for_path_resolves_json_yaml() {
-        // Framing acceptance #5.
+    fn language_for_path_resolves_json_and_not_yaml() {
+        // Framing acceptance #5; YAML since E7g has no grammar.
         let reg = SyntaxRegistry::new();
         assert_eq!(
             reg.language_name_for_path("tsconfig.json").as_deref(),
             Some("json")
         );
-        assert_eq!(
-            reg.language_name_for_path("config.yaml").as_deref(),
-            Some("yaml")
-        );
-        assert_eq!(
-            reg.language_name_for_path("ci.yml").as_deref(),
-            Some("yaml")
-        );
+        assert_eq!(reg.language_name_for_path("config.yaml"), None);
+        assert_eq!(reg.language_name_for_path("ci.yml"), None);
     }
 
     #[test]
-    fn yaml_frontmatter_injects_in_markdown() {
-        // Framing acceptance #7 — THE headline synergy with #122: a markdown
-        // `---` frontmatter block (a `minus_metadata` node) is injected as
-        // yaml by the bundled markdown injection query, so registering the
-        // yaml grammar lights it up with no extra wiring.
+    fn yaml_is_not_bundled() {
+        // E7g. tree-sitter-yaml 0.7.2 aborts the editor on a file nested
+        // 254 levels deep; `e7g_tree_sitter_yaml_stays_unshipped` in
+        // tests/e7g_grammar_fuzz_acceptance.rs names the crash. No entry, no
+        // extension, no fence alias, and no frontmatter layer bring it back
+        // unfuzzed.
+        assert!(BUILTIN_LANGUAGES.iter().all(|l| l.name != "yaml"));
+        assert!(
+            default_injection_aliases()
+                .values()
+                .all(|lang| lang != "yaml")
+        );
         let reg = SyntaxRegistry::new();
         let src = b"---\ntitle: Hello\ntags: [a, b]\n---\n\n# Body\n";
         let bundle = parse_layered(&reg, "markdown", src);
-        let yaml = bundle
-            .layers
-            .iter()
-            .find(|l| l.language_name == "yaml")
-            .expect("`---` frontmatter yields a yaml child layer");
-        assert_eq!(
-            yaml.tree.root_node().kind(),
-            "stream",
-            "yaml layer roots at stream"
+        assert!(
+            bundle.layers.iter().all(|l| l.language_name != "yaml"),
+            "`---` frontmatter yields no yaml layer"
         );
-        let query = yaml
-            .highlight_query
-            .as_ref()
-            .expect("yaml highlights resolved");
-        let spans = compute_highlight_spans_for(
-            query,
-            &yaml.tree,
-            &bundle.source,
-            yaml.local_facts.as_deref(),
-            None,
-        );
-        assert!(!spans.is_empty(), "the yaml frontmatter layer highlights");
     }
 
     #[test]
@@ -3205,15 +2953,52 @@ mod tests {
         }
     }
 
+    /// A registry holding JavaScript as a test fixture: the local-facts
+    /// machinery's witnesses parse fixed JavaScript, the one grammar whose
+    /// highlights use `local` predicates, which E7g unshipped.
+    fn javascript_fixture() -> SyntaxRegistry {
+        let registry = SyntaxRegistry::new();
+        registry.register_fixture(
+            "javascript",
+            tree_sitter_javascript::LANGUAGE.into(),
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        );
+        registry
+    }
+
+    #[test]
+    fn javascript_family_is_not_bundled() {
+        // E7g. tree-sitter-javascript 0.25.0 never returns from a 24-byte
+        // file of unclosed brackets, and the TypeScript and TSX grammars do
+        // the same on it; `e7g_the_javascript_family_stays_unshipped` in
+        // tests/e7g_grammar_fuzz_acceptance.rs names it. No entry, no
+        // extension, no fence alias brings them back unfuzzed.
+        let family = [
+            "javascript",
+            "javascriptreact",
+            "typescript",
+            "typescriptreact",
+        ];
+        assert!(BUILTIN_LANGUAGES.iter().all(|l| !family.contains(&l.name)));
+        let reg = SyntaxRegistry::new();
+        for path in [
+            "a.js", "a.mjs", "a.cjs", "a.jsx", "a.ts", "a.mts", "a.cts", "a.tsx",
+        ] {
+            assert_eq!(reg.language_name_for_path(path), None, "{path}");
+        }
+        assert!(
+            default_injection_aliases()
+                .values()
+                .all(|lang| !family.contains(&lang.as_str()))
+        );
+    }
+
     #[test]
     fn builtin_languages_include_gap_grammars() {
         for (name, exts) in [
             ("python", &["py", "pyi"][..]),
             ("go", &["go"][..]),
-            ("javascript", &["js", "mjs", "cjs"][..]),
-            ("javascriptreact", &["jsx"][..]),
-            ("typescript", &["ts", "mts", "cts"][..]),
-            ("typescriptreact", &["tsx"][..]),
             ("toml", &["toml"][..]),
             ("zig", &["zig", "zon"][..]),
         ] {
@@ -3235,19 +3020,11 @@ mod tests {
     fn gap_grammars_load_and_parse() {
         // ABI acceptance for each new grammar (set_language succeeds at
         // runtime) + a snippet that parses without error at the expected
-        // root. Covers both `tree-sitter-typescript` grammars.
+        // root.
         let reg = SyntaxRegistry::new();
         let cases: &[(&str, &str, &[u8])] = &[
             ("python", "module", b"def f(x):\n    return x + 1\n"),
             ("go", "source_file", b"package main\nfunc main() {}\n"),
-            ("javascript", "program", b"const x = 1;\nlet y = [x];\n"),
-            (
-                "javascriptreact",
-                "program",
-                b"const e = <div id=\"a\"/>;\n",
-            ),
-            ("typescript", "program", b"const x: number = 1;\n"),
-            ("typescriptreact", "program", b"const e = <div/>;\n"),
             ("toml", "document", b"[pkg]\nname = \"x\"\n"),
             ("zig", "source_file", b"const std = @import(\"std\");\n"),
         ];
@@ -3270,25 +3047,6 @@ mod tests {
             assert!(
                 !bundle.root_tree().root_node().has_error(),
                 "`{lang}` parses its snippet without error"
-            );
-        }
-    }
-
-    #[test]
-    fn typescript_highlights_compose_the_javascript_base() {
-        // The bundled TypeScript highlights are a ~5-capture delta over
-        // JavaScript; the entries prepend the JS query (and JSX for tsx).
-        // Assert the COMPILED query resolves far more than the delta — the
-        // JS base is really there, not just the ts-specific captures.
-        let reg = SyntaxRegistry::new();
-        for lang in ["typescript", "typescriptreact"] {
-            let query = reg
-                .highlights_query(lang)
-                .unwrap_or_else(|| panic!("`{lang}` highlights compile"));
-            assert!(
-                query.capture_names().len() >= 15,
-                "`{lang}` composes the JavaScript base (got {} captures, delta alone is ~5)",
-                query.capture_names().len()
             );
         }
     }
@@ -3321,7 +3079,7 @@ mod tests {
 
     #[test]
     fn javascript_local_predicates_distinguish_lexical_scope() {
-        let registry = SyntaxRegistry::new();
+        let registry = javascript_fixture();
         let source = b"console.log('outer');\n\
                        require('outer');\n\
                        function f(console, require) {\n\
@@ -3391,7 +3149,7 @@ mod tests {
 
     #[test]
     fn positive_and_capture_qualified_local_predicates_use_resolved_facts() {
-        let registry = SyntaxRegistry::new();
+        let registry = javascript_fixture();
         let source = b"let f = () => {};\nf();\ng();\n";
         let bundle = parse_layered(&registry, "javascript", source);
         let language = registry.language("javascript").expect("javascript loads");
@@ -3459,7 +3217,7 @@ mod tests {
 
     #[test]
     fn local_definition_value_and_scope_inheritance_control_resolution() {
-        let registry = SyntaxRegistry::new();
+        let registry = javascript_fixture();
         let language = registry.language("javascript").expect("javascript loads");
 
         let value_source = b"let x = x;\nx;\n";
@@ -3531,76 +3289,12 @@ mod tests {
     }
 
     #[test]
-    fn typescript_locals_compose_javascript_scopes_and_parameter_delta() {
-        let registry = SyntaxRegistry::new();
-        for (language_name, source) in [
-            (
-                "typescript",
-                &b"function f(console: string) { console.log('x'); }\n\
-                   window.alert('x');\n"[..],
-            ),
-            (
-                "typescriptreact",
-                &b"function F(console: string) { return <div>{console}</div>; }\n\
-                   window.alert('x');\n"[..],
-            ),
-        ] {
-            let locals = registry
-                .locals_query(language_name)
-                .unwrap_or_else(|| panic!("{language_name} locals compile"));
-            assert!(
-                locals.capture_index_for_name("local.scope").is_some()
-                    && locals.capture_index_for_name("local.definition").is_some()
-                    && locals.capture_index_for_name("local.reference").is_some(),
-                "{language_name} includes JavaScript's scopes and references"
-            );
-
-            let bundle = parse_layered(&registry, language_name, source);
-            let layer = &bundle.layers[0];
-            let query = layer
-                .highlight_query
-                .as_deref()
-                .expect("highlights compile");
-            let spans = compute_highlight_spans(query, &bundle);
-            let names = query.capture_names();
-            let text = std::str::from_utf8(source).expect("fixture is UTF-8");
-            for (position, _) in text.match_indices("console") {
-                assert!(
-                    spans
-                        .iter()
-                        .filter(|span| {
-                            span.start_byte == position as u32
-                                && span.end_byte == (position + "console".len()) as u32
-                        })
-                        .all(|span| !names[span.capture_index as usize].ends_with(".builtin")),
-                    "{language_name} parameter/reference `console` is local"
-                );
-            }
-            let window = text.find("window").expect("window fixture");
-            assert!(
-                spans.iter().any(|span| {
-                    span.start_byte == window as u32
-                        && span.end_byte == (window + "window".len()) as u32
-                        && names[span.capture_index as usize] == "variable.builtin"
-                }),
-                "{language_name} unresolved `window` remains builtin"
-            );
-        }
-    }
-
-    #[test]
     fn gap_grammar_extensions_resolve() {
         let reg = SyntaxRegistry::new();
         for (path, lang) in [
             ("main.py", "python"),
             ("stub.pyi", "python"),
             ("server.go", "go"),
-            ("app.js", "javascript"),
-            ("mod.mjs", "javascript"),
-            ("view.jsx", "javascriptreact"),
-            ("index.ts", "typescript"),
-            ("types.mts", "typescript"),
-            ("App.tsx", "typescriptreact"),
             ("Cargo.toml", "toml"),
             ("build.zig", "zig"),
             ("config.zon", "zig"),

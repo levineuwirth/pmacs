@@ -191,27 +191,29 @@ tree-sitter-containerfile = "0.9"
 tree-sitter-make = "1.1"
 tree-sitter-cmake = "0.7"
 # Grammar-gap languages: these already have LSP configs (basedpyright /
-# gopls / tsserver / taplo / zls) but shipped no tree-sitter grammar, so
-# they rendered with no lexical color. Fill the gap. All ride
+# gopls / taplo / zls) but shipped no tree-sitter grammar, so they
+# rendered with no lexical color. Fill the gap. All ride
 # `tree-sitter-language 0.1` (tree-sitter dev-only) and export
-# `LANGUAGE`/`HIGHLIGHTS_QUERY`. TypeScript is special: one crate ships
-# TWO grammars (`LANGUAGE_TYPESCRIPT`/`LANGUAGE_TSX`) and its highlights
-# inherit JavaScript, so the `typescript*` entries compose the JS query
-# ahead of the TS one (see `crate::syntax::BUILTIN_LANGUAGES`). JavaScript
-# parses both `.js` and `.jsx`.
+# `LANGUAGE`/`HIGHLIGHTS_QUERY`. No JavaScript or TypeScript grammar
+# (E7g): `tree-sitter-javascript` 0.25.0 never returns from a 24-byte
+# file of unclosed brackets (`[t,t[t`, `[at`, `[ ,at`, `[ ,5 ];` on four
+# lines) and grows without bound while it tries, and the TypeScript and
+# TSX grammars do the same on it; tree-sitter 0.27.0 too. `.js`, `.jsx`,
+# `.ts` and `.tsx` reach tsserver through `pmacs.lsp.filetypes`;
+# `tests/e7g_grammar_fuzz_acceptance.rs` pins the absence.
 tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
-tree-sitter-javascript = "0.25"
-tree-sitter-typescript = "0.23"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-zig = "1.1"
-# JSON + YAML — config formats + the honest gate on the Jupyter path
-# (JSON). Both are ABI-current (`LANGUAGE: LanguageFn` via
-# `tree-sitter-language`), NOT a `tree-sitter ^0.20` fork. Registering
-# yaml also lights up markdown `---` frontmatter through the #122
-# injection engine (the block injection query already sets yaml for it).
+# JSON — a config format + the honest gate on the Jupyter path. ABI-current
+# (`LANGUAGE: LanguageFn` via `tree-sitter-language`), NOT a
+# `tree-sitter ^0.20` fork. No YAML grammar (E7g): `tree-sitter-yaml`
+# 0.7.2, the newest release, writes past the runtime's 1024-byte
+# serialization buffer once a file nests 254 levels deep, and the
+# runtime's assert aborts the editor; `.yaml` reaches yaml-language-server
+# through `pmacs.lsp.filetypes`, and `tests/e7g_grammar_fuzz_acceptance.rs`
+# pins the absence.
 tree-sitter-json = "0.24"
-tree-sitter-yaml = "0.7"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.
@@ -262,17 +264,13 @@ tree-sitter-css = "0.25"
 # `crate::syntax::BUILTIN_LANGUAGES` reads `arborium_lean::language().into()`
 # rather than the `LANGUAGE.into()` every other entry uses.
 arborium-lean = "2.18"
-# Haskell (`.hs`) — aside E7e. The official tree-sitter-org grammar:
-# `tree-sitter-language 0.1` as its sole runtime dep (`tree-sitter`
-# dev-only, no second core in the graph) and `LANGUAGE` /
-# `HIGHLIGHTS_QUERY` / `INJECTIONS_QUERY` / `LOCALS_QUERY` constants, the
-# rust/lua idiom. Its generated `parser.c` is 19 MB, third after latex's
-# (42 MB) and cuda's (20 MB); under the dev profile its build script runs
-# in about 3 s beside the rest of a cold build and adds about 4 MB to the
-# debug `pmacs`. `.lhs` is NOT claimed: literate Haskell needs an
-# unliterate pass the grammar does not have, and it parses both Bird-track
-# and `\begin{code}` sources as errors.
-tree-sitter-haskell = "0.23"
+# No Haskell grammar (E7g). `tree-sitter-haskell` 0.23.1, the newest
+# release, corrupts the heap on a file opening with two `{-# LANGUAGE #-}`
+# pragmas once its scanner is built with GCC at -O2 or above: its vendored
+# `tree_sitter/array.h` pushes through an `(Array *)` cast, a strict-aliasing
+# violation, and the push writes into the buffer its own grow just freed.
+# `.hs` reaches haskell-language-server through `pmacs.lsp.filetypes`
+# instead; `tests/e7e_haskell_acceptance.rs` pins the absence.
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low. `poll` feeds the
 # compile-mode group readers (cancellable poll-based reads, Q#CM3).
@@ -335,6 +333,11 @@ loro-internal = { version = "=1.12.0", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# The local-facts machinery's witnesses in `src/syntax.rs` and
+# `src/semantic_render.rs` parse fixed JavaScript fixtures, the grammar
+# whose highlights use `local` predicates. Test-only since E7g unshipped
+# it: nothing here reaches a build of pmacs.
+tree-sitter-javascript = "0.25"
 tempfile = "3"
 # T M10.2 Day 7 perf bench (tests/m10_2_perf.rs) — seeded RNG plus
 # log-normal op-size distribution matching the M10.1 methodology.
@@ -349,6 +352,17 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 strip = "debuginfo"
+
+# E7g: `scripts/fuzz-grammars` builds `pmacs_grammar_fuzz` here. It
+# inherits `release` so the grammars' C is compiled at -O3, as it ships:
+# the tree-sitter-haskell overflow is a miscompile at -O2 and above that
+# a debug build never shows. LTO and one codegen unit buy a fuzzer
+# nothing and cost minutes; symbols stay for the sanitizer's reports.
+[profile.fuzz]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "none"
 
 [profile.bench]
 opt-level = 3

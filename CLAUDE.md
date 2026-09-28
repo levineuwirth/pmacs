@@ -20,6 +20,18 @@ Always true:
   runs alone. Every user-visible knob registers through `pmacs.config`;
   generated buffers write through `Buffer::set_generated_contents`;
   `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`.
+- A tree-sitter grammar is C beside the `forbid(unsafe_code)` Rust, and
+  in daemon mode one bad parse takes every buffer the daemon holds. A
+  grammar ships only once `scripts/fuzz-grammars` has run over it clean
+  --- built as it ships (release optimization, its C under
+  AddressSanitizer) and seeded from real files --- with its row in
+  `fuzz/corpora.tsv`; CI's `Grammar fuzz` job runs on every change to
+  the grammar set, and a session adding or bumping one also runs
+  `--seconds 600` on this machine's compiler and cites the report.
+  E7e's lesson: the author's chosen test file parsed while the owner's
+  real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
+  tree-sitter-haskell 0.23.1's scanner is miscompiled at -O2, and a
+  debug build never shows it.
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before

@@ -1,0 +1,159 @@
+#!/bin/sh
+# scripts/fuzz-grammars --- fuzz every bundled tree-sitter grammar the
+# way it ships (E7g).
+#
+#   scripts/fuzz-grammars [--seconds N] [--jobs N] [--grammar NAME]...
+#                         [--from [LABEL=]DIR]... [--max-files N]
+#                         [--out DIR] [--plain]
+#
+# The grammars are C beside a `#![forbid(unsafe_code)]` editor, and in
+# daemon mode one bad parse takes every buffer the daemon holds. E7e
+# shipped tree-sitter-haskell 0.23.1 because its author's test file
+# parsed; the owner's real file, two `{-# LANGUAGE #-}` pragmas, aborted
+# the editor within minutes. So a grammar ships only after this has run
+# over it, and CI runs it (.github/workflows/grammar-fuzz.yml) whenever
+# the grammar set can have changed.
+#
+# What it does:
+#
+#   1. Builds src/bin/pmacs_grammar_fuzz.rs under the `fuzz` profile,
+#      which inherits `release`: the C is compiled at -O3 as it ships.
+#      That is not a detail. The Haskell overflow is a strict-aliasing
+#      miscompile GCC makes at -O2 and above; a debug build is clean.
+#      The tree-sitter runtime and every grammar's C are instrumented
+#      with AddressSanitizer through a compiler wrapper that adds the
+#      flag to those sources only (--plain builds them uninstrumented,
+#      byte for byte as released).
+#   2. Fetches each grammar's own real sources at the commit
+#      fuzz/corpora.tsv pins: its upstream test corpus, or real files
+#      where it ships none.
+#   3. Collects seeds from those, from this tree, and from each --from
+#      directory (a git repository contributes its tracked files only),
+#      at most --max-files per grammar from each source (default 400; the
+#      PR smoke takes 100, since Zig's standard library alone is otherwise
+#      twenty minutes of seeds).
+#   4. Runs the harness: every seed, then mutations until --seconds pass,
+#      per grammar, --jobs grammars at a time, and writes report.md and
+#      report.tsv with a minimized reproduction per finding.
+#
+# Exit status is the harness's: 0 no finding, 1 findings, 2 setup
+# (including a grammar with no seeds). The build directory is the
+# gate's per-worktree target with `-fuzz` appended, never the shared
+# CARGO_TARGET_DIR, so the release pair there is never rebuilt; set
+# PMACS_FUZZ_DIR to put it elsewhere.
+set -eu
+
+die() { echo "fuzz-grammars: $*" >&2; exit 2; }
+
+seconds=60
+jobs=4
+max_files=400
+plain=0
+out=
+grammars=
+froms=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --seconds) seconds=${2:?}; shift 2 ;;
+        --jobs) jobs=${2:?}; shift 2 ;;
+        --grammar) grammars="$grammars --grammar ${2:?}"; shift 2 ;;
+        --from) froms="$froms --from ${2:?}"; shift 2 ;;
+        --max-files) max_files=${2:?}; shift 2 ;;
+        --out) out=${2:?}; shift 2 ;;
+        --plain) plain=1; shift ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+root=$(git rev-parse --show-toplevel) || die "not inside a git worktree"
+cd "$root"
+work=${PMACS_FUZZ_DIR:-$(scripts/gate --print-target-dir)-fuzz}
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+[ -n "$out" ] || out="$work/report-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+
+# --- 1. build -----------------------------------------------------------
+host=$(rustc -vV | sed -n 's/^host: //p')
+export CARGO_TARGET_DIR="$work/target"
+# sccache would key the instrumented objects on the wrapper, not on the
+# flag the wrapper adds; build without it.
+export RUSTC_WRAPPER=
+unset RUSTFLAGS
+preload=
+if [ "$plain" = 0 ]; then
+    real_cc=${CC:-cc}
+    libasan=$("$real_cc" -print-file-name=libasan.so)
+    [ -f "$libasan" ] || die "no libasan.so beside $real_cc (install the compiler's sanitizer runtime, or pass --plain)"
+    wrapper="$work/asan-cc"
+    cat > "$wrapper" <<EOF
+#!/bin/sh
+# Instrument the tree-sitter runtime and grammar C only.
+for a in "\$@"; do
+    case "\$a" in
+        */tree-sitter-*/*|*/codebook-tree-sitter-*/*|*/arborium-*/*)
+            exec "$real_cc" "\$@" -fsanitize=address -fno-omit-frame-pointer ;;
+    esac
+done
+exec "$real_cc" "\$@"
+EOF
+    chmod +x "$wrapper"
+    export CC="$wrapper"
+    # --target keeps these off build scripts, which run uninstrumented.
+    export RUSTFLAGS="-C link-arg=-Wl,--no-as-needed -C link-arg=$libasan"
+    preload=$libasan
+    export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:detect_stack_use_after_return=0"
+fi
+cargo build --profile fuzz --target "$host" --bin pmacs_grammar_fuzz
+bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
+fuzz() { LD_PRELOAD="$preload" "$bin" "$@"; }
+
+# --- 2. upstream sources ---------------------------------------------------
+registry=${CARGO_HOME:-$HOME/.cargo}/registry/src
+corpora=
+tab=$(printf '\t')
+while IFS="$tab" read -r grammar crate version repo commit kind paths; do
+    case "$grammar" in ''|'#'*|grammar) continue ;; esac
+    if [ "$kind" = crate ]; then
+        dir=$(ls -d "$registry"/*/"$crate-$version" 2>/dev/null | head -n 1)
+        [ -n "$dir" ] || die "$crate $version is not in $registry (cargo fetch)"
+    else
+        # One checkout per row: rows sharing a repository want different paths.
+        dir="$work/upstream/$grammar-$commit"
+        if [ ! -d "$dir/.done" ]; then
+            rm -rf "$dir"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "$repo"
+            git -C "$dir" sparse-checkout set --no-cone $(echo "$paths" | tr ',' ' ')
+            git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$commit"
+            git -C "$dir" checkout -q FETCH_HEAD
+            mkdir "$dir/.done"
+        fi
+        [ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] || die "$dir is not at $commit"
+    fi
+    for p in $(echo "$paths" | tr ',' ' '); do
+        [ -e "$dir/$p" ] || die "$grammar: $dir/$p is missing"
+        case "$kind" in
+            corpus) corpora="$corpora --corpus $grammar=$dir/$p" ;;
+            *) froms="$froms --from upstream-$grammar=$dir/$p" ;;
+        esac
+    done
+done < fuzz/corpora.tsv
+
+# --- 3. seeds ------------------------------------------------------------
+rm -rf "$work/corpus"
+# shellcheck disable=SC2086
+fuzz collect --out "$work/corpus" --max-files "$max_files" --from "pmacs=$root" $froms $corpora
+cp "$work/corpus/MANIFEST.tsv" "$out/seeds.tsv"
+
+# --- 4. run --------------------------------------------------------------
+echo "fuzz-grammars: $seconds s per grammar, $jobs at a time, report in $out" >&2
+set +e
+# shellcheck disable=SC2086
+fuzz run --corpus "$work/corpus" --out "$out" --seconds "$seconds" --jobs "$jobs" $grammars
+status=$?
+set -e
+cat "$out/report.md"
+exit "$status"

@@ -1,0 +1,93 @@
+name: Grammar fuzz
+
+# E7g. Every bundled tree-sitter grammar is C beside a Rust editor that
+# forbids `unsafe`, and in daemon mode one bad parse takes every buffer
+# the daemon holds. E7e shipped tree-sitter-haskell 0.23.1 because its
+# author's test file parsed; the owner's real file, two
+# `{-# LANGUAGE #-}` pragmas, aborted the editor. So a grammar's fuzz run
+# is a condition of shipping it, and this job runs one whenever the
+# grammar set can have changed: the crate graph (Cargo.lock, Cargo.toml),
+# the table (src/syntax.rs), the corpora (fuzz/), or the harness.
+#
+# `scripts/fuzz-grammars` builds the harness under the `fuzz` profile, so
+# the C is optimized as it ships (the Haskell overflow is a miscompile at
+# -O2 that a debug build never shows), with the tree-sitter runtime and
+# grammar C under AddressSanitizer; seeds every grammar from this tree and
+# its upstream sources at the commits fuzz/corpora.tsv pins; and fails on
+# a crash or a parse that never returns (a slow or large one is reported,
+# D36). The PR smoke is at most 100 seeds per grammar from each source
+# plus 15 s of mutation; `workflow_dispatch` runs the long form, 400 seeds
+# a source and ten minutes a grammar by default.
+#
+# CI's compiler is not the laptop's (GCC 13 here, 16 there), and a
+# miscompile is the compiler's: a green smoke here does not stand in for
+# the long run on the machine that builds the release pair.
+
+on:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - src/syntax.rs
+      - src/bin/pmacs_grammar_fuzz.rs
+      - scripts/fuzz-grammars
+      - fuzz/**
+      - .github/workflows/grammar-fuzz.yml
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - src/syntax.rs
+      - src/bin/pmacs_grammar_fuzz.rs
+      - scripts/fuzz-grammars
+      - fuzz/**
+      - .github/workflows/grammar-fuzz.yml
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds of mutation per grammar, after its seeds
+        default: "600"
+      jobs:
+        description: Grammars fuzzed at a time
+        default: "4"
+      max_files:
+        description: Seeds per grammar from each source
+        default: "400"
+
+concurrency:
+  group: grammar-fuzz-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    name: Grammar fuzz (every grammar, ASan)
+    runs-on: ubuntu-latest
+    # The smoke: a cold -O3 build of the workspace's dependencies (about
+    # ten minutes), the upstream fetch, the capped seeds and 15 s per
+    # grammar, four at a time; locally, uncapped and niced, it took 36
+    # minutes, 22 of them Zig's 400 standard-library seeds. The long form:
+    # 20 grammars at 600 s, four at a time, is under an hour of mutation.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 300 || 45 }}
+    env:
+      PMACS_FUZZ_DIR: ${{ github.workspace }}/target/grammar-fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/grammar-fuzz/target"
+      - name: Fuzz every grammar
+        run: >-
+          scripts/fuzz-grammars
+          --seconds "${{ inputs.seconds || '15' }}"
+          --jobs "${{ inputs.jobs || '4' }}"
+          --max-files "${{ inputs.max_files || '100' }}"
+          --out "${{ github.workspace }}/grammar-fuzz-report"
+      - name: Keep the report and every reproduction
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grammar-fuzz-report
+          path: grammar-fuzz-report
+          if-no-files-found: warn
