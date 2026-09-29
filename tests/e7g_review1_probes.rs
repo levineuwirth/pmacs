@@ -331,12 +331,12 @@ fn scanners_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// a residual clang's type sanitizer still reports (bash 164,968 reports of
 /// the pointer class on a growth input, html none of that class), which no
 /// compiler may now exploit. A grammar whose copy gets the fixed header
-/// leaves this list; a new grammar on the old header joins it only by an
-/// edit here, which is the point.
+/// leaves this list (python did at E7h, its copy vendored for its bound);
+/// a new grammar on the old header joins it only by an edit here, which is
+/// the point.
 const ALIASING_HEADER_RESIDUAL: &[&str] = &[
     "tree-sitter-bash: src/scanner.c",
     "tree-sitter-html: src/scanner.c",
-    "tree-sitter-python: src/scanner.c",
 ];
 
 #[test]

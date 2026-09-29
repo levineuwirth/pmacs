@@ -5,6 +5,10 @@
 # hello-world rendering. Protocol consumption arrives in session 3.
 # See `docs/pmacs-gpu-design.md`.
 members = [".", "pmacs-protocol", "pmacs-gpu"]
+# Grammar crates carried in-repo under D36 as amended (E7h): built through
+# `[patch.crates-io]` below, never workspace members, so the workspace's
+# fmt, clippy and tests do not reach into their published code.
+exclude = ["vendor"]
 
 [workspace.dependencies]
 # Shared between `pmacs` and `pmacs-protocol`. Pinned here so both
@@ -345,6 +349,15 @@ tempfile = "3"
 # `r#gen` for the (now-reserved) `gen` method name.
 rand = "0.8"
 rand_distr = "0.4"
+
+# E7h, D36 as amended: grammars whose scanner overran tree-sitter's
+# 1024-byte serialization buffer and aborted the editor ship from in-repo
+# copies with the bound fixed; each `vendor/<crate>/PMACS-VENDOR.md` says
+# what changed and when the copy can go. The versions stay the published
+# ones, so `fuzz/corpora.tsv`'s pins and every other row hold.
+[patch.crates-io]
+tree-sitter-md = { path = "vendor/tree-sitter-md" }
+tree-sitter-python = { path = "vendor/tree-sitter-python" }
 
 [profile.release]
 opt-level = 3

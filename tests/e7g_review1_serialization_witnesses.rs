@@ -16,10 +16,10 @@
 //!   indent's two bytes, so with an odd number of open string delimiters
 //!   and 511 indentation levels it writes 1025.
 //!
-//! Each row opens the file through the editor and fails by taking the test
-//! binary down, which is what it does to the daemon. They are ignored so the
-//! gate describes the reviewed tree; the fix round un-ignores them. Run:
-//! `cargo test --test e7g_review1_serialization_witnesses -- --ignored`.
+//! Each row opens the file through the editor; at `4ad9f3e` each failed by
+//! taking the test binary down, which is what it did to the daemon. E7h
+//! ships both grammars from in-repo copies with the bound fixed (D36 as
+//! amended, `vendor/*/PMACS-VENDOR.md`), and the rows run in the sweep.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -109,7 +109,6 @@ fn python(depth: usize, tail: &str) -> String {
 }
 
 #[test]
-#[ignore = "E7g review 1 witness: aborts at 4ad9f3e (tree-sitter-md's unbounded serialize); the fix round un-ignores it"]
 fn e7g_review1_a_markdown_file_quoting_255_deep_does_not_take_the_editor_down() {
     let dir = temp_dir("mdq");
     // Control: 254 levels serialize in 1021 bytes and parse.
@@ -123,7 +122,6 @@ fn e7g_review1_a_markdown_file_quoting_255_deep_does_not_take_the_editor_down() 
 }
 
 #[test]
-#[ignore = "E7g review 1 witness: aborts at 4ad9f3e (tree-sitter-md's unbounded serialize); the fix round un-ignores it"]
 fn e7g_review1_a_markdown_list_nested_255_deep_does_not_take_the_editor_down() {
     let dir = temp_dir("mdl");
     assert_eq!(
@@ -135,7 +133,6 @@ fn e7g_review1_a_markdown_list_nested_255_deep_does_not_take_the_editor_down() {
 }
 
 #[test]
-#[ignore = "E7g review 1 witness: aborts at 4ad9f3e (tree-sitter-python's off-by-one serialize); the fix round un-ignores it"]
 fn e7g_review1_a_python_string_511_blocks_deep_does_not_take_the_editor_down() {
     let dir = temp_dir("py");
     // Controls: the same depth with no string open, and a string one level
@@ -152,4 +149,54 @@ fn e7g_review1_a_python_string_511_blocks_deep_does_not_take_the_editor_down() {
     // and the loop writes 1025: SIGABRT at 4ad9f3e.
     let (language, _) = open_and_settle(&dir, "deep.py", &python(511, "x = \"s\""));
     assert_eq!(language.as_deref(), Some("python"));
+}
+
+/// The grammars shipped under D36 as amended, each from `vendor/<crate>`
+/// with its serialize bound fixed: the crate, and its patched scanner.
+const VENDORED_BOUNDS: &[(&str, &str)] = &[
+    ("tree-sitter-md", "tree-sitter-markdown/src/scanner.c"),
+    ("tree-sitter-python", "src/scanner.c"),
+];
+
+#[test]
+fn e7h_the_bounded_grammars_ship_from_their_vendored_copies() {
+    // The rows above abort the test binary if an unpatched crate returns;
+    // this one says why. Each crate must resolve to its in-repo copy, not
+    // to crates.io: a path package in the lock (no `source`), the
+    // `[patch.crates-io]` entry that makes it one, and the copy's scanner
+    // still carrying the bound. Dropping a copy is its PMACS-VENDOR.md's
+    // procedure: a released fix, fuzzed clean, then this list and the
+    // patch entry in the same commit.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let patch = manifest
+        .split("\n[patch.crates-io]\n")
+        .nth(1)
+        .expect("Cargo.toml has a [patch.crates-io] section");
+    for (krate, scanner) in VENDORED_BOUNDS {
+        let block = lock
+            .split("[[package]]")
+            .find(|b| b.lines().any(|l| l == format!("name = \"{krate}\"")))
+            .unwrap_or_else(|| panic!("Cargo.lock lists {krate}"));
+        assert!(
+            !block.lines().any(|l| l.starts_with("source = ")),
+            "{krate} resolves to crates.io again, whose serialize writes past \
+             tree-sitter's 1024-byte buffer and aborts the editor:{block}"
+        );
+        assert!(
+            patch.contains(&format!("{krate} = {{ path = \"vendor/{krate}\" }}")),
+            "[patch.crates-io] routes {krate} to vendor/{krate}"
+        );
+        let copy = root.join("vendor").join(krate);
+        assert!(
+            copy.join("PMACS-VENDOR.md").is_file(),
+            "{krate}'s copy says what changed"
+        );
+        let source = std::fs::read_to_string(copy.join(scanner)).unwrap();
+        assert!(
+            source.contains("pmacs (E7h, D36 as amended)"),
+            "vendor/{krate}/{scanner} still carries the bound"
+        );
+    }
 }
