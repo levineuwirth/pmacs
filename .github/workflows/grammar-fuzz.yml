@@ -15,33 +15,52 @@ name: Grammar fuzz
 # grammar C under AddressSanitizer; seeds every grammar from this tree and
 # its upstream sources at the commits fuzz/corpora.tsv pins; and fails on
 # a crash or a parse that never returns (a slow or large one is reported,
-# D36). The PR smoke is at most 100 seeds per grammar from each source
-# plus 15 s of mutation; `workflow_dispatch` runs the long form, 400 seeds
-# a source and ten minutes a grammar by default.
+# D36). The PR smoke is every upstream corpus example and at most 100
+# seeds per grammar from each other source, each cut to 16 KB, then at
+# least 300 mutations and 15 s per grammar (four minutes at most); the
+# grammars a pull request changed --- a crate's locked version, its
+# corpora row, its vendored copy, from `pmacs_grammar_fuzz changed` ---
+# run ten minutes instead, and a tree-sitter runtime bump runs them all
+# ten minutes. `workflow_dispatch` runs the long form, 400 seeds a source
+# and ten minutes a grammar by default.
 #
-# CI's compiler is not the laptop's (GCC 13 here, 16 there), and a
-# miscompile is the compiler's: a green smoke here does not stand in for
-# the long run on the machine that builds the release pair.
+# What this job can and cannot catch (E7h.4; CLAUDE.md states it beside
+# the rule): it builds the grammars as they ship, -fno-strict-aliasing
+# included, with ASan and UBSan on their C, so a memory error or UB on a
+# path an input reaches is reported where it happens, on any compiler;
+# every parse runs under the hang limit as its deadline, so a parse that
+# never returns is a hang however it grows; the mutator nests past the
+# depths at which a scanner's state outgrows tree-sitter's buffer. It
+# cannot reach an input its mutator does not (it is not coverage-guided),
+# it sees GCC 13 and not the laptop's GCC 16, and its green is not a
+# proof: a short run found no defect, nothing more. The owner makes it a
+# required check; a session cannot.
 
 on:
   pull_request:
     paths:
       - Cargo.lock
       - Cargo.toml
+      - .cargo/config.toml
       - src/syntax.rs
       - src/bin/pmacs_grammar_fuzz.rs
       - scripts/fuzz-grammars
       - fuzz/**
+      - vendor/**
+      - builtin/queries/**
       - .github/workflows/grammar-fuzz.yml
   push:
     branches: [main]
     paths:
       - Cargo.lock
       - Cargo.toml
+      - .cargo/config.toml
       - src/syntax.rs
       - src/bin/pmacs_grammar_fuzz.rs
       - scripts/fuzz-grammars
       - fuzz/**
+      - vendor/**
+      - builtin/queries/**
       - .github/workflows/grammar-fuzz.yml
   workflow_dispatch:
     inputs:
@@ -54,6 +73,9 @@ on:
       max_files:
         description: Seeds per grammar from each source
         default: "400"
+      min_mutations:
+        description: Mutated inputs per grammar at least (under four minutes, or the seconds if longer)
+        default: "300"
 
 concurrency:
   group: grammar-fuzz-${{ github.event.pull_request.number || github.sha }}
@@ -64,15 +86,18 @@ jobs:
     name: Grammar fuzz (every grammar, ASan)
     runs-on: ubuntu-latest
     # The smoke: a cold -O3 build of the workspace's dependencies (about
-    # ten minutes), the upstream fetch, the capped seeds and 15 s per
-    # grammar, four at a time; locally, uncapped and niced, it took 36
-    # minutes, 22 of them Zig's 400 standard-library seeds. The long form:
-    # 20 grammars at 600 s, four at a time, is under an hour of mutation.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 300 || 45 }}
+    # ten minutes), the upstream fetch, the capped seeds, then per grammar
+    # 300 mutations or four minutes, four at a time; the grammars a change
+    # touched run ten minutes. The long form: 20 grammars at 600 s, four
+    # at a time, is under an hour of mutation.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 300 || 120 }}
     env:
       PMACS_FUZZ_DIR: ${{ github.workspace }}/target/grammar-fuzz
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `changed --since` reads the base's Cargo.lock and corpora.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -83,6 +108,11 @@ jobs:
           --seconds "${{ inputs.seconds || '15' }}"
           --jobs "${{ inputs.jobs || '4' }}"
           --max-files "${{ inputs.max_files || '100' }}"
+          --max-seed-kb "${{ github.event_name == 'workflow_dispatch' && '64' || '16' }}"
+          --min-mutations "${{ inputs.min_mutations || '300' }}"
+          --max-seconds 240
+          ${{ github.event_name == 'pull_request' && format('--long-since {0}', github.event.pull_request.base.sha) || '' }}
+          ${{ github.event_name == 'push' && format('--long-since {0}', github.event.before) || '' }}
           --out "${{ github.workspace }}/grammar-fuzz-report"
       - name: Keep the report and every reproduction
         if: always()

@@ -257,7 +257,6 @@ fn e7g_review1_the_reproductions_inside_markdown_and_html_settle_plain() {
 }
 
 #[test]
-#[ignore = "E7g review 1 witness: fails at 4ad9f3e (the workflow lists no builtin/queries path); the fix round un-ignores it"]
 fn e7g_review1_the_fuzz_job_runs_when_a_query_overlay_changes() {
     // `src/syntax.rs` `include_str!`s `builtin/queries/latex/highlights.scm`
     // as LaTeX's highlights query, and the harness's settle step walks it

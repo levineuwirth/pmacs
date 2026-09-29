@@ -4,7 +4,9 @@
 #
 #   scripts/fuzz-grammars [--seconds N] [--jobs N] [--grammar NAME]...
 #                         [--from [LABEL=]DIR]... [--max-files N]
-#                         [--out DIR] [--plain]
+#                         [--max-seed-kb N] [--min-mutations N]
+#                         [--max-seconds N] [--long-since REF]
+#                         [--long-seconds N] [--out DIR] [--plain]
 #
 # The grammars are C beside a `#![forbid(unsafe_code)]` editor, and in
 # daemon mode one bad parse takes every buffer the daemon holds. E7e
@@ -17,13 +19,17 @@
 # What it does:
 #
 #   1. Builds src/bin/pmacs_grammar_fuzz.rs under the `fuzz` profile,
-#      which inherits `release`: the C is compiled at -O3 as it ships.
-#      That is not a detail. The Haskell overflow is a strict-aliasing
-#      miscompile GCC makes at -O2 and above; a debug build is clean.
-#      The tree-sitter runtime and every grammar's C are instrumented
-#      with AddressSanitizer through a compiler wrapper that adds the
-#      flag to those sources only (--plain builds them uninstrumented,
-#      byte for byte as released).
+#      which inherits `release`: the C is compiled at -O3 as it ships,
+#      with the -fno-strict-aliasing .cargo/config.toml adds to every C
+#      compile (E7h.1). That is not a detail: the Haskell overflow was
+#      undefined behavior GCC 16 exploits at -O2 and above, and a debug
+#      build is clean. The tree-sitter runtime and every grammar's C are
+#      instrumented with AddressSanitizer and UndefinedBehaviorSanitizer
+#      (E7h.4: UB is reported where it happens, not when a compiler turns
+#      it into a crash) through a compiler wrapper that recognizes a
+#      grammar by the package it builds, not by its path, and the build
+#      fails if any grammar's C went uninstrumented (--plain builds them
+#      uninstrumented, byte for byte as released).
 #   2. Fetches each grammar's own real sources at the commit
 #      fuzz/corpora.tsv pins: its upstream test corpus, or real files
 #      where it ships none.
@@ -32,9 +38,14 @@
 #      at most --max-files per grammar from each source (default 400; the
 #      PR smoke takes 100, since Zig's standard library alone is otherwise
 #      twenty minutes of seeds).
-#   4. Runs the harness: every seed, then mutations until --seconds pass,
-#      per grammar, --jobs grammars at a time, and writes report.md and
-#      report.tsv with a minimized reproduction per finding.
+#   4. Runs the harness: every seed, then mutations until --seconds pass
+#      and at least --min-mutations were made (under --max-seconds), per
+#      grammar, --jobs grammars at a time, and writes report.md and
+#      report.tsv with a minimized reproduction per finding. With
+#      --long-since REF, the grammars the change since REF touched (a
+#      crate's locked version, its corpora row, its vendored copy) run for
+#      --long-seconds (default 600) instead; a tree-sitter runtime bump
+#      runs every grammar long.
 #
 # Exit status is the harness's: 0 no finding, 1 findings, 2 setup
 # (including a grammar with no seeds). The build directory is the
@@ -48,6 +59,11 @@ die() { echo "fuzz-grammars: $*" >&2; exit 2; }
 seconds=60
 jobs=4
 max_files=400
+max_seed_kb=64
+min_mutations=0
+max_seconds=0
+long_since=
+long_seconds=600
 plain=0
 out=
 grammars=
@@ -59,6 +75,11 @@ while [ $# -gt 0 ]; do
         --grammar) grammars="$grammars --grammar ${2:?}"; shift 2 ;;
         --from) froms="$froms --from ${2:?}"; shift 2 ;;
         --max-files) max_files=${2:?}; shift 2 ;;
+        --max-seed-kb) max_seed_kb=${2:?}; shift 2 ;;
+        --min-mutations) min_mutations=${2:?}; shift 2 ;;
+        --max-seconds) max_seconds=${2:?}; shift 2 ;;
+        --long-since) long_since=${2:?}; shift 2 ;;
+        --long-seconds) long_seconds=${2:?}; shift 2 ;;
         --out) out=${2:?}; shift 2 ;;
         --plain) plain=1; shift ;;
         -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -83,30 +104,51 @@ export CARGO_TARGET_DIR="$work/target"
 export RUSTC_WRAPPER=
 unset RUSTFLAGS
 preload=
+# The crates whose C is a grammar or the runtime: fuzz/corpora.tsv's crate
+# column, and tree-sitter itself.
+grammar_crates=$(awk -F '\t' '!/^#/ && NF >= 2 && $1 != "grammar" { print $2 }' fuzz/corpora.tsv | sort -u | tr '\n' ' ')
+grammar_crates="tree-sitter $grammar_crates"
 if [ "$plain" = 0 ]; then
     real_cc=${CC:-cc}
     libasan=$("$real_cc" -print-file-name=libasan.so)
+    libubsan=$("$real_cc" -print-file-name=libubsan.so)
     [ -f "$libasan" ] || die "no libasan.so beside $real_cc (install the compiler's sanitizer runtime, or pass --plain)"
-    wrapper="$work/asan-cc"
+    [ -f "$libubsan" ] || die "no libubsan.so beside $real_cc (install the compiler's sanitizer runtime, or pass --plain)"
+    # E7h.4: it instruments by the package being built (cargo sets
+    # CARGO_PKG_NAME for the build script that runs cc), not by a path a
+    # crate's name happens to match, and records each package it did. It
+    # is named by a checksum of itself: cc recompiles only when CC's value
+    # changes, so a wrapper edited in place would leave objects the old one
+    # built.
+    : >> "$work/instrumented.log"
+    wrapper="$work/sanitize-cc.tmp"
     cat > "$wrapper" <<EOF
 #!/bin/sh
-# Instrument the tree-sitter runtime and grammar C only.
-for a in "\$@"; do
-    case "\$a" in
-        */tree-sitter-*/*|*/codebook-tree-sitter-*/*|*/arborium-*/*)
-            exec "$real_cc" "\$@" -fsanitize=address -fno-omit-frame-pointer ;;
-    esac
-done
+case " $grammar_crates " in
+    *" \${CARGO_PKG_NAME:-} "*)
+        echo "\$CARGO_PKG_NAME" >> "$work/instrumented.log"
+        exec "$real_cc" "\$@" -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer ;;
+esac
 exec "$real_cc" "\$@"
 EOF
+    sum=$(cksum < "$wrapper" | cut -d' ' -f1)
+    mv "$wrapper" "$work/sanitize-cc-$sum"
+    wrapper="$work/sanitize-cc-$sum"
     chmod +x "$wrapper"
     export CC="$wrapper"
     # --target keeps these off build scripts, which run uninstrumented.
-    export RUSTFLAGS="-C link-arg=-Wl,--no-as-needed -C link-arg=$libasan"
+    export RUSTFLAGS="-C link-arg=-Wl,--no-as-needed -C link-arg=$libasan -C link-arg=$libubsan"
     preload=$libasan
     export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:detect_stack_use_after_return=0"
+    export UBSAN_OPTIONS="halt_on_error=1:abort_on_error=1:print_stacktrace=1"
 fi
 cargo build --profile fuzz --target "$host" --bin pmacs_grammar_fuzz
+if [ "$plain" = 0 ]; then
+    for c in $grammar_crates; do
+        grep -qx "$c" "$work/instrumented.log" \
+            || die "$c's C was not compiled under the sanitizers (see $wrapper)"
+    done
+fi
 bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
 fuzz() { LD_PRELOAD="$preload" "$bin" "$@"; }
 
@@ -145,14 +187,27 @@ done < fuzz/corpora.tsv
 # --- 3. seeds ------------------------------------------------------------
 rm -rf "$work/corpus"
 # shellcheck disable=SC2086
-fuzz collect --out "$work/corpus" --max-files "$max_files" --from "pmacs=$root" $froms $corpora
+fuzz collect --out "$work/corpus" --max-files "$max_files" --max-seed-kb "$max_seed_kb" --from "pmacs=$root" $froms $corpora
 cp "$work/corpus/MANIFEST.tsv" "$out/seeds.tsv"
 
 # --- 4. run --------------------------------------------------------------
-echo "fuzz-grammars: $seconds s per grammar, $jobs at a time, report in $out" >&2
+longs=
+if [ -n "$long_since" ]; then
+    changed=$(fuzz changed --since "$long_since") || die "cannot tell what changed since $long_since"
+    if [ "$changed" = "*" ]; then
+        echo "fuzz-grammars: the tree-sitter runtime moved since $long_since; every grammar runs $long_seconds s" >&2
+        seconds=$long_seconds
+    else
+        for g in $changed; do longs="$longs --long $g"; done
+        echo "fuzz-grammars: changed since $long_since, run $long_seconds s:${changed:+ }$(echo $changed)" >&2
+    fi
+fi
+echo "fuzz-grammars: $seconds s and at least $min_mutations mutations per grammar, $jobs at a time, report in $out" >&2
 set +e
 # shellcheck disable=SC2086
-fuzz run --corpus "$work/corpus" --out "$out" --seconds "$seconds" --jobs "$jobs" $grammars
+fuzz run --corpus "$work/corpus" --out "$out" --seconds "$seconds" --jobs "$jobs" \
+    --min-mutations "$min_mutations" --max-seconds "$max_seconds" \
+    --long-seconds "$long_seconds" $longs $grammars
 status=$?
 set -e
 cat "$out/report.md"

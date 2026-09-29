@@ -104,10 +104,16 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
     for path in [
         "Cargo.lock",
         "Cargo.toml",
+        // E7h: the C flags every grammar compiles with, the grammars
+        // carried in-repo under D36's amendment, and the query overlays
+        // the harness's capture walk runs.
+        ".cargo/config.toml",
         "src/syntax.rs",
         "src/bin/pmacs_grammar_fuzz.rs",
         "scripts/fuzz-grammars",
         "fuzz/**",
+        "vendor/**",
+        "builtin/queries/**",
         ".github/workflows/grammar-fuzz.yml",
     ] {
         let listed = wf.matches(&format!("      - {path}\n")).count();

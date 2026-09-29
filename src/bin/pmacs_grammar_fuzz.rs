@@ -17,7 +17,9 @@
 //!                            [--corpus GRAMMAR=PATH]... [--max-files N]
 //! pmacs_grammar_fuzz run --corpus DIR --out DIR [--seconds N] [--jobs N]
 //!                        [--grammar NAME]... [--edits N] [--seed N]
-//!                        [--hang-ms N] [--rss-mb N]
+//!                        [--hang-ms N] [--rss-mb N] [--min-mutations N]
+//!                        [--max-seconds N] [--long NAME]... [--long-seconds N]
+//! pmacs_grammar_fuzz changed --since REF
 //! pmacs_grammar_fuzz repro GRAMMAR FILE [--edits N --seed N] [--trace 1]
 //! ```
 //!
@@ -28,7 +30,8 @@
 //! (`SyntaxRegistry::resolve_layer_queries`), the highlight capture walk
 //! over every layer whole and over a viewport, a walk of every node; then
 //! `--edits` incremental reparses of the same text under typing, deletes,
-//! pastes and batched edits, each settled the same way.
+//! pastes and batched edits, each settled the same way (two, and no
+//! retyped window, for an input past the 64 KB seed cap).
 //!
 //! Findings are crashes (the process died: a sanitizer report, a glibc
 //! heap check, an assert, a panic), hangs (a parse that has not returned
@@ -51,7 +54,7 @@
 //! the host reclaiming memory, excepted). A hang that does not come back
 //! alone is a loaded worker's and is reported, not failed.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -78,7 +81,7 @@ const INPUTS_PER_WORKER: u64 = 500;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = args.split_first() else {
-        eprintln!("usage: pmacs_grammar_fuzz list|collect|run|repro|worker ...");
+        eprintln!("usage: pmacs_grammar_fuzz list|collect|run|changed|repro|worker ...");
         return ExitCode::from(2);
     };
     let result = match cmd.as_str() {
@@ -90,6 +93,7 @@ fn main() -> ExitCode {
         }
         "collect" => collect(rest),
         "run" => run(rest),
+        "changed" => changed(rest),
         "repro" => repro(rest),
         "worker" => worker(rest),
         other => Err(format!("unknown subcommand `{other}`")),
@@ -409,6 +413,13 @@ impl Session {
             planted.fire();
         }
         let mut rng = Rng(seed);
+        // An input past the seed cap is a depth operator's or a repeat's:
+        // its cold parse is what reaches a scanner's bound, and tree-sitter's
+        // error recovery can make each of its parses take seconds (a
+        // 238 KB Lua stair, 0.8 s a parse in release, E7h.4), so it gets
+        // two edits and no retyped window instead of 49 parses.
+        let large = text.len() > MAX_SEED_BYTES;
+        let edits = if large { edits.min(2) } else { edits };
         let bundle = self.parse(&text, None, Vec::new())?;
         self.settle(&bundle, &mut rng);
         beat();
@@ -417,7 +428,7 @@ impl Session {
         let mut cur = text;
         let mut left = edits;
         // Retype a window one character at a time, as a person does.
-        if left > 0 && !cur.is_empty() && rng.chance(1, 4) {
+        if left > 0 && !cur.is_empty() && !large && rng.chance(1, 4) {
             let (a, b) = span(&cur, &mut rng, 48);
             let window = cur[a..b].to_owned();
             let mut steps = vec![(a, b, String::new())];
@@ -729,7 +740,7 @@ impl Mutator<'_> {
             let at = boundary(text, rng);
             splice(text, at, at, ins).0
         };
-        match rng.below(12) {
+        match rng.below(14) {
             0 => {
                 let frag = FRAGMENTS[rng.below(FRAGMENTS.len())];
                 insert(text, rng, frag)
@@ -763,6 +774,8 @@ impl Mutator<'_> {
             }
             6 => line_op(text, rng),
             7 => indent_op(text, rng),
+            12 => depth_prefix(text, rng),
+            13 => depth_stair(text, rng),
             8 => {
                 let cut = boundary(text, rng);
                 text[..cut].to_owned()
@@ -789,6 +802,89 @@ impl Mutator<'_> {
             }
         }
     }
+}
+
+/// How deep a depth operator nests (E7h.4): past the depths at which a
+/// scanner's state outgrows tree-sitter's 1024-byte serialization buffer
+/// --- 255 open blocks at four bytes (markdown), 254 levels (YAML), 511
+/// indents with a string open (Python), all found by E7g review 1 --- and
+/// shallow enough that a capture walk quadratic in depth (Lua's, #292)
+/// stays in milliseconds.
+fn depth(rng: &mut Rng) -> usize {
+    250 + rng.below(851)
+}
+
+/// Repeat the start of a line (its first one to three characters: `> `,
+/// `- `, `(`, `{`, `#`, `if `...) hundreds of times at the line's start.
+fn depth_prefix(s: &str, rng: &mut Rng) -> String {
+    let mut lines: Vec<String> = s.split_inclusive('\n').map(str::to_owned).collect();
+    if lines.is_empty() {
+        lines.push("(\n".to_owned());
+    }
+    let i = rng.below(lines.len());
+    let line = lines[i].clone();
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let body = &line[indent..];
+    let take = 1 + rng.below(3);
+    let unit: String = if body.trim().is_empty() {
+        FRAGMENTS[rng.below(FRAGMENTS.len())].to_owned()
+    } else {
+        body.chars().take(take).collect()
+    };
+    let room = MAX_INPUT_BYTES.saturating_sub(s.len()) / unit.len().max(1);
+    let k = depth(rng).min(room);
+    lines[i] = format!("{}{}{}", &line[..indent], unit.repeat(k), body);
+    lines.concat()
+}
+
+/// Copy a line hundreds of times, each copy indented one step deeper (a
+/// step of one, two or four spaces), then another line of the input at the
+/// deepest level: nested blocks, keys or list items with whatever the
+/// other line holds (a string, say) at the bottom.
+fn depth_stair(s: &str, rng: &mut Rng) -> String {
+    let lines: Vec<&str> = s.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        return s.to_owned();
+    }
+    // Half the time the stair is a line that opens a block (ends in `:`,
+    // `{`, `(` or `[`) and the line at the bottom holds a string: Python
+    // overruns only with a string open 511 indents deep, which a uniform
+    // pick of two lines out of a whole file rarely assembles.
+    let pick = |rng: &mut Rng, want: &dyn Fn(&str) -> bool| {
+        let fit: Vec<usize> = (0..lines.len())
+            .filter(|&j| want(lines[j].trim()))
+            .collect();
+        if fit.is_empty() || rng.chance(1, 2) {
+            rng.below(lines.len())
+        } else {
+            fit[rng.below(fit.len())]
+        }
+    };
+    let i = pick(rng, &|l| l.ends_with([':', '{', '(', '[']));
+    let stair = lines[i].trim();
+    let last = lines[pick(rng, &|l| l.contains(['"', '\'', '`']))].trim();
+    // One space a level most often: the stair's size is quadratic in its
+    // step, and only a step of one fits 511 levels under the input cap.
+    let step = [1, 1, 2, 4][rng.below(4)];
+    let budget = MAX_INPUT_BYTES.saturating_sub(s.len());
+    let mut k = depth(rng);
+    let size =
+        |k: usize| k * (k - 1) / 2 * step + k * (stair.len() + 1) + k * step + last.len() + 1;
+    while k > 1 && size(k) > budget {
+        k -= k / 8 + 1;
+    }
+    let mut out = String::with_capacity(s.len() + budget.min(k * k * step));
+    out.extend(lines[..i].iter().copied());
+    for level in 0..k {
+        out.push_str(&" ".repeat(level * step));
+        out.push_str(stair);
+        out.push('\n');
+    }
+    out.push_str(&" ".repeat(k * step));
+    out.push_str(last);
+    out.push('\n');
+    out.extend(lines[i + 1..].iter().copied());
+    out
 }
 
 fn line_op(s: &str, rng: &mut Rng) -> String {
@@ -1143,6 +1239,16 @@ struct Config {
     edits: u32,
     seed: u64,
     limits: Limits,
+    /// Mutate each grammar at least this many times, past `seconds` if
+    /// need be (E7h.4): a budget in seconds alone gave CI's smoke 12
+    /// mutated inputs for lean4 and 15 for zig.
+    min_mutations: u64,
+    /// The wall-clock cap on one grammar's mutations whatever the minimum.
+    max_seconds: u64,
+    /// Grammars to mutate for `long_seconds` instead (E7h.4): what a pull
+    /// request changed, from `changed --since`.
+    long: Vec<String>,
+    long_seconds: u64,
 }
 
 #[derive(Default)]
@@ -1207,7 +1313,14 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             hang: Duration::from_millis(flags.num("hang-ms", 10_000)?),
             rss_kb: flags.num("rss-mb", 1024)? * 1024,
         },
+        min_mutations: flags.num("min-mutations", 0)?,
+        max_seconds: flags.num("max-seconds", 0)?,
+        long: flags.all("long").into_iter().map(str::to_owned).collect(),
+        long_seconds: flags.num("long-seconds", 600)?,
     });
+    for l in &cfg.long {
+        entry(l)?;
+    }
     let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
     let wanted = flags.all("grammar");
     for w in &wanted {
@@ -1350,19 +1463,38 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
     let mut findings: Vec<Finding> = Vec::new();
     let mut spawned = 0;
     let mut worker: Option<Worker> = None;
-    // Every seed first, then mutations for `seconds`.
-    let mut deadline = None;
+    // Every seed first, then mutations for `seconds` (a long grammar's
+    // `long_seconds`) and at least `min_mutations` of them, under the cap.
+    let seconds = if cfg.long.iter().any(|l| l == lang.name) {
+        cfg.long_seconds
+    } else {
+        cfg.seconds
+    };
+    let cap = if cfg.max_seconds > 0 {
+        cfg.max_seconds.max(seconds)
+    } else {
+        u64::MAX
+    };
+    let mut window: Option<(Instant, Instant)> = None;
+    let mut mutated: u64 = 0;
     let mut next_seed = 0;
     loop {
         let input = if next_seed < seeds.len() {
             next_seed += 1;
             seeds[next_seed - 1].clone()
         } else {
-            let end =
-                *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(cfg.seconds));
-            if Instant::now() >= end {
+            let now = Instant::now();
+            let (end, hard) = *window.get_or_insert_with(|| {
+                (
+                    now + Duration::from_secs(seconds),
+                    now.checked_add(Duration::from_secs(cap))
+                        .unwrap_or(now + Duration::from_hours(24)),
+                )
+            });
+            if now >= hard || (now >= end && mutated >= cfg.min_mutations) {
                 break;
             }
+            mutated += 1;
             mutator.mutate(&mut rng)
         };
         let seed = rng.next();
@@ -1380,33 +1512,20 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
         let Some(w) = worker.as_mut() else { break };
         report.stats.inputs += 1;
         report.stats.bytes += input.len() as u64;
-        match w.run(&input, cfg.edits, seed, &cfg.limits) {
-            Outcome::Done { parses, micros } => {
-                report.stats.parses += parses;
-                if micros > report.stats.slowest_micros {
-                    report.stats.slowest_micros = micros;
-                    report.stats.slowest_len = input.len();
-                }
-            }
-            Outcome::Failed {
-                kind,
-                signature,
-                detail,
-            } => {
-                let history = w.history_before_last();
-                worker = None;
-                let seen = findings.iter().filter(|f| f.signature == signature).count();
-                if seen < 3 {
-                    findings.push(Finding {
-                        kind,
-                        signature,
-                        input,
-                        edits: cfg.edits,
-                        seed,
-                        detail,
-                        history,
-                    });
-                }
+        let outcome = w.run(&input, cfg.edits, seed, &cfg.limits);
+        if let Outcome::Failed { .. } = outcome {
+            let history = w.history_before_last();
+            worker = None;
+            record_failure(&mut findings, outcome, input, cfg.edits, seed, history);
+        } else if let Outcome::Done { parses, micros } = outcome {
+            report.stats.parses += parses;
+            if micros > report.stats.slowest_micros {
+                report.stats.slowest_micros = micros;
+                report.stats.slowest_len = input.len();
+                // Kept with its seed, so the slowest column can be
+                // replayed (`repro GRAMMAR slowest.input --seed N`).
+                let _ = std::fs::write(dir.join("slowest.input"), &input);
+                let _ = std::fs::write(dir.join("slowest.seed"), format!("{seed}\n"));
             }
         }
     }
@@ -1420,6 +1539,36 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
         .map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits))
         .collect();
     report
+}
+
+/// Keep a failed input as a finding, at most three of one signature.
+fn record_failure(
+    findings: &mut Vec<Finding>,
+    outcome: Outcome,
+    input: String,
+    edits: u32,
+    seed: u64,
+    history: Vec<Input>,
+) {
+    let Outcome::Failed {
+        kind,
+        signature,
+        detail,
+    } = outcome
+    else {
+        return;
+    };
+    if findings.iter().filter(|f| f.signature == signature).count() < 3 {
+        findings.push(Finding {
+            kind,
+            signature,
+            input,
+            edits,
+            seed,
+            detail,
+            history,
+        });
+    }
 }
 
 // -------------------------------------------------------------------
@@ -1704,7 +1853,8 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
     let _ = writeln!(
         md,
         "# Grammar fuzz report\n\n{} s per grammar after the seeds, {} edits per input, seed {}, \
-         hang {} ms per parse, RSS {} MB. MB is the text fed in; slowest is one input's whole exercise; \
+         hang {} ms per parse, RSS {} MB. MB is the text fed in; slowest is one input's whole exercise, kept as \
+         `GRAMMAR/slowest.input` with its `slowest.seed`; \
          s is the grammar's wall time, triage included; growth is the most a worker's RSS gained over \
          its inputs before it was replaced; mutated counts the inputs after the seeds. Crashes, \
          hangs, slow and allocs count findings that came back, alone or after the inputs \
@@ -1805,6 +1955,114 @@ fn shown(text: &str) -> String {
         Some((cut, _)) => format!("{}… ({} bytes; see the file)", &escaped[..cut], text.len()),
         None => escaped,
     }
+}
+
+// -------------------------------------------------------------------
+// `changed`: which grammars a change touched (E7h.4).
+// -------------------------------------------------------------------
+
+/// Every `[[package]]`'s versions in a `Cargo.lock`, by name.
+fn locked_versions(lock: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut name: Option<&str> = None;
+    for line in lock.lines() {
+        if line == "[[package]]" {
+            name = None;
+        } else if let Some(n) = line.strip_prefix("name = \"") {
+            name = n.strip_suffix('"');
+        } else if let (Some(n), Some(v)) = (name, line.strip_prefix("version = \"")) {
+            out.entry(n.to_owned())
+                .or_default()
+                .insert(v.trim_end_matches('"').to_owned());
+            name = None;
+        }
+    }
+    out
+}
+
+/// `fuzz/corpora.tsv`'s rows as `(grammar, crate, whole row)`.
+fn corpora_rows(tsv: &str) -> Vec<(String, String, String)> {
+    tsv.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty() && !l.starts_with("grammar\t"))
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?.to_owned(), f.next()?.to_owned(), l.to_owned()))
+        })
+        .collect()
+}
+
+/// The grammars a change touched, and whether it touched every grammar
+/// (the tree-sitter runtime's version moved). A grammar is touched when its
+/// crate's locked version differs, its corpora row differs or is new, or a
+/// file under `vendor/<its crate>/` changed.
+fn changed_grammars(
+    lock_then: &str,
+    lock_now: &str,
+    rows_then: &[(String, String, String)],
+    rows_now: &[(String, String, String)],
+    vendored: &BTreeSet<String>,
+) -> (bool, BTreeSet<String>) {
+    let then = locked_versions(lock_then);
+    let now = locked_versions(lock_now);
+    let all = then.get("tree-sitter") != now.get("tree-sitter");
+    let mut touched = BTreeSet::new();
+    for (grammar, krate, row) in rows_now {
+        let moved = then.get(krate) != now.get(krate);
+        let row_changed = !rows_then.iter().any(|(_, _, r)| r == row);
+        if moved || row_changed || vendored.contains(krate) {
+            touched.insert(grammar.clone());
+        }
+    }
+    (all, touched)
+}
+
+fn git_text(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Print the grammars the change since `--since REF` touched, one a line,
+/// or `*` when it touched them all; run from the repository root.
+fn changed(args: &[String]) -> Result<ExitCode, String> {
+    let (_, flags) = Flags::parse(args, 0)?;
+    let since = flags.one("since").ok_or("--since REF is required")?;
+    let lock_then = git_text(&["show", &format!("{since}:Cargo.lock")])?;
+    let lock_now = std::fs::read_to_string("Cargo.lock").map_err(|e| format!("Cargo.lock: {e}"))?;
+    let rows_then = corpora_rows(
+        &git_text(&["show", &format!("{since}:fuzz/corpora.tsv")]).unwrap_or_default(),
+    );
+    let rows_now = corpora_rows(
+        &std::fs::read_to_string("fuzz/corpora.tsv")
+            .map_err(|e| format!("fuzz/corpora.tsv: {e}"))?,
+    );
+    let vendored: BTreeSet<String> = git_text(&["diff", "--name-only", since, "--", "vendor/"])?
+        .lines()
+        .filter_map(|p| {
+            p.strip_prefix("vendor/")?
+                .split('/')
+                .next()
+                .map(str::to_owned)
+        })
+        .collect();
+    let (all, touched) = changed_grammars(&lock_then, &lock_now, &rows_then, &rows_now, &vendored);
+    if all {
+        println!("*");
+    } else {
+        for g in touched {
+            println!("{g}");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 // -------------------------------------------------------------------
@@ -1913,13 +2171,13 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 
 /// A seed as the editor would hold it: UTF-8 text without NUL, cut at a
 /// line boundary.
-fn as_seed(bytes: Vec<u8>) -> Option<String> {
+fn as_seed(bytes: Vec<u8>, max_bytes: usize) -> Option<String> {
     if bytes.len() > 4 * 1024 * 1024 || bytes.contains(&0) {
         return None;
     }
     let mut s = String::from_utf8(bytes).ok()?;
-    if s.len() > MAX_SEED_BYTES {
-        let mut cut = MAX_SEED_BYTES;
+    if s.len() > max_bytes {
+        let mut cut = max_bytes;
         while !s.is_char_boundary(cut) {
             cut -= 1;
         }
@@ -2016,6 +2274,11 @@ fn collect(args: &[String]) -> Result<ExitCode, String> {
     let (_, flags) = Flags::parse(args, 0)?;
     let out = flags.path("out")?;
     let max_files = usize::try_from(flags.num("max-files", 400)?).map_err(|e| e.to_string())?;
+    // E7h.4: a smaller cut makes every input cheaper, so a short run
+    // mutates each grammar more (Zig's standard-library seeds run to 64 KB).
+    let max_seed = usize::try_from(flags.num("max-seed-kb", (MAX_SEED_BYTES / 1024) as u64)?)
+        .map_err(|e| e.to_string())?
+        * 1024;
     let groups = gather(&flags.all("from"));
     let mut written: BTreeMap<String, usize> = BTreeMap::new();
     let mut manifest = String::from("grammar\tsource\tpath\tbytes\n");
@@ -2026,7 +2289,7 @@ fn collect(args: &[String]) -> Result<ExitCode, String> {
             if taken >= max_files {
                 break;
             }
-            let Some(text) = std::fs::read(&full).ok().and_then(as_seed) else {
+            let Some(text) = std::fs::read(&full).ok().and_then(|b| as_seed(b, max_seed)) else {
                 continue;
             };
             taken += 1;
@@ -2055,7 +2318,7 @@ fn collect(args: &[String]) -> Result<ExitCode, String> {
         for path in &files {
             let text = std::fs::read_to_string(path).unwrap_or_default();
             for (n, code) in corpus_examples(&text).into_iter().enumerate() {
-                let Some(code) = as_seed(code.into_bytes()) else {
+                let Some(code) = as_seed(code.into_bytes(), max_seed) else {
                     continue;
                 };
                 let key = fnv(format!("{}#{n}", path.display()).as_bytes());
@@ -2208,6 +2471,99 @@ mod tests {
         assert_eq!(
             crash_signature(ubsan, "signal 6"),
             "ubsan signed integer overflow at scanner.c:42:7"
+        );
+    }
+
+    #[test]
+    fn changed_names_the_grammars_a_lock_bump_a_row_or_a_vendored_crate_touched() {
+        let lock = |bash: &str, ts: &str| {
+            format!(
+                "[[package]]\nname = \"tree-sitter\"\nversion = \"{ts}\"\n\n\
+                 [[package]]\nname = \"tree-sitter-bash\"\nversion = \"{bash}\"\n\n\
+                 [[package]]\nname = \"tree-sitter-md\"\nversion = \"0.5.3\"\n"
+            )
+        };
+        let rows = |md_commit: &str| {
+            corpora_rows(&format!(
+                "grammar\tcrate\tversion\n\
+                 bash\ttree-sitter-bash\t0.25.1\n\
+                 markdown\ttree-sitter-md\t0.5.3\t{md_commit}\n\
+                 markdown_inline\ttree-sitter-md\t0.5.3\t{md_commit}\n"
+            ))
+        };
+        let none = BTreeSet::new();
+        // A lockfile-only bump of one grammar crate touches that grammar.
+        let (all, touched) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.2", "0.26.8"),
+            &rows("a"),
+            &rows("a"),
+            &none,
+        );
+        assert!(!all);
+        assert_eq!(touched, BTreeSet::from(["bash".to_owned()]));
+        // A vendored crate's change touches every grammar it carries.
+        let md = BTreeSet::from(["tree-sitter-md".to_owned()]);
+        let (_, touched) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.1", "0.26.8"),
+            &rows("a"),
+            &rows("a"),
+            &md,
+        );
+        assert_eq!(
+            touched,
+            BTreeSet::from(["markdown".to_owned(), "markdown_inline".to_owned()])
+        );
+        // A re-pinned corpora row touches its grammars.
+        let (_, touched) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.1", "0.26.8"),
+            &rows("a"),
+            &rows("b"),
+            &none,
+        );
+        assert!(touched.contains("markdown"));
+        // The runtime's bump touches them all.
+        let (all, _) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.1", "0.27.0"),
+            &rows("a"),
+            &rows("a"),
+            &none,
+        );
+        assert!(all);
+    }
+
+    #[test]
+    fn the_depth_operators_nest_past_the_scanner_state_bounds() {
+        // E7h.4: the serialization overruns sit at 254/255 and 511 levels.
+        let mut rng = Rng(3);
+        let mut deepest_prefix = 0;
+        let mut deepest_stair = 0;
+        for _ in 0..40 {
+            let p = depth_prefix("> quoted\nplain\n", &mut rng);
+            deepest_prefix = deepest_prefix.max(
+                p.lines()
+                    .map(|l| l.matches("> ").count())
+                    .max()
+                    .unwrap_or(0),
+            );
+            let st = depth_stair("import os\nif x:\n    y = 1\nz = \"s\"\nw = 2\n", &mut rng);
+            // Levels of `if x:` stepping one space, with a string below.
+            let levels = st.lines().filter(|l| l.trim() == "if x:").count();
+            if st.contains(&format!("\n{}z = \"s\"\n", " ".repeat(levels))) {
+                deepest_stair = deepest_stair.max(levels);
+            }
+            assert!(
+                st.len() <= MAX_INPUT_BYTES + 64,
+                "a stair fits the input cap"
+            );
+        }
+        assert!(deepest_prefix >= 512, "a prefix past 511: {deepest_prefix}");
+        assert!(
+            deepest_stair >= 511,
+            "a stair of block openers 511 deep with a string at the bottom: {deepest_stair}"
         );
     }
 

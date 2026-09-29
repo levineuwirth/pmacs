@@ -22,16 +22,25 @@ Always true:
   `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`.
 - A tree-sitter grammar is C beside the `forbid(unsafe_code)` Rust, and
   in daemon mode one bad parse takes every buffer the daemon holds. A
-  grammar ships only once `scripts/fuzz-grammars` has run over it clean
-  --- built as it ships (release optimization, its C under
-  AddressSanitizer) and seeded from real files --- with its row in
-  `fuzz/corpora.tsv`; CI's `Grammar fuzz` job runs on every change to
-  the grammar set, and a session adding or bumping one also runs
-  `--seconds 600` on this machine's compiler and cites the report.
+  grammar ships, or its crate is bumped, only once `scripts/fuzz-grammars
+  --grammar <name> --seconds 600` has run over it clean on the compiler
+  that builds the release pair --- built as it ships (release
+  optimization, `.cargo/config.toml`'s `-fno-strict-aliasing`, its C
+  under ASan and UBSan), seeded from real files through its row in
+  `fuzz/corpora.tsv` --- and the PR cites the report; a `tree-sitter`
+  runtime bump runs every grammar, and a change under `vendor/` or
+  `builtin/queries/` the grammars it touches. CI's `Grammar fuzz` job
+  runs on each such change, the touched grammars ten minutes and the
+  rest briefly, and fails on a crash, on UB, or on a parse that never
+  returns; it cannot reach an input its mutator does not, it builds with
+  GCC 13 rather than the laptop's 16, and its green is not a proof.
   E7e's lesson: the author's chosen test file parsed while the owner's
   real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
-  tree-sitter-haskell 0.23.1's scanner is miscompiled at -O2, and a
-  debug build never shows it.
+  tree-sitter-haskell 0.23.1's vendored `array.h` is undefined behavior
+  that GCC 16 turned into a heap overflow at -O2 and CI's GCC 13 did
+  not. D36 as amended at E7h: what aborts or never returns is unshipped
+  unless the defect is a local bound fixed in a vendored copy; what is
+  slow or large is filed.
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before

@@ -9,8 +9,11 @@
 # (latex: v0.6.0, the codebook republish 0.6.1 has no tag of its own);
 # `files` is real source classified by extension (zig: its grammar ships
 # no corpus at any revision, so the Zig standard library at 0.15.1);
-# `crate` is files inside the crate's own registry source (lean4:
-# arborium ships its samples, not its corpus).
+# `crate` is files inside the crate's own registry source. lean4 was one
+# (arborium ships two samples, not a corpus), which left CI's smoke two
+# seeds and twelve mutated inputs (E7g review 1); since E7h.4 it is the
+# Lean 4 compiler's own `src/Init` at v4.23.0, real Lean as Zig's standard
+# library is real Zig.
 grammar	crate	version	repository	commit	kind	paths
 rust	tree-sitter-rust	0.24.2	https://github.com/tree-sitter/tree-sitter-rust	77a3747266f4d621d0757825e6b11edcbf991ca5	corpus	test/corpus
 lua	tree-sitter-lua	0.5.0	https://github.com/tree-sitter-grammars/tree-sitter-lua	10fe0054734eec83049514ea2e718b2a56acd0c9	corpus	test/corpus
@@ -31,4 +34,4 @@ json	tree-sitter-json	0.24.8	https://github.com/tree-sitter/tree-sitter-json	ee3
 latex	codebook-tree-sitter-latex	0.6.1	https://github.com/latex-lsp/tree-sitter-latex	7e0ecdc02926c7b9b2e0c76003d4fe7b0944f957	corpus	test/corpus
 html	tree-sitter-html	0.23.2	https://github.com/tree-sitter/tree-sitter-html	5a5ca8551a179998360b4a4ca2c0f366a35acc03	corpus	test/corpus
 css	tree-sitter-css	0.25.0	https://github.com/tree-sitter/tree-sitter-css	dda5cfc5722c429eaba1c910ca32c2c0c5bb1a3f	corpus	test/corpus
-lean4	arborium-lean	2.18.1	-	-	crate	sample.lean,samples
+lean4	arborium-lean	2.18.1	https://github.com/leanprover/lean4	50aaf682e9b74ab92880292a25c68baa1cc81c87	files	src/Init
