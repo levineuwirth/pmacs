@@ -37,8 +37,8 @@
 //! heap check, an assert, a panic), hangs (a parse that has not returned
 //! after twelve times the hang limit, alone), slow parses (over the limit
 //! but returning), and allocations (one input growing the worker's RSS by
-//! more than `--rss-mb`). Each is confirmed alone in a fresh worker and
-//! minimized.
+//! more than `--rss-mb`). Each is confirmed alone in a fresh worker and,
+//! unless it is slow, minimized.
 //!
 //! `run` exits 1 on a crash or a hang, 2 on a usage or setup error (a
 //! grammar with no seeds is one: the rule is corpus-seeded), and 0
@@ -1718,27 +1718,34 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
     {
         repro = Repro::InSequence(k);
     }
-    let (minimal, minimal_edits) = match (alone, alone && same(&f.input, 0)) {
-        (false, _) => (f.input.clone(), f.edits),
-        (true, true) => (minimize(&f.input, |t| same(t, 0)), 0),
-        (true, false) => (minimize(&f.input, |t| same(t, f.edits)), f.edits),
-    };
     let long = Limits {
         hang: limits.hang * HANG_CONFIRM_FACTOR,
         rss_kb: limits.rss_kb * ALLOC_CONFIRM_FACTOR,
     };
+    // A hang is timed alone under twelve times the limit before anything
+    // is minimized: one that returns is slow, which D36 files and never
+    // fails, and keeps the input it was found with rather than spending
+    // the minimizer's five minutes at a hang limit an attempt (E7h.4: the
+    // depth operators make Lua's error recovery slow on most runs).
     if alone
         && f.kind == Kind::Hang
-        && let Some(micros) = time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long)
+        && let Some(micros) = time_alone(grammar, &f.input, f.edits, f.seed, dir, &long)
     {
         f.kind = Kind::Slow;
         let _ = write!(
             f.detail,
-            "\nslow, not hung: the minimal input returned alone in {} ms under a {} s limit",
+            "\nslow, not hung: it returned alone in {} ms under a {} s limit (not minimized)",
             micros / 1000,
             long.hang.as_secs()
         );
     }
+    let (minimal, minimal_edits) = if !alone || f.kind == Kind::Slow {
+        (f.input.clone(), f.edits)
+    } else if same(&f.input, 0) {
+        (minimize(&f.input, |t| same(t, 0)), 0)
+    } else {
+        (minimize(&f.input, |t| same(t, f.edits)), f.edits)
+    };
     // E7h.3: an allocation is confirmed the way a hang is. A parse that
     // grows past the RSS limit before the hang limit may never return at
     // all (a cycle that allocates each turn); run alone under twelve times
