@@ -83,9 +83,10 @@ pub struct ParseRequest {
     pub injection_aliases: Arc<HashMap<String, String>>,
     /// How long the parse may run before it is cancelled (E7h.2): the
     /// root parse and every injection layer's together, measured from
-    /// when [`run_parse`] starts. `None` is unbounded, as every parse was
-    /// before E7h; the editor's dispatch fills it from
-    /// `syntax.parse-deadline-ms`.
+    /// when [`run_parse`] starts, and enforced only where tree-sitter
+    /// calls its progress callback ([`run_parse`] names the work it cannot
+    /// reach). `None` is unbounded, as every parse was before E7h; the
+    /// editor's dispatch fills it from `syntax.parse-deadline-ms`.
     pub deadline: Option<Duration>,
 }
 
@@ -220,15 +221,20 @@ impl ParseTreeBundle {
 /// `dispatch_parse` closure invokes after pulling a job from the
 /// queue. Always synchronous --- there is no internal yielding.
 ///
-/// Since E7h.2 every parse can be bounded in time: with
-/// [`ParseRequest::deadline`] set, tree-sitter's progress callback
-/// (called about every hundred parser operations) cancels the root parse
-/// once the deadline has passed and this returns
+/// Since E7h.2 a parse is bounded in time where tree-sitter calls its
+/// progress callback, and only there: with [`ParseRequest::deadline`]
+/// set, the callback (about every hundred parser operations) cancels the
+/// root parse once the deadline has passed and this returns
 /// [`ParseError::DeadlineExceeded`]; injection layers share the same
 /// deadline, and one it cuts short drops the layers not yet parsed. The
-/// callback runs in the runtime's parse loop, so it bounds a grammar whose
-/// error recovery never terminates (the JavaScript family, E7g), not an
-/// external scanner that never returns to the runtime.
+/// callback runs in the runtime's advance loop, so it bounds a grammar
+/// whose error recovery never terminates (the JavaScript family, E7g).
+/// It does not bound work done between two callbacks: an external scanner
+/// that never returns to the runtime, or `ts_parser__accept`, which at the
+/// end of the input pops every stack path and builds a root for each with
+/// no callback at all. A markdown paragraph of underscore runs spends
+/// 29.5 s and 9.8 GB there at 32 KB under a 5 s deadline (#296); only
+/// isolating the grammar bounds that.
 ///
 /// Returns `Err` if the language is rejected by [`tree_sitter::Parser`]
 /// (ABI mismatch, almost always a build issue), if the deadline cut the

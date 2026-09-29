@@ -15,9 +15,12 @@
 //! grammar crate that ships, so the flag is shown to reach each build and
 //! not only the ones someone tested.
 //!
-//! E7h.2: every parse is bounded in time. `run_parse` cancels through
-//! tree-sitter's progress callback once `ParseRequest::deadline` passes,
-//! and the editor fills the deadline from `syntax.parse-deadline-ms`. The
+//! E7h.2: a parse is bounded in time where tree-sitter calls its progress
+//! callback. `run_parse` cancels through it once `ParseRequest::deadline`
+//! passes, and the editor fills the deadline from
+//! `syntax.parse-deadline-ms`. Work between two calls is not bounded:
+//! `ts_parser__accept` never calls it, and a markdown paragraph of
+//! underscore runs spends 29.5 s and 9.8 GB there at 32 KB (#296). The
 //! witness is the input E7g unshipped the JavaScript family for (24 bytes
 //! on which the parser cycles through 34 states while its memory grows),
 //! parsed with tree-sitter-javascript, which stays a dev-dependency; the
