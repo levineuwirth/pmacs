@@ -209,15 +209,17 @@ tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-zig = "1.1"
-# JSON — a config format + the honest gate on the Jupyter path. ABI-current
-# (`LANGUAGE: LanguageFn` via `tree-sitter-language`), NOT a
-# `tree-sitter ^0.20` fork. No YAML grammar (E7g): `tree-sitter-yaml`
-# 0.7.2, the newest release, writes past the runtime's 1024-byte
-# serialization buffer once a file nests 254 levels deep, and the
-# runtime's assert aborts the editor; `.yaml` reaches yaml-language-server
-# through `pmacs.lsp.filetypes`, and `tests/e7g_grammar_fuzz_acceptance.rs`
-# pins the absence.
+# JSON + YAML — config formats + the honest gate on the Jupyter path
+# (JSON). Both are ABI-current (`LANGUAGE: LanguageFn` via
+# `tree-sitter-language`), NOT a `tree-sitter ^0.20` fork. Registering
+# yaml also lights up markdown `---` frontmatter through the #122
+# injection engine (the block injection query already sets yaml for it).
+# E7g unshipped YAML (its scanner wrote past the runtime's 1024-byte
+# serialization buffer at 254 levels and the runtime aborted the editor);
+# since E7h it ships from `vendor/tree-sitter-yaml` with that bound fixed,
+# through `[patch.crates-io]` below.
 tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.
@@ -367,6 +369,7 @@ rand_distr = "0.4"
 [patch.crates-io]
 tree-sitter-md = { path = "vendor/tree-sitter-md" }
 tree-sitter-python = { path = "vendor/tree-sitter-python" }
+tree-sitter-yaml = { path = "vendor/tree-sitter-yaml" }
 
 [profile.release]
 opt-level = 3

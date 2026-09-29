@@ -156,6 +156,7 @@ fn e7g_review1_a_python_string_511_blocks_deep_does_not_take_the_editor_down() {
 const VENDORED_BOUNDS: &[(&str, &str)] = &[
     ("tree-sitter-md", "tree-sitter-markdown/src/scanner.c"),
     ("tree-sitter-python", "src/scanner.c"),
+    ("tree-sitter-yaml", "src/scanner.c"),
 ];
 
 #[test]

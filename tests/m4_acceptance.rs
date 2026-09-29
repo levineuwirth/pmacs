@@ -8343,6 +8343,8 @@ fn m4_gap_grammars_align_with_lsp_configs() {
         ("Cargo.toml", "toml"),
         ("build.zig", "zig"),
         ("tsconfig.json", "json"),
+        ("config.yaml", "yaml"),
+        ("ci.yml", "yaml"),
     ] {
         let (grammar, has_cfg): (Option<String>, bool) = s
             .lua_host
@@ -8363,13 +8365,11 @@ fn m4_gap_grammars_align_with_lsp_configs() {
             "{id} has an LSP config the grammar name aligns with"
         );
     }
-    // YAML and the JavaScript family have no grammar since E7g (YAML's
-    // aborts the editor on a file nested 254 levels deep, JavaScript's and
+    // The JavaScript family has no grammar since E7g (JavaScript's and
     // TypeScript's never return from a 24-byte file); the LSP filetype map
-    // names them, so the servers' configs still align.
+    // names them, so the servers' configs still align. YAML's came back at
+    // E7h and is in the list above.
     for (path, id) in [
-        ("config.yaml", "yaml"),
-        ("ci.yml", "yaml"),
         ("m.js", "javascript"),
         ("v.jsx", "javascriptreact"),
         ("i.ts", "typescript"),

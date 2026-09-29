@@ -585,9 +585,9 @@ pmacs.lsp.config.haskell = pmacs.lsp.config.haskell or {
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a
 -- server but no bundled grammar), so grammar-backed languages keep their
 -- existing detection. It keeps a language id stable when a grammar is
--- dropped, as E7g dropped four (YAML and the JavaScript family still have
--- none), and is the seam for user-added mappings. Extensible from
--- init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
+-- dropped, as E7g dropped four (the JavaScript family still has none),
+-- and is the seam for user-added mappings. Extensible from init.lua:
+-- `pmacs.lsp.filetypes.foo = "bar"`.
 pmacs.lsp.filetypes = pmacs.lsp.filetypes or {}
 pmacs.lsp.filetypes.py = pmacs.lsp.filetypes.py or "python"
 pmacs.lsp.filetypes.pyi = pmacs.lsp.filetypes.pyi or "python"
@@ -650,11 +650,8 @@ pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
 -- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
 pmacs.lsp.filetypes.zig = pmacs.lsp.filetypes.zig or "zig"
 pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
--- JSON / YAML. JSON ships a grammar, so `language_for_path` resolves it
--- and the map is the stable-id fallback (same role as `lua`/`cuda`). YAML
--- has none since E7g (tree-sitter-yaml 0.7.2 aborts the editor on a file
--- nested 254 levels deep), so these entries are what name a `.yaml`
--- buffer `yaml`, and yaml-language-server attaches uncolored.
+-- JSON / YAML. Both ship grammars, so `language_for_path` already resolves
+-- these and the map is the stable-id fallback (same role as `lua`/`cuda`).
 pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
 pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
 pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"

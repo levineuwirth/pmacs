@@ -9,9 +9,10 @@
 //! or bumping a grammar edits that file; the harness drives every grammar
 //! in the table; the workflow runs on every path that can change the set;
 //! and the `fuzz` profile compiles the C the way the release does, since
-//! the miscompile E7g found is invisible at -O0. The last rows pin out of
-//! the tree what the fuzz run itself found taking the editor down: YAML,
-//! which aborts, and the JavaScript family, which never returns.
+//! the miscompile E7g found is invisible at -O0. The last rows hold what
+//! the fuzz run itself found taking the editor down: YAML, which aborted
+//! and ships since E7h from a copy with its bound fixed, and the
+//! JavaScript family, which never returns and stays out.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -179,83 +180,66 @@ fn nested_yaml(depth: usize) -> String {
 }
 
 #[test]
-fn e7g_tree_sitter_yaml_stays_unshipped() {
-    // tree-sitter-yaml 0.7.2, the newest release, aborts the editor on
-    // nested_yaml(254): its scanner's `serialize` checks the bound before
-    // each 4-byte write of its indent stack, not after, so at 254 levels it
-    // writes 1026 bytes into the runtime's 1024-byte buffer (2 bytes past
-    // it, inside the parser's own allocation, where AddressSanitizer cannot
-    // see) and returns 1026; the runtime's `assert(length <= 1024)` in
-    // `ts_parser__external_scanner_serialize` then aborts. The release
-    // pmacs dies with SIGABRT opening that file as `.yaml` and not as
-    // `.txt`; 253 levels open fine. Upstream master has the same loop.
-    //
-    // Re-adding the crate needs a release whose scanner bounds that write
-    // and is clean under `scripts/fuzz-grammars`; delete this row and the
-    // one below in the commit that re-adds it, with the fuzz report cited.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
-    assert!(
-        lock.contains("name = \"tree-sitter-json\""),
-        "control: the lock lists the grammars pmacs ships"
-    );
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    for (file, text) in [("Cargo.lock", &lock), ("Cargo.toml", &manifest)] {
-        assert!(
-            !text
-                .lines()
-                .any(|l| l.starts_with("tree-sitter-yaml") || l == "name = \"tree-sitter-yaml\""),
-            "{file} names tree-sitter-yaml again. Its 0.7.2 scanner overruns \
-             the serialization buffer on a file nested 254 levels deep and \
-             the runtime aborts the editor (E7g); see this row's comment"
+fn e7h_a_yaml_file_nested_254_deep_opens_and_parses_as_yaml() {
+    // tree-sitter-yaml 0.7.2 aborted the editor on nested_yaml(254) (E7g):
+    // its scanner's `serialize` checks the bound before each 4-byte write
+    // of its indent stack, not after, so at 254 levels it writes 1026 bytes
+    // into the runtime's 1024 and the runtime's assert aborts. Under D36 as
+    // amended it ships since E7h from `vendor/tree-sitter-yaml` with that
+    // check made whole, after a clean 600 s fuzz run on GCC 16; the lock
+    // resolving to the copy is pinned in
+    // tests/e7g_review1_serialization_witnesses.rs. Here the reproduction
+    // itself: at 254 and 300 levels the file is `yaml` and a YAML tree
+    // settles. With the unpatched crate back, this row aborts the test
+    // binary.
+    for depth in [254, 300] {
+        let dir =
+            std::env::temp_dir().join(format!("pmacs-e7h-yaml-{depth}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deep.yaml");
+        std::fs::write(&file, nested_yaml(depth)).unwrap();
+        let mut s = EditorState::new_with_roots(&iso::roots());
+        s.lua_host.lua().remove_app_data::<StateDir>();
+        s.lua_host.lua().set_app_data(StateDir(dir.clone()));
+        let lua =
+            |s: &EditorState, src: &str| s.lua_host.lua().load(src.to_owned()).exec().unwrap();
+        lua(&s, "pmacs.lsp.config = {}");
+        lua(
+            &s,
+            &format!(
+                "pmacs.buffer.find_or_open({:?})",
+                file.display().to_string()
+            ),
         );
+        let language: Option<String> = s
+            .lua_host
+            .lua()
+            .load("return pmacs.parse.buffer_language(pmacs.window.buffer())")
+            .eval()
+            .unwrap();
+        assert_eq!(language.as_deref(), Some("yaml"), "{depth} levels");
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut parsed: Option<String> = None;
+        while Instant::now() < until && parsed.is_none() {
+            s.tick_processes();
+            s.tick_lsp();
+            s.tick_async();
+            parsed = s
+                .lua_host
+                .lua()
+                .load("local t = pmacs.parse.tree(pmacs.window.buffer()) return t and t:language() or nil")
+                .eval()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            parsed.as_deref(),
+            Some("yaml"),
+            "a YAML tree settles at {depth} levels"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-#[test]
-fn e7g_a_yaml_file_nested_254_deep_opens_as_yaml_with_no_grammar() {
-    // What E7g left, on the reproduction itself: the buffer is `yaml`
-    // through the LSP filetype map, so yaml-language-server attaches, and
-    // no grammar parses it. With the grammar back, this row aborts the
-    // test binary.
-    let dir = std::env::temp_dir().join(format!("pmacs-e7g-yaml-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("deep.yaml");
-    std::fs::write(&file, nested_yaml(254)).unwrap();
-    let mut s = EditorState::new_with_roots(&iso::roots());
-    s.lua_host.lua().remove_app_data::<StateDir>();
-    s.lua_host.lua().set_app_data(StateDir(dir.clone()));
-    let lua = |s: &EditorState, src: &str| s.lua_host.lua().load(src.to_owned()).exec().unwrap();
-    lua(&s, "pmacs.lsp.config = {}");
-    lua(
-        &s,
-        &format!(
-            "pmacs.buffer.find_or_open({:?})",
-            file.display().to_string()
-        ),
-    );
-    let language: Option<String> = s
-        .lua_host
-        .lua()
-        .load("return pmacs.parse.buffer_language(pmacs.window.buffer())")
-        .eval()
-        .unwrap();
-    assert_eq!(language.as_deref(), Some("yaml"));
-    let until = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < until {
-        s.tick_processes();
-        s.tick_lsp();
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let tree: Option<String> = s
-        .lua_host
-        .lua()
-        .load("local t = pmacs.parse.tree(pmacs.window.buffer()) return t and t:language() or nil")
-        .eval()
-        .unwrap();
-    assert_eq!(tree, None, "no grammar parses a `.yaml` file");
 }
 
 #[test]
