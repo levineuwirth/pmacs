@@ -126,6 +126,7 @@ fn m4_1_initial_parse_of_5000_line_file_under_100ms() {
         prior_tree: None,
         edits: Vec::new(),
         injection_aliases: Arc::new(std::collections::HashMap::new()),
+        deadline: None,
     };
     let bundle = syntax::run_parse(req).expect("parse succeeds");
     assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
@@ -225,6 +226,7 @@ fn dispatch_parse_round_trip_via_runtime() -> u64 {
         prior_tree: None,
         edits: Vec::new(),
         injection_aliases: Arc::new(std::collections::HashMap::new()),
+        deadline: None,
     };
     let id = rt.dispatch_parse(req, None);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -587,6 +589,7 @@ fn m4_3_open_rust_file_highlights_under_100ms() {
         prior_tree: None,
         edits: Vec::new(),
         injection_aliases: Arc::new(std::collections::HashMap::new()),
+        deadline: None,
     };
     let bundle = syntax::run_parse(req).expect("parse succeeds");
     let highlight_started = Instant::now();

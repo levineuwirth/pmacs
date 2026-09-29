@@ -8150,6 +8150,14 @@ impl UserData for ParseNodeLua {
     }
 }
 
+/// The parse deadline a dispatch carries (E7h.2): `syntax.lua` passes
+/// `syntax.parse-deadline-ms`; absent or 0 leaves the parse unbounded.
+fn parse_deadline(deadline_ms: Option<u64>) -> Option<std::time::Duration> {
+    deadline_ms
+        .filter(|&ms| ms > 0)
+        .map(std::time::Duration::from_millis)
+}
+
 /// Resolve `buf_id` to a [`ParseViewHandle`], creating and attaching
 /// a fresh [`ParseView`] if the buffer doesn't have one yet. Errors
 /// if the language is unknown or the buffer id is stale.
@@ -8304,21 +8312,29 @@ pub fn install_parse(
         let reg = registry.clone();
         parse_mod.set(
             "_parse_now",
-            lua.create_function(move |_, (id, lang): (BufferIdLua, String)| {
-                let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
-                let mut req = handle.make_request();
-                // Snapshot the alias map on the sync path too (framing Q#IJ4)
-                // — otherwise a `py` fence or a Lua-added alias would resolve
-                // asynchronously but not through `_parse_now`.
-                req.injection_aliases = s.injection_alias_snapshot();
-                let bundle = syntax::run_parse(req).map_err(mlua::Error::external)?;
-                // Resolve each layer's highlight query from the registry
-                // cache before install so producers can style every layer
-                // (framing Q#IJ2 stage 2).
-                let arc = s.resolve_layer_queries(&bundle);
-                handle.install(arc.clone());
-                Ok(ParseTreeLua(arc))
-            })?,
+            lua.create_function(
+                move |_, (id, lang, deadline_ms): (BufferIdLua, String, Option<u64>)| {
+                    let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
+                    let mut req = handle.make_request();
+                    // Snapshot the alias map on the sync path too (framing Q#IJ4)
+                    // — otherwise a `py` fence or a Lua-added alias would resolve
+                    // asynchronously but not through `_parse_now`.
+                    req.injection_aliases = s.injection_alias_snapshot();
+                    req.deadline = parse_deadline(deadline_ms);
+                    let bundle = syntax::run_parse(req).map_err(|e| {
+                        // The request drained the view's edits; keep its tree and
+                        // parse cold next time (E7h.2).
+                        handle.mark_unparsed();
+                        mlua::Error::external(e)
+                    })?;
+                    // Resolve each layer's highlight query from the registry
+                    // cache before install so producers can style every layer
+                    // (framing Q#IJ2 stage 2).
+                    let arc = s.resolve_layer_queries(&bundle);
+                    handle.install(arc.clone());
+                    Ok(ParseTreeLua(arc))
+                },
+            )?,
         )?;
     }
 
@@ -8331,16 +8347,21 @@ pub fn install_parse(
         let rt = runtime.clone();
         parse_mod.set(
             "_dispatch",
-            lua.create_function(move |_, (id, lang): (BufferIdLua, String)| {
-                let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
-                let mut req = handle.make_request();
-                // Snapshot the alias map into the request so the worker can
-                // resolve dynamic fence names off the main thread (Q#IJ4).
-                req.injection_aliases = s.injection_alias_snapshot();
-                let job_id = rt.dispatch_parse(req, None);
-                s.record_parse_job(job_id, id.0);
-                Ok(job_id)
-            })?,
+            lua.create_function(
+                move |_, (id, lang, deadline_ms): (BufferIdLua, String, Option<u64>)| {
+                    let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
+                    let mut req = handle.make_request();
+                    // Snapshot the alias map into the request so the worker can
+                    // resolve dynamic fence names off the main thread (Q#IJ4).
+                    req.injection_aliases = s.injection_alias_snapshot();
+                    // `syntax.parse-deadline-ms`, passed by `syntax.lua`'s
+                    // wrapper; absent or 0 is unbounded (E7h.2).
+                    req.deadline = parse_deadline(deadline_ms);
+                    let job_id = rt.dispatch_parse(req, None);
+                    s.record_parse_job(job_id, id.0);
+                    Ok(job_id)
+                },
+            )?,
         )?;
     }
 
@@ -8348,9 +8369,13 @@ pub fn install_parse(
     // installs it into the view, and *also* drains the pending
     // entry from the runtime --- a fire-and-forget parse never
     // calls `take_result` itself, so without this step the pending
-    // table would leak. Returns `true` if a bundle was installed,
-    // `false` if the job is unknown, was cancelled or failed, or
-    // has already been installed (idempotent).
+    // table would leak. Returns what happened, for `syntax.lua` to
+    // tell the user once (E7h.2): `"installed"`, `"installed-cut"`
+    // (installed, but the deadline dropped some injection layers),
+    // `"deadline"` (the parse ran past `syntax.parse-deadline-ms` and was
+    // cancelled; the buffer keeps its tree and parses cold next),
+    // `"failed"` (the same, for any other failure), or `"none"` (the job
+    // is unknown or already installed; idempotent).
     {
         let s = syntax.clone();
         let rt = runtime.clone();
@@ -8362,19 +8387,32 @@ pub fn install_parse(
                 // Drain the pending entry whether or not we have a
                 // bundle. `take_result` returns None for an unknown
                 // or still-running id; that's a benign no-op.
-                let _ = rt.take_result(job_id);
-                let (Some(buf_id), Some(bundle)) = (buf_id, bundle) else {
-                    return Ok(false);
+                let outcome = rt.take_result(job_id);
+                let Some(buf_id) = buf_id else {
+                    return Ok("none");
                 };
-                if let Some(handle) = s.view(buf_id) {
-                    // Stage 2 (framing Q#IJ2): resolve each layer's highlight
-                    // query on the main thread before install.
-                    let resolved = s.resolve_layer_queries(&bundle);
-                    handle.install(resolved);
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
+                let Some(handle) = s.view(buf_id) else {
+                    return Ok("none");
+                };
+                let Some(bundle) = bundle else {
+                    return Ok(match outcome {
+                        Some(JobOutcome::Failed(msg)) => {
+                            handle.mark_unparsed();
+                            if syntax::is_deadline_message(&msg) {
+                                "deadline"
+                            } else {
+                                "failed"
+                            }
+                        }
+                        _ => "none",
+                    });
+                };
+                let cut = bundle.layers_cut_by_deadline;
+                // Stage 2 (framing Q#IJ2): resolve each layer's highlight
+                // query on the main thread before install.
+                let resolved = s.resolve_layer_queries(&bundle);
+                handle.install(resolved);
+                Ok(if cut { "installed-cut" } else { "installed" })
             })?,
         )?;
     }

@@ -33,11 +33,13 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::ops::ControlFlow;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tree_sitter::{Node, Point, Range, StreamingIterator};
+use tree_sitter::{Node, ParseOptions, ParseState, Point, Range, StreamingIterator};
 
 use crate::async_runtime::JobId;
 use crate::buffer::{Buffer, BufferError, BufferId};
@@ -79,7 +81,59 @@ pub struct ParseRequest {
     /// table. Empty for the non-layered/legacy callers (no injections
     /// resolve, root parse unaffected).
     pub injection_aliases: Arc<HashMap<String, String>>,
+    /// How long the parse may run before it is cancelled (E7h.2): the
+    /// root parse and every injection layer's together, measured from
+    /// when [`run_parse`] starts. `None` is unbounded, as every parse was
+    /// before E7h; the editor's dispatch fills it from
+    /// `syntax.parse-deadline-ms`.
+    pub deadline: Option<Duration>,
 }
+
+/// Why [`run_parse`] produced no bundle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    /// The parser refused the grammar: an ABI mismatch, a build problem.
+    Language(String),
+    /// The parser returned no tree although nothing cancelled it.
+    NoTree,
+    /// The root parse ran past [`ParseRequest::deadline`] and was
+    /// cancelled through tree-sitter's progress callback (E7h.2). The
+    /// buffer keeps whatever tree it had.
+    DeadlineExceeded {
+        /// The deadline the request carried.
+        deadline: Duration,
+        /// How long the parse had run when it returned.
+        after: Duration,
+    },
+}
+
+/// How a [`ParseError::DeadlineExceeded`] message begins. The async
+/// runtime carries a worker's error as text, so the settle path tells a
+/// cancelled parse from a failed one by [`is_deadline_message`].
+pub const PARSE_DEADLINE_MESSAGE: &str = "parse ran past its deadline";
+
+/// Whether a parse job's failure text is a [`ParseError::DeadlineExceeded`].
+#[must_use]
+pub fn is_deadline_message(message: &str) -> bool {
+    message.starts_with(PARSE_DEADLINE_MESSAGE)
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Language(e) => write!(f, "set_language: {e}"),
+            Self::NoTree => f.write_str("parser produced no tree"),
+            Self::DeadlineExceeded { deadline, after } => write!(
+                f,
+                "{PARSE_DEADLINE_MESSAGE} of {} ms and was cancelled after {} ms",
+                deadline.as_millis(),
+                after.as_millis()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 /// Output of [`run_parse`]. The runtime's parse-handoff side map
 /// holds these by [`Arc`]; `Lua` introspection ([`crate::lua_bindings`])
@@ -113,6 +167,12 @@ pub struct ParseTreeBundle {
     /// `pmacs.error`; only a pathological file (thousands of embedded
     /// regions) can set it.
     pub injection_capped: bool,
+    /// True if the deadline ([`ParseRequest::deadline`]) ran out while
+    /// injection layers were being built: the layers not yet parsed were
+    /// dropped and the root and the rest installed, surfaced once per
+    /// buffer at settle (E7h.2). A root parse past the deadline is
+    /// [`ParseError::DeadlineExceeded`] instead and installs nothing.
+    pub layers_cut_by_deadline: bool,
 }
 
 /// Lexically-local identifier ranges derived from a grammar's bundled
@@ -160,31 +220,51 @@ impl ParseTreeBundle {
 /// `dispatch_parse` closure invokes after pulling a job from the
 /// queue. Always synchronous --- there is no internal yielding.
 ///
+/// Since E7h.2 every parse can be bounded in time: with
+/// [`ParseRequest::deadline`] set, tree-sitter's progress callback
+/// (called about every hundred parser operations) cancels the root parse
+/// once the deadline has passed and this returns
+/// [`ParseError::DeadlineExceeded`]; injection layers share the same
+/// deadline, and one it cuts short drops the layers not yet parsed. The
+/// callback runs in the runtime's parse loop, so it bounds a grammar whose
+/// error recovery never terminates (the JavaScript family, E7g), not an
+/// external scanner that never returns to the runtime.
+///
 /// Returns `Err` if the language is rejected by [`tree_sitter::Parser`]
-/// (ABI mismatch, almost always a build issue) or if the parser
-/// itself returns no tree (cancellation flag flipped, exhausted
-/// timeout --- neither wired in M4.1, so under M4.1 contracts this
-/// path is unreachable in practice).
-pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
+/// (ABI mismatch, almost always a build issue), if the deadline cut the
+/// root parse short, or if the parser returns no tree otherwise.
+pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, ParseError> {
+    let started = Instant::now();
+    let deadline_at = req.deadline.map(|d| started + d);
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&req.language)
-        .map_err(|e| format!("set_language: {e}"))?;
+        .map_err(|e| ParseError::Language(e.to_string()))?;
     let mut prior = req.prior_tree;
     if let Some(tree) = prior.as_mut() {
         for edit in &req.edits {
             tree.edit(edit);
         }
     }
-    let started = Instant::now();
-    let root_tree = parser
-        .parse(req.source.as_ref(), prior.as_ref())
-        .ok_or_else(|| "parser produced no tree".to_owned())?;
+    let root_started = Instant::now();
+    let root_tree = parse_bounded(
+        &mut parser,
+        req.source.as_ref(),
+        prior.as_ref(),
+        deadline_at,
+    )
+    .ok_or_else(|| match (req.deadline, deadline_at) {
+        (Some(deadline), Some(at)) if Instant::now() >= at => ParseError::DeadlineExceeded {
+            deadline,
+            after: started.elapsed(),
+        },
+        _ => ParseError::NoTree,
+    })?;
     // `parse_duration` measures the root parse only — the metric the M4.1
     // acceptance gates are stated in. Injection layer building (below) is an
     // additive phase separately guarded by the settle-time budget test; it
     // must not retroactively inflate this metric.
-    let parse_duration = started.elapsed();
+    let parse_duration = root_started.elapsed();
 
     // Seed the root layer, then expand injection layers (framing Q#IJ1).
     // Injection expansion is best-effort and isolated to the child
@@ -198,15 +278,46 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
         highlight_query: None,
         local_facts: None,
     }];
-    let injection_capped =
-        build_injection_layers(&mut layers, req.source.as_ref(), &req.injection_aliases);
+    let (injection_capped, layers_cut_by_deadline) = build_injection_layers(
+        &mut layers,
+        req.source.as_ref(),
+        &req.injection_aliases,
+        deadline_at,
+    );
     Ok(ParseTreeBundle {
         layers,
         source: req.source,
         language_name: req.language_name,
         parse_duration,
         injection_capped,
+        layers_cut_by_deadline,
     })
+}
+
+/// Parse `source` with `parser`, cancelling through the progress callback
+/// once `deadline_at` has passed. `None` from a bounded parse after the
+/// deadline is the cancellation; the parser is dropped with it, so no
+/// half-finished parse is ever resumed.
+fn parse_bounded(
+    parser: &mut tree_sitter::Parser,
+    source: &[u8],
+    old_tree: Option<&tree_sitter::Tree>,
+    deadline_at: Option<Instant>,
+) -> Option<tree_sitter::Tree> {
+    let len = source.len();
+    let mut read = |i: usize, _: Point| if i < len { &source[i..] } else { &[][..] };
+    let Some(at) = deadline_at else {
+        return parser.parse_with_options(&mut read, old_tree, None);
+    };
+    let mut progress = |_: &ParseState| {
+        if Instant::now() >= at {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let options = ParseOptions::new().progress_callback(&mut progress);
+    parser.parse_with_options(&mut read, old_tree, Some(options))
 }
 
 // ---------------------------------------------------------------------------
@@ -280,13 +391,15 @@ fn build_injection_layers(
     layers: &mut Vec<Layer>,
     source: &[u8],
     aliases: &HashMap<String, String>,
-) -> bool {
+    deadline_at: Option<Instant>,
+) -> (bool, bool) {
     let mut query_cache: HashMap<String, Option<Arc<tree_sitter::Query>>> = HashMap::new();
     let mut visited: HashSet<(String, Vec<(usize, usize)>)> = HashSet::new();
     // Frontier entries are (layer index, that layer's included ranges).
     let mut frontier: Vec<(usize, Vec<Range>)> = vec![(0, vec![whole_source_range(source)])];
     let mut depth: u16 = 0;
     let mut capped = false;
+    let mut cut_by_deadline = false;
 
     while depth < MAX_INJECTION_DEPTH && !frontier.is_empty() {
         // Children discovered this level: (layer, its ranges) to append and
@@ -314,7 +427,15 @@ fn build_injection_layers(
                 if !visited.insert(key) {
                     continue; // same (language, ranges) already parsed — cycle guard
                 }
-                let Some(tree) = parse_child(child_lang, &ranges, source) else {
+                if deadline_at.is_some_and(|at| Instant::now() >= at) {
+                    cut_by_deadline = true;
+                    break 'parents; // E7h.2: the deadline is spent; tail dropped
+                }
+                let Some(tree) = parse_child(child_lang, &ranges, source, deadline_at) else {
+                    if deadline_at.is_some_and(|at| Instant::now() >= at) {
+                        cut_by_deadline = true;
+                        break 'parents; // cancelled mid-child: the tail goes with it
+                    }
                     continue; // child parse failed — skip this child only
                 };
                 children.push((
@@ -329,7 +450,10 @@ fn build_injection_layers(
                 ));
             }
         }
-        if children.is_empty() {
+        if children.is_empty() || cut_by_deadline {
+            for (layer, _) in children {
+                layers.push(layer);
+            }
             break;
         }
         let mut next_frontier = Vec::with_capacity(children.len());
@@ -341,7 +465,7 @@ fn build_injection_layers(
         frontier = next_frontier;
         depth += 1;
     }
-    capped
+    (capped, cut_by_deadline)
 }
 
 /// Compile (once, cached) the `injections.scm` for `lang` from the static
@@ -553,13 +677,18 @@ fn resolve_injected_language(raw: &str, aliases: &HashMap<String, String>) -> Op
 
 /// Cold-parse `source` restricted to `ranges` with `lang`'s grammar. Node
 /// offsets in the returned tree are absolute into `source` (mechanic #1).
-fn parse_child(lang: &str, ranges: &[Range], source: &[u8]) -> Option<tree_sitter::Tree> {
+fn parse_child(
+    lang: &str,
+    ranges: &[Range],
+    source: &[u8],
+    deadline_at: Option<Instant>,
+) -> Option<tree_sitter::Tree> {
     let entry = BUILTIN_LANGUAGES.iter().find(|e| e.name == lang)?;
     let language = (entry.loader)();
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).ok()?;
     parser.set_included_ranges(ranges).ok()?;
-    parser.parse(source, None)
+    parse_bounded(&mut parser, source, None, deadline_at)
 }
 
 /// The whole-buffer range, the root layer's parent range.
@@ -611,6 +740,12 @@ struct ParseViewInner {
     pending: Vec<tree_sitter::InputEdit>,
     /// Most recent settled parse, or `None` if no parse has run yet.
     current: Option<Arc<ParseTreeBundle>>,
+    /// Set when a dispatched request produced no bundle (E7h.2: a parse
+    /// cancelled at its deadline, or failed). That request drained the
+    /// edits made since `current`, so `current` can no longer be carried
+    /// forward incrementally: the next request parses cold. Cleared by
+    /// `install`.
+    cold_next: bool,
 }
 
 /// Per-buffer parse-tree state. Attached to a [`Buffer`] as a
@@ -656,6 +791,7 @@ impl ParseView {
             source,
             pending: Vec::new(),
             current: None,
+            cold_next: false,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -730,7 +866,14 @@ impl ParseViewHandle {
     pub fn make_request(&self) -> ParseRequest {
         let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
         let edits = std::mem::take(&mut inner.pending);
-        let prior_tree = inner.current.as_ref().map(|b| b.root_tree().clone());
+        // After a request that installed nothing, `current` predates edits
+        // that request drained; carrying it forward would edit it with an
+        // incomplete list. Parse cold instead (E7h.2).
+        let prior_tree = if inner.cold_next {
+            None
+        } else {
+            inner.current.as_ref().map(|b| b.root_tree().clone())
+        };
         ParseRequest {
             source: Arc::from(inner.source.clone()),
             language: inner.language.clone(),
@@ -741,7 +884,20 @@ impl ParseViewHandle {
             // registry's alias snapshot (framing Q#IJ4). Callers that need
             // injections and bypass the registry set this themselves.
             injection_aliases: Arc::new(HashMap::new()),
+            // Unbounded by default; the dispatch binding sets the editor's
+            // `syntax.parse-deadline-ms` (E7h.2).
+            deadline: None,
         }
+    }
+
+    /// Record that the last request this view made produced no bundle
+    /// (E7h.2): the view keeps `current`, and the next request parses
+    /// cold because the drained edits are gone with the failed request.
+    pub fn mark_unparsed(&self) {
+        self.inner
+            .lock()
+            .expect("ParseView mutex poisoned")
+            .cold_next = true;
     }
 
     /// Install a freshly-parsed bundle. The caller is responsible
@@ -749,7 +905,9 @@ impl ParseViewHandle {
     /// installing a stale bundle would desynchronize the source
     /// mirror from the tree.
     pub fn install(&self, bundle: Arc<ParseTreeBundle>) {
-        self.inner.lock().expect("ParseView mutex poisoned").current = Some(bundle);
+        let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
+        inner.current = Some(bundle);
+        inner.cold_next = false;
     }
 }
 
@@ -1445,6 +1603,7 @@ impl SyntaxRegistry {
             language_name: raw.language_name.clone(),
             parse_duration: raw.parse_duration,
             injection_capped: raw.injection_capped,
+            layers_cut_by_deadline: raw.layers_cut_by_deadline,
         })
     }
 }

@@ -267,6 +267,7 @@ impl Session {
             prior_tree: prior,
             edits,
             injection_aliases: self.aliases.clone(),
+            deadline: None,
         };
         // No timeout and no cancellation are set, as in the editor, so a
         // parse without a tree is itself a finding.

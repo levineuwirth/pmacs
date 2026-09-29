@@ -2125,7 +2125,9 @@ fn run_parse(
                 .insert(id, Arc::new(bundle));
             ReplyKind::Parse { duration_ms }
         }
-        Err(msg) => ReplyKind::Error(msg),
+        // A parse cancelled at its deadline travels as its message, which
+        // the settle path recognizes (`syntax::is_deadline_message`).
+        Err(e) => ReplyKind::Error(e.to_string()),
     };
     let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
 }
@@ -3592,6 +3594,7 @@ mod tests {
             prior_tree: None,
             edits: Vec::new(),
             injection_aliases: Arc::new(std::collections::HashMap::new()),
+            deadline: None,
         };
         let id = rt.dispatch_parse(req, None);
         pump_until(&rt, "the parse job", || rt.is_complete(id));
@@ -3642,6 +3645,7 @@ mod tests {
             prior_tree: None,
             edits: Vec::new(),
             injection_aliases: Arc::new(std::collections::HashMap::new()),
+            deadline: None,
         };
         let id = rt.dispatch_parse(req, None);
         pump_until(&rt, "the parse job", || rt.is_complete(id));

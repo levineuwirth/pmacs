@@ -14,9 +14,32 @@
 //! records what it read, and the second row reads that record for every
 //! grammar crate that ships, so the flag is shown to reach each build and
 //! not only the ones someone tested.
+//!
+//! E7h.2: every parse is bounded in time. `run_parse` cancels through
+//! tree-sitter's progress callback once `ParseRequest::deadline` passes,
+//! and the editor fills the deadline from `syntax.parse-deadline-ms`. The
+//! witness is the input E7g unshipped the JavaScript family for (24 bytes
+//! on which the parser cycles through 34 states while its memory grows),
+//! parsed with tree-sitter-javascript, which stays a dev-dependency; the
+//! editor-level row drives the same cancellation through the key path with
+//! a deadline shorter than an ordinary large file's parse.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use pmacs::editor::EditorState;
+use pmacs::lua_bindings::{BufferIdLua, StateDir};
+use pmacs::protocol::FrontendId;
+use pmacs::syntax::{
+    BUILTIN_LANGUAGES, ParseError, ParseRequest, ParseTreeBundle, default_injection_aliases,
+    run_parse,
+};
+
+#[path = "common/iso.rs"]
+mod iso;
 
 fn read(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
@@ -122,4 +145,293 @@ fn e7h_every_grammar_build_recorded_the_flag() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The 24 bytes E7g reduced tree-sitter-javascript 0.25.0's hang to: the
+/// parser pins its offset at byte 23 and cycles through 34 (state, row,
+/// col) points while its memory grows about 16 MB a second (E7g review 1).
+const JS_HANG: &str = "[t,t[t\n[at\n[ ,at\n[ ,5 ];";
+
+fn js_request(text: &str, deadline: Option<Duration>) -> ParseRequest {
+    ParseRequest {
+        source: Arc::from(text.as_bytes()),
+        language: tree_sitter_javascript::LANGUAGE.into(),
+        language_name: "javascript".to_owned(),
+        prior_tree: None,
+        edits: Vec::new(),
+        injection_aliases: Arc::new(default_injection_aliases()),
+        deadline,
+    }
+}
+
+#[test]
+fn e7h_a_parse_that_never_returns_is_cancelled_at_its_deadline() {
+    // Control: an ordinary line of JavaScript parses under the same bound.
+    let deadline = Duration::from_millis(300);
+    assert!(
+        run_parse(js_request("let a = [1, 2];\n", Some(deadline))).is_ok(),
+        "control: the grammar parses ordinary JavaScript inside the deadline"
+    );
+    let started = Instant::now();
+    let err = run_parse(js_request(JS_HANG, Some(deadline))).expect_err("the hang is cancelled");
+    let returned = started.elapsed();
+    let ParseError::DeadlineExceeded { deadline: d, after } = err else {
+        panic!("cancelled at the deadline, not {err:?}");
+    };
+    assert_eq!(d, deadline);
+    assert!(after >= deadline, "not before the deadline: {after:?}");
+    // A generous bound for the default run (D12); the under-a-millisecond
+    // budget is `e7h_budget_cancellation_lands_within_a_millisecond`.
+    assert!(
+        returned < deadline + Duration::from_millis(250),
+        "returned {returned:?} after a {deadline:?} deadline"
+    );
+}
+
+#[test]
+#[ignore = "wall-clock budget (D12): run by scripts/perf-budgets and CI's perf jobs"]
+fn e7h_budget_cancellation_lands_within_a_millisecond() {
+    // The brief's line: the 24-byte hang cancels in under a millisecond
+    // once its deadline passes. Twenty runs; the worst overshoot counts.
+    let deadline = Duration::from_millis(50);
+    let mut worst = Duration::ZERO;
+    for _ in 0..20 {
+        let err = run_parse(js_request(JS_HANG, Some(deadline))).expect_err("cancelled");
+        let ParseError::DeadlineExceeded { after, .. } = err else {
+            panic!("{err:?}");
+        };
+        worst = worst.max(after.saturating_sub(deadline));
+    }
+    eprintln!("e7h cancellation: worst overshoot {worst:?} over 20 runs");
+    assert!(
+        worst < Duration::from_millis(1),
+        "worst overshoot {worst:?}"
+    );
+}
+
+fn exec(s: &EditorState, src: &str) {
+    s.lua_host.lua().load(src.to_owned()).exec().unwrap();
+}
+
+fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
+    s.lua_host.lua().load(src.to_owned()).eval().unwrap()
+}
+
+fn tick(s: &mut EditorState) {
+    s.tick_processes();
+    s.tick_lsp();
+    s.tick_async();
+}
+
+fn wait(s: &mut EditorState, secs: u64, mut pred: impl FnMut(&EditorState) -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        tick(s);
+        if pred(s) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn type_char(s: &mut EditorState, ch: char) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        },
+    );
+}
+
+fn editor_in(dir: &Path) -> EditorState {
+    let s = EditorState::new_with_roots(&iso::roots());
+    s.lua_host.lua().remove_app_data::<StateDir>();
+    s.lua_host.lua().set_app_data(StateDir(dir.to_path_buf()));
+    exec(&s, "pmacs.lsp.config = {}");
+    s
+}
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pmacs-e7h-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn e7h_ordinary_large_files_parse_inside_the_default_deadline() {
+    // The largest ordinary files the tree holds, parsed cold with their
+    // injection layers under the deadline the editor ships with: none may
+    // trip it, and none may lose a layer to it.
+    let dir = temp_dir("default");
+    let s = editor_in(&dir);
+    let default_ms: u64 = eval(&s, "return pmacs.config.get('syntax.parse-deadline-ms')");
+    assert_eq!(default_ms, 5000, "the shipped default");
+    let deadline = Some(Duration::from_millis(default_ms));
+    for (lang, rel) in [
+        ("rust", "pmacs-gpu/src/main.rs"),
+        ("rust", "src/lua_bindings/mod.rs"),
+        ("markdown", "docs/ci-red-signatures.md"),
+    ] {
+        let bytes = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap();
+        let entry = BUILTIN_LANGUAGES.iter().find(|e| e.name == lang).unwrap();
+        let req = ParseRequest {
+            source: Arc::from(bytes.as_slice()),
+            language: (entry.loader)(),
+            language_name: lang.to_owned(),
+            prior_tree: None,
+            edits: Vec::new(),
+            injection_aliases: Arc::new(default_injection_aliases()),
+            deadline,
+        };
+        let started = Instant::now();
+        let bundle = run_parse(req).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert!(
+            !bundle.layers_cut_by_deadline,
+            "{rel}: no layer lost to the deadline"
+        );
+        eprintln!(
+            "{rel}: {} layers in {:?}",
+            bundle.layers.len(),
+            started.elapsed()
+        );
+    }
+}
+
+/// Every node's kind and byte range, in walk order: two trees agree on
+/// this only if they are the same parse of the same bytes.
+fn node_signature(tree: &tree_sitter::Tree) -> Vec<(u16, usize, usize)> {
+    let mut out = Vec::new();
+    let mut c = tree.walk();
+    loop {
+        let n = c.node();
+        out.push((n.kind_id(), n.start_byte(), n.end_byte()));
+        if c.goto_first_child() {
+            continue;
+        }
+        loop {
+            if c.goto_next_sibling() {
+                break;
+            }
+            if !c.goto_parent() {
+                return out;
+            }
+        }
+    }
+}
+
+fn current_bundle(s: &EditorState, buf: BufferIdLua) -> Option<Arc<ParseTreeBundle>> {
+    s.syntax_registry.view(buf.0).and_then(|h| h.current())
+}
+
+fn deadline_notices(s: &EditorState) -> usize {
+    s.lua_host
+        .errors_buffer_text()
+        .matches("ran past syntax.parse-deadline-ms")
+        .count()
+}
+
+#[test]
+fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
+    // A 595 KB Rust file parses in hundreds of milliseconds; with the
+    // deadline at 1 ms every parse of it is cancelled. Typed through the
+    // key path, as a user types: the buffer keeps the tree it had, the user
+    // is told once however many keystrokes follow, nothing aborts, and once
+    // parses finish again the tree is the buffer's (the cancelled request
+    // drained the edits, so the next parse must be cold, not incremental).
+    let dir = temp_dir("keep");
+    let file = dir.join("big.rs");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/editor.rs"),
+        &file,
+    )
+    .unwrap();
+    let mut s = editor_in(&dir);
+    exec(
+        &s,
+        &format!(
+            "pmacs.buffer.find_or_open({:?})",
+            file.display().to_string()
+        ),
+    );
+    let buf: BufferIdLua = eval(&s, "return pmacs.window.buffer()");
+    assert!(
+        wait(&mut s, 60, |s| current_bundle(s, buf).is_some()),
+        "the first parse installs under the default deadline"
+    );
+    let before = current_bundle(&s, buf).unwrap();
+
+    exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 1)");
+    type_char(&mut s, 'x');
+    assert!(
+        wait(&mut s, 30, |s| deadline_notices(s) == 1),
+        "a cancelled parse is reported: {}",
+        s.lua_host.errors_buffer_text()
+    );
+    assert!(
+        Arc::ptr_eq(&before, &current_bundle(&s, buf).unwrap()),
+        "the buffer keeps the tree it had"
+    );
+    for ch in "yzw".chars() {
+        type_char(&mut s, ch);
+        wait(&mut s, 1, |_| false);
+    }
+    wait(&mut s, 3, |_| false);
+    assert_eq!(deadline_notices(&s), 1, "told once, not per keystroke");
+    assert!(
+        Arc::ptr_eq(&before, &current_bundle(&s, buf).unwrap()),
+        "still the tree it had"
+    );
+
+    // Parses finish again: the next is cold, and its tree is the buffer's.
+    exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 0)");
+    type_char(&mut s, 'v');
+    assert!(
+        wait(&mut s, 60, |s| !Arc::ptr_eq(
+            &before,
+            &current_bundle(s, buf).unwrap()
+        )),
+        "a parse installs once the deadline allows it"
+    );
+    assert!(
+        wait(&mut s, 60, |s| {
+            let text: String = eval(
+                s,
+                "local b = pmacs.window.buffer() return b:slice(0, b:len())",
+            );
+            current_bundle(s, buf).is_some_and(|b| b.source.as_ref() == text.as_bytes())
+        }),
+        "the installed tree was parsed from the buffer's text"
+    );
+    let installed = current_bundle(&s, buf).unwrap();
+    let cold = run_parse(ParseRequest {
+        source: installed.source.clone(),
+        language: tree_sitter_rust::LANGUAGE.into(),
+        language_name: "rust".to_owned(),
+        prior_tree: None,
+        edits: Vec::new(),
+        injection_aliases: Arc::new(default_injection_aliases()),
+        deadline: None,
+    })
+    .unwrap();
+    assert_eq!(
+        node_signature(installed.root_tree()),
+        node_signature(cold.root_tree()),
+        "the tree after the cancellations is a cold parse of the same text, node for node"
+    );
+
+    // The notice re-arms once a parse has installed.
+    exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 1)");
+    type_char(&mut s, 'u');
+    assert!(
+        wait(&mut s, 30, |s| deadline_notices(s) == 2),
+        "a later cancellation is reported again: {}",
+        s.lua_host.errors_buffer_text()
+    );
 }
