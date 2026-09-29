@@ -2021,6 +2021,86 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### `main` after E7g: run 36495882005 at `4ad9f3e`, #295 filed and #254's second occurrence
+
+Read at E7h's opening on 2026-09-29, from the jobs endpoint and all six
+test legs' logs; not re-run. E7g review 1 found it unrecorded. `4ad9f3e`
+is code-bearing (E7g's squash of `691aae6`, merged before review), so it
+is E7h's base control itself.
+
+| field | value |
+|---|---|
+| run | 36495882005, `push`, one attempt |
+| head | `4ad9f3e`, E7g's squash merge (PR #294 at `691aae6`) |
+| window | created 2026-09-28T23:03:01Z, updated 23:27:47Z |
+| verdict | 19 jobs: **16 success, 1 skipped, 2 failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+| the six test legs | `Test (crdt)` 171 `test result: ok`, `Test (ubuntu-latest / luajit)` and `Test (ubuntu-latest / lua54)` 172 each, `Test (macos-latest / luajit)` 173, `Test (macos-latest / lua54)` 170 and one `FAILED`, `Test (ubuntu-latest / luajit, no crdt)` 169 and one `FAILED`; every log's `running N tests` lines paired one to one with its result lines; `WouldBlock`, `did not become ready` and `got ok` zero on every leg; E7g's nine `e7g_` rows `ok` on every leg |
+
+Tally (run-36495882005-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 109175225516 | success |
+| Changed paths | 109175225770 | success |
+| Format | 109175225785 | success |
+| Commit attribution (D9) | 109175225821 | success |
+| Lint (lua54) | 109175225888 | success |
+| M1 Acceptance Gates | 109175268654 | success |
+| M5 Perf Gates | 109175268694 | success |
+| Perf budgets (debug) | 109175268711 | success |
+| M4 Perf Gates | 109175268745 | success |
+| Test (crdt) | 109175268751 | success |
+| GPU Render (headless) | 109175268755 | success |
+| M6 Perf Gates | 109175268787 | success |
+| Test (ubuntu-latest / luajit) | 109175268838 | success |
+| Test (macos-latest / luajit) | 109175268839 | success |
+| M10 Perf Gates (crdt) | 109175268873 | success |
+| Test (macos-latest / lua54) | 109175268935 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 109175268948 | failure |
+| Test (ubuntu-latest / lua54) | 109175268989 | success |
+| Docs consistency | 109175270310 | skipped |
+
+Tally (run-36495882005-failures): 2 rows of the table above with `result` = `failure`.
+
+The reds:
+
+Tally (run-36495882005-reds): 2 items in the list below.
+
+- `Test (macos-latest / lua54)` (109175268935): three rows of
+  `e7b_review_wire_acceptance` ---
+  `a_save_sends_did_save_and_rust_analyzer_flychecks_on_it`,
+  `a_keystroke_after_the_save_resends_it_behind_the_did_change`,
+  `a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`
+  --- each failing its `wait_warm` precondition with `the label reads
+  exactly ready for two seconds`, `test result: FAILED. 2 passed; 3
+  failed; 2 ignored` (`finished in 97.26s`), the suite started at
+  23:13:58Z and the rows failed at 23:15:00, 23:15:30 and 23:15:35. No
+  row carries the fragment and no issue did: **filed as #295**, a first
+  sample. The candidate is the three rows' concurrent rust-analyzer
+  warm-ups on a three-core runner keeping each label off `ready` for
+  the two-second window; the same rows ran `ok` on the other five legs.
+  Log:
+  https://github.com/levineuwirth/pmacs/actions/runs/36495882005/job/109175268935
+- `Test (ubuntu-latest / luajit, no crdt)` (109175268948):
+  `m6_5_repl_spawns_zsh`, `pump predicate did not become true within
+  15000ms; chunk:` at `tests/m6_5_repl_acceptance.rs:115`, the chunk
+  beginning `local h = _G.h` and polling for `status.kind ==
+  "running"` --- both of #254's required fragments, so **#254's second
+  occurrence**, on the sibling selector (#254 names
+  `m6_5_repl_spawns_fish`; its fish-first-start candidate does not
+  obviously apply to zsh, said on the issue). `test result: FAILED. 10
+  passed; 1 failed` (`finished in 19.90s`) at 23:16:02Z, the leg's only
+  failure; the row ran `ok` on the other five legs. Log:
+  https://github.com/levineuwirth/pmacs/actions/runs/36495882005/job/109175268948
+
+Neither touches E7g's code (grammars, the fuzz harness, the workflow);
+`Grammar fuzz` 36495882068 at the same sha is green. So neither the
+`read Hello` family, nor #259, nor U4, nor U17, nor #271, nor #276, nor
+#253, nor #282, nor #283, nor #286, nor #288, nor #289, nor #291
+sampled; #254 is at two and #295 at one. The head is not green, on two
+rows off E7g's path, stated at the moment of writing.
+
 ### `main` after E7e: run 36315238338 at `0b72108`, #288's second occurrence
 
 Read at E7g's opening on 2026-09-27, from the jobs endpoint and all
