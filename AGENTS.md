@@ -40,7 +40,10 @@ Always true:
   that GCC 16 turned into a heap overflow at -O2 and CI's GCC 13 did
   not. D36 as amended at E7h: what aborts or never returns is unshipped
   unless the defect is a local bound fixed in a vendored copy; what is
-  slow or large is filed.
+  slow or large is filed; and a parse whose memory grows to an
+  out-of-memory kill is neither, since it takes the editor down as an
+  abort does (#296, markdown: an instance memory limit, the wasm
+  phase's, is what bounds it).
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before
