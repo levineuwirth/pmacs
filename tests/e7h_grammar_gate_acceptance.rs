@@ -23,6 +23,15 @@
 //! parsed with tree-sitter-javascript, which stays a dev-dependency; the
 //! editor-level row drives the same cancellation through the key path with
 //! a deadline shorter than an ordinary large file's parse.
+//!
+//! E7h.3: the fuzz harness can fail. Review 1 planted defects in a grammar
+//! and found two it filed and passed: a parse that never returns but grows
+//! past the memory limit inside the hang limit (filed as an allocation), and
+//! a crash that only a sequence of inputs brings back (filed as "not
+//! reproduced alone"). The rows below plant each class through the worker's
+//! `PMACS_FUZZ_SELFTEST` hook, run the harness binary as CI does, and read
+//! its report and exit status: crash, hang, growth and sequence fail the run,
+//! and a slow parse that returns is filed, not failed (D36).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -434,4 +443,125 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
         "a later cancellation is reported again: {}",
         s.lua_host.errors_buffer_text()
     );
+}
+
+/// One harness run over `lua` with `seeds` as its whole corpus (no
+/// mutation), a planted `mode`, a 1 s hang limit and a 64 MB memory limit:
+/// its exit code and its report.tsv row for lua.
+fn planted_run(tag: &str, mode: &str, seeds: &[(&str, &str)]) -> (i32, Vec<String>, String) {
+    let dir = temp_dir(&format!("plant-{tag}"));
+    let corpus = dir.join("corpus/lua");
+    std::fs::create_dir_all(&corpus).unwrap();
+    for (name, text) in seeds {
+        std::fs::write(corpus.join(name), text).unwrap();
+    }
+    let out = dir.join("out");
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
+        .args(["run", "--corpus"])
+        .arg(dir.join("corpus"))
+        .arg("--out")
+        .arg(&out)
+        .args([
+            "--grammar",
+            "lua",
+            "--seconds",
+            "0",
+            "--jobs",
+            "1",
+            "--hang-ms",
+            "1000",
+            "--rss-mb",
+            "64",
+            "--edits",
+            "0",
+        ])
+        .env("PMACS_FUZZ_SELFTEST", mode)
+        .env("PMACS_FUZZ_SELFTEST_MS", "2500")
+        .output()
+        .expect("the harness runs");
+    let tsv = std::fs::read_to_string(out.join("report.tsv")).unwrap_or_default();
+    let header: Vec<&str> = tsv.lines().next().unwrap_or("").split('\t').collect();
+    let row: Vec<String> = tsv
+        .lines()
+        .find(|l| l.starts_with("lua\t"))
+        .unwrap_or("")
+        .split('\t')
+        .map(str::to_owned)
+        .collect();
+    let named: Vec<String> = header
+        .iter()
+        .zip(&row)
+        .map(|(h, v)| format!("{h}={v}"))
+        .collect();
+    let md = std::fs::read_to_string(out.join("report.md")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    (run.status.code().unwrap_or(-1), named, md)
+}
+
+fn has(row: &[String], cell: &str) -> bool {
+    row.iter().any(|c| c == cell)
+}
+
+const TRIGGER: &str = "@FUZZSELFTEST@";
+
+#[test]
+fn e7h_a_planted_crash_is_found_and_fails_the_run() {
+    let (code, row, md) = planted_run("crash", "crash", &[("a", "local y = 2\n"), ("b", TRIGGER)]);
+    assert!(has(&row, "crashes=1"), "{row:?}\n{md}");
+    assert_eq!(code, 1, "a crash fails the run: {row:?}");
+}
+
+#[test]
+fn e7h_a_planted_hang_is_found_and_fails_the_run() {
+    let (code, row, md) = planted_run("hang", "hang", &[("a", TRIGGER)]);
+    assert!(has(&row, "hangs=1"), "{row:?}\n{md}");
+    assert_eq!(code, 1, "a hang fails the run: {row:?}");
+}
+
+#[test]
+fn e7h_a_parse_that_grows_without_returning_is_a_hang_not_an_allocation() {
+    // Review 1's `grow` plant: never returns, and passes the memory limit
+    // well inside the hang limit, so it is first seen as an allocation.
+    // Confirmed alone under four times the memory and twelve times the
+    // time, it still has not returned: a hang, and the run fails.
+    let (code, row, md) = planted_run("grow", "grow", &[("a", TRIGGER)]);
+    assert!(
+        has(&row, "hangs=1") && has(&row, "allocs=0"),
+        "{row:?}\n{md}"
+    );
+    assert!(md.contains("never returned, growing past 64 MB"), "{md}");
+    assert_eq!(code, 1, "a parse that never returns fails the run: {row:?}");
+}
+
+#[test]
+fn e7h_a_crash_only_a_sequence_brings_back_is_found_and_fails_the_run() {
+    // The worker dies on the third trigger it sees: no input alone brings
+    // it back. Replayed after the inputs its worker ran before it, it does.
+    let (code, row, md) = planted_run(
+        "sequence",
+        "sequence",
+        &[("a", TRIGGER), ("b", TRIGGER), ("c", TRIGGER)],
+    );
+    assert!(
+        has(&row, "crashes=1") && has(&row, "in_sequence=1"),
+        "{row:?}\n{md}"
+    );
+    assert!(
+        md.contains("reproduced: after the 2 inputs before it"),
+        "{md}"
+    );
+    assert_eq!(
+        code, 1,
+        "a crash that needs a sequence fails the run: {row:?}"
+    );
+}
+
+#[test]
+fn e7h_a_slow_parse_that_returns_is_filed_not_failed() {
+    // 2.5 s against a 1 s hang limit: seen as a hang, it returns alone
+    // under the twelve-times limit, so it is slow, filed, and the run
+    // passes (D36).
+    let (code, row, md) = planted_run("slow", "slow", &[("a", TRIGGER)]);
+    assert!(has(&row, "slow=1") && has(&row, "hangs=0"), "{row:?}\n{md}");
+    assert_eq!(code, 0, "a slow parse does not fail the run: {row:?}");
 }
