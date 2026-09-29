@@ -286,6 +286,11 @@ enum SelfTest {
     Grow,
     /// The input returns, after `PMACS_FUZZ_SELFTEST_MS` (default 2500 ms).
     Slow,
+    /// The input returns after `PMACS_FUZZ_SELFTEST_MS` for each trigger it
+    /// holds: a large input runs past twelve times the limit where its
+    /// minimal one does not, as the cmake grammar's parse does on
+    /// whitespace (E7h).
+    Sized,
     /// The worker dies on the third trigger it sees: only a sequence of
     /// inputs reproduces it, never one alone.
     Sequence,
@@ -298,13 +303,14 @@ impl SelfTest {
             "hang" => Some(Self::Hang),
             "grow" => Some(Self::Grow),
             "slow" => Some(Self::Slow),
+            "sized" => Some(Self::Sized),
             "sequence" => Some(Self::Sequence),
             _ => None,
         }
     }
 
     /// Fire on a triggering input, before its first parse.
-    fn fire(self) {
+    fn fire(self, text: &str) {
         static SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         match self {
             Self::Crash => std::process::abort(),
@@ -319,12 +325,17 @@ impl SelfTest {
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            Self::Slow => {
-                let ms = std::env::var("PMACS_FUZZ_SELFTEST_MS")
+            Self::Slow | Self::Sized => {
+                let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2500);
-                std::thread::sleep(Duration::from_millis(ms));
+                let times = if self == Self::Sized {
+                    text.matches(SELFTEST_TRIGGER).count() as u64
+                } else {
+                    1
+                };
+                std::thread::sleep(Duration::from_millis(ms * times));
             }
             Self::Sequence => {
                 if SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 >= 3 {
@@ -410,7 +421,7 @@ impl Session {
         if let Some(planted) = self.selftest
             && text.contains(SELFTEST_TRIGGER)
         {
-            planted.fire();
+            planted.fire(&text);
         }
         let mut rng = Rng(seed);
         // An input past the seed cap is a depth operator's or a repeat's:
@@ -1746,30 +1757,26 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
     } else {
         (minimize(&f.input, |t| same(t, f.edits)), f.edits)
     };
-    // E7h.3: an allocation is confirmed the way a hang is. A parse that
-    // grows past the RSS limit before the hang limit may never return at
-    // all (a cycle that allocates each turn); run alone under twelve times
-    // the time and four times the memory, one that still has not returned
-    // is a hang, and only one that returns is large.
+    // A hang whose input ran past twelve times the limit may still be a
+    // large parse quadratic in its bytes (CMake on 247 KB of whitespace:
+    // 210 s natively, 4 s at 34 KB; E7h). Its minimal input, which still
+    // runs past the limit, is timed the same way, and one that returns is
+    // slow; only one that does not is a hang.
+    if alone
+        && f.kind == Kind::Hang
+        && let Some(micros) = time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long)
+    {
+        f.kind = Kind::Slow;
+        let _ = write!(
+            f.detail,
+            "\nslow, not hung: the input ran past the {} s limit alone, and its minimal \
+             one returned in {} ms",
+            long.hang.as_secs(),
+            micros / 1000
+        );
+    }
     if alone && f.kind == Kind::Alloc {
-        if let Some(micros) = time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long) {
-            let _ = write!(
-                f.detail,
-                "\nlarge, and it returns: alone in {} ms under {} MB and {} s",
-                micros / 1000,
-                long.rss_kb / 1024,
-                long.hang.as_secs()
-            );
-        } else {
-            f.kind = Kind::Hang;
-            f.signature = format!("never returned, growing past {} MB", limits.rss_kb / 1024);
-            let _ = write!(
-                f.detail,
-                "\nnot large but hung: alone it had not returned under {} MB and {} s",
-                long.rss_kb / 1024,
-                long.hang.as_secs()
-            );
-        }
+        confirm_alloc(grammar, &mut f, &minimal, minimal_edits, dir, limits, &long);
     }
     let stem = dir.join(format!("{}-{index}", f.kind.name()));
     let file = stem.with_extension("input");
@@ -1805,6 +1812,40 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
         minimal,
         minimal_edits,
         file,
+    }
+}
+
+/// E7h.3: an allocation is confirmed the way a hang is. A parse that grows
+/// past the RSS limit before the hang limit may never return at all (a
+/// cycle that allocates each turn); run alone under twelve times the time
+/// and four times the memory (`long`), one that still has not returned is
+/// a hang, and only one that returns is large.
+fn confirm_alloc(
+    grammar: &str,
+    f: &mut Finding,
+    minimal: &str,
+    minimal_edits: u32,
+    dir: &Path,
+    limits: &Limits,
+    long: &Limits,
+) {
+    if let Some(micros) = time_alone(grammar, minimal, minimal_edits, f.seed, dir, long) {
+        let _ = write!(
+            f.detail,
+            "\nlarge, and it returns: alone in {} ms under {} MB and {} s",
+            micros / 1000,
+            long.rss_kb / 1024,
+            long.hang.as_secs()
+        );
+    } else {
+        f.kind = Kind::Hang;
+        f.signature = format!("never returned, growing past {} MB", limits.rss_kb / 1024);
+        let _ = write!(
+            f.detail,
+            "\nnot large but hung: alone it had not returned under {} MB and {} s",
+            long.rss_kb / 1024,
+            long.hang.as_secs()
+        );
     }
 }
 

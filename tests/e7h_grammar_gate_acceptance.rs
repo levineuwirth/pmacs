@@ -568,3 +568,21 @@ fn e7h_a_slow_parse_that_returns_is_filed_not_failed() {
     assert!(has(&row, "slow=1") && has(&row, "hangs=0"), "{row:?}\n{md}");
     assert_eq!(code, 0, "a slow parse does not fail the run: {row:?}");
 }
+
+#[test]
+fn e7h_a_large_slow_input_whose_minimum_returns_is_filed_not_failed() {
+    // 2.5 s for each of six triggers: the input alone runs 15 s, past the
+    // twelve-times limit (12 s), while its minimal input, one trigger,
+    // returns in 2.5 s. That is CMake's case (247 KB of whitespace parses
+    // in 210 s natively, 34 KB in 4 s): slow in its size, not hung, so it
+    // is filed and the run passes.
+    let six = format!("{TRIGGER}\n").repeat(6);
+    let (code, row, md) = planted_run("sized", "sized", &[("a", six.as_str())]);
+    assert!(has(&row, "slow=1") && has(&row, "hangs=0"), "{row:?}\n{md}");
+    assert!(
+        md.contains("minimal 14 bytes"),
+        "whole, it ran past the limit and was minimized to one trigger, whose \
+         timing files it slow:\n{md}"
+    );
+    assert_eq!(code, 0, "a large slow parse does not fail the run: {row:?}");
+}
