@@ -87,7 +87,7 @@ references, document symbols, code actions, formatting, semantic tokens, and
 inline inlay hints. Preconfigured servers cover Rust, C/C++, Python, Go,
 JavaScript/TypeScript, Lua, Bash, TOML, Zig, Dockerfile, CMake, JSON, YAML,
 and Haskell.
-Bundled tree-sitter grammars include those languages but Haskell, YAML and
+Bundled tree-sitter grammars include those languages but YAML and
 JavaScript/TypeScript, plus Markdown, Make, and CUDA; nested Markdown fences
 and TOML frontmatter use multi-language injections. Bounded Emacs
 and Vim modelines join extensions, exact filenames, and shebangs in one

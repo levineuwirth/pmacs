@@ -504,11 +504,9 @@ pmacs.lsp.config.latex = pmacs.lsp.config.latex or {
 }
 
 -- Haskell via haskell-language-server, started through its wrapper
--- (aside E7e) and reached through `pmacs.lsp.filetypes.hs` below, since
--- E7g took the grammar away. `--lsp` is the stdio transport; without it
--- the wrapper type-checks the files it is given and exits. It sits here
--- rather than beside `lua` because its root walk reuses the two path
--- helpers above.
+-- (aside E7e). `--lsp` is the stdio transport; without it the wrapper
+-- type-checks the files it is given and exits. It sits here rather than
+-- beside `lua` because its root walk reuses the two path helpers above.
 --
 -- What HLS needs to be useful is a component, and it takes it from the
 -- root it is started in, not from the file: rooted where a `.cabal` file
@@ -587,8 +585,9 @@ pmacs.lsp.config.haskell = pmacs.lsp.config.haskell or {
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a
 -- server but no bundled grammar), so grammar-backed languages keep their
 -- existing detection. It keeps a language id stable when a grammar is
--- dropped, which Haskell's was (below), and is the seam for user-added
--- mappings. Extensible from init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
+-- dropped, as E7g dropped four (YAML and the JavaScript family still have
+-- none), and is the seam for user-added mappings. Extensible from
+-- init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
 pmacs.lsp.filetypes = pmacs.lsp.filetypes or {}
 pmacs.lsp.filetypes.py = pmacs.lsp.filetypes.py or "python"
 pmacs.lsp.filetypes.pyi = pmacs.lsp.filetypes.pyi or "python"
@@ -659,10 +658,10 @@ pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
 pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
 pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
 pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
--- Haskell (haskell-language-server). No grammar ships for it: E7g
--- unshipped tree-sitter-haskell 0.23.1, whose scanner corrupts the heap on
--- a file opening with two `{-# LANGUAGE #-}` pragmas. This entry is what
--- still names a `.hs` buffer `haskell`, so the server attaches uncolored.
+-- Haskell (haskell-language-server). The grammar claims `.hs` again since
+-- E7h, built with `-fno-strict-aliasing` (`.cargo/config.toml`); this
+-- entry keeps a `.hs` buffer `haskell`, and the server attached, if it is
+-- ever dropped again as E7g dropped it.
 pmacs.lsp.filetypes.hs = pmacs.lsp.filetypes.hs or "haskell"
 
 -- Per-buffer attachment record: { language, server, uri, version }.

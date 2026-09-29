@@ -121,15 +121,16 @@ fn opened(sink: &Path) -> Vec<String> {
 
 #[test]
 fn e7g_review1_every_extension_an_unshipped_grammar_claimed_reaches_its_server() {
-    // At `0b72108` the table claimed these eleven extensions for Haskell,
-    // YAML and the JavaScript family; C7g's rows check three of them
-    // (`.hs`, `.yaml`, `.js`/`.tsx` by language id) and none by a server
-    // receiving the file. Each opens its own reproduction, with only its
-    // language's server configured (the fake, recording what it opens),
-    // so the didOpen is the filetype map's doing and nothing else's.
+    // At `0b72108` the table claimed these extensions, and `.hs`, for
+    // Haskell, YAML and the JavaScript family; C7g's rows check three of
+    // them (`.hs`, `.yaml`, `.js`/`.tsx` by language id) and none by a
+    // server receiving the file. Each opens its own reproduction, with only
+    // its language's server configured (the fake, recording what it opens),
+    // so the didOpen is the filetype map's doing and nothing else's. `.hs`
+    // left the list at E7h, when Haskell's grammar came back
+    // (`e7h_tree_sitter_haskell_ships_because_its_c_is_built_without_strict_aliasing`).
     let fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp");
-    let cases: [(&str, &str, String); 11] = [
-        ("hs", "haskell", TWO_PRAGMAS.to_owned()),
+    let cases: [(&str, &str, String); 10] = [
         ("yaml", "yaml", nested_yaml(254)),
         ("yml", "yaml", nested_yaml(254)),
         ("js", "javascript", JS_HANG.to_owned()),
@@ -329,13 +330,15 @@ fn scanners_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// recorded at E7h.1 under the owner's ruling: `-fno-strict-aliasing` for
 /// every grammar is the class fix, and a scanner left on the old header is
 /// a residual clang's type sanitizer still reports (bash 164,968 reports of
-/// the pointer class on a growth input, html none of that class), which no
-/// compiler may now exploit. A grammar whose copy gets the fixed header
-/// leaves this list (python did at E7h, its copy vendored for its bound);
-/// a new grammar on the old header joins it only by an edit here, which is
-/// the point.
+/// the pointer class on a growth input, haskell 2,732 on the two retyped
+/// pragmas, html none of that class), which no compiler may now exploit.
+/// A grammar whose copy gets the fixed header leaves this list (python did
+/// at E7h, its copy vendored for its bound); a new grammar on the old
+/// header joins it only by an edit here, which is the point (haskell did at
+/// E7h, its grammar restored under the flag).
 const ALIASING_HEADER_RESIDUAL: &[&str] = &[
     "tree-sitter-bash: src/scanner.c",
+    "tree-sitter-haskell: src/scanner.c",
     "tree-sitter-html: src/scanner.c",
 ];
 
