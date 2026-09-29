@@ -584,5 +584,13 @@ fn e7h_a_large_slow_input_whose_minimum_returns_is_filed_not_failed() {
         "whole, it ran past the limit and was minimized to one trigger, whose \
          timing files it slow:\n{md}"
     );
+    assert!(
+        row.iter()
+            .find_map(|c| c.strip_prefix("seconds="))
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_some_and(|secs| secs >= 12),
+        "the grammar's wall time counts its triage, which timed the whole \
+         input for the full twelve-times limit: {row:?}"
+    );
     assert_eq!(code, 0, "a large slow parse does not fail the run: {row:?}");
 }

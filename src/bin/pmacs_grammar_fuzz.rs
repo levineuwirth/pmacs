@@ -1543,12 +1543,15 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
     let last = worker.as_ref().map_or(0, Worker::growth_kb);
     report.stats.growth_kb = report.stats.growth_kb.max(last);
     drop(worker);
-    report.stats.elapsed = started.elapsed();
     report.findings = findings
         .into_iter()
         .enumerate()
         .map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits))
         .collect();
+    // After triage, as the report says: confirming, timing and minimizing
+    // findings is where a grammar's minutes go (E7h: cmake's three slow
+    // findings, each timed twice under twelve times the limit).
+    report.stats.elapsed = started.elapsed();
     report
 }
 
