@@ -326,9 +326,23 @@ fn scanners_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The shipped scanners that still push through the pre-0.24 `array.h`,
+/// recorded at E7h.1 under the owner's ruling: `-fno-strict-aliasing` for
+/// every grammar is the class fix, and a scanner left on the old header is
+/// a residual clang's type sanitizer still reports (bash 164,968 reports of
+/// the pointer class on a growth input, html none of that class), which no
+/// compiler may now exploit. A grammar whose copy gets the fixed header
+/// leaves this list; a new grammar on the old header joins it only by an
+/// edit here, which is the point.
+const ALIASING_HEADER_RESIDUAL: &[&str] = &[
+    "tree-sitter-bash: src/scanner.c",
+    "tree-sitter-html: src/scanner.c",
+    "tree-sitter-python: src/scanner.c",
+];
+
 #[test]
-#[ignore = "E7g review 1 witness: fails at 4ad9f3e (bash, html and python push through it); the fix round un-ignores it"]
-fn e7g_review1_no_shipped_scanner_pushes_through_the_aliasing_array_header() {
+fn e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_without_strict_aliasing()
+ {
     // tree-sitter-haskell 0.23.1 aborted the editor because its scanner's
     // `array_push` grows the array through an `(Array *)` cast, writing
     // `contents` as `void *` and reading it back as `T *`: undefined under
@@ -337,11 +351,20 @@ fn e7g_review1_no_shipped_scanner_pushes_through_the_aliasing_array_header() {
     // type-aliasing violation; GCC 13.3, CI's, and clang happen not to
     // exploit it). The vendored `tree_sitter/array.h` that does this is
     // the pre-0.24 CLI's; grammars regenerated since assign `contents` from
-    // the grow's return. C7g removed the one grammar whose push GCC 16
-    // miscompiled on the fuzz run's inputs, not the header: any grammar
-    // that ships a scanner using these macros over that header executes
-    // the same undefined behavior on every push, and whether a compiler
-    // turns it into a heap overflow is that compiler's choice this year.
+    // the grow's return. Review 1 found bash, html and python shipping it.
+    // E7h.1 closes the class for every compiler with -fno-strict-aliasing
+    // (`.cargo/config.toml`), so what is asserted is that every scanner
+    // still on the header is one recorded above, and that the flag is set.
+    let config = read(".cargo/config.toml");
+    for var in ["HOST_CFLAGS", "TARGET_CFLAGS"] {
+        assert!(
+            config.lines().any(|l| l.starts_with(var)
+                && l.contains("-fno-strict-aliasing")
+                && l.contains("force = true")),
+            "{var} forces -fno-strict-aliasing in .cargo/config.toml; without it the \
+             scanners below execute the UB that took tree-sitter-haskell down"
+        );
+    }
     let mut exposed = Vec::new();
     for (krate, dir) in grammar_crate_dirs() {
         let mut scanners = Vec::new();
@@ -367,9 +390,11 @@ fn e7g_review1_no_shipped_scanner_pushes_through_the_aliasing_array_header() {
             }
         }
     }
-    assert!(
-        exposed.is_empty(),
-        "shipped scanners push through the strict-aliasing `array.h` that took \
-         tree-sitter-haskell 0.23.1 down under GCC -O2: {exposed:#?}"
+    exposed.sort();
+    assert_eq!(
+        exposed, ALIASING_HEADER_RESIDUAL,
+        "the shipped scanners that push through the strict-aliasing `array.h` \
+         that took tree-sitter-haskell 0.23.1 down under GCC -O2 are exactly the \
+         recorded residual"
     );
 }
