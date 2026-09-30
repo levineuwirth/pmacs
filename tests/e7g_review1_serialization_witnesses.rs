@@ -201,3 +201,63 @@ fn e7h_the_bounded_grammars_ship_from_their_vendored_copies() {
         );
     }
 }
+
+/// The grammars whose vendored copy carries tree-sitter's conforming
+/// `tree_sitter/array.h` in place of the published one: python and yaml
+/// since E7h (beside their bounds), bash, haskell and html since E7h's fix
+/// round 1, for that alone.
+const VENDORED_HEADERS: &[&str] = &[
+    "tree-sitter-bash",
+    "tree-sitter-haskell",
+    "tree-sitter-html",
+    "tree-sitter-python",
+    "tree-sitter-yaml",
+];
+
+#[test]
+fn e7h_the_conforming_array_header_ships_from_the_vendored_copies() {
+    // The published headers of these five push through an `(Array *)` cast,
+    // the aliasing UB GCC 16 compiled into tree-sitter-haskell's abort.
+    // `-fno-strict-aliasing` forbids every compiler to exploit it, but only
+    // in a build cargo starts at the repository root, where it reads
+    // `.cargo/config.toml` (E7h review 1: a `cargo install --git` editor
+    // aborted on the two-pragma file in seven of nine runs). A copy's header
+    // goes wherever its source does. Each crate must resolve to its copy,
+    // not crates.io, and the copy's header must be the conforming one; a
+    // bump past the copy's version resolves to crates.io and fails here by
+    // name, as a dropped patch entry does.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let patch = manifest
+        .split("\n[patch.crates-io]\n")
+        .nth(1)
+        .expect("Cargo.toml has a [patch.crates-io] section");
+    for krate in VENDORED_HEADERS {
+        let block = lock
+            .split("[[package]]")
+            .find(|b| b.lines().any(|l| l == format!("name = \"{krate}\"")))
+            .unwrap_or_else(|| panic!("Cargo.lock lists {krate}"));
+        assert!(
+            !block.lines().any(|l| l.starts_with("source = ")),
+            "{krate} resolves to crates.io again, whose `array.h` is the aliasing \
+             UB GCC 16 turned into tree-sitter-haskell's abort:{block}"
+        );
+        assert!(
+            patch.contains(&format!("{krate} = {{ path = \"vendor/{krate}\" }}")),
+            "[patch.crates-io] routes {krate} to vendor/{krate}"
+        );
+        let copy = root.join("vendor").join(krate);
+        assert!(
+            copy.join("PMACS-VENDOR.md").is_file(),
+            "{krate}'s copy says what changed"
+        );
+        let header = std::fs::read_to_string(copy.join("src/tree_sitter/array.h")).unwrap();
+        assert!(
+            header.starts_with("/* pmacs (E7h.1): tree-sitter-rust 0.24.2's")
+                && !header.contains("(Array *)(self)")
+                && header.contains("(self)->contents = _array__grow("),
+            "vendor/{krate}/src/tree_sitter/array.h is the conforming header"
+        );
+    }
+}

@@ -366,7 +366,16 @@ rand_distr = "0.4"
 # copies with the bound fixed; each `vendor/<crate>/PMACS-VENDOR.md` says
 # what changed and when the copy can go. The versions stay the published
 # ones, so `fuzz/corpora.tsv`'s pins and every other row hold.
+#
+# E7h fix round 1: bash, haskell and html ship from copies too, changed
+# only in carrying the `tree_sitter/array.h` tree-sitter's CLI has
+# generated since 0.24, whose pushes are not the aliasing UB that took
+# Haskell down. `-fno-strict-aliasing` travelled only with builds started
+# at the repository root; the header travels with the source.
 [patch.crates-io]
+tree-sitter-bash = { path = "vendor/tree-sitter-bash" }
+tree-sitter-haskell = { path = "vendor/tree-sitter-haskell" }
+tree-sitter-html = { path = "vendor/tree-sitter-html" }
 tree-sitter-md = { path = "vendor/tree-sitter-md" }
 tree-sitter-python = { path = "vendor/tree-sitter-python" }
 tree-sitter-yaml = { path = "vendor/tree-sitter-yaml" }

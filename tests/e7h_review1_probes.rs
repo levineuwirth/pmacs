@@ -196,14 +196,12 @@ fn e7h_review1_pmacs_built_outside_its_root_compiles_no_aliasing_scanner_without
 fn e7h_review1_the_crates_relying_on_the_flag_are_the_recorded_residual() {
     // Control for the row above: its subject is exactly the scanners E7h
     // recorded as relying on the flag, so it fails for them and no others.
+    // At 0a85d18 those were bash, haskell and html; E7h's fix round 1
+    // vendored each with the conforming header, so none relies on it now.
     let exposed: Vec<String> = crates_relying_on_the_flag().into_iter().collect();
     assert_eq!(
         exposed,
-        [
-            "tree-sitter-bash",
-            "tree-sitter-haskell",
-            "tree-sitter-html"
-        ],
-        "the scanners on the aliasing header"
+        Vec::<String>::new(),
+        "no shipped scanner is on the aliasing header"
     );
 }

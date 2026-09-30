@@ -128,7 +128,7 @@ fn e7g_review1_every_extension_an_unshipped_grammar_claimed_reaches_its_server()
     // its language's server configured (the fake, recording what it opens),
     // so the didOpen is the filetype map's doing and nothing else's. `.hs`
     // left the list at E7h, when Haskell's grammar came back
-    // (`e7h_tree_sitter_haskell_ships_because_its_c_is_built_without_strict_aliasing`),
+    // (`e7h_tree_sitter_haskell_ships_from_a_copy_on_the_conforming_array_header`),
     // and `.yaml` and `.yml` with YAML's
     // (`e7h_a_yaml_file_nested_254_deep_opens_and_parses_as_yaml`).
     let fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp");
@@ -326,21 +326,16 @@ fn scanners_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The shipped scanners that still push through the pre-0.24 `array.h`,
-/// recorded at E7h.1 under the owner's ruling: `-fno-strict-aliasing` for
-/// every grammar is the class fix, and a scanner left on the old header is
-/// a residual clang's type sanitizer still reports (bash 164,968 reports of
-/// the pointer class on a growth input, haskell 2,732 on the two retyped
-/// pragmas, html none of that class), which no compiler may now exploit.
-/// A grammar whose copy gets the fixed header leaves this list (python did
-/// at E7h, its copy vendored for its bound); a new grammar on the old
-/// header joins it only by an edit here, which is the point (haskell did at
-/// E7h, its grammar restored under the flag).
-const ALIASING_HEADER_RESIDUAL: &[&str] = &[
-    "tree-sitter-bash: src/scanner.c",
-    "tree-sitter-haskell: src/scanner.c",
-    "tree-sitter-html: src/scanner.c",
-];
+/// The shipped scanners that still push through the pre-0.24 `array.h`.
+/// E7h.1 recorded bash, haskell and html here under the owner's ruling
+/// that `-fno-strict-aliasing` was the class fix; review 1 found the flag
+/// reaches only builds cargo starts at the repository root (a `cargo
+/// install --git` editor aborted on the two-pragma file), and at E7h's fix
+/// round 1 the owner ruled the three vendored with the conforming header,
+/// as python and yaml already were. So the residual is empty, and a grammar
+/// on the old header can join the table only by an edit here, which is the
+/// point: the flag is then all that stands between it and GCC 16.
+const ALIASING_HEADER_RESIDUAL: &[&str] = &[];
 
 #[test]
 fn e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_without_strict_aliasing()
@@ -354,9 +349,11 @@ fn e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_
     // exploit it). The vendored `tree_sitter/array.h` that does this is
     // the pre-0.24 CLI's; grammars regenerated since assign `contents` from
     // the grow's return. Review 1 found bash, html and python shipping it.
-    // E7h.1 closes the class for every compiler with -fno-strict-aliasing
-    // (`.cargo/config.toml`), so what is asserted is that every scanner
-    // still on the header is one recorded above, and that the flag is set.
+    // E7h.1 set -fno-strict-aliasing (`.cargo/config.toml`) for every
+    // compiler, and E7h's fix round 1 gave every such scanner the fixed
+    // header in its vendored copy, so what is asserted is that the flag is
+    // set and every scanner still on the old header is one recorded above:
+    // none.
     let config = read(".cargo/config.toml");
     for var in ["HOST_CFLAGS", "TARGET_CFLAGS"] {
         assert!(

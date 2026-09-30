@@ -217,37 +217,28 @@ const TWO_PRAGMAS: &str = "{-# LANGUAGE OverloadedStrings #-}\n\
                            {-# LANGUAGE ScopedTypeVariables #-}\n";
 
 #[test]
-fn e7h_tree_sitter_haskell_ships_because_its_c_is_built_without_strict_aliasing() {
+fn e7h_tree_sitter_haskell_ships_from_a_copy_on_the_conforming_array_header() {
     // tree-sitter-haskell 0.23.1 aborted the editor on TWO_PRAGMAS (E7g):
-    // its vendored `tree_sitter/array.h` grows an array through an
+    // its published `tree_sitter/array.h` grows an array through an
     // `(Array *)` cast and reads it back through the element pointer,
     // undefined behavior under C's aliasing rule, and GCC 16 at -O2 and -O3
     // compiled it into a write through the pointer the grow had just freed
     // (glibc's `corrupted size vs. prev_size`; ASan: a heap-buffer-overflow
-    // in `advance`). E7h measured, on the same scanner and the same bytes
-    // retyped a byte at a time: -O2 and -O3 overflow without the flag and
-    // are clean with `-fno-strict-aliasing`, plain and under ASan; and a
-    // 600 s fuzz run on GCC 16 with the flag, under ASan and UBSan, found no
-    // crash or hang. So what holds the grammar is the flag, not the source:
-    // clang's type sanitizer still reports the header
-    // (`ALIASING_HEADER_RESIDUAL` in tests/e7g_review1_probes.rs names it).
-    // This row fails if the flag leaves the build or the crate moves off the
-    // version that was fuzzed; a bump is a new grammar under the rule in
-    // CLAUDE.md. The test build compiles grammar C at -O0, where the
-    // overflow never showed, so the parse below is the reproduction as a
-    // file and not a witness of the optimizer; the release build's record
-    // of the flag is `e7h_every_grammar_build_recorded_the_flag`.
+    // in `advance`). E7h restored it on `-fno-strict-aliasing`, which holds
+    // for every compiler measured but only in builds cargo starts at the
+    // repository root (review 1: a `cargo install --git` editor aborted on
+    // this file in seven of nine runs). Since E7h's fix round 1 it ships
+    // from `vendor/tree-sitter-haskell`, the published crate with the
+    // header tree-sitter's CLI has generated since 0.24, whose push assigns
+    // `contents` from the grow; GCC 16 at -O2 and -O3 without the flag
+    // compiles that copy clean on these bytes and E7g's crashers. So what
+    // holds the grammar is the source, and the flag stays beside it. This
+    // row fails if the crate resolves to crates.io again, if its header
+    // goes back, or if it moves off the version that was fuzzed; a bump is a
+    // new grammar under the rule in CLAUDE.md. The test build compiles
+    // grammar C at -O0, where the overflow never showed, so the parse below
+    // is the reproduction as a file and not a witness of the optimizer.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let config = std::fs::read_to_string(root.join(".cargo/config.toml")).unwrap();
-    for var in ["HOST_CFLAGS", "TARGET_CFLAGS"] {
-        assert!(
-            config.contains(&format!(
-                "{var} = {{ value = \"-fno-strict-aliasing\", force = true }}"
-            )),
-            ".cargo/config.toml forces -fno-strict-aliasing into {var}; without it \
-             GCC 16 at -O2 turns tree-sitter-haskell's aliasing UB into a heap overflow"
-        );
-    }
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
     let block = lock
         .split("[[package]]")
@@ -258,6 +249,27 @@ fn e7h_tree_sitter_haskell_ships_because_its_c_is_built_without_strict_aliasing(
         "tree-sitter-haskell moved off 0.23.1, the version E7h fuzzed; fuzz the \
          new one before it ships:{block}"
     );
+    assert!(
+        !block.lines().any(|l| l.starts_with("source = ")),
+        "tree-sitter-haskell resolves to crates.io again, whose array.h GCC 16 \
+         turns into the two-pragma abort:{block}"
+    );
+    let header =
+        std::fs::read_to_string(root.join("vendor/tree-sitter-haskell/src/tree_sitter/array.h"))
+            .unwrap();
+    assert!(
+        !header.contains("(Array *)(self)"),
+        "vendor/tree-sitter-haskell's array.h pushes through the aliasing cast again"
+    );
+    let config = std::fs::read_to_string(root.join(".cargo/config.toml")).unwrap();
+    for var in ["HOST_CFLAGS", "TARGET_CFLAGS"] {
+        assert!(
+            config.contains(&format!(
+                "{var} = {{ value = \"-fno-strict-aliasing\", force = true }}"
+            )),
+            ".cargo/config.toml still forces -fno-strict-aliasing into {var}"
+        );
+    }
     let dir = temp_dir("pragmas");
     let s = editor_in(&dir);
     exec(&s, "pmacs.lsp.config = {}");

@@ -6,15 +6,17 @@
 #   (none, ASan, ASan+UBSan as the fuzz job builds, UBSan).
 # Each build parses the owner's two-pragma file and three of E7g's crashers
 # cold and retyped a byte at a time (drv.c). Usage:
-#   CC=gcc tests/e7h_review1/haskell_matrix.sh [OUTDIR]
-# Needs the two crates in cargo's registry (`cargo fetch`).
+#   CC=gcc [HS_SRC=DIR] tests/e7h_review1/haskell_matrix.sh [OUTDIR]
+# Needs the two crates in cargo's registry (`cargo fetch`). HS_SRC names
+# another copy of the grammar's src/ (E7h fix round 1:
+# HS_SRC=vendor/tree-sitter-haskell/src, the copy on the conforming header).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cc=${CC:-gcc}
 out=${1:-${TMPDIR:-/tmp}/e7h-review1-haskell}
 reg=$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/ | head -n 1)
 rt="$reg/tree-sitter-0.26.8"
-hs="$reg/tree-sitter-haskell-0.23.1/src"
+hs=${HS_SRC:-"$reg/tree-sitter-haskell-0.23.1/src"}
 [ -d "$rt" ] && [ -d "$hs" ] || { echo "cargo fetch first: $rt, $hs" >&2; exit 2; }
 mkdir -p "$out/in"
 printf '{-# LANGUAGE OverloadedStrings #-}\n{-# LANGUAGE ScopedTypeVariables #-}\n' > "$out/in/two.hs"
@@ -22,7 +24,7 @@ printf '{-# LANGUAGE OverloadedStrings #-}\n{-# LANGUAGE ScopedTypeVariables #-}
 printf '{- #ent \n' > "$out/in/crash-0.hs"
 printf '{-   - a\n' > "$out/in/crash-1.hs"
 printf -- '-- a\n-- a' > "$out/in/crash-2.hs"
-echo "$($cc --version | head -n 1)"
+echo "$($cc --version | head -n 1); grammar from $hs"
 build() { # tag flags...
     tag=$1; shift
     d="$out/obj/$tag"; mkdir -p "$d"
