@@ -100,9 +100,42 @@ fn e7g_every_bundled_grammar_has_real_sources_pinned_to_its_locked_crate() {
     }
 }
 
+/// `scripts/grammar-fuzz-needed --paths` over `paths`: its `run=` and
+/// `reason=` lines.
+fn fuzz_needed(paths: &[&str]) -> (String, String) {
+    use std::io::Write as _;
+    let mut child =
+        Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/grammar-fuzz-needed"))
+            .arg("--paths")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("scripts/grammar-fuzz-needed runs");
+    let mut stdin = child.stdin.take().unwrap();
+    for p in paths {
+        writeln!(stdin, "{p}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "the decision exits 0: {out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let field = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .unwrap_or_else(|| panic!("no {k}= line in {text:?}"))
+            .to_owned()
+    };
+    (field("run"), field("reason"))
+}
+
 #[test]
 fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
-    let wf = read(".github/workflows/grammar-fuzz.yml");
+    // Since E7h's fix round 1 the workflow runs on every pull request and
+    // push and its first step asks `scripts/grammar-fuzz-needed`, so that
+    // the job always reports and can be a required check (a workflow a
+    // `paths:` filter skips reports nothing, and a required check that
+    // never reports blocks the merge). The paths are the script's; each
+    // must make it run, and a change to none of them must not.
     for path in [
         "Cargo.lock",
         "Cargo.toml",
@@ -113,24 +146,93 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
         "src/syntax.rs",
         "src/bin/pmacs_grammar_fuzz.rs",
         "scripts/fuzz-grammars",
-        "fuzz/**",
-        "vendor/**",
-        "builtin/queries/**",
+        "scripts/grammar-fuzz-needed",
+        "fuzz/corpora.tsv",
+        "vendor/tree-sitter-haskell/src/tree_sitter/array.h",
+        "builtin/queries/latex/highlights.scm",
         ".github/workflows/grammar-fuzz.yml",
     ] {
-        let listed = wf.matches(&format!("      - {path}\n")).count();
         assert_eq!(
-            listed, 2,
-            "{path} triggers the job on pull requests and on main"
+            fuzz_needed(&["docs/invariants.md", path]),
+            ("true".to_owned(), format!("{path} changed")),
+            "{path} makes the job fuzz"
         );
     }
+    for path in [
+        "docs/invariants.md",
+        "src/editor.rs",
+        "tests/e7g_grammar_fuzz_acceptance.rs",
+        "vendored/x.c",
+        "fuzzy.txt",
+        "builtin/queriesx/y.scm",
+        ".github/workflows/ci.yml",
+    ] {
+        assert_eq!(
+            fuzz_needed(&[path]).0,
+            "false",
+            "{path} leaves the job to pass without fuzzing"
+        );
+    }
+    assert_eq!(
+        fuzz_needed(&[]).0,
+        "false",
+        "an empty change fuzzes nothing"
+    );
+
+    let wf = read(".github/workflows/grammar-fuzz.yml");
+    let on = wf
+        .split("\non:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nconcurrency:").next())
+        .expect("an `on:` block");
     assert!(
-        wf.contains("workflow_dispatch:"),
-        "the long form is dispatchable"
+        !on.contains("paths"),
+        "no workflow-level path filter, which would stop the job reporting:\n{on}"
+    );
+    for trigger in [
+        "  pull_request:\n",
+        "  push:\n    branches: [main]\n",
+        "  workflow_dispatch:\n",
+    ] {
+        assert!(on.contains(trigger), "the workflow runs on {trigger:?}");
+    }
+    assert!(
+        wf.contains("scripts/grammar-fuzz-needed --base \"$PR_BASE\"")
+            && wf.contains("scripts/grammar-fuzz-needed --base \"$PUSH_BEFORE\""),
+        "the job asks the script for pull requests and pushes"
     );
     assert!(
-        wf.contains("scripts/fuzz-grammars"),
-        "the job runs the script"
+        wf.contains("workflow_dispatch) printf 'run=true"),
+        "a dispatched run always fuzzes"
+    );
+    let steps = wf.split("\n      - ").skip(1).collect::<Vec<_>>();
+    let gated = |name: &str| {
+        steps
+            .iter()
+            .find(|s| s.contains(name))
+            .unwrap_or_else(|| panic!("a step {name}"))
+            .contains("if: steps.decide.outputs.run == 'true'")
+            || steps
+                .iter()
+                .find(|s| s.contains(name))
+                .unwrap()
+                .contains("if: always() && steps.decide.outputs.run == 'true'")
+    };
+    for step in [
+        "dtolnay/rust-toolchain",
+        "Swatinem/rust-cache",
+        "name: Fuzz every grammar",
+        "name: Keep the report",
+    ] {
+        assert!(gated(step), "{step} runs only when the decision says so");
+    }
+    assert!(
+        wf.contains("scripts/fuzz-grammars\n          --arm ubsan"),
+        "the job runs the script's ubsan arm"
+    );
+    assert!(
+        wf.contains("    name: Grammar fuzz\n"),
+        "the job's check is named `Grammar fuzz`, the context the owner makes required"
     );
 }
 

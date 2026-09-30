@@ -269,11 +269,27 @@ fn e7g_review1_the_fuzz_job_runs_when_a_query_overlay_changes() {
         syntax.contains("builtin/queries/latex/highlights.scm"),
         "control: the overlay is compiled into the table"
     );
-    let wf = read(".github/workflows/grammar-fuzz.yml");
-    assert_eq!(
-        wf.matches("      - builtin/queries/**\n").count(),
-        2,
-        "builtin/queries/** triggers the grammar fuzz job on pull requests and on main"
+    // Since E7h's fix round 1 the job asks `scripts/grammar-fuzz-needed`
+    // rather than a workflow path filter.
+    let out =
+        Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/grammar-fuzz-needed"))
+            .arg("--paths")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"builtin/queries/latex/highlights.scm\n")?;
+                child.wait_with_output()
+            })
+            .expect("scripts/grammar-fuzz-needed runs");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("run=true\n"),
+        "builtin/queries/** makes the grammar fuzz job fuzz: {out:?}"
     );
 }
 

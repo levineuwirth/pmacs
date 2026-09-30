@@ -1,0 +1,91 @@
+#!/bin/sh
+# scripts/grammar-fuzz-needed --- whether a change touches what the
+# grammar fuzz job fuzzes (E7h fix round 1).
+#
+#   scripts/grammar-fuzz-needed --base REF [--head REF]
+#   scripts/grammar-fuzz-needed --paths < CHANGED-PATHS
+#
+# Prints two lines in GITHUB_OUTPUT's form:
+#
+#   run=true|false
+#   reason=<the first changed path that can change the grammar set, or why not>
+#
+# `--base` diffs BASE...HEAD (from their merge base, as a pull request's
+# changes are counted); `--paths` reads one path per line. A base this
+# clone does not have, or the all-zero sha a push to a new ref carries,
+# prints run=true: not knowing what changed is a reason to fuzz, never to
+# skip. A diff that fails exits 2.
+#
+# Why a script: `.github/workflows/grammar-fuzz.yml` ran on a
+# workflow-level `paths:` filter until E7h's fix round 1, and a workflow a
+# filter skips reports nothing at all, so its job could never be a
+# required check (a required check that never reports blocks the merge
+# forever). The workflow now runs on every change and asks this script;
+# its job reports success either way, and the list below is tested by
+# tests/e7g_grammar_fuzz_acceptance.rs, which a YAML list could not be.
+set -eu
+
+die() { echo "grammar-fuzz-needed: $*" >&2; exit 2; }
+
+# What can change the grammar set, how its C is compiled, or what the
+# harness does with it: the crate graph, the C flags, the table and the
+# query overlays it compiles in, the harness and its script and seeds, the
+# vendored grammars, this decision and the workflow.
+fuzzed() {
+    case "$1" in
+        Cargo.lock | Cargo.toml | .cargo/config.toml) return 0 ;;
+        src/syntax.rs | src/bin/pmacs_grammar_fuzz.rs) return 0 ;;
+        scripts/fuzz-grammars | scripts/grammar-fuzz-needed) return 0 ;;
+        fuzz/* | vendor/* | builtin/queries/*) return 0 ;;
+        .github/workflows/grammar-fuzz.yml) return 0 ;;
+    esac
+    return 1
+}
+
+base=
+head=HEAD
+from_stdin=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --base) base=${2:?}; shift 2 ;;
+        --head) head=${2:?}; shift 2 ;;
+        --paths) from_stdin=1; shift ;;
+        -h | --help) sed -n '2,26p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+decide() {
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if fuzzed "$path"; then
+            echo "run=true"
+            echo "reason=$path changed"
+            return 0
+        fi
+    done
+    echo "run=false"
+    echo "reason=no changed path can change the grammar set"
+}
+
+if [ "$from_stdin" = 1 ]; then
+    decide
+    exit 0
+fi
+[ -n "$base" ] || die "--base REF or --paths"
+case "$base" in
+    *[!0]*) ;;
+    *)
+        echo "run=true"
+        echo "reason=no base to diff against ($base)"
+        exit 0
+        ;;
+esac
+if ! git rev-parse --verify --quiet "$base^{commit}" > /dev/null; then
+    echo "run=true"
+    echo "reason=base $base is not in this clone"
+    exit 0
+fi
+git rev-parse --verify --quiet "$head^{commit}" > /dev/null || die "no commit $head"
+changed=$(git diff --name-only "$base...$head") || die "git diff $base...$head failed"
+printf '%s\n' "$changed" | decide

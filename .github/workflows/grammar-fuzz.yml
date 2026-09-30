@@ -7,61 +7,45 @@ name: Grammar fuzz
 # `{-# LANGUAGE #-}` pragmas, aborted the editor. So a grammar's fuzz run
 # is a condition of shipping it, and this job runs one whenever the
 # grammar set can have changed: the crate graph (Cargo.lock, Cargo.toml),
-# the table (src/syntax.rs), the corpora (fuzz/), or the harness.
+# the C flags (.cargo/config.toml), the table (src/syntax.rs), the query
+# overlays (builtin/queries/), the vendored grammars (vendor/), the
+# corpora (fuzz/), or the harness.
 #
-# `scripts/fuzz-grammars` builds the harness under the `fuzz` profile, so
-# the C is optimized as it ships (the Haskell overflow is a miscompile at
-# -O2 that a debug build never shows), with the tree-sitter runtime and
-# grammar C under AddressSanitizer; seeds every grammar from this tree and
-# its upstream sources at the commits fuzz/corpora.tsv pins; and fails on
-# a crash or a parse that never returns (a slow or large one is reported,
-# D36). The PR smoke is every upstream corpus example and at most 100
-# seeds per grammar from each other source, each cut to 16 KB, then at
-# least 300 mutations and 15 s per grammar (four minutes at most); the
-# grammars a pull request changed --- a crate's locked version, its
-# corpora row, its vendored copy, from `pmacs_grammar_fuzz changed` ---
-# run ten minutes instead, and a tree-sitter runtime bump runs them all
-# ten minutes. `workflow_dispatch` runs the long form, 400 seeds a source
-# and ten minutes a grammar by default.
+# The workflow runs on every pull request and every push to main, and its
+# first step asks `scripts/grammar-fuzz-needed` whether the change touched
+# any of those (E7h fix round 1). Until then a workflow-level `paths:`
+# filter decided, and a workflow a filter skips reports no check at all,
+# so the job could not be made required: a required check that never
+# reports blocks a merge forever. Now the job always reports, success when
+# nothing it fuzzes changed, and the path list is the script's, which
+# tests/e7g_grammar_fuzz_acceptance.rs exercises.
 #
-# What this job can and cannot catch (E7h.4; CLAUDE.md states it beside
-# the rule): it builds the grammars as they ship, -fno-strict-aliasing
-# included, with ASan and UBSan on their C, so a memory error or UB on a
-# path an input reaches is reported where it happens, on any compiler;
-# every parse runs under the hang limit as its deadline, so a parse that
-# never returns is a hang however it grows; the mutator nests past the
-# depths at which a scanner's state outgrows tree-sitter's buffer. It
-# cannot reach an input its mutator does not (it is not coverage-guided),
-# it sees GCC 13 and not the laptop's GCC 16, and its green is not a
-# proof: a short run found no defect, nothing more. The owner makes it a
-# required check; a session cannot.
+# `scripts/fuzz-grammars --arm ubsan` builds the harness under the `fuzz`
+# profile, so the C is optimized as it ships (the Haskell overflow was UB
+# GCC 16 exploits at -O2 that a debug build never shows), with the
+# tree-sitter runtime and grammar C under AddressSanitizer and
+# UndefinedBehaviorSanitizer; the script's two other arms, which can see
+# aliasing UB, run in the rule's laptop run and not here (CLAUDE.md). It
+# seeds every grammar from this tree and its upstream sources at the
+# commits fuzz/corpora.tsv pins, and fails on a crash or a parse that never
+# returns (a slow or large one is reported, D36). The PR smoke is every
+# upstream corpus example and at most 100 seeds per grammar from each other
+# source, each cut to 16 KB, then at least 300 mutations and 15 s per
+# grammar (four minutes at most); the grammars a pull request changed --- a
+# crate's locked version, its corpora row, its vendored copy, from
+# `pmacs_grammar_fuzz changed` --- run ten minutes instead, and a
+# tree-sitter runtime bump runs them all ten minutes. `workflow_dispatch`
+# runs the long form, 400 seeds a source and ten minutes a grammar by
+# default.
+#
+# What this job can and cannot catch is stated beside the rule in
+# CLAUDE.md, and is not repeated here so that the two cannot drift. The
+# owner makes it a required check; a session cannot.
 
 on:
   pull_request:
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - .cargo/config.toml
-      - src/syntax.rs
-      - src/bin/pmacs_grammar_fuzz.rs
-      - scripts/fuzz-grammars
-      - fuzz/**
-      - vendor/**
-      - builtin/queries/**
-      - .github/workflows/grammar-fuzz.yml
   push:
     branches: [main]
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - .cargo/config.toml
-      - src/syntax.rs
-      - src/bin/pmacs_grammar_fuzz.rs
-      - scripts/fuzz-grammars
-      - fuzz/**
-      - vendor/**
-      - builtin/queries/**
-      - .github/workflows/grammar-fuzz.yml
   workflow_dispatch:
     inputs:
       seconds:
@@ -83,7 +67,7 @@ concurrency:
 
 jobs:
   fuzz:
-    name: Grammar fuzz (every grammar, ASan)
+    name: Grammar fuzz
     runs-on: ubuntu-latest
     # The smoke: a cold -O3 build of the workspace's dependencies (about
     # ten minutes), the upstream fetch, the capped seeds, then per grammar
@@ -96,13 +80,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # `changed --since` reads the base's Cargo.lock and corpora.
+          # `changed --since` and the decision read the base's history.
           fetch-depth: 0
+      - name: Decide whether the grammar set changed
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+            workflow_dispatch) printf 'run=true\nreason=dispatched\n' > decision ;;
+            pull_request) scripts/grammar-fuzz-needed --base "$PR_BASE" > decision ;;
+            push) scripts/grammar-fuzz-needed --base "$PUSH_BEFORE" > decision ;;
+            *) printf 'run=true\nreason=event %s\n' "$EVENT" > decision ;;
+          esac
+          cat decision
+          cat decision >> "$GITHUB_OUTPUT"
+      - name: Nothing this job fuzzes changed
+        if: steps.decide.outputs.run != 'true'
+        env:
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          echo "Grammar fuzz passes without fuzzing: $REASON"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.decide.outputs.run == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.decide.outputs.run == 'true'
         with:
           workspaces: ". -> target/grammar-fuzz/target"
       - name: Fuzz every grammar
+        if: steps.decide.outputs.run == 'true'
         run: >-
           scripts/fuzz-grammars
           --arm ubsan
@@ -116,7 +124,7 @@ jobs:
           ${{ github.event_name == 'push' && format('--long-since {0}', github.event.before) || '' }}
           --out "${{ github.workspace }}/grammar-fuzz-report"
       - name: Keep the report and every reproduction
-        if: always()
+        if: always() && steps.decide.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: grammar-fuzz-report
