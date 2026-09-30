@@ -396,8 +396,9 @@ strip = "debuginfo"
 
 # E7g: `scripts/fuzz-grammars` builds `pmacs_grammar_fuzz` here. It
 # inherits `release` so the grammars' C is compiled at -O3, as it ships:
-# the tree-sitter-haskell overflow is a miscompile at -O2 and above that
-# a debug build never shows. LTO and one codegen unit buy a fuzzer
+# the tree-sitter-haskell overflow was aliasing UB in its `array.h` that
+# GCC 16 turns into a heap overflow at -O2 and above, and that a debug
+# build never shows. LTO and one codegen unit buy a fuzzer
 # nothing and cost minutes; symbols stay for the sanitizer's reports.
 [profile.fuzz]
 inherits = "release"

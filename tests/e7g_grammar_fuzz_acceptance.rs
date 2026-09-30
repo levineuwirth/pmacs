@@ -9,10 +9,11 @@
 //! or bumping a grammar edits that file; the harness drives every grammar
 //! in the table; the workflow runs on every path that can change the set;
 //! and the `fuzz` profile compiles the C the way the release does, since
-//! the miscompile E7g found is invisible at -O0. The last rows hold what
-//! the fuzz run itself found taking the editor down: YAML, which aborted
-//! and ships since E7h from a copy with its bound fixed, and the
-//! JavaScript family, which never returns and stays out.
+//! the aliasing UB E7g found becomes an overflow only when GCC 16
+//! optimizes it, and is invisible at -O0. The last rows hold what the fuzz
+//! run itself found taking the editor down: YAML, which aborted and ships
+//! since E7h from a copy with its bound fixed, and the JavaScript family,
+//! which never returns and stays out.
 
 use std::collections::BTreeSet;
 use std::path::Path;
