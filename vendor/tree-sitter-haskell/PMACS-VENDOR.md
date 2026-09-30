@@ -18,7 +18,8 @@ builds cargo starts at the repository root: E7h review 1 built pmacs with
 `cargo install --git` and it aborted on the first keystroke into the pragma
 file in seven of nine runs. The owner ruled at E7h's fix round 1 that the
 conforming header is vendored, so the fix travels with the source; the flag
-stays for every other grammar's C and the runtime's. Held by
+stays for every other grammar's C and the runtime's, and `build.rs` refuses a
+build in which the C compiler would not receive it. Held by
 `tests/e7g_review1_serialization_witnesses.rs` (this copy, not crates.io) and
 `tests/e7g_review1_probes.rs` (no shipped scanner on the old header).
 

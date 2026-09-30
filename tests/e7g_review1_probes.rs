@@ -334,7 +334,8 @@ fn scanners_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// round 1 the owner ruled the three vendored with the conforming header,
 /// as python and yaml already were. So the residual is empty, and a grammar
 /// on the old header can join the table only by an edit here, which is the
-/// point: the flag is then all that stands between it and GCC 16.
+/// point: the flag, which `build.rs` refuses to build without since the
+/// same round, is then all that stands between it and GCC 16.
 const ALIASING_HEADER_RESIDUAL: &[&str] = &[];
 
 #[test]

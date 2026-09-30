@@ -102,9 +102,12 @@ fn crates_relying_on_the_flag() -> BTreeSet<String> {
 }
 
 #[test]
-#[ignore = "fails at 0a85d18: a build started outside the repository compiles \
+#[ignore = "failed at 0a85d18: a build started outside the repository compiled \
             tree-sitter-bash, -haskell and -html without -fno-strict-aliasing; \
-            it runs a cold `cargo check` of pmacs (minutes)"]
+            passes since E7h's fix round 1 vendored them on the conforming header \
+            (the build's refusal is e7h_a_build_started_outside_the_checkout_refuses_\
+            without_the_flag); while no scanner relies on the flag it returns at once, \
+            and otherwise runs a cold `cargo check` of pmacs (minutes)"]
 fn e7h_review1_pmacs_built_outside_its_root_compiles_no_aliasing_scanner_without_the_flag() {
     // Passes when the protection travels with the build rather than with the
     // directory it starts in, by any of: no shipped scanner left on the

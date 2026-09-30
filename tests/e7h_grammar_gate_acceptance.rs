@@ -13,7 +13,14 @@
 //! (native) or `TARGET_CFLAGS` (cross); each grammar's build script
 //! records what it read, and the second row reads that record for every
 //! grammar crate that ships, so the flag is shown to reach each build and
-//! not only the ones someone tested.
+//! not only the ones someone tested. Review 1 found the build that does not
+//! start at the root: `cargo install --git` reads no `.cargo/config.toml`,
+//! and its editor aborted on the two-pragma Haskell file. Since E7h's fix
+//! round 1 no shipped scanner carries that header (bash, haskell and html
+//! are vendored with the fixed one), and `build.rs` refuses to build when
+//! the C compiler would not receive the flag; the next two rows hold the
+//! refusal's verdict and, ignored for its two cold builds, the refusal
+//! itself from outside the checkout.
 //!
 //! E7h.2: a parse is bounded in time where tree-sitter calls its progress
 //! callback. `run_parse` cancels through it once `ParseRequest::deadline`
@@ -157,6 +164,108 @@ fn e7h_every_grammar_build_recorded_the_flag() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[path = "../build/strict_aliasing.rs"]
+mod strict_aliasing;
+
+#[test]
+fn e7h_the_build_refuses_a_c_compiler_the_aliasing_flag_does_not_reach() {
+    // `build.rs` hands `strict_aliasing::verdict` the arguments `cc` would
+    // give the C compiler, environment flags last; the last aliasing flag
+    // among them decides. E7h review 1's `cargo install --git` build is the
+    // first case: `.cargo/config.toml` unread, so no flag at all.
+    let v = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        strict_aliasing::verdict("cc", &args)
+    };
+    let refused = v(&["-O3", "-ffunction-sections", "-fPIC", "-m64"]).unwrap_err();
+    assert!(
+        refused.contains("refusing to build")
+            && refused.contains("-fno-strict-aliasing")
+            && refused.contains("CFLAGS=-fno-strict-aliasing cargo install"),
+        "no flag: refused, naming the flag and the remedy: {refused}"
+    );
+    assert!(
+        v(&["-O3", "-fno-strict-aliasing"]).is_ok(),
+        "the config's flag"
+    );
+    let overridden = v(&["-O3", "-fno-strict-aliasing", "-fstrict-aliasing"]).unwrap_err();
+    assert!(
+        overridden.contains("a later -fstrict-aliasing overrides it"),
+        "a CFLAGS_<target> -fstrict-aliasing appended after the config's flag wins, and is \
+         refused: {overridden}"
+    );
+    assert!(
+        v(&["-fstrict-aliasing", "-O2", "-fno-strict-aliasing"]).is_ok(),
+        "the flag after a user's -fstrict-aliasing wins"
+    );
+    assert!(
+        v(&["-Wno-strict-aliasing", "-fno-strict-aliasing=x"]).is_err(),
+        "only the flag itself counts"
+    );
+}
+
+#[test]
+#[ignore = "two cold `cargo check`s of pmacs from outside the checkout (minutes); \
+            E7h fix round 1's witness that build.rs refuses what review 1's \
+            `cargo install --git` built"]
+fn e7h_a_build_started_outside_the_checkout_refuses_without_the_flag() {
+    // cargo reads `.cargo/config.toml` only from the directory a build
+    // starts in and its ancestors, so a build of this manifest started from
+    // a temporary directory sees no `-fno-strict-aliasing` at all, as E7h
+    // review 1's `cargo install --git` did. It must fail in pmacs's build
+    // script, naming the flag; and with the remedy the message names,
+    // `CFLAGS=-fno-strict-aliasing`, the same build must pass.
+    let dir = temp_dir("outside");
+    let target = dir.join("target");
+    let check = |cflags: Option<&str>| {
+        let mut cmd = std::process::Command::new(env!("CARGO"));
+        cmd.args([
+            "check",
+            "--offline",
+            "-p",
+            "pmacs",
+            "--lib",
+            "--manifest-path",
+        ])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target)
+        .current_dir(&dir)
+        // a user config's sccache would wrap the C too, and can fail on
+        // its own
+        .env("RUSTC_WRAPPER", "")
+        .env_remove("CARGO_TARGET_DIR")
+        // this test runs under the checkout's `[env]`; the build it
+        // starts must not inherit it
+        .env_remove("HOST_CFLAGS")
+        .env_remove("TARGET_CFLAGS")
+        .env_remove("CFLAGS");
+        if let Some(flags) = cflags {
+            cmd.env("CFLAGS", flags);
+        }
+        cmd.output().expect("cargo check from outside the checkout")
+    };
+    let refused = check(None);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success()
+            && stderr.contains("failed to run custom build command for `pmacs")
+            && stderr.contains(
+                "refusing to build: the C compiler would not receive \
+                                -fno-strict-aliasing"
+            ),
+        "a build started outside the checkout is refused by pmacs's build script, \
+         naming the flag:\n{stderr}"
+    );
+    let remedied = check(Some("-fno-strict-aliasing"));
+    let stderr = String::from_utf8_lossy(&remedied.stderr);
+    assert!(
+        remedied.status.success(),
+        "with CFLAGS=-fno-strict-aliasing, as the refusal says, the same build passes:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The 24 bytes E7g reduced tree-sitter-javascript 0.25.0's hang to: the

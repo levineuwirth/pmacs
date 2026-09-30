@@ -234,10 +234,15 @@ contract) and `src/audit/rules.rs` (the metadata table). Summary:
 ### Running the lint locally
 
 ```sh
-cargo install --git https://git.levineuwirth.org/neuwirth/pmacs \
-    --bin pmacs-audit pmacs
+CFLAGS=-fno-strict-aliasing cargo install \
+    --git https://git.levineuwirth.org/neuwirth/pmacs --bin pmacs-audit pmacs
 pmacs-audit --pretty .
 ```
+
+`CFLAGS=-fno-strict-aliasing` is required: `pmacs-audit` is a binary of
+the `pmacs` package, whose build compiles tree-sitter's C and refuses to
+do it without that flag, which the repository's `.cargo/config.toml`
+supplies only to builds started inside a checkout.
 
 Exit code 1 means at least one Error finding; 2 means an I/O or
 configuration failure; 0 means clean (Warnings/Info OK).

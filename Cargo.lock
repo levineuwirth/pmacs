@@ -2571,6 +2571,7 @@ name = "pmacs"
 version = "1.1.0"
 dependencies = [
  "arborium-lean",
+ "cc",
  "codebook-tree-sitter-latex",
  "crossbeam",
  "crossterm",

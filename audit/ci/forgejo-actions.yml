@@ -53,8 +53,11 @@ jobs:
 
       # Pin to a tag once pmacs has its first audit-supporting release.
       - name: Build pmacs-audit
+        # CFLAGS: pmacs's build refuses tree-sitter's C without it
+        # (docs/package-author-guide.md).
         run: |
-          cargo install --git https://git.levineuwirth.org/neuwirth/pmacs \
+          CFLAGS=-fno-strict-aliasing cargo install \
+            --git https://git.levineuwirth.org/neuwirth/pmacs \
             --rev main \
             --bin pmacs-audit \
             pmacs
