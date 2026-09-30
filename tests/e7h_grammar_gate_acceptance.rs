@@ -532,7 +532,13 @@ fn e7h_a_parse_that_grows_without_returning_is_a_hang_not_an_allocation() {
         has(&row, "hangs=1") && has(&row, "allocs=0"),
         "{row:?}\n{md}"
     );
-    assert!(md.contains("never returned, growing past 64 MB"), "{md}");
+    // The harness reads a worker's memory from `/proc`, so only on Linux
+    // does it see the growth before the hang limit does; on macOS, which has
+    // no `/proc`, the hang limit catches it (PR #297's first CI run). The
+    // verdict above is the same on both.
+    if cfg!(target_os = "linux") {
+        assert!(md.contains("never returned, growing past 64 MB"), "{md}");
+    }
     assert_eq!(code, 1, "a parse that never returns fails the run: {row:?}");
 }
 
