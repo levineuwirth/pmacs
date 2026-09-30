@@ -602,8 +602,18 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
 
 /// One harness run over `lua` with `seeds` as its whole corpus (no
 /// mutation), a planted `mode`, a 1 s hang limit and a 64 MB memory limit:
-/// its exit code and its report.tsv row for lua.
+/// its exit code, its report.tsv row for lua, and its report.md.
 fn planted_run(tag: &str, mode: &str, seeds: &[(&str, &str)]) -> (i32, Vec<String>, String) {
+    let (code, row, md, _) = planted_run_with_notes(tag, mode, seeds);
+    (code, row, md)
+}
+
+/// `planted_run`, and each finding's note (`lua/<kind>-<n>.txt`), joined.
+fn planted_run_with_notes(
+    tag: &str,
+    mode: &str,
+    seeds: &[(&str, &str)],
+) -> (i32, Vec<String>, String, String) {
     let dir = temp_dir(&format!("plant-{tag}"));
     let corpus = dir.join("corpus/lua");
     std::fs::create_dir_all(&corpus).unwrap();
@@ -649,8 +659,19 @@ fn planted_run(tag: &str, mode: &str, seeds: &[(&str, &str)]) -> (i32, Vec<Strin
         .map(|(h, v)| format!("{h}={v}"))
         .collect();
     let md = std::fs::read_to_string(out.join("report.md")).unwrap_or_default();
+    let mut notes = String::new();
+    if let Ok(entries) = std::fs::read_dir(out.join("lua")) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths
+            .iter()
+            .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+        {
+            notes.push_str(&std::fs::read_to_string(p).unwrap_or_default());
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
-    (run.status.code().unwrap_or(-1), named, md)
+    (run.status.code().unwrap_or(-1), named, md, notes)
 }
 
 fn has(row: &[String], cell: &str) -> bool {
@@ -760,8 +781,16 @@ fn e7h_a_slow_parse_that_returns_is_filed_not_failed() {
     // 2.5 s against a 1 s hang limit: seen as a hang, it returns alone
     // under the twelve-times limit, so it is slow, filed, and the run
     // passes (D36).
-    let (code, row, md) = planted_run("slow", "slow", &[("a", TRIGGER)]);
+    let (code, row, md, notes) = planted_run_with_notes("slow", "slow", &[("a", TRIGGER)]);
     assert!(has(&row, "slow=1") && has(&row, "hangs=0"), "{row:?}\n{md}");
+    // E7h review 1, Low 7: the twelve-times limit is per parse and an input
+    // is several parses, so the note says no parse passed it, never that the
+    // input "returned in" more than the limit "under" it.
+    assert!(
+        notes.contains("slow, not hung: alone, no parse ran past the 12 s limit")
+            && !notes.contains("returned alone in"),
+        "{notes}"
+    );
     assert_eq!(code, 0, "a slow parse does not fail the run: {row:?}");
 }
 

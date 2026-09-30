@@ -1936,11 +1936,16 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
         match time_alone(grammar, &f.input, f.edits, f.seed, dir, &long) {
             Alone::Returned(micros) => {
                 f.kind = Kind::Slow;
+                // The limit is per parse, and an input is several parses
+                // (its edits'), so the whole can take longer than one may
+                // (E7h review 1, Low 7: "returned alone in 142425 ms under
+                // a 120 s limit").
                 let _ = write!(
                     f.detail,
-                    "\nslow, not hung: it returned alone in {} ms under a {} s limit (not minimized)",
-                    micros / 1000,
-                    long.hang.as_secs()
+                    "\nslow, not hung: alone, no parse ran past the {} s limit; the input's \
+                     parses took {} ms in all (not minimized)",
+                    long.hang.as_secs(),
+                    micros / 1000
                 );
             }
             Alone::OverMemory { peak_kb, after } => over_memory(&mut f, peak_kb, after, &long),
@@ -1965,8 +1970,8 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
                 f.kind = Kind::Slow;
                 let _ = write!(
                     f.detail,
-                    "\nslow, not hung: the input ran past the {} s limit alone, and its minimal \
-                     one returned in {} ms",
+                    "\nslow, not hung: alone, a parse of the input ran past the {} s limit, and \
+                     no parse of its minimal one did; the minimal input's parses took {} ms in all",
                     long.hang.as_secs(),
                     micros / 1000
                 );
