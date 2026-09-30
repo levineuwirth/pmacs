@@ -63,6 +63,9 @@ def main():
     state = tempfile.mkdtemp(prefix="pr1-", dir=os.environ.get("PROBE_TMP", "/tmp"))
     for d in ("config", "data", "state", "cache", "run"):
         os.makedirs(os.path.join(state, d), mode=0o700)
+    if os.environ.get("PROBE_NO_LSP"):
+        os.makedirs(os.path.join(state, "config", "pmacs"), mode=0o700)
+        open(os.path.join(state, "config", "pmacs", "init.lua"), "w").write("pmacs.lsp.config = {}\n")
     env = dict(os.environ)
     env.update(
         XDG_CONFIG_HOME=os.path.join(state, "config"),
