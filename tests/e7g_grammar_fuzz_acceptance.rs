@@ -251,6 +251,10 @@ fn e7g_the_javascript_family_stays_unshipped() {
     // tree-sitter-typescript 0.23.2 do the same on it, and TSX alone on
     // TSX_HANG. tree-sitter 0.27.0's runtime does too. In the editor one
     // parse worker spins until the daemon restarts, or memory runs out.
+    // E7h.5's full-length run found a third input TSX never returns from,
+    // 74 bytes under 8 edits, on which TypeScript and JavaScript finish in
+    // a second; it is kept, with its replay line, in
+    // `fuzz/repro/typescriptreact-hang-74.input` and `fuzz/repro/README.md`.
     //
     // JavaScript stays as a dev-dependency for the local-facts witnesses'
     // fixed fixtures; re-shipping either crate needs a release clean under
