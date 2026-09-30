@@ -105,6 +105,7 @@ jobs:
       - name: Fuzz every grammar
         run: >-
           scripts/fuzz-grammars
+          --arm ubsan
           --seconds "${{ inputs.seconds || '15' }}"
           --jobs "${{ inputs.jobs || '4' }}"
           --max-files "${{ inputs.max_files || '100' }}"

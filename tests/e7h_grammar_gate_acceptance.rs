@@ -557,6 +557,47 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     );
 }
 
+#[test]
+fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
+    // E7h review 1, High 2: UBSan has no aliasing check, and its
+    // instrumentation keeps GCC 16 from exploiting aliasing UB, so the ASan
+    // and UBSan build E7h.4 made passed tree-sitter-haskell 0.23.1 without
+    // -fno-strict-aliasing where ASan alone found six crashes. The script's
+    // default run is three builds: that one, ASan alone with strict
+    // aliasing restored after the config's flag, and clang's TypeSanitizer.
+    // CI runs the first alone and says so.
+    let script = read("scripts/fuzz-grammars");
+    assert!(
+        script.contains("[ -n \"$arms\" ] || arms=\"ubsan asan-strict tysan\""),
+        "the default run builds all three arms"
+    );
+    let line = |needle: &str| {
+        script
+            .lines()
+            .find(|l| l.trim_start().starts_with(needle))
+            .unwrap_or_else(|| panic!("a line starting {needle}"))
+            .to_owned()
+    };
+    let strict = line("sanitize=\"-fsanitize=address -fno-omit-frame-pointer");
+    assert!(
+        strict.ends_with("-fstrict-aliasing\"") && !strict.contains("undefined"),
+        "asan-strict is ASan alone, strict aliasing appended last: {strict}"
+    );
+    assert!(
+        line("sanitize=\"-fsanitize=type").ends_with("-fsanitize=type\""),
+        "tysan is clang's TypeSanitizer"
+    );
+    assert!(
+        script.contains("[ \"$arm\" = tysan ] && fail_on=crashes"),
+        "only the tysan arm's crashes fail it"
+    );
+    let wf = read(".github/workflows/grammar-fuzz.yml");
+    assert!(
+        wf.contains("scripts/fuzz-grammars\n          --arm ubsan\n"),
+        "CI builds the ubsan arm alone"
+    );
+}
+
 /// One harness run over `lua` with `seeds` as its whole corpus (no
 /// mutation), a planted `mode`, a 1 s hang limit and a 64 MB memory limit:
 /// its exit code and its report.tsv row for lua.

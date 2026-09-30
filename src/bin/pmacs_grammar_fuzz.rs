@@ -8,8 +8,10 @@
 //! of them (tree-sitter-haskell 0.23.1, E7g) corrupted the heap on the
 //! most ordinary Haskell file there is. This binary is how a grammar earns
 //! its place: `scripts/fuzz-grammars` builds it the way the grammars ship
-//! (release optimization, GCC, the C instrumented with `AddressSanitizer`),
-//! seeds it from real files, and runs it.
+//! (release optimization, the C instrumented, once per arm:
+//! `AddressSanitizer` and `UndefinedBehaviorSanitizer`; `AddressSanitizer`
+//! alone with strict aliasing restored; clang's `TypeSanitizer`), seeds it
+//! from real files, and runs it.
 //!
 //! ```text
 //! pmacs_grammar_fuzz list
@@ -19,6 +21,7 @@
 //!                        [--grammar NAME]... [--edits N] [--seed N]
 //!                        [--hang-ms N] [--rss-mb N] [--min-mutations N]
 //!                        [--max-seconds N] [--long NAME]... [--long-seconds N]
+//!                        [--fail-on all|crashes]
 //! pmacs_grammar_fuzz changed --since REF
 //! pmacs_grammar_fuzz repro GRAMMAR FILE [--edits N --seed N] [--trace 1]
 //! ```
@@ -993,6 +996,9 @@ struct Worker {
     stdin: ChildStdin,
     lines: Receiver<String>,
     stderr: PathBuf,
+    /// How much of `stderr` has been read for a report that did not stop
+    /// the worker (`sanitizer_report`).
+    stderr_seen: u64,
     baseline_kb: u64,
     inputs: u64,
     /// The inputs this worker has run, in order, the current one last.
@@ -1038,6 +1044,7 @@ impl Worker {
             stdin,
             lines,
             stderr,
+            stderr_seen: 0,
             baseline_kb,
             inputs: 0,
             history: std::collections::VecDeque::new(),
@@ -1094,6 +1101,14 @@ impl Worker {
                     };
                 }
                 Ok(line) => {
+                    if let Some((signature, detail)) = self.sanitizer_report() {
+                        self.kill();
+                        return Outcome::Failed {
+                            kind: Kind::Crash,
+                            signature,
+                            detail,
+                        };
+                    }
                     let mut f = line.split_whitespace().skip(1).map(str::parse::<u64>);
                     let parses = f.next().and_then(Result::ok).unwrap_or(0);
                     let micros = f.next().and_then(Result::ok).unwrap_or(0);
@@ -1123,6 +1138,31 @@ impl Worker {
                 };
             }
         }
+    }
+
+    /// A report a sanitizer wrote without stopping the worker while the
+    /// last input ran. clang's `TypeSanitizer` (the `tysan` arm, E7h fix
+    /// round 1) prints an aliasing violation and carries on --- it has no
+    /// `halt_on_error` --- so its findings are read from the worker's stderr
+    /// rather than from its death, and filed as crashes, which fail the run.
+    /// Only a report whose access type differs from the object's is one
+    /// ([`tysan_violation`]).
+    fn sanitizer_report(&mut self) -> Option<(String, String)> {
+        use std::io::{Seek, SeekFrom};
+        let len = std::fs::metadata(&self.stderr).map_or(0, |m| m.len());
+        if len <= self.stderr_seen {
+            return None;
+        }
+        let mut file = std::fs::File::open(&self.stderr).ok()?;
+        file.seek(SeekFrom::Start(self.stderr_seen)).ok()?;
+        let mut new = Vec::new();
+        file.take(len - self.stderr_seen)
+            .read_to_end(&mut new)
+            .ok()?;
+        self.stderr_seen = len;
+        let new = String::from_utf8_lossy(&new);
+        let report = tysan_violation(&new)?;
+        Some((crash_signature(report, "tysan report"), report.to_owned()))
     }
 
     /// RSS gained since spawn, in kB.
@@ -1172,16 +1212,54 @@ const GLIBC: [&str; 7] = [
     "malloc_consolidate(): ",
 ];
 
+/// The first `TypeSanitizer` report in `log` whose access type differs from
+/// the type of the object it reads or writes, as a slice from its `ERROR`
+/// line to the next report. The aliasing class E7g found is exactly that
+/// (`p1 int` over `any pointer`: tree-sitter-haskell's `array_push` reading
+/// back as `int *` the pointer its grow wrote as `void *`; bash's and html's
+/// the same through `char *`). A report of one type over itself (`int` over
+/// `int`, `in <struct A> at offset a` against `in <struct B> at offset b`)
+/// is an `int` member read through a different enclosing struct than the
+/// one it was written through: the effective type is the same, which C
+/// permits, and tree-sitter's own lexer does it on every token
+/// (`ts_lexer_finish`, `ts_parser__lex`: hundreds of thousands a run).
+fn tysan_violation(log: &str) -> Option<&str> {
+    const MARKER: &str = "ERROR: TypeSanitizer: ";
+    let mut starts: Vec<usize> = log.match_indices(MARKER).map(|(i, _)| i).collect();
+    starts.push(log.len());
+    starts.windows(2).map(|w| &log[w[0]..w[1]]).find(|report| {
+        let access = report.split_once(" with type ").map(|(_, r)| r);
+        let object = report
+            .split_once(" accesses an existing object of type ")
+            .map(|(_, r)| r);
+        let ty = |s: &str, stops: &[&str]| {
+            let end = stops
+                .iter()
+                .filter_map(|p| s.find(p))
+                .min()
+                .unwrap_or(s.len());
+            s[..end].trim().to_owned()
+        };
+        match (access, object) {
+            (Some(a), Some(o)) => ty(a, &[" (in ", " accesses"]) != ty(o, &[" (in ", "\n"]),
+            _ => true,
+        }
+    })
+}
+
 /// A short, stable name for a crash: the sanitizer's error and first
 /// frame, glibc's complaint, the panic site, or the signal.
 fn crash_signature(log: &str, how: &str) -> String {
     let lines: Vec<&str> = log.lines().collect();
-    if let Some(i) = lines
-        .iter()
-        .position(|l| l.contains("ERROR: AddressSanitizer: "))
-    {
+    // AddressSanitizer, and clang's TypeSanitizer (the `tysan` arm):
+    // `==N==ERROR: <Sanitizer>: <what> on address …`, then a `#0` frame.
+    for (tool, short) in [("AddressSanitizer", "asan"), ("TypeSanitizer", "tysan")] {
+        let marker = format!("ERROR: {tool}: ");
+        let Some(i) = lines.iter().position(|l| l.contains(&marker)) else {
+            continue;
+        };
         let what = lines[i]
-            .split("AddressSanitizer: ")
+            .split(&marker)
             .nth(1)
             .and_then(|r| r.split_whitespace().next())
             .unwrap_or("error");
@@ -1191,7 +1269,7 @@ fn crash_signature(log: &str, how: &str) -> String {
             .and_then(|f| f.split(" in ").nth(1))
             .and_then(|f| f.split_whitespace().next())
             .map_or("?", |f| f.split('.').next().unwrap_or(f));
-        return format!("asan {what} in {frame}");
+        return format!("{short} {what} in {frame}");
     }
     // UBSan (E7h.4): `<file>:<line>:<col>: runtime error: <what>`.
     if let Some(l) = lines.iter().find(|l| l.contains(": runtime error: ")) {
@@ -1333,6 +1411,11 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         entry(l)?;
     }
     let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
+    let policy = match flags.one("fail-on").unwrap_or("all") {
+        "all" => FailOn::All,
+        "crashes" => FailOn::Crashes,
+        other => return Err(format!("--fail-on {other}: `all` or `crashes`")),
+    };
     let wanted = flags.all("grammar");
     for w in &wanted {
         entry(w)?;
@@ -1366,12 +1449,23 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let mut reports = std::mem::take(&mut *reports.lock().map_err(|_| "poisoned")?);
     reports.sort_by_key(|r| r.grammar);
     write_report(&cfg, &reports)?;
-    let failed = fails(&reports);
+    let failed = fails(&reports, policy);
     Ok(if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Which findings fail a run. `scripts/fuzz-grammars` passes `crashes` for
+/// its `tysan` arm (E7h fix round 1): that build exists to see aliasing
+/// violations, and its time and memory are `TypeSanitizer`'s (shadow memory
+/// alone is several times a parse's), so its hangs and allocations are
+/// reported and the `ubsan` arm rules on those classes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailOn {
+    All,
+    Crashes,
 }
 
 /// Whether the run fails: a grammar could not be fuzzed; a hang came back
@@ -1382,12 +1476,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
 /// single-threaded and every input they ran is replayed, so what does not
 /// come back is not load), except a kill by signal 9, which is the host
 /// reclaiming memory. Slow and large parses are reported, D36.
-fn fails(reports: &[Report]) -> bool {
+fn fails(reports: &[Report], policy: FailOn) -> bool {
     reports.iter().any(|r| {
         r.error.is_some()
             || r.findings.iter().any(|t| match t.finding.kind {
                 Kind::Crash => t.repro != Repro::No || t.finding.signature != "signal 9",
-                Kind::Hang => t.repro != Repro::No,
+                Kind::Hang => policy == FailOn::All && t.repro != Repro::No,
                 Kind::Slow | Kind::Alloc => false,
             })
     })
@@ -2475,9 +2569,13 @@ mod tests {
                     .collect(),
                 error: error.map(str::to_owned),
             };
-        let fails_with =
-            |kind, repro, signature| fails(&[report(kind, Some(repro), signature, None)]);
-        assert!(!fails(&[report(Kind::Hang, None, "", None)]), "no finding");
+        let fails_with = |kind, repro, signature| {
+            fails(&[report(kind, Some(repro), signature, None)], FailOn::All)
+        };
+        assert!(
+            !fails(&[report(Kind::Hang, None, "", None)], FailOn::All),
+            "no finding"
+        );
         assert!(
             fails_with(Kind::Hang, Repro::Alone, ""),
             "a hang that came back"
@@ -2507,7 +2605,24 @@ mod tests {
             !fails_with(Kind::Alloc, Repro::Alone, ""),
             "a large parse is reported, not failed"
         );
-        assert!(fails(&[report(Kind::Hang, None, "", Some("no seeds"))]));
+        assert!(fails(
+            &[report(Kind::Hang, None, "", Some("no seeds"))],
+            FailOn::All
+        ));
+        let crashes = |kind, signature| {
+            fails(
+                &[report(kind, Some(Repro::Alone), signature, None)],
+                FailOn::Crashes,
+            )
+        };
+        assert!(
+            crashes(Kind::Crash, "tysan type-aliasing-violation in advance"),
+            "under `--fail-on crashes` a crash still fails the run"
+        );
+        assert!(
+            !crashes(Kind::Hang, ""),
+            "and a hang, which is the sanitizer's time as much as the grammar's, is reported"
+        );
     }
 
     #[test]
@@ -2631,6 +2746,25 @@ mod tests {
         assert_eq!(
             crash_signature(asan, "signal 6"),
             "asan heap-buffer-overflow in advance"
+        );
+        let tysan = "==7==ERROR: TypeSanitizer: type-aliasing-violation on address 0x1 \
+                     (pc 0x2 bp 0x3 sp 0x4 tid 7)\n\
+                     READ of size 8 at 0x1 with type p1 int accesses an existing object of \
+                     type any pointer\n    #0 0x55 in advance /x/scanner.c:651:3\n";
+        assert_eq!(
+            crash_signature(tysan, "tysan report"),
+            "tysan type-aliasing-violation in advance"
+        );
+        let same = "==7==ERROR: TypeSanitizer: type-aliasing-violation on address 0x9\n\
+                    READ of size 4 at 0x9 with type int (in TSParser at offset 80) accesses \
+                    an existing object of type int (in <anonymous type> at offset 56)\n    \
+                    #0 0x56 in ts_parser__lex /x/parser.c:649:84\n\n";
+        assert_eq!(tysan_violation(same), None, "int over int is not the class");
+        let both = format!("{same}{tysan}");
+        assert_eq!(
+            tysan_violation(&both).map(|r| crash_signature(r, "tysan report")),
+            Some("tysan type-aliasing-violation in advance".to_owned()),
+            "the pointer over a pointer of another type, after an int over an int"
         );
         assert_eq!(
             crash_signature("corrupted size vs. prev_size\n", "signal 6"),
