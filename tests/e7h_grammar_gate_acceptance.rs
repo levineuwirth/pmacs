@@ -41,7 +41,9 @@
 //! reproduced alone"). The rows below plant each class through the worker's
 //! `PMACS_FUZZ_SELFTEST` hook, run the harness binary as CI does, and read
 //! its report and exit status: crash, hang, growth and sequence fail the run,
-//! and a slow parse that returns is filed, not failed (D36).
+//! and a slow parse that returns is filed, not failed (D36). Review 1's
+//! big-return plant, a parse past the memory cap that returns, is a memory
+//! cut since E7h's fix round 1, and fails the run too.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -672,24 +674,62 @@ fn e7h_a_planted_hang_is_found_and_fails_the_run() {
 }
 
 #[test]
-fn e7h_a_parse_that_grows_without_returning_is_a_hang_not_an_allocation() {
+fn e7h_a_parse_that_grows_without_returning_fails_the_run_and_is_no_allocation() {
     // Review 1's `grow` plant: never returns, and passes the memory limit
     // well inside the hang limit, so it is first seen as an allocation.
     // Confirmed alone under four times the memory and twelve times the
-    // time, it still has not returned: a hang, and the run fails.
+    // time, it reaches the memory cap long before the time runs out
+    // (1.3 GB a second against 256 MB): since E7h's fix round 1 that is its
+    // own outcome, "exceeded memory cap", and it fails the run. E7h.3 had
+    // filed it a hang that "never returned", which is the time limit's to
+    // say; whether this one would ever return is not known at the cut.
     let (code, row, md) = planted_run("grow", "grow", &[("a", TRIGGER)]);
-    assert!(
-        has(&row, "hangs=1") && has(&row, "allocs=0"),
-        "{row:?}\n{md}"
-    );
+    assert!(has(&row, "allocs=0"), "{row:?}\n{md}");
     // The harness reads a worker's memory from `/proc`, so only on Linux
     // does it see the growth before the hang limit does; on macOS, which has
     // no `/proc`, the hang limit catches it (PR #297's first CI run). The
-    // verdict above is the same on both.
+    // run fails on both.
     if cfg!(target_os = "linux") {
-        assert!(md.contains("never returned, growing past 64 MB"), "{md}");
+        assert!(
+            has(&row, "memory=1") && has(&row, "hangs=0"),
+            "{row:?}\n{md}"
+        );
+        assert!(md.contains("exceeded memory cap at 256 MB (peak"), "{md}");
+    } else {
+        assert!(has(&row, "hangs=1"), "{row:?}\n{md}");
     }
     assert_eq!(code, 1, "a parse that never returns fails the run: {row:?}");
+}
+
+#[test]
+fn e7h_a_parse_past_the_memory_cap_that_returns_is_a_memory_cut_and_fails_the_run() {
+    // Review 1's Medium 2: its big-return plant touched 6.4 GB and returned
+    // after 10 s, and the harness filed it a hang that "never returned".
+    // The owner's ruling at E7h's fix round 1: a parse that exceeds the cap
+    // is reported as "exceeded memory cap at N" with its peak, and fails the
+    // run; it is not a hang and not slow. The plant here touches 400 MB in
+    // 64 MB steps and returns: past the 64 MB limit (an allocation), then
+    // past the confirmation's 256 MB cap, where it is cut.
+    let (code, row, md) = planted_run("bigreturn", "bigreturn", &[("a", TRIGGER)]);
+    if cfg!(target_os = "linux") {
+        assert!(
+            has(&row, "memory=1")
+                && has(&row, "hangs=0")
+                && has(&row, "slow=0")
+                && has(&row, "allocs=0"),
+            "{row:?}\n{md}"
+        );
+        assert!(md.contains("exceeded memory cap at 256 MB (peak"), "{md}");
+        assert!(
+            !md.contains("never returned"),
+            "a memory cut is not said to have never returned:\n{md}"
+        );
+        assert_eq!(code, 1, "a memory cut fails the run: {row:?}");
+    } else {
+        // No `/proc`: the harness cannot read a worker's memory, the plant
+        // returns in well under the hang limit, and nothing is found.
+        assert_eq!(code, 0, "{row:?}\n{md}");
+    }
 }
 
 #[test]
