@@ -144,9 +144,23 @@ EOF
 fi
 cargo build --profile fuzz --target "$host" --bin pmacs_grammar_fuzz
 if [ "$plain" = 0 ]; then
+    # The proof is what the `cc` crate recorded in each grammar crate's
+    # build-script output: the compiler it ran, this wrapper, whose name
+    # carries its checksum. That record is cached with the objects it
+    # built; the wrapper's own log is not, and a restored cache recompiles
+    # nothing (PR #297's second CI run failed on exactly that).
+    build="$CARGO_TARGET_DIR/$host/fuzz/build"
     for c in $grammar_crates; do
-        grep -qx "$c" "$work/instrumented.log" \
-            || die "$c's C was not compiled under the sanitizers (see $wrapper)"
+        found=
+        for o in "$build/$c"-*/output; do
+            [ -f "$o" ] || continue
+            hash=${o%/output}
+            hash=${hash##*/"$c"-}
+            case "$hash" in *[!0-9a-f]* | '') continue ;; esac
+            grep -qxF "CC = Some($wrapper)" "$o" && found=1
+        done
+        [ -n "$found" ] \
+            || die "$c's C was not compiled under the sanitizers (no build record under $build names $wrapper)"
     done
 fi
 bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
