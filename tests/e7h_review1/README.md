@@ -30,5 +30,11 @@ measured and the build or pty it measured it with.
 - `pty_probe.py` opens the TUI in a pseudo-terminal of a real size (set on
   the slave before exec) with isolated state, sends C-x C-c at a chosen
   second and reports how long the editor took to answer, its CPU and peak
-  RSS, and the exit status. `keycost.py` reports the main thread's busy time
-  on opening a file and per keystroke, read from its CPU time in `/proc`.
+  RSS, and the exit status. `PROBE_NO_LSP=1` writes an `init.lua` emptying
+  `pmacs.lsp.config`, so no language server attaches; without it a `.rs`
+  file brings up rust-analyzer, which the review's first pass learned the
+  hard way.
+- `resp.py` measures the stall a user feels: it sends `M-x` 1 s after
+  opening and again after each of N typed characters, and times the
+  prompt's appearance on screen (`--no-lsp` as above). The review's #292
+  table is this probe's.
