@@ -24,26 +24,44 @@ Always true:
   in daemon mode one bad parse takes every buffer the daemon holds. A
   grammar ships, or its crate is bumped, only once `scripts/fuzz-grammars
   --grammar <name> --seconds 600` has run over it clean on the compiler
-  that builds the release pair --- built as it ships (release
-  optimization, `.cargo/config.toml`'s `-fno-strict-aliasing`, its C
-  under ASan and UBSan), seeded from real files through its row in
-  `fuzz/corpora.tsv` --- and the PR cites the report; a `tree-sitter`
+  that builds the release pair, seeded from real files through its row in
+  `fuzz/corpora.tsv`, and the PR cites the report; a `tree-sitter`
   runtime bump runs every grammar, and a change under `vendor/` or
-  `builtin/queries/` the grammars it touches. CI's `Grammar fuzz` job
-  runs on each such change, the touched grammars ten minutes and the
-  rest briefly, and fails on a crash, on UB, or on a parse that never
-  returns; it cannot reach an input its mutator does not, it builds with
-  GCC 13 rather than the laptop's 16, and its green is not a proof.
-  E7e's lesson: the author's chosen test file parsed while the owner's
-  real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
-  tree-sitter-haskell 0.23.1's vendored `array.h` is undefined behavior
+  `builtin/queries/` the grammars it touches. The script builds the C at
+  release optimization three ways and fails if any finds a defect:
+  `ubsan`, as it ships (`.cargo/config.toml`'s `-fno-strict-aliasing`)
+  under ASan and UBSan; `asan-strict`, ASan alone with strict aliasing
+  restored, so that a compiler may exploit aliasing UB; and `tysan`,
+  clang's TypeSanitizer, which reports an access of the wrong type on any
+  compiler. CI's `Grammar fuzz` job runs on every change, fuzzes when one
+  can change the grammar set (`scripts/grammar-fuzz-needed`; the touched
+  grammars ten minutes, the rest briefly), and builds the `ubsan` arm
+  alone, on GCC 13. On the inputs a run reaches, that job catches a memory
+  error ASan sees at the access, the UB UBSan instruments, a parse that
+  never returns, and one past the memory cap. Only the laptop's run
+  catches aliasing UB: UBSan has no aliasing check and its
+  instrumentation keeps even GCC 16 from exploiting it, GCC 13 does not
+  exploit tree-sitter-haskell's at all, and CI builds no TypeSanitizer
+  arm. Since E7h's fix round 1 no shipped scanner carries that header
+  (`ALIASING_HEADER_RESIDUAL` is empty), so those two arms guard the next
+  grammar. Neither run catches an input the mutator does not reach, a
+  defect only the release builders' GCC 11 or Apple clang would produce,
+  or UB no arm instruments, and a green run is not a proof. `build.rs`
+  refuses to compile C that `-fno-strict-aliasing` does not reach, as in
+  a build cargo did not start inside the checkout, which passes it with
+  `CFLAGS`. E7e's lesson: the author's chosen test file parsed while the
+  owner's real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
+  tree-sitter-haskell 0.23.1's published `array.h` is undefined behavior
   that GCC 16 turned into a heap overflow at -O2 and CI's GCC 13 did
   not. D36 as amended at E7h: what aborts or never returns is unshipped
   unless the defect is a local bound fixed in a vendored copy; what is
   slow or large is filed; and a parse whose memory grows to an
   out-of-memory kill is neither, since it takes the editor down as an
   abort does (#296, markdown: an instance memory limit, the wasm
-  phase's, is what bounds it).
+  phase's, is what bounds it). The harness fails a parse cut at four
+  times its memory limit, reported as "exceeded memory cap" with its
+  peak, and never calls it hung (the `tysan` arm, whose time and memory
+  are the sanitizer's, fails on its crashes alone).
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before
