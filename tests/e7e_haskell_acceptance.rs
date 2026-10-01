@@ -217,7 +217,7 @@ const TWO_PRAGMAS: &str = "{-# LANGUAGE OverloadedStrings #-}\n\
                            {-# LANGUAGE ScopedTypeVariables #-}\n";
 
 #[test]
-fn e7h_tree_sitter_haskell_ships_from_a_copy_on_the_conforming_array_header() {
+fn e7h_tree_sitter_haskell_ships_from_crates_io_on_the_conforming_array_header() {
     // tree-sitter-haskell 0.23.1 aborted the editor on TWO_PRAGMAS (E7g):
     // its published `tree_sitter/array.h` grows an array through an
     // `(Array *)` cast and reads it back through the element pointer,
@@ -227,17 +227,19 @@ fn e7h_tree_sitter_haskell_ships_from_a_copy_on_the_conforming_array_header() {
     // in `advance`). E7h restored it on `-fno-strict-aliasing`, which holds
     // for every compiler measured but only in builds cargo starts at the
     // repository root (review 1: a `cargo install --git` editor aborted on
-    // this file in seven of nine runs). Since E7h's fix round 1 it ships
-    // from `vendor/tree-sitter-haskell`, the published crate with the
-    // header tree-sitter's CLI has generated since 0.24, whose push assigns
-    // `contents` from the grow; GCC 16 at -O2 and -O3 without the flag
-    // compiles that copy clean on these bytes and E7g's crashers. So what
-    // holds the grammar is the source, and the flag stays beside it. This
-    // row fails if the crate resolves to crates.io again, if its header
-    // goes back, or if it moves off the version that was fuzzed; a bump is a
-    // new grammar under the rule in CLAUDE.md. The test build compiles
-    // grammar C at -O0, where the overflow never showed, so the parse below
-    // is the reproduction as a file and not a witness of the optimizer.
+    // this file in seven of nine runs), and its fix round 1 shipped it from
+    // a copy carrying the header tree-sitter's CLI has generated since 0.24.
+    // At fix round 2 it ships from crates.io again: 0.24.1 was published
+    // on that header (its push assigns `contents` from the grow, through
+    // `_array__cast`), with the same scanner, fuzzed 600 s on the `ubsan`,
+    // `asan-strict` and `tysan` arms. So what holds the grammar is the
+    // published source, and the flag stays beside it. This row fails if the
+    // crate moves off the version that was fuzzed (a bump is a new grammar
+    // under the rule in CLAUDE.md), if it is routed to a copy again, or if
+    // the source it resolves to pushes through the cast. The test build
+    // compiles grammar C at -O0, where the overflow never showed, so the
+    // parse below is the reproduction as a file and not a witness of the
+    // optimizer.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
     let block = lock
@@ -245,21 +247,47 @@ fn e7h_tree_sitter_haskell_ships_from_a_copy_on_the_conforming_array_header() {
         .find(|b| b.lines().any(|l| l == "name = \"tree-sitter-haskell\""))
         .expect("Cargo.lock lists tree-sitter-haskell");
     assert!(
-        block.lines().any(|l| l == "version = \"0.23.1\""),
-        "tree-sitter-haskell moved off 0.23.1, the version E7h fuzzed; fuzz the \
+        block.lines().any(|l| l == "version = \"0.24.1\""),
+        "tree-sitter-haskell moved off 0.24.1, the version E7h fuzzed; fuzz the \
          new one before it ships:{block}"
     );
     assert!(
-        !block.lines().any(|l| l.starts_with("source = ")),
-        "tree-sitter-haskell resolves to crates.io again, whose array.h GCC 16 \
-         turns into the two-pragma abort:{block}"
+        block
+            .lines()
+            .any(|l| l == "source = \"registry+https://github.com/rust-lang/crates.io-index\""),
+        "tree-sitter-haskell resolves somewhere other than crates.io; a copy needs \
+         its own note and row:{block}"
     );
-    let header =
-        std::fs::read_to_string(root.join("vendor/tree-sitter-haskell/src/tree_sitter/array.h"))
-            .unwrap();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(
-        !header.contains("(Array *)(self)"),
-        "vendor/tree-sitter-haskell's array.h pushes through the aliasing cast again"
+        !manifest.contains("vendor/tree-sitter-haskell")
+            && !root.join("vendor/tree-sitter-haskell").exists(),
+        "a copy of tree-sitter-haskell is back in the tree or the manifest"
+    );
+    let out = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+        .current_dir(root)
+        .output()
+        .expect("cargo metadata");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let source = meta["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "tree-sitter-haskell")
+        .map(|p| PathBuf::from(p["manifest_path"].as_str().unwrap()))
+        .expect("cargo metadata resolves tree-sitter-haskell");
+    let header =
+        std::fs::read_to_string(source.parent().unwrap().join("src/tree_sitter/array.h")).unwrap();
+    assert!(
+        !header.contains("(Array *)(self)") && header.contains("(self)->contents = _array__"),
+        "{}'s array.h pushes through the aliasing cast again",
+        source.display()
     );
     let config = std::fs::read_to_string(root.join(".cargo/config.toml")).unwrap();
     for var in ["HOST_CFLAGS", "TARGET_CFLAGS"] {

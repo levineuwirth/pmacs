@@ -7,9 +7,12 @@
 # Each build parses the owner's two-pragma file and three of E7g's crashers
 # cold and retyped a byte at a time (drv.c). Usage:
 #   CC=gcc [HS_SRC=DIR] tests/e7h_review1/haskell_matrix.sh [OUTDIR]
-# Needs the two crates in cargo's registry (`cargo fetch`). HS_SRC names
-# another copy of the grammar's src/ (E7h fix round 1:
-# HS_SRC=vendor/tree-sitter-haskell/src, the copy on the conforming header).
+# Needs the two crates in cargo's registry (`cargo fetch` until E7h's fix
+# round 2, which moved the workspace to 0.24.1; 0.23.1 is there now only
+# where an earlier build fetched it). HS_SRC names another copy of the
+# grammar's src/ (E7h fix round 1: vendor/tree-sitter-haskell/src, the copy
+# on the conforming header, retired at fix round 2; now
+# $CARGO_HOME/registry/src/*/tree-sitter-haskell-0.24.1/src).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cc=${CC:-gcc}

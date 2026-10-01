@@ -656,9 +656,10 @@ pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
 pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
 pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
 -- Haskell (haskell-language-server). The grammar claims `.hs` again since
--- E7h, built from `vendor/tree-sitter-haskell` on the conforming
--- `array.h`; this entry keeps a `.hs` buffer `haskell`, and the server
--- attached, if it is ever dropped again as E7g dropped it.
+-- E7h, on the conforming `array.h` (tree-sitter-haskell 0.24.1 from
+-- crates.io since E7h's fix round 2); this entry keeps a `.hs` buffer
+-- `haskell`, and the server attached, if it is ever dropped again as E7g
+-- dropped it.
 pmacs.lsp.filetypes.hs = pmacs.lsp.filetypes.hs or "haskell"
 
 -- Per-buffer attachment record: { language, server, uri, version }.

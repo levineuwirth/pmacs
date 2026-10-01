@@ -1016,10 +1016,11 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     // (`lhs_is_not_haskell_to_this_grammar` pins it). Unshipped at E7g, its
     // vendored `array.h` being aliasing UB that GCC 16 at -O2 compiled into
     // a heap overflow, and restored at E7h under `.cargo/config.toml`'s
-    // `-fno-strict-aliasing` after a clean 600 s fuzz run on GCC 16. Since
-    // E7h's fix round 1 it is built from `vendor/tree-sitter-haskell`, the
-    // published crate with the conforming header, because the flag reaches
-    // only builds cargo starts at the repository root.
+    // `-fno-strict-aliasing` after a clean 600 s fuzz run on GCC 16. E7h's
+    // fix round 1 built it from a copy carrying the conforming header,
+    // because the flag reaches only builds cargo starts at the repository
+    // root; since fix round 2 it is tree-sitter-haskell 0.24.1 from
+    // crates.io, published on that header.
     LanguageEntry {
         name: "haskell",
         extensions: &["hs"],

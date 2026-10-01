@@ -128,7 +128,7 @@ fn e7g_review1_every_extension_an_unshipped_grammar_claimed_reaches_its_server()
     // its language's server configured (the fake, recording what it opens),
     // so the didOpen is the filetype map's doing and nothing else's. `.hs`
     // left the list at E7h, when Haskell's grammar came back
-    // (`e7h_tree_sitter_haskell_ships_from_a_copy_on_the_conforming_array_header`),
+    // (`e7h_tree_sitter_haskell_ships_from_crates_io_on_the_conforming_array_header`),
     // and `.yaml` and `.yml` with YAML's
     // (`e7h_a_yaml_file_nested_254_deep_opens_and_parses_as_yaml`).
     let fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp");

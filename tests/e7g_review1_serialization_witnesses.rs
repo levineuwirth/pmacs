@@ -204,11 +204,12 @@ fn e7h_the_bounded_grammars_ship_from_their_vendored_copies() {
 
 /// The grammars whose vendored copy carries tree-sitter's conforming
 /// `tree_sitter/array.h` in place of the published one: python and yaml
-/// since E7h (beside their bounds), bash, haskell and html since E7h's fix
-/// round 1, for that alone.
+/// since E7h (beside their bounds), bash and html since E7h's fix round 1,
+/// for that alone. Haskell's copy, also from fix round 1, was retired at
+/// fix round 2 for 0.24.1, published on that header
+/// (`e7h_tree_sitter_haskell_ships_from_crates_io_on_the_conforming_array_header`).
 const VENDORED_HEADERS: &[&str] = &[
     "tree-sitter-bash",
-    "tree-sitter-haskell",
     "tree-sitter-html",
     "tree-sitter-python",
     "tree-sitter-yaml",
@@ -216,7 +217,7 @@ const VENDORED_HEADERS: &[&str] = &[
 
 #[test]
 fn e7h_the_conforming_array_header_ships_from_the_vendored_copies() {
-    // The published headers of these five push through an `(Array *)` cast,
+    // The published headers of these four push through an `(Array *)` cast,
     // the aliasing UB GCC 16 compiled into tree-sitter-haskell's abort.
     // `-fno-strict-aliasing` forbids every compiler to exploit it, but only
     // in a build cargo starts at the repository root, where it reads

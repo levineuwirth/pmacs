@@ -148,7 +148,7 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
         "scripts/fuzz-grammars",
         "scripts/grammar-fuzz-needed",
         "fuzz/corpora.tsv",
-        "vendor/tree-sitter-haskell/src/tree_sitter/array.h",
+        "vendor/tree-sitter-bash/src/tree_sitter/array.h",
         "builtin/queries/latex/highlights.scm",
         ".github/workflows/grammar-fuzz.yml",
     ] {
