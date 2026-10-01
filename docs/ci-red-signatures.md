@@ -2021,6 +2021,176 @@ neither the `read Hello` family, nor #259, nor U4, nor #271, nor
 are not green, on the review's probe and by design, stated at the
 moment of writing; the line that turns it green is the fix round's.
 
+### E7h's PR runs and local samples, recorded at its second fix round
+
+**Why these were late.** E7h recorded the runs of PR #297 and the intermittents it met in the PR body and in its passes instead of here, and its first fix round said so as a choice ("E7h recorded its PR heads' runs in the PR body and the passes, and this round follows it"). Every phase from E1 to E7d had recorded its PR runs on `main`; E7e and E7g stopped recording the green ones, and E7h was the first to leave out red runs and local samples too. So by E7h's review 2 (2026-10-01) the counts of record here were stale while the bodies were right: #283 at six against seven, #291 at one against five, #298 and #300 without a word. A PR body is mutable and read once; this file is what the next phase reads first and what a row's disposition is decided from. **An occurrence goes here when it is seen**, by a commit on `main`, and the PR body and the passes cite this file, not the other way round. Recorded 2026-10-01 at E7h's fix round 2, each run read again from the jobs endpoint and each sample from its issue comment and gate log.
+
+The eight runs PR #297 had before fix round 2, each `pull_request` at attempt 1 of 1 (`CI` 19 jobs, `Grammar fuzz` one):
+
+Tally (pr297-runs): 8 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 36648396729 | CI | `7e3af6e` | failure |
+| 36648396732 | Grammar fuzz | `7e3af6e` | success |
+| 36653190278 | CI | `569e21e` | cancelled |
+| 36653190348 | Grammar fuzz | `569e21e` | failure |
+| 36653672405 | CI | `0a85d18` | success |
+| 36653672430 | Grammar fuzz | `0a85d18` | success |
+| 36761534199 | CI | `17c3c8f` | failure |
+| 36761534142 | Grammar fuzz | `17c3c8f` | success |
+
+#### `CI` 36648396729 at `7e3af6e`: the branch's own growth row on both macOS legs
+
+Created 2026-09-30T00:03:37Z, updated 00:29:32Z. 19 jobs: **16 success, 1 skipped, 2 failures**; read from the jobs endpoint.
+
+Tally (run-36648396729-jobs): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 109676627864 | success |
+| Format | 109676628019 | success |
+| Lint (lua54) | 109676628042 | success |
+| Changed paths | 109676628136 | success |
+| Lint (luajit) | 109676628142 | success |
+| M10 Perf Gates (crdt) | 109676687198 | success |
+| Perf budgets (debug) | 109676687208 | success |
+| M4 Perf Gates | 109676687226 | success |
+| Test (crdt) | 109676687227 | success |
+| GPU Render (headless) | 109676687235 | success |
+| M1 Acceptance Gates | 109676687254 | success |
+| M5 Perf Gates | 109676687293 | success |
+| Test (ubuntu-latest / luajit) | 109676687303 | success |
+| M6 Perf Gates | 109676687311 | success |
+| Test (macos-latest / luajit) | 109676687320 | failure |
+| Test (ubuntu-latest / lua54) | 109676687326 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 109676687333 | success |
+| Test (macos-latest / lua54) | 109676687375 | failure |
+| Docs consistency | 109676688970 | skipped |
+
+Tally (run-36648396729-failures): 2 rows of the table above with `result` = `failure`.
+
+Both failures are `e7h_grammar_gate_acceptance::e7h_a_parse_that_grows_without_returning_is_a_hang_not_an_allocation` (`tests/e7h_grammar_gate_acceptance.rs:535`), each leg `173` `test result: ok` and one `FAILED`: the row held the growth plant's memory signature, and on macOS the harness reads no memory (no `/proc`), so the hang limit caught the parse instead. The branch's own row, fixed in `569e21e`; no registered row.
+
+#### `CI` 36653190278 at `569e21e`: cancelled by the next push
+
+Created 01:02:23Z, updated 01:10:06Z. 19 jobs: **12 success, 1 skipped, 6 cancelled**; the six test legs were cancelled when `0a85d18` was pushed (the workflow's `concurrency` group); nothing ran to a verdict there.
+
+Tally (run-36653190278-jobs): 19 = 12 + 1 + 6.
+
+| job | id | result |
+|---|---|---|
+| Format | 109691748814 | success |
+| Changed paths | 109691748987 | success |
+| Commit attribution (D9) | 109691749032 | success |
+| Lint (luajit) | 109691749049 | success |
+| Lint (lua54) | 109691749058 | success |
+| Test (crdt) | 109691794917 | cancelled |
+| M4 Perf Gates | 109691794964 | success |
+| GPU Render (headless) | 109691794972 | success |
+| M10 Perf Gates (crdt) | 109691794975 | success |
+| M1 Acceptance Gates | 109691795010 | success |
+| M6 Perf Gates | 109691795032 | success |
+| Test (macos-latest / luajit) | 109691795047 | cancelled |
+| Test (ubuntu-latest / luajit, no crdt) | 109691795051 | cancelled |
+| Perf budgets (debug) | 109691795059 | success |
+| M5 Perf Gates | 109691795091 | success |
+| Test (macos-latest / lua54) | 109691795106 | cancelled |
+| Test (ubuntu-latest / luajit) | 109691795112 | cancelled |
+| Test (ubuntu-latest / lua54) | 109691795203 | cancelled |
+| Docs consistency | 109691796379 | skipped |
+
+Tally (run-36653190278-cancelled): 6 rows of the table above with `result` = `cancelled`.
+
+#### `CI` 36653672405 at `0a85d18`, and it is GREEN
+
+Created 01:08:20Z, updated 01:34:07Z. 19 jobs: **18 success, 1 skipped, 0 failures**; the skip `Docs consistency`, correctly. The PR body's leg counts: `Test (crdt)` 174 `test result: ok`, both macOS legs 176, the three ubuntu legs 175 each.
+
+Tally (run-36653672405-jobs): 19 = 18 + 1 + 0.
+
+#### `CI` 36761534199 at `17c3c8f`: #283's seventh
+
+Created 18:51:14Z, updated 19:20:51Z. 19 jobs: **17 success, 1 skipped, 1 failure**; read from the jobs endpoint.
+
+Tally (run-36761534199-jobs): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Format | 110045042048 | success |
+| Lint (luajit) | 110045042260 | success |
+| Commit attribution (D9) | 110045042413 | success |
+| Changed paths | 110045042506 | success |
+| Lint (lua54) | 110045042979 | success |
+| M4 Perf Gates | 110045110064 | success |
+| GPU Render (headless) | 110045110104 | success |
+| Test (crdt) | 110045110109 | success |
+| Test (ubuntu-latest / lua54) | 110045110183 | success |
+| M1 Acceptance Gates | 110045110199 | success |
+| Perf budgets (debug) | 110045110221 | success |
+| M6 Perf Gates | 110045110253 | success |
+| Test (macos-latest / luajit) | 110045110267 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 110045110270 | success |
+| Test (macos-latest / lua54) | 110045110295 | failure |
+| Test (ubuntu-latest / luajit) | 110045110303 | success |
+| M10 Perf Gates (crdt) | 110045110356 | success |
+| M5 Perf Gates | 110045110365 | success |
+| Docs consistency | 110045111302 | skipped |
+
+Tally (run-36761534199-failures): 1 row of the table above with `result` = `failure`.
+
+`Test (macos-latest / lua54)` (110045110295): `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`, `pump timeout waiting for the accept and its import`, the mirror's `popup_rows=0 anchor=None`, `9 passed; 1 failed; 0 ignored`: all three of #283's fragments, **#283's seventh occurrence**, on the leg of its first, third and fourth; 174 `ok` and that one on the leg; the other five legs `ok`, the row among them. Off the branch's path; commented on the issue; not rerun.
+
+#### The four `Grammar fuzz` runs
+
+Each one job, `Grammar fuzz (every grammar, ASan)` before `a830270` renamed it `Grammar fuzz`:
+
+Tally (pr297-fuzz): 4 items in the list below.
+
+- 36648396732 at `7e3af6e`, 00:03:37Z to 01:00:43Z: success; 22 grammars, six of them 600 s by `changed --since`; no crash and no reproduced hang.
+- 36653190348 at `569e21e`, 01:02:23Z to 01:03:50Z: failure, before fuzzing anything: the check that every grammar crate was compiled under the sanitizers read a wrapper log a restored cache did not carry. The branch's own; fixed in `0a85d18`.
+- 36653672430 at `0a85d18`, 01:08:20Z to 02:02:55Z: success; six grammars 600 s, no crash or reproduced hang.
+- 36761534142 at `17c3c8f`, 18:51:14Z to 19:57:29Z: success; eight grammars 600 s, no crash, reproduced hang or memory cut; two markdown_inline hangs not reproduced alone (E7h review 2 later reproduced the class on the laptop, #301).
+
+#### #283, seven occurrences
+
+#283 is `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import` on a macOS leg with all three fragments (`pump timeout waiting for the accept and its import`, `popup_rows=0 anchor=None`, `9 passed; 1 failed`). Each occurrence, one run and job:
+
+Tally (283): 7 items in the list below.
+
+- run 35437135435 at `361bb3b` (`main` after E7b), job 105881622751, `Test (macos-latest / lua54)`;
+- run 35455311600 at `1847805` (PR #284), job 105929452757, `Test (macos-latest / luajit)`;
+- run 35474631618 at `09798eb` (PR #284), job 105981654430, `Test (macos-latest / lua54)`;
+- run 35504020999 at `0a287d6` (PR #284), job 106060744338, `Test (macos-latest / lua54)`;
+- run 35505799659 at `9eb89c1` (PR #284), job 106065308768, `Test (macos-latest / luajit)`;
+- run 35507517448 at `3de1e1f` (PR #284), job 106069747083, `Test (macos-latest / luajit)`;
+- run 36761534199 at `17c3c8f` (PR #297), job 110045110295, `Test (macos-latest / lua54)`.
+
+#283 is at seven; the list above is the one the count is read from.
+
+#### #291, five occurrences, all local
+
+`e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
+
+Tally (291): 5 items in the list below.
+
+- 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
+- 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
+- 2026-09-30, a hand run in the gate's environment on `e7h/grammar-gate` at `1036723` with fix round 1's first change uncommitted, beside a niced GCC 16 compile matrix, 128.21 s;
+- 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T185138Z-270502`, beside three niced fuzz runs (load 9 to 20), 128.61 s;
+- 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T202751Z-465064`, the whole gate niced beside a game, the handshake 17.7 s, 141.18 s.
+
+#291 is at five, four of them E7h's and all four beside heavy load; each is commented on the issue. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+
+#### #298, first sample, local
+
+`scripts/gate` on `e7h/review-1` at `7f0f223` (PR #297's `0a85d18` plus two files under `tests/`), `20260930T131808Z-2237827`, step `05-sweep`: `e7c_didsave_acceptance::e7c_4_a_server_message_reaches_the_log_and_the_status_line`, `the warning is on the status line: ""` (`tests/e7c_didsave_acceptance.rs:630:5`), `8 passed; 1 failed; 0 ignored` in 90.78 s, four of the suite's other rows past 60 s. No row matched; filed by E7h review 1 as **#298**. #298 is at one.
+
+#### #300, first sample, local
+
+`scripts/gate` at `17c3c8f`, `20260930T202751Z-465064` (the run of #291's fifth), the whole gate niced beside a game, load about 10: `--lib process::tests::shutdown_still_force_kills_a_group_a_failed_escalation_marked_killed`, `precondition: the entry is marked killed by a SIGKILL that failed`, `left: None` / `right: Some(true)`, `test result: FAILED. 2250 passed; 1 failed; 12 ignored`. No row matched; filed by E7h's fix round 1 as **#300**; the row alone at the same tip passed five times in five. #300 is at one.
+
+So, across E7h: neither the `read Hello` family, nor #259, nor U4, nor U17, nor #271, nor #276, nor #253, nor #282, nor #288 sampled; #283 moves to seven and #291 to five; #298 and #300 are at one each.
+
 ### `main` after E7g: run 36495882005 at `4ad9f3e`, #295 filed and #254's second occurrence
 
 Read at E7h's opening on 2026-09-29, from the jobs endpoint and all six
