@@ -905,9 +905,16 @@ fn e7h2_a_parse_whose_memory_grows_with_its_input_is_judged_on_the_input_as_foun
             has(&row, "memory=1") && has(&row, "allocs=0"),
             "{row:?}\n{md}"
         );
+        // The minimum's size is the minimizer's, whose oracle is a 50 ms
+        // RSS poll: here one trigger, 14 bytes; CI's runners stopped at 20
+        // (`c1fd1ed`, three ubuntu legs). What the row holds is that it
+        // returned, and is reported beside the input as found.
         assert!(
             notes.contains("the input as found, alone: passed the 256 MB cap and was cut there")
-                && notes.contains("its minimum (14 bytes), alone: returned in"),
+                && notes
+                    .lines()
+                    .any(|l| l.starts_with("its minimum (")
+                        && l.contains(" bytes), alone: returned in")),
             "both confirmations reported:\n{notes}"
         );
         assert_eq!(code, 1, "a memory cut fails the run: {row:?}");
