@@ -1224,6 +1224,12 @@ impl Worker {
     /// rather than from its death, and filed as crashes, which fail the run.
     /// Only a report whose access type differs from the object's is one
     /// ([`tysan_violation`]).
+    ///
+    /// The new output is read in bounded chunks and the scan stops at the
+    /// first report of the class, so the parent never holds more than a few
+    /// megabytes of it (E7h review 2, Low 3: one input's symbolized reports
+    /// ran to 112 MB, and the `tysan` arm's parent, which links
+    /// `TypeSanitizer`'s runtime too, reached 18 GB reading them whole).
     fn sanitizer_report(&mut self) -> Option<(String, String)> {
         use std::io::{Seek, SeekFrom};
         let len = std::fs::metadata(&self.stderr).map_or(0, |m| m.len());
@@ -1232,14 +1238,40 @@ impl Worker {
         }
         let mut file = std::fs::File::open(&self.stderr).ok()?;
         file.seek(SeekFrom::Start(self.stderr_seen)).ok()?;
-        let mut new = Vec::new();
-        file.take(len - self.stderr_seen)
-            .read_to_end(&mut new)
-            .ok()?;
+        let mut left = len - self.stderr_seen;
         self.stderr_seen = len;
-        let new = String::from_utf8_lossy(&new);
-        let report = tysan_violation(&new)?;
-        Some((crash_signature(report, "tysan report"), report.to_owned()))
+        // What is kept between chunks: the text from the last report's
+        // start, which may continue in the next chunk.
+        let mut carry = String::new();
+        let mut chunk = vec![0; STDERR_CHUNK];
+        while left > 0 {
+            let want = usize::try_from(left.min(STDERR_CHUNK as u64)).ok()?;
+            let got = file.read(&mut chunk[..want]).ok()?;
+            if got == 0 {
+                break;
+            }
+            left -= got as u64;
+            carry.push_str(&String::from_utf8_lossy(&chunk[..got]));
+            // Judge every report that is complete (another starts after it,
+            // or the output has ended).
+            let last_start = carry.rfind(TYSAN_MARKER).unwrap_or(0);
+            let judged = if left == 0 { carry.len() } else { last_start };
+            if let Some(report) = tysan_violation(&carry[..judged]) {
+                let report = clip(report, STDERR_KEPT);
+                return Some((crash_signature(&report, "tysan report"), report));
+            }
+            carry.drain(..judged);
+            if carry.len() > STDERR_KEPT {
+                // One report larger than anything kept: judge what is there.
+                let report = clip(&carry, STDERR_KEPT);
+                carry.clear();
+                if let Some(r) = tysan_violation(&report) {
+                    let r = r.to_owned();
+                    return Some((crash_signature(&r, "tysan report"), r));
+                }
+            }
+        }
+        None
     }
 
     /// RSS gained since spawn, in kB.
@@ -1254,8 +1286,7 @@ impl Worker {
 
     fn died(&mut self) -> Outcome {
         let status = self.child.wait().ok();
-        let log = std::fs::read(&self.stderr).unwrap_or_default();
-        let log = String::from_utf8_lossy(&log[log.len().saturating_sub(64 * 1024)..]).into_owned();
+        let log = tail(&self.stderr, STDERR_KEPT as u64);
         let how = status.map_or_else(
             || "unknown exit".to_owned(),
             |s| match (s.signal(), s.code()) {
@@ -1276,6 +1307,38 @@ impl Drop for Worker {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// How a `TypeSanitizer` report begins.
+const TYSAN_MARKER: &str = "ERROR: TypeSanitizer: ";
+
+/// A worker's stderr is read this much at a time.
+const STDERR_CHUNK: usize = 1 << 20;
+
+/// The most of a worker's stderr a finding keeps: a crash's last 64 KB, a
+/// report's first.
+const STDERR_KEPT: usize = 64 * 1024;
+
+/// The last `bytes` of the file at `path`, read without the rest of it.
+fn tail(path: &Path, bytes: u64) -> String {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map_or(0, |m| m.len());
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(bytes)));
+    let mut buf = Vec::new();
+    let _ = file.take(bytes).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// `text` cut to at most `bytes`, on a character boundary.
+fn clip(text: &str, bytes: usize) -> String {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }
 
 /// What glibc's allocator prints before it aborts on a corrupted heap.
@@ -1301,7 +1364,7 @@ const GLIBC: [&str; 7] = [
 /// permits, and tree-sitter's own lexer does it on every token
 /// (`ts_lexer_finish`, `ts_parser__lex`: hundreds of thousands a run).
 fn tysan_violation(log: &str) -> Option<&str> {
-    const MARKER: &str = "ERROR: TypeSanitizer: ";
+    const MARKER: &str = TYSAN_MARKER;
     let mut starts: Vec<usize> = log.match_indices(MARKER).map(|(i, _)| i).collect();
     starts.push(log.len());
     starts.windows(2).map(|w| &log[w[0]..w[1]]).find(|report| {
