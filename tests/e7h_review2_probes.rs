@@ -3,7 +3,9 @@
 
 //! Two rows that fail at the reviewed head `17c3c8f`, each ignored with the
 //! finding it witnesses so that the fix round un-ignores it in the commit
-//! that closes it, and their live controls.
+//! that closes it, and their live controls. E7h's fix round 2 closed both
+//! (`--no-renames` in the decision, the thirteen macros in the residual row)
+//! and un-ignored them.
 //!
 //! The workflow's decision (`scripts/grammar-fuzz-needed --base`) lists a
 //! change's paths with `git diff --name-only`, which pairs a moved file as a
@@ -117,9 +119,6 @@ fn e7h_review2_the_decision_controls_run_on_the_table_and_skip_on_docs() {
 }
 
 #[test]
-#[ignore = "fails at 17c3c8f (E7h review 2, Low): a commit that moves the grammar table and \
-            edits a registration decides run=false; git diff --name-only prints a rename's \
-            new path alone. Un-ignore with the fix (--no-renames)."]
 fn e7h_review2_the_decision_runs_when_the_grammar_table_moves_and_changes() {
     let (repo, base) = scratch_repo();
     std::fs::create_dir_all(repo.path().join("src/syntax")).unwrap();
@@ -240,9 +239,6 @@ fn e7h_review2_the_old_header_casts_in_thirteen_macros() {
 }
 
 #[test]
-#[ignore = "fails at 17c3c8f (E7h review 2, Low): the residual row flags a scanner on the old \
-            header only when it pushes, extends, grows or inserts; nine more macros write \
-            through the same cast. Un-ignore with the fix."]
 fn e7h_review2_the_residual_row_flags_every_macro_that_writes_through_the_cast() {
     let Some(header) = published_old_header() else {
         eprintln!("skipped: tree-sitter-haskell 0.23.1 is not in the cargo registry");

@@ -387,11 +387,26 @@ fn e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_
         scanners_under(&dir, &mut scanners);
         for scanner in scanners {
             let src = std::fs::read_to_string(&scanner).unwrap();
+            // Every macro of the old header that writes `contents` through
+            // the cast, directly or through another (E7h review 2: the row
+            // named four of the thirteen; `array_reserve` and `array_delete`,
+            // which bash, haskell, html and python call, were not among
+            // them). `tests/e7h_review2_probes.rs` derives the thirteen from
+            // the header and holds this list to them.
             let pushes = [
+                "array_reserve(",
+                "array_delete(",
                 "array_push(",
                 "array_grow_by(",
+                "array_push_all(",
                 "array_extend(",
+                "array_splice(",
                 "array_insert(",
+                "array_erase(",
+                "array_assign(",
+                "array_swap(",
+                "array_insert_sorted_with(",
+                "array_insert_sorted_by(",
             ]
             .iter()
             .any(|m| src.contains(m));

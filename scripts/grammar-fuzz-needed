@@ -87,5 +87,9 @@ if ! git rev-parse --verify --quiet "$base^{commit}" > /dev/null; then
     exit 0
 fi
 git rev-parse --verify --quiet "$head^{commit}" > /dev/null || die "no commit $head"
-changed=$(git diff --name-only "$base...$head") || die "git diff $base...$head failed"
+# --no-renames: a moved file is a deletion and an addition, so both paths
+# are listed. Paired as a rename, it prints only its new path, and a commit
+# that moves src/syntax.rs and edits a registration decided run=false (E7h
+# review 2, tests/e7h_review2_probes.rs).
+changed=$(git diff --no-renames --name-only "$base...$head") || die "git diff $base...$head failed"
 printf '%s\n' "$changed" | decide
