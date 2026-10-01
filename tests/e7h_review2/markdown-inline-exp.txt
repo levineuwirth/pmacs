@@ -18,3 +18,6 @@ the runs: this laptop's `ubsan` arm, markdown_inline at CI's PR long settings (6
   16 KB): 1,500 inputs (1,037 mutated), one hang reproduced alone, minimal 7,672 bytes from 246,287, exit 1.
   CI's run 36761534142 at 17c3c8f, the same settings and harness seed: 1,271 inputs (808 mutated), two
   hangs not reproduced alone (260 and 262 KB) and one slow, exit 0.
+a second run at the same settings: one hang reproduced alone, minimal 596 bytes of `[f![` repeated
+  (markdown-inline-hang-596.input, from 2,219, `--edits 8 --seed 15703056251634817165`), so the
+  laptop's two 600 s runs both failed on the class and CI's one passed.

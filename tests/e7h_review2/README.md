@@ -60,10 +60,11 @@ measured and the build it measured it with.
   where it fell, and peak RSS. Build it with `-DLANG=tree_sitter_<name>` and
   `-D_POSIX_C_SOURCE=200809L` beside the runtime and a grammar.
 - `markdown-inline-84.input` (the sweep's slow finding, filed slow because its
-  minimum returned) and `markdown-inline-hang-7672.input` (the 600 s run's
-  reproduced hang) are markdown_inline inputs of nested image openers whose
+  minimum returned), `markdown-inline-hang-7672.input` and
+  `markdown-inline-hang-596.input` (the two 600 s runs' reproduced hangs) are
+  markdown_inline inputs of nested image openers whose
   parse is exponential in the openers and spent in the runtime's stack
-  condensation, which the progress callback never reaches, both kept byte
+  condensation, which the progress callback never reaches, all kept byte
   for byte by the directory's `.gitattributes`; `markdown-inline-exp.txt`
   holds the measurements.
 - `spin_probe.py` opens a file in the TUI, types N characters, and after a
