@@ -80,7 +80,9 @@
 #      --long-since REF, the grammars the change since REF touched (a
 #      crate's locked version, its corpora row, its vendored copy) run for
 #      --long-seconds (default 600) instead; a tree-sitter runtime bump
-#      runs every grammar long.
+#      runs every grammar long. A finding fuzz/accepted.tsv names is
+#      reported "known, accepted (#N)" and does not fail the run; adding
+#      a row there is the owner's ruling (fuzz/accepted/README.md).
 #
 # Exit status is the harness's: 0 no finding, 1 findings, 2 setup
 # (including a grammar with no seeds). The build directory is the
@@ -326,7 +328,8 @@ for arm in $arms; do
     # shellcheck disable=SC2086
     fuzz run --corpus "$work/corpus" --out "$out/$arm" --seconds "$seconds" --jobs "$jobs" \
         --min-mutations "$min_mutations" --max-seconds "$max_seconds" \
-        --long-seconds "$long_seconds" --fail-on "$fail_on" $longs $grammars
+        --long-seconds "$long_seconds" --fail-on "$fail_on" \
+        --accepted "$root/fuzz/accepted.tsv" $longs $grammars
     arm_status=$?
     set -e
     echo "## arm: $arm (exit $arm_status)"

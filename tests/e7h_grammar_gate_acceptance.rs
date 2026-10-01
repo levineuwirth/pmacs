@@ -622,6 +622,7 @@ fn planted_run_with_notes(
         hang_ms: 1000,
         rss_mb: 64,
         accepted: false,
+        minimize_secs: None,
     })
 }
 
@@ -638,6 +639,8 @@ struct Fuzz<'a> {
     rss_mb: u64,
     /// Pass this tree's `fuzz/accepted.tsv`.
     accepted: bool,
+    /// The minimizer's budget, if not its default five minutes.
+    minimize_secs: Option<u64>,
 }
 
 fn fuzz_run(f: &Fuzz) -> (i32, Vec<String>, String, String) {
@@ -649,6 +652,7 @@ fn fuzz_run(f: &Fuzz) -> (i32, Vec<String>, String, String) {
         hang_ms,
         rss_mb,
         accepted,
+        minimize_secs,
     } = *f;
     let dir = temp_dir(&format!("plant-{tag}"));
     let corpus = dir.join("corpus").join(grammar);
@@ -672,6 +676,9 @@ fn fuzz_run(f: &Fuzz) -> (i32, Vec<String>, String, String) {
         .args(["--edits", "0"])
         .env("PMACS_FUZZ_SELFTEST", mode)
         .env("PMACS_FUZZ_SELFTEST_MS", "2500");
+    if let Some(secs) = minimize_secs {
+        cmd.env("PMACS_FUZZ_MINIMIZE_SECONDS", secs.to_string());
+    }
     if accepted {
         cmd.arg("--accepted")
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/accepted.tsv"));
@@ -876,6 +883,7 @@ fn e7h2_a_parse_whose_memory_grows_with_its_input_is_judged_on_the_input_as_foun
         hang_ms: 10_000,
         rss_mb: 64,
         accepted: false,
+        minimize_secs: None,
     });
     if cfg!(target_os = "linux") {
         assert!(
@@ -908,6 +916,7 @@ fn e7h2_a_crash_while_an_allocation_is_confirmed_is_filed_as_a_crash() {
         hang_ms: 10_000,
         rss_mb: 64,
         accepted: false,
+        minimize_secs: None,
     });
     if cfg!(target_os = "linux") {
         assert!(
@@ -923,4 +932,89 @@ fn e7h2_a_crash_while_an_allocation_is_confirmed_is_filed_as_a_crash() {
         assert!(has(&row, "crashes=1"), "{row:?}\n{md}");
     }
     assert_eq!(code, 1, "a crash fails the run: {row:?}");
+}
+
+/// #296's paragraph at `lines` lines of 588 bytes.
+fn underscores(lines: usize) -> String {
+    vec![format!("{}a `_`_", "_".repeat(582)); lines].join("\n")
+}
+
+#[test]
+fn e7h2_296s_paragraph_is_known_and_accepted_and_does_not_fail_the_run() {
+    // The owner's ruling at fix round 2 on review 2's High 1: a finding
+    // `fuzz/accepted.tsv` names is reported "known, accepted (#N)" and does
+    // not fail the run. #296's paragraph, scaled to the limits here (8 MB,
+    // a 32 MB cap): confirmed on the input as found it is a memory cut, and
+    // the list's #296 row, keyed to its underscores, names it.
+    let paragraph = underscores(3);
+    let (code, row, md, notes) = fuzz_run(&Fuzz {
+        tag: "accept-296",
+        grammar: "markdown_inline",
+        mode: "",
+        seeds: &[("a", paragraph.as_str())],
+        hang_ms: 30_000,
+        rss_mb: 8,
+        accepted: true,
+        minimize_secs: Some(30),
+    });
+    if cfg!(target_os = "linux") {
+        assert!(
+            has(&row, "memory=1") && has(&row, "accepted=1"),
+            "{row:?}\n{md}\n{notes}"
+        );
+        assert!(md.contains("known, accepted (#296)"), "{md}");
+        assert_eq!(
+            code, 0,
+            "an accepted finding does not fail the run: {row:?}"
+        );
+    } else {
+        assert_eq!(code, 0, "{row:?}\n{md}");
+    }
+}
+
+#[test]
+fn e7h2_a_different_defect_in_markdown_inline_fails_though_it_is_found_inside_an_accepted_class() {
+    // The narrowness the ruling asks for: planted defects in markdown_inline,
+    // each found inside the text of an accepted class, still fail. A hang
+    // planted in #301's nested openers minimizes to its trigger, which no
+    // accepted unit covers.
+    let openers = format!("*bar**\n{}{TRIGGER}{}", "f![".repeat(12), "f*bark]");
+    let (code, row, md, _) = fuzz_run(&Fuzz {
+        tag: "planted-301",
+        grammar: "markdown_inline",
+        mode: "hang",
+        seeds: &[("a", openers.as_str())],
+        hang_ms: 1000,
+        rss_mb: 1024,
+        accepted: true,
+        minimize_secs: Some(30),
+    });
+    assert!(
+        has(&row, "hangs=1") && has(&row, "accepted=0"),
+        "{row:?}\n{md}"
+    );
+    assert!(
+        !md.contains(", known, accepted"),
+        "no finding is marked accepted:\n{md}"
+    );
+    assert_eq!(code, 1, "a planted hang is not #301: {row:?}");
+    if cfg!(target_os = "linux") {
+        // And a memory cut planted in #296's underscores is not #296.
+        let paragraph = format!("{}{TRIGGER}", underscores(1));
+        let (code, row, md, _) = fuzz_run(&Fuzz {
+            tag: "planted-296",
+            grammar: "markdown_inline",
+            mode: "bigreturn",
+            seeds: &[("a", paragraph.as_str())],
+            hang_ms: 10_000,
+            rss_mb: 64,
+            accepted: true,
+            minimize_secs: Some(30),
+        });
+        assert!(
+            has(&row, "memory=1") && has(&row, "accepted=0"),
+            "{row:?}\n{md}"
+        );
+        assert_eq!(code, 1, "a planted memory cut is not #296: {row:?}");
+    }
 }

@@ -1012,6 +1012,18 @@ enum Kind {
 }
 
 impl Kind {
+    fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::Crash,
+            Self::Hang,
+            Self::Memory,
+            Self::Slow,
+            Self::Alloc,
+        ]
+        .into_iter()
+        .find(|k| k.name() == name)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Crash => "crash",
@@ -1478,6 +1490,8 @@ struct Config {
     /// request changed, from `changed --since`.
     long: Vec<String>,
     long_seconds: u64,
+    /// The findings the owner has accepted (`--accepted`, `fuzz/accepted.tsv`).
+    accepted: Vec<Accepted>,
 }
 
 #[derive(Default)]
@@ -1528,6 +1542,9 @@ struct Triaged {
     minimal: String,
     minimal_edits: u32,
     file: PathBuf,
+    /// The issue of the accepted-list entry this finding matches, if any:
+    /// reported "known, accepted (#N)", and it does not fail the run.
+    accepted: Option<u32>,
 }
 
 fn run(args: &[String]) -> Result<ExitCode, String> {
@@ -1546,6 +1563,10 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         max_seconds: flags.num("max-seconds", 0)?,
         long: flags.all("long").into_iter().map(str::to_owned).collect(),
         long_seconds: flags.num("long-seconds", 600)?,
+        accepted: match flags.one("accepted") {
+            Some(path) => load_accepted(Path::new(path))?,
+            None => Vec::new(),
+        },
     });
     for l in &cfg.long {
         entry(l)?;
@@ -1619,10 +1640,13 @@ enum FailOn {
 fn fails(reports: &[Report], policy: FailOn) -> bool {
     reports.iter().any(|r| {
         r.error.is_some()
-            || r.findings.iter().any(|t| match t.finding.kind {
-                Kind::Crash => t.repro != Repro::No || t.finding.signature != "signal 9",
-                Kind::Hang | Kind::Memory => policy == FailOn::All && t.repro != Repro::No,
-                Kind::Slow | Kind::Alloc => false,
+            || r.findings.iter().any(|t| {
+                t.accepted.is_none()
+                    && match t.finding.kind {
+                        Kind::Crash => t.repro != Repro::No || t.finding.signature != "signal 9",
+                        Kind::Hang | Kind::Memory => policy == FailOn::All && t.repro != Repro::No,
+                        Kind::Slow | Kind::Alloc => false,
+                    }
             })
     })
 }
@@ -1780,7 +1804,7 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
     report.findings = findings
         .into_iter()
         .enumerate()
-        .map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits))
+        .map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits, &cfg.accepted))
         .collect();
     // After triage, as the report says: confirming, timing and minimizing
     // findings is where a grammar's minutes go (E7h: cmake's three slow
@@ -2113,7 +2137,14 @@ fn write_sequence(stem: &Path, f: &Finding, k: usize) {
     let _ = std::fs::write(seq.join("sequence.tsv"), manifest);
 }
 
-fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limits) -> Triaged {
+fn triage(
+    grammar: &str,
+    mut f: Finding,
+    dir: &Path,
+    index: usize,
+    limits: &Limits,
+    accepted: &[Accepted],
+) -> Triaged {
     let want = (f.kind, f.signature.clone());
     let seed = f.seed;
     let same = |text: &str, edits: u32| {
@@ -2204,8 +2235,19 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
         }
         Repro::No => "no".to_owned(),
     };
+    let entry = if repro == Repro::No {
+        None
+    } else {
+        accepted_entry(accepted, grammar, f.kind, &minimal)
+    };
+    let known = entry.map_or(String::new(), |e| {
+        format!(
+            "accepted: known, accepted (#{}); it does not fail the run until {}\n",
+            e.issue, e.removal
+        )
+    });
     let note = format!(
-        "grammar: {grammar}\nkind: {}\nsignature: {}\nreproduced: {reproduced}\n\
+        "grammar: {grammar}\nkind: {}\nsignature: {}\nreproduced: {reproduced}\n{known}\
          minimal: {} bytes (from {}), edits {minimal_edits}, seed {}\n\
          repro: pmacs_grammar_fuzz repro {grammar} {} --edits {minimal_edits} --seed {}\n\n{}",
         f.kind.name(),
@@ -2224,13 +2266,21 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
         minimal,
         minimal_edits,
         file,
+        accepted: entry.map(|e| e.issue),
     }
 }
 
 /// Delta debugging over lines, then characters, under a budget: keep a
 /// candidate only while `still` holds for it.
 fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
-    let deadline = Instant::now() + Duration::from_mins(5);
+    // Five minutes, or `PMACS_FUZZ_MINIMIZE_SECONDS` (a test's knob, beside
+    // the self-test plants': a row that only needs a finding's kind need not
+    // wait out the budget).
+    let budget = std::env::var("PMACS_FUZZ_MINIMIZE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let deadline = Instant::now() + Duration::from_secs(budget);
     let mut cur = input.to_owned();
     for by_char in [false, true] {
         let mut units: Vec<String> = if by_char {
@@ -2271,10 +2321,186 @@ fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
 // Report
 // -------------------------------------------------------------------
 
+// -------------------------------------------------------------------
+// The accepted findings (E7h review 2, High 1; the owner's ruling at
+// E7h's fix round 2).
+// -------------------------------------------------------------------
+
+/// A finding the owner has accepted, from `fuzz/accepted.tsv`: one row
+/// each, the issue that records it, its grammar, the kinds it is seen as,
+/// the reproductions that identify it and the condition that removes it. A
+/// finding matches when it is of that grammar and one of those kinds and its
+/// minimal input is covered, at least `ACCEPT_MIN_COVERAGE` of its bytes,
+/// by the repeated unit of one of the reproductions (`dominant_unit`): the
+/// nested image openers of #301 (`![f`, `*f[`), the delimiter runs of #296
+/// (`_`, `*`). A different defect in the same grammar does not match: its
+/// minimum is what triggers it, not a run of those units, and minimizing
+/// strips whatever of them it was found inside. What the units cannot tell
+/// apart is a different defect whose minimal input is itself such a run;
+/// a variant of the class with another unit is not accepted until the owner
+/// adds its reproduction.
+struct Accepted {
+    issue: u32,
+    grammar: String,
+    kinds: Vec<Kind>,
+    /// The repeated unit of each reproduction, as `dominant_unit` names it.
+    units: Vec<String>,
+    removal: String,
+}
+
+/// How much of a finding's minimal input one of an entry's units must cover,
+/// and of a reproduction its own unit, for the entry to name it.
+const ACCEPT_MIN_COVERAGE: f64 = 0.5;
+
+/// The list at `path`: tab-separated, `issue grammar kinds reproductions
+/// removal`, kinds and reproductions comma-separated, a reproduction's path
+/// relative to the list's directory, `#` lines and the header skipped.
+fn load_accepted(path: &Path) -> Result<Vec<Accepted>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut entries = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("issue\t") {
+            continue;
+        }
+        let at = || format!("{}:{}", path.display(), n + 1);
+        let cells: Vec<&str> = line.split('\t').collect();
+        let [issue, grammar, kinds, reproductions, removal] = cells[..] else {
+            return Err(format!(
+                "{}: five tab-separated cells, not {}",
+                at(),
+                cells.len()
+            ));
+        };
+        let issue: u32 = issue
+            .trim_start_matches('#')
+            .parse()
+            .map_err(|_| format!("{}: `{issue}` is not an issue number", at()))?;
+        entry(grammar).map_err(|e| format!("{}: {e}", at()))?;
+        let kinds = kinds
+            .split(',')
+            .map(|k| Kind::from_name(k.trim()).ok_or_else(|| format!("{}: no kind `{k}`", at())))
+            .collect::<Result<Vec<_>, _>>()?;
+        if removal.trim().is_empty() {
+            return Err(format!(
+                "{}: an entry names the condition that removes it",
+                at()
+            ));
+        }
+        let mut units = Vec::new();
+        for r in reproductions.split(',') {
+            let file = base.join(r.trim());
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| format!("{}: {}: {e}", at(), file.display()))?;
+            let (unit, covered) = dominant_unit(&text)
+                .ok_or_else(|| format!("{}: {} has no repeated unit", at(), file.display()))?;
+            if covered < ACCEPT_MIN_COVERAGE {
+                return Err(format!(
+                    "{}: {}'s unit `{unit}` covers {:.0}% of it, under {:.0}%",
+                    at(),
+                    file.display(),
+                    covered * 100.0,
+                    ACCEPT_MIN_COVERAGE * 100.0
+                ));
+            }
+            if !units.contains(&unit) {
+                units.push(unit);
+            }
+        }
+        entries.push(Accepted {
+            issue,
+            grammar: grammar.to_owned(),
+            kinds,
+            units,
+            removal: removal.trim().to_owned(),
+        });
+    }
+    Ok(entries)
+}
+
+/// The entry, if any, that names a finding of `kind` in `grammar` whose
+/// minimal input is `minimal`.
+fn accepted_entry<'a>(
+    list: &'a [Accepted],
+    grammar: &str,
+    kind: Kind,
+    minimal: &str,
+) -> Option<&'a Accepted> {
+    list.iter().find(|e| {
+        e.grammar == grammar
+            && e.kinds.contains(&kind)
+            && e.units
+                .iter()
+                .any(|u| coverage(minimal, u) >= ACCEPT_MIN_COVERAGE)
+    })
+}
+
+/// The share of `text`'s bytes that non-overlapping occurrences of `unit`,
+/// in its best rotation, cover.
+fn coverage(text: &str, unit: &str) -> f64 {
+    if text.is_empty() || unit.is_empty() {
+        return 0.0;
+    }
+    let chars: Vec<char> = unit.chars().collect();
+    let best = (0..chars.len())
+        .map(|i| {
+            let rotation: String = chars[i..].iter().chain(&chars[..i]).collect();
+            text.matches(rotation.as_str()).count() * rotation.len()
+        })
+        .max()
+        .unwrap_or(0);
+    #[allow(clippy::cast_precision_loss)]
+    let share = best as f64 / text.len() as f64;
+    share
+}
+
+/// The run of one to four characters (no newline) that covers most of
+/// `text`, reduced to its primitive root and named by its least rotation
+/// (`f![` and `[f!` are both `![f`), with the share it covers.
+fn dominant_unit(text: &str) -> Option<(String, f64)> {
+    let chars: Vec<char> = text.chars().collect();
+    // Each length's most frequent window, then the one whose occurrences,
+    // counted without overlap, cover most of the text: overlapping counts
+    // would favour a window one longer than a short period.
+    let mut best: Option<(f64, String)> = None;
+    for len in 1..=4 {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for w in chars.windows(len) {
+            if !w.contains(&'\n') {
+                *counts.entry(w.iter().collect()).or_insert(0) += 1;
+            }
+        }
+        let Some(top) = counts
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .map(|(u, _)| u.clone())
+        else {
+            continue;
+        };
+        let covered = coverage(text, &top);
+        if best.as_ref().is_none_or(|(c, _)| covered > *c + 1e-9) {
+            best = Some((covered, top));
+        }
+    }
+    let (_, unit) = best?;
+    let chars: Vec<char> = unit.chars().collect();
+    let root_len = (1..=chars.len())
+        .find(|d| {
+            chars.len().is_multiple_of(*d) && (0..chars.len()).all(|i| chars[i] == chars[i % d])
+        })
+        .unwrap_or(chars.len());
+    let root = &chars[..root_len];
+    let canonical = (0..root.len())
+        .map(|i| root[i..].iter().chain(&root[..i]).collect::<String>())
+        .min()?;
+    let covered = coverage(text, &canonical);
+    Some((canonical, covered))
+}
+
 fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
     let mut md = String::new();
     let mut tsv = String::from(
-        "grammar\tseeds\tinputs\tparses\tmutated\tMB\tslowest_ms\tseconds\tgrowth_mb\tcrashes\thangs\tmemory\tslow\tallocs\tin_sequence\tunconfirmed\terror\n",
+        "grammar\tseeds\tinputs\tparses\tmutated\tMB\tslowest_ms\tseconds\tgrowth_mb\tcrashes\thangs\tmemory\tslow\tallocs\tin_sequence\tunconfirmed\taccepted\terror\n",
     );
     let _ = writeln!(
         md,
@@ -2285,10 +2511,12 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
          its inputs before it was replaced; mutated counts the inputs after the seeds. Crashes, \
          hangs, memory, slow and allocs count findings that came back, alone or after the inputs \
          before them (in sequence counts the latter), memory those cut at four times the RSS \
-         limit; the last column those that came back neither way. A crash, however it came \
-         back, a hang that came back and a memory cut fail the run.\n\n\
-         | grammar | seeds | inputs | mutated | parses | MB | slowest ms (bytes) | s | growth MB | crashes | hangs | memory | slow | allocs | in sequence | unconfirmed |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+         limit; unconfirmed those that came back neither way. A crash, however it came \
+         back, a hang that came back and a memory cut fail the run, unless the accepted \
+         list (`fuzz/accepted.tsv`, the owner's) names the finding: accepted counts those, \
+         reported known, accepted (#N).\n\n\
+         | grammar | seeds | inputs | mutated | parses | MB | slowest ms (bytes) | s | growth MB | crashes | hangs | memory | slow | allocs | in sequence | unconfirmed | accepted |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         cfg.seconds,
         cfg.edits,
         cfg.seed,
@@ -2313,13 +2541,14 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
         let (mem, slow_n) = (count(Kind::Memory), count(Kind::Slow));
         let growth = s.growth_kb / 1024;
         let unconfirmed = r.findings.iter().filter(|t| t.repro == Repro::No).count();
+        let accepted = r.findings.iter().filter(|t| t.accepted.is_some()).count();
         let secs = s.elapsed.as_secs();
         let mb = s.bytes / (1024 * 1024);
         let slow = s.slowest_micros / 1000;
         let err = r.error.as_deref().unwrap_or("");
         let _ = writeln!(
             md,
-            "| {} | {} | {} | {mutated} | {} | {mb} | {slow} ({}) | {secs} | {growth} | {c} | {h} | {mem} | {slow_n} | {a} | {in_sequence} | {unconfirmed} |{}",
+            "| {} | {} | {} | {mutated} | {} | {mb} | {slow} ({}) | {secs} | {growth} | {c} | {h} | {mem} | {slow_n} | {a} | {in_sequence} | {unconfirmed} | {accepted} |{}",
             r.grammar,
             s.seeds,
             s.inputs,
@@ -2333,10 +2562,18 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
         );
         let _ = writeln!(
             tsv,
-            "{}\t{}\t{}\t{}\t{mutated}\t{mb}\t{slow}\t{secs}\t{growth}\t{c}\t{h}\t{mem}\t{slow_n}\t{a}\t{in_sequence}\t{unconfirmed}\t{err}",
+            "{}\t{}\t{}\t{}\t{mutated}\t{mb}\t{slow}\t{secs}\t{growth}\t{c}\t{h}\t{mem}\t{slow_n}\t{a}\t{in_sequence}\t{unconfirmed}\t{accepted}\t{err}",
             r.grammar, s.seeds, s.inputs, s.parses
         );
     }
+    md.push_str(&findings_md(reports));
+    std::fs::write(cfg.out.join("report.md"), md).map_err(|e| e.to_string())?;
+    std::fs::write(cfg.out.join("report.tsv"), tsv).map_err(|e| e.to_string())
+}
+
+/// The report's findings, those that came back and those that did not.
+fn findings_md(reports: &[Report]) -> String {
+    let mut md = String::new();
     for (heading, came_back) in [("Findings", true), ("Not reproduced", false)] {
         let _ = writeln!(md, "\n## {heading}\n");
         let mut none = true;
@@ -2352,9 +2589,12 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
                     Repro::InSequence(k) => format!("after the {k} inputs before it"),
                     Repro::No => "no".to_owned(),
                 };
+                let known = t
+                    .accepted
+                    .map_or(String::new(), |n| format!(", known, accepted (#{n})"));
                 let _ = writeln!(
                     md,
-                    "- **{}** {} `{}`, reproduced: {}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
+                    "- **{}** {} `{}`, reproduced: {}{known}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
                     r.grammar,
                     t.finding.kind.name(),
                     t.finding.signature,
@@ -2370,8 +2610,7 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
             let _ = writeln!(md, "None.");
         }
     }
-    std::fs::write(cfg.out.join("report.md"), md).map_err(|e| e.to_string())?;
-    std::fs::write(cfg.out.join("report.tsv"), tsv).map_err(|e| e.to_string())
+    md
 }
 
 /// A minimal input as the report shows it: escaped, and cut at 400
@@ -2826,6 +3065,65 @@ mod tests {
     }
 
     #[test]
+    fn the_accepted_list_names_its_findings_and_no_other() {
+        // E7h fix round 2, the owner's ruling on review 2's High 1: each row
+        // names its findings by the repeated unit of its reproductions.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let list = load_accepted(&root.join("fuzz/accepted.tsv")).expect("the list loads");
+        let issues: Vec<u32> = list.iter().map(|e| e.issue).collect();
+        assert_eq!(issues, [296, 301]);
+        let units = |issue| {
+            list.iter()
+                .find(|e| e.issue == issue)
+                .map(|e| e.units.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(units(296), ["_", "*"]);
+        assert_eq!(units(301), ["![f", "*f["]);
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).expect(p);
+        let named = |kind, text: &str| {
+            accepted_entry(&list, "markdown_inline", kind, text).map(|e| e.issue)
+        };
+        // #301's three minimal inputs from review 2's runs, and #296's 4 KB
+        // minimum and a run of asterisks.
+        for p in [
+            "tests/e7h_review2/markdown-inline-84.input",
+            "tests/e7h_review2/markdown-inline-hang-596.input",
+            "tests/e7h_review2/markdown-inline-hang-7672.input",
+        ] {
+            assert_eq!(named(Kind::Hang, &read(p)), Some(301), "{p}");
+            assert_eq!(named(Kind::Memory, &read(p)), None, "{p} as a memory cut");
+            assert_eq!(
+                accepted_entry(&list, "markdown", Kind::Hang, &read(p)).map(|e| e.issue),
+                None,
+                "{p} in another grammar"
+            );
+        }
+        let underscores = vec![format!("{}a `_`_", "_".repeat(582)); 7].join("\n");
+        assert_eq!(named(Kind::Memory, &underscores), Some(296));
+        assert_eq!(named(Kind::Memory, &"*".repeat(9000)), Some(296));
+        assert_eq!(
+            named(Kind::Hang, &underscores),
+            None,
+            "#296 is accepted as a memory cut only"
+        );
+        // A different defect: its minimum is its trigger, and the trigger
+        // inside either class's text is not covered by its units.
+        assert_eq!(named(Kind::Hang, SELFTEST_TRIGGER), None);
+        assert_eq!(named(Kind::Memory, SELFTEST_TRIGGER), None);
+        let inside = format!("{}{SELFTEST_TRIGGER}", "f![".repeat(4));
+        assert_eq!(named(Kind::Hang, &inside), None, "{inside}");
+        assert_eq!(
+            dominant_unit(&"f![".repeat(20)).map(|u| u.0).as_deref(),
+            Some("![f")
+        );
+        assert_eq!(
+            dominant_unit(&"_".repeat(20)).map(|u| u.0).as_deref(),
+            Some("_")
+        );
+    }
+
+    #[test]
     fn what_fails_the_run_is_a_crash_or_a_hang_that_came_back() {
         let report =
             |kind: Kind, repro: Option<Repro>, signature: &str, error: Option<&str>| Report {
@@ -2846,6 +3144,7 @@ mod tests {
                         minimal: String::new(),
                         minimal_edits: 0,
                         file: PathBuf::new(),
+                        accepted: None,
                     })
                     .into_iter()
                     .collect(),
@@ -2913,6 +3212,15 @@ mod tests {
             !crashes(Kind::Memory, ""),
             "except under `--fail-on crashes`, whose memory is the sanitizer's"
         );
+        let mut known = report(Kind::Hang, Some(Repro::Alone), "", None);
+        known.findings[0].accepted = Some(301);
+        assert!(
+            !fails(&[known], FailOn::All),
+            "a finding the accepted list names is reported, not failed (E7h fix round 2)"
+        );
+        let mut known = report(Kind::Crash, Some(Repro::Alone), "asan x in y", None);
+        known.findings[0].accepted = Some(1);
+        assert!(!fails(&[known], FailOn::All));
         assert_eq!(size(4 * 1024 * 1024), "4 GB");
         assert_eq!(size(6_743_000), "6.4 GB");
         assert_eq!(size(256 * 1024), "256 MB");
