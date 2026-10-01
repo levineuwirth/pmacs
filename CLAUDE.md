@@ -128,7 +128,12 @@ Always true:
   its final paragraph.** Git's trailer parser reads a lone
   `Validation: …` closing a message as a trailer, which is the whole of
   how `a712720` came to carry one; keep the validation inside the last
-  body paragraph, or put another line after it. Commits carry no
+  body paragraph, or put another line after it. **No line of a message
+  may begin with `#`.** The parser skips such a line as a comment, so a
+  validation line followed only by a line like `#291's tally …` closes
+  its paragraph alone and becomes the trailer block: that is how
+  `5359176`, whose validation line was written correctly, reached
+  `main` with one. Commits carry no
   trailers, and nothing session- or assistant-related appears in any
   commit message, PR body or issue text --- no `Co-Authored-By`, no
   `Claude-Session`, no claude.ai URL, no assistant or vendor name; a
@@ -144,7 +149,11 @@ Always true:
   fixture commits. The attribution rule's reach begins at `d97e137`,
   the E0 merge; the trailers rule's at `a712720`, the one commit on
   `main` after it that carries a trailer, so CI's fallback range over
-  the whole post-epoch history stays green. Earlier history carries
+  the whole post-epoch history stays green. `5359176` is excepted from
+  the trailers rule by name in the script, not by a later epoch, which
+  would drop the rule's reach over every clean commit between (the
+  owner's ruling); the summary line names it whenever a range holds
+  it. Earlier history carries
   the trailers, is read as history, and is not rewritten. Neither
   assertion reads the tree, so nothing had to land on `main` first.
   Commits are SSH-signed: check with `git log --show-signature`, not
