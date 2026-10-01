@@ -2094,11 +2094,14 @@ pub fn run_grep(cancel: &CancellationToken, bus: &BusEnd, id: JobId, spec: GrepS
 /// under `id`, and reports settle (or cancel/error) over the bus.
 ///
 /// Cancellation is coarse: the token is checked once before the
-/// parse runs. Mid-parse cancellation requires wiring tree-sitter's
-/// `AtomicUsize` cancellation flag through the worker's
-/// `CancellationToken` (an `AtomicBool`), which is M4.x territory ---
-/// M4.1 parses are bounded (5000-line cold parse < 100 ms; edits
-/// even faster), so coarse cancellation suffices for v0.1.
+/// parse runs, and a parse already running does not see it. What
+/// bounds a running parse is its deadline ([`ParseRequest::deadline`],
+/// E7h.2), and only where tree-sitter calls its progress callback:
+/// work between two callbacks is not bounded by either, so a parse
+/// can outlive its token and its deadline both. [`syntax_mod::run_parse`]
+/// names that work; #296 (a markdown paragraph, 9.8 GB at 32 KB) and
+/// #301 (nested image openers, exponential in their depth) are
+/// instances, and the wasm phase's limits are what bound them.
 fn run_parse(
     cancel: &CancellationToken,
     bus: &BusEnd,

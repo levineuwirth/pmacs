@@ -230,11 +230,13 @@ impl ParseTreeBundle {
 /// callback runs in the runtime's advance loop, so it bounds a grammar
 /// whose error recovery never terminates (the JavaScript family, E7g).
 /// It does not bound work done between two callbacks: an external scanner
-/// that never returns to the runtime, or `ts_parser__accept`, which at the
+/// that never returns to the runtime; `ts_parser__accept`, which at the
 /// end of the input pops every stack path and builds a root for each with
-/// no callback at all. A markdown paragraph of underscore runs spends
-/// 29.5 s and 9.8 GB there at 32 KB under a 5 s deadline (#296); only
-/// isolating the grammar bounds that.
+/// no callback at all (a markdown paragraph of underscore runs spends
+/// 29.5 s and 9.8 GB there at 32 KB under a 5 s deadline, #296); or
+/// `ts_parser__condense_stack`, whose merging of stack versions runs
+/// exponentially long in nested image and link openers (37 s at 28 of them
+/// under a 5 s deadline, #301). Only isolating the grammar bounds that.
 ///
 /// Returns `Err` if the language is rejected by [`tree_sitter::Parser`]
 /// (ABI mismatch, almost always a build issue), if the deadline cut the
