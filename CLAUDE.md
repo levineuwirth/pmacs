@@ -75,6 +75,9 @@ Always true:
   finding `fuzz/accepted.tsv` names, by grammar, kind and the repeated
   unit of a reproduction, is reported "known, accepted (#N)" and does not
   fail: markdown_inline's #296 and #301, until the wasm phase's limits.
+  A row is keyed to the defect, not the route, so those two name
+  `markdown` too, through whose inline injection a `.md` file meets
+  them.
   Adding a row is the owner's ruling, never a session's; a session that
   meets a finding it believes known files or comments the issue and
   leaves the run red.

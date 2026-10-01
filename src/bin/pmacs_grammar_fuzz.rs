@@ -2356,9 +2356,13 @@ fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
 // -------------------------------------------------------------------
 
 /// A finding the owner has accepted, from `fuzz/accepted.tsv`: one row
-/// each, the issue that records it, its grammar, the kinds it is seen as,
-/// the reproductions that identify it and the condition that removes it. A
-/// finding matches when it is of that grammar and one of those kinds and its
+/// each, the issue that records it, the grammars it is reached through, the
+/// kinds it is seen as, the reproductions that identify it and the condition
+/// that removes it. An entry is keyed to the defect, not to the route the
+/// fuzzer took to it: `markdown_inline`'s classes are reached directly and
+/// through markdown's inline injection, and their rows name both (the
+/// owner's ruling at E7h's fix round 3). A finding matches when it is of one
+/// of those grammars and one of those kinds and its
 /// minimal input is covered, at least `ACCEPT_MIN_COVERAGE` of its bytes,
 /// by the repeated unit of one of the reproductions (`dominant_unit`): the
 /// nested image openers of #301 (`![f`, `*f[`), the delimiter runs of #296
@@ -2370,7 +2374,7 @@ fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
 /// adds its reproduction.
 struct Accepted {
     issue: u32,
-    grammar: String,
+    grammars: Vec<String>,
     kinds: Vec<Kind>,
     /// The repeated unit of each reproduction, as `dominant_unit` names it.
     units: Vec<String>,
@@ -2405,7 +2409,14 @@ fn load_accepted(path: &Path) -> Result<Vec<Accepted>, String> {
             .trim_start_matches('#')
             .parse()
             .map_err(|_| format!("{}: `{issue}` is not an issue number", at()))?;
-        entry(grammar).map_err(|e| format!("{}: {e}", at()))?;
+        let grammars = grammar
+            .split(',')
+            .map(|g| {
+                entry(g.trim())
+                    .map(|e| e.name.to_owned())
+                    .map_err(|e| format!("{}: {e}", at()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let kinds = kinds
             .split(',')
             .map(|k| Kind::from_name(k.trim()).ok_or_else(|| format!("{}: no kind `{k}`", at())))
@@ -2438,7 +2449,7 @@ fn load_accepted(path: &Path) -> Result<Vec<Accepted>, String> {
         }
         entries.push(Accepted {
             issue,
-            grammar: grammar.to_owned(),
+            grammars,
             kinds,
             units,
             removal: removal.trim().to_owned(),
@@ -2456,7 +2467,7 @@ fn accepted_entry<'a>(
     minimal: &str,
 ) -> Option<&'a Accepted> {
     list.iter().find(|e| {
-        e.grammar == grammar
+        e.grammars.iter().any(|g| g == grammar)
             && e.kinds.contains(&kind)
             && e.units
                 .iter()
@@ -3122,12 +3133,31 @@ mod tests {
         ] {
             assert_eq!(named(Kind::Hang, &read(p)), Some(301), "{p}");
             assert_eq!(named(Kind::Memory, &read(p)), None, "{p} as a memory cut");
+            // Reached through markdown's inline injection, it is the same
+            // defect (E7h fix round 3); in a grammar that does not reach
+            // markdown_inline it is not.
             assert_eq!(
                 accepted_entry(&list, "markdown", Kind::Hang, &read(p)).map(|e| e.issue),
+                Some(301),
+                "{p} through markdown"
+            );
+            assert_eq!(
+                accepted_entry(&list, "rust", Kind::Hang, &read(p)).map(|e| e.issue),
                 None,
                 "{p} in another grammar"
             );
         }
+        let through = read("fuzz/repro/markdown-296-through-injection-20515.input");
+        assert_eq!(
+            accepted_entry(&list, "markdown", Kind::Memory, &through).map(|e| e.issue),
+            Some(296),
+            "#296 through markdown's injection, as the 600 s run met it"
+        );
+        assert_eq!(
+            accepted_entry(&list, "markdown", Kind::Memory, SELFTEST_TRIGGER).map(|e| e.issue),
+            None,
+            "a different defect through markdown"
+        );
         let underscores = vec![format!("{}a `_`_", "_".repeat(582)); 7].join("\n");
         assert_eq!(named(Kind::Memory, &underscores), Some(296));
         assert_eq!(named(Kind::Memory, &"*".repeat(9000)), Some(296));

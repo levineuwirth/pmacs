@@ -986,6 +986,88 @@ fn e7h2_a_large_slow_input_that_first_meets_the_memory_limit_is_filed_slow() {
     assert_eq!(code, 0, "a large slow parse does not fail the run: {row:?}");
 }
 
+// -------------------------------------------------------------------
+// E7h fix round 3: the owner's rulings.
+// -------------------------------------------------------------------
+
+#[test]
+fn e7h3_296s_paragraph_through_markdown_is_known_and_accepted() {
+    // An accepted entry is keyed to the defect, not to the route the fuzzer
+    // took to it (the owner's ruling at fix round 3). Round 2's 600 s run over
+    // markdown met #296 through the inline injection, and the row, then keyed
+    // to markdown_inline alone, failed it.
+    let paragraph = underscores(3);
+    let (code, row, md, notes) = fuzz_run(&Fuzz {
+        tag: "accept-296-markdown",
+        grammar: "markdown",
+        mode: "",
+        seeds: &[("a", paragraph.as_str())],
+        hang_ms: 30_000,
+        rss_mb: 8,
+        accepted: true,
+        minimize_secs: Some(30),
+    });
+    if cfg!(target_os = "linux") {
+        assert!(
+            has(&row, "memory=1") && has(&row, "accepted=1"),
+            "{row:?}\n{md}\n{notes}"
+        );
+        assert!(md.contains("known, accepted (#296)"), "{md}");
+        assert_eq!(
+            code, 0,
+            "#296 through markdown does not fail the run: {row:?}"
+        );
+    } else {
+        assert_eq!(code, 0, "{row:?}\n{md}");
+    }
+}
+
+#[test]
+fn e7h3_a_different_defect_reached_through_markdown_still_fails() {
+    // The guard the widening keeps: defects planted inside each class's text,
+    // reached through markdown, are not the class and fail the run.
+    let openers = format!("*bar**\n{}{TRIGGER}{}", "f![".repeat(12), "f*bark]");
+    let (code, row, md, _) = fuzz_run(&Fuzz {
+        tag: "planted-301-markdown",
+        grammar: "markdown",
+        mode: "hang",
+        seeds: &[("a", openers.as_str())],
+        hang_ms: 1000,
+        rss_mb: 1024,
+        accepted: true,
+        minimize_secs: Some(30),
+    });
+    assert!(
+        has(&row, "hangs=1") && has(&row, "accepted=0"),
+        "{row:?}\n{md}"
+    );
+    assert_eq!(
+        code, 1,
+        "a planted hang through markdown is not #301: {row:?}"
+    );
+    if cfg!(target_os = "linux") {
+        let paragraph = format!("{}{TRIGGER}", underscores(1));
+        let (code, row, md, _) = fuzz_run(&Fuzz {
+            tag: "planted-296-markdown",
+            grammar: "markdown",
+            mode: "bigreturn",
+            seeds: &[("a", paragraph.as_str())],
+            hang_ms: 10_000,
+            rss_mb: 64,
+            accepted: true,
+            minimize_secs: Some(30),
+        });
+        assert!(
+            has(&row, "memory=1") && has(&row, "accepted=0"),
+            "{row:?}\n{md}"
+        );
+        assert_eq!(
+            code, 1,
+            "a planted memory cut through markdown is not #296: {row:?}"
+        );
+    }
+}
+
 /// #296's paragraph at `lines` lines of 588 bytes.
 fn underscores(lines: usize) -> String {
     vec![format!("{}a `_`_", "_".repeat(582)); lines].join("\n")

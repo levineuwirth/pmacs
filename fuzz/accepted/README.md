@@ -13,7 +13,14 @@ as before. A row is removed in the commit that meets its removal condition.
 
 A finding matches a row when all three hold:
 
-- its grammar is the row's;
+- its grammar is one of the row's. A row names every route to its defect,
+  because an entry is keyed to the defect and not to the path a fuzzer took
+  to it: markdown_inline's classes are reached directly and through
+  markdown's inline injection, the way a `.md` file meets them in the
+  editor, so #296's and #301's rows name `markdown` and `markdown_inline`
+  (the owner's ruling at E7h's fix round 3, after a 600 s run over
+  `markdown` met #296 that way:
+  `fuzz/repro/markdown-296-through-injection-20515.input`);
 - its kind, after triage, is one of the row's kinds (`memory`, `hang`, and
   so on);
 - its minimal input is at least half covered by the repeated unit of one of
@@ -30,9 +37,9 @@ reproduction its own unit covers less than half of is refused.
 **What the match tells apart.** A different defect in the same grammar does
 not match. Its minimal input is what triggers it, not a run of those units,
 and minimizing strips whatever of them it was found inside.
-`tests/e7h_grammar_gate_acceptance.rs` holds this with planted defects in
-markdown_inline: one found inside #301's openers, and one inside #296's
-underscores.
+`tests/e7h_grammar_gate_acceptance.rs` holds this with planted defects
+found inside #301's openers and inside #296's underscores, in
+markdown_inline and again through markdown.
 
 **What it cannot tell apart.** It cannot separate a different defect whose
 minimal input is itself such a run. And a variant of an accepted class with
