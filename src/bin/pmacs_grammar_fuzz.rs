@@ -305,6 +305,15 @@ enum SelfTest {
     /// steps, frees it and returns: past four times a 64 MB limit, and
     /// returning (review 1's big-return plant; E7h fix round 1).
     BigReturn,
+    /// The input touches `PMACS_FUZZ_SELFTEST_MB` (default 100) for each
+    /// trigger it holds, then frees it and returns: memory that grows with
+    /// the input, as #296's does (E7h review 2, High 2). One trigger passes
+    /// a 64 MB limit and returns under four times it; four pass the cap.
+    Scaled,
+    /// The input touches `PMACS_FUZZ_SELFTEST_MB` (default 160), then the
+    /// worker aborts: an allocation whose confirmation crashes (E7h review
+    /// 2, Low 4).
+    GrowCrash,
 }
 
 impl SelfTest {
@@ -317,6 +326,8 @@ impl SelfTest {
             "sized" => Some(Self::Sized),
             "sequence" => Some(Self::Sequence),
             "bigreturn" => Some(Self::BigReturn),
+            "scaled" => Some(Self::Scaled),
+            "growcrash" => Some(Self::GrowCrash),
             _ => None,
         }
     }
@@ -354,16 +365,36 @@ impl SelfTest {
                     std::process::abort();
                 }
             }
-            Self::BigReturn => {
-                let mb: usize = std::env::var("PMACS_FUZZ_SELFTEST_MB")
+            Self::BigReturn | Self::Scaled | Self::GrowCrash => {
+                let each: usize = std::env::var("PMACS_FUZZ_SELFTEST_MB")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(400);
+                    .unwrap_or(match self {
+                        Self::BigReturn => 400,
+                        Self::Scaled => 100,
+                        _ => 160,
+                    });
+                let mb = if self == Self::Scaled {
+                    each * text.matches(SELFTEST_TRIGGER).count()
+                } else {
+                    each
+                };
+                // Review 1's plant in 64 MB steps as it was; the others finer.
+                // The crashing plant slowly enough that a poll sees it pass the
+                // first limit before it aborts.
+                let (step, pause) = match self {
+                    Self::BigReturn => (64, 20),
+                    Self::GrowCrash => (16, 25),
+                    _ => (16, 5),
+                };
                 let mut held: Vec<Vec<u8>> = Vec::new();
-                for _ in 0..mb.div_ceil(64) {
-                    held.push(vec![1; 64 << 20]);
+                for _ in 0..mb.div_ceil(step) {
+                    held.push(vec![1; step << 20]);
                     std::hint::black_box(&held);
-                    std::thread::sleep(Duration::from_millis(20));
+                    std::thread::sleep(Duration::from_millis(pause));
+                }
+                if self == Self::GrowCrash {
+                    std::process::abort();
                 }
                 drop(held);
             }
@@ -996,6 +1027,9 @@ enum Outcome {
     Done {
         parses: u64,
         micros: u64,
+        /// The worker's peak RSS (`VmHWM`) in kB when the input returned:
+        /// the input's own peak in a worker spawned for it alone.
+        peak_kb: u64,
     },
     Failed {
         kind: Kind,
@@ -1148,7 +1182,12 @@ impl Worker {
                     let mut f = line.split_whitespace().skip(1).map(str::parse::<u64>);
                     let parses = f.next().and_then(Result::ok).unwrap_or(0);
                     let micros = f.next().and_then(Result::ok).unwrap_or(0);
-                    return Outcome::Done { parses, micros };
+                    let peak_kb = f.next().and_then(Result::ok).unwrap_or(0);
+                    return Outcome::Done {
+                        parses,
+                        micros,
+                        peak_kb,
+                    };
                 }
                 Err(RecvTimeoutError::Disconnected) => return self.died(),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -1660,7 +1699,7 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
             let history = w.history_before_last();
             worker = None;
             record_failure(&mut findings, outcome, input, cfg.edits, seed, history);
-        } else if let Outcome::Done { parses, micros } = outcome {
+        } else if let Outcome::Done { parses, micros, .. } = outcome {
             report.stats.parses += parses;
             if micros > report.stats.slowest_micros {
                 report.stats.slowest_micros = micros;
@@ -1738,17 +1777,49 @@ fn outcome_alone(
     }
 }
 
-/// How long `text` takes alone in a fresh worker under `limits`, or
-/// `None` if it did not return.
-/// How an input run alone under a confirmation's limits came out.
+/// How an input run alone in a fresh worker under a confirmation's limits
+/// came out.
 enum Alone {
-    /// It returned, in this many microseconds.
-    Returned(u64),
-    /// It passed the memory limit and was cut there: the worker's peak RSS
-    /// in kB, and how long it had run.
-    OverMemory { peak_kb: u64, after: Duration },
-    /// It ran out of time, died, or its worker did not start.
+    /// It returned: in this many microseconds, at this peak RSS in kB.
+    Returned { micros: u64, peak_kb: u64 },
+    /// It passed the memory limit and was cut there: the worker's RSS in kB
+    /// at the cut (its high-water mark then, which is the cap and one
+    /// poll's growth, not the parse's own peak), and how long it had run.
+    OverMemory { cut_kb: u64, after: Duration },
+    /// It ran out of time without returning.
     NotReturned,
+    /// Its worker died under the confirmation, with this signature and
+    /// detail: a crash, which is filed as one (E7h review 2, Low 4; it had
+    /// been filed as a hang that "never returned").
+    Crashed { signature: String, detail: String },
+    /// Its worker did not start.
+    NoWorker,
+}
+
+impl Alone {
+    /// What the input did, as a note says it.
+    fn said(&self, long: &Limits) -> String {
+        match self {
+            Self::Returned { micros, peak_kb } => format!(
+                "returned in {} ms at a peak RSS of {}",
+                micros / 1000,
+                size(*peak_kb)
+            ),
+            Self::OverMemory { cut_kb, after } => format!(
+                "passed the {} cap and was cut there at {} after {:.1} s",
+                size(long.rss_kb),
+                size(*cut_kb),
+                after.as_secs_f64()
+            ),
+            Self::NotReturned => format!(
+                "did not return in {} s under {}",
+                long.hang.as_secs(),
+                size(long.rss_kb)
+            ),
+            Self::Crashed { signature, .. } => format!("crashed: {signature}"),
+            Self::NoWorker => "could not be run: its worker did not start".to_owned(),
+        }
+    }
 }
 
 fn time_alone(
@@ -1760,18 +1831,25 @@ fn time_alone(
     limits: &Limits,
 ) -> Alone {
     let Ok(mut w) = Worker::spawn(grammar, dir.join("triage.stderr"), limits.hang) else {
-        return Alone::NotReturned;
+        return Alone::NoWorker;
     };
     match w.run(text, edits, seed, limits) {
-        Outcome::Done { micros, .. } => Alone::Returned(micros),
+        Outcome::Done {
+            micros, peak_kb, ..
+        } => Alone::Returned { micros, peak_kb },
         Outcome::Failed {
             kind: Kind::Alloc, ..
         } => w
             .memory_cut
-            .map_or(Alone::NotReturned, |(peak_kb, after)| Alone::OverMemory {
-                peak_kb,
+            .map_or(Alone::NotReturned, |(cut_kb, after)| Alone::OverMemory {
+                cut_kb,
                 after,
             }),
+        Outcome::Failed {
+            kind: Kind::Crash,
+            signature,
+            detail,
+        } => Alone::Crashed { signature, detail },
         Outcome::Failed { .. } => Alone::NotReturned,
     }
 }
@@ -1792,25 +1870,94 @@ fn size(kb: u64) -> String {
 }
 
 /// A finding cut alone at the confirmation's memory cap: its own kind,
-/// named with the cap and the peak it had reached (E7h fix round 1).
-fn over_memory(f: &mut Finding, peak_kb: u64, after: Duration, long: &Limits) {
+/// named with the cap and the RSS it was cut at (E7h fix round 1). The RSS
+/// at the cut is the cap and one poll's growth, not the parse's own peak,
+/// which the harness never sees (E7h review 2, Low 7).
+fn over_memory(f: &mut Finding, cut_kb: u64, after: Duration, long: &Limits) {
     f.kind = Kind::Memory;
     f.signature = format!(
-        "exceeded memory cap at {} (peak {} after {:.1} s)",
+        "exceeded memory cap at {} (cut at {} after {:.1} s)",
         size(long.rss_kb),
-        size(peak_kb),
+        size(cut_kb),
         after.as_secs_f64()
     );
     let _ = write!(
         f.detail,
-        "\nexceeded memory cap: alone it passed {} (peak {} after {:.1} s) and was cut \
-         there, inside the {} s limit; whether it would have returned is not known. It \
-         fails the run: a parse that grows this far takes the editor out of memory (#296).",
+        "\nexceeded memory cap: alone it passed {} and was cut there at {} after {:.1} s, \
+         inside the {} s limit; its own peak is not known, nor whether it would have \
+         returned. It fails the run: a parse that grows this far takes the editor out of \
+         memory (#296).",
         size(long.rss_kb),
-        size(peak_kb),
+        size(cut_kb),
         after.as_secs_f64(),
         long.hang.as_secs()
     );
+}
+
+/// What the input as found did alone under the confirmation's limits
+/// decides an allocation's or a hang's kind (E7h review 2, High 2): a cut
+/// at the memory cap is `memory`, a crash is a crash, an allocation that
+/// returns is large, one that runs out of time never returned, and a hang
+/// that returns is slow. Until then an allocation was minimized first and
+/// only its minimum confirmed, so a parse whose memory grows with its
+/// input (#296) was confirmed at the size just past the first limit, where
+/// it returns, and passed.
+fn classify(f: &mut Finding, found: &Alone, limits: &Limits, long: &Limits) {
+    let first = f.kind;
+    let _ = write!(
+        f.detail,
+        "\nthe input as found, alone: {}",
+        found.said(long)
+    );
+    match found {
+        Alone::OverMemory { cut_kb, after } => over_memory(f, *cut_kb, *after, long),
+        Alone::Crashed { signature, detail } => {
+            f.kind = Kind::Crash;
+            f.signature.clone_from(signature);
+            let _ = write!(
+                f.detail,
+                "\ncrashed under the confirmation's limits, after the first pass met its {} \
+                 limit:\n{detail}",
+                if first == Kind::Hang {
+                    "time"
+                } else {
+                    "memory"
+                }
+            );
+        }
+        Alone::Returned { micros, .. } if first == Kind::Hang => {
+            f.kind = Kind::Slow;
+            // The limit is per parse, and an input is several parses (its
+            // edits'), so the whole can take longer than one may (E7h review
+            // 1, Low 7: "returned alone in 142425 ms under a 120 s limit").
+            let _ = write!(
+                f.detail,
+                "\nslow, not hung: alone, no parse ran past the {} s limit; the input's \
+                 parses took {} ms in all (not minimized)",
+                long.hang.as_secs(),
+                micros / 1000
+            );
+        }
+        Alone::Returned { .. } => {
+            let _ = write!(
+                f.detail,
+                "\nlarge, and it returns: under {} and {} s",
+                size(long.rss_kb),
+                long.hang.as_secs()
+            );
+        }
+        Alone::NotReturned if first == Kind::Alloc => {
+            f.kind = Kind::Hang;
+            f.signature = format!("never returned, growing past {} MB", limits.rss_kb / 1024);
+            let _ = write!(
+                f.detail,
+                "\nnot large but hung: alone it had not returned in {} s, under {}",
+                long.hang.as_secs(),
+                size(long.rss_kb)
+            );
+        }
+        Alone::NotReturned | Alone::NoWorker => {}
+    }
 }
 
 /// A hang is re-run alone under this multiple of the hang limit; what
@@ -1927,61 +2074,58 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
         hang: limits.hang * HANG_CONFIRM_FACTOR,
         rss_kb: limits.rss_kb * ALLOC_CONFIRM_FACTOR,
     };
-    // A hang is timed alone under twelve times the limit before anything
-    // is minimized: one that returns is slow, which D36 files and never
-    // fails, and keeps the input it was found with rather than spending
-    // the minimizer's five minutes at a hang limit an attempt (E7h.4: the
-    // depth operators make Lua's error recovery slow on most runs).
-    if alone && f.kind == Kind::Hang {
-        match time_alone(grammar, &f.input, f.edits, f.seed, dir, &long) {
-            Alone::Returned(micros) => {
-                f.kind = Kind::Slow;
-                // The limit is per parse, and an input is several parses
-                // (its edits'), so the whole can take longer than one may
-                // (E7h review 1, Low 7: "returned alone in 142425 ms under
-                // a 120 s limit").
-                let _ = write!(
-                    f.detail,
-                    "\nslow, not hung: alone, no parse ran past the {} s limit; the input's \
-                     parses took {} ms in all (not minimized)",
-                    long.hang.as_secs(),
-                    micros / 1000
-                );
-            }
-            Alone::OverMemory { peak_kb, after } => over_memory(&mut f, peak_kb, after, &long),
-            Alone::NotReturned => {}
-        }
+    // E7h review 2, High 2: an allocation or a hang is confirmed alone on
+    // the input that showed it, under twelve times the time and four times
+    // the memory, and what that input did decides its kind (`classify`).
+    // Then it is minimized against the first pass's limits, and the minimum
+    // is confirmed the same way and reported beside it. A hang is still
+    // timed before it is minimized, as since E7h.4: one that returns is
+    // slow, which D36 files and never fails, and keeps its input rather
+    // than spending the minimizer's five minutes at a hang limit an
+    // attempt (the depth operators make Lua's error recovery slow on most
+    // runs).
+    let confirmed = alone && matches!(f.kind, Kind::Hang | Kind::Alloc);
+    if confirmed {
+        let found = time_alone(grammar, &f.input, f.edits, f.seed, dir, &long);
+        classify(&mut f, &found, limits, &long);
     }
-    let (minimal, minimal_edits) = if !alone || f.kind == Kind::Slow || f.kind == Kind::Memory {
+    let (minimal, minimal_edits) = if !alone || f.kind == Kind::Slow {
         (f.input.clone(), f.edits)
     } else if same(&f.input, 0) {
         (minimize(&f.input, |t| same(t, 0)), 0)
     } else {
         (minimize(&f.input, |t| same(t, f.edits)), f.edits)
     };
-    // A hang whose input ran past twelve times the limit may still be a
-    // large parse quadratic in its bytes (CMake on 247 KB of whitespace:
-    // 210 s natively, 4 s at 34 KB; E7h). Its minimal input, which still
-    // runs past the limit, is timed the same way, and one that returns is
-    // slow; only one that does not is a hang.
-    if alone && f.kind == Kind::Hang {
-        match time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long) {
-            Alone::Returned(micros) => {
-                f.kind = Kind::Slow;
-                let _ = write!(
-                    f.detail,
-                    "\nslow, not hung: alone, a parse of the input ran past the {} s limit, and \
-                     no parse of its minimal one did; the minimal input's parses took {} ms in all",
-                    long.hang.as_secs(),
-                    micros / 1000
-                );
-            }
-            Alone::OverMemory { peak_kb, after } => over_memory(&mut f, peak_kb, after, &long),
-            Alone::NotReturned => {}
+    if confirmed && f.kind != Kind::Slow && minimal != f.input {
+        let least = time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long);
+        let _ = write!(
+            f.detail,
+            "\nits minimum ({} bytes), alone: {}",
+            minimal.len(),
+            least.said(&long)
+        );
+        // A hang whose input ran past twelve times the limit may still be a
+        // large parse quadratic in its bytes (CMake on 247 KB of whitespace:
+        // 210 s natively, 4 s at 34 KB; E7h). Its minimal input, which still
+        // runs past the first limit, returns: slow, not hung. What the input
+        // as found did decides every other kind; this one stays where E7h.4
+        // put it, because the alternative fails the smoke on cmake's and
+        // html's recoveries every run (E7h review 2's sweep), and the owner
+        // has not ruled it. A parse exponential in its input (#301) is filed
+        // slow this way where its minimum returns.
+        if f.kind == Kind::Hang
+            && want.0 == Kind::Hang
+            && let Alone::Returned { micros, .. } = least
+        {
+            f.kind = Kind::Slow;
+            let _ = write!(
+                f.detail,
+                "\nslow, not hung: alone, a parse of the input ran past the {} s limit, and \
+                 no parse of its minimal one did; the minimal input's parses took {} ms in all",
+                long.hang.as_secs(),
+                micros / 1000
+            );
         }
-    }
-    if alone && f.kind == Kind::Alloc {
-        confirm_alloc(grammar, &mut f, &minimal, minimal_edits, dir, limits, &long);
     }
     let stem = dir.join(format!("{}-{index}", f.kind.name()));
     let file = stem.with_extension("input");
@@ -2017,47 +2161,6 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
         minimal,
         minimal_edits,
         file,
-    }
-}
-
-/// E7h.3: an allocation is confirmed the way a hang is. A parse that grows
-/// past the RSS limit before the hang limit may never return at all (a
-/// cycle that allocates each turn); it is run alone under twelve times the
-/// time and four times the memory (`long`). One that returns is large. One
-/// cut at the memory cap is `memory` (the owner's ruling at E7h's fix round
-/// 1: review 1's big-return plant touched 6.4 GB and returned, and was filed
-/// as a hang that "never returned"). One still running at the time limit
-/// never returned, and is a hang.
-fn confirm_alloc(
-    grammar: &str,
-    f: &mut Finding,
-    minimal: &str,
-    minimal_edits: u32,
-    dir: &Path,
-    limits: &Limits,
-    long: &Limits,
-) {
-    match time_alone(grammar, minimal, minimal_edits, f.seed, dir, long) {
-        Alone::Returned(micros) => {
-            let _ = write!(
-                f.detail,
-                "\nlarge, and it returns: alone in {} ms under {} MB and {} s",
-                micros / 1000,
-                long.rss_kb / 1024,
-                long.hang.as_secs()
-            );
-        }
-        Alone::OverMemory { peak_kb, after } => over_memory(f, peak_kb, after, long),
-        Alone::NotReturned => {
-            f.kind = Kind::Hang;
-            f.signature = format!("never returned, growing past {} MB", limits.rss_kb / 1024);
-            let _ = write!(
-                f.detail,
-                "\nnot large but hung: alone it had not returned in {} s, under {} MB",
-                long.hang.as_secs(),
-                long.rss_kb / 1024
-            );
-        }
     }
 }
 

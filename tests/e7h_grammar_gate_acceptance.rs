@@ -614,41 +614,74 @@ fn planted_run_with_notes(
     mode: &str,
     seeds: &[(&str, &str)],
 ) -> (i32, Vec<String>, String, String) {
+    fuzz_run(&Fuzz {
+        tag,
+        grammar: "lua",
+        mode,
+        seeds,
+        hang_ms: 1000,
+        rss_mb: 64,
+        accepted: false,
+    })
+}
+
+/// One harness run with `seeds` as `grammar`'s whole corpus (no mutation,
+/// no edits): its exit code, its report.tsv row for the grammar as
+/// `column=value` cells, its report.md, and its findings' notes, joined.
+struct Fuzz<'a> {
+    tag: &'a str,
+    grammar: &'a str,
+    /// `PMACS_FUZZ_SELFTEST`, or "" for none.
+    mode: &'a str,
+    seeds: &'a [(&'a str, &'a str)],
+    hang_ms: u64,
+    rss_mb: u64,
+    /// Pass this tree's `fuzz/accepted.tsv`.
+    accepted: bool,
+}
+
+fn fuzz_run(f: &Fuzz) -> (i32, Vec<String>, String, String) {
+    let Fuzz {
+        tag,
+        grammar,
+        mode,
+        seeds,
+        hang_ms,
+        rss_mb,
+        accepted,
+    } = *f;
     let dir = temp_dir(&format!("plant-{tag}"));
-    let corpus = dir.join("corpus/lua");
+    let corpus = dir.join("corpus").join(grammar);
     std::fs::create_dir_all(&corpus).unwrap();
     for (name, text) in seeds {
         std::fs::write(corpus.join(name), text).unwrap();
     }
     let out = dir.join("out");
-    let run = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
-        .args(["run", "--corpus"])
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"));
+    cmd.args(["run", "--corpus"])
         .arg(dir.join("corpus"))
         .arg("--out")
         .arg(&out)
+        .args(["--grammar", grammar, "--seconds", "0", "--jobs", "1"])
         .args([
-            "--grammar",
-            "lua",
-            "--seconds",
-            "0",
-            "--jobs",
-            "1",
             "--hang-ms",
-            "1000",
+            &hang_ms.to_string(),
             "--rss-mb",
-            "64",
-            "--edits",
-            "0",
+            &rss_mb.to_string(),
         ])
+        .args(["--edits", "0"])
         .env("PMACS_FUZZ_SELFTEST", mode)
-        .env("PMACS_FUZZ_SELFTEST_MS", "2500")
-        .output()
-        .expect("the harness runs");
+        .env("PMACS_FUZZ_SELFTEST_MS", "2500");
+    if accepted {
+        cmd.arg("--accepted")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/accepted.tsv"));
+    }
+    let run = cmd.output().expect("the harness runs");
     let tsv = std::fs::read_to_string(out.join("report.tsv")).unwrap_or_default();
     let header: Vec<&str> = tsv.lines().next().unwrap_or("").split('\t').collect();
     let row: Vec<String> = tsv
         .lines()
-        .find(|l| l.starts_with("lua\t"))
+        .find(|l| l.starts_with(&format!("{grammar}\t")))
         .unwrap_or("")
         .split('\t')
         .map(str::to_owned)
@@ -660,7 +693,7 @@ fn planted_run_with_notes(
         .collect();
     let md = std::fs::read_to_string(out.join("report.md")).unwrap_or_default();
     let mut notes = String::new();
-    if let Ok(entries) = std::fs::read_dir(out.join("lua")) {
+    if let Ok(entries) = std::fs::read_dir(out.join(grammar)) {
         let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         paths.sort();
         for p in paths
@@ -715,7 +748,7 @@ fn e7h_a_parse_that_grows_without_returning_fails_the_run_and_is_no_allocation()
             has(&row, "memory=1") && has(&row, "hangs=0"),
             "{row:?}\n{md}"
         );
-        assert!(md.contains("exceeded memory cap at 256 MB (peak"), "{md}");
+        assert!(md.contains("exceeded memory cap at 256 MB (cut at"), "{md}");
     } else {
         assert!(has(&row, "hangs=1"), "{row:?}\n{md}");
     }
@@ -740,7 +773,7 @@ fn e7h_a_parse_past_the_memory_cap_that_returns_is_a_memory_cut_and_fails_the_ru
                 && has(&row, "allocs=0"),
             "{row:?}\n{md}"
         );
-        assert!(md.contains("exceeded memory cap at 256 MB (peak"), "{md}");
+        assert!(md.contains("exceeded memory cap at 256 MB (cut at"), "{md}");
         assert!(
             !md.contains("never returned"),
             "a memory cut is not said to have never returned:\n{md}"
@@ -818,4 +851,76 @@ fn e7h_a_large_slow_input_whose_minimum_returns_is_filed_not_failed() {
          input for the full twelve-times limit: {row:?}"
     );
     assert_eq!(code, 0, "a large slow parse does not fail the run: {row:?}");
+}
+
+// -------------------------------------------------------------------
+// E7h fix round 2: review 2's High 2 and High 1, and its Low 4.
+// -------------------------------------------------------------------
+
+#[test]
+fn e7h2_a_parse_whose_memory_grows_with_its_input_is_judged_on_the_input_as_found() {
+    // Review 2's High 2: an allocation was minimized against the first
+    // limit before it was confirmed, so a parse whose memory grows with its
+    // input was confirmed at the size just past that limit, where it
+    // returns, and passed (#296's 16 KB input: 5.29 GB as found, filed
+    // "large, and it returns" at a 4 KB minimum). The `scaled` plant touches
+    // 100 MB a trigger: four pass the 256 MB cap, one returns under it.
+    // Confirmed on the input as found it is a memory cut and fails the run;
+    // its minimum, one trigger, is confirmed too and reported beside it.
+    let four = format!("{TRIGGER}\n").repeat(4);
+    let (code, row, md, notes) = fuzz_run(&Fuzz {
+        tag: "scaled",
+        grammar: "lua",
+        mode: "scaled",
+        seeds: &[("a", four.as_str())],
+        hang_ms: 10_000,
+        rss_mb: 64,
+        accepted: false,
+    });
+    if cfg!(target_os = "linux") {
+        assert!(
+            has(&row, "memory=1") && has(&row, "allocs=0"),
+            "{row:?}\n{md}"
+        );
+        assert!(
+            notes.contains("the input as found, alone: passed the 256 MB cap and was cut there")
+                && notes.contains("its minimum (14 bytes), alone: returned in"),
+            "both confirmations reported:\n{notes}"
+        );
+        assert_eq!(code, 1, "a memory cut fails the run: {row:?}");
+    } else {
+        // No `/proc`: no memory is read, and nothing is found.
+        assert_eq!(code, 0, "{row:?}\n{md}");
+    }
+}
+
+#[test]
+fn e7h2_a_crash_while_an_allocation_is_confirmed_is_filed_as_a_crash() {
+    // Review 2's Low 4: the confirmation mapped a crash to "did not
+    // return", and an allocation whose confirmation crashed was filed as a
+    // hang that "never returned, growing past 1024 MB". The `growcrash`
+    // plant touches 160 MB, past the 64 MB limit, then aborts.
+    let (code, row, md, notes) = fuzz_run(&Fuzz {
+        tag: "growcrash",
+        grammar: "lua",
+        mode: "growcrash",
+        seeds: &[("a", TRIGGER)],
+        hang_ms: 10_000,
+        rss_mb: 64,
+        accepted: false,
+    });
+    if cfg!(target_os = "linux") {
+        assert!(
+            has(&row, "crashes=1") && has(&row, "hangs=0"),
+            "{row:?}\n{md}"
+        );
+        assert!(
+            notes.contains("crashed under the confirmation's limits")
+                && !notes.contains("never returned"),
+            "{notes}"
+        );
+    } else {
+        assert!(has(&row, "crashes=1"), "{row:?}\n{md}");
+    }
+    assert_eq!(code, 1, "a crash fails the run: {row:?}");
 }
