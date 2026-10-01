@@ -24,7 +24,12 @@ A finding matches a row when all three hold:
 - its kind, after triage, is one of the row's kinds (`memory`, `hang`, and
   so on);
 - its minimal input is at least half covered by the repeated unit of one of
-  the row's reproductions.
+  the row's reproductions. Coverage is counted over the input's
+  non-whitespace characters: indentation and line breaks are layout, the
+  route and not the defect (since fix round 3, when #296's underscores
+  reached markdown_inline on lazy-continuation lines indented hundreds of
+  spaces, 59% of a minimum the minimizer could not shrink by lines:
+  `fuzz/repro/markdown-inline-296-indented-7414.input`).
 
 The unit is the run of one to four characters that covers most of a
 reproduction, counted without overlap, reduced to its primitive root and

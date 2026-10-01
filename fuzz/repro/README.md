@@ -47,3 +47,24 @@ accepted list names #296 under `markdown` too is the owner's ruling
 (commented on #296).
 
     pmacs_grammar_fuzz repro markdown fuzz/repro/markdown-296-through-injection-20515.input
+
+## `markdown-inline-296-indented-7414.input`
+
+7,414 bytes. E7h's fix round 3 found it with a 600 s run of the `ubsan` arm
+over `markdown_inline` at `1836541` (GCC 16.2.1): `memory`, `exceeded memory
+cap at 4 GB (cut at 4.0 GB after 28.2 s)` on a 231,815-byte mutated input,
+reproduced alone and minimized to this. This minimum returned alone in 5.3 s
+at a 1.0 GB peak.
+
+It is #296's paragraph of underscore runs on lazy-continuation lines indented
+by hundreds of spaces: 4,354 spaces and 3,010 underscores. The minimizer
+works by lines past 4 KB, so it kept the spaces, and #296's unit `_` covered
+41% of the bytes, under the list's 50%, so the run failed. Natively
+(`tests/e7h_review2/drvp.c`) it parses in 0.49 s at 265 MB, the longest gap
+between progress callbacks after the last byte (`ts_parser__accept`). With
+every line's indentation stripped it is 3,060 bytes and costs the same: 0.47
+s at 265 MB. The accepted list now counts a unit's coverage over
+non-whitespace characters, and the unit row in `pmacs_grammar_fuzz` holds
+this input as #296 through both routes.
+
+    pmacs_grammar_fuzz repro markdown_inline fuzz/repro/markdown-inline-296-indented-7414.input

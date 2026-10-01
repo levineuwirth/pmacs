@@ -2422,7 +2422,8 @@ fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
 /// through markdown's inline injection, and their rows name both (the
 /// owner's ruling at E7h's fix round 3). A finding matches when it is of one
 /// of those grammars and one of those kinds and its
-/// minimal input is covered, at least `ACCEPT_MIN_COVERAGE` of its bytes,
+/// minimal input is covered, at least `ACCEPT_MIN_COVERAGE` of its
+/// non-whitespace characters (indentation is layout, since fix round 3),
 /// by the repeated unit of one of the reproductions (`dominant_unit`): the
 /// nested image openers of #301 (`![f`, `*f[`), the delimiter runs of #296
 /// (`_`, `*`). A different defect in the same grammar does not match: its
@@ -2537,6 +2538,14 @@ fn accepted_entry<'a>(
 /// The share of `text`'s bytes that non-overlapping occurrences of `unit`,
 /// in its best rotation, cover.
 fn coverage(text: &str, unit: &str) -> f64 {
+    // Counted over the text's non-whitespace characters: indentation and
+    // line breaks are layout, the route a fuzzer took, not the defect. #296's
+    // paragraph reached markdown_inline with lazy-continuation lines indented
+    // hundreds of spaces, which a minimizer working by lines cannot remove,
+    // and the same 3,060 underscores cost the same with them or without
+    // (E7h fix round 3).
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let text = text.as_str();
     if text.is_empty() || unit.is_empty() {
         return 0.0;
     }
@@ -2557,6 +2566,9 @@ fn coverage(text: &str, unit: &str) -> f64 {
 /// `text`, reduced to its primitive root and named by its least rotation
 /// (`f![` and `[f!` are both `![f`), with the share it covers.
 fn dominant_unit(text: &str) -> Option<(String, f64)> {
+    // Over the non-whitespace characters, as `coverage` counts.
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let text = text.as_str();
     let chars: Vec<char> = text.chars().collect();
     // Each length's most frequent window, then the one whose occurrences,
     // counted without overlap, cover most of the text: overlapping counts
@@ -3216,6 +3228,25 @@ mod tests {
             accepted_entry(&list, "markdown", Kind::Memory, SELFTEST_TRIGGER).map(|e| e.issue),
             None,
             "a different defect through markdown"
+        );
+        // Fix round 3's 600 s run: #296's underscores on lazy-continuation
+        // lines indented hundreds of spaces (59% of the bytes), which the
+        // minimizer, working by lines past 4 KB, kept. Coverage is counted
+        // over the non-whitespace characters, so it is #296 by either route;
+        // indentation around a planted trigger does not make it the class.
+        let indented = read("fuzz/repro/markdown-inline-296-indented-7414.input");
+        for g in ["markdown_inline", "markdown"] {
+            assert_eq!(
+                accepted_entry(&list, g, Kind::Memory, &indented).map(|e| e.issue),
+                Some(296),
+                "#296's indented paragraph through {g}"
+            );
+        }
+        let padded = format!("{}{SELFTEST_TRIGGER}\n{}", " ".repeat(400), " ".repeat(400));
+        assert_eq!(
+            named(Kind::Memory, &padded),
+            None,
+            "a trigger padded with spaces"
         );
         let underscores = vec![format!("{}a `_`_", "_".repeat(582)); 7].join("\n");
         assert_eq!(named(Kind::Memory, &underscores), Some(296));
