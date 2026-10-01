@@ -1972,8 +1972,8 @@ fn over_memory(f: &mut Finding, cut_kb: u64, after: Duration, long: &Limits) {
         f.detail,
         "\nexceeded memory cap: alone it passed {} and was cut there at {} after {:.1} s, \
          inside the {} s limit; its own peak is not known, nor whether it would have \
-         returned. It fails the run: a parse that grows this far takes the editor out of \
-         memory (#296).",
+         returned. A memory cut fails the run, since a parse that grows this far takes the \
+         editor out of memory (#296), unless fuzz/accepted.tsv names it.",
         size(long.rss_kb),
         size(cut_kb),
         after.as_secs_f64(),

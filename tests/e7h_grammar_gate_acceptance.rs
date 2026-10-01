@@ -963,6 +963,14 @@ fn e7h2_296s_paragraph_is_known_and_accepted_and_does_not_fail_the_run() {
             "{row:?}\n{md}\n{notes}"
         );
         assert!(md.contains("known, accepted (#296)"), "{md}");
+        // The note says so once and nowhere the opposite: fix round 2's
+        // first run of #296's input wrote "It fails the run" two lines below
+        // "it does not fail the run".
+        assert!(
+            notes.contains("accepted: known, accepted (#296); it does not fail the run")
+                && !notes.contains("It fails the run"),
+            "{notes}"
+        );
         assert_eq!(
             code, 0,
             "an accepted finding does not fail the run: {row:?}"
