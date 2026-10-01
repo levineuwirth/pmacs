@@ -855,10 +855,19 @@ fn e7h_a_large_slow_input_whose_minimum_returns_is_filed_not_failed() {
     // twelve-times limit (12 s), while its minimal input, one trigger,
     // returns in 2.5 s. That is CMake's case (247 KB of whitespace parses
     // in 210 s natively, 34 KB in 4 s): slow in its size, not hung, so it
-    // is filed and the run passes.
+    // is filed and the run passes. Since the owner's ruling at E7h's fix
+    // round 3 what decides it is the input as found, run alone again under
+    // ten times the twelve-times limit (120 s), where it returns in 15 s.
     let six = format!("{TRIGGER}\n").repeat(6);
-    let (code, row, md) = planted_run("sized", "sized", &[("a", six.as_str())]);
+    let (code, row, md, notes) = planted_run_with_notes("sized", "sized", &[("a", six.as_str())]);
     assert!(has(&row, "slow=1") && has(&row, "hangs=0"), "{row:?}\n{md}");
+    assert!(
+        notes.contains("alone again under ten times that limit: returned in")
+            && notes.contains(
+                "slow, not hung: alone it ran past the 12 s limit and returned under 120 s"
+            ),
+        "the extended run returned, and decided it:\n{notes}"
+    );
     assert!(
         md.contains("minimal 14 bytes"),
         "whole, it ran past the limit and was minimized to one trigger, whose \
@@ -1066,6 +1075,43 @@ fn e7h3_a_different_defect_reached_through_markdown_still_fails() {
             "a planted memory cut through markdown is not #296: {row:?}"
         );
     }
+}
+
+#[test]
+fn e7h3_a_parse_exponential_in_its_input_is_a_hang_though_its_minimum_returns() {
+    // The owner's ruling at fix round 3: the time limit is a trigger, not a
+    // verdict. The `doubling` plant sleeps 2.5 s for one trigger and doubles
+    // it for each more, as #301's parse grows with its openers: six triggers
+    // run 80 s, past the confirmation's limit (twelve times 300 ms, 3.6 s)
+    // and past ten times it (36 s), where the one-trigger minimum returns in
+    // 2.5 s. Decided by the minimum, it was slow and passed; run again under
+    // ten times the limit it does not return, so it is a hang and fails.
+    // `sized`, above, is the other half: linear, it returns and is slow.
+    let six = format!("{TRIGGER}\n").repeat(6);
+    let (code, row, md, notes) = fuzz_run(&Fuzz {
+        tag: "doubling",
+        grammar: "lua",
+        mode: "doubling",
+        seeds: &[("a", six.as_str())],
+        hang_ms: 300,
+        rss_mb: 1024,
+        accepted: false,
+        minimize_secs: None,
+    });
+    assert!(
+        has(&row, "hangs=1") && has(&row, "slow=0"),
+        "{row:?}\n{md}\n{notes}"
+    );
+    assert!(
+        notes.contains("returned in")
+            && notes.contains("alone again under ten times that limit: did not return in 36 s")
+            && notes.contains("hung: alone it did not return under ten times the 3 s limit"),
+        "the minimum returned, and the extended run did not:\n{notes}"
+    );
+    assert_eq!(
+        code, 1,
+        "a parse that does not terminate fails the run: {row:?}"
+    );
 }
 
 /// #296's paragraph at `lines` lines of 588 bytes.

@@ -39,11 +39,13 @@
 //! Findings are crashes (the process died: a sanitizer report, a glibc
 //! heap check, an assert, a panic; or `TypeSanitizer` reported an access of
 //! another type), hangs (a parse that has not returned after twelve times
-//! the hang limit, alone), memory cuts (a parse cut alone at four times
-//! `--rss-mb`), slow parses (over the limit but returning), and allocations
-//! (one input growing the worker's RSS by more than `--rss-mb`, returning
-//! under four times it). Each is confirmed alone in a fresh worker and,
-//! unless it is slow or a memory cut, minimized.
+//! the hang limit, alone, nor, when its minimal input returns, after ten
+//! times that), memory cuts (a parse cut alone at four times `--rss-mb`),
+//! slow parses (over the limit but returning), and allocations (one input
+//! growing the worker's RSS by more than `--rss-mb`, returning under four
+//! times it). Each is confirmed alone in a fresh worker on the input that
+//! showed it, which decides its kind, then, unless it is slow, minimized,
+//! with the minimum confirmed and reported beside it (E7h's fix round 2).
 //!
 //! `run` exits 1 on a crash, a hang or a memory cut, 2 on a usage or setup
 //! error (a grammar with no seeds is one: the rule is corpus-seeded), and 0
@@ -55,7 +57,12 @@
 //! allocation is confirmed under four times the memory and twelve times the
 //! time, one that still has not returned is a hang, and (E7h's fix round 1,
 //! the owner's ruling) one cut at the four-times memory cap is `memory`,
-//! "exceeded memory cap", with its peak, which fails the run; and a crash that
+//! "exceeded memory cap", with the RSS at the cut, which fails the run; the
+//! time limit is a trigger and not a verdict (fix round 3, the owner's
+//! ruling), so an input past twelve times it whose minimum returns is run
+//! again under ten times that, slow if it returns there and a hang if not;
+//! a finding `fuzz/accepted.tsv` names is reported and does not fail; and a
+//! crash that
 //! does not come back alone is replayed after the inputs its worker ran
 //! before it, and fails the run however it came back (a kill by signal 9,
 //! the host reclaiming memory, excepted). A hang that does not come back
@@ -320,6 +327,11 @@ enum SelfTest {
     /// input whose time grows with it, as bash's large inputs did on CI's
     /// `asan-strict` leg (E7h fix round 2).
     SizedAlloc,
+    /// The input returns after `PMACS_FUZZ_SELFTEST_MS` doubled for each
+    /// trigger past the first: a cost exponential in its input, as #301's is
+    /// in its openers, so the minimal input returns where the input as found
+    /// does not within ten times the confirmation's limit (E7h fix round 3).
+    Doubling,
 }
 
 impl SelfTest {
@@ -331,6 +343,7 @@ impl SelfTest {
             "slow" => Some(Self::Slow),
             "sized" => Some(Self::Sized),
             "sizedalloc" => Some(Self::SizedAlloc),
+            "doubling" => Some(Self::Doubling),
             "sequence" => Some(Self::Sequence),
             "bigreturn" => Some(Self::BigReturn),
             "scaled" => Some(Self::Scaled),
@@ -366,6 +379,14 @@ impl SelfTest {
                     1
                 };
                 std::thread::sleep(Duration::from_millis(ms * times));
+            }
+            Self::Doubling => {
+                let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2500);
+                let times = text.matches(SELFTEST_TRIGGER).count().clamp(1, 40) as u32;
+                std::thread::sleep(Duration::from_millis(ms.saturating_mul(1 << (times - 1))));
             }
             Self::SizedAlloc => {
                 let mb: usize = std::env::var("PMACS_FUZZ_SELFTEST_MB")
@@ -2073,6 +2094,11 @@ fn classify(f: &mut Finding, found: &Alone, limits: &Limits, long: &Limits) {
 /// returns is slow, what does not is a hang.
 const HANG_CONFIRM_FACTOR: u32 = 12;
 
+/// A hang whose minimal input returns is run alone once more under this
+/// multiple of the confirmation's time limit: what returns is slow, what
+/// does not is a hang (the owner's ruling at E7h's fix round 3).
+const HANG_EXTENSION_FACTOR: u32 = 10;
+
 /// An allocation is re-run alone under this multiple of the RSS limit
 /// (and the hang confirmation's time); what does not return is a hang.
 const ALLOC_CONFIRM_FACTOR: u64 = 4;
@@ -2159,6 +2185,65 @@ fn write_sequence(stem: &Path, f: &Finding, k: usize) {
     let _ = std::fs::write(seq.join("sequence.tsv"), manifest);
 }
 
+/// The time limit is a trigger, not a verdict (the owner's ruling at
+/// E7h's fix round 3). An input as found that ran past twelve times
+/// the limit, but whose minimum returns, may be a parse quadratic in
+/// its bytes (`cmake` on 247 KB of whitespace: 210 s natively, 4 s at
+/// 34 KB) or one that never terminates (#301's nested openers,
+/// exponential in their depth). So it is run alone once more under
+/// ten times that limit: one that returns is slow, filed with its
+/// time; one that does not is a hang and fails the run. Before, the
+/// minimum alone decided, which filed an exponential slow, and from
+/// `4c521c7` until this round it did so whichever limit the first
+/// parse met. A memory cut or a crash in that run is filed as one.
+fn extend_hang(grammar: &str, f: &mut Finding, dir: &Path, limits: &Limits, long: &Limits) {
+    let extended = Limits {
+        hang: long.hang * HANG_EXTENSION_FACTOR,
+        rss_kb: long.rss_kb,
+    };
+    let again = time_alone(grammar, &f.input, f.edits, f.seed, dir, &extended);
+    let _ = write!(
+        f.detail,
+        "\nthe input as found, alone again under ten times that limit: {}",
+        again.said(&extended)
+    );
+    match again {
+        Alone::Returned { micros, .. } => {
+            f.kind = Kind::Slow;
+            // A first parse that met the memory limit was named a
+            // hang by `classify`; slow, it carries the time limit's
+            // name.
+            f.signature = format!("one parse over {} ms", limits.hang.as_millis());
+            let _ = write!(
+                f.detail,
+                "\nslow, not hung: alone it ran past the {} s limit and returned under \
+                     {} s, its parses taking {} ms in all",
+                long.hang.as_secs(),
+                extended.hang.as_secs(),
+                micros / 1000
+            );
+        }
+        Alone::OverMemory { cut_kb, after } => {
+            over_memory(f, cut_kb, after, &extended);
+        }
+        Alone::Crashed { signature, detail } => {
+            f.kind = Kind::Crash;
+            f.signature = signature;
+            let _ = write!(f.detail, "\ncrashed under the extended limit:\n{detail}");
+        }
+        Alone::NotReturned => {
+            let _ = write!(
+                f.detail,
+                "\nhung: alone it did not return under ten times the {} s limit, though \
+                     its minimum does; a parse that does not terminate on its input fails \
+                     the run",
+                long.hang.as_secs()
+            );
+        }
+        Alone::NoWorker => {}
+    }
+}
+
 fn triage(
     grammar: &str,
     mut f: Finding,
@@ -2220,34 +2305,8 @@ fn triage(
             minimal.len(),
             least.said(&long)
         );
-        // A hang whose input ran past twelve times the limit may still be a
-        // large parse quadratic in its bytes (CMake on 247 KB of whitespace:
-        // 210 s natively, 4 s at 34 KB; E7h). Its minimal input, which still
-        // runs past the first limit, returns: slow, not hung. What the input
-        // as found did decides every other kind; this one stays where E7h.4
-        // put it, because the alternative would have failed review 2's smoke
-        // sweep on cmake's recoveries three times and html's once, and the
-        // owner has not ruled it. A parse exponential in its input (#301) is filed
-        // slow this way where its minimum returns. The boundary holds
-        // whatever limit the first parse met: bash's large inputs met the
-        // memory limit first on CI's `asan-strict` leg, ran past twelve times
-        // the time limit as found and returned minimized, and were failed as
-        // hangs while the same quadratic entering by time was filed slow
-        // (E7h fix round 2, `sizedalloc`).
-        if f.kind == Kind::Hang
-            && let Alone::Returned { micros, .. } = least
-        {
-            f.kind = Kind::Slow;
-            // A finding whose first parse met the memory limit was named a
-            // hang by `classify`; slow, it carries the time limit's name.
-            f.signature = format!("one parse over {} ms", limits.hang.as_millis());
-            let _ = write!(
-                f.detail,
-                "\nslow, not hung: alone, a parse of the input ran past the {} s limit, and \
-                 no parse of its minimal one did; the minimal input's parses took {} ms in all",
-                long.hang.as_secs(),
-                micros / 1000
-            );
+        if f.kind == Kind::Hang && matches!(least, Alone::Returned { .. }) {
+            extend_hang(grammar, &mut f, dir, limits, &long);
         }
     }
     let stem = dir.join(format!("{}-{index}", f.kind.name()));
