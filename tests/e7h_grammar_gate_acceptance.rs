@@ -956,6 +956,36 @@ fn e7h2_a_crash_while_an_allocation_is_confirmed_is_filed_as_a_crash() {
     assert_eq!(code, 1, "a crash fails the run: {row:?}");
 }
 
+#[test]
+fn e7h2_a_large_slow_input_that_first_meets_the_memory_limit_is_filed_slow() {
+    // The time boundary whatever limit the first parse met. CI's
+    // `asan-strict` leg at `38c9287` failed bash as two hangs: 235 KB inputs
+    // whose first parse passed 1 GB, which as found did not return in 120 s
+    // under 4 GB, and whose 28 KB minima returned in 2.6 s. The same
+    // quadratic entering by the time limit is filed slow (`sized`, above).
+    // `sizedalloc` holds 96 MB, past the 64 MB limit, while it sleeps 2.5 s
+    // for each of six triggers: 15 s whole, past the twelve-times limit
+    // (12 s), under the 256 MB cap, and 2.5 s minimized.
+    let six = format!("{TRIGGER}\n").repeat(6);
+    let (code, row, md, notes) =
+        planted_run_with_notes("sizedalloc", "sizedalloc", &[("a", six.as_str())]);
+    assert!(
+        has(&row, "slow=1") && has(&row, "hangs=0") && has(&row, "allocs=0"),
+        "{row:?}\n{md}\n{notes}"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            notes.contains("\nRSS ")
+                && notes.contains("signature: one parse over 1000 ms")
+                && notes.contains("the input as found, alone: did not return")
+                && notes.contains("slow, not hung"),
+            "its first parse met the memory limit, the input as found ran past the \
+             time limit, and its minimum returned:\n{notes}"
+        );
+    }
+    assert_eq!(code, 0, "a large slow parse does not fail the run: {row:?}");
+}
+
 /// #296's paragraph at `lines` lines of 588 bytes.
 fn underscores(lines: usize) -> String {
     vec![format!("{}a `_`_", "_".repeat(582)); lines].join("\n")

@@ -314,6 +314,12 @@ enum SelfTest {
     /// worker aborts: an allocation whose confirmation crashes (E7h review
     /// 2, Low 4).
     GrowCrash,
+    /// The input holds `PMACS_FUZZ_SELFTEST_MB` (default 96) while it sleeps
+    /// `PMACS_FUZZ_SELFTEST_MS` for each trigger it holds, then returns: a
+    /// first parse that meets the memory limit before the time limit, on an
+    /// input whose time grows with it, as bash's large inputs did on CI's
+    /// `asan-strict` leg (E7h fix round 2).
+    SizedAlloc,
 }
 
 impl SelfTest {
@@ -324,6 +330,7 @@ impl SelfTest {
             "grow" => Some(Self::Grow),
             "slow" => Some(Self::Slow),
             "sized" => Some(Self::Sized),
+            "sizedalloc" => Some(Self::SizedAlloc),
             "sequence" => Some(Self::Sequence),
             "bigreturn" => Some(Self::BigReturn),
             "scaled" => Some(Self::Scaled),
@@ -359,6 +366,21 @@ impl SelfTest {
                     1
                 };
                 std::thread::sleep(Duration::from_millis(ms * times));
+            }
+            Self::SizedAlloc => {
+                let mb: usize = std::env::var("PMACS_FUZZ_SELFTEST_MB")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(96);
+                let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2500);
+                let held = vec![1u8; mb << 20];
+                std::hint::black_box(&held);
+                let times = text.matches(SELFTEST_TRIGGER).count() as u64;
+                std::thread::sleep(Duration::from_millis(ms * times));
+                drop(held);
             }
             Self::Sequence => {
                 if SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 >= 3 {
@@ -2203,15 +2225,22 @@ fn triage(
         // 210 s natively, 4 s at 34 KB; E7h). Its minimal input, which still
         // runs past the first limit, returns: slow, not hung. What the input
         // as found did decides every other kind; this one stays where E7h.4
-        // put it, because the alternative fails the smoke on cmake's and
-        // html's recoveries every run (E7h review 2's sweep), and the owner
-        // has not ruled it. A parse exponential in its input (#301) is filed
-        // slow this way where its minimum returns.
+        // put it, because the alternative would have failed review 2's smoke
+        // sweep on cmake's recoveries three times and html's once, and the
+        // owner has not ruled it. A parse exponential in its input (#301) is filed
+        // slow this way where its minimum returns. The boundary holds
+        // whatever limit the first parse met: bash's large inputs met the
+        // memory limit first on CI's `asan-strict` leg, ran past twelve times
+        // the time limit as found and returned minimized, and were failed as
+        // hangs while the same quadratic entering by time was filed slow
+        // (E7h fix round 2, `sizedalloc`).
         if f.kind == Kind::Hang
-            && want.0 == Kind::Hang
             && let Alone::Returned { micros, .. } = least
         {
             f.kind = Kind::Slow;
+            // A finding whose first parse met the memory limit was named a
+            // hang by `classify`; slow, it carries the time limit's name.
+            f.signature = format!("one parse over {} ms", limits.hang.as_millis());
             let _ = write!(
                 f.detail,
                 "\nslow, not hung: alone, a parse of the input ran past the {} s limit, and \
