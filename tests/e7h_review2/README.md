@@ -45,6 +45,30 @@ measured and the build it measured it with.
   the pty carried, one line a run. Its positive control is a release build
   with tree-sitter-haskell 0.23.1 from crates.io and no
   `-fno-strict-aliasing`, which aborts on the two-pragma file.
+- `alias_shape.c` is the alias plant's shape on its own: GCC 16.2.1 and GCC
+  13.3.0 (`gcc:13.3`, CI's) at -O3 forward the `int` store past the `short`
+  one plainly, under ASan and under ASan with UBSan; `-fno-strict-aliasing`
+  reloads.
+- `i296_tripwire.sh` seeds markdown_inline with #296's input at 8, 16 and 32
+  KB in the `ubsan` arm at CI's smoke settings and exits 0 only if the run
+  fails on a memory cut, as the owner's ruling asks. At `17c3c8f` it exits 1:
+  each input is minimized against the first 1 GB limit before the 4 GB
+  confirmation, and only the 4,123-byte minimum is confirmed.
+- `drvp.c` parses a file natively through `ts_parser_parse_with_options` with
+  a progress callback (and, given seconds, a deadline as `run_parse` has),
+  and prints the parse time, the callbacks, the longest gap between them and
+  where it fell, and peak RSS. Build it with `-DLANG=tree_sitter_<name>` and
+  `-D_POSIX_C_SOURCE=200809L` beside the runtime and a grammar.
+- `markdown-inline-84.input` (the sweep's slow finding, filed slow because its
+  minimum returned) and `markdown-inline-hang-7672.input` (the 600 s run's
+  reproduced hang) are markdown_inline inputs of nested image openers whose
+  parse is exponential in the openers and spent in the runtime's stack
+  condensation, which the progress callback never reaches, both kept byte
+  for byte by the directory's `.gitattributes`; `markdown-inline-exp.txt`
+  holds the measurements.
+- `spin_probe.py` opens a file in the TUI, types N characters, and after a
+  wait reports how many of the editor's threads were on a CPU over two
+  seconds.
 
 #296's input, as the issue generates it (`l` repeated 14 times is 8 KB, 28
 times 16 KB, 56 times 32 KB):
