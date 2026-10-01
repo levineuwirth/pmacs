@@ -51,9 +51,11 @@ measured and the build it measured it with.
   reloads.
 - `i296_tripwire.sh` seeds markdown_inline with #296's input at 8, 16 and 32
   KB in the `ubsan` arm at CI's smoke settings and exits 0 only if the run
-  fails on a memory cut, as the owner's ruling asks. At `17c3c8f` it exits 1:
-  each input is minimized against the first 1 GB limit before the 4 GB
-  confirmation, and only the 4,123-byte minimum is confirmed.
+  files a memory cut for it. At `17c3c8f` it exits 1: each input is minimized
+  against the first 1 GB limit before the 4 GB confirmation, and only the
+  4,123-byte minimum is confirmed. Since E7h's fix round 2 the input as found
+  is confirmed first and `fuzz/accepted.tsv` names #296, so it expects the
+  cut reported "known, accepted (#296)" and the run passing.
 - `drvp.c` parses a file natively through `ts_parser_parse_with_options` with
   a progress callback (and, given seconds, a deadline as `run_parse` has),
   and prints the parse time, the callbacks, the longest gap between them and
