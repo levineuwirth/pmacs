@@ -746,9 +746,15 @@ static bool parse_ordered_list_marker(Scanner *s, TSLexer *lexer,
          valid_symbols[LIST_MARKER_PARENTHESIS_DONT_INTERRUPT] ||
          valid_symbols[LIST_MARKER_DOT_DONT_INTERRUPT])) {
         size_t digits = 1;
-        bool dont_interrupt = !isdigit(lexer->lookahead);
+        // pmacs (E7h fix round 2): `lookahead` is a codepoint, and
+        // `isdigit` is defined only for an `unsigned char` or EOF; glibc
+        // indexes its table with it, so `4` before U+4A28A read unmapped
+        // memory and the editor died on opening the file. CommonMark's
+        // list markers are ASCII digits, which is what this checks.
+        bool dont_interrupt =
+            !(lexer->lookahead >= '0' && lexer->lookahead <= '9');
         advance(s, lexer);
-        while (isdigit(lexer->lookahead)) {
+        while (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
             dont_interrupt = true;
             digits++;
             advance(s, lexer);

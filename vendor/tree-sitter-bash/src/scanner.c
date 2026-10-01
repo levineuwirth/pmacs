@@ -1155,7 +1155,12 @@ brace_start:
         advance(lexer);
         lexer->mark_end(lexer);
 
-        while (isdigit(lexer->lookahead)) {
+        // pmacs (E7h fix round 2): `lookahead` is a codepoint, and
+        // `isdigit` is defined only for an `unsigned char` or EOF; glibc
+        // indexes its table with it, so `echo {` before U+4A28A read
+        // unmapped memory and the editor died on opening the file. A brace
+        // range's bounds are ASCII digits, which is what this checks.
+        while (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
             advance(lexer);
         }
 
@@ -1169,7 +1174,7 @@ brace_start:
         }
         advance(lexer);
 
-        while (isdigit(lexer->lookahead)) {
+        while (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
             advance(lexer);
         }
 

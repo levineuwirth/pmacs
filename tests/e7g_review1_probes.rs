@@ -429,3 +429,78 @@ fn e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_
          recorded residual"
     );
 }
+
+/// The grammar C files under `dir`, but the generated `parser.c`, which
+/// calls no library function and is up to 42 MB.
+fn grammar_c_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            grammar_c_under(&p, out);
+        } else if p
+            .extension()
+            .is_some_and(|x| x == "c" || x == "h" || x == "cc")
+            && p.file_name().is_some_and(|n| n != "parser.c")
+        {
+            out.push(p);
+        }
+    }
+}
+
+#[test]
+fn e7h2_no_shipped_grammar_passes_a_codepoint_to_a_narrow_ctype_function() {
+    // E7h's fix round 2: tree-sitter-md's block scanner called
+    // `isdigit(lexer->lookahead)` and tree-sitter-bash's brace-range scan
+    // did the same. `lookahead` is a codepoint and the narrow `<ctype.h>`
+    // functions are defined only for an `unsigned char` or EOF; glibc
+    // indexes a 384-entry table with the value, so `4` or `echo {` before
+    // U+4A28A read about 600 KB past it into unmapped memory, and the
+    // release editor died with SIGSEGV on opening a 6-byte markdown file
+    // (two runs of three) and a 12-byte bash file (three of three). The
+    // copies now compare against '0'..'9'. A smaller codepoint reads mapped
+    // memory and returns garbage, which no sanitizer arm reports, so the
+    // fuzz gate sees this class only by luck of the address; this row sees
+    // the call. The wide functions (`iswspace`, `towlower`) take any
+    // `wint_t` and are what a scanner should call on `lookahead`.
+    const NARROW: &[&str] = &[
+        "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph", "islower", "isprint",
+        "ispunct", "isspace", "isupper", "isxdigit", "tolower", "toupper",
+    ];
+    let mut calls = Vec::new();
+    for (krate, dir) in grammar_crate_dirs() {
+        let mut files = Vec::new();
+        grammar_c_under(&dir, &mut files);
+        for file in files {
+            let src = std::fs::read_to_string(&file).unwrap_or_default();
+            for (n, line) in src.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                for name in NARROW {
+                    let called = code.match_indices(name).any(|(i, _)| {
+                        let before = code[..i].chars().next_back();
+                        let after = code[i + name.len()..].trim_start();
+                        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                            && after.starts_with('(')
+                    });
+                    if called {
+                        calls.push(format!(
+                            "{krate}: {}:{}: {}",
+                            file.strip_prefix(&dir).unwrap().display(),
+                            n + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        calls.is_empty(),
+        "a shipped grammar calls a narrow ctype function, which is undefined for a \
+         codepoint past 255 and on glibc reads past its table (E7h fix round 2: \
+         markdown's `4` and bash's `echo {{` before U+4A28A killed the editor):\n{}",
+        calls.join("\n")
+    );
+}

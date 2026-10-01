@@ -20,6 +20,12 @@ opens 254 and 300 levels in the editor and requires a YAML tree, and
 `tests/e7g_review1_serialization_witnesses.rs` fails by name if the crate
 resolves to crates.io again.
 
-To drop this copy: a crates.io release with the bound fixed, fuzzed clean with
+Upstream, as of 2026-10-01: issue #48 (the overrun, 2026-08-11) is open. PR #47
+(the bound, 2026-08-11) and PR #45 (the header, 2026-07-21) are open. Master
+`a1c4812` carries neither fix.
+
+To drop this copy: a crates.io release with both fixed (the bound and a
+`src/tree_sitter/array.h` passing no `(Array *)` to `_array__grow`; a release
+merging #47 without #45 meets only the first), fuzzed clean with
 `scripts/fuzz-grammars --grammar yaml --seconds 600`, the `[patch.crates-io]`
 entry and this directory removed in the same commit.
