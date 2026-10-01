@@ -33,23 +33,29 @@ Always true:
   under ASan and UBSan; `asan-strict`, ASan alone with strict aliasing
   restored, so that a compiler may exploit aliasing UB; and `tysan`,
   clang's TypeSanitizer, which reports an access of the wrong type on any
-  compiler. CI's `Grammar fuzz` job runs on every change, fuzzes when one
-  can change the grammar set (`scripts/grammar-fuzz-needed`; the touched
-  grammars ten minutes, the rest briefly), and builds the `ubsan` arm
-  alone, on GCC 13. On the inputs a run reaches, that job catches a memory
-  error ASan sees at the access, the UB UBSan instruments, a parse that
-  never returns, and one past the memory cap. Only the laptop's run
-  catches aliasing UB: UBSan has no aliasing check and its
-  instrumentation keeps even GCC 16 from exploiting it, GCC 13 does not
-  exploit tree-sitter-haskell's at all, and CI builds no TypeSanitizer
-  arm. Since E7h's fix round 1 no shipped scanner carries that header
-  (`ALIASING_HEADER_RESIDUAL` is empty), so those two arms guard the next
-  grammar. Neither run catches an input the mutator does not reach, a
-  defect only the release builders' GCC 11 or Apple clang would produce,
-  or UB no arm instruments, and a green run is not a proof. `build.rs`
-  refuses to compile C that `-fno-strict-aliasing` does not reach, as in
-  a build cargo did not start inside the checkout, which passes it with
-  `CFLAGS`. E7e's lesson: the author's chosen test file parsed while the
+  compiler. CI's grammar fuzz runs on every change, fuzzes when one can
+  change the grammar set (`scripts/grammar-fuzz-needed`; the touched
+  grammars ten minutes, the rest briefly), and builds two arms on
+  `ubuntu-24.04`'s GCC 13, which it prints: `ubsan`, the check named
+  `Grammar fuzz`, and `asan-strict`, `Grammar fuzz (asan-strict)`. On the
+  inputs a run reaches, CI catches a memory error ASan sees at the access,
+  the UB UBSan instruments, a parse that never returns, one past the
+  memory cap, and aliasing UB that GCC 13 turns into a memory error under
+  `asan-strict` (E7h review 2 measured one shape on GCC 13.3, a stored
+  length forwarded past a write through a narrower lvalue; it never
+  exploits tree-sitter-haskell 0.23.1's). The `ubsan` arm is blind to
+  aliasing UB because it is built with the flag, as it ships, which
+  forbids every compiler to exploit it, and UBSan has no aliasing check.
+  Only the laptop's run adds GCC 16, which exploits more of it, and
+  `tysan`, which reports the access on any compiler. Since E7h's fix round 1 no shipped scanner carries the
+  aliasing header (`ALIASING_HEADER_RESIDUAL` is empty), so those arms
+  guard the next grammar. Neither run catches an input the mutator does
+  not reach, a defect only the release builders' GCC 11 or Apple clang
+  would produce, or UB no arm instruments (a ctype table read past its
+  end into mapped memory, #302, which a row now forbids), and a green run
+  is not a proof. `build.rs` refuses to compile C that
+  `-fno-strict-aliasing` does not reach, as in a build cargo did not start
+  inside the checkout, which passes it with `CFLAGS`. E7e's lesson: the author's chosen test file parsed while the
   owner's real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
   tree-sitter-haskell 0.23.1's published `array.h` is undefined behavior
   that GCC 16 turned into a heap overflow at -O2 and CI's GCC 13 did
@@ -58,10 +64,20 @@ Always true:
   slow or large is filed; and a parse whose memory grows to an
   out-of-memory kill is neither, since it takes the editor down as an
   abort does (#296, markdown: an instance memory limit, the wasm
-  phase's, is what bounds it). The harness fails a parse cut at four
-  times its memory limit, reported as "exceeded memory cap" with its
-  peak, and never calls it hung (the `tysan` arm, whose time and memory
-  are the sanitizer's, fails on its crashes alone).
+  phase's, is what bounds it). The harness confirms a finding alone on
+  the input that showed it, and what that input did decides its kind;
+  then it minimizes and reports the minimum's outcome beside it. It fails
+  a parse cut at four times its memory limit, reported as "exceeded
+  memory cap" with the RSS at the cut (the parse's own peak is not
+  known), and never calls it hung; a hang whose minimum returns is still
+  filed slow, a boundary the owner has not ruled (the `tysan` arm, whose
+  time and memory are the sanitizer's, fails on its crashes alone). A
+  finding `fuzz/accepted.tsv` names, by grammar, kind and the repeated
+  unit of a reproduction, is reported "known, accepted (#N)" and does not
+  fail: markdown_inline's #296 and #301, until the wasm phase's limits.
+  Adding a row is the owner's ruling, never a session's; a session that
+  meets a finding it believes known files or comments the issue and
+  leaves the run red.
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before

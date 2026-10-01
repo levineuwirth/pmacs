@@ -567,7 +567,10 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
     // -fno-strict-aliasing where ASan alone found six crashes. The script's
     // default run is three builds: that one, ASan alone with strict
     // aliasing restored after the config's flag, and clang's TypeSanitizer.
-    // CI runs the first alone and says so.
+    // CI ran the first alone until E7h's fix round 2; review 2 found GCC
+    // 13.3, CI's, forwards a stored length through a narrower lvalue under
+    // ASan, so CI now runs the first two as a matrix whose `ubsan` leg keeps
+    // the job's name, on a pinned image that prints its compiler.
     let script = read("scripts/fuzz-grammars");
     assert!(
         script.contains("[ -n \"$arms\" ] || arms=\"ubsan asan-strict tysan\""),
@@ -595,8 +598,20 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
     );
     let wf = read(".github/workflows/grammar-fuzz.yml");
     assert!(
-        wf.contains("scripts/fuzz-grammars\n          --arm ubsan\n"),
-        "CI builds the ubsan arm alone"
+        wf.contains("scripts/fuzz-grammars\n          --arm \"${{ matrix.arm }}\"\n")
+            && wf.contains("        arm: [ubsan, asan-strict]\n"),
+        "CI builds the ubsan and asan-strict arms, one leg each"
+    );
+    assert!(
+        wf.contains(
+            "    name: ${{ matrix.arm == 'ubsan' && 'Grammar fuzz' || \
+             format('Grammar fuzz ({0})', matrix.arm) }}\n"
+        ),
+        "the ubsan leg keeps the check's name, `Grammar fuzz`"
+    );
+    assert!(
+        wf.contains("    runs-on: ubuntu-24.04\n") && wf.contains("cc --version"),
+        "the image is pinned and the job prints its compiler"
     );
 }
 

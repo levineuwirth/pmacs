@@ -20,15 +20,22 @@ name: Grammar fuzz
 # nothing it fuzzes changed, and the path list is the script's, which
 # tests/e7g_grammar_fuzz_acceptance.rs exercises.
 #
-# `scripts/fuzz-grammars --arm ubsan` builds the harness under the `fuzz`
-# profile, so the C is optimized as it ships (the Haskell overflow was UB
-# GCC 16 exploits at -O2 that a debug build never shows), with the
-# tree-sitter runtime and grammar C under AddressSanitizer and
-# UndefinedBehaviorSanitizer; the script's two other arms, which can see
-# aliasing UB, run in the rule's laptop run and not here (CLAUDE.md). It
-# seeds every grammar from this tree and its upstream sources at the
-# commits fuzz/corpora.tsv pins, and fails on a crash or a parse that never
-# returns (a slow or large one is reported, D36). The PR smoke is every
+# `scripts/fuzz-grammars` builds the harness under the `fuzz` profile, so
+# the C is optimized as it ships (the Haskell overflow was UB GCC 16
+# exploits at -O2 that a debug build never shows), once per leg of the
+# matrix: `ubsan`, the tree-sitter runtime and grammar C under
+# AddressSanitizer and UndefinedBehaviorSanitizer with the config's
+# -fno-strict-aliasing, as it ships; and since E7h's fix round 2
+# `asan-strict`, AddressSanitizer alone with strict aliasing restored after
+# that flag, the one leg that lets a compiler turn aliasing UB into the
+# memory error ASan reports (E7h review 2: GCC 13.3 forwards a stored length
+# through a narrower lvalue under it). The `ubsan` leg keeps the job's name,
+# `Grammar fuzz`. The script's third arm, TypeSanitizer, runs in the rule's
+# laptop run and not here (CLAUDE.md). It seeds every grammar from this tree
+# and its upstream sources at the commits fuzz/corpora.tsv pins, and fails on
+# a crash, a parse that never returns or one cut at the memory cap, unless
+# fuzz/accepted.tsv names the finding (a slow or large one is reported,
+# D36). The PR smoke is every
 # upstream corpus example and at most 100 seeds per grammar from each other
 # source, each cut to 16 KB, then at least 300 mutations and 15 s per
 # grammar (four minutes at most); the grammars a pull request changed --- a
@@ -67,13 +74,21 @@ concurrency:
 
 jobs:
   fuzz:
-    name: Grammar fuzz
-    runs-on: ubuntu-latest
+    name: ${{ matrix.arm == 'ubsan' && 'Grammar fuzz' || format('Grammar fuzz ({0})', matrix.arm) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [ubsan, asan-strict]
+    # Pinned, not `ubuntu-latest`: the image decides the compiler, and
+    # CLAUDE.md says which compiler this job is (GCC 13 on 24.04); the
+    # first fuzzing step prints it (E7h review 2, Low 8).
+    runs-on: ubuntu-24.04
     # The smoke: a cold -O3 build of the workspace's dependencies (about
     # ten minutes), the upstream fetch, the capped seeds, then per grammar
     # 300 mutations or four minutes, four at a time; the grammars a change
     # touched run ten minutes. The long form: 20 grammars at 600 s, four
-    # at a time, is under an hour of mutation.
+    # at a time, is under an hour of mutation. Each leg is its own runner,
+    # so the second arm adds runner minutes, not wall clock.
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 300 || 120 }}
     env:
       PMACS_FUZZ_DIR: ${{ github.workspace }}/target/grammar-fuzz
@@ -108,12 +123,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.decide.outputs.run == 'true'
         with:
-          workspaces: ". -> target/grammar-fuzz/target"
+          # One cache a leg: the arms build into their own directories.
+          key: ${{ matrix.arm }}
+          workspaces: ". -> target/grammar-fuzz/${{ matrix.arm == 'ubsan' && 'target' || format('target-{0}', matrix.arm) }}"
+      - name: Name the runner image and the compiler
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          echo "image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          cc --version | head -n 1
+          gcc -print-file-name=libasan.so
       - name: Fuzz every grammar
         if: steps.decide.outputs.run == 'true'
         run: >-
           scripts/fuzz-grammars
-          --arm ubsan
+          --arm "${{ matrix.arm }}"
           --seconds "${{ inputs.seconds || '15' }}"
           --jobs "${{ inputs.jobs || '4' }}"
           --max-files "${{ inputs.max_files || '100' }}"
@@ -127,6 +150,6 @@ jobs:
         if: always() && steps.decide.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: grammar-fuzz-report
+          name: ${{ matrix.arm == 'ubsan' && 'grammar-fuzz-report' || format('grammar-fuzz-report-{0}', matrix.arm) }}
           path: grammar-fuzz-report
           if-no-files-found: warn

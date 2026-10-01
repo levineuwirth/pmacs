@@ -221,18 +221,23 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
     for step in [
         "dtolnay/rust-toolchain",
         "Swatinem/rust-cache",
+        "name: Name the runner image and the compiler",
         "name: Fuzz every grammar",
         "name: Keep the report",
     ] {
         assert!(gated(step), "{step} runs only when the decision says so");
     }
     assert!(
-        wf.contains("scripts/fuzz-grammars\n          --arm ubsan"),
-        "the job runs the script's ubsan arm"
+        wf.contains("scripts/fuzz-grammars\n          --arm \"${{ matrix.arm }}\"")
+            && wf.contains("        arm: [ubsan, asan-strict]\n"),
+        "the job runs the script's ubsan arm, and since E7h's fix round 2 its \
+         asan-strict arm beside it"
     );
+    // The `ubsan` leg's check keeps the name the owner makes required; the
+    // second leg's is `Grammar fuzz (asan-strict)`.
     assert!(
-        wf.contains("    name: Grammar fuzz\n"),
-        "the job's check is named `Grammar fuzz`, the context the owner makes required"
+        wf.contains("    name: ${{ matrix.arm == 'ubsan' && 'Grammar fuzz' || "),
+        "the job's ubsan check is named `Grammar fuzz`, the context the owner makes required"
     );
 }
 

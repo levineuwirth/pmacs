@@ -30,7 +30,8 @@
 #      any arm's does. The tree-sitter runtime and every grammar's C are
 #      instrumented through a compiler wrapper that recognizes a grammar
 #      by the package it builds, not by its path, and the build fails if
-#      any grammar's C went uninstrumented. The arms, both run by default:
+#      any grammar's C went uninstrumented. The arms, all three run by
+#      default:
 #
 #        ubsan        AddressSanitizer and UndefinedBehaviorSanitizer, as
 #                     the grammars ship (E7h.4): a memory error or the UB
@@ -45,9 +46,11 @@
 #                     compiler do what the flag forbids, so a new grammar's
 #                     aliasing UB shows as the crash the compiler makes of
 #                     it, on a compiler that makes one (GCC 16 here; GCC
-#                     13, CI's, did not for Haskell's). Since E7h's fix
+#                     13, CI's, did not for Haskell's, and does for E7h
+#                     review 2's narrower-lvalue shape). Since E7h's fix
 #                     round 1 no shipped scanner carries that header, so
-#                     this arm guards the next grammar, not these.
+#                     this arm guards the next grammar, not these; CI runs
+#                     it beside ubsan since fix round 2.
 #        tysan        clang's TypeSanitizer on every grammar's C (not the
 #                     runtime's), compiled by $TYSAN_CC (default clang, 20
 #                     or later): the direct detector for the aliasing
