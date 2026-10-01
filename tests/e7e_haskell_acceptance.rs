@@ -211,6 +211,23 @@ fn e7e_a_hs_file_is_haskell_and_the_grid_paints_its_syntax() {
     );
 }
 
+/// The host's target triple, from `cargo -vV`. `cargo metadata` takes it as
+/// `--filter-platform`, so it resolves only the crates a host build uses:
+/// unfiltered and offline it needs every locked crate's source, and CI's
+/// runners hold only the host's (at `cbcff4b` every test leg failed here on
+/// `android-activity`, which only an Android build fetches).
+fn host() -> String {
+    let out = Command::new(env!("CARGO"))
+        .arg("-vV")
+        .output()
+        .expect("cargo -vV");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .expect("cargo -vV names the host")
+        .to_owned()
+}
+
 /// The file E7g reduced the owner's abort to: two `LANGUAGE` pragmas, the
 /// most ordinary opening a Haskell module has.
 const TWO_PRAGMAS: &str = "{-# LANGUAGE OverloadedStrings #-}\n\
@@ -266,6 +283,7 @@ fn e7h_tree_sitter_haskell_ships_from_crates_io_on_the_conforming_array_header()
     );
     let out = Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+        .args(["--filter-platform", &host()])
         .current_dir(root)
         .output()
         .expect("cargo metadata");

@@ -28,6 +28,23 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
+/// The host's target triple, from `cargo -vV`. `cargo metadata` takes it as
+/// `--filter-platform`, so it resolves only the crates a host build uses:
+/// unfiltered and offline it needs every locked crate's source, and CI's
+/// runners hold only the host's (at `cbcff4b` every test leg failed here on
+/// `android-activity`, which only an Android build fetches).
+fn host() -> String {
+    let out = Command::new(env!("CARGO"))
+        .arg("-vV")
+        .output()
+        .expect("cargo -vV");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .expect("cargo -vV names the host")
+        .to_owned()
+}
+
 /// Every grammar crate `fuzz/corpora.tsv` names, with its source directory
 /// as this workspace resolves it (a vendored copy where one is patched in).
 fn grammar_crate_dirs() -> Vec<(String, PathBuf)> {
@@ -38,6 +55,7 @@ fn grammar_crate_dirs() -> Vec<(String, PathBuf)> {
         .collect();
     let out = Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+        .args(["--filter-platform", &host()])
         .current_dir(root())
         .output()
         .expect("cargo metadata");
