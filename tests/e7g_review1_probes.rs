@@ -448,6 +448,50 @@ fn e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_
     );
 }
 
+/// The tree-sitter runtime's source directory, as this workspace resolves
+/// it for the host.
+fn runtime_dir() -> PathBuf {
+    let out = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+        .args(["--filter-platform", &host()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo metadata");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    meta["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "tree-sitter")
+        .map(|p| {
+            PathBuf::from(p["manifest_path"].as_str().unwrap())
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        })
+        .expect("cargo metadata resolves the tree-sitter runtime")
+}
+
+/// Every C file under `dir`.
+fn c_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            c_under(&p, out);
+        } else if p.extension().is_some_and(|x| x == "c" || x == "h") {
+            out.push(p);
+        }
+    }
+}
+
 /// The grammar C files under `dir`, but the generated `parser.c`, which
 /// calls no library function and is up to 42 MB.
 fn grammar_c_under(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -483,14 +527,36 @@ fn e7h2_no_shipped_grammar_passes_a_codepoint_to_a_narrow_ctype_function() {
     // fuzz gate sees this class only by luck of the address; this row sees
     // the call. The wide functions (`iswspace`, `towlower`) take any
     // `wint_t` and are what a scanner should call on `lookahead`.
+    //
+    // It covers every shipped grammar crate (`grammar_crate_dirs`, the
+    // crates `fuzz/corpora.tsv` holds to the table), not only the two that
+    // were caught, and, since E7h's fix round 3, the tree-sitter runtime's
+    // C, which reads the same buffer. A call whose line first bounds its
+    // argument below 128 is defined and allowed: the runtime's one narrow
+    // call, `isprint(chr)` after `0 < chr && chr < 128` in `subtree.c`, is
+    // that.
     const NARROW: &[&str] = &[
         "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph", "islower", "isprint",
         "ispunct", "isspace", "isupper", "isxdigit", "tolower", "toupper",
     ];
     let mut calls = Vec::new();
-    for (krate, dir) in grammar_crate_dirs() {
-        let mut files = Vec::new();
-        grammar_c_under(&dir, &mut files);
+    let mut scanned: Vec<(String, PathBuf, Vec<PathBuf>)> = grammar_crate_dirs()
+        .into_iter()
+        .map(|(krate, dir)| {
+            let mut files = Vec::new();
+            grammar_c_under(&dir, &mut files);
+            (krate, dir, files)
+        })
+        .collect();
+    let runtime = runtime_dir();
+    let mut files = Vec::new();
+    c_under(&runtime.join("src"), &mut files);
+    assert!(
+        files.iter().any(|f| f.ends_with("src/parser.c")),
+        "control: the runtime's own parser.c is scanned"
+    );
+    scanned.push(("tree-sitter (runtime)".to_owned(), runtime, files));
+    for (krate, dir, files) in scanned {
         for file in files {
             let src = std::fs::read_to_string(&file).unwrap_or_default();
             for (n, line) in src.lines().enumerate() {
@@ -499,8 +565,10 @@ fn e7h2_no_shipped_grammar_passes_a_codepoint_to_a_narrow_ctype_function() {
                     let called = code.match_indices(name).any(|(i, _)| {
                         let before = code[..i].chars().next_back();
                         let after = code[i + name.len()..].trim_start();
+                        let bounded = code[..i].contains("< 128 &&");
                         !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
                             && after.starts_with('(')
+                            && !bounded
                     });
                     if called {
                         calls.push(format!(
@@ -516,7 +584,7 @@ fn e7h2_no_shipped_grammar_passes_a_codepoint_to_a_narrow_ctype_function() {
     }
     assert!(
         calls.is_empty(),
-        "a shipped grammar calls a narrow ctype function, which is undefined for a \
+        "a shipped grammar or the runtime calls a narrow ctype function, which is undefined for a \
          codepoint past 255 and on glibc reads past its table (E7h fix round 2: \
          markdown's `4` and bash's `echo {{` before U+4A28A killed the editor):\n{}",
         calls.join("\n")
