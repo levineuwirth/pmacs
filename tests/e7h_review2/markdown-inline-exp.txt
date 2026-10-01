@@ -1,0 +1,20 @@
+markdown_inline (vendor/tree-sitter-md 0.5.3), tree-sitter 0.26.8, GCC 16.2.1 -O2 -fno-strict-aliasing,
+drvp.c (ts_parser_parse_with_options, a progress callback), the laptop loaded by niced fuzz runs.
+input: '*bar**\n' + 'f![' * k + 'f*bark]'
+wall, first series:  k=14 0.001 s, 16 0.004, 18 0.014, 20 0.053-0.060, 22 0.213, 24 0.791
+deadline 0.05 s:     k=20 cancelled at 0.066 s, 22 at 0.213 s, 24 at 0.786 s (the gap ends before the check)
+deadline 5 s:        k=26 cancelled at 13.093 s, k=28 at 37.127 s; longest gap = the whole parse, over the last 6-8 bytes; peak 2 MB
+cpu (user), second:  k=20 0.09 s, 22 0.51, 24 3.35, 26 12.99
+the fuzz-found 84 bytes: 0.747 s, 12 callbacks, longest gap 0.747 s
+'![' x28 + 'x]': 0.013 s; '[' x28 + 'x]': 0.000 s
+perf (k=24, k=22 with frame pointers): 90% / 48% self in stack_node_add_link, under
+ts_parser_parse -> ts_parser__condense_stack -> ts_stack_merge -> stack_node_add_link (recursive)
+release pair, 98-byte file (k=28), TUI 40x120 no server: C-x C-c answered in 0.04 s; after typing 5
+characters, 10 s later one thread at 97% of a core (16.4 s CPU in ~14 s), the others idle
+the 600 s run's reproduced hang (markdown-inline-hang-7672.input, `![*` repeated after spaces), natively:
+  no deadline: did not return in 120 s (95 s CPU); 5 s deadline: cancelled at 8.485 s, one gap of
+  7.127 s (offset 113 to 121), 11 callbacks; perf: stack_node_add_link under ts_parser__condense_stack
+the runs: this laptop's `ubsan` arm, markdown_inline at CI's PR long settings (600 s, 100 seeds a source,
+  16 KB): 1,500 inputs (1,037 mutated), one hang reproduced alone, minimal 7,672 bytes from 246,287, exit 1.
+  CI's run 36761534142 at 17c3c8f, the same settings and harness seed: 1,271 inputs (808 mutated), two
+  hangs not reproduced alone (260 and 262 KB) and one slow, exit 0.
