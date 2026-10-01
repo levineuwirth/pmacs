@@ -2191,6 +2191,119 @@ Tally (291): 5 items in the list below.
 
 So, across E7h: neither the `read Hello` family, nor #259, nor U4, nor U17, nor #271, nor #276, nor #253, nor #282, nor #288 sampled; #283 moves to seven and #291 to five; #298 and #300 are at one each.
 
+### E7h's second fix round: PR #297's runs, `main` at `5359176`, and the gate's samples
+
+Recorded 2026-10-01 by the round that wrote the rule above, under that rule. Each run was read from the jobs endpoint at attempt 1. The PR's runs are `pull_request` runs of the merge commit with `main`.
+
+**`main` at `5359176`**, the registry commit above: `CI` run 36899885972, `push`.
+
+Tally (run-36899885972-jobs): 15 = 5 + 1 + 9.
+
+Five success, one failure, nine skipped; the skips are correct for a docs-only commit. The failure is `Commit attribution (D9)`, on that commit's own message: "53591762… carries a trailer block, and commits carry no trailers". Its final paragraph's second line began with `#291's`, which git's trailer parser skips as a comment, so the lone `Validation:` line read as a trailer. `main` is not rewritten. Later pushes check only their own range, but the whole-history fallback will fail on it until the owner names an exception or moves the trailers epoch. This is no intermittent and no registered row: the commit's author's defect, recorded here because this file is where a red on `main` is accounted for.
+
+**PR #297's runs at the round's heads:**
+
+Tally (pr297-round2-runs): 20 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 36899274977 | CI | `cbcff4b` | failure |
+| 36899274860 | Grammar fuzz | `cbcff4b` | cancelled |
+| 36906446130 | CI | `a213a99` | cancelled |
+| 36906446229 | Grammar fuzz | `a213a99` | cancelled |
+| 36907198504 | CI | `792cdfa` | cancelled |
+| 36907198549 | Grammar fuzz | `792cdfa` | cancelled |
+| 36909344264 | CI | `90605f8` | cancelled |
+| 36909344319 | Grammar fuzz | `90605f8` | cancelled |
+| 36909902610 | CI | `02fe7af` | cancelled |
+| 36909903029 | Grammar fuzz | `02fe7af` | cancelled |
+| 36910548493 | CI | `f1819a6` | cancelled |
+| 36910548872 | Grammar fuzz | `f1819a6` | cancelled |
+| 36911490396 | CI | `23c7b1f` | cancelled |
+| 36911490387 | Grammar fuzz | `23c7b1f` | cancelled |
+| 36914436990 | CI | `c1fd1ed` | cancelled |
+| 36914437009 | Grammar fuzz | `c1fd1ed` | cancelled |
+| 36917782629 | CI | `38c9287` | failure |
+| 36917782552 | Grammar fuzz | `38c9287` | failure |
+| 36927231233 | CI | `4c521c7` | failure |
+| 36927231200 | Grammar fuzz | `4c521c7` | success |
+
+Tally (pr297-round2-cancelled): 15 rows of the table above with `verdict` = `cancelled`.
+
+Each cancelled run was cancelled by the next push, through the workflows' `concurrency` groups. Nothing in it ran to a verdict that the next run did not repeat.
+
+#### `CI` 36899274977 at `cbcff4b`: the round's own red, on every test leg
+
+Tally (run-36899274977-jobs): 19 = 12 + 1 + 6.
+
+Twelve success, `Docs consistency` skipped, and all six test legs failed on the same rows:
+- `e7g_review1_every_scanner_on_the_aliasing_array_header_is_recorded_and_built_without_strict_aliasing`;
+- `e7h_review1_the_crates_relying_on_the_flag_are_the_recorded_residual`.
+
+Each failed on `cargo metadata --offline --locked`: "failed to download `android-activity v0.6.1` … --offline was specified". The rows passed at `17c3c8f`. Unfiltered, cargo metadata needs every locked crate's source, and the runner's restored registry held only the host's. That is the branch's own fragility, not an intermittent of the product. `c1fd1ed` passes `--filter-platform` with the host, and on the laptop a host-only `CARGO_HOME` reproduces the failure and the fix. At `23c7b1f` (`CI` 36911490396, cancelled by the next push after two legs had finished, both failed) the same failure took four rows on the crdt leg, the round having added two callers. The no-crdt leg failed those four and the row below.
+
+#### Two cancelled runs that had already failed: the round's own rows
+
+`CI` 36911490396 at `23c7b1f` and 36914436990 at `c1fd1ed` were cancelled by the next push, but some test legs had finished first, and they are recorded here because they failed.
+
+Tally (run-36911490396-jobs): 19 = 12 + 1 + 2 + 4.
+
+Tally (run-36914436990-jobs): 19 = 14 + 1 + 3 + 1.
+
+The terms are success, skipped, failure, cancelled.
+- At `23c7b1f`, `Test (crdt)` failed the four metadata rows. `Test (ubuntu-latest / luajit, no crdt)` failed those and `e7h2_a_parse_whose_memory_grows_with_its_input_is_judged_on_the_input_as_found`.
+- At `c1fd1ed`, the metadata fix in, `Test (crdt)`, `Test (ubuntu-latest / luajit, no crdt)` and `Test (ubuntu-latest / luajit)` failed that row alone. Its note printed "its minimum (20 bytes), alone: returned in 53 ms", where the row required 14 bytes. Both macOS legs passed; `Test (ubuntu-latest / lua54)` was cancelled.
+
+The row passed on `23c7b1f`'s crdt leg, so the minimum's size is the runner's: the minimizer's oracle is a 50 ms RSS poll. `38c9287` holds the row to its claim. Both are the branch's own defects, fixed on the branch. No registered row and no intermittent of the product.
+
+#### `CI` 36917782629 at `38c9287`: #305, a first sample
+
+Tally (run-36917782629-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure: `Test (macos-latest / luajit)`, job 110556464685, its only failure against 175 `test result: ok`. The failing row is `e7c_indicator_acceptance::e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line`, "no request outlived the threshold, so no indicator at 3861 ms" with "⋯1 parse rust" on the activity indicator. That is the row #288 names, but not #288's fragment (`the check's diagnostic landed`), so it was filed as **#305**, first occurrence.
+
+The branch does touch the parse path the indicator reports on (`run_parse`'s deadline, E7h.2), so this sample is not one the branch is clear of. The other five legs ran it `ok`. The round's two CI fixes held there: the four metadata rows and the scaled row ran `ok` on `Test (crdt)` and `Test (ubuntu-latest / luajit)`.
+
+#### `Grammar fuzz` 36917782552 at `38c9287`: the new leg's first full run, red on the harness
+
+Tally (run-36917782552-jobs): 2 = 1 + 1.
+
+`Grammar fuzz` (the `ubsan` leg) succeeded, 66.1 min. `Grammar fuzz (asan-strict)` failed, 62.9 min, on bash: two `hang`s, "never returned, growing past 1024 MB", whose input as found did not return in 120 s and whose minimum returned in 2.6 s. That is a large slow input the harness's time boundary should have filed slow, and it did not because the first parse had met the memory limit. The round's own defect, fixed in `4c521c7`; no registered row.
+
+#### `CI` 36927231233 at `4c521c7`, the round's head: #306, a first sample
+
+Tally (run-36927231233-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure: `Test (macos-latest / lua54)`, job 110587518878, against 175 `test result: ok`. The row is `compile_mode_acceptance::acc05_kill_reaps_backgrounded_descendant`, "kill must produce a signaled exit marker; buffer:", with the shell's "Terminated: 15 sleep 30" in the buffer and no `[compile killed by` marker within 10 s. It has no registered row and touches nothing the branch changes, so it was filed as **#306**, first occurrence; not rerun.
+
+Every leg's `running` lines pair one to one with its result lines (176, 176, 177, 177, 177 and 178), and `WouldBlock`, `did not become ready` and `got ok` appear zero times. The round's six `e7h2_` rows ran `ok` on every leg.
+
+#### `Grammar fuzz` 36927231200 at `4c521c7`: both legs green
+
+Both legs succeeded:
+- `Grammar fuzz` (job 110587446735), 21:13:45–22:20:31Z;
+- `Grammar fuzz (asan-strict)` (job 110587447401), 21:13:46–22:20:06Z.
+
+Each printed `image: ubuntu24 20260927.320.1` and GCC 13.3.0. The decision step said `run=true` (`.cargo/config.toml changed`). No crash and no reproduced hang in any grammar on either leg. The `asan-strict` leg filed bash's 28,272-byte minimum, the input it had failed as a hang at `38c9287`, as slow.
+
+#### Local samples in the round's gates
+
+- `20261001T190159Z-1887994` at `f1819a6`: stopped by its author at the doc stage (exit 143) to commit the tripwire first. Not a result.
+- `20261001T190344Z-1908417` at `23c7b1f`, beside a niced 600 s fuzz arm, a tripwire run and a niced test build, load 25 to 30: five of six; the sweep 179 targets, 5,140 passed, 2 failed, 62 ignored. Its two reds are first samples, filed:
+  - **#303**, `git_status_stage1_acceptance::g6_4_d_answers_every_row_class`, "the status panel must render; status was "git: rev-parse returned no worktree root"";
+  - **#304**, `pmacs-gpu`'s `caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled`, the frames differing by a caret.
+
+  #291's, #298's and #300's rows ran `ok`.
+- `20261001T192607Z-2093589` at `c1fd1ed`, beside the 600 s arm's last two niced workers: five of six; the sweep 179 targets, 5,140 passed, 2 failed, 62 ignored, both in `pmacs-gpu`:
+  - **#304's second occurrence**, the same fragments to the pixel;
+  - `tests::overwide_status_runs_never_wrap_and_keep_the_suffix_pinned`, "assertion failed: min_y >= band_top && max_y <= height", recorded on #304 as the same candidate mechanism (two frames compared across a caret blink), not filed apart.
+
+  #291's, #298's, #300's and #303's rows ran `ok`.
+- `20261001T195235Z-2267767` at `01c8c75`: stopped by its author at the doc stage (exit 143) when CI showed the scaled row's defect. Not a result.
+- `20261001T195503Z-2281145` at `38c9287`, the round's tip, beside other sessions' load and none of the round's own fuzzing: **six of six**, 179 targets, 5,142 passed, 0 failed, 62 ignored; every intermittent's row above ran `ok`.
+
+So, at E7h's second fix round: #303 at one, #304 at two, #305 and #306 at one each; #283, #291, #298 and #300 not sampled, and every count above stands.
+
 ### `main` after E7g: run 36495882005 at `4ad9f3e`, #295 filed and #254's second occurrence
 
 Read at E7h's opening on 2026-09-29, from the jobs endpoint and all six
