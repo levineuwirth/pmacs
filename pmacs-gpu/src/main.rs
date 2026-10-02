@@ -2113,6 +2113,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     use std::fmt::Write as _;
     use std::sync::mpsc;
 
+    /// How long styling must be quiet before the typed byte's first style
+    /// is read (E7i).
+    const STYLE_QUIET: std::time::Duration = std::time::Duration::from_millis(500);
+
     /// Where one sample is.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Phase {
@@ -2226,6 +2230,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     // from it, so a restore whose restyle has not landed yet does not make
     // the next keystroke's style look unchanged.
     let mut original_style = None;
+    // When the last `StyleSpans` arrived: the byte's first style is read
+    // only once styling has been quiet for `STYLE_QUIET`, so a frame for
+    // a viewport the caret walk scrolled to has landed first.
+    let mut last_style_at: Option<std::time::Instant> = None;
     let samples_wanted = env_u64("PMACS_GPU_PROBE_SAMPLES", 30).max(1);
     let gap = std::time::Duration::from_millis(env_u64("PMACS_GPU_PROBE_GAP_MS", 300));
     let wait_lsp = std::env::var("PMACS_GPU_PROBE_WAIT_LSP_MS")
@@ -2336,10 +2344,12 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                         // Highlighted at all: the typed byte itself may be
                         // unstyled (a markdown paragraph's text is).
                         let highlighted = !wait_visible
-                            || app
+                            || (app
                                 .state
                                 .as_ref()
-                                .is_some_and(|s| !s.current_spans.is_empty());
+                                .is_some_and(|s| !s.current_spans.is_empty())
+                                && last_style_at
+                                    .is_some_and(|t| now.duration_since(t) >= STYLE_QUIET));
                         if server_ready && highlighted {
                             original_text.clone_from(&current);
                             original_style = style_at(&app);
@@ -2584,6 +2594,9 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             }
             Phase::Restoring => sample.restore_trace.push(format!("{label}@{since}")),
             _ => {}
+        }
+        if is_style {
+            last_style_at = Some(now);
         }
         if matches!(phase, Phase::Sampling | Phase::Settled)
             && is_style
