@@ -1,0 +1,62 @@
+[package]
+name = "pmacs-syntax"
+version = "1.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "pmacs's tree-sitter parse logic, shared by the editor and its parse units"
+license = "MIT OR Apache-2.0"
+authors = ["Pmacs contributors"]
+readme = "../README.md"
+repository = "https://git.levineuwirth.org/neuwirth/pmacs"
+homepage = "https://levineuwirth.org/essays/pmacs"
+keywords = ["editor", "emacs", "tree-sitter", "parsing"]
+categories = ["text-editors", "parsing"]
+publish = false
+
+# The grammar crates and their versions are the root package's, listed
+# again here because this crate is where `BUILTIN_LANGUAGES` now lives;
+# the workspace lockfile resolves both to the same crates, and the
+# vendored copies apply through the workspace's `[patch.crates-io]`.
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-lua = "0.5"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-cuda = "0.21"
+tree-sitter-bash = "0.25"
+tree-sitter-containerfile = "0.9"
+tree-sitter-make = "1.1"
+tree-sitter-cmake = "0.7"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-zig = "1.1"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+tree-sitter-md = "0.5"
+codebook-tree-sitter-latex = "0.6"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+arborium-lean = "2.18"
+tree-sitter-haskell = "0.24.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Allows: the root `pmacs` crate's set, mirrored so the code moved here
+# does not trip lints the original did not.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+multiple_crate_versions = "allow"

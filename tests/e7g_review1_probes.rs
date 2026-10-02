@@ -264,7 +264,8 @@ fn e7g_review1_the_fuzz_job_runs_when_a_query_overlay_changes() {
     // (TOML's quadratic walk, #292, was a query's shape, not a parse's).
     // An edit to the overlay changes what the harness exercises and what
     // ships, and touches no path the job listens on.
-    let syntax = read("src/syntax.rs");
+    // The table moved into `pmacs-syntax` at E7i.
+    let syntax = read("pmacs-syntax/src/lib.rs");
     assert!(
         syntax.contains("builtin/queries/latex/highlights.scm"),
         "control: the overlay is compiled into the table"

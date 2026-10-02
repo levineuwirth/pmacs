@@ -2581,6 +2581,7 @@ dependencies = [
  "mlua",
  "nix 0.29.0",
  "pmacs-protocol",
+ "pmacs-syntax",
  "portable-pty",
  "postcard",
  "proptest",
@@ -2648,6 +2649,34 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "unicode-width",
+]
+
+[[package]]
+name = "pmacs-syntax"
+version = "1.1.0"
+dependencies = [
+ "arborium-lean",
+ "codebook-tree-sitter-latex",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-cmake",
+ "tree-sitter-containerfile",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-cuda",
+ "tree-sitter-go",
+ "tree-sitter-haskell",
+ "tree-sitter-html",
+ "tree-sitter-json",
+ "tree-sitter-lua",
+ "tree-sitter-make",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-toml-ng",
+ "tree-sitter-yaml",
+ "tree-sitter-zig",
 ]
 
 [[package]]

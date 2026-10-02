@@ -4,7 +4,7 @@
 # the GPU/GUI frontend binary — wgpu/winit/cosmic-text/glyphon — with
 # hello-world rendering. Protocol consumption arrives in session 3.
 # See `docs/pmacs-gpu-design.md`.
-members = [".", "pmacs-protocol", "pmacs-gpu"]
+members = [".", "pmacs-protocol", "pmacs-gpu", "pmacs-syntax"]
 # Grammar crates carried in-repo under D36 as amended (E7h): built through
 # `[patch.crates-io]` below, never workspace members, so the workspace's
 # fmt, clippy and tests do not reach into their published code.
@@ -142,6 +142,9 @@ mlua = { version = "0.10", default-features = false }
 # Tree-sitter incremental-parser core (T M4.1). The bundled grammars
 # below (T M4.2) sit on top of this crate.
 tree-sitter = "0.26"
+# E7i: the parse logic that needs no editor state, shared with the parse
+# units; `pmacs::syntax` re-exports it.
+pmacs-syntax = { path = "pmacs-syntax" }
 # Bundled grammars (T M4.2). Detection is by file extension; loading
 # is lazy --- the C-side language object isn't materialized until the
 # first buffer of that language opens. Adding a new grammar requires
