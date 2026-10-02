@@ -2085,6 +2085,13 @@ fn typing_probe_observe(
 /// opened the file (E6d.3's cold case); without it the probe types into
 /// whatever the daemon already shows.
 /// `PMACS_GPU_PROBE_DEADLINE_MS` bounds the whole run.
+/// `PMACS_GPU_PROBE_VISIBLE_AT` (E7i) is the byte whose styling marks the
+/// visible update, the typed byte by default: `visible` is the first
+/// `StyleSpans` after which that byte carries a style, and a different one
+/// from before the keystroke. The optimistic shift of the old spans leaves
+/// typed text unstyled, so only a frame styled from the new parse sets it;
+/// type a keystroke that restyles that byte (`//` before code, `# ` before
+/// a markdown paragraph) on a buffer no language server styles.
 ///
 /// Per sample the report carries, in milliseconds after the
 /// keystroke: `cursor` (the confirming `CursorByte`: the predicted byte
@@ -2131,6 +2138,8 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         text_ms: Option<u64>,
         closer_ms: Option<u64>,
         style_ms: Option<u64>,
+        /// E7i: the first frame styled from the keystroke's own parse.
+        visible_ms: Option<u64>,
         settled_ms: Option<u64>,
         fallback_ms: Option<u64>,
         restore_ms: Option<u64>,
@@ -2199,6 +2208,24 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             .unwrap_or(default)
     };
     let at = env_u64("PMACS_GPU_PROBE_TYPE_AT", 0);
+    let visible_at = env_u64("PMACS_GPU_PROBE_VISIBLE_AT", at);
+    // Named explicitly, the restore waits for the visible frame (or the
+    // per-sample limit), so a sample's parse lands before its restore.
+    let wait_visible = std::env::var_os("PMACS_GPU_PROBE_VISIBLE_AT").is_some();
+    let style_at = |app: &App| {
+        app.state.as_ref().and_then(|s| {
+            s.current_spans
+                .iter()
+                .rev()
+                .find(|sp| sp.range.start <= visible_at && visible_at < sp.range.end)
+                .map(|sp| sp.style)
+        })
+    };
+    let mut style_before = None;
+    // The byte's style once the file is highlighted: every sample starts
+    // from it, so a restore whose restyle has not landed yet does not make
+    // the next keystroke's style look unchanged.
+    let mut original_style = None;
     let samples_wanted = env_u64("PMACS_GPU_PROBE_SAMPLES", 30).max(1);
     let gap = std::time::Duration::from_millis(env_u64("PMACS_GPU_PROBE_GAP_MS", 300));
     let wait_lsp = std::env::var("PMACS_GPU_PROBE_WAIT_LSP_MS")
@@ -2306,8 +2333,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                                 lsp_ready_at.is_some() || now.duration_since(started) >= limit
                             }
                         };
-                        if server_ready {
+                        let highlighted = !wait_visible || style_at(&app).is_some();
+                        if server_ready && highlighted {
                             original_text.clone_from(&current);
+                            original_style = style_at(&app);
                             placed_at = Some(now);
                             phase = Phase::Gap;
                             phase_since = now;
@@ -2316,7 +2345,15 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 }
             }
             Phase::Gap => {
-                if now.duration_since(phase_since) >= gap {
+                let restyled = !wait_visible || style_at(&app) == original_style;
+                if !restyled && now.duration_since(phase_since) >= per_sample {
+                    failure = Some(format!(
+                        "sample {} precondition: the style at byte {visible_at} did not come back",
+                        samples.len()
+                    ));
+                    break;
+                }
+                if now.duration_since(phase_since) >= gap && restyled {
                     if samples.len() as u64 >= samples_wanted {
                         break;
                     }
@@ -2331,6 +2368,7 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                         break;
                     }
                     sample = Sample::default();
+                    style_before = style_at(&app);
                     if is_enter {
                         app.apply_keyboard(&Key::Named(NamedKey::Enter), None, None);
                     } else if key_gaps.is_empty() {
@@ -2445,7 +2483,10 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 }
             }
             Phase::Settled => {
-                if now.duration_since(phase_since) >= gap {
+                let visible_done = !wait_visible
+                    || sample.visible_ms.is_some()
+                    || typed_at.is_some_and(|t| now.duration_since(t) >= per_sample);
+                if now.duration_since(phase_since) >= gap && visible_done {
                     // Delete what the keystroke and its hooks inserted:
                     // what stands after the caret with Delete, what
                     // stands before it with Backspace, each the way
@@ -2524,6 +2565,11 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         snapshot_seen |= is_snapshot;
         let since = typed_at.map_or(0, |t| ms(now).saturating_sub(ms(t)));
         match phase {
+            // E7i: past the text's settling the trace goes on until the
+            // visible frame, which is what the comparison reads.
+            Phase::Settled if wait_visible && sample.visible_ms.is_none() => {
+                sample.trace.push(format!("{label}@{since}"));
+            }
             Phase::Sampling => {
                 sample.trace.push(format!("{label}@{since}"));
                 if is_style && sample.style_ms.is_none() {
@@ -2532,6 +2578,15 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             }
             Phase::Restoring => sample.restore_trace.push(format!("{label}@{since}")),
             _ => {}
+        }
+        if matches!(phase, Phase::Sampling | Phase::Settled)
+            && is_style
+            && sample.visible_ms.is_none()
+        {
+            let now_style = style_at(&app);
+            if now_style.is_some() && now_style != style_before {
+                sample.visible_ms = Some(since);
+            }
         }
         if is_disconnect {
             break;
@@ -2546,10 +2601,12 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         values.sort_unstable();
         let n = values.len();
         format!(
-            "n={n} min={} p50={} p90={} max={}",
+            "n={n} min={} p50={} p90={} p95={} p99={} max={}",
             values[0],
             values[n / 2],
             values[(n * 9 / 10).min(n - 1)],
+            values[(n * 95 / 100).min(n - 1)],
+            values[(n * 99 / 100).min(n - 1)],
             values[n - 1]
         )
     };
@@ -2566,6 +2623,8 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let _ = writeln!(out, "text={}", quantiles(&|s| s.text_ms));
     let _ = writeln!(out, "closer={}", quantiles(&|s| s.closer_ms));
     let _ = writeln!(out, "style={}", quantiles(&|s| s.style_ms));
+    let _ = writeln!(out, "visible_at_byte={visible_at}");
+    let _ = writeln!(out, "visible={}", quantiles(&|s| s.visible_ms));
     let _ = writeln!(out, "settled={}", quantiles(&|s| s.settled_ms));
     let _ = writeln!(out, "restore={}", quantiles(&|s| s.restore_ms));
     let _ = writeln!(
@@ -2582,12 +2641,13 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     for (i, s) in samples.iter().enumerate() {
         let _ = writeln!(
             out,
-            "sample.{i}=cursor={} text={} closer={} style={} settled={} fallback={} restore={} \
-             trace={} restore_trace={}",
+            "sample.{i}=cursor={} text={} closer={} style={} visible={} settled={} fallback={} \
+             restore={} trace={} restore_trace={}",
             opt(s.cursor_ms),
             opt(s.text_ms),
             opt(s.closer_ms),
             opt(s.style_ms),
+            opt(s.visible_ms),
             opt(s.settled_ms),
             opt(s.fallback_ms),
             opt(s.restore_ms),
