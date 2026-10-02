@@ -223,6 +223,8 @@ struct Slot {
     synced: bool,
     deaths: u64,
     last_death: Option<Death>,
+    /// Times a discarded unit's previous parse was rebuilt in a fresh one.
+    reestablished: u64,
 }
 
 /// Process-wide state: the units, the wasm engine, the cgroup, the trace.
@@ -269,6 +271,7 @@ impl Host {
                     synced: false,
                     deaths: 0,
                     last_death: None,
+                    reestablished: 0,
                 }))
             })
             .clone()
@@ -665,6 +668,7 @@ impl IsolatedHandle {
         match answer {
             Ok(Response::Parsed(parsed)) => {
                 slot.generation += 1;
+                slot.reestablished += 1;
                 // The unit's mirror is this older text, not the buffer's.
                 slot.synced = false;
                 self.generation.store(slot.generation, Ordering::Relaxed);
@@ -711,6 +715,24 @@ pub fn shutdown() {
     }
 }
 
+/// Trace an in-process parse (`syntax.isolation` none) beside the units'
+/// own events, when `PMACS_E7I_TRACE` is set: `unit_us` is the parse's
+/// whole time on the worker thread, as a unit's is inside the unit.
+pub fn trace_native_parse(bytes: usize, layers: usize, root: Duration, total: Duration) {
+    let host = host();
+    if host.trace.is_none() {
+        return;
+    }
+    host.trace(&[
+        ("event", json_str("parsed")),
+        ("mode", json_str("none")),
+        ("bytes", bytes.to_string()),
+        ("layers", layers.to_string()),
+        ("root_us", root.as_micros().to_string()),
+        ("unit_us", total.as_micros().to_string()),
+    ]);
+}
+
 /// What the editor can say about a buffer's unit (for Lua and the trace).
 #[derive(Clone, Debug, Default)]
 pub struct UnitReport {
@@ -726,6 +748,8 @@ pub struct UnitReport {
     pub last_death: Option<String>,
     /// The unit is answering a request now; the other fields are empty.
     pub busy: bool,
+    /// Times a discarded unit's previous parse was rebuilt in a fresh one.
+    pub reestablished: u64,
 }
 
 /// The report for `buffer`'s unit, if it has had one. Never waits: the
@@ -747,6 +771,7 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
     };
     Some(UnitReport {
         busy: false,
+        reestablished: slot.reestablished,
         mode: slot.mode.name().to_owned(),
         unit: slot.transport.as_ref().map(|t| t.id()).unwrap_or_default(),
         memory: slot.transport.as_ref().and_then(|t| t.memory_bytes()),

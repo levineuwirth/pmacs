@@ -8338,9 +8338,32 @@ pub fn install_parse(
             t.set("deaths", report.deaths)?;
             t.set("last_death", report.last_death)?;
             t.set("busy", report.busy)?;
+            t.set("reestablished", report.reestablished)?;
             Ok(mlua::Value::Table(t))
         })?,
     )?;
+    // E7i: how many highlight spans the buffer's current parse has over
+    // `[start, end)` when its tree lives in a unit, fetching them as a
+    // renderer would (from what came back, from the idle unit, or by
+    // rebuilding a discarded unit's previous parse); `nil` when there is
+    // no isolated parse or no answer now.
+    {
+        let s = syntax.clone();
+        parse_mod.set(
+            "_isolated_spans",
+            lua.create_function(move |_, (id, start, end): (BufferIdLua, usize, usize)| {
+                let Some(bundle) = s.view(id.0).and_then(|h| h.current()) else {
+                    return Ok(None);
+                };
+                let Some(isolated) = bundle.isolated.as_ref() else {
+                    return Ok(None);
+                };
+                Ok(isolated
+                    .spans_for(start..end)
+                    .map(|set| set.layers.iter().map(|l| l.spans.len()).sum::<usize>()))
+            })?,
+        )?;
+    }
     parse_mod.set(
         "_unit_memory_total",
         lua.create_function(|_, ()| Ok(crate::parse_isolation::total_unit_memory()))?,

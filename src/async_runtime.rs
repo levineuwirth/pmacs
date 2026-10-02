@@ -2143,8 +2143,18 @@ fn run_parse(
         );
         return;
     }
+    let bytes = spec.source.len();
+    let started = std::time::Instant::now();
     let kind = match syntax_mod::run_parse(spec) {
         Ok(bundle) => {
+            // E7i: the in-process arm's parse, timed as a unit's is, so the
+            // comparison reads both from one trace.
+            crate::parse_isolation::trace_native_parse(
+                bytes,
+                bundle.layers.len(),
+                bundle.parse_duration,
+                started.elapsed(),
+            );
             let duration_ms = u64::try_from(bundle.parse_duration.as_millis()).unwrap_or(u64::MAX);
             handoff
                 .lock()
