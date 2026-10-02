@@ -70,13 +70,19 @@ Always true:
   a parse cut at four times its memory limit, reported as "exceeded
   memory cap" with the RSS at the cut (the parse's own peak is not
   known), and never calls it hung. The time limit is a trigger, not a
-  verdict (the owner's ruling): an input that runs past the
+  verdict (the owner's rulings): an input that runs past the
   confirmation's time limit while its minimum returns is run alone again
-  under ten times that limit, and is slow, filed with its time, if it
-  returns there and a hang that fails the run if it does not, so a
-  quadratic parse passes and one that does not terminate fails (the
-  `tysan` arm, whose time and memory are the sanitizer's, fails on its
-  crashes alone). A
+  under a cap, 180 times the limit a parse, which bounds a job, and is a
+  hang that fails the run if it does not return there. One that returns
+  is slow, filed with the exponent of its growth, fitted from its
+  minimum at one, two and four times over; past the budget that exponent
+  projects for it (four times the projection, floored at the limit and
+  capped at the cap) it is filed as mispredicted, since a growth curve
+  that mispredicts is itself a finding. Every slow finding states its
+  exponent, one not minimized fitted over its prefixes. So a quadratic
+  parse passes and one that does not terminate fails (the `tysan` arm,
+  whose time and memory are the sanitizer's, fails on its crashes
+  alone). A
   finding `fuzz/accepted.tsv` names, by grammar, kind and the repeated
   unit of a reproduction, is reported "known, accepted (#N)" and does not
   fail: markdown_inline's #296 and #301, until the wasm phase's limits.

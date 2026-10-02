@@ -39,13 +39,14 @@
 //! Findings are crashes (the process died: a sanitizer report, a glibc
 //! heap check, an assert, a panic; or `TypeSanitizer` reported an access of
 //! another type), hangs (a parse that has not returned after twelve times
-//! the hang limit, alone, nor, when its minimal input returns, after ten
-//! times that), memory cuts (a parse cut alone at four times `--rss-mb`),
-//! slow parses (over the limit but returning), and allocations (one input
-//! growing the worker's RSS by more than `--rss-mb`, returning under four
-//! times it). Each is confirmed alone in a fresh worker on the input that
-//! showed it, which decides its kind, then, unless it is slow, minimized,
-//! with the minimum confirmed and reported beside it (E7h's fix round 2).
+//! the hang limit, alone, nor, when its minimal input returns, inside the
+//! cap, 180 times it), memory cuts (a parse cut alone at four times
+//! `--rss-mb`), slow parses (over the limit but returning, each with the
+//! exponent of its growth), and allocations (one input growing the worker's
+//! RSS by more than `--rss-mb`, returning under four times it). Each is
+//! confirmed alone in a fresh worker on the input that showed it, which
+//! decides its kind, then, unless it is slow, minimized, with the minimum
+//! confirmed and reported beside it (E7h's fix round 2).
 //!
 //! `run` exits 1 on a crash, a hang or a memory cut, 2 on a usage or setup
 //! error (a grammar with no seeds is one: the rule is corpus-seeded), and 0
@@ -58,15 +59,16 @@
 //! time, one that still has not returned is a hang, and (E7h's fix round 1,
 //! the owner's ruling) one cut at the four-times memory cap is `memory`,
 //! "exceeded memory cap", with the RSS at the cut, which fails the run; the
-//! time limit is a trigger and not a verdict (fix round 3, the owner's
-//! ruling), so an input past twelve times it whose minimum returns is run
-//! again under ten times that, slow if it returns there and a hang if not;
-//! a finding `fuzz/accepted.tsv` names is reported and does not fail; and a
-//! crash that
-//! does not come back alone is replayed after the inputs its worker ran
-//! before it, and fails the run however it came back (a kill by signal 9,
-//! the host reclaiming memory, excepted). A hang that does not come back
-//! alone is a loaded worker's and is reported, not failed.
+//! time limit is a trigger and not a verdict (fix rounds 3 and 4, the
+//! owner's rulings), so an input past twelve times it whose minimum returns
+//! is run again under the cap, a hang if it does not return there and slow
+//! if it does, its time judged against a budget its minimum's growth
+//! projects for it (`decide_by_growth`); a finding `fuzz/accepted.tsv`
+//! names is reported and does not fail; and a crash that does not come back
+//! alone is replayed after the inputs its worker ran before it, and fails
+//! the run however it came back (a kill by signal 9, the host reclaiming
+//! memory, excepted). A hang that does not come back alone is a loaded
+//! worker's and is reported, not failed.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
@@ -330,8 +332,14 @@ enum SelfTest {
     /// The input returns after `PMACS_FUZZ_SELFTEST_MS` doubled for each
     /// trigger past the first: a cost exponential in its input, as #301's is
     /// in its openers, so the minimal input returns where the input as found
-    /// does not within ten times the confirmation's limit (E7h fix round 3).
+    /// does not inside the cap (E7h fix rounds 3 and 4).
     Doubling,
+    /// The input returns after `PMACS_FUZZ_SELFTEST_MS` for each trigger it
+    /// holds, and six times that for each past four: a cost whose growth
+    /// bends past the sizes its minimum is scaled to (four times), so the
+    /// curve fitted there mispredicts the input as found, which returns
+    /// past its budget and inside the cap (E7h fix round 4).
+    Bend,
 }
 
 impl SelfTest {
@@ -344,6 +352,7 @@ impl SelfTest {
             "sized" => Some(Self::Sized),
             "sizedalloc" => Some(Self::SizedAlloc),
             "doubling" => Some(Self::Doubling),
+            "bend" => Some(Self::Bend),
             "sequence" => Some(Self::Sequence),
             "bigreturn" => Some(Self::BigReturn),
             "scaled" => Some(Self::Scaled),
@@ -368,15 +377,16 @@ impl SelfTest {
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            Self::Slow | Self::Sized => {
+            Self::Slow | Self::Sized | Self::Bend => {
                 let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2500);
-                let times = if self == Self::Sized {
-                    text.matches(SELFTEST_TRIGGER).count() as u64
-                } else {
-                    1
+                let triggers = text.matches(SELFTEST_TRIGGER).count() as u64;
+                let times = match self {
+                    Self::Bend if triggers > 4 => triggers * 6,
+                    Self::Sized | Self::Bend => triggers,
+                    _ => 1,
                 };
                 std::thread::sleep(Duration::from_millis(ms * times));
             }
@@ -1559,6 +1569,20 @@ struct Finding {
     /// What the worker ran before this input, oldest first (E7h.3), for a
     /// crash that needs it.
     history: Vec<Input>,
+    /// A slow finding's growth, which the report states on every one (the
+    /// owner's ruling at E7h's fix round 4).
+    growth: Option<Growth>,
+}
+
+/// How a slow input's time grows with its size: the exponent fitted to its
+/// time at three sizes, and whether the input as found returned outside the
+/// budget that exponent projected for it.
+#[derive(Clone, Copy, Debug)]
+struct Growth {
+    exponent: Option<f64>,
+    /// The input as found's time and its budget, in ms, when it returned
+    /// past the budget: the growth curve mispredicted it.
+    mispredicted: Option<(u64, u64)>,
 }
 
 /// How a finding came back when triage ran it again (E7h.3).
@@ -1847,7 +1871,7 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
     report.findings = findings
         .into_iter()
         .enumerate()
-        .map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits, &cfg.accepted))
+        .flat_map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits, &cfg.accepted))
         .collect();
     // After triage, as the report says: confirming, timing and minimizing
     // findings is where a grammar's minutes go (E7h: cmake's three slow
@@ -1882,6 +1906,7 @@ fn record_failure(
             seed,
             detail,
             history,
+            growth: None,
         });
     }
 }
@@ -2094,10 +2119,18 @@ fn classify(f: &mut Finding, found: &Alone, limits: &Limits, long: &Limits) {
 /// returns is slow, what does not is a hang.
 const HANG_CONFIRM_FACTOR: u32 = 12;
 
-/// A hang whose minimal input returns is run alone once more under this
-/// multiple of the confirmation's time limit: what returns is slow, what
-/// does not is a hang (the owner's ruling at E7h's fix round 3).
-const HANG_EXTENSION_FACTOR: u32 = 10;
+/// A hang whose minimal input returns is run alone once more under the
+/// cap, this multiple of the hang limit (30 minutes a parse at CI's 10 s):
+/// what does not return inside it is a hang. It is what bounds a job, not
+/// what judges a slow input (the owner's ruling at E7h's fix round 4); CI's
+/// largest quadratic, cmake's 228 KB of whitespace, parses in about 1,300 s
+/// under `ubsan` on its runner.
+const HANG_CAP_FACTOR: u32 = 180;
+
+/// A slow input's budget is the time its growth projects for it times this
+/// margin: one that returns past it, inside the cap, mispredicted its own
+/// growth curve, which is reported (the owner's ruling at E7h's fix round 4).
+const GROWTH_MARGIN: f64 = 4.0;
 
 /// An allocation is re-run alone under this multiple of the RSS limit
 /// (and the hang confirmation's time); what does not return is a hang.
@@ -2185,66 +2218,305 @@ fn write_sequence(stem: &Path, f: &Finding, k: usize) {
     let _ = std::fs::write(seq.join("sequence.tsv"), manifest);
 }
 
-/// The time limit is a trigger, not a verdict (the owner's ruling at
-/// E7h's fix round 3). An input as found that ran past twelve times
-/// the limit, but whose minimum returns, may be a parse quadratic in
-/// its bytes (`cmake` on 247 KB of whitespace: 210 s natively, 4 s at
-/// 34 KB) or one that never terminates (#301's nested openers,
-/// exponential in their depth). So it is run alone once more under
-/// ten times that limit: one that returns is slow, filed with its
-/// time; one that does not is a hang and fails the run. Before, the
-/// minimum alone decided, which filed an exponential slow, and from
-/// `4c521c7` until this round it did so whichever limit the first
-/// parse met. A memory cut or a crash in that run is filed as one.
-fn extend_hang(grammar: &str, f: &mut Finding, dir: &Path, limits: &Limits, long: &Limits) {
-    let extended = Limits {
-        hang: long.hang * HANG_EXTENSION_FACTOR,
+/// A minimized hang's minimum as triage timed it alone under the
+/// confirmation's limits: its text, its edits, and its time in µs.
+struct Minimum<'a> {
+    text: &'a str,
+    edits: u32,
+    micros: u64,
+}
+
+/// The time limit is a trigger, not a verdict (the owner's rulings at
+/// E7h's fix rounds 3 and 4). An input as found that ran past twelve times
+/// the limit, but whose minimum returns, may be a parse polynomial in its
+/// bytes (cmake on 228 KB of whitespace: quadratic, 375 s under `ubsan`
+/// here and about 1,300 s on CI's runner, 3 s at its 20 KB minimum) or one
+/// that never terminates (#301's nested openers, exponential in their
+/// depth). So it is run alone again, at its minimum's edits, under the cap
+/// ([`HANG_CAP_FACTOR`] times the limit, a parse): one that does not return
+/// inside it is a hang and fails the run. One that returns is slow, and its
+/// growth is fitted: its minimum at one, two and four times over gives an
+/// exponent `k` ([`growth_exponent`]), which projects the input's time as
+/// `t_min × (len / len_min)^k`; its budget is that projection times
+/// [`GROWTH_MARGIN`], floored at the hang limit and capped at the cap for
+/// each of its parses. Returned inside its budget it is slow; past it, it is
+/// slow and its growth curve mispredicted it, which the report says. Round
+/// 3 ran it under ten times the confirmation's limit instead, a fixed wall
+/// past which CI's slower runner turned cmake's quadratic into a hang.
+///
+/// The input as found runs first, since no budget changes the verdict on
+/// one that does not return. A memory cut or a crash in that run is filed
+/// as one. One in a scaled minimum is returned as a finding of its own,
+/// since it is an input that shows a defect; a scaled minimum that does not
+/// return inside the cap is left out of the fit and said in the note, not
+/// filed, since it may be larger than any input the mutator makes.
+fn decide_by_growth(
+    grammar: &str,
+    f: &mut Finding,
+    min: &Minimum,
+    dir: &Path,
+    limits: &Limits,
+    long: &Limits,
+) -> Vec<Finding> {
+    let cap = Limits {
+        hang: limits.hang * HANG_CAP_FACTOR,
         rss_kb: long.rss_kb,
     };
-    let again = time_alone(grammar, &f.input, f.edits, f.seed, dir, &extended);
+    let again = time_alone(grammar, &f.input, min.edits, f.seed, dir, &cap);
     let _ = write!(
         f.detail,
-        "\nthe input as found, alone again under ten times that limit: {}",
-        again.said(&extended)
+        "\nthe input as found, alone again at its minimum's {} edits under the cap of {} s \
+         a parse: {}",
+        min.edits,
+        cap.hang.as_secs(),
+        again.said(&cap)
     );
-    match again {
-        Alone::Returned { micros, .. } => {
-            f.kind = Kind::Slow;
-            // A first parse that met the memory limit was named a
-            // hang by `classify`; slow, it carries the time limit's
-            // name.
-            f.signature = format!("one parse over {} ms", limits.hang.as_millis());
-            let _ = write!(
-                f.detail,
-                "\nslow, not hung: alone a parse of it ran past the {} s limit, and run again \
-                     no parse ran past {} s; its parses took {} ms in all (the limits are per \
-                     parse, and an input with edits is several)",
-                long.hang.as_secs(),
-                extended.hang.as_secs(),
-                micros / 1000
-            );
-        }
+    let micros = match again {
+        Alone::Returned { micros, .. } => micros,
         Alone::OverMemory { cut_kb, after } => {
-            over_memory(f, cut_kb, after, &extended);
+            over_memory(f, cut_kb, after, &cap);
+            return Vec::new();
         }
         Alone::Crashed { signature, detail } => {
             f.kind = Kind::Crash;
             f.signature = signature;
-            let _ = write!(f.detail, "\ncrashed under the extended limit:\n{detail}");
+            let _ = write!(f.detail, "\ncrashed under the cap:\n{detail}");
+            return Vec::new();
         }
         Alone::NotReturned => {
             let _ = write!(
                 f.detail,
-                "\nhung: alone a parse of it did not return under ten times the {} s limit, \
-                     though its minimum's do; a parse that does not terminate on its input \
-                     fails the run",
-                long.hang.as_secs()
+                "\nhung: a parse of it did not return inside the cap, {} s, though its \
+                 minimum's do; a parse that does not terminate on its input fails the run",
+                cap.hang.as_secs()
             );
+            return Vec::new();
         }
-        Alone::NoWorker => {}
+        Alone::NoWorker => return Vec::new(),
+    };
+    f.kind = Kind::Slow;
+    // A first parse that met the memory limit was named a hang by
+    // `classify`; slow, it carries the time limit's name.
+    f.signature = format!("one parse over {} ms", limits.hang.as_millis());
+    let mut points = vec![(min.text.len(), min.micros)];
+    let mut derived = Vec::new();
+    for times in [2, 4] {
+        let text = min.text.repeat(times);
+        let scaled = time_alone(grammar, &text, min.edits, f.seed, dir, &cap);
+        let _ = write!(
+            f.detail,
+            "\nits minimum {times} times over ({} bytes), alone: {}",
+            text.len(),
+            scaled.said(&cap)
+        );
+        if let Alone::Returned { micros, .. } = scaled {
+            points.push((text.len(), micros));
+        } else {
+            derived.extend(seen_while_measuring(scaled, text, min.edits, f.seed, &cap));
+        }
+    }
+    judge_growth(f, &points, min, micros, limits, &cap);
+    derived
+}
+
+/// Judge a slow input that returned in `micros` against the budget its
+/// minimum's growth, fitted over `points`, projects for it (the owner's
+/// ruling at E7h's fix round 4), and say so in its note.
+fn judge_growth(
+    f: &mut Finding,
+    points: &[(usize, u64)],
+    min: &Minimum,
+    micros: u64,
+    limits: &Limits,
+    cap: &Limits,
+) {
+    let took = micros / 1000;
+    let Some(k) = growth_exponent(points) else {
+        f.growth = Some(Growth {
+            exponent: None,
+            mispredicted: None,
+        });
+        let _ = write!(
+            f.detail,
+            "\nslow, not hung: it returned in {took} ms; its growth was not fitted, since its \
+             minimum scaled did not return"
+        );
+        return;
+    };
+    let (projected, budget) = growth_budget(
+        min.micros,
+        f.input.len() as f64 / min.text.len() as f64,
+        k,
+        limits.hang,
+        cap.hang * (min.edits + 1),
+    );
+    let _ = write!(
+        f.detail,
+        "\ngrowth: exponent {k:.2}, fitted over its minimum at {}; projected for its {} \
+         bytes, {} ms; its budget {} ms, {GROWTH_MARGIN} times that, floored at the {} ms \
+         limit and capped at the cap for each of its {} parses",
+        sizes(points),
+        f.input.len(),
+        projected / 1000,
+        budget / 1000,
+        limits.hang.as_millis(),
+        min.edits + 1
+    );
+    let mispredicted = (micros > budget).then_some((took, budget / 1000));
+    f.growth = Some(Growth {
+        exponent: Some(k),
+        mispredicted,
+    });
+    if mispredicted.is_some() {
+        let _ = write!(
+            f.detail,
+            "\nslow, and its growth mispredicted it: it returned in {took} ms, past its budget \
+             and inside the cap; a growth curve that mispredicts is itself a finding"
+        );
+    } else {
+        let _ = write!(
+            f.detail,
+            "\nslow, not hung: it returned in {took} ms, inside its budget"
+        );
     }
 }
 
+/// A slow finding the confirmation decided is not minimized, so its growth
+/// is fitted over its first quarter, its first half and the whole, at its
+/// own edits (the owner's ruling at E7h's fix round 4: every slow finding
+/// states its exponent). A crash or a memory cut in a prefix is returned
+/// as a finding of its own.
+fn growth_over_prefixes(
+    grammar: &str,
+    f: &mut Finding,
+    micros: u64,
+    dir: &Path,
+    long: &Limits,
+) -> Vec<Finding> {
+    let mut points = Vec::new();
+    let mut derived = Vec::new();
+    for part in [4, 2] {
+        let mut cut = f.input.len() / part;
+        while !f.input.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut == 0 {
+            continue;
+        }
+        let prefix = f.input[..cut].to_owned();
+        let alone = time_alone(grammar, &prefix, f.edits, f.seed, dir, long);
+        let _ = write!(
+            f.detail,
+            "\nits first {cut} bytes, alone: {}",
+            alone.said(long)
+        );
+        if let Alone::Returned { micros, .. } = alone {
+            points.push((cut, micros));
+        } else {
+            derived.extend(seen_while_measuring(alone, prefix, f.edits, f.seed, long));
+        }
+    }
+    points.push((f.input.len(), micros));
+    let exponent = growth_exponent(&points);
+    let _ = match exponent {
+        Some(k) => write!(
+            f.detail,
+            "\ngrowth: exponent {k:.2}, fitted over its prefixes at {}",
+            sizes(&points)
+        ),
+        None => write!(
+            f.detail,
+            "\ngrowth: not fitted, since its prefixes did not return"
+        ),
+    };
+    f.growth = Some(Growth {
+        exponent,
+        mispredicted: None,
+    });
+    derived
+}
+
+/// A crash or a memory cut that a scaled minimum or a prefix of a slow input
+/// showed while its growth was measured: a finding of its own, seen alone in
+/// a fresh worker, filed as it was seen and not minimized. Anything else is
+/// `None`.
+fn seen_while_measuring(
+    alone: Alone,
+    input: String,
+    edits: u32,
+    seed: u64,
+    limits: &Limits,
+) -> Option<Finding> {
+    let mut f = Finding {
+        kind: Kind::Crash,
+        signature: String::new(),
+        input,
+        edits,
+        seed,
+        detail: "seen alone while the growth of a slow input was measured".to_owned(),
+        history: Vec::new(),
+        growth: None,
+    };
+    match alone {
+        Alone::Crashed { signature, detail } => {
+            f.signature = signature;
+            let _ = write!(f.detail, ":\n{detail}");
+        }
+        Alone::OverMemory { cut_kb, after } => over_memory(&mut f, cut_kb, after, limits),
+        _ => return None,
+    }
+    Some(f)
+}
+
+/// The time, in µs, that a growth of exponent `k` projects for an input
+/// `ratio` times as long as its minimum, which took `micros`; and its
+/// budget, that times [`GROWTH_MARGIN`], no less than `floor` and no more
+/// than `ceiling`.
+fn growth_budget(
+    micros: u64,
+    ratio: f64,
+    k: f64,
+    floor: Duration,
+    ceiling: Duration,
+) -> (u64, u64) {
+    let projected = micros as f64 * ratio.powf(k);
+    let budget = (projected * GROWTH_MARGIN)
+        .max(floor.as_micros() as f64)
+        .min(ceiling.as_micros() as f64);
+    (projected.min(u64::MAX as f64) as u64, budget as u64)
+}
+
+/// The sizes of `points` as a note lists them: "a, b and c bytes".
+fn sizes(points: &[(usize, u64)]) -> String {
+    let all: Vec<String> = points.iter().map(|p| p.0.to_string()).collect();
+    match all.split_last() {
+        Some((last, [])) => format!("{last} bytes"),
+        Some((last, rest)) => format!("{} and {last} bytes", rest.join(", ")),
+        None => "no sizes".to_owned(),
+    }
+}
+
+/// The exponent of a power law through `points`, each a size in bytes and a
+/// time in µs: the least-squares slope of the log of the time on the log of
+/// the size. `None` without two distinct sizes.
+fn growth_exponent(points: &[(usize, u64)]) -> Option<f64> {
+    let logs: Vec<(f64, f64)> = points
+        .iter()
+        .filter(|(len, _)| *len > 0)
+        .map(|&(len, micros)| ((len as f64).ln(), (micros.max(1) as f64).ln()))
+        .collect();
+    let n = logs.len() as f64;
+    let (mx, my) = (
+        logs.iter().map(|p| p.0).sum::<f64>() / n,
+        logs.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let sxx: f64 = logs.iter().map(|p| (p.0 - mx).powi(2)).sum();
+    let sxy: f64 = logs.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+    (logs.len() >= 2 && sxx > 1e-9).then(|| sxy / sxx)
+}
+
+/// Triage one finding, and file it with any a measurement of its growth
+/// showed (`decide_by_growth`, `growth_over_prefixes`), each after it.
 fn triage(
     grammar: &str,
     mut f: Finding,
@@ -2252,7 +2524,7 @@ fn triage(
     index: usize,
     limits: &Limits,
     accepted: &[Accepted],
-) -> Triaged {
+) -> Vec<Triaged> {
     let want = (f.kind, f.signature.clone());
     let seed = f.seed;
     let same = |text: &str, edits: u32| {
@@ -2287,9 +2559,13 @@ fn triage(
     // attempt (the depth operators make Lua's error recovery slow on most
     // runs).
     let confirmed = alone && matches!(f.kind, Kind::Hang | Kind::Alloc);
+    let mut derived = Vec::new();
     if confirmed {
         let found = time_alone(grammar, &f.input, f.edits, f.seed, dir, &long);
         classify(&mut f, &found, limits, &long);
+        if let (Kind::Slow, Alone::Returned { micros, .. }) = (f.kind, &found) {
+            derived = growth_over_prefixes(grammar, &mut f, *micros, dir, &long);
+        }
     }
     let (minimal, minimal_edits) = if !alone || f.kind == Kind::Slow {
         (f.input.clone(), f.edits)
@@ -2306,11 +2582,54 @@ fn triage(
             minimal.len(),
             least.said(&long)
         );
-        if f.kind == Kind::Hang && matches!(least, Alone::Returned { .. }) {
-            extend_hang(grammar, &mut f, dir, limits, &long);
+        if f.kind == Kind::Hang
+            && let Alone::Returned { micros, .. } = least
+        {
+            let min = Minimum {
+                text: &minimal,
+                edits: minimal_edits,
+                micros,
+            };
+            derived = decide_by_growth(grammar, &mut f, &min, dir, limits, &long);
         }
     }
-    let stem = dir.join(format!("{}-{index}", f.kind.name()));
+    let mut filed = vec![file_finding(
+        grammar,
+        f,
+        repro,
+        (minimal, minimal_edits),
+        dir,
+        &index.to_string(),
+        accepted,
+    )];
+    for (n, d) in derived.into_iter().enumerate() {
+        let (text, edits) = (d.input.clone(), d.edits);
+        filed.push(file_finding(
+            grammar,
+            d,
+            Repro::Alone,
+            (text, edits),
+            dir,
+            &format!("{index}-{}", n + 1),
+            accepted,
+        ));
+    }
+    filed
+}
+
+/// Write a triaged finding's files in `dir` as `<kind>-<label>`: its
+/// minimum (`.input`), the input as found (`.original`), any sequence, and
+/// its note (`.txt`).
+fn file_finding(
+    grammar: &str,
+    f: Finding,
+    repro: Repro,
+    (minimal, minimal_edits): (String, u32),
+    dir: &Path,
+    label: &str,
+    accepted: &[Accepted],
+) -> Triaged {
+    let stem = dir.join(format!("{}-{label}", f.kind.name()));
     let file = stem.with_extension("input");
     let _ = std::fs::write(&file, &minimal);
     let _ = std::fs::write(stem.with_extension("original"), &f.input);
@@ -2626,7 +2945,9 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
          limit; unconfirmed those that came back neither way. A crash, however it came \
          back, a hang that came back and a memory cut fail the run, unless the accepted \
          list (`fuzz/accepted.tsv`, the owner's) names the finding: accepted counts those, \
-         reported known, accepted (#N).\n\n\
+         reported known, accepted (#N). A slow finding states the exponent of its time's growth \
+         with its size (not the memory growth above), and is mispredicted when it returned past \
+         the budget that exponent projected for it.\n\n\
          | grammar | seeds | inputs | mutated | parses | MB | slowest ms (bytes) | s | growth MB | crashes | hangs | memory | slow | allocs | in sequence | unconfirmed | accepted |\n\
          |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         cfg.seconds,
@@ -2704,9 +3025,28 @@ fn findings_md(reports: &[Report]) -> String {
                 let known = t
                     .accepted
                     .map_or(String::new(), |n| format!(", known, accepted (#{n})"));
+                // The owner's ruling at E7h's fix round 4: every slow
+                // finding states its growth exponent.
+                let growth = match (t.finding.kind, t.finding.growth) {
+                    (
+                        Kind::Slow,
+                        Some(Growth {
+                            exponent: Some(k),
+                            mispredicted,
+                        }),
+                    ) => format!(
+                        ", growth exponent {k:.2}{}",
+                        mispredicted.map_or(String::new(), |(took, budget)| format!(
+                            ", mispredicted: returned in {took} ms, past its budget of \
+                             {budget} ms"
+                        ))
+                    ),
+                    (Kind::Slow, _) => ", growth not fitted".to_owned(),
+                    _ => String::new(),
+                };
                 let _ = writeln!(
                     md,
-                    "- **{}** {} `{}`, reproduced: {}{known}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
+                    "- **{}** {} `{}`{growth}, reproduced: {}{known}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
                     r.grammar,
                     t.finding.kind.name(),
                     t.finding.signature,
@@ -3289,6 +3629,7 @@ mod tests {
                             seed: 0,
                             detail: String::new(),
                             history: Vec::new(),
+                            growth: None,
                         },
                         repro,
                         minimal: String::new(),
@@ -3482,6 +3823,59 @@ mod tests {
             deepest_stair >= 511,
             "a stair of block openers 511 deep with a string at the bottom: {deepest_stair}"
         );
+    }
+
+    #[test]
+    fn growth_is_the_slope_of_time_on_size_in_logs() {
+        // cmake's 19,755-byte minimum under the local `ubsan` build, at one,
+        // two and four times over (E7h fix round 3): quadratic.
+        let cmake = [
+            (19_755, 3_020_000),
+            (39_510, 11_730_000),
+            (79_020, 47_180_000),
+        ];
+        let k = growth_exponent(&cmake).expect("three sizes");
+        assert!((1.95..2.05).contains(&k), "{k}");
+        let linear = growth_exponent(&[(14, 2_500_000), (28, 5_000_000), (56, 10_000_000)]);
+        assert!(linear.is_some_and(|k| (k - 1.0).abs() < 1e-9), "{linear:?}");
+        // The `doubling` plant at one, two and four triggers: an exponential
+        // fitted over three sizes looks like a power of 1.5.
+        let doubling = growth_exponent(&[(14, 2_500_000), (28, 5_000_000), (56, 20_000_000)]);
+        assert!(
+            doubling.is_some_and(|k| (k - 1.5).abs() < 0.01),
+            "{doubling:?}"
+        );
+        // Two sizes are enough; one, or one size twice, is not.
+        assert!(growth_exponent(&[(10, 100), (20, 400)]).is_some_and(|k| (k - 2.0).abs() < 1e-9));
+        assert_eq!(growth_exponent(&[(10, 100)]), None);
+        assert_eq!(growth_exponent(&[(10, 100), (10, 400)]), None);
+        assert_eq!(growth_exponent(&[]), None);
+        assert_eq!(sizes(&cmake), "19755, 39510 and 79020 bytes");
+        assert_eq!(sizes(&[(56, 1)]), "56 bytes");
+    }
+
+    #[test]
+    fn a_budget_is_the_projection_times_the_margin_floored_and_capped() {
+        let s = Duration::from_secs;
+        // cmake's 228,316-byte input from its minimum's 3.02 s here: about
+        // 400 s projected (it took 375 s), and four times that its budget;
+        // from CI's 10.3 s, about 1,375 s, whose budget is the 1,800 s cap.
+        let ratio = 228_316.0 / 19_755.0;
+        let (here, budget) = growth_budget(3_020_000, ratio, 2.0, s(10), s(1800));
+        assert!((395_000_000..410_000_000).contains(&here), "{here}");
+        assert!(budget.abs_diff(here * 4) < 8, "{budget}");
+        let (ci, budget) = growth_budget(10_300_000, ratio, 2.0, s(10), s(1800));
+        assert!((1_370_000_000..1_380_000_000).contains(&ci), "{ci}");
+        assert_eq!(budget, 1_800_000_000);
+        // Inside: the margin times the projection.
+        assert_eq!(
+            growth_budget(2_500_000, 6.0, 1.0, s(1), s(180)),
+            (15_000_000, 60_000_000)
+        );
+        // The floor: a projection far under the hang limit.
+        assert_eq!(growth_budget(1_000, 2.0, 1.0, s(10), s(1800)).1, 10_000_000);
+        // A projection past any time a u64 holds is the cap's.
+        assert_eq!(growth_budget(1_000_000, 1e9, 9.0, s(1), s(5)).1, 5_000_000);
     }
 
     #[test]

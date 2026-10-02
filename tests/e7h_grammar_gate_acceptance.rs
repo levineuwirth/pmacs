@@ -846,27 +846,62 @@ fn e7h_a_slow_parse_that_returns_is_filed_not_failed() {
             && !notes.contains("returned alone in"),
         "{notes}"
     );
+    // The owner's ruling at fix round 4: every slow finding states its
+    // growth. One not minimized is fitted over its first quarter, its first
+    // half and the whole; here a step, since only the whole holds the
+    // trigger, so what the row holds is that the exponent is stated.
+    assert!(
+        notes.contains("its first 3 bytes, alone: returned in")
+            && notes.contains("its first 7 bytes, alone: returned in")
+            && notes.contains("growth: exponent ",)
+            && md.contains("slow `one parse over 1000 ms`, growth exponent "),
+        "{notes}\n{md}"
+    );
     assert_eq!(code, 0, "a slow parse does not fail the run: {row:?}");
+}
+
+/// The growth exponent a note states, `growth: exponent K`.
+fn exponent(notes: &str) -> f64 {
+    notes
+        .split("growth: exponent ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|k| k.parse().ok())
+        .unwrap_or_else(|| panic!("no growth exponent in:\n{notes}"))
 }
 
 #[test]
 fn e7h_a_large_slow_input_whose_minimum_returns_is_filed_not_failed() {
     // 2.5 s for each of six triggers: the input alone runs 15 s, past the
     // twelve-times limit (12 s), while its minimal input, one trigger,
-    // returns in 2.5 s. That is CMake's case (247 KB of whitespace parses
-    // in 210 s natively, 34 KB in 4 s): slow in its size, not hung, so it
-    // is filed and the run passes. Since the owner's ruling at E7h's fix
-    // round 3 what decides it is the input as found, run alone again under
-    // ten times the twelve-times limit (120 s), where it returns in 15 s.
+    // returns in 2.5 s. That is CMake's case (228 KB of whitespace parses
+    // in 375 s under `ubsan`, its 20 KB minimum in 3 s): slow in its size,
+    // not hung, so it is filed and the run passes. Since the owner's ruling
+    // at E7h's fix round 4 the input as found runs alone again under the
+    // cap (180 times the limit), where it returns in 15 s, and its minimum
+    // at one, two and four triggers fits its growth: linear, exponent 1,
+    // which projects about 16 s for its 90 bytes, inside a 64 s budget.
     let six = format!("{TRIGGER}\n").repeat(6);
     let (code, row, md, notes) = planted_run_with_notes("sized", "sized", &[("a", six.as_str())]);
     assert!(has(&row, "slow=1") && has(&row, "hangs=0"), "{row:?}\n{md}");
     assert!(
-        notes.contains("alone again under ten times that limit: returned in")
-            && notes.contains(
-                "slow, not hung: alone a parse of it ran past the 12 s limit, and run again no parse ran past 120 s"
-            ),
-        "the extended run returned, and decided it:\n{notes}"
+        notes.contains("under the cap of 180 s a parse: returned in")
+            && notes.contains("its minimum 2 times over (28 bytes), alone: returned in")
+            && notes.contains("its minimum 4 times over (56 bytes), alone: returned in")
+            && notes.contains("slow, not hung: it returned in")
+            && notes.contains("inside its budget"),
+        "the run under the cap returned, inside the budget its growth projects:\n{notes}"
+    );
+    let k = exponent(&notes);
+    assert!(
+        (0.9..1.1).contains(&k),
+        "a linear plant grows as a power of 1: {k}\n{notes}"
+    );
+    assert!(
+        md.contains(&format!(
+            "slow `one parse over 1000 ms`, growth exponent {k:.2}, reproduced"
+        )),
+        "the report states the exponent:\n{md}"
     );
     assert!(
         md.contains("minimal 14 bytes"),
@@ -987,10 +1022,12 @@ fn e7h2_a_large_slow_input_that_first_meets_the_memory_limit_is_filed_slow() {
             notes.contains("\nRSS ")
                 && notes.contains("signature: one parse over 1000 ms")
                 && notes.contains("the input as found, alone: did not return")
-                && notes.contains("slow, not hung"),
+                && notes.contains("slow, not hung: it returned in"),
             "its first parse met the memory limit, the input as found ran past the \
              time limit, and its minimum returned:\n{notes}"
         );
+        let k = exponent(&notes);
+        assert!((0.9..1.1).contains(&k), "{k}\n{notes}");
     }
     assert_eq!(code, 0, "a large slow parse does not fail the run: {row:?}");
 }
@@ -1079,14 +1116,16 @@ fn e7h3_a_different_defect_reached_through_markdown_still_fails() {
 
 #[test]
 fn e7h3_a_parse_exponential_in_its_input_is_a_hang_though_its_minimum_returns() {
-    // The owner's ruling at fix round 3: the time limit is a trigger, not a
-    // verdict. The `doubling` plant sleeps 2.5 s for one trigger and doubles
-    // it for each more, as #301's parse grows with its openers: six triggers
-    // run 80 s, past the confirmation's limit (twelve times 300 ms, 3.6 s)
-    // and past ten times it (36 s), where the one-trigger minimum returns in
-    // 2.5 s. Decided by the minimum, it was slow and passed; run again under
-    // ten times the limit it does not return, so it is a hang and fails.
-    // `sized`, above, is the other half: linear, it returns and is slow.
+    // The owner's rulings at fix rounds 3 and 4: the time limit is a
+    // trigger, not a verdict. The `doubling` plant sleeps 2.5 s for one
+    // trigger and doubles it for each more, as #301's parse grows with its
+    // openers: six triggers run 80 s, past the confirmation's limit (twelve
+    // times 300 ms, 3.6 s) and past the cap (180 times it, 54 s), where the
+    // one-trigger minimum returns in 2.5 s. Decided by the minimum, it was
+    // slow and passed; run again under the cap it does not return, so it is
+    // a hang and fails, and its growth is not measured, since no budget
+    // changes that. `sized`, above, is the other half: linear, it returns
+    // and is slow; `bend`, below, returns past its budget.
     let six = format!("{TRIGGER}\n").repeat(6);
     let (code, row, md, notes) = fuzz_run(&Fuzz {
         tag: "doubling",
@@ -1104,14 +1143,63 @@ fn e7h3_a_parse_exponential_in_its_input_is_a_hang_though_its_minimum_returns() 
     );
     assert!(
         notes.contains("returned in")
-            && notes.contains("alone again under ten times that limit: did not return in 36 s")
-            && notes
-                .contains("hung: alone a parse of it did not return under ten times the 3 s limit"),
-        "the minimum returned, and the extended run did not:\n{notes}"
+            && notes.contains("under the cap of 54 s a parse: did not return in 54 s")
+            && notes.contains("hung: a parse of it did not return inside the cap, 54 s")
+            && !notes.contains("times over"),
+        "the minimum returned, and the run under the cap did not:\n{notes}"
     );
     assert_eq!(
         code, 1,
         "a parse that does not terminate fails the run: {row:?}"
+    );
+}
+
+// -------------------------------------------------------------------
+// E7h fix round 4: the owner's ruling, a budget from the input's growth.
+// -------------------------------------------------------------------
+
+#[test]
+fn e7h4_a_slow_input_past_the_budget_its_growth_projects_is_filed_mispredicted() {
+    // The third outcome of the owner's ruling at fix round 4: an input that
+    // returns past its budget, inside the cap, is slow, and its growth curve
+    // mispredicted it, which is itself a finding and is reported. The `bend`
+    // plant sleeps 2.5 s a trigger up to four and six times that past four:
+    // five triggers run 75 s, inside the cap (180 times 500 ms, 90 s), while
+    // the one-trigger minimum at one, two and four triggers is linear, and
+    // projects about 13 s for the 75 bytes, a 54 s budget.
+    let five = format!("{TRIGGER}\n").repeat(5);
+    let (code, row, md, notes) = fuzz_run(&Fuzz {
+        tag: "bend",
+        grammar: "lua",
+        mode: "bend",
+        seeds: &[("a", five.as_str())],
+        hang_ms: 500,
+        rss_mb: 1024,
+        accepted: false,
+        minimize_secs: None,
+    });
+    assert!(
+        has(&row, "slow=1") && has(&row, "hangs=0"),
+        "{row:?}\n{md}\n{notes}"
+    );
+    let k = exponent(&notes);
+    assert!((0.9..1.1).contains(&k), "{k}\n{notes}");
+    assert!(
+        notes.contains("under the cap of 90 s a parse: returned in")
+            && notes.contains("its minimum 4 times over (56 bytes), alone: returned in")
+            && notes.contains("slow, and its growth mispredicted it: it returned in")
+            && notes.contains("past its budget and inside the cap"),
+        "{notes}"
+    );
+    assert!(
+        md.contains(&format!(
+            "slow `one parse over 500 ms`, growth exponent {k:.2}, mispredicted: returned in"
+        )) && md.contains("ms, past its budget of 5"),
+        "the report states the exponent and the misprediction:\n{md}"
+    );
+    assert_eq!(
+        code, 0,
+        "a slow parse does not fail the run, mispredicted or not: {row:?}"
     );
 }
 
