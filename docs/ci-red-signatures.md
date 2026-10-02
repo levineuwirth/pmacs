@@ -2181,7 +2181,7 @@ Tally (291): 6 items in the list below.
 - 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T202751Z-465064`, the whole gate niced beside a game, the handshake 17.7 s, 141.18 s;
 - 2026-10-02, `scripts/gate` at `5daf85d`, `20261002T012705Z-3618489`, on a nearly idle machine (load about 1.5 at its start, nothing of E7h's beside it), 125.52 s (recorded at E7h's fix round 3, below).
 
-#291 is at five, four of them E7h's and all four beside heavy load; each is commented on the issue. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+#291 is at six; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
 #### #298, first sample, local
 
@@ -2380,6 +2380,78 @@ On the laptop the same input under the same build **returned in 375 s**, and its
 - `20261002T013808Z-3707117` at `5daf85d`, run again: **six of six**, 179 targets, 5,146 passed, 0 failed, 62 ignored; #291's row `ok`, which is non-reproduction and nothing more.
 
 So, at E7h's third fix round: #283 moves to eight, #291 to six and #304 to three; #307 is at one; #298, #300, #303, #305 and #306 not sampled, and every count above stands.
+
+### E7h's fourth fix round: PR #297's runs, R7's twenty-first and #308's first
+
+Recorded 2026-10-02 under the rule above, each run read from the jobs endpoint at attempt 1. The PR's runs are `pull_request` runs of the merge commit with `main`.
+
+Tally (pr297-round4-runs): 6 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 36992701054 | CI | `d07d8b7` | success |
+| 36992701122 | Grammar fuzz | `d07d8b7` | success |
+| 37001969427 | CI | `972aa44` | cancelled |
+| 37001969422 | Grammar fuzz | `972aa44` | cancelled |
+| 37002984277 | CI | `64d396b` | failure |
+| 37002984373 | Grammar fuzz | `64d396b` | success |
+
+Tally (pr297-round4-cancelled): 2 rows of the table above with `verdict` = `cancelled`.
+
+Both were cancelled by the next push, `CI` 37001969427 with twelve jobs finished green, its six test legs cancelled and `Docs consistency` skipped.
+
+#### `CI` 36992701054 at `d07d8b7`
+
+Tally (run-36992701054-jobs): 19 = 18 + 1.
+
+Eighteen success and `Docs consistency` skipped, correctly: green. Every leg's target headers pair one to one with its result lines, all `ok`: `Test (crdt)` 176, both macOS legs 178, the three Ubuntu legs 177. `FAILED`, `WouldBlock`, `did not become ready` and `got ok` appear zero times, and the round's growth rows ran `ok` on every leg.
+
+#### `Grammar fuzz` 36992701122 at `d07d8b7`: the owner's growth rule on CI
+
+Both legs succeeded:
+- `Grammar fuzz`, job 110792350344, 09:57:00–11:34:15Z, 97.3 min;
+- `Grammar fuzz (asan-strict)`, job 110792349637, 09:57:00–11:24:12Z, 87.2 min.
+
+The owner's ruling at the round judges a slow input by the budget its growth projects, and calls a hang only what does not return inside a cap of 180 times the limit. **Round 3's red, cmake's 228,316-byte whitespace input, came up again in both legs, byte-identical, and is filed slow:**
+- exponent 1.98 under `ubsan`, 1,011 s against a projected 987 s;
+- 1.97 under `asan-strict`, 1,154 s against 1,135 s.
+
+Two inputs under `ubsan` returned past their budgets and are filed slow and mispredicted:
+- cmake, exponent 0.55, 777 s against a 150 s budget;
+- yaml, exponent 1.01, 515 s against 225 s.
+
+Each minimum ends in a token that closes its slow context, so repeating it grows the time linearly where the input grows another way.
+
+Under `asan-strict` the first half of a slow markdown_inline input passed the 4 GB cap and was filed as its own memory finding, which the list's #296 row accepts.
+
+The legs ran 97.3 and 87.2 min against round 3's 104.8 and 100.2 at `5daf85d`; the grammars' summed seconds fell 9% and 14%. That is not round 2's 66: what remains is the quadratic inputs' own time. This is no intermittent; it is recorded because this file is where a fuzz leg's time has been accounted since round 3.
+
+#### `CI` 37002984277 at `64d396b`, the round's head: #308, a first sample
+
+Tally (run-37002984277-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure: `Perf budgets (debug)`, job 110825077473, on `editor::tests::composition_overhead_under_ten_percent`, "composition machinery added more than 10% overhead: 1.102 (single=90612 ns, dispatch=99840 ns)", the dispatch overhead printed as 10.2% against the budget's 10%. Every other target `scripts/perf-budgets` runs reported `ok`. U6 and U20 were retired by moving this budget into this job, so no row matched; it was filed as **#308**, first occurrence, not rerun. `src/editor.rs` has no diff on the branch, and the same job was green at `d07d8b7`, whose code differs from `64d396b` in comments only. The six test legs pair their target headers one to one with their result lines, all `ok` (176, 178, 178, 177, 177, 177); `FAILED`, `WouldBlock`, `did not become ready` and `got ok` appear zero times, and the round's growth rows ran `ok` on every leg.
+
+#### `Grammar fuzz` 37002984373 at `64d396b`
+
+Both legs succeeded:
+- `Grammar fuzz`, job 110824871973, 11:48:33–13:12:56Z, 84.4 min;
+- `Grammar fuzz (asan-strict)`, job 110824872140, 11:48:32–13:18:26Z, 89.9 min.
+
+cmake's 228,316-byte input came up again in each leg and is filed slow:
+- exponent 1.96 under `asan-strict`, 1,048 s against a projected 1,012 s;
+- exponent 1.49 under `ubsan`. There its whitespace minimum at two times over took 21.4 s where a quadratic takes about 40 (10.2, 21.4 and 79.9 s at one, two and four times), so it projected 386 s for an input that took 1,261 s, which is inside the 1,546 s budget of four times that.
+
+No input returned past its budget. A prefix of the slow markdown_inline input again passed the 4 GB cap in both legs, accepted as #296. The legs' time is a second sample beside `d07d8b7`'s: 84.4 and 89.9 min against 97.3 and 87.2.
+
+#### Local samples in the round's gates
+
+- `20261002T095734Z-57751` at `d07d8b7`: **six of six**, 179 targets, 5,149 passed, 0 failed, 62 ignored. The rows of #283, #291, #298, #300 and #303 to #307 all ran `ok`.
+- `20261002T113708Z-303920` at `972aa44`: **six of six**, 179 targets, 5,149 passed, 0 failed, 62 ignored; the same rows `ok`.
+- `20261002T114815Z-408166` at `64d396b`, the round's head, the load average 3.4 at its start and about 18 over five minutes at its end (other sessions' work): five of six, 179 targets, 5,148 passed, 1 failed, 62 ignored. The one failure is **R7's twenty-first occurrence**, all three of its fragments at `attach.rs:1971`, `test result: FAILED. 373 passed; 1 failed`; its row above is extended. Every other intermittent's row ran `ok`.
+- `20261002T115902Z-518091` at `64d396b`, run again: **six of six**, 179 targets, 5,149 passed, 0 failed, 62 ignored; R7's row `ok`, which is non-reproduction and nothing more.
+
+So, at E7h's fourth fix round: R7 moves to twenty-one, and #308 is at one; #283, #291, #298, #300 and #303 to #307 not sampled, and every count above stands.
 
 ### `main` after E7g: run 36495882005 at `4ad9f3e`, #295 filed and #254's second occurrence
 
@@ -3956,13 +4028,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least twenty, 2026-08-07 to 2026-09-20, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the eight since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least twenty-one, 2026-08-07 to 2026-10-02, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the nine since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 20 = 12 + 8.
+Tally (R7): 21 = 12 + 9.
 
-Tally (R7-held): 8 items in the list below.
+Tally (R7-held): 9 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -3972,6 +4044,7 @@ Tally (R7-held): 8 items in the list below.
 - eighteenth: gate log `20260917T001151Z-3116741`, step `05-sweep` on E6d's branch, `attach.rs:1971`, `test result: FAILED. 365 passed; 1 failed` (its own section above)
 - nineteenth: gate log `20260919T224133Z-2027161`, step `05-sweep` on E7c's branch at `09798eb` (fix round 2's tip), load average 18, `attach.rs:1971`, `test result: FAILED. 366 passed; 1 failed`, all three fragments; the next run on the same tree (`20260919T224739Z-2089471`) six of six, non-reproduction and nothing more
 - twentieth: gate log `20260920T110710Z-2592202`, step `05-sweep` on E7c's branch at `3de1e1f` (fix round 3's tip), the fifteen-minute load average 17 (the round's own bites and builds), `attach.rs:1971`, `test result: FAILED. 366 passed; 1 failed`, all three fragments; the next run on the same tree (`20260920T111455Z-2678460`) six of six, non-reproduction and nothing more
+- twenty-first: gate log `20261002T114815Z-408166`, step `05-sweep` on E7h's branch at `64d396b` (fix round 4's tip, whose change from the green gate before it is comments in the fuzz harness and one test), the load average 3.4 at its start and about 18 over five minutes at its end (other sessions' work), `attach.rs:1971`, `test result: FAILED. 373 passed; 1 failed`, all three fragments (recorded in E7h's fourth fix round, below); the next run on the same tree (`20261002T115902Z-518091`) six of six, non-reproduction and nothing more
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
