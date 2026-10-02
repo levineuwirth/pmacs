@@ -4,7 +4,11 @@
 #
 #   scripts/fuzz-grammars [--seconds N] [--jobs N] [--grammar NAME]...
 #                         [--from [LABEL=]DIR]... [--max-files N]
-#                         [--out DIR] [--plain]
+#                         [--max-seed-kb N] [--min-mutations N]
+#                         [--max-seconds N] [--long-since REF]
+#                         [--long-seconds N] [--out DIR]
+#                         [--arm ubsan|asan-strict|tysan|plain]...
+#                         [--plain]
 #
 # The grammars are C beside a `#![forbid(unsafe_code)]` editor, and in
 # daemon mode one bad parse takes every buffer the daemon holds. E7e
@@ -17,13 +21,53 @@
 # What it does:
 #
 #   1. Builds src/bin/pmacs_grammar_fuzz.rs under the `fuzz` profile,
-#      which inherits `release`: the C is compiled at -O3 as it ships.
-#      That is not a detail. The Haskell overflow is a strict-aliasing
-#      miscompile GCC makes at -O2 and above; a debug build is clean.
-#      The tree-sitter runtime and every grammar's C are instrumented
-#      with AddressSanitizer through a compiler wrapper that adds the
-#      flag to those sources only (--plain builds them uninstrumented,
-#      byte for byte as released).
+#      which inherits `release`: the C is compiled at -O3 as it ships,
+#      with the -fno-strict-aliasing .cargo/config.toml adds to every C
+#      compile (E7h.1). That is not a detail: the Haskell overflow was
+#      undefined behavior GCC 16 exploits at -O2 and above, and a debug
+#      build is clean. It builds once per ARM, each in its own target
+#      directory, and runs the same seeds through each; the run fails if
+#      any arm's does. The tree-sitter runtime and every grammar's C are
+#      instrumented through a compiler wrapper that recognizes a grammar
+#      by the package it builds, not by its path, and the build fails if
+#      any grammar's C went uninstrumented. The arms, all three run by
+#      default:
+#
+#        ubsan        AddressSanitizer and UndefinedBehaviorSanitizer, as
+#                     the grammars ship (E7h.4): a memory error or the UB
+#                     UBSan checks, reported where it happens, on any
+#                     compiler.
+#        asan-strict  AddressSanitizer alone, with -fstrict-aliasing after
+#                     the config's flag (E7h review 1, High 2). UBSan has
+#                     no aliasing check, and its instrumentation stops GCC
+#                     16 exploiting aliasing UB: the ubsan arm passed
+#                     tree-sitter-haskell 0.23.1 without the flag, where
+#                     this arm finds its overflow in seconds. It lets the
+#                     compiler do what the flag forbids, so a new grammar's
+#                     aliasing UB shows as the crash the compiler makes of
+#                     it, on a compiler that makes one (GCC 16 here; GCC
+#                     13, CI's, did not for Haskell's, and does for E7h
+#                     review 2's narrower-lvalue shape). Since E7h's fix
+#                     round 1 no shipped scanner carries that header, so
+#                     this arm guards the next grammar, not these; CI runs
+#                     it beside ubsan since fix round 2.
+#        tysan        clang's TypeSanitizer on every grammar's C (not the
+#                     runtime's), compiled by $TYSAN_CC (default clang, 20
+#                     or later): the direct detector for the aliasing
+#                     class, on any compiler, since it reports the access
+#                     rather than waiting for an optimizer to exploit it.
+#                     It reports and carries on, so the harness reads each
+#                     worker's stderr and files a report whose access type
+#                     differs from the object's (tree-sitter-haskell's
+#                     `p1 int` over `any pointer`) as a crash; an `int`
+#                     read through another struct than it was written
+#                     through is not the class and is not filed. The
+#                     runtime is compiled uninstrumented: its lexer makes
+#                     hundreds of thousands of those same-type reports a
+#                     run. Only its crashes fail it (`run --fail-on
+#                     crashes`): its time and memory are the sanitizer's,
+#                     and the ubsan arm rules on hangs and memory.
+#        plain        no sanitizer, byte for byte as released (--plain).
 #   2. Fetches each grammar's own real sources at the commit
 #      fuzz/corpora.tsv pins: its upstream test corpus, or real files
 #      where it ships none.
@@ -32,9 +76,16 @@
 #      at most --max-files per grammar from each source (default 400; the
 #      PR smoke takes 100, since Zig's standard library alone is otherwise
 #      twenty minutes of seeds).
-#   4. Runs the harness: every seed, then mutations until --seconds pass,
-#      per grammar, --jobs grammars at a time, and writes report.md and
-#      report.tsv with a minimized reproduction per finding.
+#   4. Runs the harness: every seed, then mutations until --seconds pass
+#      and at least --min-mutations were made (under --max-seconds), per
+#      grammar, --jobs grammars at a time, and writes report.md and
+#      report.tsv with a minimized reproduction per finding. With
+#      --long-since REF, the grammars the change since REF touched (a
+#      crate's locked version, its corpora row, its vendored copy) run for
+#      --long-seconds (default 600) instead; a tree-sitter runtime bump
+#      runs every grammar long. A finding fuzz/accepted.tsv names is
+#      reported "known, accepted (#N)" and does not fail the run; adding
+#      a row there is the owner's ruling (fuzz/accepted/README.md).
 #
 # Exit status is the harness's: 0 no finding, 1 findings, 2 setup
 # (including a grammar with no seeds). The build directory is the
@@ -48,7 +99,12 @@ die() { echo "fuzz-grammars: $*" >&2; exit 2; }
 seconds=60
 jobs=4
 max_files=400
-plain=0
+max_seed_kb=64
+min_mutations=0
+max_seconds=0
+long_since=
+long_seconds=600
+arms=
 out=
 grammars=
 froms=
@@ -59,9 +115,15 @@ while [ $# -gt 0 ]; do
         --grammar) grammars="$grammars --grammar ${2:?}"; shift 2 ;;
         --from) froms="$froms --from ${2:?}"; shift 2 ;;
         --max-files) max_files=${2:?}; shift 2 ;;
+        --max-seed-kb) max_seed_kb=${2:?}; shift 2 ;;
+        --min-mutations) min_mutations=${2:?}; shift 2 ;;
+        --max-seconds) max_seconds=${2:?}; shift 2 ;;
+        --long-since) long_since=${2:?}; shift 2 ;;
+        --long-seconds) long_seconds=${2:?}; shift 2 ;;
         --out) out=${2:?}; shift 2 ;;
-        --plain) plain=1; shift ;;
-        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        --arm) arms="$arms ${2:?}"; shift 2 ;;
+        --plain) arms="$arms plain"; shift ;;
+        -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -76,39 +138,131 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
 # --- 1. build -----------------------------------------------------------
+[ -n "$arms" ] || arms="ubsan asan-strict tysan"
+for arm in $arms; do
+    case "$arm" in
+        ubsan|asan-strict|tysan|plain) ;;
+        *) die "unknown arm: $arm (ubsan, asan-strict, tysan or plain)" ;;
+    esac
+done
 host=$(rustc -vV | sed -n 's/^host: //p')
-export CARGO_TARGET_DIR="$work/target"
 # sccache would key the instrumented objects on the wrapper, not on the
 # flag the wrapper adds; build without it.
 export RUSTC_WRAPPER=
-unset RUSTFLAGS
-preload=
-if [ "$plain" = 0 ]; then
-    real_cc=${CC:-cc}
-    libasan=$("$real_cc" -print-file-name=libasan.so)
-    [ -f "$libasan" ] || die "no libasan.so beside $real_cc (install the compiler's sanitizer runtime, or pass --plain)"
-    wrapper="$work/asan-cc"
-    cat > "$wrapper" <<EOF
-#!/bin/sh
-# Instrument the tree-sitter runtime and grammar C only.
-for a in "\$@"; do
-    case "\$a" in
-        */tree-sitter-*/*|*/codebook-tree-sitter-*/*|*/arborium-*/*)
-            exec "$real_cc" "\$@" -fsanitize=address -fno-omit-frame-pointer ;;
+# The crates whose C is a grammar or the runtime: fuzz/corpora.tsv's crate
+# column, and tree-sitter itself.
+grammar_crates=$(awk -F '\t' '!/^#/ && NF >= 2 && $1 != "grammar" { print $2 }' fuzz/corpora.tsv | sort -u | tr '\n' ' ')
+grammar_crates="tree-sitter $grammar_crates"
+real_cc=${CC:-cc}
+tysan_cc=${TYSAN_CC:-clang}
+export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:detect_stack_use_after_return=0"
+export UBSAN_OPTIONS="halt_on_error=1:abort_on_error=1:print_stacktrace=1"
+
+# build_arm ARM: build the harness for ARM in its own target directory and
+# set `bin` and `preload` for it. The ubsan arm keeps `$work/target`, the
+# directory CI's cache holds.
+build_arm() {
+    arm=$1
+    case "$arm" in
+        ubsan) export CARGO_TARGET_DIR="$work/target" ;;
+        *) export CARGO_TARGET_DIR="$work/target-$arm" ;;
     esac
-done
+    unset RUSTFLAGS
+    preload=
+    export CC="$real_cc"
+    if [ "$arm" != plain ]; then
+        inst_cc=$real_cc
+        inst_crates=$grammar_crates
+        runtime_cc=$real_cc
+        case "$arm" in
+            ubsan|asan-strict)
+                libasan=$("$real_cc" -print-file-name=libasan.so)
+                [ -f "$libasan" ] || die "no libasan.so beside $real_cc (install the compiler's sanitizer runtime, or pass --arm plain)"
+                link="-C link-arg=-Wl,--no-as-needed -C link-arg=$libasan"
+                preload=$libasan
+                ;;
+        esac
+        case "$arm" in
+            ubsan)
+                libubsan=$("$real_cc" -print-file-name=libubsan.so)
+                [ -f "$libubsan" ] || die "no libubsan.so beside $real_cc (install the compiler's sanitizer runtime, or pass --arm asan-strict)"
+                link="$link -C link-arg=$libubsan"
+                sanitize="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+                ;;
+            asan-strict)
+                # Appended after cc's arguments, so after the config's
+                # -fno-strict-aliasing: the last one wins. build.rs's
+                # refusal reads cc's arguments, not what this wrapper adds,
+                # and this arm exists to do what it refuses.
+                sanitize="-fsanitize=address -fno-omit-frame-pointer -fstrict-aliasing"
+                ;;
+            tysan)
+                printf 'int main(void) { return 0; }\n' > "$work/tysan-probe.c"
+                "$tysan_cc" -fsanitize=type "$work/tysan-probe.c" -o "$work/tysan-probe" 2>/dev/null \
+                    || die "$tysan_cc has no TypeSanitizer (clang 20 or later; set TYSAN_CC, or pass --arm)"
+                inst_cc=$tysan_cc
+                inst_crates=${grammar_crates#tree-sitter }
+                runtime_cc=$tysan_cc
+                sanitize="-fsanitize=type"
+                # The runtime is static, so clang links it.
+                link="-C linker=$tysan_cc -C link-arg=-fsanitize=type"
+                ;;
+        esac
+        # E7h.4: it instruments by the package being built (cargo sets
+        # CARGO_PKG_NAME for the build script that runs cc), not by a path a
+        # crate's name happens to match. It is named by a checksum of
+        # itself: cc recompiles only when CC's value changes, so a wrapper
+        # edited in place would leave objects the old one built.
+        wrapper="$work/sanitize-cc.tmp"
+        cat > "$wrapper" <<EOF
+#!/bin/sh
+case " $inst_crates " in
+    *" \${CARGO_PKG_NAME:-} "*)
+        exec "$inst_cc" "\$@" $sanitize ;;
+esac
+case "\${CARGO_PKG_NAME:-}" in
+    tree-sitter) exec "$runtime_cc" "\$@" ;;
+esac
 exec "$real_cc" "\$@"
 EOF
-    chmod +x "$wrapper"
-    export CC="$wrapper"
-    # --target keeps these off build scripts, which run uninstrumented.
-    export RUSTFLAGS="-C link-arg=-Wl,--no-as-needed -C link-arg=$libasan"
-    preload=$libasan
-    export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:detect_stack_use_after_return=0"
-fi
-cargo build --profile fuzz --target "$host" --bin pmacs_grammar_fuzz
-bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
+        sum=$(cksum < "$wrapper" | cut -d' ' -f1)
+        mv "$wrapper" "$work/sanitize-cc-$sum"
+        wrapper="$work/sanitize-cc-$sum"
+        chmod +x "$wrapper"
+        export CC="$wrapper"
+        # --target keeps these off build scripts, which run uninstrumented.
+        export RUSTFLAGS="$link"
+    fi
+    echo "fuzz-grammars: building the $arm arm in $CARGO_TARGET_DIR" >&2
+    cargo build --profile fuzz --target "$host" --bin pmacs_grammar_fuzz
+    if [ "$arm" != plain ]; then
+        # The proof is what the `cc` crate recorded in each grammar crate's
+        # build-script output: the compiler it ran, this wrapper, whose name
+        # carries its checksum. That record is cached with the objects it
+        # built; a log the wrapper wrote would not be, and a restored cache
+        # recompiles nothing (PR #297's second CI run failed on exactly
+        # that).
+        build="$CARGO_TARGET_DIR/$host/fuzz/build"
+        for c in $grammar_crates; do
+            found=
+            for o in "$build/$c"-*/output; do
+                [ -f "$o" ] || continue
+                hash=${o%/output}
+                hash=${hash##*/"$c"-}
+                case "$hash" in *[!0-9a-f]* | '') continue ;; esac
+                grep -qxF "CC = Some($wrapper)" "$o" && found=1
+            done
+            [ -n "$found" ] \
+                || die "$c's C was not compiled for the $arm arm (no build record under $build names $wrapper)"
+        done
+    fi
+    bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
+}
 fuzz() { LD_PRELOAD="$preload" "$bin" "$@"; }
+# shellcheck disable=SC2086
+set -- $arms
+built=$1
+build_arm "$built"
 
 # --- 2. upstream sources ---------------------------------------------------
 registry=${CARGO_HOME:-$HOME/.cargo}/registry/src
@@ -145,15 +299,48 @@ done < fuzz/corpora.tsv
 # --- 3. seeds ------------------------------------------------------------
 rm -rf "$work/corpus"
 # shellcheck disable=SC2086
-fuzz collect --out "$work/corpus" --max-files "$max_files" --from "pmacs=$root" $froms $corpora
+fuzz collect --out "$work/corpus" --max-files "$max_files" --max-seed-kb "$max_seed_kb" --from "pmacs=$root" $froms $corpora
 cp "$work/corpus/MANIFEST.tsv" "$out/seeds.tsv"
 
 # --- 4. run --------------------------------------------------------------
-echo "fuzz-grammars: $seconds s per grammar, $jobs at a time, report in $out" >&2
-set +e
-# shellcheck disable=SC2086
-fuzz run --corpus "$work/corpus" --out "$out" --seconds "$seconds" --jobs "$jobs" $grammars
-status=$?
-set -e
-cat "$out/report.md"
+longs=
+if [ -n "$long_since" ]; then
+    changed=$(fuzz changed --since "$long_since") || die "cannot tell what changed since $long_since"
+    if [ "$changed" = "*" ]; then
+        echo "fuzz-grammars: the tree-sitter runtime moved since $long_since; every grammar runs $long_seconds s" >&2
+        seconds=$long_seconds
+    else
+        for g in $changed; do longs="$longs --long $g"; done
+        echo "fuzz-grammars: changed since $long_since, run $long_seconds s:${changed:+ }$(echo $changed)" >&2
+    fi
+fi
+echo "fuzz-grammars: $seconds s and at least $min_mutations mutations per grammar, $jobs at a time, arms:$arms, report in $out" >&2
+# Each arm's report under $out/<arm>. The run's status is the worst arm's:
+# 2 setup, then 1 findings, then 0.
+status=0
+for arm in $arms; do
+    [ "$arm" = "$built" ] || build_arm "$arm"
+    built=
+    mkdir -p "$out/$arm"
+    # The tysan arm's time and memory are TypeSanitizer's: only its crashes
+    # (a TypeSanitizer report among them) fail it; the ubsan arm rules on
+    # hangs and memory.
+    fail_on=all
+    [ "$arm" = tysan ] && fail_on=crashes
+    set +e
+    # shellcheck disable=SC2086
+    fuzz run --corpus "$work/corpus" --out "$out/$arm" --seconds "$seconds" --jobs "$jobs" \
+        --min-mutations "$min_mutations" --max-seconds "$max_seconds" \
+        --long-seconds "$long_seconds" --fail-on "$fail_on" \
+        --accepted "$root/fuzz/accepted.tsv" $longs $grammars
+    arm_status=$?
+    set -e
+    echo "## arm: $arm (exit $arm_status)"
+    cat "$out/$arm/report.md"
+    case "$arm_status" in
+        0) ;;
+        1) [ "$status" = 2 ] || status=1 ;;
+        *) status=2 ;;
+    esac
+done
 exit "$status"

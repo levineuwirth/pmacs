@@ -504,11 +504,9 @@ pmacs.lsp.config.latex = pmacs.lsp.config.latex or {
 }
 
 -- Haskell via haskell-language-server, started through its wrapper
--- (aside E7e) and reached through `pmacs.lsp.filetypes.hs` below, since
--- E7g took the grammar away. `--lsp` is the stdio transport; without it
--- the wrapper type-checks the files it is given and exits. It sits here
--- rather than beside `lua` because its root walk reuses the two path
--- helpers above.
+-- (aside E7e). `--lsp` is the stdio transport; without it the wrapper
+-- type-checks the files it is given and exits. It sits here rather than
+-- beside `lua` because its root walk reuses the two path helpers above.
 --
 -- What HLS needs to be useful is a component, and it takes it from the
 -- root it is started in, not from the file: rooted where a `.cabal` file
@@ -587,8 +585,9 @@ pmacs.lsp.config.haskell = pmacs.lsp.config.haskell or {
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a
 -- server but no bundled grammar), so grammar-backed languages keep their
 -- existing detection. It keeps a language id stable when a grammar is
--- dropped, which Haskell's was (below), and is the seam for user-added
--- mappings. Extensible from init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
+-- dropped, as E7g dropped four (the JavaScript family still has none),
+-- and is the seam for user-added mappings. Extensible from init.lua:
+-- `pmacs.lsp.filetypes.foo = "bar"`.
 pmacs.lsp.filetypes = pmacs.lsp.filetypes or {}
 pmacs.lsp.filetypes.py = pmacs.lsp.filetypes.py or "python"
 pmacs.lsp.filetypes.pyi = pmacs.lsp.filetypes.pyi or "python"
@@ -651,18 +650,16 @@ pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
 -- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
 pmacs.lsp.filetypes.zig = pmacs.lsp.filetypes.zig or "zig"
 pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
--- JSON / YAML. JSON ships a grammar, so `language_for_path` resolves it
--- and the map is the stable-id fallback (same role as `lua`/`cuda`). YAML
--- has none since E7g (tree-sitter-yaml 0.7.2 aborts the editor on a file
--- nested 254 levels deep), so these entries are what name a `.yaml`
--- buffer `yaml`, and yaml-language-server attaches uncolored.
+-- JSON / YAML. Both ship grammars, so `language_for_path` already resolves
+-- these and the map is the stable-id fallback (same role as `lua`/`cuda`).
 pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
 pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
 pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
--- Haskell (haskell-language-server). No grammar ships for it: E7g
--- unshipped tree-sitter-haskell 0.23.1, whose scanner corrupts the heap on
--- a file opening with two `{-# LANGUAGE #-}` pragmas. This entry is what
--- still names a `.hs` buffer `haskell`, so the server attaches uncolored.
+-- Haskell (haskell-language-server). The grammar claims `.hs` again since
+-- E7h, on the conforming `array.h` (tree-sitter-haskell 0.24.1 from
+-- crates.io since E7h's fix round 2); this entry keeps a `.hs` buffer
+-- `haskell`, and the server attached, if it is ever dropped again as E7g
+-- dropped it.
 pmacs.lsp.filetypes.hs = pmacs.lsp.filetypes.hs or "haskell"
 
 -- Per-buffer attachment record: { language, server, uri, version }.

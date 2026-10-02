@@ -33,11 +33,13 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::ops::ControlFlow;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tree_sitter::{Node, Point, Range, StreamingIterator};
+use tree_sitter::{Node, ParseOptions, ParseState, Point, Range, StreamingIterator};
 
 use crate::async_runtime::JobId;
 use crate::buffer::{Buffer, BufferError, BufferId};
@@ -79,7 +81,60 @@ pub struct ParseRequest {
     /// table. Empty for the non-layered/legacy callers (no injections
     /// resolve, root parse unaffected).
     pub injection_aliases: Arc<HashMap<String, String>>,
+    /// How long the parse may run before it is cancelled (E7h.2): the
+    /// root parse and every injection layer's together, measured from
+    /// when [`run_parse`] starts, and enforced only where tree-sitter
+    /// calls its progress callback ([`run_parse`] names the work it cannot
+    /// reach). `None` is unbounded, as every parse was before E7h; the
+    /// editor's dispatch fills it from `syntax.parse-deadline-ms`.
+    pub deadline: Option<Duration>,
 }
+
+/// Why [`run_parse`] produced no bundle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    /// The parser refused the grammar: an ABI mismatch, a build problem.
+    Language(String),
+    /// The parser returned no tree although nothing cancelled it.
+    NoTree,
+    /// The root parse ran past [`ParseRequest::deadline`] and was
+    /// cancelled through tree-sitter's progress callback (E7h.2). The
+    /// buffer keeps whatever tree it had.
+    DeadlineExceeded {
+        /// The deadline the request carried.
+        deadline: Duration,
+        /// How long the parse had run when it returned.
+        after: Duration,
+    },
+}
+
+/// How a [`ParseError::DeadlineExceeded`] message begins. The async
+/// runtime carries a worker's error as text, so the settle path tells a
+/// cancelled parse from a failed one by [`is_deadline_message`].
+pub const PARSE_DEADLINE_MESSAGE: &str = "parse ran past its deadline";
+
+/// Whether a parse job's failure text is a [`ParseError::DeadlineExceeded`].
+#[must_use]
+pub fn is_deadline_message(message: &str) -> bool {
+    message.starts_with(PARSE_DEADLINE_MESSAGE)
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Language(e) => write!(f, "set_language: {e}"),
+            Self::NoTree => f.write_str("parser produced no tree"),
+            Self::DeadlineExceeded { deadline, after } => write!(
+                f,
+                "{PARSE_DEADLINE_MESSAGE} of {} ms and was cancelled after {} ms",
+                deadline.as_millis(),
+                after.as_millis()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 /// Output of [`run_parse`]. The runtime's parse-handoff side map
 /// holds these by [`Arc`]; `Lua` introspection ([`crate::lua_bindings`])
@@ -113,6 +168,12 @@ pub struct ParseTreeBundle {
     /// `pmacs.error`; only a pathological file (thousands of embedded
     /// regions) can set it.
     pub injection_capped: bool,
+    /// True if the deadline ([`ParseRequest::deadline`]) ran out while
+    /// injection layers were being built: the layers not yet parsed were
+    /// dropped and the root and the rest installed, surfaced once per
+    /// buffer at settle (E7h.2). A root parse past the deadline is
+    /// [`ParseError::DeadlineExceeded`] instead and installs nothing.
+    pub layers_cut_by_deadline: bool,
 }
 
 /// Lexically-local identifier ranges derived from a grammar's bundled
@@ -160,31 +221,58 @@ impl ParseTreeBundle {
 /// `dispatch_parse` closure invokes after pulling a job from the
 /// queue. Always synchronous --- there is no internal yielding.
 ///
+/// Since E7h.2 a parse is bounded in time where tree-sitter calls its
+/// progress callback, and only there: with [`ParseRequest::deadline`]
+/// set, the callback (about every hundred parser operations) cancels the
+/// root parse once the deadline has passed and this returns
+/// [`ParseError::DeadlineExceeded`]; injection layers share the same
+/// deadline, and one it cuts short drops the layers not yet parsed. The
+/// callback runs in the runtime's advance loop, so it bounds a grammar
+/// whose error recovery never terminates (the JavaScript family, E7g).
+/// It does not bound work done between two callbacks: an external scanner
+/// that never returns to the runtime; `ts_parser__accept`, which at the
+/// end of the input pops every stack path and builds a root for each with
+/// no callback at all (a markdown paragraph of underscore runs spends
+/// 29.5 s and 9.8 GB there at 32 KB under a 5 s deadline, #296); or
+/// `ts_parser__condense_stack`, whose merging of stack versions runs
+/// exponentially long in nested image and link openers (37 s at 28 of them
+/// under a 5 s deadline, #301). Only isolating the grammar bounds that.
+///
 /// Returns `Err` if the language is rejected by [`tree_sitter::Parser`]
-/// (ABI mismatch, almost always a build issue) or if the parser
-/// itself returns no tree (cancellation flag flipped, exhausted
-/// timeout --- neither wired in M4.1, so under M4.1 contracts this
-/// path is unreachable in practice).
-pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
+/// (ABI mismatch, almost always a build issue), if the deadline cut the
+/// root parse short, or if the parser returns no tree otherwise.
+pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, ParseError> {
+    let started = Instant::now();
+    let deadline_at = req.deadline.map(|d| started + d);
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&req.language)
-        .map_err(|e| format!("set_language: {e}"))?;
+        .map_err(|e| ParseError::Language(e.to_string()))?;
     let mut prior = req.prior_tree;
     if let Some(tree) = prior.as_mut() {
         for edit in &req.edits {
             tree.edit(edit);
         }
     }
-    let started = Instant::now();
-    let root_tree = parser
-        .parse(req.source.as_ref(), prior.as_ref())
-        .ok_or_else(|| "parser produced no tree".to_owned())?;
+    let root_started = Instant::now();
+    let root_tree = parse_bounded(
+        &mut parser,
+        req.source.as_ref(),
+        prior.as_ref(),
+        deadline_at,
+    )
+    .ok_or_else(|| match (req.deadline, deadline_at) {
+        (Some(deadline), Some(at)) if Instant::now() >= at => ParseError::DeadlineExceeded {
+            deadline,
+            after: started.elapsed(),
+        },
+        _ => ParseError::NoTree,
+    })?;
     // `parse_duration` measures the root parse only — the metric the M4.1
     // acceptance gates are stated in. Injection layer building (below) is an
     // additive phase separately guarded by the settle-time budget test; it
     // must not retroactively inflate this metric.
-    let parse_duration = started.elapsed();
+    let parse_duration = root_started.elapsed();
 
     // Seed the root layer, then expand injection layers (framing Q#IJ1).
     // Injection expansion is best-effort and isolated to the child
@@ -198,15 +286,46 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
         highlight_query: None,
         local_facts: None,
     }];
-    let injection_capped =
-        build_injection_layers(&mut layers, req.source.as_ref(), &req.injection_aliases);
+    let (injection_capped, layers_cut_by_deadline) = build_injection_layers(
+        &mut layers,
+        req.source.as_ref(),
+        &req.injection_aliases,
+        deadline_at,
+    );
     Ok(ParseTreeBundle {
         layers,
         source: req.source,
         language_name: req.language_name,
         parse_duration,
         injection_capped,
+        layers_cut_by_deadline,
     })
+}
+
+/// Parse `source` with `parser`, cancelling through the progress callback
+/// once `deadline_at` has passed. `None` from a bounded parse after the
+/// deadline is the cancellation; the parser is dropped with it, so no
+/// half-finished parse is ever resumed.
+fn parse_bounded(
+    parser: &mut tree_sitter::Parser,
+    source: &[u8],
+    old_tree: Option<&tree_sitter::Tree>,
+    deadline_at: Option<Instant>,
+) -> Option<tree_sitter::Tree> {
+    let len = source.len();
+    let mut read = |i: usize, _: Point| if i < len { &source[i..] } else { &[][..] };
+    let Some(at) = deadline_at else {
+        return parser.parse_with_options(&mut read, old_tree, None);
+    };
+    let mut progress = |_: &ParseState| {
+        if Instant::now() >= at {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let options = ParseOptions::new().progress_callback(&mut progress);
+    parser.parse_with_options(&mut read, old_tree, Some(options))
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +364,7 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         ("cxx", "cpp"),
         ("cc", "cpp"),
         ("golang", "go"),
+        ("yml", "yaml"),
         ("md", "markdown"),
         // Lean 4 (framing Q#LN17). A ```lean fence is overwhelmingly Lean 4
         // in practice, so the Lean 3 spelling is deliberately mapped forward
@@ -252,6 +372,8 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         // entry name. `lean4-mode` does the equivalent through
         // `markdown-code-lang-modes`.
         ("lean", "lean4"),
+        // A ```hs fence is as common as ```haskell, which needs no alias.
+        ("hs", "haskell"),
     ]
     .into_iter()
     .map(|(a, b)| (a.to_owned(), b.to_owned()))
@@ -280,13 +402,15 @@ fn build_injection_layers(
     layers: &mut Vec<Layer>,
     source: &[u8],
     aliases: &HashMap<String, String>,
-) -> bool {
+    deadline_at: Option<Instant>,
+) -> (bool, bool) {
     let mut query_cache: HashMap<String, Option<Arc<tree_sitter::Query>>> = HashMap::new();
     let mut visited: HashSet<(String, Vec<(usize, usize)>)> = HashSet::new();
     // Frontier entries are (layer index, that layer's included ranges).
     let mut frontier: Vec<(usize, Vec<Range>)> = vec![(0, vec![whole_source_range(source)])];
     let mut depth: u16 = 0;
     let mut capped = false;
+    let mut cut_by_deadline = false;
 
     while depth < MAX_INJECTION_DEPTH && !frontier.is_empty() {
         // Children discovered this level: (layer, its ranges) to append and
@@ -314,7 +438,15 @@ fn build_injection_layers(
                 if !visited.insert(key) {
                     continue; // same (language, ranges) already parsed — cycle guard
                 }
-                let Some(tree) = parse_child(child_lang, &ranges, source) else {
+                if deadline_at.is_some_and(|at| Instant::now() >= at) {
+                    cut_by_deadline = true;
+                    break 'parents; // E7h.2: the deadline is spent; tail dropped
+                }
+                let Some(tree) = parse_child(child_lang, &ranges, source, deadline_at) else {
+                    if deadline_at.is_some_and(|at| Instant::now() >= at) {
+                        cut_by_deadline = true;
+                        break 'parents; // cancelled mid-child: the tail goes with it
+                    }
                     continue; // child parse failed — skip this child only
                 };
                 children.push((
@@ -329,7 +461,10 @@ fn build_injection_layers(
                 ));
             }
         }
-        if children.is_empty() {
+        if children.is_empty() || cut_by_deadline {
+            for (layer, _) in children {
+                layers.push(layer);
+            }
             break;
         }
         let mut next_frontier = Vec::with_capacity(children.len());
@@ -341,7 +476,7 @@ fn build_injection_layers(
         frontier = next_frontier;
         depth += 1;
     }
-    capped
+    (capped, cut_by_deadline)
 }
 
 /// Compile (once, cached) the `injections.scm` for `lang` from the static
@@ -553,13 +688,18 @@ fn resolve_injected_language(raw: &str, aliases: &HashMap<String, String>) -> Op
 
 /// Cold-parse `source` restricted to `ranges` with `lang`'s grammar. Node
 /// offsets in the returned tree are absolute into `source` (mechanic #1).
-fn parse_child(lang: &str, ranges: &[Range], source: &[u8]) -> Option<tree_sitter::Tree> {
+fn parse_child(
+    lang: &str,
+    ranges: &[Range],
+    source: &[u8],
+    deadline_at: Option<Instant>,
+) -> Option<tree_sitter::Tree> {
     let entry = BUILTIN_LANGUAGES.iter().find(|e| e.name == lang)?;
     let language = (entry.loader)();
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).ok()?;
     parser.set_included_ranges(ranges).ok()?;
-    parser.parse(source, None)
+    parse_bounded(&mut parser, source, None, deadline_at)
 }
 
 /// The whole-buffer range, the root layer's parent range.
@@ -611,6 +751,12 @@ struct ParseViewInner {
     pending: Vec<tree_sitter::InputEdit>,
     /// Most recent settled parse, or `None` if no parse has run yet.
     current: Option<Arc<ParseTreeBundle>>,
+    /// Set when a dispatched request produced no bundle (E7h.2: a parse
+    /// cancelled at its deadline, or failed). That request drained the
+    /// edits made since `current`, so `current` can no longer be carried
+    /// forward incrementally: the next request parses cold. Cleared by
+    /// `install`.
+    cold_next: bool,
 }
 
 /// Per-buffer parse-tree state. Attached to a [`Buffer`] as a
@@ -656,6 +802,7 @@ impl ParseView {
             source,
             pending: Vec::new(),
             current: None,
+            cold_next: false,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -730,7 +877,14 @@ impl ParseViewHandle {
     pub fn make_request(&self) -> ParseRequest {
         let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
         let edits = std::mem::take(&mut inner.pending);
-        let prior_tree = inner.current.as_ref().map(|b| b.root_tree().clone());
+        // After a request that installed nothing, `current` predates edits
+        // that request drained; carrying it forward would edit it with an
+        // incomplete list. Parse cold instead (E7h.2).
+        let prior_tree = if inner.cold_next {
+            None
+        } else {
+            inner.current.as_ref().map(|b| b.root_tree().clone())
+        };
         ParseRequest {
             source: Arc::from(inner.source.clone()),
             language: inner.language.clone(),
@@ -741,7 +895,20 @@ impl ParseViewHandle {
             // registry's alias snapshot (framing Q#IJ4). Callers that need
             // injections and bypass the registry set this themselves.
             injection_aliases: Arc::new(HashMap::new()),
+            // Unbounded by default; the dispatch binding sets the editor's
+            // `syntax.parse-deadline-ms` (E7h.2).
+            deadline: None,
         }
+    }
+
+    /// Record that the last request this view made produced no bundle
+    /// (E7h.2): the view keeps `current`, and the next request parses
+    /// cold because the drained edits are gone with the failed request.
+    pub fn mark_unparsed(&self) {
+        self.inner
+            .lock()
+            .expect("ParseView mutex poisoned")
+            .cold_next = true;
     }
 
     /// Install a freshly-parsed bundle. The caller is responsible
@@ -749,7 +916,9 @@ impl ParseViewHandle {
     /// installing a stale bundle would desynchronize the source
     /// mirror from the tree.
     pub fn install(&self, bundle: Arc<ParseTreeBundle>) {
-        self.inner.lock().expect("ParseView mutex poisoned").current = Some(bundle);
+        let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
+        inner.current = Some(bundle);
+        inner.cold_next = false;
     }
 }
 
@@ -835,6 +1004,30 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
         locals_query: &[tree_sitter_lua::LOCALS_QUERY],
         injections_query: &[],
+    },
+    // Haskell (aside E7e). The crate exports all three query constants, in
+    // the plural rust/lua idiom. Its injections inject quasiquote bodies by
+    // quoter (`[hamlet|…|]` -> html, `[aesonQQ|…|]` -> json, `[sql|…|]`) and
+    // tag comments as `comment`; a language this table does not register
+    // resolves to nothing and is skipped. `.lhs` is deliberately unclaimed:
+    // literate Haskell is prose with code in Bird tracks (`> `) or
+    // `\begin{code}` blocks, which needs an unliterate pass this grammar does
+    // not have, and it parses both as errors
+    // (`lhs_is_not_haskell_to_this_grammar` pins it). Unshipped at E7g, its
+    // vendored `array.h` being aliasing UB that GCC 16 at -O2 compiled into
+    // a heap overflow, and restored at E7h under `.cargo/config.toml`'s
+    // `-fno-strict-aliasing` after a clean 600 s fuzz run on GCC 16. E7h's
+    // fix round 1 built it from a copy carrying the conforming header,
+    // because the flag reaches only builds cargo starts at the repository
+    // root; since fix round 2 it is tree-sitter-haskell 0.24.1 from
+    // crates.io, published on that header.
+    LanguageEntry {
+        name: "haskell",
+        extensions: &["hs"],
+        loader: || tree_sitter_haskell::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_haskell::HIGHLIGHTS_QUERY],
+        locals_query: &[tree_sitter_haskell::LOCALS_QUERY],
+        injections_query: &[tree_sitter_haskell::INJECTIONS_QUERY],
     },
     // T M9.7: markdown block grammar (`tree_sitter_md::LANGUAGE`) — headers,
     // lists, fenced code blocks, blockquotes. Its `injections.scm` (framing
@@ -1025,19 +1218,30 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
-    // JSON — a config format with self-contained highlights and no
-    // injections of its own; root kind `document`. `.jsonc`/`.json5`
-    // (comments / trailing commas) are a deferred variant — the plain JSON
-    // grammar rejects them. YAML is not bundled (E7g): tree-sitter-yaml
-    // 0.7.2's scanner overflows the runtime's 1024-byte serialization
-    // buffer at 254 levels of nesting and the runtime's assert aborts the
-    // editor (`yaml_is_not_bundled`); markdown `---` frontmatter stays
-    // plain for it, `+++` TOML frontmatter still injects.
+    // JSON + YAML — config formats, both self-contained highlights and no
+    // injections of their own. Registering `yaml` also lights up markdown
+    // `---` frontmatter via the #122 injection engine (the markdown block
+    // injection query sets `injection.language "yaml"` for `minus_metadata`;
+    // `+++` TOML frontmatter already works). Root kinds: json `document`,
+    // yaml `stream`. `.jsonc`/`.json5` (comments / trailing commas) are a
+    // deferred variant — the plain JSON grammar rejects them.
     LanguageEntry {
         name: "json",
         extensions: &["json"],
         loader: || tree_sitter_json::LANGUAGE.into(),
         highlights_query: &[tree_sitter_json::HIGHLIGHTS_QUERY],
+        locals_query: &[],
+        injections_query: &[],
+    },
+    // YAML: unshipped at E7g (its scanner wrote past the runtime's
+    // 1024-byte serialization buffer at 254 levels and the runtime aborted
+    // the editor) and shipped again at E7h from `vendor/tree-sitter-yaml`
+    // with that bound fixed (D36 as amended), after a clean 600 s fuzz run.
+    LanguageEntry {
+        name: "yaml",
+        extensions: &["yaml", "yml"],
+        loader: || tree_sitter_yaml::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
         locals_query: &[],
         injections_query: &[],
     },
@@ -1445,6 +1649,7 @@ impl SyntaxRegistry {
             language_name: raw.language_name.clone(),
             parse_duration: raw.parse_duration,
             injection_capped: raw.injection_capped,
+            layers_cut_by_deadline: raw.layers_cut_by_deadline,
         })
     }
 }
@@ -2535,19 +2740,157 @@ mod tests {
     }
 
     #[test]
-    fn haskell_is_not_bundled() {
-        // E7g. tree-sitter-haskell 0.23.1 aborts the editor on a two-line
-        // file of `{-# LANGUAGE #-}` pragmas; `e7g_tree_sitter_haskell_stays_
-        // unshipped` in tests/e7e_haskell_acceptance.rs names the crash. No
-        // entry, no extension and no fence alias may bring it back unfuzzed.
-        assert!(BUILTIN_LANGUAGES.iter().all(|l| l.name != "haskell"));
-        let reg = SyntaxRegistry::new();
-        assert_eq!(reg.language_name_for_path("app/Main.hs"), None);
-        assert!(
-            default_injection_aliases()
-                .values()
-                .all(|lang| lang != "haskell")
+    fn builtin_languages_include_haskell() {
+        // Aside E7e. The crate's three query constants, `.hs` only.
+        let hs = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "haskell")
+            .expect("`haskell` language entry must be present");
+        assert_eq!(
+            hs.extensions,
+            &["hs"],
+            "`haskell` claims `.hs` and not `.lhs`"
         );
+        assert_eq!(
+            hs.highlights_query,
+            &[tree_sitter_haskell::HIGHLIGHTS_QUERY]
+        );
+        assert_eq!(hs.locals_query, &[tree_sitter_haskell::LOCALS_QUERY]);
+        assert_eq!(
+            hs.injections_query,
+            &[tree_sitter_haskell::INJECTIONS_QUERY]
+        );
+    }
+
+    #[test]
+    fn haskell_grammar_loads_and_parses() {
+        // The crate rides `tree-sitter-language 0.1`, so `LANGUAGE.into()`
+        // must yield a language our 0.26 core accepts. The fixture leans on
+        // the external scanner (layout: `where` and `do` blocks close by
+        // indentation, not braces), which a misbuilt scanner shreds.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("haskell")
+            .expect("`haskell` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("Main.hs");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: "module Main (main) where\n\
+                    \n\
+                    import qualified Data.Map as Map\n\
+                    \n\
+                    -- | A greeting.\n\
+                    greet :: String -> String\n\
+                    greet name = \"hello, \" ++ name\n\
+                    \n\
+                    main :: IO ()\n\
+                    main = do\n\
+                    \x20 let m = Map.fromList [(1 :: Int, 'a')]\n\
+                    \x20 putStrLn (greet \"world\")\n\
+                    \x20 print (Map.size m)\n"
+                .as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "haskell".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        let root = bundle.root_tree().root_node();
+        let sexp = root.to_sexp();
+        assert_eq!(root.kind(), "haskell", "Haskell grammar roots at haskell");
+        assert!(
+            !root.has_error(),
+            "the fixture parses without error; got {sexp}"
+        );
+        for expected in ["(header ", "(import ", "(signature ", "(function ", "(do "] {
+            assert!(
+                sexp.contains(expected),
+                "expected `{expected}` in the tree; got {sexp}"
+            );
+        }
+    }
+
+    #[test]
+    fn haskell_highlights_locals_and_injections_resolve() {
+        // All three crate queries must compile against the grammar they ship
+        // with; the highlights use supertype patterns (`decl/function`) that
+        // an older core would refuse.
+        let reg = SyntaxRegistry::new();
+        let query = reg
+            .highlights_query("haskell")
+            .expect("haskell highlights compile against the grammar");
+        let names = query.capture_names();
+        for expected in ["keyword", "type", "string", "comment", "function"] {
+            assert!(
+                names.contains(&expected),
+                "haskell query uses `@{expected}`; got {names:?}"
+            );
+        }
+        assert!(
+            reg.locals_query("haskell").is_some(),
+            "haskell locals compile"
+        );
+        let language = reg.language("haskell").expect("grammar loads");
+        tree_sitter::Query::new(&language, tree_sitter_haskell::INJECTIONS_QUERY)
+            .expect("haskell injections compile");
+    }
+
+    #[test]
+    fn language_for_path_resolves_hs_and_not_lhs() {
+        let reg = SyntaxRegistry::new();
+        assert_eq!(
+            reg.language_name_for_path("app/Main.hs").as_deref(),
+            Some("haskell"),
+            "`.hs` resolves to the haskell grammar"
+        );
+        assert_ne!(
+            reg.language_name_for_path("app/Main.lhs").as_deref(),
+            Some("haskell"),
+            "`.lhs` must not resolve to haskell"
+        );
+    }
+
+    #[test]
+    fn lhs_is_not_haskell_to_this_grammar() {
+        // Why `.lhs` is unclaimed. Literate Haskell is prose; the code is
+        // either Bird-tracked (`> ` at column 0) or between `\begin{code}` and
+        // `\end{code}`. GHC unliterates before it lexes; this grammar has no
+        // such pass, so both styles parse as errors. If a grammar bump makes
+        // either parse clean, this fails and `.lhs` is worth revisiting.
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("haskell").expect("grammar loads");
+        for (style, src) in [
+            (
+                "Bird tracks",
+                "A literate module.\n\n> module Main where\n> main :: IO ()\n> main = pure ()\n",
+            ),
+            (
+                "LaTeX style",
+                "\\documentclass{article}\n\\begin{document}\n\\begin{code}\nmain :: IO ()\nmain = pure ()\n\\end{code}\n\\end{document}\n",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&language).unwrap();
+            let tree = parser.parse(src, None).expect("parse");
+            assert!(
+                tree.root_node().has_error(),
+                "{style} literate source parsed clean: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
+
+    #[test]
+    fn a_hs_fence_in_markdown_injects_haskell() {
+        let reg = SyntaxRegistry::new();
+        for fence in ["hs", "haskell"] {
+            let src = format!("```{fence}\nmain = pure ()\n```\n");
+            let bundle = parse_layered(&reg, "markdown", src.as_bytes());
+            assert!(
+                bundle.layers.iter().any(|l| l.language_name == "haskell"),
+                "fence ```{fence} resolves to haskell"
+            );
+        }
     }
 
     #[test]
@@ -2761,15 +3104,22 @@ mod tests {
     }
 
     #[test]
-    fn builtin_languages_include_json() {
-        // Framing acceptance #1: the entry is present, claims its
-        // extension, ships non-empty highlights.
+    fn builtin_languages_include_json_and_yaml() {
+        // Framing acceptance #1: both entries present, claim their
+        // extensions, ship non-empty highlights.
         let json = BUILTIN_LANGUAGES
             .iter()
             .find(|l| l.name == "json")
             .expect("`json` entry present");
         assert!(json.extensions.contains(&"json"), "`json` claims `.json`");
         assert!(!json.highlights_query.is_empty(), "`json` ships highlights");
+        let yaml = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "yaml")
+            .expect("`yaml` entry present");
+        assert!(yaml.extensions.contains(&"yaml"), "`yaml` claims `.yaml`");
+        assert!(yaml.extensions.contains(&"yml"), "`yaml` claims `.yml`");
+        assert!(!yaml.highlights_query.is_empty(), "`yaml` ships highlights");
     }
 
     #[test]
@@ -2801,9 +3151,36 @@ mod tests {
     }
 
     #[test]
-    fn json_highlights_compile() {
-        // Framing acceptance #4: the highlights query compiles against its
-        // grammar and resolves capture classes.
+    fn yaml_grammar_loads_and_parses() {
+        // Framing acceptance #3 / ABI pin: `tree-sitter-yaml` 0.7 loads and
+        // a YAML mapping parses to a `stream` root without error.
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("yaml").expect("`yaml` loads");
+        let mut buf = fresh_buffer("config.yaml");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"name: pmacs\nversion: 1\ntags:\n  - a\n  - b\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "yaml".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "stream",
+            "yaml grammar roots at `stream`"
+        );
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "yaml grammar parses a mapping without error"
+        );
+    }
+
+    #[test]
+    fn json_yaml_highlights_compile() {
+        // Framing acceptance #4: both highlights queries compile against
+        // their grammars and resolve capture classes.
         let reg = SyntaxRegistry::new();
         let json = reg
             .highlights_query("json")
@@ -2813,40 +3190,65 @@ mod tests {
             "json highlights resolve capture classes; got {}",
             json.capture_names().len()
         );
+        let yaml = reg
+            .highlights_query("yaml")
+            .expect("yaml highlights compile");
+        assert!(
+            yaml.capture_names().len() >= 3,
+            "yaml highlights resolve capture classes; got {}",
+            yaml.capture_names().len()
+        );
     }
 
     #[test]
-    fn language_for_path_resolves_json_and_not_yaml() {
-        // Framing acceptance #5; YAML since E7g has no grammar.
+    fn language_for_path_resolves_json_yaml() {
+        // Framing acceptance #5.
         let reg = SyntaxRegistry::new();
         assert_eq!(
             reg.language_name_for_path("tsconfig.json").as_deref(),
             Some("json")
         );
-        assert_eq!(reg.language_name_for_path("config.yaml"), None);
-        assert_eq!(reg.language_name_for_path("ci.yml"), None);
+        assert_eq!(
+            reg.language_name_for_path("config.yaml").as_deref(),
+            Some("yaml")
+        );
+        assert_eq!(
+            reg.language_name_for_path("ci.yml").as_deref(),
+            Some("yaml")
+        );
     }
 
     #[test]
-    fn yaml_is_not_bundled() {
-        // E7g. tree-sitter-yaml 0.7.2 aborts the editor on a file nested
-        // 254 levels deep; `e7g_tree_sitter_yaml_stays_unshipped` in
-        // tests/e7g_grammar_fuzz_acceptance.rs names the crash. No entry, no
-        // extension, no fence alias, and no frontmatter layer bring it back
-        // unfuzzed.
-        assert!(BUILTIN_LANGUAGES.iter().all(|l| l.name != "yaml"));
-        assert!(
-            default_injection_aliases()
-                .values()
-                .all(|lang| lang != "yaml")
-        );
+    fn yaml_frontmatter_injects_in_markdown() {
+        // Framing acceptance #7 — THE headline synergy with #122: a markdown
+        // `---` frontmatter block (a `minus_metadata` node) is injected as
+        // yaml by the bundled markdown injection query, so registering the
+        // yaml grammar lights it up with no extra wiring.
         let reg = SyntaxRegistry::new();
         let src = b"---\ntitle: Hello\ntags: [a, b]\n---\n\n# Body\n";
         let bundle = parse_layered(&reg, "markdown", src);
-        assert!(
-            bundle.layers.iter().all(|l| l.language_name != "yaml"),
-            "`---` frontmatter yields no yaml layer"
+        let yaml = bundle
+            .layers
+            .iter()
+            .find(|l| l.language_name == "yaml")
+            .expect("`---` frontmatter yields a yaml child layer");
+        assert_eq!(
+            yaml.tree.root_node().kind(),
+            "stream",
+            "yaml layer roots at stream"
         );
+        let query = yaml
+            .highlight_query
+            .as_ref()
+            .expect("yaml highlights resolved");
+        let spans = compute_highlight_spans_for(
+            query,
+            &yaml.tree,
+            &bundle.source,
+            yaml.local_facts.as_deref(),
+            None,
+        );
+        assert!(!spans.is_empty(), "the yaml frontmatter layer highlights");
     }
 
     #[test]

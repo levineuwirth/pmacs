@@ -8,8 +8,10 @@
 //! of them (tree-sitter-haskell 0.23.1, E7g) corrupted the heap on the
 //! most ordinary Haskell file there is. This binary is how a grammar earns
 //! its place: `scripts/fuzz-grammars` builds it the way the grammars ship
-//! (release optimization, GCC, the C instrumented with `AddressSanitizer`),
-//! seeds it from real files, and runs it.
+//! (release optimization, the C instrumented, once per arm:
+//! `AddressSanitizer` and `UndefinedBehaviorSanitizer`; `AddressSanitizer`
+//! alone with strict aliasing restored; clang's `TypeSanitizer`), seeds it
+//! from real files, and runs it.
 //!
 //! ```text
 //! pmacs_grammar_fuzz list
@@ -17,7 +19,10 @@
 //!                            [--corpus GRAMMAR=PATH]... [--max-files N]
 //! pmacs_grammar_fuzz run --corpus DIR --out DIR [--seconds N] [--jobs N]
 //!                        [--grammar NAME]... [--edits N] [--seed N]
-//!                        [--hang-ms N] [--rss-mb N]
+//!                        [--hang-ms N] [--rss-mb N] [--min-mutations N]
+//!                        [--max-seconds N] [--long NAME]... [--long-seconds N]
+//!                        [--fail-on all|crashes]
+//! pmacs_grammar_fuzz changed --since REF
 //! pmacs_grammar_fuzz repro GRAMMAR FILE [--edits N --seed N] [--trace 1]
 //! ```
 //!
@@ -28,25 +33,44 @@
 //! (`SyntaxRegistry::resolve_layer_queries`), the highlight capture walk
 //! over every layer whole and over a viewport, a walk of every node; then
 //! `--edits` incremental reparses of the same text under typing, deletes,
-//! pastes and batched edits, each settled the same way.
+//! pastes and batched edits, each settled the same way (two, and no
+//! retyped window, for an input past the 64 KB seed cap).
 //!
 //! Findings are crashes (the process died: a sanitizer report, a glibc
-//! heap check, an assert, a panic), hangs (a parse that has not returned
-//! after twelve times the hang limit, alone), slow parses (over the limit
-//! but returning), and allocations (one input growing the worker's RSS by
-//! more than `--rss-mb`). Each is confirmed alone in a fresh worker and
-//! minimized.
+//! heap check, an assert, a panic; or `TypeSanitizer` reported an access of
+//! another type), hangs (a parse that has not returned after twelve times
+//! the hang limit, alone, nor, when its minimal input returns, inside the
+//! cap, 180 times it), memory cuts (a parse cut alone at four times
+//! `--rss-mb`), slow parses (over the limit but returning, each with the
+//! exponent of its growth), and allocations (one input growing the worker's
+//! RSS by more than `--rss-mb`, returning under four times it). Each is
+//! confirmed alone in a fresh worker on the input that showed it, which
+//! decides its kind, then, unless it is slow, minimized, with the minimum
+//! confirmed and reported beside it (E7h's fix round 2).
 //!
-//! `run` exits 1 when a crash or a hang reproduces alone, 2 on a usage or
-//! setup error (a grammar with no seeds is one: the rule is corpus-seeded),
-//! and 0 otherwise. That is the owner's ruling at E7g: what aborts or never
-//! returns is not shipped, what is slow or large is filed. A finding that
-//! does not reproduce alone never fails the run: with the C under the
-//! sanitizer a memory error is caught at the faulting write, so what will
-//! not come back alone is load or timing, and failing on it would make the
-//! CI job a source of unregistered intermittent reds.
+//! `run` exits 1 on a crash, a hang or a memory cut, 2 on a usage or setup
+//! error (a grammar with no seeds is one: the rule is corpus-seeded), and 0
+//! otherwise. That is the owner's ruling at E7g (D36): what aborts or never
+//! returns is not shipped, what is slow or large is filed. E7h.3 made the
+//! line hold where review 1's planted defects showed it did not: every
+//! parse runs under the hang limit as its deadline, so a parse that never
+//! returns is cancelled and filed as a hang whatever it allocates; an
+//! allocation is confirmed under four times the memory and twelve times the
+//! time, one that still has not returned is a hang, and (E7h's fix round 1,
+//! the owner's ruling) one cut at the four-times memory cap is `memory`,
+//! "exceeded memory cap", with the RSS at the cut, which fails the run; the
+//! time limit is a trigger and not a verdict (fix rounds 3 and 4, the
+//! owner's rulings), so an input past twelve times it whose minimum returns
+//! is run again under the cap, a hang if it does not return there and slow
+//! if it does, its time judged against a budget its minimum's growth
+//! projects for it (`decide_by_growth`); a finding `fuzz/accepted.tsv`
+//! names is reported and does not fail; and a crash that does not come back
+//! alone is replayed after the inputs its worker ran before it, and fails
+//! the run however it came back (a kill by signal 9, the host reclaiming
+//! memory, excepted). A hang that does not come back alone is a loaded
+//! worker's and is reported, not failed.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -57,8 +81,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pmacs::syntax::{
-    BUILTIN_LANGUAGES, LanguageEntry, ParseRequest, ParseTreeBundle, SyntaxRegistry, byte_to_point,
-    compute_highlight_spans_for, default_injection_aliases, run_parse,
+    BUILTIN_LANGUAGES, LanguageEntry, ParseError, ParseRequest, ParseTreeBundle, SyntaxRegistry,
+    byte_to_point, compute_highlight_spans_for, default_injection_aliases, run_parse,
 };
 
 /// Seeds longer than this are cut at a line boundary: the editor parses
@@ -73,7 +97,7 @@ const INPUTS_PER_WORKER: u64 = 500;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = args.split_first() else {
-        eprintln!("usage: pmacs_grammar_fuzz list|collect|run|repro|worker ...");
+        eprintln!("usage: pmacs_grammar_fuzz list|collect|run|changed|repro|worker ...");
         return ExitCode::from(2);
     };
     let result = match cmd.as_str() {
@@ -85,6 +109,7 @@ fn main() -> ExitCode {
         }
         "collect" => collect(rest),
         "run" => run(rest),
+        "changed" => changed(rest),
         "repro" => repro(rest),
         "worker" => worker(rest),
         other => Err(format!("unknown subcommand `{other}`")),
@@ -193,9 +218,17 @@ fn fnv(bytes: &[u8]) -> u64 {
 // -------------------------------------------------------------------
 
 fn worker(args: &[String]) -> Result<ExitCode, String> {
-    let (pos, _) = Flags::parse(args, 1)?;
+    let (pos, flags) = Flags::parse(args, 1)?;
     let lang = entry(&pos[0])?;
-    let session = Session::new(lang);
+    let mut session = Session::new(lang);
+    // E7h.3: the parent's per-parse hang limit is the parse's deadline, so
+    // a grammar whose parse never returns is cancelled through the same
+    // progress callback the editor uses and reported as a hang, before
+    // anything it allocates while cycling can pass for a large parse.
+    session.deadline = match flags.num("deadline-ms", 0)? {
+        0 => None,
+        ms => Some(Duration::from_millis(ms)),
+    };
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut out = std::io::stdout().lock();
     writeln!(out, "READY").map_err(|e| e.to_string())?;
@@ -215,12 +248,21 @@ fn worker(args: &[String]) -> Result<ExitCode, String> {
         input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
         let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
         let started = Instant::now();
-        let parses = session.exercise(text, edits as u32, seed, &mut || {
+        let exercised = session.exercise(text, edits as u32, seed, &mut || {
             // A heartbeat per parse: the parent's hang limit is per parse.
             let _ = writeln!(out, "P").and_then(|()| out.flush());
         });
-        let micros = started.elapsed().as_micros();
-        writeln!(out, "E {parses} {micros} {}", peak_rss_kb("self")).map_err(|e| e.to_string())?;
+        match exercised {
+            Ok(parses) => {
+                let micros = started.elapsed().as_micros();
+                writeln!(out, "E {parses} {micros} {}", peak_rss_kb("self"))
+                    .map_err(|e| e.to_string())?;
+            }
+            // The parse never returned inside its deadline and was
+            // cancelled; the parent files it as a hang. The worker is
+            // replaced, as after any finding.
+            Err(e) => writeln!(out, "D {e}").map_err(|e| e.to_string())?,
+        }
         out.flush().map_err(|e| e.to_string())?;
     }
 }
@@ -235,6 +277,183 @@ struct Session {
     /// `repro --trace 1`: each parse's text, prior tree and edits to
     /// stderr before it runs, so a hang's last line is its reproduction.
     trace: bool,
+    /// Every parse's deadline (E7h.3): the parent's hang limit, passed as
+    /// `worker --deadline-ms`. `None` for `repro` and the unit rows.
+    deadline: Option<Duration>,
+    /// `PMACS_FUZZ_SELFTEST` (E7h.3): a defect planted in the worker on
+    /// inputs holding [`SELFTEST_TRIGGER`], so the harness's own
+    /// classification is witnessed by tests that plant each class.
+    selftest: Option<SelfTest>,
+}
+
+/// The text that fires a planted [`SelfTest`] defect.
+const SELFTEST_TRIGGER: &str = "@FUZZSELFTEST@";
+
+/// The defect classes a harness self-test plants (E7h.3), one per mode of
+/// `PMACS_FUZZ_SELFTEST`: each is a class the harness must classify, and
+/// all but `slow` must fail the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfTest {
+    /// The worker dies (an abort, as a failed assert or a sanitizer does).
+    Crash,
+    /// The input never returns and allocates nothing.
+    Hang,
+    /// The input never returns and grows its memory about 1.3 GB a second.
+    Grow,
+    /// The input returns, after `PMACS_FUZZ_SELFTEST_MS` (default 2500 ms).
+    Slow,
+    /// The input returns after `PMACS_FUZZ_SELFTEST_MS` for each trigger it
+    /// holds: a large input runs past twelve times the limit where its
+    /// minimal one does not, as the cmake grammar's parse does on
+    /// whitespace (E7h).
+    Sized,
+    /// The worker dies on the third trigger it sees: only a sequence of
+    /// inputs reproduces it, never one alone.
+    Sequence,
+    /// The input touches `PMACS_FUZZ_SELFTEST_MB` (default 400) in 64 MB
+    /// steps, frees it and returns: past four times a 64 MB limit, and
+    /// returning (review 1's big-return plant; E7h fix round 1).
+    BigReturn,
+    /// The input touches `PMACS_FUZZ_SELFTEST_MB` (default 100) for each
+    /// trigger it holds, then frees it and returns: memory that grows with
+    /// the input, as #296's does (E7h review 2, High 2). One trigger passes
+    /// a 64 MB limit and returns under four times it; four pass the cap.
+    Scaled,
+    /// The input touches `PMACS_FUZZ_SELFTEST_MB` (default 160), then the
+    /// worker aborts: an allocation whose confirmation crashes (E7h review
+    /// 2, Low 4).
+    GrowCrash,
+    /// The input holds `PMACS_FUZZ_SELFTEST_MB` (default 96) while it sleeps
+    /// `PMACS_FUZZ_SELFTEST_MS` for each trigger it holds, then returns: a
+    /// first parse that meets the memory limit before the time limit, on an
+    /// input whose time grows with it, as bash's large inputs did on CI's
+    /// `asan-strict` leg (E7h fix round 2).
+    SizedAlloc,
+    /// The input returns after `PMACS_FUZZ_SELFTEST_MS` doubled for each
+    /// trigger past the first: a cost exponential in its input, as #301's is
+    /// in its openers, so the minimal input returns where the input as found
+    /// does not inside the cap (E7h fix rounds 3 and 4).
+    Doubling,
+    /// The input returns after `PMACS_FUZZ_SELFTEST_MS` for each trigger it
+    /// holds while it holds four or fewer, and six times that for each once
+    /// it holds more: a cost whose growth bends past the sizes its minimum
+    /// is scaled to (four times), so the curve fitted there mispredicts the
+    /// input as found, which returns past its budget and inside the cap (E7h
+    /// fix round 4).
+    Bend,
+}
+
+impl SelfTest {
+    fn from_env() -> Option<Self> {
+        match std::env::var("PMACS_FUZZ_SELFTEST").ok()?.as_str() {
+            "crash" => Some(Self::Crash),
+            "hang" => Some(Self::Hang),
+            "grow" => Some(Self::Grow),
+            "slow" => Some(Self::Slow),
+            "sized" => Some(Self::Sized),
+            "sizedalloc" => Some(Self::SizedAlloc),
+            "doubling" => Some(Self::Doubling),
+            "bend" => Some(Self::Bend),
+            "sequence" => Some(Self::Sequence),
+            "bigreturn" => Some(Self::BigReturn),
+            "scaled" => Some(Self::Scaled),
+            "growcrash" => Some(Self::GrowCrash),
+            _ => None,
+        }
+    }
+
+    /// Fire on a triggering input, before its first parse.
+    fn fire(self, text: &str) {
+        static SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        match self {
+            Self::Crash => std::process::abort(),
+            Self::Hang => loop {
+                std::thread::sleep(Duration::from_secs(1));
+            },
+            Self::Grow => {
+                let mut held: Vec<Vec<u8>> = Vec::new();
+                loop {
+                    held.push(vec![1; 64 << 20]);
+                    std::hint::black_box(&held);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            Self::Slow | Self::Sized | Self::Bend => {
+                let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2500);
+                let triggers = text.matches(SELFTEST_TRIGGER).count() as u64;
+                let times = match self {
+                    Self::Bend if triggers > 4 => triggers * 6,
+                    Self::Sized | Self::Bend => triggers,
+                    _ => 1,
+                };
+                std::thread::sleep(Duration::from_millis(ms * times));
+            }
+            Self::Doubling => {
+                let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2500);
+                let times = text.matches(SELFTEST_TRIGGER).count().clamp(1, 40) as u32;
+                std::thread::sleep(Duration::from_millis(ms.saturating_mul(1 << (times - 1))));
+            }
+            Self::SizedAlloc => {
+                let mb: usize = std::env::var("PMACS_FUZZ_SELFTEST_MB")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(96);
+                let ms: u64 = std::env::var("PMACS_FUZZ_SELFTEST_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2500);
+                let held = vec![1u8; mb << 20];
+                std::hint::black_box(&held);
+                let times = text.matches(SELFTEST_TRIGGER).count() as u64;
+                std::thread::sleep(Duration::from_millis(ms * times));
+                drop(held);
+            }
+            Self::Sequence => {
+                if SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 >= 3 {
+                    std::process::abort();
+                }
+            }
+            Self::BigReturn | Self::Scaled | Self::GrowCrash => {
+                let each: usize = std::env::var("PMACS_FUZZ_SELFTEST_MB")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(match self {
+                        Self::BigReturn => 400,
+                        Self::Scaled => 100,
+                        _ => 160,
+                    });
+                let mb = if self == Self::Scaled {
+                    each * text.matches(SELFTEST_TRIGGER).count()
+                } else {
+                    each
+                };
+                // Review 1's plant in 64 MB steps as it was; the others finer.
+                // The crashing plant slowly enough that a poll sees it pass the
+                // first limit before it aborts.
+                let (step, pause) = match self {
+                    Self::BigReturn => (64, 20),
+                    Self::GrowCrash => (16, 25),
+                    _ => (16, 5),
+                };
+                let mut held: Vec<Vec<u8>> = Vec::new();
+                for _ in 0..mb.div_ceil(step) {
+                    held.push(vec![1; step << 20]);
+                    std::hint::black_box(&held);
+                    std::thread::sleep(Duration::from_millis(pause));
+                }
+                if self == Self::GrowCrash {
+                    std::process::abort();
+                }
+                drop(held);
+            }
+        }
+    }
 }
 
 impl Session {
@@ -245,6 +464,8 @@ impl Session {
             registry: SyntaxRegistry::new(),
             aliases: Arc::new(default_injection_aliases()),
             trace: false,
+            deadline: None,
+            selftest: SelfTest::from_env(),
         }
     }
 
@@ -253,7 +474,7 @@ impl Session {
         text: &str,
         prior: Option<tree_sitter::Tree>,
         edits: Vec<tree_sitter::InputEdit>,
-    ) -> ParseTreeBundle {
+    ) -> Result<ParseTreeBundle, ParseError> {
         if self.trace {
             eprintln!(
                 "parse: incremental {}, edits {edits:?}\ntext {text:?}",
@@ -267,10 +488,15 @@ impl Session {
             prior_tree: prior,
             edits,
             injection_aliases: self.aliases.clone(),
+            deadline: self.deadline,
         };
-        // No timeout and no cancellation are set, as in the editor, so a
-        // parse without a tree is itself a finding.
-        run_parse(req).unwrap_or_else(|e| panic!("run_parse returned no tree: {e}"))
+        // A parse past its deadline is the caller's to report (a hang);
+        // any other parse without a tree is itself a finding.
+        match run_parse(req) {
+            Err(e @ ParseError::DeadlineExceeded { .. }) => Err(e),
+            Err(e) => panic!("run_parse returned no tree: {e}"),
+            Ok(bundle) => Ok(bundle),
+        }
     }
 
     /// The settle step and its consumers: layer queries resolved, the
@@ -293,10 +519,29 @@ impl Session {
     }
 
     /// Cold parse and settle, then `edits` incremental reparses, calling
-    /// `beat` after each. Returns the number of parses run.
-    fn exercise(&self, text: String, edits: u32, seed: u64, beat: &mut dyn FnMut()) -> u32 {
+    /// `beat` after each. Returns the number of parses run, or the first
+    /// parse that ran past its deadline.
+    fn exercise(
+        &self,
+        text: String,
+        edits: u32,
+        seed: u64,
+        beat: &mut dyn FnMut(),
+    ) -> Result<u32, ParseError> {
+        if let Some(planted) = self.selftest
+            && text.contains(SELFTEST_TRIGGER)
+        {
+            planted.fire(&text);
+        }
         let mut rng = Rng(seed);
-        let bundle = self.parse(&text, None, Vec::new());
+        // An input past the seed cap is a depth operator's or a repeat's:
+        // its cold parse is what reaches a scanner's bound, and tree-sitter's
+        // error recovery can make each of its parses take seconds (a
+        // 238 KB Lua stair, 0.8 s a parse in release, E7h.4), so it gets
+        // two edits and no retyped window instead of 49 parses.
+        let large = text.len() > MAX_SEED_BYTES;
+        let edits = if large { edits.min(2) } else { edits };
+        let bundle = self.parse(&text, None, Vec::new())?;
         self.settle(&bundle, &mut rng);
         beat();
         let mut parses = 1;
@@ -304,7 +549,7 @@ impl Session {
         let mut cur = text;
         let mut left = edits;
         // Retype a window one character at a time, as a person does.
-        if left > 0 && !cur.is_empty() && rng.chance(1, 4) {
+        if left > 0 && !cur.is_empty() && !large && rng.chance(1, 4) {
             let (a, b) = span(&cur, &mut rng, 48);
             let window = cur[a..b].to_owned();
             let mut steps = vec![(a, b, String::new())];
@@ -316,7 +561,7 @@ impl Session {
             for (s, e, ins) in steps {
                 let (next, edit) = splice(&cur, s, e, &ins);
                 cur = next;
-                let b = self.parse(&cur, Some(tree), vec![edit]);
+                let b = self.parse(&cur, Some(tree), vec![edit])?;
                 self.settle(&b, &mut rng);
                 beat();
                 tree = b.root_tree().clone();
@@ -336,13 +581,13 @@ impl Session {
                 cur = next;
                 ops.push(edit);
             }
-            let b = self.parse(&cur, Some(tree), ops);
+            let b = self.parse(&cur, Some(tree), ops)?;
             self.settle(&b, &mut rng);
             beat();
             tree = b.root_tree().clone();
             parses += 1;
         }
-        parses
+        Ok(parses)
     }
 }
 
@@ -616,7 +861,7 @@ impl Mutator<'_> {
             let at = boundary(text, rng);
             splice(text, at, at, ins).0
         };
-        match rng.below(12) {
+        match rng.below(14) {
             0 => {
                 let frag = FRAGMENTS[rng.below(FRAGMENTS.len())];
                 insert(text, rng, frag)
@@ -650,6 +895,8 @@ impl Mutator<'_> {
             }
             6 => line_op(text, rng),
             7 => indent_op(text, rng),
+            12 => depth_prefix(text, rng),
+            13 => depth_stair(text, rng),
             8 => {
                 let cut = boundary(text, rng);
                 text[..cut].to_owned()
@@ -676,6 +923,89 @@ impl Mutator<'_> {
             }
         }
     }
+}
+
+/// How deep a depth operator nests (E7h.4): past the depths at which a
+/// scanner's state outgrows tree-sitter's 1024-byte serialization buffer
+/// --- 255 open blocks at four bytes (markdown), 254 levels (YAML), 511
+/// indents with a string open (Python), all found by E7g review 1 --- and
+/// shallow enough that a capture walk quadratic in depth (Lua's, #292)
+/// stays in milliseconds.
+fn depth(rng: &mut Rng) -> usize {
+    250 + rng.below(851)
+}
+
+/// Repeat the start of a line (its first one to three characters: `> `,
+/// `- `, `(`, `{`, `#`, `if `...) hundreds of times at the line's start.
+fn depth_prefix(s: &str, rng: &mut Rng) -> String {
+    let mut lines: Vec<String> = s.split_inclusive('\n').map(str::to_owned).collect();
+    if lines.is_empty() {
+        lines.push("(\n".to_owned());
+    }
+    let i = rng.below(lines.len());
+    let line = lines[i].clone();
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let body = &line[indent..];
+    let take = 1 + rng.below(3);
+    let unit: String = if body.trim().is_empty() {
+        FRAGMENTS[rng.below(FRAGMENTS.len())].to_owned()
+    } else {
+        body.chars().take(take).collect()
+    };
+    let room = MAX_INPUT_BYTES.saturating_sub(s.len()) / unit.len().max(1);
+    let k = depth(rng).min(room);
+    lines[i] = format!("{}{}{}", &line[..indent], unit.repeat(k), body);
+    lines.concat()
+}
+
+/// Copy a line hundreds of times, each copy indented one step deeper (a
+/// step of one, two or four spaces), then another line of the input at the
+/// deepest level: nested blocks, keys or list items with whatever the
+/// other line holds (a string, say) at the bottom.
+fn depth_stair(s: &str, rng: &mut Rng) -> String {
+    let lines: Vec<&str> = s.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        return s.to_owned();
+    }
+    // Half the time the stair is a line that opens a block (ends in `:`,
+    // `{`, `(` or `[`) and the line at the bottom holds a string: Python
+    // overruns only with a string open 511 indents deep, which a uniform
+    // pick of two lines out of a whole file rarely assembles.
+    let pick = |rng: &mut Rng, want: &dyn Fn(&str) -> bool| {
+        let fit: Vec<usize> = (0..lines.len())
+            .filter(|&j| want(lines[j].trim()))
+            .collect();
+        if fit.is_empty() || rng.chance(1, 2) {
+            rng.below(lines.len())
+        } else {
+            fit[rng.below(fit.len())]
+        }
+    };
+    let i = pick(rng, &|l| l.ends_with([':', '{', '(', '[']));
+    let stair = lines[i].trim();
+    let last = lines[pick(rng, &|l| l.contains(['"', '\'', '`']))].trim();
+    // One space a level most often: the stair's size is quadratic in its
+    // step, and only a step of one fits 511 levels under the input cap.
+    let step = [1, 1, 2, 4][rng.below(4)];
+    let budget = MAX_INPUT_BYTES.saturating_sub(s.len());
+    let mut k = depth(rng);
+    let size =
+        |k: usize| k * (k - 1) / 2 * step + k * (stair.len() + 1) + k * step + last.len() + 1;
+    while k > 1 && size(k) > budget {
+        k -= k / 8 + 1;
+    }
+    let mut out = String::with_capacity(s.len() + budget.min(k * k * step));
+    out.extend(lines[..i].iter().copied());
+    for level in 0..k {
+        out.push_str(&" ".repeat(level * step));
+        out.push_str(stair);
+        out.push('\n');
+    }
+    out.push_str(&" ".repeat(k * step));
+    out.push_str(last);
+    out.push('\n');
+    out.extend(lines[i + 1..].iter().copied());
+    out
 }
 
 fn line_op(s: &str, rng: &mut Rng) -> String {
@@ -723,16 +1053,36 @@ enum Kind {
     Crash,
     /// A parse that did not return within the long limit alone.
     Hang,
+    /// A parse cut, alone, at the confirmation's memory cap (four times the
+    /// RSS limit): the owner's ruling at E7h's fix round 1, on review 1's
+    /// Medium 2. Whether it would have returned is not known and does not
+    /// matter: a parse that grows so far takes the editor out of memory, as
+    /// #296's does, so it fails the run. It is not a hang, which is the time
+    /// limit's, and not slow.
+    Memory,
     /// A parse over the hang limit that did return alone.
     Slow,
     Alloc,
 }
 
 impl Kind {
+    fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::Crash,
+            Self::Hang,
+            Self::Memory,
+            Self::Slow,
+            Self::Alloc,
+        ]
+        .into_iter()
+        .find(|k| k.name() == name)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Crash => "crash",
             Self::Hang => "hang",
+            Self::Memory => "memory",
             Self::Slow => "slow",
             Self::Alloc => "alloc",
         }
@@ -743,6 +1093,9 @@ enum Outcome {
     Done {
         parses: u64,
         micros: u64,
+        /// The worker's peak RSS (`VmHWM`) in kB when the input returned:
+        /// the input's own peak in a worker spawned for it alone.
+        peak_kb: u64,
     },
     Failed {
         kind: Kind,
@@ -756,21 +1109,46 @@ struct Limits {
     rss_kb: u64,
 }
 
+/// One input as a worker ran it, kept so a finding that needs what came
+/// before it can be replayed (E7h.3).
+#[derive(Clone)]
+struct Input {
+    text: String,
+    edits: u32,
+    seed: u64,
+}
+
+/// A worker's history is capped in bytes; the oldest inputs go first.
+const HISTORY_BYTES: usize = 64 << 20;
+
 struct Worker {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
     stderr: PathBuf,
+    /// How much of `stderr` has been read for a report that did not stop
+    /// the worker (`sanitizer_report`).
+    stderr_seen: u64,
+    /// When the last input was cut for its memory: the worker's peak RSS
+    /// in kB and how long the input had run.
+    memory_cut: Option<(u64, Duration)>,
     baseline_kb: u64,
     inputs: u64,
+    /// The inputs this worker has run, in order, the current one last.
+    history: std::collections::VecDeque<Input>,
+    history_bytes: usize,
 }
 
 impl Worker {
-    fn spawn(grammar: &str, stderr: PathBuf) -> Result<Self, String> {
+    /// Spawn a worker whose every parse has `deadline` (the hang limit
+    /// it runs under): a parse that never returns is cancelled at it and
+    /// reported as a hang (E7h.3).
+    fn spawn(grammar: &str, stderr: PathBuf, deadline: Duration) -> Result<Self, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let err = std::fs::File::create(&stderr).map_err(|e| e.to_string())?;
+        let deadline_ms = deadline.as_millis().max(1).to_string();
         let mut child = Command::new(exe)
-            .args(["worker", grammar])
+            .args(["worker", grammar, "--deadline-ms", &deadline_ms])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(err)
@@ -799,12 +1177,33 @@ impl Worker {
             stdin,
             lines,
             stderr,
+            stderr_seen: 0,
+            memory_cut: None,
             baseline_kb,
             inputs: 0,
+            history: std::collections::VecDeque::new(),
+            history_bytes: 0,
         })
     }
 
+    /// The inputs this worker ran before the current (last) one.
+    fn history_before_last(&self) -> Vec<Input> {
+        let n = self.history.len().saturating_sub(1);
+        self.history.iter().take(n).cloned().collect()
+    }
+
     fn run(&mut self, text: &str, edits: u32, seed: u64, limits: &Limits) -> Outcome {
+        self.history.push_back(Input {
+            text: text.to_owned(),
+            edits,
+            seed,
+        });
+        self.history_bytes += text.len();
+        while self.history_bytes > HISTORY_BYTES && self.history.len() > 1 {
+            if let Some(old) = self.history.pop_front() {
+                self.history_bytes -= old.text.len();
+            }
+        }
         let header = format!("{} {edits} {seed}\n", text.len());
         let sent = self
             .stdin
@@ -812,6 +1211,8 @@ impl Worker {
             .and_then(|()| self.stdin.write_all(text.as_bytes()))
             .and_then(|()| self.stdin.flush());
         let mut last = Instant::now();
+        let started = last;
+        self.memory_cut = None;
         let pid = self.child.id().to_string();
         // Excessive allocation is one input's growth, measured from where
         // the worker stood when the input went in; what accumulates across
@@ -824,11 +1225,35 @@ impl Worker {
             }
             match self.lines.recv_timeout(Duration::from_millis(50)) {
                 Ok(line) if line == "P" => last = Instant::now(),
+                // E7h.3: the worker's parse ran past its deadline (the hang
+                // limit) and was cancelled; the same finding as a hang
+                // caught by the missing heartbeat.
+                Ok(line) if line.starts_with("D ") => {
+                    self.kill();
+                    return Outcome::Failed {
+                        kind: Kind::Hang,
+                        signature: format!("one parse over {} ms", limits.hang.as_millis()),
+                        detail: line[2..].to_owned(),
+                    };
+                }
                 Ok(line) => {
+                    if let Some((signature, detail)) = self.sanitizer_report() {
+                        self.kill();
+                        return Outcome::Failed {
+                            kind: Kind::Crash,
+                            signature,
+                            detail,
+                        };
+                    }
                     let mut f = line.split_whitespace().skip(1).map(str::parse::<u64>);
                     let parses = f.next().and_then(Result::ok).unwrap_or(0);
                     let micros = f.next().and_then(Result::ok).unwrap_or(0);
-                    return Outcome::Done { parses, micros };
+                    let peak_kb = f.next().and_then(Result::ok).unwrap_or(0);
+                    return Outcome::Done {
+                        parses,
+                        micros,
+                        peak_kb,
+                    };
                 }
                 Err(RecvTimeoutError::Disconnected) => return self.died(),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -843,6 +1268,8 @@ impl Worker {
             }
             let rss = proc_status_kb(&pid, "VmRSS:");
             if rss > start_kb + limits.rss_kb {
+                let peak_kb = proc_status_kb(&pid, "VmHWM:").max(rss);
+                self.memory_cut = Some((peak_kb, started.elapsed()));
                 self.kill();
                 return Outcome::Failed {
                     kind: Kind::Alloc,
@@ -854,6 +1281,63 @@ impl Worker {
                 };
             }
         }
+    }
+
+    /// A report a sanitizer wrote without stopping the worker while the
+    /// last input ran. clang's `TypeSanitizer` (the `tysan` arm, E7h fix
+    /// round 1) prints an aliasing violation and carries on --- it has no
+    /// `halt_on_error` --- so its findings are read from the worker's stderr
+    /// rather than from its death, and filed as crashes, which fail the run.
+    /// Only a report whose access type differs from the object's is one
+    /// ([`tysan_violation`]).
+    ///
+    /// The new output is read in bounded chunks and the scan stops at the
+    /// first report of the class, so the parent never holds more than a few
+    /// megabytes of it (E7h review 2, Low 3: one input's symbolized reports
+    /// ran to 112 MB, and the `tysan` arm's parent, which links
+    /// `TypeSanitizer`'s runtime too, reached 18 GB reading them whole).
+    fn sanitizer_report(&mut self) -> Option<(String, String)> {
+        use std::io::{Seek, SeekFrom};
+        let len = std::fs::metadata(&self.stderr).map_or(0, |m| m.len());
+        if len <= self.stderr_seen {
+            return None;
+        }
+        let mut file = std::fs::File::open(&self.stderr).ok()?;
+        file.seek(SeekFrom::Start(self.stderr_seen)).ok()?;
+        let mut left = len - self.stderr_seen;
+        self.stderr_seen = len;
+        // What is kept between chunks: the text from the last report's
+        // start, which may continue in the next chunk.
+        let mut carry = String::new();
+        let mut chunk = vec![0; STDERR_CHUNK];
+        while left > 0 {
+            let want = usize::try_from(left.min(STDERR_CHUNK as u64)).ok()?;
+            let got = file.read(&mut chunk[..want]).ok()?;
+            if got == 0 {
+                break;
+            }
+            left -= got as u64;
+            carry.push_str(&String::from_utf8_lossy(&chunk[..got]));
+            // Judge every report that is complete (another starts after it,
+            // or the output has ended).
+            let last_start = carry.rfind(TYSAN_MARKER).unwrap_or(0);
+            let judged = if left == 0 { carry.len() } else { last_start };
+            if let Some(report) = tysan_violation(&carry[..judged]) {
+                let report = clip(report, STDERR_KEPT);
+                return Some((crash_signature(&report, "tysan report"), report));
+            }
+            carry.drain(..judged);
+            if carry.len() > STDERR_KEPT {
+                // One report larger than anything kept: judge what is there.
+                let report = clip(&carry, STDERR_KEPT);
+                carry.clear();
+                if let Some(r) = tysan_violation(&report) {
+                    let r = r.to_owned();
+                    return Some((crash_signature(&r, "tysan report"), r));
+                }
+            }
+        }
+        None
     }
 
     /// RSS gained since spawn, in kB.
@@ -868,8 +1352,7 @@ impl Worker {
 
     fn died(&mut self) -> Outcome {
         let status = self.child.wait().ok();
-        let log = std::fs::read(&self.stderr).unwrap_or_default();
-        let log = String::from_utf8_lossy(&log[log.len().saturating_sub(64 * 1024)..]).into_owned();
+        let log = tail(&self.stderr, STDERR_KEPT as u64);
         let how = status.map_or_else(
             || "unknown exit".to_owned(),
             |s| match (s.signal(), s.code()) {
@@ -892,6 +1375,38 @@ impl Drop for Worker {
     }
 }
 
+/// How a `TypeSanitizer` report begins.
+const TYSAN_MARKER: &str = "ERROR: TypeSanitizer: ";
+
+/// A worker's stderr is read this much at a time.
+const STDERR_CHUNK: usize = 1 << 20;
+
+/// The most of a worker's stderr a finding keeps: a crash's last 64 KB, a
+/// report's first.
+const STDERR_KEPT: usize = 64 * 1024;
+
+/// The last `bytes` of the file at `path`, read without the rest of it.
+fn tail(path: &Path, bytes: u64) -> String {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map_or(0, |m| m.len());
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(bytes)));
+    let mut buf = Vec::new();
+    let _ = file.take(bytes).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// `text` cut to at most `bytes`, on a character boundary.
+fn clip(text: &str, bytes: usize) -> String {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 /// What glibc's allocator prints before it aborts on a corrupted heap.
 const GLIBC: [&str; 7] = [
     "corrupted ",
@@ -903,16 +1418,54 @@ const GLIBC: [&str; 7] = [
     "malloc_consolidate(): ",
 ];
 
+/// The first `TypeSanitizer` report in `log` whose access type differs from
+/// the type of the object it reads or writes, as a slice from its `ERROR`
+/// line to the next report. The aliasing class E7g found is exactly that
+/// (`p1 int` over `any pointer`: tree-sitter-haskell's `array_push` reading
+/// back as `int *` the pointer its grow wrote as `void *`; bash's and html's
+/// the same through `char *`). A report of one type over itself (`int` over
+/// `int`, `in <struct A> at offset a` against `in <struct B> at offset b`)
+/// is an `int` member read through a different enclosing struct than the
+/// one it was written through: the effective type is the same, which C
+/// permits, and tree-sitter's own lexer does it on every token
+/// (`ts_lexer_finish`, `ts_parser__lex`: hundreds of thousands a run).
+fn tysan_violation(log: &str) -> Option<&str> {
+    const MARKER: &str = TYSAN_MARKER;
+    let mut starts: Vec<usize> = log.match_indices(MARKER).map(|(i, _)| i).collect();
+    starts.push(log.len());
+    starts.windows(2).map(|w| &log[w[0]..w[1]]).find(|report| {
+        let access = report.split_once(" with type ").map(|(_, r)| r);
+        let object = report
+            .split_once(" accesses an existing object of type ")
+            .map(|(_, r)| r);
+        let ty = |s: &str, stops: &[&str]| {
+            let end = stops
+                .iter()
+                .filter_map(|p| s.find(p))
+                .min()
+                .unwrap_or(s.len());
+            s[..end].trim().to_owned()
+        };
+        match (access, object) {
+            (Some(a), Some(o)) => ty(a, &[" (in ", " accesses"]) != ty(o, &[" (in ", "\n"]),
+            _ => true,
+        }
+    })
+}
+
 /// A short, stable name for a crash: the sanitizer's error and first
 /// frame, glibc's complaint, the panic site, or the signal.
 fn crash_signature(log: &str, how: &str) -> String {
     let lines: Vec<&str> = log.lines().collect();
-    if let Some(i) = lines
-        .iter()
-        .position(|l| l.contains("ERROR: AddressSanitizer: "))
-    {
+    // AddressSanitizer, and clang's TypeSanitizer (the `tysan` arm):
+    // `==N==ERROR: <Sanitizer>: <what> on address …`, then a `#0` frame.
+    for (tool, short) in [("AddressSanitizer", "asan"), ("TypeSanitizer", "tysan")] {
+        let marker = format!("ERROR: {tool}: ");
+        let Some(i) = lines.iter().position(|l| l.contains(&marker)) else {
+            continue;
+        };
         let what = lines[i]
-            .split("AddressSanitizer: ")
+            .split(&marker)
             .nth(1)
             .and_then(|r| r.split_whitespace().next())
             .unwrap_or("error");
@@ -922,7 +1475,39 @@ fn crash_signature(log: &str, how: &str) -> String {
             .and_then(|f| f.split(" in ").nth(1))
             .and_then(|f| f.split_whitespace().next())
             .map_or("?", |f| f.split('.').next().unwrap_or(f));
-        return format!("asan {what} in {frame}");
+        return format!("{short} {what} in {frame}");
+    }
+    // UBSan (E7h.4): `<file>:<line>:<col>: runtime error: <what>`.
+    if let Some(l) = lines.iter().find(|l| l.contains(": runtime error: ")) {
+        let (at, what) = l.split_once(": runtime error: ").unwrap_or((l, ""));
+        let at = at.rsplit('/').next().unwrap_or(at);
+        // The kind of UB, without the operands, which vary per input:
+        // `signed integer overflow: 1 + 2147483647 …` names its kind before
+        // the colon; a message without one keeps its first three words.
+        let what: String = match what.split_once(':') {
+            Some((kind, _)) => kind.to_owned(),
+            None => what
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" "),
+        };
+        return format!("ubsan {what} at {at}");
+    }
+    // An assert (tree-sitter's serialization bound, E7g): glibc prints
+    // `<prog>: <path>:<line>: <function>: Assertion `<expr>' failed.`, so
+    // two different asserts no longer share `signal 6` (E7h.3).
+    if let Some(l) = lines.iter().find(|l| l.contains("Assertion `")) {
+        let (head, expr) = l.split_once("Assertion `").unwrap_or((l, ""));
+        let expr = expr.split('\'').next().unwrap_or(expr);
+        let site = head
+            .trim_end_matches(": ")
+            .split(": ")
+            .skip(1)
+            .map(|part| part.rsplit('/').next().unwrap_or(part))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!("assert `{expr}` at {site}");
     }
     if let Some(l) = lines.iter().find(|l| GLIBC.iter().any(|g| l.contains(g))) {
         return format!("glibc: {}", l.trim());
@@ -949,6 +1534,18 @@ struct Config {
     edits: u32,
     seed: u64,
     limits: Limits,
+    /// Mutate each grammar at least this many times, past `seconds` if
+    /// need be (E7h.4): a budget in seconds alone gave CI's smoke 12
+    /// mutated inputs for lean4 and 15 for zig.
+    min_mutations: u64,
+    /// The wall-clock cap on one grammar's mutations whatever the minimum.
+    max_seconds: u64,
+    /// Grammars to mutate for `long_seconds` instead (E7h.4): what a pull
+    /// request changed, from `changed --since`.
+    long: Vec<String>,
+    long_seconds: u64,
+    /// The findings the owner has accepted (`--accepted`, `fuzz/accepted.tsv`).
+    accepted: Vec<Accepted>,
 }
 
 #[derive(Default)]
@@ -970,6 +1567,34 @@ struct Finding {
     edits: u32,
     seed: u64,
     detail: String,
+    /// What the worker ran before this input, oldest first (E7h.3), for a
+    /// crash that needs it.
+    history: Vec<Input>,
+    /// A slow finding's growth, which the report states on every one (the
+    /// owner's ruling at E7h's fix round 4).
+    growth: Option<Growth>,
+}
+
+/// How a slow input's time grows with its size: the exponent fitted to its
+/// time at three sizes, and whether the input as found returned outside the
+/// budget that exponent projected for it.
+#[derive(Clone, Copy, Debug)]
+struct Growth {
+    exponent: Option<f64>,
+    /// The input as found's time and its budget, in ms, when it returned
+    /// past the budget: the growth curve mispredicted it.
+    mispredicted: Option<(u64, u64)>,
+}
+
+/// How a finding came back when triage ran it again (E7h.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Repro {
+    /// Alone, in a fresh worker.
+    Alone,
+    /// Only after the last `n` inputs its worker had run before it.
+    InSequence(usize),
+    /// Neither way.
+    No,
 }
 
 struct Report {
@@ -981,10 +1606,13 @@ struct Report {
 
 struct Triaged {
     finding: Finding,
-    reproduced: bool,
+    repro: Repro,
     minimal: String,
     minimal_edits: u32,
     file: PathBuf,
+    /// The issue of the accepted-list entry this finding matches, if any:
+    /// reported "known, accepted (#N)", and it does not fail the run.
+    accepted: Option<u32>,
 }
 
 fn run(args: &[String]) -> Result<ExitCode, String> {
@@ -999,8 +1627,24 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             hang: Duration::from_millis(flags.num("hang-ms", 10_000)?),
             rss_kb: flags.num("rss-mb", 1024)? * 1024,
         },
+        min_mutations: flags.num("min-mutations", 0)?,
+        max_seconds: flags.num("max-seconds", 0)?,
+        long: flags.all("long").into_iter().map(str::to_owned).collect(),
+        long_seconds: flags.num("long-seconds", 600)?,
+        accepted: match flags.one("accepted") {
+            Some(path) => load_accepted(Path::new(path))?,
+            None => Vec::new(),
+        },
     });
+    for l in &cfg.long {
+        entry(l)?;
+    }
     let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
+    let policy = match flags.one("fail-on").unwrap_or("all") {
+        "all" => FailOn::All,
+        "crashes" => FailOn::Crashes,
+        other => return Err(format!("--fail-on {other}: `all` or `crashes`")),
+    };
     let wanted = flags.all("grammar");
     for w in &wanted {
         entry(w)?;
@@ -1034,7 +1678,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let mut reports = std::mem::take(&mut *reports.lock().map_err(|_| "poisoned")?);
     reports.sort_by_key(|r| r.grammar);
     write_report(&cfg, &reports)?;
-    let failed = fails(&reports);
+    let failed = fails(&reports, policy);
     Ok(if failed {
         ExitCode::from(1)
     } else {
@@ -1042,14 +1686,36 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     })
 }
 
-/// Whether the run fails: a grammar could not be fuzzed, or a crash or a
-/// hang of it reproduced alone.
-fn fails(reports: &[Report]) -> bool {
+/// Which findings fail a run. `scripts/fuzz-grammars` passes `crashes` for
+/// its `tysan` arm (E7h fix round 1): that build exists to see aliasing
+/// violations, and its time and memory are `TypeSanitizer`'s (shadow memory
+/// alone is several times a parse's), so its hangs and allocations are
+/// reported and the `ubsan` arm rules on those classes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailOn {
+    All,
+    Crashes,
+}
+
+/// Whether the run fails: a grammar could not be fuzzed; a hang came back
+/// (a parse that never returned, E7h.3); a parse was cut alone at the
+/// confirmation's memory cap (E7h fix round 1); or a crash was seen at all. A
+/// crash that came back alone or after its worker's own history fails the
+/// run, and one that came back neither way fails it too (the workers are
+/// single-threaded and every input they ran is replayed, so what does not
+/// come back is not load), except a kill by signal 9, which is the host
+/// reclaiming memory. Slow and large parses are reported, D36.
+fn fails(reports: &[Report], policy: FailOn) -> bool {
     reports.iter().any(|r| {
         r.error.is_some()
-            || r.findings
-                .iter()
-                .any(|t| t.reproduced && matches!(t.finding.kind, Kind::Crash | Kind::Hang))
+            || r.findings.iter().any(|t| {
+                t.accepted.is_none()
+                    && match t.finding.kind {
+                        Kind::Crash => t.repro != Repro::No || t.finding.signature != "signal 9",
+                        Kind::Hang | Kind::Memory => policy == FailOn::All && t.repro != Repro::No,
+                        Kind::Slow | Kind::Alloc => false,
+                    }
+            })
     })
 }
 
@@ -1087,6 +1753,7 @@ fn keep_worker(
     grammar: &str,
     dir: &Path,
     stats: &mut Stats,
+    limits: &Limits,
 ) -> Result<(), String> {
     if let Some(w) = worker.as_ref()
         && w.inputs >= INPUTS_PER_WORKER
@@ -1099,6 +1766,7 @@ fn keep_worker(
         *worker = Some(Worker::spawn(
             grammar,
             dir.join(format!("worker-{spawned}.stderr")),
+            limits.hang,
         )?);
     }
     Ok(())
@@ -1132,19 +1800,38 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
     let mut findings: Vec<Finding> = Vec::new();
     let mut spawned = 0;
     let mut worker: Option<Worker> = None;
-    // Every seed first, then mutations for `seconds`.
-    let mut deadline = None;
+    // Every seed first, then mutations for `seconds` (a long grammar's
+    // `long_seconds`) and at least `min_mutations` of them, under the cap.
+    let seconds = if cfg.long.iter().any(|l| l == lang.name) {
+        cfg.long_seconds
+    } else {
+        cfg.seconds
+    };
+    let cap = if cfg.max_seconds > 0 {
+        cfg.max_seconds.max(seconds)
+    } else {
+        u64::MAX
+    };
+    let mut window: Option<(Instant, Instant)> = None;
+    let mut mutated: u64 = 0;
     let mut next_seed = 0;
     loop {
         let input = if next_seed < seeds.len() {
             next_seed += 1;
             seeds[next_seed - 1].clone()
         } else {
-            let end =
-                *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(cfg.seconds));
-            if Instant::now() >= end {
+            let now = Instant::now();
+            let (end, hard) = *window.get_or_insert_with(|| {
+                (
+                    now + Duration::from_secs(seconds),
+                    now.checked_add(Duration::from_secs(cap))
+                        .unwrap_or(now + Duration::from_hours(24)),
+                )
+            });
+            if now >= hard || (now >= end && mutated >= cfg.min_mutations) {
                 break;
             }
+            mutated += 1;
             mutator.mutate(&mut rng)
         };
         let seed = rng.next();
@@ -1154,6 +1841,7 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
             lang.name,
             &dir,
             &mut report.stats,
+            &cfg.limits,
         ) {
             report.error = Some(e);
             break;
@@ -1161,44 +1849,67 @@ fn fuzz_grammar(lang: &'static LanguageEntry, cfg: &Config) -> Report {
         let Some(w) = worker.as_mut() else { break };
         report.stats.inputs += 1;
         report.stats.bytes += input.len() as u64;
-        match w.run(&input, cfg.edits, seed, &cfg.limits) {
-            Outcome::Done { parses, micros } => {
-                report.stats.parses += parses;
-                if micros > report.stats.slowest_micros {
-                    report.stats.slowest_micros = micros;
-                    report.stats.slowest_len = input.len();
-                }
-            }
-            Outcome::Failed {
-                kind,
-                signature,
-                detail,
-            } => {
-                worker = None;
-                let seen = findings.iter().filter(|f| f.signature == signature).count();
-                if seen < 3 {
-                    findings.push(Finding {
-                        kind,
-                        signature,
-                        input,
-                        edits: cfg.edits,
-                        seed,
-                        detail,
-                    });
-                }
+        let outcome = w.run(&input, cfg.edits, seed, &cfg.limits);
+        if let Outcome::Failed { .. } = outcome {
+            let history = w.history_before_last();
+            worker = None;
+            record_failure(&mut findings, outcome, input, cfg.edits, seed, history);
+        } else if let Outcome::Done { parses, micros, .. } = outcome {
+            report.stats.parses += parses;
+            if micros > report.stats.slowest_micros {
+                report.stats.slowest_micros = micros;
+                report.stats.slowest_len = input.len();
+                // Kept with its seed, so the slowest column can be
+                // replayed (`repro GRAMMAR slowest.input --seed N`).
+                let _ = std::fs::write(dir.join("slowest.input"), &input);
+                let _ = std::fs::write(dir.join("slowest.seed"), format!("{seed}\n"));
             }
         }
     }
     let last = worker.as_ref().map_or(0, Worker::growth_kb);
     report.stats.growth_kb = report.stats.growth_kb.max(last);
     drop(worker);
-    report.stats.elapsed = started.elapsed();
     report.findings = findings
         .into_iter()
         .enumerate()
-        .map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits))
+        .flat_map(|(i, f)| triage(lang.name, f, &dir, i, &cfg.limits, &cfg.accepted))
         .collect();
+    // After triage, as the report says: confirming, timing and minimizing
+    // findings is where a grammar's minutes go (E7h: cmake's three slow
+    // findings, each timed twice under twelve times the limit).
+    report.stats.elapsed = started.elapsed();
     report
+}
+
+/// Keep a failed input as a finding, at most three of one signature.
+fn record_failure(
+    findings: &mut Vec<Finding>,
+    outcome: Outcome,
+    input: String,
+    edits: u32,
+    seed: u64,
+    history: Vec<Input>,
+) {
+    let Outcome::Failed {
+        kind,
+        signature,
+        detail,
+    } = outcome
+    else {
+        return;
+    };
+    if findings.iter().filter(|f| f.signature == signature).count() < 3 {
+        findings.push(Finding {
+            kind,
+            signature,
+            input,
+            edits,
+            seed,
+            detail,
+            history,
+            growth: None,
+        });
+    }
 }
 
 // -------------------------------------------------------------------
@@ -1213,7 +1924,7 @@ fn outcome_alone(
     dir: &Path,
     limits: &Limits,
 ) -> Option<(Kind, String)> {
-    let mut w = Worker::spawn(grammar, dir.join("triage.stderr")).ok()?;
+    let mut w = Worker::spawn(grammar, dir.join("triage.stderr"), limits.hang).ok()?;
     match w.run(text, edits, seed, limits) {
         Outcome::Done { .. } => None,
         Outcome::Failed {
@@ -1222,8 +1933,51 @@ fn outcome_alone(
     }
 }
 
-/// How long `text` takes alone in a fresh worker under `limits`, or
-/// `None` if it did not return.
+/// How an input run alone in a fresh worker under a confirmation's limits
+/// came out.
+enum Alone {
+    /// It returned: in this many microseconds, at this peak RSS in kB.
+    Returned { micros: u64, peak_kb: u64 },
+    /// It passed the memory limit and was cut there: the worker's RSS in kB
+    /// at the cut (its high-water mark then, which is the cap and one
+    /// poll's growth, not the parse's own peak), and how long it had run.
+    OverMemory { cut_kb: u64, after: Duration },
+    /// It ran out of time without returning.
+    NotReturned,
+    /// Its worker died under the confirmation, with this signature and
+    /// detail: a crash, which is filed as one (E7h review 2, Low 4; it had
+    /// been filed as a hang that "never returned").
+    Crashed { signature: String, detail: String },
+    /// Its worker did not start.
+    NoWorker,
+}
+
+impl Alone {
+    /// What the input did, as a note says it.
+    fn said(&self, long: &Limits) -> String {
+        match self {
+            Self::Returned { micros, peak_kb } => format!(
+                "returned in {} ms at a peak RSS of {}",
+                micros / 1000,
+                size(*peak_kb)
+            ),
+            Self::OverMemory { cut_kb, after } => format!(
+                "passed the {} cap and was cut there at {} after {:.1} s",
+                size(long.rss_kb),
+                size(*cut_kb),
+                after.as_secs_f64()
+            ),
+            Self::NotReturned => format!(
+                "did not return in {} s under {}",
+                long.hang.as_secs(),
+                size(long.rss_kb)
+            ),
+            Self::Crashed { signature, .. } => format!("crashed: {signature}"),
+            Self::NoWorker => "could not be run: its worker did not start".to_owned(),
+        }
+    }
+}
+
 fn time_alone(
     grammar: &str,
     text: &str,
@@ -1231,11 +1985,134 @@ fn time_alone(
     seed: u64,
     dir: &Path,
     limits: &Limits,
-) -> Option<u64> {
-    let mut w = Worker::spawn(grammar, dir.join("triage.stderr")).ok()?;
+) -> Alone {
+    let Ok(mut w) = Worker::spawn(grammar, dir.join("triage.stderr"), limits.hang) else {
+        return Alone::NoWorker;
+    };
     match w.run(text, edits, seed, limits) {
-        Outcome::Done { micros, .. } => Some(micros),
-        Outcome::Failed { .. } => None,
+        Outcome::Done {
+            micros, peak_kb, ..
+        } => Alone::Returned { micros, peak_kb },
+        Outcome::Failed {
+            kind: Kind::Alloc, ..
+        } => w
+            .memory_cut
+            .map_or(Alone::NotReturned, |(cut_kb, after)| Alone::OverMemory {
+                cut_kb,
+                after,
+            }),
+        Outcome::Failed {
+            kind: Kind::Crash,
+            signature,
+            detail,
+        } => Alone::Crashed { signature, detail },
+        Outcome::Failed { .. } => Alone::NotReturned,
+    }
+}
+
+/// `kb` as the report states a size: whole gigabytes where it is one, a
+/// tenth of one past a gigabyte, megabytes below.
+fn size(kb: u64) -> String {
+    const GB: u64 = 1024 * 1024;
+    if kb >= GB && kb.is_multiple_of(GB) {
+        format!("{} GB", kb / GB)
+    } else if kb >= GB {
+        #[allow(clippy::cast_precision_loss)]
+        let gb = kb as f64 / GB as f64;
+        format!("{gb:.1} GB")
+    } else {
+        format!("{} MB", kb / 1024)
+    }
+}
+
+/// A finding cut alone at the confirmation's memory cap: its own kind,
+/// named with the cap and the RSS it was cut at (E7h fix round 1). The RSS
+/// at the cut is the cap and one poll's growth, not the parse's own peak,
+/// which the harness never sees (E7h review 2, Low 7).
+fn over_memory(f: &mut Finding, cut_kb: u64, after: Duration, long: &Limits) {
+    f.kind = Kind::Memory;
+    f.signature = format!(
+        "exceeded memory cap at {} (cut at {} after {:.1} s)",
+        size(long.rss_kb),
+        size(cut_kb),
+        after.as_secs_f64()
+    );
+    let _ = write!(
+        f.detail,
+        "\nexceeded memory cap: alone it passed {} and was cut there at {} after {:.1} s, \
+         inside the {} s limit; its own peak is not known, nor whether it would have \
+         returned. A memory cut fails the run, since a parse that grows this far takes the \
+         editor out of memory (#296), unless fuzz/accepted.tsv names it.",
+        size(long.rss_kb),
+        size(cut_kb),
+        after.as_secs_f64(),
+        long.hang.as_secs()
+    );
+}
+
+/// What the input as found did alone under the confirmation's limits
+/// decides an allocation's or a hang's kind (E7h review 2, High 2): a cut
+/// at the memory cap is `memory`, a crash is a crash, an allocation that
+/// returns is large, one that runs out of time never returned, and a hang
+/// that returns is slow. Until then an allocation was minimized first and
+/// only its minimum confirmed, so a parse whose memory grows with its
+/// input (#296) was confirmed at the size just past the first limit, where
+/// it returns, and passed.
+fn classify(f: &mut Finding, found: &Alone, limits: &Limits, long: &Limits) {
+    let first = f.kind;
+    let _ = write!(
+        f.detail,
+        "\nthe input as found, alone: {}",
+        found.said(long)
+    );
+    match found {
+        Alone::OverMemory { cut_kb, after } => over_memory(f, *cut_kb, *after, long),
+        Alone::Crashed { signature, detail } => {
+            f.kind = Kind::Crash;
+            f.signature.clone_from(signature);
+            let _ = write!(
+                f.detail,
+                "\ncrashed under the confirmation's limits, after the first pass met its {} \
+                 limit:\n{detail}",
+                if first == Kind::Hang {
+                    "time"
+                } else {
+                    "memory"
+                }
+            );
+        }
+        Alone::Returned { micros, .. } if first == Kind::Hang => {
+            f.kind = Kind::Slow;
+            // The limit is per parse, and an input is several parses (its
+            // edits'), so the whole can take longer than one may (E7h review
+            // 1, Low 7: "returned alone in 142425 ms under a 120 s limit").
+            let _ = write!(
+                f.detail,
+                "\nslow, not hung: alone, no parse ran past the {} s limit; the input's \
+                 parses took {} ms in all (not minimized)",
+                long.hang.as_secs(),
+                micros / 1000
+            );
+        }
+        Alone::Returned { .. } => {
+            let _ = write!(
+                f.detail,
+                "\nlarge, and it returns: under {} and {} s",
+                size(long.rss_kb),
+                long.hang.as_secs()
+            );
+        }
+        Alone::NotReturned if first == Kind::Alloc => {
+            f.kind = Kind::Hang;
+            f.signature = format!("never returned, growing past {} MB", limits.rss_kb / 1024);
+            let _ = write!(
+                f.detail,
+                "\nnot large but hung: alone it had not returned in {} s, under {}",
+                long.hang.as_secs(),
+                size(long.rss_kb)
+            );
+        }
+        Alone::NotReturned | Alone::NoWorker => {}
     }
 }
 
@@ -1243,39 +2120,547 @@ fn time_alone(
 /// returns is slow, what does not is a hang.
 const HANG_CONFIRM_FACTOR: u32 = 12;
 
-fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limits) -> Triaged {
-    let want = (f.kind, f.signature.clone());
-    let same = |text: &str, edits: u32| {
-        outcome_alone(grammar, text, edits, f.seed, dir, limits)
-            .is_some_and(|got| got.0 == want.0 && (want.0 != Kind::Crash || got.1 == want.1))
-    };
-    let reproduced = same(&f.input, f.edits);
-    let (minimal, minimal_edits) = match (reproduced, reproduced && same(&f.input, 0)) {
-        (false, _) => (f.input.clone(), f.edits),
-        (true, true) => (minimize(&f.input, |t| same(t, 0)), 0),
-        (true, false) => (minimize(&f.input, |t| same(t, f.edits)), f.edits),
-    };
-    if reproduced && f.kind == Kind::Hang {
-        let long = Limits {
-            hang: limits.hang * HANG_CONFIRM_FACTOR,
-            rss_kb: limits.rss_kb,
-        };
-        if let Some(micros) = time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long) {
-            f.kind = Kind::Slow;
-            let _ = write!(
-                f.detail,
-                "\nslow, not hung: the minimal input returned alone in {} ms under a {} s limit",
-                micros / 1000,
-                long.hang.as_secs()
-            );
+/// A hang whose minimal input returns is run alone once more under the
+/// cap, this multiple of the hang limit (30 minutes a parse at CI's 10 s):
+/// what does not return inside it is a hang. It is what bounds a job, not
+/// what judges a slow input (the owner's ruling at E7h's fix round 4); CI's
+/// largest quadratic, cmake's 228 KB of whitespace, parses in about 1,300 s
+/// under `ubsan` on its runner.
+const HANG_CAP_FACTOR: u32 = 180;
+
+/// A slow input's budget is the time its growth projects for it times this
+/// margin: one that returns past it, inside the cap, mispredicted its own
+/// growth curve, which is reported (the owner's ruling at E7h's fix round 4).
+const GROWTH_MARGIN: f64 = 4.0;
+
+/// An allocation is re-run alone under this multiple of the RSS limit
+/// (and the hang confirmation's time); what does not return is a hang.
+const ALLOC_CONFIRM_FACTOR: u64 = 4;
+
+/// Run `prefix` then `last` in one fresh worker and return the first
+/// failure, if any: how a crash that needs its worker's history is
+/// reproduced (E7h.3).
+fn sequence_outcome(
+    grammar: &str,
+    prefix: &[Input],
+    last: &Input,
+    dir: &Path,
+    limits: &Limits,
+) -> Option<(Kind, String)> {
+    let mut w = Worker::spawn(grammar, dir.join("triage.stderr"), limits.hang).ok()?;
+    for input in prefix.iter().chain(std::iter::once(last)) {
+        if let Outcome::Failed {
+            kind, signature, ..
+        } = w.run(&input.text, input.edits, input.seed, limits)
+        {
+            return Some((kind, signature));
         }
     }
-    let stem = dir.join(format!("{}-{index}", f.kind.name()));
+    None
+}
+
+/// The fewest inputs from the end of `f.history` after which `f`'s input
+/// crashes again with its own signature, or `None` if the whole history
+/// does not bring it back. Doubling, then a binary search below the first
+/// length that works (E7h.3).
+fn shortest_crashing_suffix(
+    grammar: &str,
+    f: &Finding,
+    dir: &Path,
+    limits: &Limits,
+) -> Option<usize> {
+    let last = Input {
+        text: f.input.clone(),
+        edits: f.edits,
+        seed: f.seed,
+    };
+    let n = f.history.len();
+    let crashes = |k: usize| {
+        sequence_outcome(grammar, &f.history[n - k..], &last, dir, limits)
+            .is_some_and(|(kind, sig)| kind == Kind::Crash && sig == f.signature)
+    };
+    let mut hi = 1;
+    while hi < n && !crashes(hi) {
+        hi = (hi * 2).min(n);
+    }
+    if !crashes(hi) {
+        return None;
+    }
+    let mut lo = hi / 2; // the largest length known not to crash, or 0
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if crashes(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(hi)
+}
+
+/// The inputs a sequence finding needs, beside its note: `<stem>.sequence/`
+/// holds the last `k` inputs its worker ran before it, in order, and a
+/// manifest with each one's edits and seed (E7h.3).
+fn write_sequence(stem: &Path, f: &Finding, k: usize) {
+    let seq = stem.with_extension("sequence");
+    let _ = std::fs::create_dir_all(&seq);
+    let mut manifest = String::from("n\tedits\tseed\tfile\n");
+    let start = f.history.len() - k;
+    for (i, input) in f.history[start..].iter().enumerate() {
+        let name = format!("{i:03}.input");
+        let _ = std::fs::write(seq.join(&name), &input.text);
+        let _ = writeln!(manifest, "{i}\t{}\t{}\t{name}", input.edits, input.seed);
+    }
+    let _ = writeln!(
+        manifest,
+        "{k}\t{}\t{}\t(the finding's input)",
+        f.edits, f.seed
+    );
+    let _ = std::fs::write(seq.join("sequence.tsv"), manifest);
+}
+
+/// A minimized hang's minimum as triage timed it alone under the
+/// confirmation's limits: its text, its edits, and its time in µs.
+struct Minimum<'a> {
+    text: &'a str,
+    edits: u32,
+    micros: u64,
+}
+
+/// The time limit is a trigger, not a verdict (the owner's rulings at
+/// E7h's fix rounds 3 and 4). An input as found that ran past twelve times
+/// the limit, but whose minimum returns, may be a parse polynomial in its
+/// bytes (cmake on 228 KB of whitespace: quadratic, 375 s under `ubsan`
+/// here and about 1,300 s on CI's runner, 3 s at its 20 KB minimum) or one
+/// that never terminates (#301's nested openers, exponential in their
+/// depth). So it is run alone again, at its minimum's edits, under the cap
+/// ([`HANG_CAP_FACTOR`] times the limit, a parse): one that does not return
+/// inside it is a hang and fails the run. One that returns is slow, and its
+/// growth is fitted: its minimum at one, two and four times over gives an
+/// exponent `k` ([`growth_exponent`]), which projects the input's time as
+/// `t_min × (len / len_min)^k`; its budget is that projection times
+/// [`GROWTH_MARGIN`], floored at the hang limit and capped at the cap for
+/// each of its parses. Returned inside its budget it is slow; past it, it is
+/// slow and its growth curve mispredicted it, which the report says. Round
+/// 3 ran it under ten times the confirmation's limit instead, a fixed wall
+/// past which CI's slower runner turned cmake's quadratic into a hang.
+///
+/// The input as found runs first, since no budget changes the verdict on
+/// one that does not return. A memory cut or a crash in that run is filed
+/// as one. One in a scaled minimum is returned as a finding of its own,
+/// since it is an input that shows a defect; a scaled minimum that does not
+/// return inside the cap is left out of the fit and said in the note, not
+/// filed, since it may be larger than any input the mutator makes.
+fn decide_by_growth(
+    grammar: &str,
+    f: &mut Finding,
+    min: &Minimum,
+    dir: &Path,
+    limits: &Limits,
+    long: &Limits,
+) -> Vec<Finding> {
+    let cap = Limits {
+        hang: limits.hang * HANG_CAP_FACTOR,
+        rss_kb: long.rss_kb,
+    };
+    let again = time_alone(grammar, &f.input, min.edits, f.seed, dir, &cap);
+    let _ = write!(
+        f.detail,
+        "\nthe input as found, alone again at its minimum's {} edits under the cap of {} s \
+         a parse: {}",
+        min.edits,
+        cap.hang.as_secs(),
+        again.said(&cap)
+    );
+    let micros = match again {
+        Alone::Returned { micros, .. } => micros,
+        Alone::OverMemory { cut_kb, after } => {
+            over_memory(f, cut_kb, after, &cap);
+            return Vec::new();
+        }
+        Alone::Crashed { signature, detail } => {
+            f.kind = Kind::Crash;
+            f.signature = signature;
+            let _ = write!(f.detail, "\ncrashed under the cap:\n{detail}");
+            return Vec::new();
+        }
+        Alone::NotReturned => {
+            let _ = write!(
+                f.detail,
+                "\nhung: a parse of it did not return inside the cap, {} s, though its \
+                 minimum's do; a parse that does not terminate on its input fails the run",
+                cap.hang.as_secs()
+            );
+            return Vec::new();
+        }
+        Alone::NoWorker => return Vec::new(),
+    };
+    f.kind = Kind::Slow;
+    // A first parse that met the memory limit was named a hang by
+    // `classify`; slow, it carries the time limit's name.
+    f.signature = format!("one parse over {} ms", limits.hang.as_millis());
+    let mut points = vec![(min.text.len(), min.micros)];
+    let mut derived = Vec::new();
+    for times in [2, 4] {
+        let text = min.text.repeat(times);
+        let scaled = time_alone(grammar, &text, min.edits, f.seed, dir, &cap);
+        let _ = write!(
+            f.detail,
+            "\nits minimum {times} times over ({} bytes), alone: {}",
+            text.len(),
+            scaled.said(&cap)
+        );
+        if let Alone::Returned { micros, .. } = scaled {
+            points.push((text.len(), micros));
+        } else {
+            derived.extend(seen_while_measuring(scaled, text, min.edits, f.seed, &cap));
+        }
+    }
+    judge_growth(f, &points, min, micros, limits, &cap);
+    derived
+}
+
+/// Judge a slow input that returned in `micros` against the budget its
+/// minimum's growth, fitted over `points`, projects for it (the owner's
+/// ruling at E7h's fix round 4), and say so in its note.
+fn judge_growth(
+    f: &mut Finding,
+    points: &[(usize, u64)],
+    min: &Minimum,
+    micros: u64,
+    limits: &Limits,
+    cap: &Limits,
+) {
+    let took = micros / 1000;
+    let Some(k) = growth_exponent(points) else {
+        f.growth = Some(Growth {
+            exponent: None,
+            mispredicted: None,
+        });
+        let _ = write!(
+            f.detail,
+            "\nslow, not hung: it returned in {took} ms; its growth was not fitted, since its \
+             minimum scaled did not return"
+        );
+        return;
+    };
+    let (projected, budget) = growth_budget(
+        min.micros,
+        f.input.len() as f64 / min.text.len() as f64,
+        k,
+        limits.hang,
+        cap.hang * (min.edits + 1),
+    );
+    let _ = write!(
+        f.detail,
+        "\ngrowth: exponent {k:.2}, fitted over its minimum at {}; projected for its {} \
+         bytes, {} ms; its budget {} ms, {GROWTH_MARGIN} times that, floored at the {} ms \
+         limit and capped at the cap{}",
+        sizes(points),
+        f.input.len(),
+        projected / 1000,
+        budget / 1000,
+        limits.hang.as_millis(),
+        if min.edits == 0 {
+            String::new()
+        } else {
+            format!(" for each of its {} parses", min.edits + 1)
+        }
+    );
+    let mispredicted = (micros > budget).then_some((took, budget / 1000));
+    f.growth = Some(Growth {
+        exponent: Some(k),
+        mispredicted,
+    });
+    if mispredicted.is_some() {
+        let _ = write!(
+            f.detail,
+            "\nslow, and its growth mispredicted it: it returned in {took} ms, past its budget \
+             and inside the cap; a growth curve that mispredicts is itself a finding"
+        );
+    } else {
+        let _ = write!(
+            f.detail,
+            "\nslow, not hung: it returned in {took} ms, inside its budget"
+        );
+    }
+}
+
+/// A slow finding the confirmation decided is not minimized, so its growth
+/// is fitted over its first quarter, its first half and the whole, at its
+/// own edits (the owner's ruling at E7h's fix round 4: every slow finding
+/// states its exponent). A crash or a memory cut in a prefix is returned
+/// as a finding of its own.
+fn growth_over_prefixes(
+    grammar: &str,
+    f: &mut Finding,
+    micros: u64,
+    dir: &Path,
+    long: &Limits,
+) -> Vec<Finding> {
+    let mut points = Vec::new();
+    let mut derived = Vec::new();
+    for part in [4, 2] {
+        let mut cut = f.input.len() / part;
+        while !f.input.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut == 0 {
+            continue;
+        }
+        let prefix = f.input[..cut].to_owned();
+        let alone = time_alone(grammar, &prefix, f.edits, f.seed, dir, long);
+        let _ = write!(
+            f.detail,
+            "\nits first {cut} bytes, alone: {}",
+            alone.said(long)
+        );
+        if let Alone::Returned { micros, .. } = alone {
+            points.push((cut, micros));
+        } else {
+            derived.extend(seen_while_measuring(alone, prefix, f.edits, f.seed, long));
+        }
+    }
+    points.push((f.input.len(), micros));
+    let exponent = growth_exponent(&points);
+    let _ = match exponent {
+        Some(k) => write!(
+            f.detail,
+            "\ngrowth: exponent {k:.2}, fitted over its prefixes at {}",
+            sizes(&points)
+        ),
+        None => write!(
+            f.detail,
+            "\ngrowth: not fitted, since its prefixes did not return"
+        ),
+    };
+    f.growth = Some(Growth {
+        exponent,
+        mispredicted: None,
+    });
+    derived
+}
+
+/// A crash or a memory cut that a scaled minimum or a prefix of a slow input
+/// showed while its growth was measured: a finding of its own, seen alone in
+/// a fresh worker, filed as it was seen and not minimized. Anything else is
+/// `None`.
+fn seen_while_measuring(
+    alone: Alone,
+    input: String,
+    edits: u32,
+    seed: u64,
+    limits: &Limits,
+) -> Option<Finding> {
+    let mut f = Finding {
+        kind: Kind::Crash,
+        signature: String::new(),
+        input,
+        edits,
+        seed,
+        detail: "seen alone while the growth of a slow input was measured".to_owned(),
+        history: Vec::new(),
+        growth: None,
+    };
+    match alone {
+        Alone::Crashed { signature, detail } => {
+            f.signature = signature;
+            let _ = write!(f.detail, ":\n{detail}");
+        }
+        Alone::OverMemory { cut_kb, after } => over_memory(&mut f, cut_kb, after, limits),
+        _ => return None,
+    }
+    Some(f)
+}
+
+/// The time, in µs, that a growth of exponent `k` projects for an input
+/// `ratio` times as long as its minimum, which took `micros`; and its
+/// budget, that times [`GROWTH_MARGIN`], no less than `floor` and no more
+/// than `ceiling`.
+fn growth_budget(
+    micros: u64,
+    ratio: f64,
+    k: f64,
+    floor: Duration,
+    ceiling: Duration,
+) -> (u64, u64) {
+    let projected = micros as f64 * ratio.powf(k);
+    let budget = (projected * GROWTH_MARGIN)
+        .max(floor.as_micros() as f64)
+        .min(ceiling.as_micros() as f64);
+    (projected.min(u64::MAX as f64) as u64, budget as u64)
+}
+
+/// The sizes of `points` as a note lists them: "a, b and c bytes".
+fn sizes(points: &[(usize, u64)]) -> String {
+    let all: Vec<String> = points.iter().map(|p| p.0.to_string()).collect();
+    match all.split_last() {
+        Some((last, [])) => format!("{last} bytes"),
+        Some((last, rest)) => format!("{} and {last} bytes", rest.join(", ")),
+        None => "no sizes".to_owned(),
+    }
+}
+
+/// The exponent of a power law through `points`, each a size in bytes and a
+/// time in µs: the least-squares slope of the log of the time on the log of
+/// the size. `None` without two distinct sizes.
+fn growth_exponent(points: &[(usize, u64)]) -> Option<f64> {
+    let logs: Vec<(f64, f64)> = points
+        .iter()
+        .filter(|(len, _)| *len > 0)
+        .map(|&(len, micros)| ((len as f64).ln(), (micros.max(1) as f64).ln()))
+        .collect();
+    let n = logs.len() as f64;
+    let (mx, my) = (
+        logs.iter().map(|p| p.0).sum::<f64>() / n,
+        logs.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let sxx: f64 = logs.iter().map(|p| (p.0 - mx).powi(2)).sum();
+    let sxy: f64 = logs.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+    (logs.len() >= 2 && sxx > 1e-9).then(|| sxy / sxx)
+}
+
+/// Triage one finding, and file it with any a measurement of its growth
+/// showed (`decide_by_growth`, `growth_over_prefixes`), each after it.
+fn triage(
+    grammar: &str,
+    mut f: Finding,
+    dir: &Path,
+    index: usize,
+    limits: &Limits,
+    accepted: &[Accepted],
+) -> Vec<Triaged> {
+    let want = (f.kind, f.signature.clone());
+    let seed = f.seed;
+    let same = |text: &str, edits: u32| {
+        outcome_alone(grammar, text, edits, seed, dir, limits)
+            .is_some_and(|got| got.0 == want.0 && (want.0 != Kind::Crash || got.1 == want.1))
+    };
+    let alone = same(&f.input, f.edits);
+    let mut repro = if alone { Repro::Alone } else { Repro::No };
+    // E7h.3: a crash that does not come back alone is replayed after the
+    // inputs its worker ran before it, shortest suffix first; state a
+    // scanner carries across parses is exactly what the daemon, which
+    // parses for days, would meet.
+    if !alone
+        && f.kind == Kind::Crash
+        && !f.history.is_empty()
+        && let Some(k) = shortest_crashing_suffix(grammar, &f, dir, limits)
+    {
+        repro = Repro::InSequence(k);
+    }
+    let long = Limits {
+        hang: limits.hang * HANG_CONFIRM_FACTOR,
+        rss_kb: limits.rss_kb * ALLOC_CONFIRM_FACTOR,
+    };
+    // E7h review 2, High 2: an allocation or a hang is confirmed alone on
+    // the input that showed it, under twelve times the time and four times
+    // the memory, and what that input did decides its kind (`classify`).
+    // Then it is minimized against the first pass's limits, and the minimum
+    // is confirmed the same way and reported beside it. A hang is still
+    // timed before it is minimized, as since E7h.4: one that returns is
+    // slow, which D36 files and never fails, and keeps its input rather
+    // than spending the minimizer's five minutes at a hang limit an
+    // attempt (the depth operators make Lua's error recovery slow on most
+    // runs).
+    let confirmed = alone && matches!(f.kind, Kind::Hang | Kind::Alloc);
+    let mut derived = Vec::new();
+    if confirmed {
+        let found = time_alone(grammar, &f.input, f.edits, f.seed, dir, &long);
+        classify(&mut f, &found, limits, &long);
+        if let (Kind::Slow, Alone::Returned { micros, .. }) = (f.kind, &found) {
+            derived = growth_over_prefixes(grammar, &mut f, *micros, dir, &long);
+        }
+    }
+    let (minimal, minimal_edits) = if !alone || f.kind == Kind::Slow {
+        (f.input.clone(), f.edits)
+    } else if same(&f.input, 0) {
+        (minimize(&f.input, |t| same(t, 0)), 0)
+    } else {
+        (minimize(&f.input, |t| same(t, f.edits)), f.edits)
+    };
+    if confirmed && f.kind != Kind::Slow && minimal != f.input {
+        let least = time_alone(grammar, &minimal, minimal_edits, f.seed, dir, &long);
+        let _ = write!(
+            f.detail,
+            "\nits minimum ({} bytes), alone: {}",
+            minimal.len(),
+            least.said(&long)
+        );
+        if f.kind == Kind::Hang
+            && let Alone::Returned { micros, .. } = least
+        {
+            let min = Minimum {
+                text: &minimal,
+                edits: minimal_edits,
+                micros,
+            };
+            derived = decide_by_growth(grammar, &mut f, &min, dir, limits, &long);
+        }
+    }
+    let mut filed = vec![file_finding(
+        grammar,
+        f,
+        repro,
+        (minimal, minimal_edits),
+        dir,
+        &index.to_string(),
+        accepted,
+    )];
+    for (n, d) in derived.into_iter().enumerate() {
+        let (text, edits) = (d.input.clone(), d.edits);
+        filed.push(file_finding(
+            grammar,
+            d,
+            Repro::Alone,
+            (text, edits),
+            dir,
+            &format!("{index}-{}", n + 1),
+            accepted,
+        ));
+    }
+    filed
+}
+
+/// Write a triaged finding's files in `dir` as `<kind>-<label>`: its
+/// minimum (`.input`), the input as found (`.original`), any sequence, and
+/// its note (`.txt`).
+fn file_finding(
+    grammar: &str,
+    f: Finding,
+    repro: Repro,
+    (minimal, minimal_edits): (String, u32),
+    dir: &Path,
+    label: &str,
+    accepted: &[Accepted],
+) -> Triaged {
+    let stem = dir.join(format!("{}-{label}", f.kind.name()));
     let file = stem.with_extension("input");
     let _ = std::fs::write(&file, &minimal);
     let _ = std::fs::write(stem.with_extension("original"), &f.input);
+    if let Repro::InSequence(k) = repro {
+        write_sequence(&stem, &f, k);
+    }
+    let reproduced = match repro {
+        Repro::Alone => "alone".to_owned(),
+        Repro::InSequence(k) => {
+            format!("after the {k} inputs before it (see the .sequence directory)")
+        }
+        Repro::No => "no".to_owned(),
+    };
+    let entry = if repro == Repro::No {
+        None
+    } else {
+        accepted_entry(accepted, grammar, f.kind, &minimal)
+    };
+    let known = entry.map_or(String::new(), |e| {
+        format!(
+            "accepted: known, accepted (#{}); it does not fail the run until {}\n",
+            e.issue, e.removal
+        )
+    });
     let note = format!(
-        "grammar: {grammar}\nkind: {}\nsignature: {}\nreproduced alone: {reproduced}\n\
+        "grammar: {grammar}\nkind: {}\nsignature: {}\nreproduced: {reproduced}\n{known}\
          minimal: {} bytes (from {}), edits {minimal_edits}, seed {}\n\
          repro: pmacs_grammar_fuzz repro {grammar} {} --edits {minimal_edits} --seed {}\n\n{}",
         f.kind.name(),
@@ -1290,17 +2675,25 @@ fn triage(grammar: &str, mut f: Finding, dir: &Path, index: usize, limits: &Limi
     let _ = std::fs::write(stem.with_extension("txt"), note);
     Triaged {
         finding: f,
-        reproduced,
+        repro,
         minimal,
         minimal_edits,
         file,
+        accepted: entry.map(|e| e.issue),
     }
 }
 
 /// Delta debugging over lines, then characters, under a budget: keep a
 /// candidate only while `still` holds for it.
 fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
-    let deadline = Instant::now() + Duration::from_mins(5);
+    // Five minutes, or `PMACS_FUZZ_MINIMIZE_SECONDS` (a test's knob, beside
+    // the self-test plants': a row that only needs a finding's kind need not
+    // wait out the budget).
+    let budget = std::env::var("PMACS_FUZZ_MINIMIZE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let deadline = Instant::now() + Duration::from_secs(budget);
     let mut cur = input.to_owned();
     for by_char in [false, true] {
         let mut units: Vec<String> = if by_char {
@@ -1341,20 +2734,227 @@ fn minimize(input: &str, mut still: impl FnMut(&str) -> bool) -> String {
 // Report
 // -------------------------------------------------------------------
 
+// -------------------------------------------------------------------
+// The accepted findings (E7h review 2, High 1; the owner's ruling at
+// E7h's fix round 2).
+// -------------------------------------------------------------------
+
+/// A finding the owner has accepted, from `fuzz/accepted.tsv`: one row
+/// each, the issue that records it, the grammars it is reached through, the
+/// kinds it is seen as, the reproductions that identify it and the condition
+/// that removes it. An entry is keyed to the defect, not to the route the
+/// fuzzer took to it: `markdown_inline`'s classes are reached directly and
+/// through markdown's inline injection, and their rows name both (the
+/// owner's ruling at E7h's fix round 3). A finding matches when it is of one
+/// of those grammars and one of those kinds and its
+/// minimal input is covered, at least `ACCEPT_MIN_COVERAGE` of its
+/// non-whitespace characters (indentation is layout, since fix round 3),
+/// by the repeated unit of one of the reproductions (`dominant_unit`): the
+/// nested image openers of #301 (`![f`, `*f[`), the delimiter runs of #296
+/// (`_`, `*`). A different defect in the same grammar does not match: its
+/// minimum is what triggers it, not a run of those units, and minimizing
+/// strips whatever of them it was found inside. What the units cannot tell
+/// apart is a different defect whose minimal input is itself such a run;
+/// a variant of the class with another unit is not accepted until the owner
+/// adds its reproduction.
+struct Accepted {
+    issue: u32,
+    grammars: Vec<String>,
+    kinds: Vec<Kind>,
+    /// The repeated unit of each reproduction, as `dominant_unit` names it.
+    units: Vec<String>,
+    removal: String,
+}
+
+/// How much of a finding's minimal input one of an entry's units must cover,
+/// and of a reproduction its own unit, for the entry to name it.
+const ACCEPT_MIN_COVERAGE: f64 = 0.5;
+
+/// The list at `path`: tab-separated, `issue grammar kinds reproductions
+/// removal`, kinds and reproductions comma-separated, a reproduction's path
+/// relative to the list's directory, `#` lines and the header skipped.
+fn load_accepted(path: &Path) -> Result<Vec<Accepted>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut entries = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("issue\t") {
+            continue;
+        }
+        let at = || format!("{}:{}", path.display(), n + 1);
+        let cells: Vec<&str> = line.split('\t').collect();
+        let [issue, grammar, kinds, reproductions, removal] = cells[..] else {
+            return Err(format!(
+                "{}: five tab-separated cells, not {}",
+                at(),
+                cells.len()
+            ));
+        };
+        let issue: u32 = issue
+            .trim_start_matches('#')
+            .parse()
+            .map_err(|_| format!("{}: `{issue}` is not an issue number", at()))?;
+        let grammars = grammar
+            .split(',')
+            .map(|g| {
+                entry(g.trim())
+                    .map(|e| e.name.to_owned())
+                    .map_err(|e| format!("{}: {e}", at()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let kinds = kinds
+            .split(',')
+            .map(|k| Kind::from_name(k.trim()).ok_or_else(|| format!("{}: no kind `{k}`", at())))
+            .collect::<Result<Vec<_>, _>>()?;
+        if removal.trim().is_empty() {
+            return Err(format!(
+                "{}: an entry names the condition that removes it",
+                at()
+            ));
+        }
+        let mut units = Vec::new();
+        for r in reproductions.split(',') {
+            let file = base.join(r.trim());
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| format!("{}: {}: {e}", at(), file.display()))?;
+            let (unit, covered) = dominant_unit(&text)
+                .ok_or_else(|| format!("{}: {} has no repeated unit", at(), file.display()))?;
+            if covered < ACCEPT_MIN_COVERAGE {
+                return Err(format!(
+                    "{}: {}'s unit `{unit}` covers {:.0}% of it, under {:.0}%",
+                    at(),
+                    file.display(),
+                    covered * 100.0,
+                    ACCEPT_MIN_COVERAGE * 100.0
+                ));
+            }
+            if !units.contains(&unit) {
+                units.push(unit);
+            }
+        }
+        entries.push(Accepted {
+            issue,
+            grammars,
+            kinds,
+            units,
+            removal: removal.trim().to_owned(),
+        });
+    }
+    Ok(entries)
+}
+
+/// The entry, if any, that names a finding of `kind` in `grammar` whose
+/// minimal input is `minimal`.
+fn accepted_entry<'a>(
+    list: &'a [Accepted],
+    grammar: &str,
+    kind: Kind,
+    minimal: &str,
+) -> Option<&'a Accepted> {
+    list.iter().find(|e| {
+        e.grammars.iter().any(|g| g == grammar)
+            && e.kinds.contains(&kind)
+            && e.units
+                .iter()
+                .any(|u| coverage(minimal, u) >= ACCEPT_MIN_COVERAGE)
+    })
+}
+
+/// The share of `text`'s bytes that non-overlapping occurrences of `unit`,
+/// in its best rotation, cover.
+fn coverage(text: &str, unit: &str) -> f64 {
+    // Counted over the text's non-whitespace characters: indentation and
+    // line breaks are layout, the route a fuzzer took, not the defect. #296's
+    // paragraph reached markdown_inline with lazy-continuation lines indented
+    // hundreds of spaces, which a minimizer working by lines cannot remove,
+    // and the same 3,060 underscores cost the same with them or without
+    // (E7h fix round 3).
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let text = text.as_str();
+    if text.is_empty() || unit.is_empty() {
+        return 0.0;
+    }
+    let chars: Vec<char> = unit.chars().collect();
+    let best = (0..chars.len())
+        .map(|i| {
+            let rotation: String = chars[i..].iter().chain(&chars[..i]).collect();
+            text.matches(rotation.as_str()).count() * rotation.len()
+        })
+        .max()
+        .unwrap_or(0);
+    #[allow(clippy::cast_precision_loss)]
+    let share = best as f64 / text.len() as f64;
+    share
+}
+
+/// The run of one to four characters (no newline) that covers most of
+/// `text`, reduced to its primitive root and named by its least rotation
+/// (`f![` and `[f!` are both `![f`), with the share it covers.
+fn dominant_unit(text: &str) -> Option<(String, f64)> {
+    // Over the non-whitespace characters, as `coverage` counts.
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let text = text.as_str();
+    let chars: Vec<char> = text.chars().collect();
+    // Each length's most frequent window, then the one whose occurrences,
+    // counted without overlap, cover most of the text: overlapping counts
+    // would favour a window one longer than a short period.
+    let mut best: Option<(f64, String)> = None;
+    for len in 1..=4 {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for w in chars.windows(len) {
+            if !w.contains(&'\n') {
+                *counts.entry(w.iter().collect()).or_insert(0) += 1;
+            }
+        }
+        let Some(top) = counts
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .map(|(u, _)| u.clone())
+        else {
+            continue;
+        };
+        let covered = coverage(text, &top);
+        if best.as_ref().is_none_or(|(c, _)| covered > *c + 1e-9) {
+            best = Some((covered, top));
+        }
+    }
+    let (_, unit) = best?;
+    let chars: Vec<char> = unit.chars().collect();
+    let root_len = (1..=chars.len())
+        .find(|d| {
+            chars.len().is_multiple_of(*d) && (0..chars.len()).all(|i| chars[i] == chars[i % d])
+        })
+        .unwrap_or(chars.len());
+    let root = &chars[..root_len];
+    let canonical = (0..root.len())
+        .map(|i| root[i..].iter().chain(&root[..i]).collect::<String>())
+        .min()?;
+    let covered = coverage(text, &canonical);
+    Some((canonical, covered))
+}
+
 fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
     let mut md = String::new();
     let mut tsv = String::from(
-        "grammar\tseeds\tinputs\tparses\tMB\tslowest_ms\tseconds\tgrowth_mb\tcrashes\thangs\tslow\tallocs\tunconfirmed\terror\n",
+        "grammar\tseeds\tinputs\tparses\tmutated\tMB\tslowest_ms\tseconds\tgrowth_mb\tcrashes\thangs\tmemory\tslow\tallocs\tin_sequence\tunconfirmed\taccepted\terror\n",
     );
     let _ = writeln!(
         md,
         "# Grammar fuzz report\n\n{} s per grammar after the seeds, {} edits per input, seed {}, \
-         hang {} ms per parse, RSS {} MB. MB is the text fed in; slowest is one input's whole exercise; \
+         hang {} ms per parse, RSS {} MB. MB is the text fed in; slowest is one input's whole exercise, kept as \
+         `GRAMMAR/slowest.input` with its `slowest.seed`; \
          s is the grammar's wall time, triage included; growth is the most a worker's RSS gained over \
-         its inputs before it was replaced. Crashes, hangs, slow and allocs count findings that \
-         reproduced alone; the last column those that did not.\n\n\
-         | grammar | seeds | inputs | parses | MB | slowest ms (bytes) | s | growth MB | crashes | hangs | slow | allocs | not alone |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|",
+         its inputs before it was replaced; mutated counts the inputs after the seeds. Crashes, \
+         hangs, memory, slow and allocs count findings that came back, alone or after the inputs \
+         before them (in sequence counts the latter), memory those cut at four times the RSS \
+         limit; unconfirmed those that came back neither way. A crash, however it came \
+         back, a hang that came back and a memory cut fail the run, unless the accepted \
+         list (`fuzz/accepted.tsv`, the owner's) names the finding: accepted counts those, \
+         reported known, accepted (#N). A slow finding states the exponent of its time's growth \
+         with its size (not the memory growth above), and is mispredicted when it returned past \
+         the budget that exponent projected for it.\n\n\
+         | grammar | seeds | inputs | mutated | parses | MB | slowest ms (bytes) | s | growth MB | crashes | hangs | memory | slow | allocs | in sequence | unconfirmed | accepted |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         cfg.seconds,
         cfg.edits,
         cfg.seed,
@@ -1365,21 +2965,28 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
         let count = |k: Kind| {
             r.findings
                 .iter()
-                .filter(|t| t.reproduced && t.finding.kind == k)
+                .filter(|t| t.repro != Repro::No && t.finding.kind == k)
                 .count()
         };
+        let in_sequence = r
+            .findings
+            .iter()
+            .filter(|t| matches!(t.repro, Repro::InSequence(_)))
+            .count();
+        let mutated = r.stats.inputs.saturating_sub(r.stats.seeds as u64);
         let s = &r.stats;
         let (c, h, a) = (count(Kind::Crash), count(Kind::Hang), count(Kind::Alloc));
-        let slow_n = count(Kind::Slow);
+        let (mem, slow_n) = (count(Kind::Memory), count(Kind::Slow));
         let growth = s.growth_kb / 1024;
-        let unconfirmed = r.findings.iter().filter(|t| !t.reproduced).count();
+        let unconfirmed = r.findings.iter().filter(|t| t.repro == Repro::No).count();
+        let accepted = r.findings.iter().filter(|t| t.accepted.is_some()).count();
         let secs = s.elapsed.as_secs();
         let mb = s.bytes / (1024 * 1024);
         let slow = s.slowest_micros / 1000;
         let err = r.error.as_deref().unwrap_or("");
         let _ = writeln!(
             md,
-            "| {} | {} | {} | {} | {mb} | {slow} ({}) | {secs} | {growth} | {c} | {h} | {slow_n} | {a} | {unconfirmed} |{}",
+            "| {} | {} | {} | {mutated} | {} | {mb} | {slow} ({}) | {secs} | {growth} | {c} | {h} | {mem} | {slow_n} | {a} | {in_sequence} | {unconfirmed} | {accepted} |{}",
             r.grammar,
             s.seeds,
             s.inputs,
@@ -1393,23 +3000,62 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
         );
         let _ = writeln!(
             tsv,
-            "{}\t{}\t{}\t{}\t{mb}\t{slow}\t{secs}\t{growth}\t{c}\t{h}\t{slow_n}\t{a}\t{unconfirmed}\t{err}",
+            "{}\t{}\t{}\t{}\t{mutated}\t{mb}\t{slow}\t{secs}\t{growth}\t{c}\t{h}\t{mem}\t{slow_n}\t{a}\t{in_sequence}\t{unconfirmed}\t{accepted}\t{err}",
             r.grammar, s.seeds, s.inputs, s.parses
         );
     }
-    for (heading, alone) in [("Findings", true), ("Not reproduced alone", false)] {
+    md.push_str(&findings_md(reports));
+    std::fs::write(cfg.out.join("report.md"), md).map_err(|e| e.to_string())?;
+    std::fs::write(cfg.out.join("report.tsv"), tsv).map_err(|e| e.to_string())
+}
+
+/// The report's findings, those that came back and those that did not.
+fn findings_md(reports: &[Report]) -> String {
+    let mut md = String::new();
+    for (heading, came_back) in [("Findings", true), ("Not reproduced", false)] {
         let _ = writeln!(md, "\n## {heading}\n");
         let mut none = true;
         for r in reports {
-            for t in r.findings.iter().filter(|t| t.reproduced == alone) {
+            for t in r
+                .findings
+                .iter()
+                .filter(|t| (t.repro != Repro::No) == came_back)
+            {
                 none = false;
+                let how = match t.repro {
+                    Repro::Alone => "alone".to_owned(),
+                    Repro::InSequence(k) => format!("after the {k} inputs before it"),
+                    Repro::No => "no".to_owned(),
+                };
+                let known = t
+                    .accepted
+                    .map_or(String::new(), |n| format!(", known, accepted (#{n})"));
+                // The owner's ruling at E7h's fix round 4: every slow
+                // finding states its growth exponent.
+                let growth = match (t.finding.kind, t.finding.growth) {
+                    (
+                        Kind::Slow,
+                        Some(Growth {
+                            exponent: Some(k),
+                            mispredicted,
+                        }),
+                    ) => format!(
+                        ", growth exponent {k:.2}{}",
+                        mispredicted.map_or(String::new(), |(took, budget)| format!(
+                            ", mispredicted: returned in {took} ms, past its budget of \
+                             {budget} ms"
+                        ))
+                    ),
+                    (Kind::Slow, _) => ", growth not fitted".to_owned(),
+                    _ => String::new(),
+                };
                 let _ = writeln!(
                     md,
-                    "- **{}** {} `{}`, reproduced alone: {}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
+                    "- **{}** {} `{}`{growth}, reproduced: {}{known}, minimal {} bytes, edits {}: `{}`\n\n```\n{}\n```\n",
                     r.grammar,
                     t.finding.kind.name(),
                     t.finding.signature,
-                    t.reproduced,
+                    how,
                     t.minimal.len(),
                     t.minimal_edits,
                     t.file.display(),
@@ -1421,8 +3067,7 @@ fn write_report(cfg: &Config, reports: &[Report]) -> Result<(), String> {
             let _ = writeln!(md, "None.");
         }
     }
-    std::fs::write(cfg.out.join("report.md"), md).map_err(|e| e.to_string())?;
-    std::fs::write(cfg.out.join("report.tsv"), tsv).map_err(|e| e.to_string())
+    md
 }
 
 /// A minimal input as the report shows it: escaped, and cut at 400
@@ -1433,6 +3078,114 @@ fn shown(text: &str) -> String {
         Some((cut, _)) => format!("{}… ({} bytes; see the file)", &escaped[..cut], text.len()),
         None => escaped,
     }
+}
+
+// -------------------------------------------------------------------
+// `changed`: which grammars a change touched (E7h.4).
+// -------------------------------------------------------------------
+
+/// Every `[[package]]`'s versions in a `Cargo.lock`, by name.
+fn locked_versions(lock: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut name: Option<&str> = None;
+    for line in lock.lines() {
+        if line == "[[package]]" {
+            name = None;
+        } else if let Some(n) = line.strip_prefix("name = \"") {
+            name = n.strip_suffix('"');
+        } else if let (Some(n), Some(v)) = (name, line.strip_prefix("version = \"")) {
+            out.entry(n.to_owned())
+                .or_default()
+                .insert(v.trim_end_matches('"').to_owned());
+            name = None;
+        }
+    }
+    out
+}
+
+/// `fuzz/corpora.tsv`'s rows as `(grammar, crate, whole row)`.
+fn corpora_rows(tsv: &str) -> Vec<(String, String, String)> {
+    tsv.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty() && !l.starts_with("grammar\t"))
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?.to_owned(), f.next()?.to_owned(), l.to_owned()))
+        })
+        .collect()
+}
+
+/// The grammars a change touched, and whether it touched every grammar
+/// (the tree-sitter runtime's version moved). A grammar is touched when its
+/// crate's locked version differs, its corpora row differs or is new, or a
+/// file under `vendor/<its crate>/` changed.
+fn changed_grammars(
+    lock_then: &str,
+    lock_now: &str,
+    rows_then: &[(String, String, String)],
+    rows_now: &[(String, String, String)],
+    vendored: &BTreeSet<String>,
+) -> (bool, BTreeSet<String>) {
+    let then = locked_versions(lock_then);
+    let now = locked_versions(lock_now);
+    let all = then.get("tree-sitter") != now.get("tree-sitter");
+    let mut touched = BTreeSet::new();
+    for (grammar, krate, row) in rows_now {
+        let moved = then.get(krate) != now.get(krate);
+        let row_changed = !rows_then.iter().any(|(_, _, r)| r == row);
+        if moved || row_changed || vendored.contains(krate) {
+            touched.insert(grammar.clone());
+        }
+    }
+    (all, touched)
+}
+
+fn git_text(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Print the grammars the change since `--since REF` touched, one a line,
+/// or `*` when it touched them all; run from the repository root.
+fn changed(args: &[String]) -> Result<ExitCode, String> {
+    let (_, flags) = Flags::parse(args, 0)?;
+    let since = flags.one("since").ok_or("--since REF is required")?;
+    let lock_then = git_text(&["show", &format!("{since}:Cargo.lock")])?;
+    let lock_now = std::fs::read_to_string("Cargo.lock").map_err(|e| format!("Cargo.lock: {e}"))?;
+    let rows_then = corpora_rows(
+        &git_text(&["show", &format!("{since}:fuzz/corpora.tsv")]).unwrap_or_default(),
+    );
+    let rows_now = corpora_rows(
+        &std::fs::read_to_string("fuzz/corpora.tsv")
+            .map_err(|e| format!("fuzz/corpora.tsv: {e}"))?,
+    );
+    let vendored: BTreeSet<String> = git_text(&["diff", "--name-only", since, "--", "vendor/"])?
+        .lines()
+        .filter_map(|p| {
+            p.strip_prefix("vendor/")?
+                .split('/')
+                .next()
+                .map(str::to_owned)
+        })
+        .collect();
+    let (all, touched) = changed_grammars(&lock_then, &lock_now, &rows_then, &rows_now, &vendored);
+    if all {
+        println!("*");
+    } else {
+        for g in touched {
+            println!("{g}");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 // -------------------------------------------------------------------
@@ -1448,9 +3201,20 @@ fn repro(args: &[String]) -> Result<ExitCode, String> {
     let edits = u32::try_from(flags.num("edits", 0)?).map_err(|e| e.to_string())?;
     let mut session = Session::new(lang);
     session.trace = flags.num("trace", 0)? != 0;
-    let parses = session.exercise(text, edits, flags.num("seed", 1)?, &mut || {});
-    println!("{}: {parses} parses, no fault", lang.name);
-    Ok(ExitCode::SUCCESS)
+    session.deadline = match flags.num("deadline-ms", 0)? {
+        0 => None,
+        ms => Some(Duration::from_millis(ms)),
+    };
+    match session.exercise(text, edits, flags.num("seed", 1)?, &mut || {}) {
+        Ok(parses) => {
+            println!("{}: {parses} parses, no fault", lang.name);
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            println!("{}: {e}", lang.name);
+            Ok(ExitCode::from(1))
+        }
+    }
 }
 
 // -------------------------------------------------------------------
@@ -1530,13 +3294,13 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 
 /// A seed as the editor would hold it: UTF-8 text without NUL, cut at a
 /// line boundary.
-fn as_seed(bytes: Vec<u8>) -> Option<String> {
+fn as_seed(bytes: Vec<u8>, max_bytes: usize) -> Option<String> {
     if bytes.len() > 4 * 1024 * 1024 || bytes.contains(&0) {
         return None;
     }
     let mut s = String::from_utf8(bytes).ok()?;
-    if s.len() > MAX_SEED_BYTES {
-        let mut cut = MAX_SEED_BYTES;
+    if s.len() > max_bytes {
+        let mut cut = max_bytes;
         while !s.is_char_boundary(cut) {
             cut -= 1;
         }
@@ -1633,6 +3397,11 @@ fn collect(args: &[String]) -> Result<ExitCode, String> {
     let (_, flags) = Flags::parse(args, 0)?;
     let out = flags.path("out")?;
     let max_files = usize::try_from(flags.num("max-files", 400)?).map_err(|e| e.to_string())?;
+    // E7h.4: a smaller cut makes every input cheaper, so a short run
+    // mutates each grammar more (Zig's standard-library seeds run to 64 KB).
+    let max_seed = usize::try_from(flags.num("max-seed-kb", (MAX_SEED_BYTES / 1024) as u64)?)
+        .map_err(|e| e.to_string())?
+        * 1024;
     let groups = gather(&flags.all("from"));
     let mut written: BTreeMap<String, usize> = BTreeMap::new();
     let mut manifest = String::from("grammar\tsource\tpath\tbytes\n");
@@ -1643,7 +3412,7 @@ fn collect(args: &[String]) -> Result<ExitCode, String> {
             if taken >= max_files {
                 break;
             }
-            let Some(text) = std::fs::read(&full).ok().and_then(as_seed) else {
+            let Some(text) = std::fs::read(&full).ok().and_then(|b| as_seed(b, max_seed)) else {
                 continue;
             };
             taken += 1;
@@ -1672,7 +3441,7 @@ fn collect(args: &[String]) -> Result<ExitCode, String> {
         for path in &files {
             let text = std::fs::read_to_string(path).unwrap_or_default();
             for (n, code) in corpus_examples(&text).into_iter().enumerate() {
-                let Some(code) = as_seed(code.into_bytes()) else {
+                let Some(code) = as_seed(code.into_bytes(), max_seed) else {
                     continue;
                 };
                 let key = fnv(format!("{}#{n}", path.display()).as_bytes());
@@ -1745,53 +3514,373 @@ mod tests {
     #[test]
     fn a_session_parses_and_reparses_every_grammar() {
         for lang in BUILTIN_LANGUAGES {
-            let parses = Session::new(lang).exercise("a (b) {c}\n".to_owned(), 3, 1, &mut || {});
+            let parses = Session::new(lang)
+                .exercise("a (b) {c}\n".to_owned(), 3, 1, &mut || {})
+                .expect("no deadline, so every parse returns");
             assert!(parses >= 4, "{}: {parses} parses", lang.name);
         }
     }
 
     #[test]
-    fn only_a_finding_that_reproduces_alone_fails_the_run() {
-        let report = |reproduced: Option<bool>, error: Option<&str>| Report {
-            grammar: "rust",
-            stats: Stats::default(),
-            findings: reproduced
-                .map(|reproduced| Triaged {
-                    finding: Finding {
-                        kind: Kind::Hang,
-                        signature: String::new(),
-                        input: String::new(),
-                        edits: 0,
-                        seed: 0,
-                        detail: String::new(),
-                    },
-                    reproduced,
-                    minimal: String::new(),
-                    minimal_edits: 0,
-                    file: PathBuf::new(),
-                })
-                .into_iter()
-                .collect(),
-            error: error.map(str::to_owned),
+    fn the_accepted_list_names_its_findings_and_no_other() {
+        // E7h fix round 2, the owner's ruling on review 2's High 1: each row
+        // names its findings by the repeated unit of its reproductions.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let list = load_accepted(&root.join("fuzz/accepted.tsv")).expect("the list loads");
+        let issues: Vec<u32> = list.iter().map(|e| e.issue).collect();
+        assert_eq!(issues, [296, 301]);
+        let units = |issue| {
+            list.iter()
+                .find(|e| e.issue == issue)
+                .map(|e| e.units.clone())
+                .unwrap_or_default()
         };
-        assert!(!fails(&[report(None, None)]));
-        assert!(!fails(&[report(Some(false), None)]));
-        assert!(fails(&[report(Some(true), None)]));
-        let with_kind = |kind| {
-            let mut r = report(Some(true), None);
-            r.findings[0].finding.kind = kind;
-            fails(&[r])
+        assert_eq!(units(296), ["_", "*"]);
+        assert_eq!(units(301), ["![f", "*f["]);
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).expect(p);
+        let named = |kind, text: &str| {
+            accepted_entry(&list, "markdown_inline", kind, text).map(|e| e.issue)
         };
-        assert!(with_kind(Kind::Crash), "a crash fails the run");
+        // #301's three minimal inputs from review 2's runs, and #296's 4 KB
+        // minimum and a run of asterisks.
+        for p in [
+            "tests/e7h_review2/markdown-inline-84.input",
+            "tests/e7h_review2/markdown-inline-hang-596.input",
+            "tests/e7h_review2/markdown-inline-hang-7672.input",
+        ] {
+            assert_eq!(named(Kind::Hang, &read(p)), Some(301), "{p}");
+            assert_eq!(named(Kind::Memory, &read(p)), None, "{p} as a memory cut");
+            // Reached through markdown's inline injection, it is the same
+            // defect (E7h fix round 3); in a grammar that does not reach
+            // markdown_inline it is not.
+            assert_eq!(
+                accepted_entry(&list, "markdown", Kind::Hang, &read(p)).map(|e| e.issue),
+                Some(301),
+                "{p} through markdown"
+            );
+            assert_eq!(
+                accepted_entry(&list, "rust", Kind::Hang, &read(p)).map(|e| e.issue),
+                None,
+                "{p} in another grammar"
+            );
+        }
+        let through = read("fuzz/repro/markdown-296-through-injection-20515.input");
+        assert_eq!(
+            accepted_entry(&list, "markdown", Kind::Memory, &through).map(|e| e.issue),
+            Some(296),
+            "#296 through markdown's injection, as the 600 s run met it"
+        );
+        assert_eq!(
+            accepted_entry(&list, "markdown", Kind::Memory, SELFTEST_TRIGGER).map(|e| e.issue),
+            None,
+            "a different defect through markdown"
+        );
+        // Fix round 3's 600 s run: #296's underscores on lazy-continuation
+        // lines indented hundreds of spaces (59% of the bytes), which the
+        // minimizer, working by lines past 4 KB, kept. Coverage is counted
+        // over the non-whitespace characters, so it is #296 by either route;
+        // indentation around a planted trigger does not make it the class.
+        let indented = read("fuzz/repro/markdown-inline-296-indented-7414.input");
+        for g in ["markdown_inline", "markdown"] {
+            assert_eq!(
+                accepted_entry(&list, g, Kind::Memory, &indented).map(|e| e.issue),
+                Some(296),
+                "#296's indented paragraph through {g}"
+            );
+        }
+        let padded = format!("{}{SELFTEST_TRIGGER}\n{}", " ".repeat(400), " ".repeat(400));
+        assert_eq!(
+            named(Kind::Memory, &padded),
+            None,
+            "a trigger padded with spaces"
+        );
+        let underscores = vec![format!("{}a `_`_", "_".repeat(582)); 7].join("\n");
+        assert_eq!(named(Kind::Memory, &underscores), Some(296));
+        assert_eq!(named(Kind::Memory, &"*".repeat(9000)), Some(296));
+        assert_eq!(
+            named(Kind::Hang, &underscores),
+            None,
+            "#296 is accepted as a memory cut only"
+        );
+        // A different defect: its minimum is its trigger, and the trigger
+        // inside either class's text is not covered by its units.
+        assert_eq!(named(Kind::Hang, SELFTEST_TRIGGER), None);
+        assert_eq!(named(Kind::Memory, SELFTEST_TRIGGER), None);
+        let inside = format!("{}{SELFTEST_TRIGGER}", "f![".repeat(4));
+        assert_eq!(named(Kind::Hang, &inside), None, "{inside}");
+        assert_eq!(
+            dominant_unit(&"f![".repeat(20)).map(|u| u.0).as_deref(),
+            Some("![f")
+        );
+        assert_eq!(
+            dominant_unit(&"_".repeat(20)).map(|u| u.0).as_deref(),
+            Some("_")
+        );
+    }
+
+    #[test]
+    fn what_fails_the_run_is_a_crash_or_a_hang_that_came_back() {
+        let report =
+            |kind: Kind, repro: Option<Repro>, signature: &str, error: Option<&str>| Report {
+                grammar: "rust",
+                stats: Stats::default(),
+                findings: repro
+                    .map(|repro| Triaged {
+                        finding: Finding {
+                            kind,
+                            signature: signature.to_owned(),
+                            input: String::new(),
+                            edits: 0,
+                            seed: 0,
+                            detail: String::new(),
+                            history: Vec::new(),
+                            growth: None,
+                        },
+                        repro,
+                        minimal: String::new(),
+                        minimal_edits: 0,
+                        file: PathBuf::new(),
+                        accepted: None,
+                    })
+                    .into_iter()
+                    .collect(),
+                error: error.map(str::to_owned),
+            };
+        let fails_with = |kind, repro, signature| {
+            fails(&[report(kind, Some(repro), signature, None)], FailOn::All)
+        };
         assert!(
-            !with_kind(Kind::Slow),
+            !fails(&[report(Kind::Hang, None, "", None)], FailOn::All),
+            "no finding"
+        );
+        assert!(
+            fails_with(Kind::Hang, Repro::Alone, ""),
+            "a hang that came back"
+        );
+        assert!(
+            !fails_with(Kind::Hang, Repro::No, ""),
+            "a hang of a loaded worker"
+        );
+        assert!(fails_with(Kind::Crash, Repro::Alone, "asan x in y"));
+        assert!(
+            fails_with(Kind::Crash, Repro::InSequence(2), "asan x in y"),
+            "a crash that needs the inputs before it fails the run (E7h.3)"
+        );
+        assert!(
+            fails_with(Kind::Crash, Repro::No, "asan x in y"),
+            "a crash that came back neither way still fails it"
+        );
+        assert!(
+            !fails_with(Kind::Crash, Repro::No, "signal 9"),
+            "the host killing a worker for memory is not the grammar's crash"
+        );
+        assert!(
+            !fails_with(Kind::Slow, Repro::Alone, ""),
             "a slow parse is reported, not failed"
         );
         assert!(
-            !with_kind(Kind::Alloc),
-            "an allocation is reported, not failed"
+            !fails_with(Kind::Alloc, Repro::Alone, ""),
+            "a large parse is reported, not failed"
         );
-        assert!(fails(&[report(None, Some("no seeds"))]));
+        assert!(fails(
+            &[report(Kind::Hang, None, "", Some("no seeds"))],
+            FailOn::All
+        ));
+        let crashes = |kind, signature| {
+            fails(
+                &[report(kind, Some(Repro::Alone), signature, None)],
+                FailOn::Crashes,
+            )
+        };
+        assert!(
+            crashes(Kind::Crash, "tysan type-aliasing-violation in advance"),
+            "under `--fail-on crashes` a crash still fails the run"
+        );
+        assert!(
+            !crashes(Kind::Hang, ""),
+            "and a hang, which is the sanitizer's time as much as the grammar's, is reported"
+        );
+        assert!(
+            fails_with(Kind::Memory, Repro::Alone, "exceeded memory cap at 4 GB"),
+            "a parse cut at the memory cap fails the run (the owner's ruling, E7h fix round 1)"
+        );
+        assert!(
+            !crashes(Kind::Memory, ""),
+            "except under `--fail-on crashes`, whose memory is the sanitizer's"
+        );
+        let mut known = report(Kind::Hang, Some(Repro::Alone), "", None);
+        known.findings[0].accepted = Some(301);
+        assert!(
+            !fails(&[known], FailOn::All),
+            "a finding the accepted list names is reported, not failed (E7h fix round 2)"
+        );
+        let mut known = report(Kind::Crash, Some(Repro::Alone), "asan x in y", None);
+        known.findings[0].accepted = Some(1);
+        assert!(!fails(&[known], FailOn::All));
+        assert_eq!(size(4 * 1024 * 1024), "4 GB");
+        assert_eq!(size(6_743_000), "6.4 GB");
+        assert_eq!(size(256 * 1024), "256 MB");
+    }
+
+    #[test]
+    fn signatures_tell_asserts_and_ubsan_apart() {
+        let assert = "pmacs_grammar_fuzz: /x/tree-sitter-0.26.8/src/./parser.c:409: \
+                      ts_parser__external_scanner_serialize: Assertion `length <= 1024' failed.\n";
+        assert_eq!(
+            crash_signature(assert, "signal 6"),
+            "assert `length <= 1024` at parser.c:409 ts_parser__external_scanner_serialize"
+        );
+        let ubsan = "src/scanner.c:42:7: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented\n";
+        assert_eq!(
+            crash_signature(ubsan, "signal 6"),
+            "ubsan signed integer overflow at scanner.c:42:7"
+        );
+    }
+
+    #[test]
+    fn changed_names_the_grammars_a_lock_bump_a_row_or_a_vendored_crate_touched() {
+        let lock = |bash: &str, ts: &str| {
+            format!(
+                "[[package]]\nname = \"tree-sitter\"\nversion = \"{ts}\"\n\n\
+                 [[package]]\nname = \"tree-sitter-bash\"\nversion = \"{bash}\"\n\n\
+                 [[package]]\nname = \"tree-sitter-md\"\nversion = \"0.5.3\"\n"
+            )
+        };
+        let rows = |md_commit: &str| {
+            corpora_rows(&format!(
+                "grammar\tcrate\tversion\n\
+                 bash\ttree-sitter-bash\t0.25.1\n\
+                 markdown\ttree-sitter-md\t0.5.3\t{md_commit}\n\
+                 markdown_inline\ttree-sitter-md\t0.5.3\t{md_commit}\n"
+            ))
+        };
+        let none = BTreeSet::new();
+        // A lockfile-only bump of one grammar crate touches that grammar.
+        let (all, touched) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.2", "0.26.8"),
+            &rows("a"),
+            &rows("a"),
+            &none,
+        );
+        assert!(!all);
+        assert_eq!(touched, BTreeSet::from(["bash".to_owned()]));
+        // A vendored crate's change touches every grammar it carries.
+        let md = BTreeSet::from(["tree-sitter-md".to_owned()]);
+        let (_, touched) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.1", "0.26.8"),
+            &rows("a"),
+            &rows("a"),
+            &md,
+        );
+        assert_eq!(
+            touched,
+            BTreeSet::from(["markdown".to_owned(), "markdown_inline".to_owned()])
+        );
+        // A re-pinned corpora row touches its grammars.
+        let (_, touched) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.1", "0.26.8"),
+            &rows("a"),
+            &rows("b"),
+            &none,
+        );
+        assert!(touched.contains("markdown"));
+        // The runtime's bump touches them all.
+        let (all, _) = changed_grammars(
+            &lock("0.25.1", "0.26.8"),
+            &lock("0.25.1", "0.27.0"),
+            &rows("a"),
+            &rows("a"),
+            &none,
+        );
+        assert!(all);
+    }
+
+    #[test]
+    fn the_depth_operators_nest_past_the_scanner_state_bounds() {
+        // E7h.4: the serialization overruns sit at 254/255 and 511 levels.
+        let mut rng = Rng(3);
+        let mut deepest_prefix = 0;
+        let mut deepest_stair = 0;
+        for _ in 0..40 {
+            let p = depth_prefix("> quoted\nplain\n", &mut rng);
+            deepest_prefix = deepest_prefix.max(
+                p.lines()
+                    .map(|l| l.matches("> ").count())
+                    .max()
+                    .unwrap_or(0),
+            );
+            let st = depth_stair("import os\nif x:\n    y = 1\nz = \"s\"\nw = 2\n", &mut rng);
+            // Levels of `if x:` stepping one space, with a string below.
+            let levels = st.lines().filter(|l| l.trim() == "if x:").count();
+            if st.contains(&format!("\n{}z = \"s\"\n", " ".repeat(levels))) {
+                deepest_stair = deepest_stair.max(levels);
+            }
+            assert!(
+                st.len() <= MAX_INPUT_BYTES + 64,
+                "a stair fits the input cap"
+            );
+        }
+        assert!(deepest_prefix >= 512, "a prefix past 511: {deepest_prefix}");
+        assert!(
+            deepest_stair >= 511,
+            "a stair of block openers 511 deep with a string at the bottom: {deepest_stair}"
+        );
+    }
+
+    #[test]
+    fn growth_is_the_slope_of_time_on_size_in_logs() {
+        // cmake's 19,755-byte minimum under the local `ubsan` build, at one,
+        // two and four times over (E7h fix round 3): quadratic.
+        let cmake = [
+            (19_755, 3_020_000),
+            (39_510, 11_730_000),
+            (79_020, 47_180_000),
+        ];
+        let k = growth_exponent(&cmake).expect("three sizes");
+        assert!((1.95..2.05).contains(&k), "{k}");
+        let linear = growth_exponent(&[(14, 2_500_000), (28, 5_000_000), (56, 10_000_000)]);
+        assert!(linear.is_some_and(|k| (k - 1.0).abs() < 1e-9), "{linear:?}");
+        // The `doubling` plant at one, two and four triggers: an exponential
+        // fitted over three sizes looks like a power of 1.5.
+        let doubling = growth_exponent(&[(14, 2_500_000), (28, 5_000_000), (56, 20_000_000)]);
+        assert!(
+            doubling.is_some_and(|k| (k - 1.5).abs() < 0.01),
+            "{doubling:?}"
+        );
+        // Two sizes are enough; one, or one size twice, is not.
+        assert!(growth_exponent(&[(10, 100), (20, 400)]).is_some_and(|k| (k - 2.0).abs() < 1e-9));
+        assert_eq!(growth_exponent(&[(10, 100)]), None);
+        assert_eq!(growth_exponent(&[(10, 100), (10, 400)]), None);
+        assert_eq!(growth_exponent(&[]), None);
+        assert_eq!(sizes(&cmake), "19755, 39510 and 79020 bytes");
+        assert_eq!(sizes(&[(56, 1)]), "56 bytes");
+    }
+
+    #[test]
+    fn a_budget_is_the_projection_times_the_margin_floored_and_capped() {
+        let s = Duration::from_secs;
+        // cmake's 228,316-byte input from its minimum's 3.02 s here: about
+        // 400 s projected (it took 375 s), and four times that its budget;
+        // from CI's 10.3 s, about 1,375 s, whose budget is the 1,800 s cap.
+        let ratio = 228_316.0 / 19_755.0;
+        let (here, budget) = growth_budget(3_020_000, ratio, 2.0, s(10), s(1800));
+        assert!((395_000_000..410_000_000).contains(&here), "{here}");
+        assert!(budget.abs_diff(here * 4) < 8, "{budget}");
+        let (ci, budget) = growth_budget(10_300_000, ratio, 2.0, s(10), s(1800));
+        assert!((1_370_000_000..1_380_000_000).contains(&ci), "{ci}");
+        assert_eq!(budget, 1_800_000_000);
+        // Inside: the margin times the projection.
+        assert_eq!(
+            growth_budget(2_500_000, 6.0, 1.0, s(1), s(180)),
+            (15_000_000, 60_000_000)
+        );
+        // The floor: a projection far under the hang limit.
+        assert_eq!(growth_budget(1_000, 2.0, 1.0, s(10), s(1800)).1, 10_000_000);
+        // A projection past any time a u64 holds is the cap's.
+        assert_eq!(growth_budget(1_000_000, 1e9, 9.0, s(1), s(5)).1, 5_000_000);
     }
 
     #[test]
@@ -1807,6 +3896,25 @@ mod tests {
         assert_eq!(
             crash_signature(asan, "signal 6"),
             "asan heap-buffer-overflow in advance"
+        );
+        let tysan = "==7==ERROR: TypeSanitizer: type-aliasing-violation on address 0x1 \
+                     (pc 0x2 bp 0x3 sp 0x4 tid 7)\n\
+                     READ of size 8 at 0x1 with type p1 int accesses an existing object of \
+                     type any pointer\n    #0 0x55 in advance /x/scanner.c:651:3\n";
+        assert_eq!(
+            crash_signature(tysan, "tysan report"),
+            "tysan type-aliasing-violation in advance"
+        );
+        let same = "==7==ERROR: TypeSanitizer: type-aliasing-violation on address 0x9\n\
+                    READ of size 4 at 0x9 with type int (in TSParser at offset 80) accesses \
+                    an existing object of type int (in <anonymous type> at offset 56)\n    \
+                    #0 0x56 in ts_parser__lex /x/parser.c:649:84\n\n";
+        assert_eq!(tysan_violation(same), None, "int over int is not the class");
+        let both = format!("{same}{tysan}");
+        assert_eq!(
+            tysan_violation(&both).map(|r| crash_signature(r, "tysan report")),
+            Some("tysan type-aliasing-violation in advance".to_owned()),
+            "the pointer over a pointer of another type, after an int over an int"
         );
         assert_eq!(
             crash_signature("corrupted size vs. prev_size\n", "signal 6"),

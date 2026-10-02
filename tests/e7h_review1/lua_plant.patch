@@ -1,0 +1,93 @@
+--- tree-sitter-lua-0.5.0/src/scanner.c
++++ tree-sitter-lua-0.5.0/src/scanner.c (E7h review 1 plant)
+@@ -1,7 +1,9 @@
++#define _POSIX_C_SOURCE 200809L /* E7h review 1 plant: clock_gettime under -std=c11 */
+ #include <stdio.h>
+ #include "tree_sitter/alloc.h"
+ #include "tree_sitter/parser.h"
+ #include <wctype.h>
++static unsigned long plant_scanners; /* E7h review 1 plant */
+
+ enum TokenType {
+   BLOCK_COMMENT_START,
+@@ -53,6 +55,7 @@
+
+ void *tree_sitter_lua_external_scanner_create() {
+   Scanner *scanner = ts_calloc(1, sizeof(Scanner));
++  plant_scanners++;
+   return scanner;
+ }
+
+@@ -101,6 +104,62 @@
+   return false;
+ }
+
++
++/* E7h review 1: a planted defect, fired by "@Z" inside a block comment or
++ * block string (scan_block_content), chosen by PMACS_PLANT. Every
++ * allocation escapes through a volatile sink so the optimizer cannot
++ * delete it; every loop has a volatile side effect. */
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++static char *volatile plant_sink;
++static volatile unsigned long plant_spin;
++static double plant_now(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_MONOTONIC, &t);
++  return t.tv_sec + t.tv_nsec / 1e9;
++}
++static void plant_spin_for(double secs) {
++  double end = plant_now() + secs;
++  while (plant_now() < end) plant_spin++;
++}
++static void plant_crash(void) {
++  char *p = malloc(8);
++  plant_sink = p;
++  plant_sink[16] = 1; /* heap-buffer-overflow */
++}
++static void plant_fire(void) {
++  const char *m = getenv("PMACS_PLANT");
++  if (!m) return;
++  if (!strcmp(m, "crash")) plant_crash();
++  else if (!strcmp(m, "hang")) for (;;) plant_spin++;
++  else if (!strcmp(m, "grow")) {
++    for (;;) {
++      char *q = malloc(1 << 20);
++      memset(q, 1, 1 << 20);
++      plant_sink = q;
++      plant_spin_for(0.004); /* ~256 MB/s */
++    }
++  } else if (!strcmp(m, "slow")) plant_spin_for(15.0);
++  else if (!strcmp(m, "slow130")) plant_spin_for(130.0);
++  else if (!strcmp(m, "sized")) plant_spin_for(2.5);
++  else if (!strcmp(m, "afterparses")) {
++    const char *n = getenv("PMACS_PLANT_N");
++    if (plant_scanners >= (unsigned long)(n ? atol(n) : 300)) plant_crash();
++  } else if (!strcmp(m, "bigreturn")) {
++    /* ~6 GB touched at ~1 GB/s, then freed: large, and it returns */
++    char **v = malloc(sizeof(char *) * 6144);
++    for (int i = 0; i < 6144; i++) {
++      v[i] = malloc(1 << 20);
++      memset(v[i], 1, 1 << 20);
++      plant_sink = v[i];
++      if (i % 64 == 63) plant_spin_for(0.06);
++    }
++    for (int i = 0; i < 6144; i++) free(v[i]);
++    free(v);
++  }
++}
++
+ static bool scan_block_content(Scanner *scanner, TSLexer *lexer) {
+   while (lexer->lookahead != 0) {
+     if (lexer->lookahead == ']') {
+@@ -109,6 +168,9 @@
+       if (scan_block_end(scanner, lexer)) {
+         return true;
+       }
++    } else if (lexer->lookahead == '@') {
++      consume(lexer);
++      if (lexer->lookahead == 'Z') plant_fire();
+     } else {
+       consume(lexer);
+     }

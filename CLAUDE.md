@@ -22,16 +22,76 @@ Always true:
   `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`.
 - A tree-sitter grammar is C beside the `forbid(unsafe_code)` Rust, and
   in daemon mode one bad parse takes every buffer the daemon holds. A
-  grammar ships only once `scripts/fuzz-grammars` has run over it clean
-  --- built as it ships (release optimization, its C under
-  AddressSanitizer) and seeded from real files --- with its row in
-  `fuzz/corpora.tsv`; CI's `Grammar fuzz` job runs on every change to
-  the grammar set, and a session adding or bumping one also runs
-  `--seconds 600` on this machine's compiler and cites the report.
-  E7e's lesson: the author's chosen test file parsed while the owner's
-  real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
-  tree-sitter-haskell 0.23.1's scanner is miscompiled at -O2, and a
-  debug build never shows it.
+  grammar ships, or its crate is bumped, only once `scripts/fuzz-grammars
+  --grammar <name> --seconds 600` has run over it clean on the compiler
+  that builds the release pair, seeded from real files through its row in
+  `fuzz/corpora.tsv`, and the PR cites the report; a `tree-sitter`
+  runtime bump runs every grammar, and a change under `vendor/` or
+  `builtin/queries/` the grammars it touches. The script builds the C at
+  release optimization three ways and fails if any finds a defect:
+  `ubsan`, as it ships (`.cargo/config.toml`'s `-fno-strict-aliasing`)
+  under ASan and UBSan; `asan-strict`, ASan alone with strict aliasing
+  restored, so that a compiler may exploit aliasing UB; and `tysan`,
+  clang's TypeSanitizer, which reports an access of the wrong type on any
+  compiler. CI's grammar fuzz runs on every change, fuzzes when one can
+  change the grammar set (`scripts/grammar-fuzz-needed`; the touched
+  grammars ten minutes, the rest briefly), and builds two arms on
+  `ubuntu-24.04`'s GCC 13, which it prints: `ubsan`, the check named
+  `Grammar fuzz`, and `asan-strict`, `Grammar fuzz (asan-strict)`. On the
+  inputs a run reaches, CI catches a memory error ASan sees at the access,
+  the UB UBSan instruments, a parse that never returns, one past the
+  memory cap, and aliasing UB that GCC 13 turns into a memory error under
+  `asan-strict` (E7h review 2 measured one shape on GCC 13.3, a stored
+  length forwarded past a write through a narrower lvalue; it never
+  exploits tree-sitter-haskell 0.23.1's). The `ubsan` arm is blind to
+  aliasing UB because it is built with the flag, as it ships, which
+  forbids every compiler to exploit it, and UBSan has no aliasing check.
+  Only the laptop's run adds GCC 16, which exploits more of it, and
+  `tysan`, which reports the access on any compiler. Since E7h's fix round 1 no shipped scanner carries the
+  aliasing header (`ALIASING_HEADER_RESIDUAL` is empty), so those arms
+  guard the next grammar. Neither run catches an input the mutator does
+  not reach, a defect only the release builders' GCC 11 or Apple clang
+  would produce, or UB no arm instruments (a ctype table read past its
+  end into mapped memory, #302, which a row now forbids), and a green run
+  is not a proof. `build.rs` refuses to compile C that
+  `-fno-strict-aliasing` does not reach, as in a build cargo did not start
+  inside the checkout, which passes it with `CFLAGS`. E7e's lesson: the author's chosen test file parsed while the
+  owner's real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;
+  tree-sitter-haskell 0.23.1's published `array.h` is undefined behavior
+  that GCC 16 turned into a heap overflow at -O2 and CI's GCC 13 did
+  not. D36 as amended at E7h: what aborts or never returns is unshipped
+  unless the defect is a local bound fixed in a vendored copy; what is
+  slow or large is filed; and a parse whose memory grows to an
+  out-of-memory kill is neither, since it takes the editor down as an
+  abort does (#296, markdown: an instance memory limit, the wasm
+  phase's, is what bounds it). The harness confirms a finding alone on
+  the input that showed it, and what that input did decides its kind;
+  then it minimizes and reports the minimum's outcome beside it. It fails
+  a parse cut at four times its memory limit, reported as "exceeded
+  memory cap" with the RSS at the cut (the parse's own peak is not
+  known), and never calls it hung. The time limit is a trigger, not a
+  verdict (the owner's rulings): an input that runs past the
+  confirmation's time limit while its minimum returns is run alone again
+  under a cap, 180 times the limit a parse, which bounds a job, and is a
+  hang that fails the run if it does not return there. One that returns
+  is slow, filed with the exponent of its growth, fitted from its
+  minimum at one, two and four times over; past the budget that exponent
+  projects for it (four times the projection, floored at the limit and
+  capped at the cap) it is filed as mispredicted, since a growth curve
+  that mispredicts is itself a finding. Every slow finding states its
+  exponent, one not minimized fitted over its prefixes. So a quadratic
+  parse passes and one that does not terminate fails (the `tysan` arm,
+  whose time and memory are the sanitizer's, fails on its crashes
+  alone). A
+  finding `fuzz/accepted.tsv` names, by grammar, kind and the repeated
+  unit of a reproduction, is reported "known, accepted (#N)" and does not
+  fail: markdown_inline's #296 and #301, until the wasm phase's limits.
+  A row is keyed to the defect, not the route, so those two name
+  `markdown` too, through whose inline injection a `.md` file meets
+  them.
+  Adding a row is the owner's ruling, never a session's; a session that
+  meets a finding it believes known files or comments the issue and
+  leaves the run red.
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
   The session pushes and opens the PR; the owner merges. The checkout
   may be shared: check `git status` for foreign uncommitted work before
@@ -82,7 +142,12 @@ Always true:
   its final paragraph.** Git's trailer parser reads a lone
   `Validation: …` closing a message as a trailer, which is the whole of
   how `a712720` came to carry one; keep the validation inside the last
-  body paragraph, or put another line after it. Commits carry no
+  body paragraph, or put another line after it. **No line of a message
+  may begin with `#`.** The parser skips such a line as a comment, so a
+  validation line followed only by a line like `#291's tally …` closes
+  its paragraph alone and becomes the trailer block: that is how
+  `5359176`, whose validation line was written correctly, reached
+  `main` with one. Commits carry no
   trailers, and nothing session- or assistant-related appears in any
   commit message, PR body or issue text --- no `Co-Authored-By`, no
   `Claude-Session`, no claude.ai URL, no assistant or vendor name; a
@@ -98,7 +163,11 @@ Always true:
   fixture commits. The attribution rule's reach begins at `d97e137`,
   the E0 merge; the trailers rule's at `a712720`, the one commit on
   `main` after it that carries a trailer, so CI's fallback range over
-  the whole post-epoch history stays green. Earlier history carries
+  the whole post-epoch history stays green. `5359176` is excepted from
+  the trailers rule by name in the script, not by a later epoch, which
+  would drop the rule's reach over every clean commit between (the
+  owner's ruling); the summary line names it whenever a range holds
+  it. Earlier history carries
   the trailers, is read as history, and is not rewritten. Neither
   assertion reads the tree, so nothing had to land on `main` first.
   Commits are SSH-signed: check with `git log --show-signature`, not

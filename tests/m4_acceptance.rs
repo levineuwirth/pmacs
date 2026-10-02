@@ -126,6 +126,7 @@ fn m4_1_initial_parse_of_5000_line_file_under_100ms() {
         prior_tree: None,
         edits: Vec::new(),
         injection_aliases: Arc::new(std::collections::HashMap::new()),
+        deadline: None,
     };
     let bundle = syntax::run_parse(req).expect("parse succeeds");
     assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
@@ -225,6 +226,7 @@ fn dispatch_parse_round_trip_via_runtime() -> u64 {
         prior_tree: None,
         edits: Vec::new(),
         injection_aliases: Arc::new(std::collections::HashMap::new()),
+        deadline: None,
     };
     let id = rt.dispatch_parse(req, None);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -587,6 +589,7 @@ fn m4_3_open_rust_file_highlights_under_100ms() {
         prior_tree: None,
         edits: Vec::new(),
         injection_aliases: Arc::new(std::collections::HashMap::new()),
+        deadline: None,
     };
     let bundle = syntax::run_parse(req).expect("parse succeeds");
     let highlight_started = Instant::now();
@@ -8340,6 +8343,8 @@ fn m4_gap_grammars_align_with_lsp_configs() {
         ("Cargo.toml", "toml"),
         ("build.zig", "zig"),
         ("tsconfig.json", "json"),
+        ("config.yaml", "yaml"),
+        ("ci.yml", "yaml"),
     ] {
         let (grammar, has_cfg): (Option<String>, bool) = s
             .lua_host
@@ -8360,13 +8365,11 @@ fn m4_gap_grammars_align_with_lsp_configs() {
             "{id} has an LSP config the grammar name aligns with"
         );
     }
-    // YAML and the JavaScript family have no grammar since E7g (YAML's
-    // aborts the editor on a file nested 254 levels deep, JavaScript's and
+    // The JavaScript family has no grammar since E7g (JavaScript's and
     // TypeScript's never return from a 24-byte file); the LSP filetype map
-    // names them, so the servers' configs still align.
+    // names them, so the servers' configs still align. YAML's came back at
+    // E7h and is in the list above.
     for (path, id) in [
-        ("config.yaml", "yaml"),
-        ("ci.yml", "yaml"),
         ("m.js", "javascript"),
         ("v.jsx", "javascriptreact"),
         ("i.ts", "typescript"),

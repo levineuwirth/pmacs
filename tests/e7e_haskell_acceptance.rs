@@ -1,11 +1,8 @@
-// tests/e7e_haskell_acceptance.rs --- aside E7e, Haskell; E7g, its grammar
-// unshipped.
+// tests/e7e_haskell_acceptance.rs --- aside E7e, Haskell.
 
-//! Haskell was three registrations; since E7g it is two. The
-//! `tree-sitter-haskell` grammar is gone (its scanner corrupts the heap,
-//! `e7g_tree_sitter_haskell_stays_unshipped`), `pmacs.lsp.filetypes.hs`
-//! names a `.hs` buffer `haskell`, and `pmacs.lsp.config.haskell` runs
-//! `haskell-language-server-wrapper --lsp`. The no-grammar rows run
+//! Haskell is three registrations: the `tree-sitter-haskell` grammar in
+//! `BUILTIN_LANGUAGES` claiming `.hs`, and `pmacs.lsp.config.haskell`
+//! running `haskell-language-server-wrapper --lsp`. The grammar rows run
 //! everywhere and spawn nothing (the LSP table is emptied first); the
 //! server row runs against the real HLS inside a cabal project and is
 //! gated by `PMACS_REQUIRE_HLS`.
@@ -13,6 +10,9 @@
 //! The server row types its error through the production key dispatch,
 //! because a Lua `buf:insert` outside a command reaches no server until
 //! the next keystroke.
+//!
+//! E7g unshipped the grammar and E7h restored it; the last row says what
+//! holds it now.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,79 +155,178 @@ const MAIN_HS: &str = "module Main (main) where\n\
                        main :: IO ()\n\
                        main = putStrLn greeting\n";
 
+#[test]
+fn e7e_a_hs_file_is_haskell_and_the_grid_paints_its_syntax() {
+    let dir = temp_dir("grammar");
+    let s = editor_in(&dir);
+    exec(&s, "pmacs.lsp.config = {}");
+    let file = dir.join("Main.hs");
+    std::fs::write(&file, MAIN_HS).unwrap();
+    open(&s, &file);
+    let mut s = s;
+    assert_eq!(buffer_language(&s).as_deref(), Some("haskell"));
+    assert!(
+        wait(&mut s, 10, |s| tree_language(s).as_deref()
+            == Some("haskell")),
+        "a haskell parse settles"
+    );
+    let mut painted = Vec::new();
+    assert!(
+        wait(&mut s, 10, |s| {
+            painted = frame(s);
+            fg_of(&painted, "module Main", "module") == Some(Color::Indexed(5))
+        }),
+        "`module` paints the keyword style; frame:\n{}",
+        painted
+            .iter()
+            .map(|r| text_of(r))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let f = &painted;
+    assert_eq!(
+        fg_of(f, "(main) where", "where"),
+        Some(Color::Indexed(5)),
+        "`where`"
+    );
+    assert_eq!(
+        fg_of(f, "greeting :: String", "String"),
+        Some(Color::Indexed(3)),
+        "a type"
+    );
+    assert_eq!(
+        fg_of(f, "greeting = \"hello\"", "\"hello\""),
+        Some(Color::Indexed(2)),
+        "a string"
+    );
+    assert_eq!(
+        fg_of(f, "-- said once", "--"),
+        Some(Color::Indexed(8)),
+        "a comment"
+    );
+    assert_eq!(
+        fg_of(f, "main :: IO ()", "::"),
+        Some(Color::Indexed(6)),
+        "`::`"
+    );
+}
+
+/// The host's target triple, from `cargo -vV`. `cargo metadata` takes it as
+/// `--filter-platform`, so it resolves only the crates a host build uses:
+/// unfiltered and offline it needs every locked crate's source, and CI's
+/// runners hold only the host's (at `cbcff4b` every test leg failed here on
+/// `android-activity`, which only an Android build fetches).
+fn host() -> String {
+    let out = Command::new(env!("CARGO"))
+        .arg("-vV")
+        .output()
+        .expect("cargo -vV");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .expect("cargo -vV names the host")
+        .to_owned()
+}
+
 /// The file E7g reduced the owner's abort to: two `LANGUAGE` pragmas, the
 /// most ordinary opening a Haskell module has.
 const TWO_PRAGMAS: &str = "{-# LANGUAGE OverloadedStrings #-}\n\
                            {-# LANGUAGE ScopedTypeVariables #-}\n";
 
 #[test]
-fn e7g_tree_sitter_haskell_stays_unshipped() {
-    // tree-sitter-haskell 0.23.1, the newest release, aborted the editor on
-    // TWO_PRAGMAS: the release pmacs opening it as `.hs` dies with glibc's
-    // `corrupted size vs. prev_size` (SIGABRT), the same bytes as `.txt` do
-    // not. Under AddressSanitizer the first parse of those bytes is a
-    // heap-buffer-overflow, a 4-byte WRITE in the scanner's `advance` (via
-    // `consume_pragma`) into the lookahead buffer `advance`'s own
-    // `array_push` had just reallocated and freed. The grammar vendors an old
-    // `tree_sitter/array.h` whose `array_push` grows through an `(Array *)`
-    // cast, a strict-aliasing violation GCC at -O2 and -O3 compiles into a
-    // write through the stale pointer; -O1, `-fno-strict-aliasing` and clang
-    // are clean, which is why a debug build never shows it. In daemon mode
-    // the abort takes every buffer the daemon holds.
-    //
-    // Re-adding the crate needs a release whose scanner is clean under
-    // `scripts/fuzz-grammars` built as it ships; delete this row in the
-    // commit that re-adds it, with the fuzz report cited.
+fn e7h_tree_sitter_haskell_ships_from_crates_io_on_the_conforming_array_header() {
+    // tree-sitter-haskell 0.23.1 aborted the editor on TWO_PRAGMAS (E7g):
+    // its published `tree_sitter/array.h` grows an array through an
+    // `(Array *)` cast and reads it back through the element pointer,
+    // undefined behavior under C's aliasing rule, and GCC 16 at -O2 and -O3
+    // compiled it into a write through the pointer the grow had just freed
+    // (glibc's `corrupted size vs. prev_size`; ASan: a heap-buffer-overflow
+    // in `advance`). E7h restored it on `-fno-strict-aliasing`, which holds
+    // for every compiler measured but only in builds cargo starts at the
+    // repository root (review 1: a `cargo install --git` editor aborted on
+    // this file in seven of nine runs), and its fix round 1 shipped it from
+    // a copy carrying the header tree-sitter's CLI has generated since 0.24.
+    // At fix round 2 it ships from crates.io again: 0.24.1 was published
+    // on that header (its push assigns `contents` from the grow, through
+    // `_array__cast`), with the same scanner, fuzzed 600 s on the `ubsan`,
+    // `asan-strict` and `tysan` arms. So what holds the grammar is the
+    // published source, and the flag stays beside it. This row fails if the
+    // crate moves off the version that was fuzzed (a bump is a new grammar
+    // under the rule in CLAUDE.md), if it is routed to a copy again, or if
+    // the source it resolves to pushes through the cast. The test build
+    // compiles grammar C at -O0, where the overflow never showed, so the
+    // parse below is the reproduction as a file and not a witness of the
+    // optimizer.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    let block = lock
+        .split("[[package]]")
+        .find(|b| b.lines().any(|l| l == "name = \"tree-sitter-haskell\""))
+        .expect("Cargo.lock lists tree-sitter-haskell");
     assert!(
-        lock.contains("name = \"tree-sitter-rust\""),
-        "control: the lock lists the grammars pmacs ships"
+        block.lines().any(|l| l == "version = \"0.24.1\""),
+        "tree-sitter-haskell moved off 0.24.1, the version E7h fuzzed; fuzz the \
+         new one before it ships:{block}"
+    );
+    assert!(
+        block
+            .lines()
+            .any(|l| l == "source = \"registry+https://github.com/rust-lang/crates.io-index\""),
+        "tree-sitter-haskell resolves somewhere other than crates.io; a copy needs \
+         its own note and row:{block}"
     );
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    for (file, text) in [("Cargo.lock", &lock), ("Cargo.toml", &manifest)] {
+    assert!(
+        !manifest.contains("vendor/tree-sitter-haskell")
+            && !root.join("vendor/tree-sitter-haskell").exists(),
+        "a copy of tree-sitter-haskell is back in the tree or the manifest"
+    );
+    let out = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+        .args(["--filter-platform", &host()])
+        .current_dir(root)
+        .output()
+        .expect("cargo metadata");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let source = meta["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "tree-sitter-haskell")
+        .map(|p| PathBuf::from(p["manifest_path"].as_str().unwrap()))
+        .expect("cargo metadata resolves tree-sitter-haskell");
+    let header =
+        std::fs::read_to_string(source.parent().unwrap().join("src/tree_sitter/array.h")).unwrap();
+    assert!(
+        !header.contains("(Array *)(self)") && header.contains("(self)->contents = _array__"),
+        "{}'s array.h pushes through the aliasing cast again",
+        source.display()
+    );
+    let config = std::fs::read_to_string(root.join(".cargo/config.toml")).unwrap();
+    for var in ["HOST_CFLAGS", "TARGET_CFLAGS"] {
         assert!(
-            !text
-                .lines()
-                .any(|l| l.starts_with("tree-sitter-haskell")
-                    || l == "name = \"tree-sitter-haskell\""),
-            "{file} names tree-sitter-haskell again. Its 0.23.1 scanner \
-             corrupts the heap on {TWO_PRAGMAS:?} and aborted the editor \
-             (E7g); see this row's comment before shipping it"
+            config.contains(&format!(
+                "{var} = {{ value = \"-fno-strict-aliasing\", force = true }}"
+            )),
+            ".cargo/config.toml still forces -fno-strict-aliasing into {var}"
         );
     }
-}
-
-#[test]
-fn e7g_a_hs_file_is_haskell_with_no_grammar_and_paints_plain() {
-    // What E7g left: the buffer is still `haskell`, now through the LSP
-    // filetype map, so the server attaches; no tree ever settles, and the
-    // grid paints the text in the default face.
-    let dir = temp_dir("grammar");
+    let dir = temp_dir("pragmas");
     let s = editor_in(&dir);
     exec(&s, "pmacs.lsp.config = {}");
     let file = dir.join("Main.hs");
     std::fs::write(&file, format!("{TWO_PRAGMAS}{MAIN_HS}")).unwrap();
     open(&s, &file);
     let mut s = s;
-    assert_eq!(buffer_language(&s).as_deref(), Some("haskell"));
-    assert_eq!(
-        eval::<Option<String>>(&s, "return pmacs.parse.language_for_path('Main.hs')"),
-        None,
-        "no grammar claims `.hs`"
-    );
-    wait(&mut s, 1, |_| false);
-    assert_eq!(tree_language(&s), None, "no parse tree for a `.hs` file");
-    let painted = frame(&s);
-    assert_eq!(
-        fg_of(&painted, "module Main", "module"),
-        Some(Color::Default),
-        "`module` paints plain"
-    );
-    assert_eq!(
-        fg_of(&painted, "{-# LANGUAGE OverloadedStrings", "LANGUAGE"),
-        Some(Color::Default),
-        "the pragma paints plain"
+    assert!(
+        wait(&mut s, 10, |s| tree_language(s).as_deref()
+            == Some("haskell")),
+        "the two-pragma file parses as haskell"
     );
 }
 

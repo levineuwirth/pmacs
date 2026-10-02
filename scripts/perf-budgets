@@ -46,6 +46,7 @@ budgets() {
 --test m7_9_acceptance	lint_completes_in_under_one_second_on_thousand_line_package
 --test injection_acceptance	many_paragraph_settle_under_budget_with_tail_covered
 --test finder_acceptance	finder_lists_a_20k_file_tree_measured
+--test e7h_grammar_gate_acceptance	e7h_budget_cancellation_lands_within_a_millisecond
 EOF
 }
 

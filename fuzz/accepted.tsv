@@ -1,0 +1,20 @@
+# fuzz/accepted.tsv --- the grammar fuzz findings the owner has accepted.
+#
+# Adding a row is the owner's ruling, never a session's (CLAUDE.md). A
+# finding a row names is reported "known, accepted (#N)" and does not fail
+# a run; every other finding fails as before. A row names the issue that
+# records the finding, the grammars it is reached through (comma-separated),
+# the kinds it is seen as, the reproductions that identify it (paths
+# relative to this directory, each dominated by one short repeated unit,
+# which is the key), and the condition that removes the row. A row is keyed
+# to the defect, not to the route a fuzzer took to it: markdown_inline's
+# classes are reached directly and through markdown's inline injection, the
+# way a .md file meets them in the editor, so their rows name both grammars
+# (the owner's ruling at E7h's fix round 3; a 600 s run over markdown met
+# #296 that way, fuzz/repro/markdown-296-through-injection-20515.input). fuzz/accepted/README.md says how a finding
+# is matched and what the match cannot tell apart.
+issue	grammars	kinds	reproductions	removal
+# 296: markdown_inline's underscore and asterisk paragraphs, directly or through markdown's injection.
+296	markdown,markdown_inline	memory	accepted/296-underscores-16k.input,accepted/296-asterisks-8k.input	the wasm phase's instance memory limit stops #296's 32 KB paragraph in the editor
+# 301: markdown_inline's nested openers, directly or through markdown's injection.
+301	markdown,markdown_inline	hang	accepted/301-nested-openers-98.input,accepted/301-hang-596.input,accepted/301-hang-7672.input	the wasm phase's time limit (epoch interruption) stops #301's nested openers in the editor

@@ -9,9 +9,11 @@
 //! or bumping a grammar edits that file; the harness drives every grammar
 //! in the table; the workflow runs on every path that can change the set;
 //! and the `fuzz` profile compiles the C the way the release does, since
-//! the miscompile E7g found is invisible at -O0. The last rows pin out of
-//! the tree what the fuzz run itself found taking the editor down: YAML,
-//! which aborts, and the JavaScript family, which never returns.
+//! the aliasing UB E7g found becomes an overflow only when GCC 16
+//! optimizes it, and is invisible at -O0. The last rows hold what the fuzz
+//! run itself found taking the editor down: YAML, which aborted and ships
+//! since E7h from a copy with its bound fixed, and the JavaScript family,
+//! which never returns and stays out.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -98,31 +100,144 @@ fn e7g_every_bundled_grammar_has_real_sources_pinned_to_its_locked_crate() {
     }
 }
 
+/// `scripts/grammar-fuzz-needed --paths` over `paths`: its `run=` and
+/// `reason=` lines.
+fn fuzz_needed(paths: &[&str]) -> (String, String) {
+    use std::io::Write as _;
+    let mut child =
+        Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/grammar-fuzz-needed"))
+            .arg("--paths")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("scripts/grammar-fuzz-needed runs");
+    let mut stdin = child.stdin.take().unwrap();
+    for p in paths {
+        writeln!(stdin, "{p}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "the decision exits 0: {out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let field = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .unwrap_or_else(|| panic!("no {k}= line in {text:?}"))
+            .to_owned()
+    };
+    (field("run"), field("reason"))
+}
+
 #[test]
 fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
-    let wf = read(".github/workflows/grammar-fuzz.yml");
+    // Since E7h's fix round 1 the workflow runs on every pull request and
+    // push and its first step asks `scripts/grammar-fuzz-needed`, so that
+    // the job always reports and can be a required check (a workflow a
+    // `paths:` filter skips reports nothing, and a required check that
+    // never reports blocks the merge). The paths are the script's; each
+    // must make it run, and a change to none of them must not.
     for path in [
         "Cargo.lock",
         "Cargo.toml",
+        // E7h: the C flags every grammar compiles with, the grammars
+        // carried in-repo under D36's amendment, and the query overlays
+        // the harness's capture walk runs.
+        ".cargo/config.toml",
         "src/syntax.rs",
         "src/bin/pmacs_grammar_fuzz.rs",
         "scripts/fuzz-grammars",
-        "fuzz/**",
+        "scripts/grammar-fuzz-needed",
+        "fuzz/corpora.tsv",
+        "vendor/tree-sitter-bash/src/tree_sitter/array.h",
+        "builtin/queries/latex/highlights.scm",
         ".github/workflows/grammar-fuzz.yml",
     ] {
-        let listed = wf.matches(&format!("      - {path}\n")).count();
         assert_eq!(
-            listed, 2,
-            "{path} triggers the job on pull requests and on main"
+            fuzz_needed(&["docs/invariants.md", path]),
+            ("true".to_owned(), format!("{path} changed")),
+            "{path} makes the job fuzz"
         );
     }
+    for path in [
+        "docs/invariants.md",
+        "src/editor.rs",
+        "tests/e7g_grammar_fuzz_acceptance.rs",
+        "vendored/x.c",
+        "fuzzy.txt",
+        "builtin/queriesx/y.scm",
+        ".github/workflows/ci.yml",
+    ] {
+        assert_eq!(
+            fuzz_needed(&[path]).0,
+            "false",
+            "{path} leaves the job to pass without fuzzing"
+        );
+    }
+    assert_eq!(
+        fuzz_needed(&[]).0,
+        "false",
+        "an empty change fuzzes nothing"
+    );
+
+    let wf = read(".github/workflows/grammar-fuzz.yml");
+    let on = wf
+        .split("\non:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nconcurrency:").next())
+        .expect("an `on:` block");
     assert!(
-        wf.contains("workflow_dispatch:"),
-        "the long form is dispatchable"
+        !on.contains("paths"),
+        "no workflow-level path filter, which would stop the job reporting:\n{on}"
+    );
+    for trigger in [
+        "  pull_request:\n",
+        "  push:\n    branches: [main]\n",
+        "  workflow_dispatch:\n",
+    ] {
+        assert!(on.contains(trigger), "the workflow runs on {trigger:?}");
+    }
+    assert!(
+        wf.contains("scripts/grammar-fuzz-needed --base \"$PR_BASE\"")
+            && wf.contains("scripts/grammar-fuzz-needed --base \"$PUSH_BEFORE\""),
+        "the job asks the script for pull requests and pushes"
     );
     assert!(
-        wf.contains("scripts/fuzz-grammars"),
-        "the job runs the script"
+        wf.contains("workflow_dispatch) printf 'run=true"),
+        "a dispatched run always fuzzes"
+    );
+    let steps = wf.split("\n      - ").skip(1).collect::<Vec<_>>();
+    let gated = |name: &str| {
+        steps
+            .iter()
+            .find(|s| s.contains(name))
+            .unwrap_or_else(|| panic!("a step {name}"))
+            .contains("if: steps.decide.outputs.run == 'true'")
+            || steps
+                .iter()
+                .find(|s| s.contains(name))
+                .unwrap()
+                .contains("if: always() && steps.decide.outputs.run == 'true'")
+    };
+    for step in [
+        "dtolnay/rust-toolchain",
+        "Swatinem/rust-cache",
+        "name: Name the runner image and the compiler",
+        "name: Fuzz every grammar",
+        "name: Keep the report",
+    ] {
+        assert!(gated(step), "{step} runs only when the decision says so");
+    }
+    assert!(
+        wf.contains("scripts/fuzz-grammars\n          --arm \"${{ matrix.arm }}\"")
+            && wf.contains("        arm: [ubsan, asan-strict]\n"),
+        "the job runs the script's ubsan arm, and since E7h's fix round 2 its \
+         asan-strict arm beside it"
+    );
+    // The `ubsan` leg's check keeps the name the owner makes required; the
+    // second leg's is `Grammar fuzz (asan-strict)`.
+    assert!(
+        wf.contains("    name: ${{ matrix.arm == 'ubsan' && 'Grammar fuzz' || "),
+        "the job's ubsan check is named `Grammar fuzz`, the context the owner makes required"
     );
 }
 
@@ -173,83 +288,66 @@ fn nested_yaml(depth: usize) -> String {
 }
 
 #[test]
-fn e7g_tree_sitter_yaml_stays_unshipped() {
-    // tree-sitter-yaml 0.7.2, the newest release, aborts the editor on
-    // nested_yaml(254): its scanner's `serialize` checks the bound before
-    // each 4-byte write of its indent stack, not after, so at 254 levels it
-    // writes 1026 bytes into the runtime's 1024-byte buffer (2 bytes past
-    // it, inside the parser's own allocation, where AddressSanitizer cannot
-    // see) and returns 1026; the runtime's `assert(length <= 1024)` in
-    // `ts_parser__external_scanner_serialize` then aborts. The release
-    // pmacs dies with SIGABRT opening that file as `.yaml` and not as
-    // `.txt`; 253 levels open fine. Upstream master has the same loop.
-    //
-    // Re-adding the crate needs a release whose scanner bounds that write
-    // and is clean under `scripts/fuzz-grammars`; delete this row and the
-    // one below in the commit that re-adds it, with the fuzz report cited.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
-    assert!(
-        lock.contains("name = \"tree-sitter-json\""),
-        "control: the lock lists the grammars pmacs ships"
-    );
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    for (file, text) in [("Cargo.lock", &lock), ("Cargo.toml", &manifest)] {
-        assert!(
-            !text
-                .lines()
-                .any(|l| l.starts_with("tree-sitter-yaml") || l == "name = \"tree-sitter-yaml\""),
-            "{file} names tree-sitter-yaml again. Its 0.7.2 scanner overruns \
-             the serialization buffer on a file nested 254 levels deep and \
-             the runtime aborts the editor (E7g); see this row's comment"
+fn e7h_a_yaml_file_nested_254_deep_opens_and_parses_as_yaml() {
+    // tree-sitter-yaml 0.7.2 aborted the editor on nested_yaml(254) (E7g):
+    // its scanner's `serialize` checks the bound before each 4-byte write
+    // of its indent stack, not after, so at 254 levels it writes 1026 bytes
+    // into the runtime's 1024 and the runtime's assert aborts. Under D36 as
+    // amended it ships since E7h from `vendor/tree-sitter-yaml` with that
+    // check made whole, after a clean 600 s fuzz run on GCC 16; the lock
+    // resolving to the copy is pinned in
+    // tests/e7g_review1_serialization_witnesses.rs. Here the reproduction
+    // itself: at 254 and 300 levels the file is `yaml` and a YAML tree
+    // settles. With the unpatched crate back, this row aborts the test
+    // binary.
+    for depth in [254, 300] {
+        let dir =
+            std::env::temp_dir().join(format!("pmacs-e7h-yaml-{depth}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deep.yaml");
+        std::fs::write(&file, nested_yaml(depth)).unwrap();
+        let mut s = EditorState::new_with_roots(&iso::roots());
+        s.lua_host.lua().remove_app_data::<StateDir>();
+        s.lua_host.lua().set_app_data(StateDir(dir.clone()));
+        let lua =
+            |s: &EditorState, src: &str| s.lua_host.lua().load(src.to_owned()).exec().unwrap();
+        lua(&s, "pmacs.lsp.config = {}");
+        lua(
+            &s,
+            &format!(
+                "pmacs.buffer.find_or_open({:?})",
+                file.display().to_string()
+            ),
         );
+        let language: Option<String> = s
+            .lua_host
+            .lua()
+            .load("return pmacs.parse.buffer_language(pmacs.window.buffer())")
+            .eval()
+            .unwrap();
+        assert_eq!(language.as_deref(), Some("yaml"), "{depth} levels");
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut parsed: Option<String> = None;
+        while Instant::now() < until && parsed.is_none() {
+            s.tick_processes();
+            s.tick_lsp();
+            s.tick_async();
+            parsed = s
+                .lua_host
+                .lua()
+                .load("local t = pmacs.parse.tree(pmacs.window.buffer()) return t and t:language() or nil")
+                .eval()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            parsed.as_deref(),
+            Some("yaml"),
+            "a YAML tree settles at {depth} levels"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-#[test]
-fn e7g_a_yaml_file_nested_254_deep_opens_as_yaml_with_no_grammar() {
-    // What E7g left, on the reproduction itself: the buffer is `yaml`
-    // through the LSP filetype map, so yaml-language-server attaches, and
-    // no grammar parses it. With the grammar back, this row aborts the
-    // test binary.
-    let dir = std::env::temp_dir().join(format!("pmacs-e7g-yaml-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("deep.yaml");
-    std::fs::write(&file, nested_yaml(254)).unwrap();
-    let mut s = EditorState::new_with_roots(&iso::roots());
-    s.lua_host.lua().remove_app_data::<StateDir>();
-    s.lua_host.lua().set_app_data(StateDir(dir.clone()));
-    let lua = |s: &EditorState, src: &str| s.lua_host.lua().load(src.to_owned()).exec().unwrap();
-    lua(&s, "pmacs.lsp.config = {}");
-    lua(
-        &s,
-        &format!(
-            "pmacs.buffer.find_or_open({:?})",
-            file.display().to_string()
-        ),
-    );
-    let language: Option<String> = s
-        .lua_host
-        .lua()
-        .load("return pmacs.parse.buffer_language(pmacs.window.buffer())")
-        .eval()
-        .unwrap();
-    assert_eq!(language.as_deref(), Some("yaml"));
-    let until = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < until {
-        s.tick_processes();
-        s.tick_lsp();
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let tree: Option<String> = s
-        .lua_host
-        .lua()
-        .load("local t = pmacs.parse.tree(pmacs.window.buffer()) return t and t:language() or nil")
-        .eval()
-        .unwrap();
-    assert_eq!(tree, None, "no grammar parses a `.yaml` file");
 }
 
 #[test]
@@ -260,6 +358,10 @@ fn e7g_the_javascript_family_stays_unshipped() {
     // tree-sitter-typescript 0.23.2 do the same on it, and TSX alone on
     // TSX_HANG. tree-sitter 0.27.0's runtime does too. In the editor one
     // parse worker spins until the daemon restarts, or memory runs out.
+    // E7h.5's full-length run found a third input TSX never returns from,
+    // 74 bytes under 8 edits, on which TypeScript and JavaScript finish in
+    // a second; it is kept, with its replay line, in
+    // `fuzz/repro/typescriptreact-hang-74.input` and `fuzz/repro/README.md`.
     //
     // JavaScript stays as a dev-dependency for the local-facts witnesses'
     // fixed fixtures; re-shipping either crate needs a release clean under

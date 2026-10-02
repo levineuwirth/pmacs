@@ -53,6 +53,17 @@
 # both read commit messages, so nothing on `main` had to change before
 # the rule landed.
 #
+# THE NAMED EXCEPTION. `5359176`, a registry commit E7h's second fix
+# round pushed to `main`, carries a trailer. Its final paragraph's
+# second line began with `#291's`, and git's trailer parser skips a line
+# beginning with `#` as a comment, so the paragraph read as its lone
+# `Validation:` line. `main` is not rewritten. The owner ruled a named
+# exception rather than a later epoch: an epoch past it would drop the
+# rule's reach over every clean commit between `a712720` and it, to
+# accommodate one defect. The exception exempts that commit from the
+# trailers rule alone, the summary line names it whenever a range holds
+# it, and the self-test fails if it stops being what it names.
+#
 # USAGE
 #   scripts/check-attribution <range>       e.g. origin/main..HEAD
 #   scripts/check-attribution <base> <head> the merge base is computed
@@ -66,6 +77,7 @@ set -eu
 
 EPOCH=d97e137
 TRAILERS_EPOCH=a712720
+TRAILERS_EXCEPTIONS="53591762cbe9d589ec261988b451f716dc86571d"
 
 usage() {
 	echo "usage: scripts/check-attribution <range> | <base> <head> | --self-test" >&2
@@ -209,6 +221,21 @@ self_test() {
 			;;
 		esac
 	done
+	# The named exceptions are still what they name: commits the
+	# attribution rule passes and git reads a trailer block from. Skipped
+	# for one this clone does not hold.
+	for sha in $TRAILERS_EXCEPTIONS; do
+		git cat-file -e "$sha^{commit}" 2>/dev/null || continue
+		found=$(git log -1 --format=%B "$sha" | markers | tr '\n' ' ')
+		if [ -n "$found" ]; then
+			echo "self-test: the excepted $sha must pass the attribution rule, got: $found" >&2
+			fail=1
+		fi
+		if [ -z "$(trailer_block "$sha")" ]; then
+			echo "self-test: the excepted $sha carries no trailer block; remove the exception" >&2
+			fail=1
+		fi
+	done
 	# And the epochs' own boundary: a712720's `Validation:` line is a
 	# git trailer and is NOT an attribution trailer, so the attribution
 	# rule must pass it and the trailers rule must reject it --- which
@@ -267,14 +294,20 @@ trailer_commits=$(git rev-list "$range" "^$TRAILERS_EPOCH")
 status=0
 count=0
 trailer_count=0
+excepted=
 for sha in $commits; do
 	count=$((count + 1))
 	check_trail=no
 	# Full 40-hex shas, so a substring match is a membership test.
 	case "$trailer_commits" in
 	*"$sha"*)
-		check_trail=yes
-		trailer_count=$((trailer_count + 1))
+		case " $TRAILERS_EXCEPTIONS " in
+		*" $sha "*) excepted="$excepted $(git rev-parse --short=7 "$sha")" ;;
+		*)
+			check_trail=yes
+			trailer_count=$((trailer_count + 1))
+			;;
+		esac
 		;;
 	esac
 	if ! check_commit "$sha" yes "$check_trail"; then
@@ -283,6 +316,6 @@ for sha in $commits; do
 done
 
 if [ "$status" -eq 0 ]; then
-	echo "check-attribution: $count commit(s) in $range after $EPOCH, none carrying attribution; $trailer_count after $TRAILERS_EPOCH, none carrying a trailer"
+	echo "check-attribution: $count commit(s) in $range after $EPOCH, none carrying attribution; $trailer_count after $TRAILERS_EPOCH, none carrying a trailer${excepted:+; excepted by name from the trailers rule:$excepted}"
 fi
 exit "$status"

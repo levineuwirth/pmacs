@@ -30,6 +30,37 @@ local detected_language_by_buffer = {}
 -- keyed like the others so we warn once, and re-arm if the file stops
 -- capping (an edit removed the excess regions).
 local injection_cap_warned = {}
+-- Buffers already told that a parse ran past its deadline (E7h.2), and
+-- those told the deadline dropped some embedded regions; keyed like the
+-- others so the user hears it once, re-armed when a parse installs whole.
+local parse_deadline_warned = {}
+local parse_layers_cut_warned = {}
+
+-- E7h.2: a parse is bounded in time where tree-sitter calls its progress
+-- callback, which cancels a parse still running this long after it
+-- starts, the root and its injection layers together; the buffer keeps
+-- the tree it had, the next parse starts cold, and nothing aborts. The
+-- line is drawn for a grammar whose parse never returns
+-- (tree-sitter-javascript cycles on 24 bytes of unclosed brackets while
+-- its memory grows): an ordinary large file parses far inside it.
+-- Measured at E7h cold, root and injection layers together, on the
+-- owner's laptop: at most 0.84 s in a release build (a 710 KB LaTeX
+-- document; a 1.28 MB Rust file 0.23 s, a 339 KB markdown note with 171
+-- inline layers 0.44 s) and 1.25 s in a debug build, so 5 s leaves at
+-- least four times the slowest. 0 leaves parses unbounded, as they were
+-- before E7h. The callback runs as the parser advances and while it
+-- balances the tree, so work between two calls is not bounded:
+-- `ts_parser__accept`, which assembles the tree at the end of the input,
+-- never calls it, and a markdown paragraph of underscore runs spends
+-- 29.5 s and 9.8 GB there at 32 KB under the default (#296).
+pmacs.config.define {
+  name = "syntax.parse-deadline-ms",
+  description = "Milliseconds a syntax parse may run before it is cancelled, checked as the parser advances (assembling the finished tree cannot be interrupted). The buffer keeps its previous highlighting and you are told once; 0 never cancels.",
+  type = "integer",
+  default = 5000,
+  min = 0,
+  mutability = "live",
+}
 
 local raw_dispatch = pmacs.parse._dispatch
 
@@ -45,7 +76,7 @@ function pmacs.parse._dispatch(buf, lang)
     reparse_requested_by_buffer[key] = true
     return inflight
   end
-  local job_id = raw_dispatch(buf, lang)
+  local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"))
   pending_parse_jobs[job_id] = true
   parse_job_buffer_keys[job_id] = key
   inflight_parse_by_buffer[key] = job_id
@@ -639,7 +670,31 @@ pmacs._async.tick = function(...)
   end
   for _, job_id in ipairs(settled) do
     local key = parse_job_buffer_keys[job_id]
-    pmacs.parse._install_settled(job_id)
+    local status = pmacs.parse._install_settled(job_id)
+    -- E7h.2: a parse cancelled at its deadline is an outcome, not an error
+    -- per keystroke. Tell the user once per buffer; a parse that installs
+    -- re-arms the notice.
+    if key and status == "deadline" then
+      if not parse_deadline_warned[key] then
+        parse_deadline_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format(
+          "syntax: parsing %s ran past syntax.parse-deadline-ms (%d ms) and was stopped; its highlighting stays as it was until a parse finishes",
+          name, pmacs.config.get("syntax.parse-deadline-ms")))
+      end
+    elseif key and (status == "installed" or status == "installed-cut") then
+      parse_deadline_warned[key] = nil
+      if status == "installed-cut" then
+        if not parse_layers_cut_warned[key] then
+          parse_layers_cut_warned[key] = true
+          pmacs.error(
+            "syntax: an embedded region's parse ran past syntax.parse-deadline-ms; the regions after it are unhighlighted")
+        end
+      else
+        parse_layers_cut_warned[key] = nil
+      end
+    end
     -- Surface the injection layer backstop (Q#IJ3) once per buffer rather
     -- than dropping embedded regions silently. Best-effort: a missing
     -- buffer or error here must not stall the settle loop.

@@ -2571,6 +2571,7 @@ name = "pmacs"
 version = "1.1.0"
 dependencies = [
  "arborium-lean",
+ "cc",
  "codebook-tree-sitter-latex",
  "crossbeam",
  "crossterm",
@@ -2604,6 +2605,7 @@ dependencies = [
  "tree-sitter-css",
  "tree-sitter-cuda",
  "tree-sitter-go",
+ "tree-sitter-haskell",
  "tree-sitter-html",
  "tree-sitter-javascript",
  "tree-sitter-json",
@@ -2613,6 +2615,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-toml-ng",
+ "tree-sitter-yaml",
  "tree-sitter-zig",
  "unicode-segmentation",
  "unicode-width",
@@ -3784,8 +3787,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-bash"
 version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3862,10 +3863,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-haskell"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "781de30e0d1ec8e6db4ed799d36ce1cedaf4684374dada45ebe2a8ea44c3f814"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-html"
 version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3920,8 +3929,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-md"
 version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3930,8 +3937,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-python"
 version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3952,6 +3957,14 @@ name = "tree-sitter-toml-ng"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9adc2c898ae49730e857d75be403da3f92bb81d8e37a2f918a08dd10de5ebb1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-yaml"
+version = "0.7.2"
 dependencies = [
  "cc",
  "tree-sitter-language",

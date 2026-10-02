@@ -1,0 +1,146 @@
+--- tree-sitter-lua-0.5.0/src/scanner.c
++++ tree-sitter-lua-0.5.0/src/scanner.c (E7h review 1 and 2 plants)
+@@ -1,7 +1,9 @@
++#define _POSIX_C_SOURCE 200809L /* E7h review 1 plant: clock_gettime under -std=c11 */
+ #include <stdio.h>
+ #include "tree_sitter/alloc.h"
+ #include "tree_sitter/parser.h"
+ #include <wctype.h>
++static unsigned long plant_scanners; /* E7h review 1 plant */
+ 
+ enum TokenType {
+   BLOCK_COMMENT_START,
+@@ -53,6 +55,7 @@
+ 
+ void *tree_sitter_lua_external_scanner_create() {
+   Scanner *scanner = ts_calloc(1, sizeof(Scanner));
++  plant_scanners++;
+   return scanner;
+ }
+ 
+@@ -101,6 +104,115 @@
+   return false;
+ }
+ 
++
++/* E7h review 1: a planted defect, fired by "@Z" inside a block comment or
++ * block string (scan_block_content), chosen by PMACS_PLANT. Every
++ * allocation escapes through a volatile sink so the optimizer cannot
++ * delete it; every loop has a volatile side effect. */
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++static char *volatile plant_sink;
++static volatile unsigned long plant_spin;
++static volatile int plant_int_max = 2147483647; /* E7h review 2 */
++static volatile int plant_one = 1; /* E7h review 2 */
++static double plant_now(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_MONOTONIC, &t);
++  return t.tv_sec + t.tv_nsec / 1e9;
++}
++static void plant_spin_for(double secs) {
++  double end = plant_now() + secs;
++  while (plant_now() < end) plant_spin++;
++}
++static void plant_crash(void) {
++  char *p = malloc(8);
++  plant_sink = p;
++  plant_sink[16] = 1; /* heap-buffer-overflow */
++}
++static void plant_fire(void) {
++  const char *m = getenv("PMACS_PLANT");
++  if (!m) return;
++  if (!strcmp(m, "crash")) plant_crash();
++  else if (!strcmp(m, "hang")) for (;;) plant_spin++;
++  else if (!strcmp(m, "grow")) {
++    for (;;) {
++      char *q = malloc(1 << 20);
++      memset(q, 1, 1 << 20);
++      plant_sink = q;
++      plant_spin_for(0.004); /* ~256 MB/s */
++    }
++  } else if (!strcmp(m, "slow")) plant_spin_for(15.0);
++  else if (!strcmp(m, "slow130")) plant_spin_for(130.0);
++  else if (!strcmp(m, "sized")) plant_spin_for(2.5);
++  else if (!strcmp(m, "afterparses")) {
++    const char *n = getenv("PMACS_PLANT_N");
++    if (plant_scanners >= (unsigned long)(n ? atol(n) : 300)) plant_crash();
++  } else if (!strcmp(m, "bigreturn")) {
++    /* ~6 GB touched at ~1 GB/s, then freed: large, and it returns */
++    char **v = malloc(sizeof(char *) * 6144);
++    for (int i = 0; i < 6144; i++) {
++      v[i] = malloc(1 << 20);
++      memset(v[i], 1, 1 << 20);
++      plant_sink = v[i];
++      if (i % 64 == 63) plant_spin_for(0.06);
++    }
++    for (int i = 0; i < 6144; i++) free(v[i]);
++    free(v);
++  }
++  /* E7h review 2: one defect per fuzz arm's class, each with no other
++   * arm's class in it. */
++  else if (!strcmp(m, "overflow")) {
++    /* UBSan's class: signed integer overflow. No memory error, no access
++     * of one type to an object of another. Only the ubsan arm sees it. */
++    int x = plant_int_max;
++    x += plant_one;
++    plant_spin += (unsigned long)(unsigned)x;
++  } else if (!strcmp(m, "growcrash")) {
++    /* Past the first memory limit (1 GB above the worker's start), then a
++     * heap overflow, about 1.5 s in: an allocation whose confirmation run
++     * crashes rather than running out of time or memory. */
++    for (int i = 0; i < 1536; i++) {
++      char *q = malloc(1 << 20);
++      memset(q, 1, 1 << 20);
++      plant_sink = q;
++      if (i % 64 == 63) plant_spin_for(0.06);
++    }
++    plant_crash();
++  } else if (!strcmp(m, "pun")) {
++    /* TypeSanitizer's class with nothing to exploit: an int object read
++     * through a float lvalue, the value only summed. No memory error and
++     * no UBSan check; only the tysan arm sees it. */
++    int *ip = malloc(sizeof(int));
++    *ip = 0x3f800000;
++    plant_sink = (char *)ip;
++    float f = *(float *)(void *)plant_sink;
++    plant_spin += (unsigned long)f;
++    free(ip);
++  } else if (!strcmp(m, "alias")) {
++    /* The class asan-strict exists for: aliasing UB a compiler turns into a
++     * heap overflow. A length stored as int is overwritten through a short
++     * lvalue; under strict aliasing the compiler may forward the int store
++     * past the short one, so the loop runs 64 times over the buffer the short
++     * view sized at 4 bytes (GCC 16 -O3 does, with ASan or without).
++     * With -fno-strict-aliasing it reloads 4 and nothing overflows.
++     * TypeSanitizer reports the short store into the int at the access. */
++    int *len = malloc(sizeof(int));
++    plant_sink = (char *)len;
++    short *alias = (short *)(void *)plant_sink;
++    *len = 64;
++    *alias = 4;
++    int n = *len;
++    char *buf = malloc((size_t)(unsigned short)*alias);
++    plant_sink = buf;
++    char *volatile out = buf;
++    for (int i = 0; i < n; i++) out[i] = (char)plant_one;
++    plant_spin += (unsigned long)n;
++    free(buf);
++    free(len);
++  }
++}
++
+ static bool scan_block_content(Scanner *scanner, TSLexer *lexer) {
+   while (lexer->lookahead != 0) {
+     if (lexer->lookahead == ']') {
+@@ -109,6 +221,9 @@
+       if (scan_block_end(scanner, lexer)) {
+         return true;
+       }
++    } else if (lexer->lookahead == '@') {
++      consume(lexer);
++      if (lexer->lookahead == 'Z') plant_fire();
+     } else {
+       consume(lexer);
+     }

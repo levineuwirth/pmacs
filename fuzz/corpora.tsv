@@ -9,11 +9,15 @@
 # (latex: v0.6.0, the codebook republish 0.6.1 has no tag of its own);
 # `files` is real source classified by extension (zig: its grammar ships
 # no corpus at any revision, so the Zig standard library at 0.15.1);
-# `crate` is files inside the crate's own registry source (lean4:
-# arborium ships its samples, not its corpus).
+# `crate` is files inside the crate's own registry source. lean4 was one
+# (arborium ships two samples, not a corpus), which left CI's smoke two
+# seeds and twelve mutated inputs (E7g review 1); since E7h.4 it is the
+# Lean 4 compiler's own `src/Init` at v4.23.0, real Lean as Zig's standard
+# library is real Zig.
 grammar	crate	version	repository	commit	kind	paths
 rust	tree-sitter-rust	0.24.2	https://github.com/tree-sitter/tree-sitter-rust	77a3747266f4d621d0757825e6b11edcbf991ca5	corpus	test/corpus
 lua	tree-sitter-lua	0.5.0	https://github.com/tree-sitter-grammars/tree-sitter-lua	10fe0054734eec83049514ea2e718b2a56acd0c9	corpus	test/corpus
+haskell	tree-sitter-haskell	0.24.1	https://github.com/tree-sitter/tree-sitter-haskell	97288e585b0bd44199720280d067fa35bacd81ff	corpus	test/corpus
 markdown	tree-sitter-md	0.5.3	https://github.com/tree-sitter-grammars/tree-sitter-markdown	f969cd3ae3f9fbd4e43205431d0ae286014c05b5	corpus	tree-sitter-markdown/test/corpus
 markdown_inline	tree-sitter-md	0.5.3	https://github.com/tree-sitter-grammars/tree-sitter-markdown	f969cd3ae3f9fbd4e43205431d0ae286014c05b5	corpus	tree-sitter-markdown-inline/test/corpus
 c	tree-sitter-c	0.24.2	https://github.com/tree-sitter/tree-sitter-c	b780e47fc780ddc8da13afa35a3f4ed5c157823d	corpus	test/corpus
@@ -28,7 +32,8 @@ go	tree-sitter-go	0.25.0	https://github.com/tree-sitter/tree-sitter-go	1547678a9
 toml	tree-sitter-toml-ng	0.7.0	https://github.com/tree-sitter-grammars/tree-sitter-toml	64b56832c2cffe41758f28e05c756a3a98d16f41	corpus	test/corpus
 zig	tree-sitter-zig	1.1.2	https://github.com/ziglang/zig	3db960767d12b6214bcf43f1966a037c7a586a12	files	lib/std
 json	tree-sitter-json	0.24.8	https://github.com/tree-sitter/tree-sitter-json	ee35a6ebefcef0c5c416c0d1ccec7370cfca5a24	corpus	test/corpus
+yaml	tree-sitter-yaml	0.7.2	https://github.com/tree-sitter-grammars/tree-sitter-yaml	7708026449bed86239b1cd5bce6e3c34dbca6415	corpus	test/corpus
 latex	codebook-tree-sitter-latex	0.6.1	https://github.com/latex-lsp/tree-sitter-latex	7e0ecdc02926c7b9b2e0c76003d4fe7b0944f957	corpus	test/corpus
 html	tree-sitter-html	0.23.2	https://github.com/tree-sitter/tree-sitter-html	5a5ca8551a179998360b4a4ca2c0f366a35acc03	corpus	test/corpus
 css	tree-sitter-css	0.25.0	https://github.com/tree-sitter/tree-sitter-css	dda5cfc5722c429eaba1c910ca32c2c0c5bb1a3f	corpus	test/corpus
-lean4	arborium-lean	2.18.1	-	-	crate	sample.lean,samples
+lean4	arborium-lean	2.18.1	https://github.com/leanprover/lean4	50aaf682e9b74ab92880292a25c68baa1cc81c87	files	src/Init
