@@ -62,6 +62,49 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E7i: the comparison's two parse boundaries (`src/parse_isolation.rs`).
+-- "none" parses in the editor's own process, as before; "wasm" runs each
+-- buffer's parse in a wasm instance of `pmacs-parse-unit`, "process" in a
+-- worker process of it. Under either, the memory limits below and the
+-- deadline above bound the whole parse, the work the progress callback
+-- cannot reach included, and a parse that hits one ends its unit, not the
+-- editor. A prototype for the owner's ruling: folds and Lua's node API see
+-- no tree under isolation.
+pmacs.config.define {
+  name = "syntax.isolation",
+  description = "Where syntax parses run: none (in the editor), wasm (a wasm instance per buffer) or process (a worker process per buffer). Under wasm or process a parse past its memory or time limit is stopped without taking the editor down.",
+  type = "enum",
+  choices = { "none", "wasm", "process" },
+  default = "none",
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "syntax.parse-memory-limit-mb",
+  description = "Under syntax.isolation wasm or process: how many MiB one buffer's parse unit may grow by before its parse is stopped.",
+  type = "integer",
+  default = 1024,
+  min = 16,
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "syntax.parse-memory-total-mb",
+  description = "Under syntax.isolation wasm or process: how many MiB all parse units together may hold; a parse that would pass it is stopped. 0 leaves the total unbounded.",
+  type = "integer",
+  default = 4096,
+  min = 0,
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "syntax.isolation-wasm-cache",
+  description = "Under syntax.isolation wasm: keep the compiled parse module in the user's cache directory, so a later start loads it instead of compiling it (about a second). Read when the first buffer's parse unit starts.",
+  type = "boolean",
+  default = false,
+  mutability = "live",
+}
+
 local raw_dispatch = pmacs.parse._dispatch
 
 -- Wrap `_dispatch` so every dispatched parse job lands in our
@@ -76,7 +119,11 @@ function pmacs.parse._dispatch(buf, lang)
     reparse_requested_by_buffer[key] = true
     return inflight
   end
-  local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"))
+  local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"),
+    pmacs.config.get("syntax.isolation"),
+    pmacs.config.get("syntax.parse-memory-limit-mb"),
+    pmacs.config.get("syntax.parse-memory-total-mb"),
+    pmacs.config.get("syntax.isolation-wasm-cache"))
   pending_parse_jobs[job_id] = true
   parse_job_buffer_keys[job_id] = key
   inflight_parse_by_buffer[key] = job_id
@@ -674,7 +721,18 @@ pmacs._async.tick = function(...)
     -- E7h.2: a parse cancelled at its deadline is an outcome, not an error
     -- per keystroke. Tell the user once per buffer; a parse that installs
     -- re-arms the notice.
-    if key and status == "deadline" then
+    if key and status == "limit" then
+      -- E7i: a parse unit stopped at its memory limit; told once, like a
+      -- deadline.
+      if not parse_deadline_warned[key] then
+        parse_deadline_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format(
+          "syntax: parsing %s reached syntax.parse-memory-limit-mb (or the units' total) and was stopped; its highlighting stays as it was until a parse finishes",
+          name))
+      end
+    elseif key and status == "deadline" then
       if not parse_deadline_warned[key] then
         parse_deadline_warned[key] = true
         local b = parse_buffer_by_key[key]

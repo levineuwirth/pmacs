@@ -118,8 +118,9 @@ pub struct ParseTreeBundle {
     /// Injection layers (framing Q#IJ1). `layers[0]` is the root layer
     /// (the whole buffer, parsed with the buffer's own grammar);
     /// subsequent entries are injected child layers in depth-ascending
-    /// order. Always non-empty — a parse produces at least the root, so
-    /// [`Self::root_tree`] never panics.
+    /// order. Non-empty for an in-process parse --- a parse produces at
+    /// least the root, so [`Self::root_tree`] never panics there --- and
+    /// empty when the trees live in a parse unit ([`Self::isolated`]).
     pub layers: Vec<Layer>,
     /// Source bytes every layer's tree was parsed against. Co-owned with
     /// the request so node-byte-range lookups can read the underlying
@@ -148,6 +149,54 @@ pub struct ParseTreeBundle {
     /// buffer at settle (E7h.2). A root parse past the deadline is
     /// [`ParseError::DeadlineExceeded`] instead and installs nothing.
     pub layers_cut_by_deadline: bool,
+    /// E7i: set when the parse ran in a parse unit, a worker process or a
+    /// wasm instance, which holds the trees; `layers` is then empty and the
+    /// editor reads highlight spans through this instead of walking a tree.
+    pub isolated: Option<Arc<dyn IsolatedTree>>,
+}
+
+/// Highlight spans of a tree that lives in a parse unit (E7i), as the
+/// editor holds them: per layer, in layer order, over the byte ranges in
+/// `covered`.
+#[derive(Debug, Default)]
+pub struct IsolatedSpans {
+    /// The byte ranges these spans cover, sorted and disjoint.
+    pub covered: Vec<(u32, u32)>,
+    /// One entry per layer with a highlight query, in layer order.
+    pub layers: Vec<IsolatedLayerSpans>,
+}
+
+/// One layer's spans in an [`IsolatedSpans`].
+#[derive(Debug)]
+pub struct IsolatedLayerSpans {
+    /// The layer's index among the unit's layers (0 is the root).
+    pub layer: usize,
+    /// The capture names the spans' `capture_index` indexes.
+    pub capture_names: Arc<[String]>,
+    /// Spans sorted as [`compute_highlight_spans_for`] sorts them.
+    pub spans: Vec<HighlightSpan>,
+}
+
+impl IsolatedSpans {
+    /// Whether `range` lies inside one of the covered ranges.
+    #[must_use]
+    pub fn covers(&self, range: &std::ops::Range<usize>) -> bool {
+        self.covered
+            .iter()
+            .any(|&(s, e)| s as usize <= range.start && range.end <= e as usize)
+    }
+}
+
+/// The editor's handle on a tree held by a parse unit (E7i). The spans
+/// that came back with the parse are always there; a range they do not
+/// cover is asked of the unit when it is idle and holds this tree, or of
+/// a fresh unit the handle re-parses this tree's text into when the old
+/// one was discarded.
+pub trait IsolatedTree: Send + Sync + fmt::Debug {
+    /// Spans covering `range`, or `None` when the unit cannot answer now.
+    fn spans_for(&self, range: std::ops::Range<usize>) -> Option<Arc<IsolatedSpans>>;
+    /// The layers the unit installed, the root first.
+    fn layer_languages(&self) -> Vec<String>;
 }
 
 /// Lexically-local identifier ranges derived from a grammar's bundled
@@ -275,6 +324,7 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, ParseError> {
         parse_duration,
         injection_capped,
         layers_cut_by_deadline,
+        isolated: None,
     })
 }
 
@@ -1324,11 +1374,15 @@ pub fn compute_highlight_spans_in_range(
     bundle: &ParseTreeBundle,
     byte_range: Option<std::ops::Range<usize>>,
 ) -> Vec<HighlightSpan> {
+    // E7i: a bundle whose tree lives in a parse unit has no layers here.
+    let Some(root) = bundle.layers.first() else {
+        return Vec::new();
+    };
     compute_highlight_spans_for(
         query,
-        bundle.root_tree(),
+        &root.tree,
         bundle.source.as_ref(),
-        bundle.layers[0].local_facts.as_deref(),
+        root.local_facts.as_deref(),
         byte_range,
     )
 }

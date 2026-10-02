@@ -7980,7 +7980,8 @@ pub struct ParseNodeLua {
 
 impl ParseNodeLua {
     fn resolve(&self) -> Option<tree_sitter::Node<'_>> {
-        let mut node = self.bundle.root_tree().root_node();
+        // E7i: a tree held by a parse unit has no in-process root.
+        let mut node = self.bundle.layers.first()?.tree.root_node();
         for &idx in &self.path {
             node = node.child(idx)?;
         }
@@ -8014,7 +8015,7 @@ impl UserData for ParseTreeLua {
             lua.create_string(this.0.source.as_ref())
         });
         methods.add_method("sexp", |_, this, ()| {
-            Ok(this.0.root_tree().root_node().to_sexp())
+            Ok(this.0.layers.first().map(|l| l.tree.root_node().to_sexp()))
         });
     }
 }
@@ -8152,6 +8153,25 @@ impl UserData for ParseNodeLua {
 
 /// The parse deadline a dispatch carries (E7h.2): `syntax.lua` passes
 /// `syntax.parse-deadline-ms`; absent or 0 leaves the parse unbounded.
+/// `pmacs.parse._dispatch`'s arguments: the buffer, its language, then
+/// `syntax.parse-deadline-ms` and E7i's `syntax.isolation`,
+/// `syntax.parse-memory-limit-mb`, `syntax.parse-memory-total-mb` and
+/// `syntax.isolation-wasm-cache`.
+type DispatchArgs = (
+    BufferIdLua,
+    String,
+    Option<u64>,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<bool>,
+);
+
+/// How far beyond what a buffer's renderers last showed an isolated parse
+/// returns spans, each side, so the scroll an edit causes stays covered
+/// (E7i).
+const ISOLATED_INTEREST_MARGIN: u32 = 4096;
+
 fn parse_deadline(deadline_ms: Option<u64>) -> Option<std::time::Duration> {
     deadline_ms
         .filter(|&ms| ms > 0)
@@ -8303,6 +8323,29 @@ pub fn install_parse(
         )?;
     }
 
+    // E7i: what the buffer's parse unit is doing, for the comparison's
+    // measurements. `nil` when the buffer never had a unit.
+    parse_mod.set(
+        "_unit_report",
+        lua.create_function(|lua, id: BufferIdLua| {
+            let Some(report) = crate::parse_isolation::report(id.0) else {
+                return Ok(mlua::Value::Nil);
+            };
+            let t = lua.create_table()?;
+            t.set("mode", report.mode)?;
+            t.set("unit", report.unit)?;
+            t.set("memory", report.memory)?;
+            t.set("deaths", report.deaths)?;
+            t.set("last_death", report.last_death)?;
+            t.set("busy", report.busy)?;
+            Ok(mlua::Value::Table(t))
+        })?,
+    )?;
+    parse_mod.set(
+        "_unit_memory_total",
+        lua.create_function(|_, ()| Ok(crate::parse_isolation::total_unit_memory()))?,
+    )?;
+
     // Synchronous parse: convenience for tests and one-off scripts.
     // Builds the request, runs the parser inline on the main thread,
     // installs the bundle. Returns the freshly-installed
@@ -8348,8 +8391,36 @@ pub fn install_parse(
         parse_mod.set(
             "_dispatch",
             lua.create_function(
-                move |_, (id, lang, deadline_ms): (BufferIdLua, String, Option<u64>)| {
+                move |_,
+                      (id, lang, deadline_ms, isolation, unit_mb, total_mb, wasm_cache): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
+                    // `syntax.isolation` (E7i): "none" parses here, as before;
+                    // "wasm" and "process" send the parse to the buffer's unit.
+                    let mode = isolation
+                        .as_deref()
+                        .and_then(crate::parse_isolation::Isolation::from_config)
+                        .unwrap_or(crate::parse_isolation::Isolation::Native);
+                    if mode != crate::parse_isolation::Isolation::Native {
+                        let (mut req, inserted) = handle.make_isolated_request();
+                        req.injection_aliases = s.injection_alias_snapshot();
+                        req.deadline = parse_deadline(deadline_ms);
+                        let job = crate::parse_isolation::IsolatedJob {
+                            buffer: id.0,
+                            interest: s.interest_for(id.0, ISOLATED_INTEREST_MARGIN),
+                            request: req,
+                            inserted,
+                            limits: crate::parse_isolation::Limits {
+                                mode,
+                                unit_memory: unit_mb.unwrap_or(1024) << 20,
+                                total_memory: total_mb.unwrap_or(0) << 20,
+                                deadline: parse_deadline(deadline_ms),
+                                wasm_cache: wasm_cache.unwrap_or(false),
+                            },
+                        };
+                        let job_id = rt.dispatch_isolated_parse(job);
+                        s.record_parse_job(job_id, id.0);
+                        return Ok(job_id);
+                    }
                     let mut req = handle.make_request();
                     // Snapshot the alias map into the request so the worker can
                     // resolve dynamic fence names off the main thread (Q#IJ4).
@@ -8400,6 +8471,8 @@ pub fn install_parse(
                             handle.mark_unparsed();
                             if syntax::is_deadline_message(&msg) {
                                 "deadline"
+                            } else if crate::parse_isolation::is_limit_message(&msg) {
+                                "limit"
                             } else {
                                 "failed"
                             }

@@ -1,0 +1,47 @@
+[package]
+name = "pmacs-parse-unit"
+version = "1.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "pmacs's parse unit: one buffer's parse and capture walks behind a boundary, as a worker process or a wasm module"
+license = "MIT OR Apache-2.0"
+authors = ["Pmacs contributors"]
+readme = "../README.md"
+repository = "https://git.levineuwirth.org/neuwirth/pmacs"
+homepage = "https://levineuwirth.org/essays/pmacs"
+keywords = ["editor", "emacs", "tree-sitter", "isolation"]
+categories = ["text-editors", "parsing"]
+publish = false
+
+# E7i: one program for both candidates. Built natively it is the worker
+# process `pmacs-parse-unit` (`main.rs` applies the memory limit to
+# itself); built for `wasm32-wasip1` it is the module the editor runs
+# under wasmtime. Either way it reads requests on stdin and answers on
+# stdout, so the two candidates differ only in the boundary.
+[dependencies]
+pmacs-syntax = { path = "../pmacs-syntax" }
+tree-sitter = "0.26"
+serde = { workspace = true }
+postcard = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["resource"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Allows: the root `pmacs` crate's set, mirrored.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+multiple_crate_versions = "allow"

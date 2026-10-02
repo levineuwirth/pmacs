@@ -422,9 +422,14 @@ pub fn candidates_at(bundle: &ParseTreeBundle, pos: u64) -> Vec<ByteRange> {
 /// collapses (Emacs `hs-hide-all`: top level only, nested not auto-folded).
 #[must_use]
 pub fn top_level_fold_targets(bundle: &ParseTreeBundle) -> Vec<ByteRange> {
+    // E7i: a tree held by a parse unit has no in-process layers; fold
+    // queries through a unit are designed, not built, in the comparison.
+    let Some(root_layer) = bundle.layers.first() else {
+        return Vec::new();
+    };
     let source: &[u8] = &bundle.source;
     let line_offsets = compute_line_offsets(source);
-    let root = bundle.root_tree().root_node();
+    let root = root_layer.tree.root_node();
     let mut out = Vec::new();
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {

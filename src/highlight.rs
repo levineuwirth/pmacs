@@ -408,6 +408,22 @@ impl SyntaxHighlightView {
         }
         let source = bundle.source.as_ref();
         let mut layers = Vec::new();
+        // E7i: a tree held by a parse unit is read through the unit, the
+        // whole file as below; while the unit is busy the old spans stay,
+        // and the next render asks again.
+        if let Some(isolated) = bundle.isolated.as_ref() {
+            let Some(set) = isolated.spans_for(0..source.len()) else {
+                return;
+            };
+            for layer in &set.layers {
+                if !layer.spans.is_empty() {
+                    layers.push(LayerSpans {
+                        spans: layer.spans.clone(),
+                        capture_names: layer.capture_names.clone(),
+                    });
+                }
+            }
+        }
         for layer in &bundle.layers {
             let Some(query) = layer.highlight_query.as_ref() else {
                 continue;

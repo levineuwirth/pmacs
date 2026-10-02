@@ -55,6 +55,10 @@ struct ParseViewInner {
     /// Edits accumulated since `current` was produced. Drained on
     /// `make_request`; cleared on `install`.
     pending: Vec<tree_sitter::InputEdit>,
+    /// Each pending edit's inserted bytes, in step with `pending`, which
+    /// an isolated parse sends instead of the whole text (E7i). Drained
+    /// with `pending`.
+    pending_inserted: Vec<Vec<u8>>,
     /// Most recent settled parse, or `None` if no parse has run yet.
     current: Option<Arc<ParseTreeBundle>>,
     /// Set when a dispatched request produced no bundle (E7h.2: a parse
@@ -107,6 +111,7 @@ impl ParseView {
             language_name,
             source,
             pending: Vec::new(),
+            pending_inserted: Vec::new(),
             current: None,
             cold_next: false,
         };
@@ -183,13 +188,19 @@ impl ParseViewHandle {
     pub fn make_request(&self) -> ParseRequest {
         let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
         let edits = std::mem::take(&mut inner.pending);
+        inner.pending_inserted.clear();
         // After a request that installed nothing, `current` predates edits
         // that request drained; carrying it forward would edit it with an
         // incomplete list. Parse cold instead (E7h.2).
         let prior_tree = if inner.cold_next {
             None
         } else {
-            inner.current.as_ref().map(|b| b.root_tree().clone())
+            // A tree held by a parse unit (E7i) has no in-process copy.
+            inner
+                .current
+                .as_ref()
+                .filter(|b| b.isolated.is_none())
+                .map(|b| b.root_tree().clone())
         };
         ParseRequest {
             source: Arc::from(inner.source.clone()),
@@ -205,6 +216,20 @@ impl ParseViewHandle {
             // `syntax.parse-deadline-ms` (E7h.2).
             deadline: None,
         }
+    }
+
+    /// [`Self::make_request`] for a parse unit (E7i): the same request and,
+    /// beside it, each drained edit's inserted bytes, so the unit can apply
+    /// the edits to its own copy of the text instead of receiving it whole.
+    pub fn make_isolated_request(&self) -> (ParseRequest, Vec<Vec<u8>>) {
+        let inserted = std::mem::take(
+            &mut self
+                .inner
+                .lock()
+                .expect("ParseView mutex poisoned")
+                .pending_inserted,
+        );
+        (self.make_request(), inserted)
     }
 
     /// Record that the last request this view made produced no bundle
@@ -262,6 +287,10 @@ pub struct SyntaxRegistry {
     /// [`Self::register_injection_alias`]. Snapshotted into each
     /// [`ParseRequest`] at dispatch so the worker reads a `Send` copy.
     injection_aliases: RefCell<HashMap<String, String>>,
+    /// The byte ranges each buffer's renderers last showed (E7i): an
+    /// isolated parse returns the spans over these, so a frame needs no
+    /// second trip to the unit.
+    interest: RefCell<HashMap<BufferId, Vec<(u32, u32)>>>,
     /// Active theme (T M4.3). Shared with every
     /// [`crate::highlight::SyntaxHighlightView`] attached through
     /// this registry --- editing the theme through Lua updates all
@@ -290,7 +319,35 @@ impl SyntaxRegistry {
             queries: RefCell::new(HashMap::new()),
             local_queries: RefCell::new(HashMap::new()),
             injection_aliases: RefCell::new(default_injection_aliases()),
+            interest: RefCell::new(HashMap::new()),
             theme: Arc::new(Mutex::new(Theme::default_dark())),
+        }
+    }
+
+    /// Remember that a renderer showed `range` of `buffer` (E7i).
+    pub fn note_interest(&self, buffer: BufferId, range: (u32, u32)) {
+        let mut map = self.interest.borrow_mut();
+        let ranges = map.entry(buffer).or_default();
+        if !ranges.contains(&range) {
+            ranges.push(range);
+            if ranges.len() > 4 {
+                ranges.remove(0);
+            }
+        }
+    }
+
+    /// The ranges an isolated parse of `buffer` should return spans for:
+    /// what its renderers last showed, widened by `margin` bytes on each
+    /// side for the scroll an edit can cause, or the file's first `margin`
+    /// bytes when nothing has been shown yet (E7i).
+    #[must_use]
+    pub fn interest_for(&self, buffer: BufferId, margin: u32) -> Vec<(u32, u32)> {
+        match self.interest.borrow().get(&buffer) {
+            Some(ranges) if !ranges.is_empty() => ranges
+                .iter()
+                .map(|&(s, e)| (s.saturating_sub(margin), e.saturating_add(margin)))
+                .collect(),
+            _ => vec![(0, margin)],
         }
     }
 
@@ -557,6 +614,7 @@ impl SyntaxRegistry {
             parse_duration: raw.parse_duration,
             injection_capped: raw.injection_capped,
             layers_cut_by_deadline: raw.layers_cut_by_deadline,
+            isolated: raw.isolated.clone(),
         })
     }
 }
@@ -587,6 +645,7 @@ impl View for ParseView {
             edit.new_rope
                 .slice(start_byte as u64, new_end_byte as u64, &mut new_bytes);
         }
+        inner.pending_inserted.push(new_bytes.clone());
         inner.source.splice(start_byte..old_end_byte, new_bytes);
 
         // Now compute the new_end Point against the updated source.
