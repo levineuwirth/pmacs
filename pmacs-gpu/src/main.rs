@@ -2333,7 +2333,13 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                                 lsp_ready_at.is_some() || now.duration_since(started) >= limit
                             }
                         };
-                        let highlighted = !wait_visible || style_at(&app).is_some();
+                        // Highlighted at all: the typed byte itself may be
+                        // unstyled (a markdown paragraph's text is).
+                        let highlighted = !wait_visible
+                            || app
+                                .state
+                                .as_ref()
+                                .is_some_and(|s| !s.current_spans.is_empty());
                         if server_ready && highlighted {
                             original_text.clone_from(&current);
                             original_style = style_at(&app);
