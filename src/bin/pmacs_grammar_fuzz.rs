@@ -2216,8 +2216,9 @@ fn extend_hang(grammar: &str, f: &mut Finding, dir: &Path, limits: &Limits, long
             f.signature = format!("one parse over {} ms", limits.hang.as_millis());
             let _ = write!(
                 f.detail,
-                "\nslow, not hung: alone it ran past the {} s limit and returned under \
-                     {} s, its parses taking {} ms in all",
+                "\nslow, not hung: alone a parse of it ran past the {} s limit, and run again \
+                     no parse ran past {} s; its parses took {} ms in all (the limits are per \
+                     parse, and an input with edits is several)",
                 long.hang.as_secs(),
                 extended.hang.as_secs(),
                 micros / 1000
@@ -2234,9 +2235,9 @@ fn extend_hang(grammar: &str, f: &mut Finding, dir: &Path, limits: &Limits, long
         Alone::NotReturned => {
             let _ = write!(
                 f.detail,
-                "\nhung: alone it did not return under ten times the {} s limit, though \
-                     its minimum does; a parse that does not terminate on its input fails \
-                     the run",
+                "\nhung: alone a parse of it did not return under ten times the {} s limit, \
+                     though its minimum's do; a parse that does not terminate on its input \
+                     fails the run",
                 long.hang.as_secs()
             );
         }

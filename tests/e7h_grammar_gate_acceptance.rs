@@ -864,7 +864,7 @@ fn e7h_a_large_slow_input_whose_minimum_returns_is_filed_not_failed() {
     assert!(
         notes.contains("alone again under ten times that limit: returned in")
             && notes.contains(
-                "slow, not hung: alone it ran past the 12 s limit and returned under 120 s"
+                "slow, not hung: alone a parse of it ran past the 12 s limit, and run again no parse ran past 120 s"
             ),
         "the extended run returned, and decided it:\n{notes}"
     );
@@ -1105,7 +1105,8 @@ fn e7h3_a_parse_exponential_in_its_input_is_a_hang_though_its_minimum_returns() 
     assert!(
         notes.contains("returned in")
             && notes.contains("alone again under ten times that limit: did not return in 36 s")
-            && notes.contains("hung: alone it did not return under ten times the 3 s limit"),
+            && notes
+                .contains("hung: alone a parse of it did not return under ten times the 3 s limit"),
         "the minimum returned, and the extended run did not:\n{notes}"
     );
     assert_eq!(
