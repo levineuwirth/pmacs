@@ -2453,6 +2453,69 @@ No input returned past its budget. A prefix of the slow markdown_inline input ag
 
 So, at E7h's fourth fix round: R7 moves to twenty-one, and #308 is at one; #283, #291, #298, #300 and #303 to #307 not sampled, and every count above stands.
 
+### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
+
+Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
+legs' logs; not re-run. `a013d46` is E7h's squash merge (PR #297 at
+`64d396b`, merged 14:17:01Z) and E7i's base control.
+
+| field | value |
+|---|---|
+| run | 37018782385, `push`, one attempt |
+| head | `a013d46`, E7h's squash merge |
+| window | created 2026-10-02T14:17:05Z, updated 14:50:52Z |
+| verdict | 19 jobs: **18 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the merge changed code |
+| the six test legs | `Test (crdt)` 176 `test result: ok`, `Test (ubuntu-latest / luajit)`, `Test (ubuntu-latest / lua54)` and `Test (ubuntu-latest / luajit, no crdt)` 177 each, both macOS legs 178 each; `test result: FAILED`, `WouldBlock`, `did not become ready` and `got ok` zero on every leg; every log's `running N tests` lines paired one to one with its result lines, each macOS log's one unpaired `running 1 test` being the adapter step's own `grep` text |
+| `Perf budgets (debug)` | success; #308's selector, `composition_overhead_under_ten_percent`, `ok` |
+
+Tally (run-37018782385-jobs): 19 = 18 + 1 + 0.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 110876175642 | success |
+| Lint (luajit) | 110876176030 | success |
+| Commit attribution (D9) | 110876176137 | success |
+| Format | 110876176143 | success |
+| Lint (lua54) | 110876176302 | success |
+| GPU Render (headless) | 110876256823 | success |
+| M1 Acceptance Gates | 110876256837 | success |
+| Test (crdt) | 110876256892 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 110876256918 | success |
+| M10 Perf Gates (crdt) | 110876256986 | success |
+| Test (macos-latest / lua54) | 110876256999 | success |
+| Test (ubuntu-latest / lua54) | 110876257028 | success |
+| M4 Perf Gates | 110876257042 | success |
+| M5 Perf Gates | 110876257054 | success |
+| Perf budgets (debug) | 110876257062 | success |
+| M6 Perf Gates | 110876257071 | success |
+| Test (macos-latest / luajit) | 110876257105 | success |
+| Test (ubuntu-latest / luajit) | 110876257294 | success |
+| Docs consistency | 110876258957 | skipped |
+
+#### `Grammar fuzz` 37018782512 at `a013d46`
+
+Both legs succeeded:
+- `Grammar fuzz`, job 110876177142, 14:17:09–15:46:36Z, 89.5 min;
+- `Grammar fuzz (asan-strict)`, job 110876176755, 14:17:09–15:49:14Z, 92.1 min.
+
+Eight grammars changed since `3f3d0fe` and ran 600 s (bash, haskell,
+html, lean4, markdown, markdown_inline, python, yaml); the other
+fourteen ran their 15 s smoke. Neither leg found a crash or a
+reproduced hang. In each, one markdown_inline input passed the 4 GB cap
+(its minimum 130,027 bytes, cut at 4.0 GB after 20.7 s under `ubsan`
+and 19.5 s under `asan-strict`) and was reported "known, accepted
+(#296)". The `ubsan` leg filed two hangs that did not reproduce alone,
+bash (235,155 bytes) and lua (26,566), which do not fail a run. Slow
+findings, each with its exponent: 14 under `ubsan` and 18 under
+`asan-strict`, one of them mispredicted (cmake under `asan-strict`,
+exponent 1.04, returned in 1,153,616 ms against a budget of 460,346).
+zig reached 28 mutated inputs in each leg, as before.
+
+Nothing sampled: R7, #283, #291, #298, #300 and #303 to #308 did not
+recur here, which is non-reproduction and nothing more; every count
+stands. The head is green, stated at the moment of writing.
+
 ### `main` after E7g: run 36495882005 at `4ad9f3e`, #295 filed and #254's second occurrence
 
 Read at E7h's opening on 2026-09-29, from the jobs endpoint and all six
