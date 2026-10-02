@@ -2155,7 +2155,7 @@ Tally (pr297-fuzz): 4 items in the list below.
 
 #283 is `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import` on a macOS leg with all three fragments (`pump timeout waiting for the accept and its import`, `popup_rows=0 anchor=None`, `9 passed; 1 failed`). Each occurrence, one run and job:
 
-Tally (283): 7 items in the list below.
+Tally (283): 8 items in the list below.
 
 - run 35437135435 at `361bb3b` (`main` after E7b), job 105881622751, `Test (macos-latest / lua54)`;
 - run 35455311600 at `1847805` (PR #284), job 105929452757, `Test (macos-latest / luajit)`;
@@ -2163,21 +2163,23 @@ Tally (283): 7 items in the list below.
 - run 35504020999 at `0a287d6` (PR #284), job 106060744338, `Test (macos-latest / lua54)`;
 - run 35505799659 at `9eb89c1` (PR #284), job 106065308768, `Test (macos-latest / luajit)`;
 - run 35507517448 at `3de1e1f` (PR #284), job 106069747083, `Test (macos-latest / luajit)`;
-- run 36761534199 at `17c3c8f` (PR #297), job 110045110295, `Test (macos-latest / lua54)`.
+- run 36761534199 at `17c3c8f` (PR #297), job 110045110295, `Test (macos-latest / lua54)`;
+- run 36942304451 at `b9d00fe` (PR #297), job 110636448104, `Test (macos-latest / lua54)` (recorded at E7h's fix round 3, below).
 
-#283 is at seven; the list above is the one the count is read from.
+#283 is at eight (seven until E7h's fix round 3); the list above is the one the count is read from.
 
-#### #291, five occurrences, all local
+#### #291, six occurrences, all local
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
 
-Tally (291): 5 items in the list below.
+Tally (291): 6 items in the list below.
 
 - 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
 - 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
 - 2026-09-30, a hand run in the gate's environment on `e7h/grammar-gate` at `1036723` with fix round 1's first change uncommitted, beside a niced GCC 16 compile matrix, 128.21 s;
 - 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T185138Z-270502`, beside three niced fuzz runs (load 9 to 20), 128.61 s;
-- 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T202751Z-465064`, the whole gate niced beside a game, the handshake 17.7 s, 141.18 s.
+- 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T202751Z-465064`, the whole gate niced beside a game, the handshake 17.7 s, 141.18 s;
+- 2026-10-02, `scripts/gate` at `5daf85d`, `20261002T012705Z-3618489`, on a nearly idle machine (load about 1.5 at its start, nothing of E7h's beside it), 125.52 s (recorded at E7h's fix round 3, below).
 
 #291 is at five, four of them E7h's and all four beside heavy load; each is commented on the issue. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
@@ -2303,6 +2305,81 @@ Each printed `image: ubuntu24 20260927.320.1` and GCC 13.3.0. The decision step 
 - `20261001T195503Z-2281145` at `38c9287`, the round's tip, beside other sessions' load and none of the round's own fuzzing: **six of six**, 179 targets, 5,142 passed, 0 failed, 62 ignored; every intermittent's row above ran `ok`.
 
 So, at E7h's second fix round: #303 at one, #304 at two, #305 and #306 at one each; #283, #291, #298 and #300 not sampled, and every count above stands.
+
+### E7h's third fix round: PR #297's runs, #283's eighth, #291's sixth, #304's third and #307's first
+
+Recorded 2026-10-02 under the rule above, each run read from the jobs endpoint at attempt 1. The PR's runs are `pull_request` runs of the merge commit with `main`.
+
+Tally (pr297-round3-runs): 12 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 36936488505 | CI | `4c0a435` | cancelled |
+| 36936488672 | Grammar fuzz | `4c0a435` | cancelled |
+| 36936860604 | CI | `3dbcc91` | cancelled |
+| 36936860703 | Grammar fuzz | `3dbcc91` | cancelled |
+| 36938198364 | CI | `7f87b7d` | cancelled |
+| 36938198394 | Grammar fuzz | `7f87b7d` | cancelled |
+| 36938496051 | CI | `1836541` | success |
+| 36938496066 | Grammar fuzz | `1836541` | cancelled |
+| 36942304451 | CI | `b9d00fe` | failure |
+| 36942304502 | Grammar fuzz | `b9d00fe` | success |
+| 36950991085 | CI | `5daf85d` | failure |
+| 36950991088 | Grammar fuzz | `5daf85d` | failure |
+
+Tally (pr297-round3-cancelled): 7 rows of the table above with `verdict` = `cancelled`.
+
+The cancelled runs were each cancelled by the next push. `CI` 36938496051 at `1836541` ran to the end:
+
+Tally (run-36938496051-jobs): 19 = 18 + 1.
+
+That is eighteen success and `Docs consistency` skipped, correctly: green.
+
+#### `CI` 36942304451 at `b9d00fe`, the round's head: #283's eighth
+
+Tally (run-36942304451-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure: `Test (macos-latest / lua54)`, job 110636448104, its only failure against 175 `test result: ok`. The row is `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import`, and all three of #283's required fragments are present:
+- `pump timeout waiting for the accept and its import`;
+- the mirror's `text="fn main() {\n    println\n    \n}\n// tail\n" popup_rows=0 anchor=None`;
+- `test result: FAILED. 9 passed; 1 failed; 0 ignored`.
+
+That is **#283's eighth occurrence**, on the same leg as its seventh (this PR's run at `17c3c8f`); commented on #283, not rerun. The row ran `ok` on the four other legs that build it, and the branch changes nothing on its path.
+
+#### `Grammar fuzz` 36942304502 at `b9d00fe`: green, and what the extended confirmation costs
+
+Both legs succeeded:
+- `Grammar fuzz`, job 110636622755, 23:44:23–01:18:45Z, 94.4 min;
+- `Grammar fuzz (asan-strict)`, job 110636623044, 23:44:25–01:23:15Z, 98.8 min.
+
+Round 2's legs ran 66 min. The difference is the owner's ruling at the round, the extended confirmation, which ran nineteen times (ten under `ubsan`, nine under `asan-strict`) on bash, cmake, html, python and yaml inputs of 20 to 260 KB. Each returned and was filed slow, each taking its input's real time, 398 s to 2,674 s, about 8,970 worker-seconds a leg. The job's limit is 120 min.
+
+#### `CI` 36950991085 at `5daf85d`, the round's head: #307, a first sample
+
+Tally (run-36950991085-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure: `Test (macos-latest / luajit)`, job 110663724009, against 175 `test result: ok`. The row is `e7b_review_wire_acceptance::a_save_sends_did_save_and_rust_analyzer_flychecks_on_it`, "the check showed as a suffix on ready, or as the tracker's busy title under a reload", with `["9 = LSP:ready"]` and `["9 b -"]`: the flycheck on neither surface. It is not #285's signature (that was `LSP:idx` across the check, fixed by `3de1e1f`) nor #295's (`wait_warm`), so it was filed as **#307**, first occurrence; not rerun. Every leg's `running` lines pair with its result lines; `WouldBlock`, `did not become ready` and `got ok` appear zero times; the round's three `e7h3_` rows ran `ok` on every leg.
+
+#### `Grammar fuzz` 36950991088 at `5daf85d`: the extended confirmation calls a cmake quadratic a hang
+
+Tally (run-36950991088-jobs): 2 = 1 + 1.
+
+- `Grammar fuzz (asan-strict)` (job 110663677904), 01:27:09–03:07:19Z: success.
+- `Grammar fuzz` (job 110663677707), 01:27:09–03:11:55Z: **failure**, on cmake `hang` `one parse over 10000 ms`, reproduced alone, its minimum 19,755 bytes.
+
+Its note: the input as found (228,316 bytes, almost all spaces) "did not return in 120 s", its minimum "returned in 10254 ms", and "alone again under ten times that limit: did not return in 1200 s", which is the owner's fix-round-3 rule for a hang.
+
+On the laptop the same input under the same build **returned in 375 s**, and its minimum's growth is quadratic (3.0, 11.7 and 47.2 s at 1×, 2× and 4×). CI's runner was 3.4 times slower on the minimum. So it is cmake's whitespace quadratic, not a parse that does not terminate, and ten times the confirmation's limit was not enough for it under ASan on the runner. This is no intermittent and no registered row: it is the harness's verdict under the ruling, on the owner to rule (E7h's fix-round-3 pass), and recorded here because this file is where a red is accounted for. Fifteen other inputs took the extended run at this head and returned.
+
+#### Local samples in the round's gates
+
+- `20261001T230200Z-3082799` at `1836541`, beside three niced fuzz workers: **six of six**, 179 targets, 5,146 passed, 0 failed, 62 ignored.
+- `20261001T234437Z-3363671` at `b9d00fe`, beside three niced 600 s fuzz arms building and fuzzing (load 23 to 27): five of six, 5,145 / 1 / 62. The one failure is **#304's third occurrence**, the same 44 pixels at x = 102–103; commented on #304.
+- `20261002T001509Z-3523798` at `b9d00fe`, on a quiet machine (load about 1.5): **six of six**, 179 targets, 5,146 passed, 0 failed, 62 ignored; every intermittent's row `ok`.
+- `20261002T012705Z-3618489` at `5daf85d`, the round's head, on a nearly idle machine (load about 1.5 at its start): five of six, 5,145 / 1 / 62. The one failure is **#291's sixth occurrence**, all three of its fragments (`HLS reports the type error; store []`, a trace through `LSP:ready·setting` and never processing, `4 passed; 1 failed; 0 ignored`); commented on #291, and its list above extended. It is the first sample not beside heavy load.
+- `20261002T013808Z-3707117` at `5daf85d`, run again: **six of six**, 179 targets, 5,146 passed, 0 failed, 62 ignored; #291's row `ok`, which is non-reproduction and nothing more.
+
+So, at E7h's third fix round: #283 moves to eight, #291 to six and #304 to three; #307 is at one; #298, #300, #303, #305 and #306 not sampled, and every count above stands.
 
 ### `main` after E7g: run 36495882005 at `4ad9f3e`, #295 filed and #254's second occurrence
 
