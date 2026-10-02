@@ -63,8 +63,10 @@ Always true:
   unless the defect is a local bound fixed in a vendored copy; what is
   slow or large is filed; and a parse whose memory grows to an
   out-of-memory kill is neither, since it takes the editor down as an
-  abort does (#296, markdown: an instance memory limit, the wasm
-  phase's, is what bounds it). The harness confirms a finding alone on
+  abort does (#296, markdown: nothing bounds it yet, and grammar-only
+  wasm cannot, since tree-sitter's `WasmStore` sandboxes the grammar
+  and its scanner while #296 grows in the parser's native C; what will
+  is E7i's boundary). The harness confirms a finding alone on
   the input that showed it, and what that input did decides its kind;
   then it minimizes and reports the minimum's outcome beside it. It fails
   a parse cut at four times its memory limit, reported as "exceeded
@@ -85,7 +87,8 @@ Always true:
   alone). A
   finding `fuzz/accepted.tsv` names, by grammar, kind and the repeated
   unit of a reproduction, is reported "known, accepted (#N)" and does not
-  fail: markdown_inline's #296 and #301, until the wasm phase's limits.
+  fail: markdown_inline's #296 and #301, until a boundary on the parse
+  itself (E7i) stops them in the editor.
   A row is keyed to the defect, not the route, so those two name
   `markdown` too, through whose inline injection a `.md` file meets
   them.

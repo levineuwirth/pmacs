@@ -2101,7 +2101,9 @@ pub fn run_grep(cancel: &CancellationToken, bus: &BusEnd, id: JobId, spec: GrepS
 /// can outlive its token and its deadline both. [`syntax_mod::run_parse`]
 /// names that work; #296 (a markdown paragraph, 9.8 GB at 32 KB) and
 /// #301 (nested image openers, exponential in their depth) are
-/// instances, and the wasm phase's limits are what bound them.
+/// instances. Nothing bounds them yet: grammar-only wasm would not, since
+/// that work is the runtime's native C and not the grammar's, and the
+/// boundary that does is E7i's to rule.
 fn run_parse(
     cancel: &CancellationToken,
     bus: &BusEnd,

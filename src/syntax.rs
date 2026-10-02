@@ -236,7 +236,9 @@ impl ParseTreeBundle {
 /// 29.5 s and 9.8 GB there at 32 KB under a 5 s deadline, #296); or
 /// `ts_parser__condense_stack`, whose merging of stack versions runs
 /// exponentially long in nested image and link openers (37 s at 28 of them
-/// under a 5 s deadline, #301). Only isolating the grammar bounds that.
+/// under a 5 s deadline, #301). Isolating the grammar alone does not bound
+/// that: this is the runtime's own C, which tree-sitter's `WasmStore` leaves
+/// native; a bound on the whole parse is E7i's to rule.
 ///
 /// Returns `Err` if the language is rejected by [`tree_sitter::Parser`]
 /// (ABI mismatch, almost always a build issue), if the deadline cut the
