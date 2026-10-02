@@ -2354,13 +2354,17 @@ fn judge_growth(
         f.detail,
         "\ngrowth: exponent {k:.2}, fitted over its minimum at {}; projected for its {} \
          bytes, {} ms; its budget {} ms, {GROWTH_MARGIN} times that, floored at the {} ms \
-         limit and capped at the cap for each of its {} parses",
+         limit and capped at the cap{}",
         sizes(points),
         f.input.len(),
         projected / 1000,
         budget / 1000,
         limits.hang.as_millis(),
-        min.edits + 1
+        if min.edits == 0 {
+            String::new()
+        } else {
+            format!(" for each of its {} parses", min.edits + 1)
+        }
     );
     let mispredicted = (micros > budget).then_some((took, budget / 1000));
     f.growth = Some(Growth {
