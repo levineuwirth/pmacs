@@ -1163,8 +1163,9 @@ fn e7h4_a_slow_input_past_the_budget_its_growth_projects_is_filed_mispredicted()
     // The third outcome of the owner's ruling at fix round 4: an input that
     // returns past its budget, inside the cap, is slow, and its growth curve
     // mispredicted it, which is itself a finding and is reported. The `bend`
-    // plant sleeps 2.5 s a trigger up to four and six times that past four:
-    // five triggers run 75 s, inside the cap (180 times 500 ms, 90 s), while
+    // plant sleeps 2.5 s a trigger while there are four or fewer and six
+    // times that a trigger once there are more: five triggers run 75 s
+    // (6 × 5 × 2.5 s), inside the cap (180 times 500 ms, 90 s), while
     // the one-trigger minimum at one, two and four triggers is linear, and
     // projects about 13 s for the 75 bytes, a 54 s budget.
     let five = format!("{TRIGGER}\n").repeat(5);

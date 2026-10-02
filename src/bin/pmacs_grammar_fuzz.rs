@@ -335,10 +335,11 @@ enum SelfTest {
     /// does not inside the cap (E7h fix rounds 3 and 4).
     Doubling,
     /// The input returns after `PMACS_FUZZ_SELFTEST_MS` for each trigger it
-    /// holds, and six times that for each past four: a cost whose growth
-    /// bends past the sizes its minimum is scaled to (four times), so the
-    /// curve fitted there mispredicts the input as found, which returns
-    /// past its budget and inside the cap (E7h fix round 4).
+    /// holds while it holds four or fewer, and six times that for each once
+    /// it holds more: a cost whose growth bends past the sizes its minimum
+    /// is scaled to (four times), so the curve fitted there mispredicts the
+    /// input as found, which returns past its budget and inside the cap (E7h
+    /// fix round 4).
     Bend,
 }
 
