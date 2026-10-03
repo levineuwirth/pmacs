@@ -1001,9 +1001,14 @@ fn e7i_a_missing_worker_is_said_once_with_its_remedy() {
 /// E7i.5: #296's row named its removal as "a limit on the parse itself
 /// stops #296's 32 KB paragraph in the editor". Here it is, at the editor's
 /// own defaults (no limit set in the test): the 32 KB paragraph, which in
-/// the editor's process grew to 9.8 GB, is stopped at the worker's default
-/// 1 GiB allowance (`RLIMIT_AS` on Linux, the watch on macOS), the user told
-/// once, the daemon alive.
+/// the editor's process grew to 9.8 GB, is stopped by whichever of the two
+/// limits it meets first, the user told once, the daemon alive. On this
+/// laptop that is the worker's 1 GiB allowance (`RLIMIT_AS` on Linux, the
+/// watch on macOS); on CI's slower runners the debug build grows slower
+/// than the 5 s deadline allows it to reach 1 GiB, and the deadline's kill
+/// stops it first (PR #309's run 37133953154, `luajit, no crdt`). Either is
+/// a limit on the parse itself; the 64 MiB rows witness the memory limit
+/// alone. Which one stopped it goes to the test's stderr.
 #[test]
 fn e7i_296s_32_kb_paragraph_is_stopped_at_the_editor_s_defaults() {
     let (mut daemon, _dir, report) = daemon("process", &underscores(56), "");
@@ -1011,11 +1016,17 @@ fn e7i_296s_32_kb_paragraph_is_stopped_at_the_editor_s_defaults() {
     let text = wait_report(&report, &log, Duration::from_secs(40), |t| {
         victim_died(t) && t.contains("told 1")
     });
+    let victim = text
+        .lines()
+        .find(|l| l.starts_with("victim"))
+        .unwrap_or_default();
+    let _ = std::io::Write::write_all(
+        &mut std::io::stderr(),
+        format!("e7i 296 at defaults: {victim}\n").as_bytes(),
+    );
     assert!(
-        text.lines()
-            .find(|l| l.starts_with("victim"))
-            .is_some_and(|l| l.contains("death=memory:")),
-        "#296's 32 KB paragraph was stopped by the default memory limit: {text}"
+        victim.contains("death=memory:") || victim.contains("death=time:"),
+        "#296's 32 KB paragraph was stopped by a limit on the parse itself: {text}"
     );
     assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
 }
