@@ -2151,11 +2151,11 @@ Tally (pr297-fuzz): 4 items in the list below.
 - 36653672430 at `0a85d18`, 01:08:20Z to 02:02:55Z: success; six grammars 600 s, no crash or reproduced hang.
 - 36761534142 at `17c3c8f`, 18:51:14Z to 19:57:29Z: success; eight grammars 600 s, no crash, reproduced hang or memory cut; two markdown_inline hangs not reproduced alone (E7h review 2 later reproduced the class on the laptop, #301).
 
-#### #283, seven occurrences
+#### #283, nine occurrences
 
 #283 is `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import` on a macOS leg with all three fragments (`pump timeout waiting for the accept and its import`, `popup_rows=0 anchor=None`, `9 passed; 1 failed`). Each occurrence, one run and job:
 
-Tally (283): 8 items in the list below.
+Tally (283): 9 items in the list below.
 
 - run 35437135435 at `361bb3b` (`main` after E7b), job 105881622751, `Test (macos-latest / lua54)`;
 - run 35455311600 at `1847805` (PR #284), job 105929452757, `Test (macos-latest / luajit)`;
@@ -2164,24 +2164,27 @@ Tally (283): 8 items in the list below.
 - run 35505799659 at `9eb89c1` (PR #284), job 106065308768, `Test (macos-latest / luajit)`;
 - run 35507517448 at `3de1e1f` (PR #284), job 106069747083, `Test (macos-latest / luajit)`;
 - run 36761534199 at `17c3c8f` (PR #297), job 110045110295, `Test (macos-latest / lua54)`;
-- run 36942304451 at `b9d00fe` (PR #297), job 110636448104, `Test (macos-latest / lua54)` (recorded at E7h's fix round 3, below).
+- run 36942304451 at `b9d00fe` (PR #297), job 110636448104, `Test (macos-latest / lua54)` (recorded at E7h's fix round 3, below);
+- run 37080922545 at `2d4c848` (PR #309), job 111081065656, `Test (macos-latest / lua54)` (recorded at C7i, below).
 
-#283 is at eight (seven until E7h's fix round 3); the list above is the one the count is read from.
+#283 is at nine (eight until C7i); the list above is the one the count is read from.
 
-#### #291, six occurrences, all local
+#### #291, eight occurrences, all local
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
 
-Tally (291): 6 items in the list below.
+Tally (291): 8 items in the list below.
 
 - 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
 - 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
 - 2026-09-30, a hand run in the gate's environment on `e7h/grammar-gate` at `1036723` with fix round 1's first change uncommitted, beside a niced GCC 16 compile matrix, 128.21 s;
 - 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T185138Z-270502`, beside three niced fuzz runs (load 9 to 20), 128.61 s;
 - 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T202751Z-465064`, the whole gate niced beside a game, the handshake 17.7 s, 141.18 s;
-- 2026-10-02, `scripts/gate` at `5daf85d`, `20261002T012705Z-3618489`, on a nearly idle machine (load about 1.5 at its start, nothing of E7h's beside it), 125.52 s (recorded at E7h's fix round 3, below).
+- 2026-10-02, `scripts/gate` at `5daf85d`, `20261002T012705Z-3618489`, on a nearly idle machine (load about 1.5 at its start, nothing of E7h's beside it), 125.52 s (recorded at E7h's fix round 3, below);
+- 2026-10-03, `scripts/gate` on `e7i/parse-containment` at `2d4c848`, `20261002T233722Z-2508081`, 125.51 s;
+- 2026-10-03, `scripts/gate` at `0e2998b`, `20261003T004422Z-2872349` (recorded at C7i, below, with a base control: `a013d46` 5 of 8, `0e2998b` 2 of 8).
 
-#291 is at six; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+#291 is at eight; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
 #### #298, first sample, local
 
@@ -2452,6 +2455,61 @@ No input returned past its budget. A prefix of the slow markdown_inline input ag
 - `20261002T115902Z-518091` at `64d396b`, run again: **six of six**, 179 targets, 5,149 passed, 0 failed, 62 ignored; R7's row `ok`, which is non-reproduction and nothing more.
 
 So, at E7h's fourth fix round: R7 moves to twenty-one, and #308 is at one; #283, #291, #298, #300 and #303 to #307 not sampled, and every count above stands.
+
+### E7i's checkpoint: PR #309's runs, #283's ninth, and #291's seventh and eighth with a base control
+
+Recorded 2026-10-03, each run read from the jobs endpoint at attempt 1. The PR's runs are `pull_request` runs of the merge commit with `main`.
+
+Tally (pr309-runs): 4 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 37080922545 | CI | `2d4c848` | cancelled |
+| 37080922546 | Grammar fuzz | `2d4c848` | cancelled |
+| 37082904461 | CI | `0e2998b` | success |
+| 37082904517 | Grammar fuzz | `0e2998b` | success |
+
+Tally (pr309-cancelled): 2 rows of the table above with `verdict` = `cancelled`.
+
+Both were cancelled by the push of `0e2998b`.
+
+#### `CI` 37080922545 at `2d4c848`: the branch's own, and #283's ninth
+
+Tally (run-37080922545-jobs): 19 = 13 + 4 + 1 + 1.
+
+Thirteen success, four failure, `Docs consistency` skipped, `Test (macos-latest / luajit)` cancelled.
+
+- **Three Ubuntu test legs**, jobs 111081065680 (`luajit`), 111081065724 (`luajit, no crdt`) and 111081065769 (`lua54`), failed while linking test binaries: `ld terminated with signal 7 [Bus error]`, `No space left on device`, and the runner's warning of 51 MB free. That is the branch's own. Its wasm candidate linked wasmtime and Cranelift into the `pmacs` library, about 160 MB more in every debug test binary (`m4_acceptance` 278.9 MB without, 438.9 MB with). It is fixed at `fe65e1d` by a non-default `wasm-unit` feature. It is not an intermittent.
+- **`Test (macos-latest / lua54)`**, job 111081065656, failed two targets:
+  - the branch's own three E7i process rows: the worker exited because `setrlimit(RLIMIT_AS)` returned `EINVAL` on macOS. Fixed at `0e2998b`.
+  - **#283's ninth occurrence**, with all three fragments (`pump timeout waiting for the accept and its import`, `popup_rows=0 anchor=None`, `9 passed; 1 failed`). Commented on #283, not rerun.
+- `Test (crdt)` succeeded.
+
+#### `CI` 37082904461 at `0e2998b`, the head: green
+
+Tally (run-37082904461-jobs): 19 = 18 + 1.
+
+Eighteen success, and `Docs consistency` skipped, correctly. Every leg's target headers pair one to one with its result lines (each macOS log's one unpaired `running 1 test` is the adapter step's own `grep` text), all `ok`: `Test (crdt)` 177, `luajit, no crdt` 178, both macOS legs 179, the two other Ubuntu legs 178. `FAILED`, `WouldBlock`, `did not become ready` and `got ok` appear zero times. The E7i process rows ran `ok` on every leg: three on Linux, and two on macOS, where #296's memory row is ignored because `RLIMIT_AS` is refused. #283's selector ran `ok` on both macOS legs, which is non-reproduction and nothing more.
+
+#### `Grammar fuzz` 37082904517 at `0e2998b`
+
+Both legs succeeded:
+- `Grammar fuzz`, job 111087337525, 00:39:43–01:27:07Z, 47.4 min;
+- `Grammar fuzz (asan-strict)`, job 111087337212, 00:39:42–01:29:40Z, 50.0 min.
+
+Each printed `image: ubuntu24 20260927.320.1` and GCC 13.3.0. The decision step said `run=true` (`Cargo.lock changed`, by the branch's new crates). No `tree-sitter` package and nothing under `vendor/` or `builtin/queries/` changed since `a013d46`, so no grammar counted as changed since `cf63a2f` and all twenty-two ran their 15 s smoke. Neither leg found a crash, a hang, a memory finding, an unconfirmed one or an accepted one; markdown_inline's #296 input, which `a013d46`'s 600 s run reached, is not reached in 15 s. Slow findings, each with its exponent: five in each leg, cmake three, cuda and lua one each. One is mispredicted: cmake under `ubsan`, exponent 0.56, minimum 21,647 bytes, returned in 407,788 ms against a budget of 153,404. zig reached 33 mutated inputs under `ubsan` and 28 under `asan-strict`.
+
+#### Local samples in the checkpoint's gates, and a base control for #291
+
+- `20261002T233722Z-2508081` at `2d4c848`: five of six, 185 targets, 5,156 passed, 1 failed, 65 ignored. The failure is **#291's seventh**, all three fragments; commented.
+- `20261003T000314Z-2657125` at `2d4c848`: six of six, 5,157 / 0 / 65. #291's row `ok`.
+- `20261003T003848Z-2861426` at `0e2998b`: the sweep failed on a full local disk (`mold: failed to write to an output file. Disk full?`). It is no evidence.
+- `20261003T004422Z-2872349` at `0e2998b`: five of six, 5,156 / 1 / 65. The failure is **#291's eighth**, all three fragments; commented.
+- `20261003T011317Z-3001607` at `0e2998b`, the head: **six of six**, 185 targets, 5,157 passed, 0 failed, 65 ignored. #291's row `ok`, which is non-reproduction and nothing more.
+
+**The control.** #291's row alone, eight interleaved pairs in the gate's environment, at `a013d46` (the base, its own worktree and target) and `0e2998b`, 03:05 to 03:30 local on a quiet machine. **`a013d46` failed 5 of 8 and `0e2998b` 2 of 8**, every failure with `store []` and no `processi` at 125.8–131.2 s, every pass in 7.5–9.0 s. The branch is excluded as the cause for this sample, and the row's rate on this machine tonight is far above E7g's 2 of 16. Commented on #291.
+
+So, at C7i: #283 moves to nine and #291 to eight; R7, #298, #300 and #303 to #308 not sampled, and every count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
