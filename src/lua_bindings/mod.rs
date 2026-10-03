@@ -8202,6 +8202,42 @@ type DispatchArgs = (
 /// (E7i).
 const ISOLATED_INTEREST_MARGIN: u32 = 4096;
 
+/// The boundary `syntax.isolation` names; absent or unknown is in-process.
+fn isolation_mode(isolation: Option<&str>) -> crate::parse_isolation::Isolation {
+    isolation
+        .and_then(crate::parse_isolation::Isolation::from_config)
+        .unwrap_or(crate::parse_isolation::Isolation::Native)
+}
+
+/// The isolated parse of `buffer`'s pending edits, its limits from the
+/// dispatch's arguments: `syntax.parse-memory-limit-mb`,
+/// `syntax.parse-memory-total-mb` and `syntax.isolation-wasm-cache`.
+fn isolated_job(
+    s: &SharedSyntaxRegistry,
+    buffer: BufferId,
+    handle: &ParseViewHandle,
+    deadline_ms: Option<u64>,
+    mode: crate::parse_isolation::Isolation,
+    (unit_mb, total_mb, wasm_cache): (Option<u64>, Option<u64>, Option<bool>),
+) -> crate::parse_isolation::IsolatedJob {
+    let (mut req, inserted) = handle.make_isolated_request();
+    req.injection_aliases = s.injection_alias_snapshot();
+    req.deadline = parse_deadline(deadline_ms);
+    crate::parse_isolation::IsolatedJob {
+        buffer,
+        interest: s.interest_for(buffer, ISOLATED_INTEREST_MARGIN),
+        request: req,
+        inserted,
+        limits: crate::parse_isolation::Limits {
+            mode,
+            unit_memory: unit_mb.unwrap_or(1024) << 20,
+            total_memory: total_mb.unwrap_or(0) << 20,
+            deadline: parse_deadline(deadline_ms),
+            wasm_cache: wasm_cache.unwrap_or(false),
+        },
+    }
+}
+
 fn parse_deadline(deadline_ms: Option<u64>) -> Option<std::time::Duration> {
     deadline_ms
         .filter(|&ms| ms > 0)
@@ -8419,15 +8455,35 @@ pub fn install_parse(
         parse_mod.set(
             "_parse_now",
             lua.create_function(
-                move |_, (id, lang, deadline_ms): (BufferIdLua, String, Option<u64>)| {
+                move |_,
+                      (id, lang, deadline_ms, isolation, unit_mb, total_mb, wasm_cache): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
-                    let mut req = handle.make_request();
-                    // Snapshot the alias map on the sync path too (framing Q#IJ4)
-                    // — otherwise a `py` fence or a Lua-added alias would resolve
-                    // asynchronously but not through `_parse_now`.
-                    req.injection_aliases = s.injection_alias_snapshot();
-                    req.deadline = parse_deadline(deadline_ms);
-                    let bundle = syntax::run_parse(req).map_err(|e| {
+                    // Under `syntax.isolation` (E7i) the parse runs in the
+                    // buffer's unit, waited for here as the in-process one is.
+                    let bundle = match isolation_mode(isolation.as_deref()) {
+                        crate::parse_isolation::Isolation::Native => {
+                            let mut req = handle.make_request();
+                            // Snapshot the alias map on the sync path too
+                            // (framing Q#IJ4) — otherwise a `py` fence or a
+                            // Lua-added alias would resolve asynchronously but
+                            // not through `_parse_now`.
+                            req.injection_aliases = s.injection_alias_snapshot();
+                            req.deadline = parse_deadline(deadline_ms);
+                            syntax::run_parse(req).map_err(|e| e.to_string())
+                        }
+                        mode => {
+                            let job = isolated_job(
+                                &s,
+                                id.0,
+                                &handle,
+                                deadline_ms,
+                                mode,
+                                (unit_mb, total_mb, wasm_cache),
+                            );
+                            crate::parse_isolation::run(&job)
+                        }
+                    }
+                    .map_err(|e| {
                         // The request drained the view's edits; keep its tree and
                         // parse cold next time (E7h.2).
                         handle.mark_unparsed();
@@ -8459,27 +8515,16 @@ pub fn install_parse(
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
                     // `syntax.isolation` (E7i): "none" parses here, as before;
                     // "wasm" and "process" send the parse to the buffer's unit.
-                    let mode = isolation
-                        .as_deref()
-                        .and_then(crate::parse_isolation::Isolation::from_config)
-                        .unwrap_or(crate::parse_isolation::Isolation::Native);
+                    let mode = isolation_mode(isolation.as_deref());
                     if mode != crate::parse_isolation::Isolation::Native {
-                        let (mut req, inserted) = handle.make_isolated_request();
-                        req.injection_aliases = s.injection_alias_snapshot();
-                        req.deadline = parse_deadline(deadline_ms);
-                        let job = crate::parse_isolation::IsolatedJob {
-                            buffer: id.0,
-                            interest: s.interest_for(id.0, ISOLATED_INTEREST_MARGIN),
-                            request: req,
-                            inserted,
-                            limits: crate::parse_isolation::Limits {
-                                mode,
-                                unit_memory: unit_mb.unwrap_or(1024) << 20,
-                                total_memory: total_mb.unwrap_or(0) << 20,
-                                deadline: parse_deadline(deadline_ms),
-                                wasm_cache: wasm_cache.unwrap_or(false),
-                            },
-                        };
+                        let job = isolated_job(
+                            &s,
+                            id.0,
+                            &handle,
+                            deadline_ms,
+                            mode,
+                            (unit_mb, total_mb, wasm_cache),
+                        );
                         let job_id = rt.dispatch_isolated_parse(job);
                         s.record_parse_job(job_id, id.0);
                         return Ok(job_id);

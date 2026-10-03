@@ -524,3 +524,44 @@ fn e7i_a_held_tree_answers_nil_once_its_unit_holds_a_newer_one() {
         "a superseded tree in a unit stops answering"
     );
 }
+
+/// `pmacs.parse._parse_now` parses where a dispatch would (E7i): under
+/// process isolation, #296's paragraph is stopped at a 64 MiB unit and the
+/// synchronous call returns that error, where in-process it would have
+/// grown and returned a tree; a clean buffer's `_parse_now` comes back
+/// from its unit with its tree.
+#[test]
+fn e7i_parse_now_runs_in_the_unit_and_is_held_to_its_limit() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let victim = dir.join("victim.md");
+    std::fs::write(&victim, underscores(14)).expect("victim");
+    let clean = dir.join("clean.rs");
+    std::fs::write(&clean, "fn main() {}\n").expect("clean");
+    let report = dir.join("report.txt");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         pmacs.config.set('syntax.parse-memory-limit-mb', 64)\n\
+         local v = pmacs.buffer.find_or_open({victim:?})\n\
+         local c = pmacs.buffer.find_or_open({clean:?})\n\
+         local ok, err = pcall(pmacs.parse._parse_now, v, 'markdown')\n\
+         local t = pmacs.parse._parse_now(c, 'rust')\n\
+         local r = pmacs.parse._unit_report(c)\n\
+         local f = assert(io.open({report:?}, 'w'))\n\
+         f:write(string.format('ok=%s limit=%s clean=%s unit=%s\\n', tostring(ok),\n\
+           tostring(tostring(err):find('parse stopped at its memory limit', 1, true) ~= nil),\n\
+           tostring(t:root():type()), tostring(r ~= nil and r.mode == 'process' and r.unit ~= '')))\n\
+         f:close()\n",
+        victim = victim.display().to_string(),
+        clean = clean.display().to_string(),
+        report = report.display().to_string(),
+    );
+    let mut daemon = TestDaemon::spawn_with_env_and_init(&[], &init);
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_mins(1), |t| t.ends_with('\n'));
+    assert_eq!(
+        text, "ok=false limit=true clean=source_file unit=true\n",
+        "the synchronous parse ran in the unit, held to its limit"
+    );
+    assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
+}

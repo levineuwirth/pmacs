@@ -130,6 +130,19 @@ function pmacs.parse._dispatch(buf, lang)
   return job_id
 end
 
+-- `_parse_now` parses synchronously where a dispatch would: in the
+-- editor, or in the buffer's parse unit under syntax.isolation (E7i). The
+-- deadline is the caller's, absent leaving the parse unbounded in time as
+-- it always was here.
+local raw_parse_now = pmacs.parse._parse_now
+function pmacs.parse._parse_now(buf, lang, deadline_ms)
+  return raw_parse_now(buf, lang, deadline_ms,
+    pmacs.config.get("syntax.isolation"),
+    pmacs.config.get("syntax.parse-memory-limit-mb"),
+    pmacs.config.get("syntax.parse-memory-total-mb"),
+    pmacs.config.get("syntax.isolation-wasm-cache"))
+end
+
 -- Injection language aliases (framing Q#IJ4). The registry holds the
 -- merged map (seeded with defaults on the Rust side), and each dispatch
 -- snapshots it into the parse request so the worker can resolve dynamic
