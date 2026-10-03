@@ -2169,11 +2169,11 @@ Tally (283): 9 items in the list below.
 
 #283 is at nine (eight until C7i); the list above is the one the count is read from.
 
-#### #291, eight occurrences, all local
+#### #291, nine occurrences, all local
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
 
-Tally (291): 8 items in the list below.
+Tally (291): 9 items in the list below.
 
 - 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
 - 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
@@ -2182,9 +2182,10 @@ Tally (291): 8 items in the list below.
 - 2026-09-30, `scripts/gate` at `17c3c8f`, `20260930T202751Z-465064`, the whole gate niced beside a game, the handshake 17.7 s, 141.18 s;
 - 2026-10-02, `scripts/gate` at `5daf85d`, `20261002T012705Z-3618489`, on a nearly idle machine (load about 1.5 at its start, nothing of E7h's beside it), 125.52 s (recorded at E7h's fix round 3, below);
 - 2026-10-03, `scripts/gate` on `e7i/parse-containment` at `2d4c848`, `20261002T233722Z-2508081`, 125.51 s;
-- 2026-10-03, `scripts/gate` at `0e2998b`, `20261003T004422Z-2872349` (recorded at C7i, below, with a base control: `a013d46` 5 of 8, `0e2998b` 2 of 8).
+- 2026-10-03, `scripts/gate` at `0e2998b`, `20261003T004422Z-2872349` (recorded at C7i, below, with a base control: `a013d46` 5 of 8, `0e2998b` 2 of 8);
+- 2026-10-03, `scripts/gate` on `e7i/parse-containment` at `45186c9`, `20261003T150924Z-395472`, the owner gaming beside it (load 6 to 78), 129.81 s (recorded at the E7i build, below).
 
-#291 is at eight; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+#291 is at nine; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
 #### #298, first sample, local
 
@@ -2510,6 +2511,109 @@ Each printed `image: ubuntu24 20260927.320.1` and GCC 13.3.0. The decision step 
 **The control.** #291's row alone, eight interleaved pairs in the gate's environment, at `a013d46` (the base, its own worktree and target) and `0e2998b`, 03:05 to 03:30 local on a quiet machine. **`a013d46` failed 5 of 8 and `0e2998b` 2 of 8**, every failure with `store []` and no `processi` at 125.8–131.2 s, every pass in 7.5–9.0 s. The branch is excluded as the cause for this sample, and the row's rate on this machine tonight is far above E7g's 2 of 16. Commented on #291.
 
 So, at C7i: #283 moves to nine and #291 to eight; R7, #298, #300 and #303 to #308 not sampled, and every count above stands.
+
+### The E7i build: PR #309's runs, #282's third, and #291's ninth
+
+Recorded 2026-10-03, after the owner's ruling, each run read from the jobs endpoint at attempt 1. The PR's runs are `pull_request` runs of the merge commit with `main`.
+
+Tally (pr309-build-runs): 12 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 37127164189 | CI | `32cf223` | failure |
+| 37127164469 | Grammar fuzz | `32cf223` | cancelled |
+| 37130407757 | CI | `cfaa81a` | success |
+| 37130407788 | Grammar fuzz | `cfaa81a` | cancelled |
+| 37132283583 | CI | `45186c9` | cancelled |
+| 37132283539 | Grammar fuzz | `45186c9` | cancelled |
+| 37133953154 | CI | `0b7a5bb` | failure |
+| 37133953201 | Grammar fuzz | `0b7a5bb` | success |
+| 37137958321 | CI | `fd53449` | cancelled |
+| 37137958314 | Grammar fuzz | `fd53449` | cancelled |
+| 37138741327 | CI | `fa176de` | success |
+| 37138741372 | Grammar fuzz | `fa176de` | success |
+
+Tally (pr309-build-cancelled): 6 rows of the table above with `verdict` = `cancelled`.
+
+Each was cancelled by the push that followed it.
+
+#### `CI` 37127164189 at `32cf223`: #282's third
+
+Tally (run-37127164189-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure.
+
+The failure is **`Test (crdt)`**, job 111214728970, with 175 `test result: ok` and one `FAILED`. It is **#282's third occurrence** and the first on that job, with all of its fragments:
+
+- `*lsp* names the request and the code: []`;
+- `WIRE *errors* gained ["[lsp] LSP: default-rust refused textDocument/prepareRename as a client error, -32602 InvalidParams: No references found at position"]` and `WIRE label "ready", last_error None`;
+- `test result: FAILED. 4 passed; 1 failed; 2 ignored`, the count moving with the suite as at the second occurrence.
+
+The row's trace holds 98 `$/progress` frames, 78 of them `cachePriming` reports, against the 64-entry ring. The same row ran `ok` on the run's three other Linux legs. It is not the branch's: the head adds a cgroup report, an arming row and an E7i witness, and nothing reaches LSP. Commented on #282, not rerun.
+
+The other five test legs:
+
+- `ubuntu lua54` 111214729006, `luajit` 111214729049 and `luajit, no crdt` 111214729102: 178 `ok` each;
+- `macos lua54` 111214729079 and `luajit` 111214729114: 179 each.
+
+Zero `FAILED`, `WouldBlock`, `did not become ready` and `got ok` on those legs. Every leg printed the editor's cgroup attempt: refused at `mkdir` beside `/system.slice/hosted-compute-agent.service` on Ubuntu, no `/proc/self/cgroup` on macOS.
+
+#### `CI` 37130407757 at `cfaa81a`: green
+
+Tally (run-37130407757-jobs): 19 = 18 + 1.
+
+Eighteen success, and `Docs consistency` skipped, correctly. All six test legs read:
+
+| leg | job | `ok` |
+|---|---|---|
+| `Test (crdt)` | 111224260631 | 177 |
+| `luajit, no crdt` | 111224260672 | 178 |
+| `macos luajit` | 111224260680 | 179 |
+| `macos lua54` | 111224260732 | 179 |
+| `ubuntu lua54` | 111224260780 | 178 |
+| `ubuntu luajit` | 111224260791 | 178 |
+
+Zero `FAILED`, `WouldBlock`, `did not become ready` and `got ok`. All thirteen E7i rows `ok` on every leg, macOS included.
+
+#### `CI` 37133953154 at `0b7a5bb`: the branch's own red
+
+Tally (run-37133953154-jobs): 19 = 17 + 1 + 1.
+
+Seventeen success, `Docs consistency` skipped, and one failure.
+
+The failure is **`Test (ubuntu-latest / luajit, no crdt)`**, job 111234611782: its test step's 176 results are 175 `ok` and one `FAILED`, and the failure skipped the leg's doc-test and `pmacs-protocol` steps. The failing row is the branch's own, `e7i_296s_32_kb_paragraph_is_stopped_at_the_editor_s_defaults`: `death=time: parse ran past its deadline of 5000 ms and was cancelled after 5100 ms`, where the row demanded a memory death. On that runner the debug build grew slower than the deadline allowed it to reach 1 GiB. The row now accepts either limit and prints which fired (`fd53449`). It is not an intermittent, and no issue is commented.
+
+The other five test legs: `Test (crdt)` 111234611431 177 `ok`, `ubuntu lua54` 111234611494 and `luajit` 111234611505 178 each, `macos luajit` 111234611490 and `lua54` 111234611613 179 each. Zero `FAILED`, `WouldBlock`, `did not become ready` and `got ok` on those legs, and all twenty E7i rows `ok` on each.
+
+`Grammar fuzz` 37133953201 at the same head is green on both legs, with no crash, hang or memory finding. It is CI's first replay through the worker, and the replay crashed nothing.
+
+#### `CI` 37138741327 at `fa176de`, the head: green
+
+Tally (run-37138741327-jobs): 19 = 18 + 1.
+
+Eighteen success, and `Docs consistency` skipped, correctly. All six test legs read:
+
+| leg | job | `ok` |
+|---|---|---|
+| `Test (crdt)` | 111248673840 | 177 |
+| `luajit, no crdt` | 111248673940 | 178 |
+| `ubuntu lua54` | 111248673942 | 178 |
+| `ubuntu luajit` | 111248673968 | 178 |
+| `macos lua54` | 111248673890 | 179 |
+| `macos luajit` | 111248673976 | 179 |
+
+Zero `FAILED`, `WouldBlock`, `did not become ready` and `got ok`. All twenty-two E7i rows `ok` on every leg. The 32 KB row that was red at `0b7a5bb` printed its stopping limit: memory on four legs, and the deadline on `ubuntu lua54` and `ubuntu luajit`.
+
+`Grammar fuzz` 37138741372 at the head is green on both legs, with no crash, hang or memory finding and none mispredicted. The replay crashed nothing.
+
+#### Local samples in the build's gates
+
+- `20261003T150924Z-395472` at `45186c9`: five of six, 186 targets, 5,170 passed, 2 failed, 62 ignored, no daemon survived.
+  - **#291's ninth**, all three fragments, 129.81 s, the owner gaming beside it; commented.
+  - An E7h witness row of the branch's own (`index out of bounds` reading an in-process tree that the branch's new default had moved into a worker), fixed at `e27d347`. It is not an intermittent.
+- `20261003T153819Z-531575` at `0b7a5bb`, `20261003T160232Z-667691` at `6122fc4`, `20261003T161417Z-787953` at `fd53449` and `20261003T164622Z-966978` at `fa176de`: six of six each, 186 targets, 5,176, 5,178, 5,178 and 5,178 passed, 0 failed, 62 ignored, no daemon survived. No intermittent sampled.
+
+So, at the E7i build: #282 moves to three and #291 to nine; #283, R7, #298, #300 and #303 to #308 not sampled, and every count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
