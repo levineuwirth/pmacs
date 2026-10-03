@@ -8185,8 +8185,8 @@ impl UserData for ParseNodeLua {
 /// `syntax.parse-deadline-ms`; absent or 0 leaves the parse unbounded.
 /// `pmacs.parse._dispatch`'s arguments: the buffer, its language, then
 /// `syntax.parse-deadline-ms` and E7i's `syntax.isolation`,
-/// `syntax.parse-memory-limit-mb`, `syntax.parse-memory-total-mb` and
-/// `syntax.parse-worker-recycle-mb`.
+/// `syntax.parse-memory-limit-mb`, `syntax.parse-memory-total-mb`,
+/// `syntax.parse-worker-recycle-mb` and `syntax.parse-unit-path`.
 type DispatchArgs = (
     BufferIdLua,
     String,
@@ -8195,6 +8195,7 @@ type DispatchArgs = (
     Option<u64>,
     Option<u64>,
     Option<u64>,
+    Option<String>,
 );
 
 /// How far beyond what a buffer's renderers last showed an isolated parse
@@ -8458,8 +8459,19 @@ pub fn install_parse(
         parse_mod.set(
             "_parse_now",
             lua.create_function(
-                move |_, (id, lang, deadline_ms, isolation, unit_mb, total_mb, recycle_mb): DispatchArgs| {
+                move |_,
+                      (
+                    id,
+                    lang,
+                    deadline_ms,
+                    isolation,
+                    unit_mb,
+                    total_mb,
+                    recycle_mb,
+                    unit_path,
+                ): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
+                    crate::parse_isolation::set_unit_path(unit_path.as_deref());
                     // Under `syntax.isolation` (E7i) the parse runs in the
                     // buffer's unit, waited for here as the in-process one is.
                     let bundle = match isolation_mode(isolation.as_deref()) {
@@ -8512,14 +8524,31 @@ pub fn install_parse(
         parse_mod.set(
             "_dispatch",
             lua.create_function(
-                move |_, (id, lang, deadline_ms, isolation, unit_mb, total_mb, recycle_mb): DispatchArgs| {
+                move |_,
+                      (
+                    id,
+                    lang,
+                    deadline_ms,
+                    isolation,
+                    unit_mb,
+                    total_mb,
+                    recycle_mb,
+                    unit_path,
+                ): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
+                    crate::parse_isolation::set_unit_path(unit_path.as_deref());
                     // `syntax.isolation` (E7i): "none" parses here, as before;
                     // "process" sends the parse to the buffer's unit.
                     let mode = isolation_mode(isolation.as_deref());
                     if mode != crate::parse_isolation::Isolation::Native {
-                        let job =
-                            isolated_job(&s, id.0, &handle, deadline_ms, mode, (unit_mb, total_mb, recycle_mb));
+                        let job = isolated_job(
+                            &s,
+                            id.0,
+                            &handle,
+                            deadline_ms,
+                            mode,
+                            (unit_mb, total_mb, recycle_mb),
+                        );
                         let job_id = rt.dispatch_isolated_parse(job);
                         s.record_parse_job(job_id, id.0);
                         return Ok(job_id);
@@ -8563,24 +8592,26 @@ pub fn install_parse(
                 // or still-running id; that's a benign no-op.
                 let outcome = rt.take_result(job_id);
                 let Some(buf_id) = buf_id else {
-                    return Ok("none");
+                    return Ok(("none", None));
                 };
                 let Some(handle) = s.view(buf_id) else {
-                    return Ok("none");
+                    return Ok(("none", None));
                 };
                 let Some(bundle) = bundle else {
                     return Ok(match outcome {
                         Some(JobOutcome::Failed(msg)) => {
                             handle.mark_unparsed();
                             if syntax::is_deadline_message(&msg) {
-                                "deadline"
+                                ("deadline", None)
                             } else if crate::parse_isolation::is_limit_message(&msg) {
-                                "limit"
+                                ("limit", None)
+                            } else if crate::parse_isolation::is_unavailable_message(&msg) {
+                                ("unavailable", Some(msg))
                             } else {
-                                "failed"
+                                ("failed", None)
                             }
                         }
-                        _ => "none",
+                        _ => ("none", None),
                     });
                 };
                 let cut = bundle.layers_cut_by_deadline;
@@ -8588,7 +8619,7 @@ pub fn install_parse(
                 // query on the main thread before install.
                 let resolved = s.resolve_layer_queries(&bundle);
                 handle.install(resolved);
-                Ok(if cut { "installed-cut" } else { "installed" })
+                Ok((if cut { "installed-cut" } else { "installed" }, None))
             })?,
         )?;
     }

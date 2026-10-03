@@ -943,3 +943,50 @@ fn e7i_the_fuzz_replay_fails_a_worker_that_crashes() {
         "{report}"
     );
 }
+
+/// A missing worker is said once, with both ways out (E7i): with
+/// `syntax.parse-unit-path` naming no file, no buffer can be parsed, and
+/// the user is told once a session, however many buffers try, that nothing
+/// is highlighted, why, and what to install or set.
+#[test]
+fn e7i_a_missing_worker_is_said_once_with_its_remedy() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let a = dir.join("a.rs");
+    let b = dir.join("b.rs");
+    std::fs::write(&a, "fn a() {}\n").expect("a");
+    std::fs::write(&b, "fn b() {}\n").expect("b");
+    let report = dir.join("report.txt");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         pmacs.config.set('syntax.parse-unit-path', {missing:?})\n\
+         pmacs.buffer.find_or_open({a:?})\n\
+         pmacs.buffer.find_or_open({b:?})\n\
+         pmacs.async(function()\n\
+           pmacs.workers.sleep(3000):await()\n\
+           local said = ''\n\
+           for _, x in ipairs(pmacs.buffer.list()) do\n\
+             if x:name() == '*errors*' then said = x:slice(0, x:len()) end\n\
+           end\n\
+           local _, told = said:gsub('so nothing is highlighted', '')\n\
+           local f = assert(io.open({report:?}, 'w'))\n\
+           f:write(string.format('told=%d path=%s remedy=%s\\n', told,\n\
+             tostring(said:find('does not exist', 1, true) ~= nil),\n\
+             tostring(said:find('set syntax.isolation to none', 1, true) ~= nil)))\n\
+           f:close()\n\
+         end)\n",
+        missing = dir.join("no-such-worker").display().to_string(),
+        a = a.display().to_string(),
+        b = b.display().to_string(),
+        report = report.display().to_string(),
+    );
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init);
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_secs(30), |t| {
+        t.ends_with('\n')
+    });
+    assert_eq!(
+        text, "told=1 path=true remedy=true\n",
+        "told once, naming the missing path and the way out"
+    );
+}

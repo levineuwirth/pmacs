@@ -203,7 +203,7 @@ impl Death {
                 limit >> 20
             ),
             Self::Ended(why) => format!("parse unit ended: {why}"),
-            Self::Unavailable(why) => format!("parse unit unavailable: {why}"),
+            Self::Unavailable(why) => format!("{UNAVAILABLE_MESSAGE}: {why}"),
         }
     }
 
@@ -240,6 +240,18 @@ impl Death {
 
 /// How a memory stop's message begins, for the settle path.
 pub const PARSE_LIMIT_MESSAGE: &str = "parse stopped at its memory limit";
+
+/// How the message of a parse that found no worker begins: none could be
+/// started (no `pmacs-parse-unit` where the editor looks, or one from
+/// another build), so the buffer is not highlighted, which the settle path
+/// says once.
+pub const UNAVAILABLE_MESSAGE: &str = "parse unit unavailable";
+
+/// Whether a parse job's failure text is a worker that could not start.
+#[must_use]
+pub fn is_unavailable_message(message: &str) -> bool {
+    message.starts_with(UNAVAILABLE_MESSAGE)
+}
 
 /// Whether a parse job's failure text is a memory stop.
 #[must_use]
@@ -302,6 +314,9 @@ struct Host {
     cgroup: OnceLock<CgroupAttempt>,
     /// The total's watchdog, started when no cgroup holds the workers.
     watchdog: OnceLock<Arc<TotalWatchdog>>,
+    /// `syntax.parse-unit-path`: the worker binary, when not beside the
+    /// editor's own.
+    unit_path: Mutex<Option<PathBuf>>,
     next_serial: AtomicU64,
     trace: Option<Mutex<std::fs::File>>,
     started: Instant,
@@ -314,6 +329,7 @@ fn host() -> &'static Host {
         slots: Mutex::new(HashMap::new()),
         cgroup: OnceLock::new(),
         watchdog: OnceLock::new(),
+        unit_path: Mutex::new(None),
         next_serial: AtomicU64::new(1),
         trace: std::env::var_os("PMACS_E7I_TRACE").and_then(|path| {
             std::fs::OpenOptions::new()
@@ -443,6 +459,14 @@ impl Host {
 
 fn json_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Where to find the worker binary: `syntax.parse-unit-path`, empty for
+/// beside the running editor (`pmacs-parse-unit`, as the release ships
+/// it). Set by every dispatch; read when a worker starts.
+pub fn set_unit_path(path: Option<&str>) {
+    let path = path.filter(|p| !p.is_empty()).map(PathBuf::from);
+    *host().unit_path.lock().expect("unit path poisoned") = path;
 }
 
 /// Run one isolated parse on the calling (worker) thread and build the
@@ -1053,8 +1077,18 @@ impl ProcessUnit {
         cgroup: Option<&Cgroup>,
         report_memory: bool,
     ) -> Result<Self, Death> {
-        let bin = sibling("pmacs-parse-unit")
-            .ok_or_else(|| Death::Unavailable("no pmacs-parse-unit beside pmacs".into()))?;
+        let configured = host().unit_path.lock().expect("unit path poisoned").clone();
+        let bin = match configured {
+            Some(path) if path.exists() => path,
+            Some(path) => {
+                return Err(Death::Unavailable(format!(
+                    "syntax.parse-unit-path {} does not exist",
+                    path.display()
+                )));
+            }
+            None => sibling("pmacs-parse-unit")
+                .ok_or_else(|| Death::Unavailable("no pmacs-parse-unit beside pmacs".into()))?,
+        };
         let mut command = Command::new(&bin);
         command
             .envs(pmacs_parse_unit::WORKER_ENV.iter().copied())

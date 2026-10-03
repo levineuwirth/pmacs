@@ -34,6 +34,9 @@ local injection_cap_warned = {}
 -- those told the deadline dropped some embedded regions; keyed like the
 -- others so the user hears it once, re-armed when a parse installs whole.
 local parse_deadline_warned = {}
+-- E7i: no parse worker could start (none beside pmacs, or one from another
+-- build). Told once a session, not per buffer: the cause is the install.
+local parse_unit_unavailable_warned = false
 local parse_layers_cut_warned = {}
 
 -- E7h.2: a parse is bounded in time where tree-sitter calls its progress
@@ -105,6 +108,18 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E7i: where the parse worker is. Empty is beside the running pmacs, as
+-- the release puts it; a packager who installs it elsewhere (a libexec
+-- directory) names it here.
+pmacs.config.define {
+  name = "syntax.parse-unit-path",
+  description = "Under syntax.isolation process: the pmacs-parse-unit binary each buffer's parse worker runs. Empty means the one beside pmacs.",
+  type = "string",
+  default = "",
+  allow_empty = true,
+  mutability = "live",
+}
+
 pmacs.config.define {
   name = "syntax.parse-memory-total-mb",
   description = "Under syntax.isolation process: how many MiB all parse workers together may hold; a parse that would pass it is stopped. 0 leaves the total unbounded.",
@@ -132,7 +147,8 @@ function pmacs.parse._dispatch(buf, lang)
     pmacs.config.get("syntax.isolation"),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
     pmacs.config.get("syntax.parse-memory-total-mb"),
-    pmacs.config.get("syntax.parse-worker-recycle-mb"))
+    pmacs.config.get("syntax.parse-worker-recycle-mb"),
+    pmacs.config.get("syntax.parse-unit-path"))
   pending_parse_jobs[job_id] = true
   parse_job_buffer_keys[job_id] = key
   inflight_parse_by_buffer[key] = job_id
@@ -149,7 +165,8 @@ function pmacs.parse._parse_now(buf, lang, deadline_ms)
     pmacs.config.get("syntax.isolation"),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
     pmacs.config.get("syntax.parse-memory-total-mb"),
-    pmacs.config.get("syntax.parse-worker-recycle-mb"))
+    pmacs.config.get("syntax.parse-worker-recycle-mb"),
+    pmacs.config.get("syntax.parse-unit-path"))
 end
 
 -- Injection language aliases (framing Q#IJ4). The registry holds the
@@ -739,11 +756,20 @@ pmacs._async.tick = function(...)
   end
   for _, job_id in ipairs(settled) do
     local key = parse_job_buffer_keys[job_id]
-    local status = pmacs.parse._install_settled(job_id)
+    local status, detail = pmacs.parse._install_settled(job_id)
     -- E7h.2: a parse cancelled at its deadline is an outcome, not an error
     -- per keystroke. Tell the user once per buffer; a parse that installs
     -- re-arms the notice.
-    if key and status == "limit" then
+    if status == "unavailable" then
+      -- E7i: no worker could start, so nothing is highlighted; told once a
+      -- session, with the two ways out.
+      if not parse_unit_unavailable_warned then
+        parse_unit_unavailable_warned = true
+        pmacs.error(string.format(
+          "syntax: %s, so nothing is highlighted; install pmacs-parse-unit beside pmacs (or name it in syntax.parse-unit-path), or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
+          tostring(detail)))
+      end
+    elseif key and status == "limit" then
       -- E7i: a parse unit stopped at its memory limit; told once, like a
       -- deadline.
       if not parse_deadline_warned[key] then
