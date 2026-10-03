@@ -87,6 +87,24 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E7i.4: a worker is reused from parse to parse, since a fresh one per
+-- parse loses incremental parsing (measured: a cold parse in a new worker
+-- cost 154 ms against 83 ms incremental on a 595 KB Rust file, 409 against
+-- 288 on a 360 KB markdown note), and its memory does not creep under
+-- typing (flat after fifty keystrokes). What it keeps is the high-water
+-- mark of its largest parse: a worker that parsed a pathological 903 MiB
+-- file still held 849 MiB after re-parsing 24 bytes, where a fresh one
+-- holds 6 MiB. So one whose peak passed this in a parse is replaced at the
+-- buffer's next parse; ordinary files peak at 24 to 79 MiB.
+pmacs.config.define {
+  name = "syntax.parse-worker-recycle-mb",
+  description = "Under syntax.isolation process: a parse worker whose memory passed this many MiB in a parse is replaced by a fresh one at the buffer's next parse, releasing what the large parse left behind. 0 keeps a worker for the buffer's life.",
+  type = "integer",
+  default = 256,
+  min = 0,
+  mutability = "live",
+}
+
 pmacs.config.define {
   name = "syntax.parse-memory-total-mb",
   description = "Under syntax.isolation process: how many MiB all parse workers together may hold; a parse that would pass it is stopped. 0 leaves the total unbounded.",
@@ -113,7 +131,8 @@ function pmacs.parse._dispatch(buf, lang)
   local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"),
     pmacs.config.get("syntax.isolation"),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
-    pmacs.config.get("syntax.parse-memory-total-mb"))
+    pmacs.config.get("syntax.parse-memory-total-mb"),
+    pmacs.config.get("syntax.parse-worker-recycle-mb"))
   pending_parse_jobs[job_id] = true
   parse_job_buffer_keys[job_id] = key
   inflight_parse_by_buffer[key] = job_id
@@ -129,7 +148,8 @@ function pmacs.parse._parse_now(buf, lang, deadline_ms)
   return raw_parse_now(buf, lang, deadline_ms,
     pmacs.config.get("syntax.isolation"),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
-    pmacs.config.get("syntax.parse-memory-total-mb"))
+    pmacs.config.get("syntax.parse-memory-total-mb"),
+    pmacs.config.get("syntax.parse-worker-recycle-mb"))
 end
 
 -- Injection language aliases (framing Q#IJ4). The registry holds the

@@ -91,6 +91,10 @@ pub struct Limits {
     /// `syntax.parse-deadline-ms`: enforced inside the unit through the
     /// progress callback, and by the boundary [`HARD_GRACE`] after it.
     pub deadline: Option<Duration>,
+    /// `syntax.parse-worker-recycle-mb`: a worker whose peak passed this
+    /// many bytes in a parse is replaced at the buffer's next parse (E7i.4);
+    /// 0 keeps workers for the buffer's life.
+    pub recycle: u64,
 }
 
 /// How long after the deadline the boundary stops a unit that has not
@@ -256,6 +260,14 @@ struct Slot {
     /// Bytes of text whose spans a renderer asked the unit for after its
     /// parse, beyond what came back with the parse.
     fetched: u64,
+    /// The unit's peak passed `syntax.parse-worker-recycle-mb` in its last
+    /// parse: the next parse runs in a fresh worker (E7i.4).
+    recycle_next: bool,
+    /// The worker the last parse replaced, kept for one parse so the tree
+    /// the editor shows until the new one settles is still read from it.
+    retiring: Option<Arc<ProcessUnit>>,
+    /// Workers replaced after a large parse.
+    recycled: u64,
 }
 
 /// A buffer's slot, and the lock a parse holds for its whole round trip so
@@ -340,6 +352,9 @@ impl Host {
                         last_death: None,
                         reestablished: 0,
                         fetched: 0,
+                        recycle_next: false,
+                        retiring: None,
+                        recycled: 0,
                     }),
                     parsing: Mutex::new(()),
                 })
@@ -405,7 +420,8 @@ impl Host {
         Ok(Arc::new(unit))
     }
 
-    /// Every live unit, for the watchdog and the steady-state figure.
+    /// Every live unit, retiring ones included, for the watchdog and the
+    /// steady-state figure.
     fn units(&self) -> Vec<Arc<ProcessUnit>> {
         let cells: Vec<Arc<SlotCell>> = self
             .slots
@@ -414,7 +430,14 @@ impl Host {
             .values()
             .cloned()
             .collect();
-        cells.iter().filter_map(|c| c.slot().unit.clone()).collect()
+        cells
+            .iter()
+            .flat_map(|c| {
+                let slot = c.slot();
+                [slot.unit.clone(), slot.retiring.clone()]
+            })
+            .flatten()
+            .collect()
     }
 }
 
@@ -431,26 +454,19 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
     let _in_order = cell.parsing.lock().expect("parse order poisoned");
     let hard = job.limits.deadline.map(|d| d + HARD_GRACE);
     for attempt in 1..=2 {
-        let (unit, full) = {
-            let mut slot = cell.slot();
-            if slot.mode != job.limits.mode {
-                slot.unit = None;
-                slot.mode = job.limits.mode;
-                slot.synced = false;
-            }
-            if slot.unit.is_none() {
-                slot.unit = Some(host.spawn(&job.limits).map_err(|death| death.message())?);
-                slot.synced = false;
-            }
-            (slot.unit.clone().expect("started above"), !slot.synced)
-        };
+        let (unit, full) = unit_for(host, &cell, job, attempt == 1)?;
         let (call, payload) = parse_call(job, full);
         let started = Instant::now();
         let answer = unit.call(&Request::Parse(call), &payload, hard);
         let elapsed = started.elapsed();
         match answer {
             Ok(Response::Parsed(parsed)) => {
-                cell.slot().synced = true;
+                {
+                    let mut slot = cell.slot();
+                    slot.synced = true;
+                    slot.recycle_next =
+                        job.limits.recycle > 0 && parsed.peak_bytes > job.limits.recycle;
+                }
                 host.trace(&[
                     ("event", json_str("parsed")),
                     ("mode", json_str(job.limits.mode.name())),
@@ -511,6 +527,47 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
         }
     }
     Err(failure_message(&Failure::Desync { have: 0, want: 0 }))
+}
+
+/// The worker this parse goes to, and whether it needs the whole text:
+/// the buffer's, a fresh one when it has none, or, on a parse's `first`
+/// attempt after one that passed the recycle threshold, a fresh one while
+/// the old one retires (E7i.4).
+fn unit_for(
+    host: &Host,
+    cell: &SlotCell,
+    job: &IsolatedJob,
+    first: bool,
+) -> Result<(Arc<ProcessUnit>, bool), String> {
+    let mut slot = cell.slot();
+    if first {
+        // The worker the previous parse replaced has served the tree
+        // the editor showed until then; this parse replaces this
+        // slot's worker instead if its last parse passed the
+        // threshold (E7i.4).
+        slot.retiring = if slot.recycle_next {
+            slot.recycle_next = false;
+            slot.synced = false;
+            slot.recycled += 1;
+            host.trace(&[
+                ("event", json_str("recycle")),
+                ("buffer", job.buffer.raw().to_string()),
+            ]);
+            slot.unit.take()
+        } else {
+            None
+        };
+    }
+    if slot.mode != job.limits.mode {
+        slot.unit = None;
+        slot.mode = job.limits.mode;
+        slot.synced = false;
+    }
+    if slot.unit.is_none() {
+        slot.unit = Some(host.spawn(&job.limits).map_err(|death| death.message())?);
+        slot.synced = false;
+    }
+    Ok((slot.unit.clone().expect("started above"), !slot.synced))
 }
 
 fn failure_message(failure: &Failure) -> String {
@@ -754,12 +811,15 @@ impl IsolatedHandle {
     fn ask(&self, request: impl Fn(u64) -> Request) -> Option<Response> {
         let unit = {
             let slot = self.cell.slot();
-            match slot.unit.as_ref() {
-                Some(unit) if unit.serial == self.unit.load(Ordering::Relaxed) => {
-                    Some(unit.clone())
-                }
-                Some(_) => return None,
-                None => None,
+            let serial = self.unit.load(Ordering::Relaxed);
+            let holding = [slot.unit.as_ref(), slot.retiring.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|u| u.serial == serial);
+            match (holding, slot.unit.as_ref()) {
+                (Some(unit), _) => Some(unit.clone()),
+                (None, Some(_)) => return None,
+                (None, None) => None,
             }
         };
         let unit = match unit {
@@ -838,7 +898,11 @@ pub fn shutdown() {
         .map(|(_, c)| c)
         .collect();
     for cell in cells {
-        if let Some(unit) = cell.slot().unit.take() {
+        let mut slot = cell.slot();
+        for unit in [slot.unit.take(), slot.retiring.take()]
+            .into_iter()
+            .flatten()
+        {
             unit.kill_for(Death::Ended("the editor stopped".into()));
         }
     }
@@ -908,6 +972,8 @@ pub struct UnitReport {
     /// Bytes of text whose spans renderers asked the unit for beyond what
     /// came back with each parse.
     pub fetched: u64,
+    /// Workers replaced after a large parse (E7i.4).
+    pub recycled: u64,
 }
 
 /// The report for `buffer`'s unit, if it has had one. Never waits on a
@@ -926,6 +992,7 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
         busy,
         reestablished: slot.reestablished,
         fetched: slot.fetched,
+        recycled: slot.recycled,
         mode: slot.mode.name().to_owned(),
         unit: slot.unit.as_ref().map(|u| u.id()).unwrap_or_default(),
         memory: slot.unit.as_ref().and_then(|u| u.memory_bytes()),

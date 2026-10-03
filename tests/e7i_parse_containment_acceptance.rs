@@ -788,3 +788,46 @@ fn e7i_the_watchdog_holds_the_total_where_no_cgroup_does() {
         "the watchdog held the total: {text}"
     );
 }
+
+/// E7i.4: a worker whose peak passed `syntax.parse-worker-recycle-mb` in a
+/// parse is replaced at the buffer's next parse. With the threshold at
+/// 1 MiB every parse passes it: the first parse after setting it stays in
+/// the worker it found, the next runs in a fresh one, while the replaced
+/// worker still answers reads of the tree it held, and one parse later
+/// that worker is gone.
+#[test]
+fn e7i_a_worker_past_the_recycle_threshold_is_replaced_at_the_next_parse() {
+    let probe = "pmacs.config.set('syntax.parse-worker-recycle-mb', 1)\n\
+         local function unit() return pmacs.parse._unit_report(b).unit end\n\
+         local function alive(u)\n\
+           local p = io.popen('kill -0 ' .. u:match('%d+') .. ' 2>/dev/null; echo $?')\n\
+           local code = p:read('*l'); p:close(); return code == '0'\n\
+         end\n\
+         local function reparse()\n\
+           local len = pmacs.parse.tree(b):source_len()\n\
+           b:insert(0, '// x\\n')\n\
+           pmacs.parse._dispatch(b, 'rust')\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 20000 do\n\
+             pmacs.workers.sleep(50):await()\n\
+             local now = pmacs.parse.tree(b)\n\
+             if now and now:source_len() ~= len and not pmacs.parse._unit_report(b).busy then return end\n\
+           end\n\
+         end\n\
+         local u0 = unit()\n\
+         reparse()\n\
+         local u1, t1 = unit(), pmacs.parse.tree(b)\n\
+         reparse()\n\
+         local u2 = unit()\n\
+         local old = t1:root():type()\n\
+         reparse()\n\
+         local u3 = unit()\n\
+         return string.format('same=%s new=%s newer=%s old=%s recycled=%d gone=%s',\n\
+           tostring(u1 == u0), tostring(u2 ~= u1), tostring(u3 ~= u2), tostring(old),\n\
+           pmacs.parse._unit_report(b).recycled, tostring(not alive(u0)))";
+    let report = probe_in_unit("recycle.rs", "fn main() {}\n", probe);
+    assert_eq!(
+        report, "mode=process same=true new=true newer=true old=source_file recycled=2 gone=true",
+        "workers are replaced after a parse past the threshold"
+    );
+}

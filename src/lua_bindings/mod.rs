@@ -8185,12 +8185,14 @@ impl UserData for ParseNodeLua {
 /// `syntax.parse-deadline-ms`; absent or 0 leaves the parse unbounded.
 /// `pmacs.parse._dispatch`'s arguments: the buffer, its language, then
 /// `syntax.parse-deadline-ms` and E7i's `syntax.isolation`,
-/// `syntax.parse-memory-limit-mb` and `syntax.parse-memory-total-mb`.
+/// `syntax.parse-memory-limit-mb`, `syntax.parse-memory-total-mb` and
+/// `syntax.parse-worker-recycle-mb`.
 type DispatchArgs = (
     BufferIdLua,
     String,
     Option<u64>,
     Option<String>,
+    Option<u64>,
     Option<u64>,
     Option<u64>,
 );
@@ -8208,15 +8210,15 @@ fn isolation_mode(isolation: Option<&str>) -> crate::parse_isolation::Isolation 
 }
 
 /// The isolated parse of `buffer`'s pending edits, its limits from the
-/// dispatch's arguments: `syntax.parse-memory-limit-mb` and
-/// `syntax.parse-memory-total-mb`.
+/// dispatch's arguments: `syntax.parse-memory-limit-mb`,
+/// `syntax.parse-memory-total-mb` and `syntax.parse-worker-recycle-mb`.
 fn isolated_job(
     s: &SharedSyntaxRegistry,
     buffer: BufferId,
     handle: &ParseViewHandle,
     deadline_ms: Option<u64>,
     mode: crate::parse_isolation::Isolation,
-    (unit_mb, total_mb): (Option<u64>, Option<u64>),
+    (unit_mb, total_mb, recycle_mb): (Option<u64>, Option<u64>, Option<u64>),
 ) -> crate::parse_isolation::IsolatedJob {
     let (mut req, inserted) = handle.make_isolated_request();
     req.injection_aliases = s.injection_alias_snapshot();
@@ -8231,6 +8233,7 @@ fn isolated_job(
             unit_memory: unit_mb.unwrap_or(1024) << 20,
             total_memory: total_mb.unwrap_or(0) << 20,
             deadline: parse_deadline(deadline_ms),
+            recycle: recycle_mb.unwrap_or(0) << 20,
         },
     }
 }
@@ -8407,6 +8410,7 @@ pub fn install_parse(
             t.set("busy", report.busy)?;
             t.set("reestablished", report.reestablished)?;
             t.set("fetched", report.fetched)?;
+            t.set("recycled", report.recycled)?;
             Ok(mlua::Value::Table(t))
         })?,
     )?;
@@ -8453,7 +8457,7 @@ pub fn install_parse(
         parse_mod.set(
             "_parse_now",
             lua.create_function(
-                move |_, (id, lang, deadline_ms, isolation, unit_mb, total_mb): DispatchArgs| {
+                move |_, (id, lang, deadline_ms, isolation, unit_mb, total_mb, recycle_mb): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
                     // Under `syntax.isolation` (E7i) the parse runs in the
                     // buffer's unit, waited for here as the in-process one is.
@@ -8475,7 +8479,7 @@ pub fn install_parse(
                                 &handle,
                                 deadline_ms,
                                 mode,
-                                (unit_mb, total_mb),
+                                (unit_mb, total_mb, recycle_mb),
                             );
                             crate::parse_isolation::run(&job)
                         }
@@ -8507,14 +8511,14 @@ pub fn install_parse(
         parse_mod.set(
             "_dispatch",
             lua.create_function(
-                move |_, (id, lang, deadline_ms, isolation, unit_mb, total_mb): DispatchArgs| {
+                move |_, (id, lang, deadline_ms, isolation, unit_mb, total_mb, recycle_mb): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
                     // `syntax.isolation` (E7i): "none" parses here, as before;
                     // "process" sends the parse to the buffer's unit.
                     let mode = isolation_mode(isolation.as_deref());
                     if mode != crate::parse_isolation::Isolation::Native {
                         let job =
-                            isolated_job(&s, id.0, &handle, deadline_ms, mode, (unit_mb, total_mb));
+                            isolated_job(&s, id.0, &handle, deadline_ms, mode, (unit_mb, total_mb, recycle_mb));
                         let job_id = rt.dispatch_isolated_parse(job);
                         s.record_parse_job(job_id, id.0);
                         return Ok(job_id);
