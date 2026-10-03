@@ -2,9 +2,10 @@
 
 Inputs every arm of `scripts/fuzz-grammars` replays through the editor's
 parse worker (`pmacs_grammar_fuzz replay-unit`, E7i.2), one directory per
-grammar the worker parses them as. Each was a finding that took the editor
-down before E7i and that the worker now stops at its own limit: the replay
-must report it contained (or answered) and never crashed, or the arm fails.
+grammar the worker parses them as. Each reproduces a finding of a kind
+that took the editor down before E7i: the replay must report it contained
+or answered, and never crashed, or the arm fails. A directory's route need
+not reach the defect; what each input does there is said below.
 
 ## `markdown/`
 
@@ -21,6 +22,13 @@ markdown's inline injection, the way the editor parses it.
 | `301-nested-openers-98.input` | #301, `![f` | `'*bar**\n' + 'f![' * 28 + 'f*bark]'`, 37 s natively against a 5 s deadline |
 | `301-hang-596.input` | #301, `![f` | a hang reproduced alone by E7h review 2's second 600 s markdown_inline run |
 | `301-hang-7672.input` | #301, `*f[` | a hang reproduced alone by E7h review 2's first 600 s markdown_inline run |
+
+Through markdown the first three are contained: #296's two by the memory
+limit, the nested openers at the deadline. The two hangs found against
+markdown_inline directly return within the deadline by markdown's route, so
+the replay reports them answered (both CI arms, run 37133953201, and the
+laptop). A copy under `markdown_inline/` would replay them as they were
+found; none is kept yet.
 
 `tests/e7h_review2/accepted-296-301.tsv` keeps the two retired rows, naming
 these files, so the accepted list's matching stays under test while the
