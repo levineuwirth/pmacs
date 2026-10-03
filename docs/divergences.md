@@ -139,3 +139,45 @@ whole. Under one cap a growing register squeezes the rules.
   `WindowFacts` on the wire and the GPU paints more than one document
    window, at which point the preview is visible on both and this entry
    becomes a statement that the two frontends agree.
+- **Parse containment by platform.** By default every buffer's parse
+  runs in a worker process (`syntax.isolation`, E7i), and what holds a
+  worker depends on what the platform grants. A platform difference, not a
+  frontend's, recorded here at the owner's direction because it changes
+  what "contained" means. Time is the editor's everywhere:
+  a parse past `syntax.parse-deadline-ms` is killed 100 ms after it. A
+  crash ends only its worker everywhere. Memory is where they differ.
+  On Linux each worker caps its own address space (`RLIMIT_AS`), so an
+  allocation past `syntax.parse-memory-limit-mb` fails before the memory
+  exists, and where the session's cgroup subtree is delegated (a systemd
+  user session) a cgroup v2 `memory.max` holds every worker to
+  `syntax.parse-memory-total-mb`, the kernel's OOM killer enforcing it:
+  both preventive. macOS refuses `RLIMIT_AS` (`EINVAL`) and has no
+  cgroups, so there each worker watches its own peak resident memory
+  every millisecond while it parses and exits past its allowance, and
+  the editor's watchdog sums the sizes the workers report every 10 ms
+  and kills the largest past the total: both reactive, acting after the
+  memory exists, by what a parse grows between two looks. A Linux
+  session without a delegated subtree (CI's hosted runners: `mkdir`
+  beside `/system.slice/hosted-compute-agent.service` is refused) gets
+  the per-worker limit and the watchdog's total. Measured on #296's
+  paragraph (E7i, 2026-10-03, `tests/e7i_parse_containment_acceptance.rs`
+  printing each figure, the laptop and PR #309's run 37130407757): the
+  watch stopped a worker 0.19 to 0.21 MB past a 64 MiB allowance on the
+  laptop, 0.07 to 0.62 MB on CI's four Ubuntu legs and 0.52 to 1.33 MB
+  on its two macOS legs; the watchdog held a 256 MiB total over three
+  such workers at worst 7.1 MB over on the laptop, 2.7 to 15.2 MB on
+  Ubuntu and 7.9 to 41.4 MB on macOS. #296 grows at about 1 GB/s, so the
+  gap is that rate times the interval and the scheduling around it: small
+  at these intervals, but a loaded machine or a starved watch thread
+  widens it, where a limit has no gap at all.
+  `PMACS_PARSE_UNIT_MEMORY=watch` and `PMACS_PARSE_UNIT_CGROUP=off` (test
+  hooks, not settings) put a Linux machine on the reactive paths, so the
+  gate witnesses them here. What would close it: a preventive limit on
+  macOS, a per-process memory limit the kernel enforces (none is exposed
+  to an unprivileged process there; a `posix_spawn` attribute or a
+  sandbox profile that bounds memory would be one), or a worker
+  allocator that counts its own bytes and refuses past the allowance,
+  which tree-sitter's C allocator hooks would allow but which needs an
+  `unsafe` call this codebase forbids; on Linux, a delegated cgroup in
+  every session that runs the editor. Removed when macOS bounds a
+  worker's memory before it exists.
