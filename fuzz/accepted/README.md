@@ -9,6 +9,15 @@ A finding a row names is reported `known, accepted (#N)` in the run's report
 and its note, and does not set the run's exit status. Everything else fails
 as before. A row is removed in the commit that meets its removal condition.
 
+**The list is empty since E7i.5.** #296's and #301's rows retired when
+E7i's parse worker stopped both in the editor, the condition each named.
+Their reproductions moved to `fuzz/regress/markdown/`, which every arm of
+`scripts/fuzz-grammars` replays through the worker, and the two rows are
+kept as they stood in `tests/e7h_review2/accepted-296-301.tsv`, which holds
+the matching below under test. A list with no rows is the state to keep:
+an accepted row outliving its reason is how such a list becomes a place to
+hide findings.
+
 ## How a finding is matched
 
 A finding matches a row when all three hold:
@@ -53,10 +62,6 @@ design.
 
 ## The reproductions
 
-| file | finding | where it came from |
-|---|---|---|
-| `296-underscores-16k.input` | #296, `_` | the issue's generator, 28 lines (16,492 bytes); alone under the `ubsan` build 33.6 s and 5.29 GB |
-| `296-asterisks-8k.input` | #296, `*` | 8,237 asterisks, an allocation E7h review 2's sweep reached from ordinary seeds (`asan-strict` arm) |
-| `301-nested-openers-98.input` | #301, `![f` | `'*bar**\n' + 'f![' * 28 + 'f*bark]'`, 37 s natively against a 5 s deadline |
-| `301-hang-596.input` | #301, `![f` | a hang reproduced alone by E7h review 2's second 600 s markdown_inline run |
-| `301-hang-7672.input` | #301, `*f[` | a hang reproduced alone by E7h review 2's first 600 s markdown_inline run |
+The rows retired at E7i.5, and their reproductions with them: they are
+regression inputs now, in `fuzz/regress/markdown/`, whose README lists
+them.

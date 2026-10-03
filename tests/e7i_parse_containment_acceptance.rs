@@ -6,7 +6,7 @@
 //! `pmacs-parse-unit` beside `pmacs`, where the editor finds it, and beside
 //! cargo's `deps/`, where a test binary's editor does.
 //!
-//! #301's nested image openers (`fuzz/accepted/301-nested-openers-98.input`)
+//! #301's nested image openers (`fuzz/regress/markdown/301-nested-openers-98.input`)
 //! never return from `ts_parser__condense_stack` inside a deadline, and
 //! #296's underscore paragraph grows inside `ts_parser__accept`; neither
 //! reaches tree-sitter's progress callback, so in-process nothing stops
@@ -141,8 +141,9 @@ fn field<'a>(text: &'a str, row: &str, key: &str) -> &'a str {
 /// #301 behind `mode`: stopped at the deadline (300 ms here), the daemon
 /// alive, and the other buffer's parse installed from its own unit.
 fn stops_301_at_the_deadline(mode: &str, limit: Duration) {
-    let victim = std::fs::read_to_string(repo().join("fuzz/accepted/301-nested-openers-98.input"))
-        .expect("#301's input");
+    let victim =
+        std::fs::read_to_string(repo().join("fuzz/regress/markdown/301-nested-openers-98.input"))
+            .expect("#301's input");
     let (mut daemon, _dir, report) = daemon(
         mode,
         &victim,
@@ -222,8 +223,9 @@ fn previous_parse_answers_after_its_unit_is_discarded(mode: &str, limit: Duratio
     let good_len = good.len();
     let path = dir.join("good.md");
     std::fs::write(&path, &good).expect("good.md");
-    let openers = std::fs::read_to_string(repo().join("fuzz/accepted/301-nested-openers-98.input"))
-        .expect("#301's input");
+    let openers =
+        std::fs::read_to_string(repo().join("fuzz/regress/markdown/301-nested-openers-98.input"))
+            .expect("#301's input");
     let report = dir.join("report.txt");
     let init = format!(
         "pmacs.lsp.config = {{}}\n\
@@ -635,8 +637,9 @@ fn e7i_the_grid_reads_what_it_shows_from_the_buffer_s_unit() {
 /// on the unit's other thread.
 #[test]
 fn e7i_a_read_is_answered_while_the_unit_parses() {
-    let openers = std::fs::read_to_string(repo().join("fuzz/accepted/301-nested-openers-98.input"))
-        .expect("#301's input");
+    let openers =
+        std::fs::read_to_string(repo().join("fuzz/regress/markdown/301-nested-openers-98.input"))
+            .expect("#301's input");
     let probe = format!(
         "pmacs.config.set('syntax.parse-deadline-ms', 4000)\n\
          local t = pmacs.parse.tree(b)\n\
@@ -902,8 +905,8 @@ fn e7i_the_fuzz_replay_drives_the_worker_and_finds_296_and_301_contained() {
     let (code, report) = replay(
         &worker,
         &[
-            "fuzz/accepted/296-underscores-16k.input",
-            "fuzz/accepted/301-nested-openers-98.input",
+            "fuzz/regress/markdown/296-underscores-16k.input",
+            "fuzz/regress/markdown/301-nested-openers-98.input",
         ],
     );
     assert_eq!(code, Some(0), "no crash: {report}");
@@ -989,4 +992,48 @@ fn e7i_a_missing_worker_is_said_once_with_its_remedy() {
         text, "told=1 path=true remedy=true\n",
         "told once, naming the missing path and the way out"
     );
+}
+
+/// E7i.5: #296's row named its removal as "a limit on the parse itself
+/// stops #296's 32 KB paragraph in the editor". Here it is, at the editor's
+/// own defaults (no limit set in the test): the 32 KB paragraph, which in
+/// the editor's process grew to 9.8 GB, is stopped at the worker's default
+/// 1 GiB allowance (`RLIMIT_AS` on Linux, the watch on macOS), the user told
+/// once, the daemon alive.
+#[test]
+fn e7i_296s_32_kb_paragraph_is_stopped_at_the_editor_s_defaults() {
+    let (mut daemon, _dir, report) = daemon("process", &underscores(56), "");
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_secs(40), |t| {
+        victim_died(t) && t.contains("told 1")
+    });
+    assert!(
+        text.lines()
+            .find(|l| l.starts_with("victim"))
+            .is_some_and(|l| l.contains("death=memory:")),
+        "#296's 32 KB paragraph was stopped by the default memory limit: {text}"
+    );
+    assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
+}
+
+/// E7i.5: #301's row named its removal as "a time limit on the parse
+/// itself stops #301's nested openers in the editor". At the editor's
+/// default deadline, 5 s, the worker is killed 100 ms past it.
+#[test]
+fn e7i_301_is_stopped_at_the_editor_s_default_deadline() {
+    let victim =
+        std::fs::read_to_string(repo().join("fuzz/regress/markdown/301-nested-openers-98.input"))
+            .expect("#301's input");
+    let (mut daemon, _dir, report) = daemon("process", &victim, "");
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_secs(40), |t| {
+        victim_died(t) && t.contains("tree=rust")
+    });
+    assert!(
+        text.lines()
+            .find(|l| l.starts_with("victim"))
+            .is_some_and(|l| l.contains("death=time:") && l.contains("deadline of 5000 ms")),
+        "#301 was stopped at the default deadline: {text}"
+    );
+    assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
 }

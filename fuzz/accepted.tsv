@@ -7,14 +7,17 @@
 # the kinds it is seen as, the reproductions that identify it (paths
 # relative to this directory, each dominated by one short repeated unit,
 # which is the key), and the condition that removes the row. A row is keyed
-# to the defect, not to the route a fuzzer took to it: markdown_inline's
-# classes are reached directly and through markdown's inline injection, the
-# way a .md file meets them in the editor, so their rows name both grammars
-# (the owner's ruling at E7h's fix round 3; a 600 s run over markdown met
-# #296 that way, fuzz/repro/markdown-296-through-injection-20515.input). fuzz/accepted/README.md says how a finding
-# is matched and what the match cannot tell apart.
+# to the defect, not to the route a fuzzer took to it. fuzz/accepted/README.md
+# says how a finding is matched and what the match cannot tell apart.
+#
+# The list is empty. #296 (markdown_inline's underscore and asterisk
+# paragraphs, memory) and #301 (its nested image and link openers, hang)
+# were accepted until a boundary on the parse itself stopped them in the
+# editor; E7i's worker process does (each buffer's parse is killed at the
+# deadline and stopped at its memory limit, tests/e7i_parse_containment_
+# acceptance.rs), so their rows retired at E7i.5 and their reproductions
+# moved to fuzz/regress/markdown/, which every arm of scripts/fuzz-grammars
+# replays through the worker. The two rows are kept, as they stood, in
+# tests/e7h_review2/accepted-296-301.tsv, which holds the matching itself
+# under test.
 issue	grammars	kinds	reproductions	removal
-# 296: markdown_inline's underscore and asterisk paragraphs, directly or through markdown's injection.
-296	markdown,markdown_inline	memory	accepted/296-underscores-16k.input,accepted/296-asterisks-8k.input	a limit on the parse itself, under the boundary E7i rules (not grammar-only wasm, whose linear memory #296's native allocation never touches), stops #296's 32 KB paragraph in the editor
-# 301: markdown_inline's nested openers, directly or through markdown's injection.
-301	markdown,markdown_inline	hang	accepted/301-nested-openers-98.input,accepted/301-hang-596.input,accepted/301-hang-7672.input	a time limit on the parse itself, under the boundary E7i rules (not grammar-only wasm, whose epoch check never runs in the native condensation), stops #301's nested openers in the editor

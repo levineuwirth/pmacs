@@ -26,7 +26,7 @@
 //! pmacs_grammar_fuzz repro GRAMMAR FILE [--edits N --seed N] [--trace 1]
 //! pmacs_grammar_fuzz replay-unit --unit PATH --corpus DIR --out DIR
 //!                        [--grammar NAME]... [--max-inputs N] [--jobs N]
-//!                        [--findings DIR] [--extra GRAMMAR=PATH]...
+//!                        [--findings DIR]... [--extra GRAMMAR=PATH]...
 //!                        [--memory-mb N] [--enforcement rlimit|watch]
 //!                        [--deadline-ms N] [--grace-ms N]
 //! ```
@@ -85,6 +85,12 @@
 //! the run however it came back (a kill by signal 9, the host reclaiming
 //! memory, excepted). A hang that does not come back alone is a loaded
 //! worker's and is reported, not failed.
+//!
+//! Since E7i.5 `scripts/fuzz-grammars` passes `--fail-on crashes` to every
+//! arm: a hang or a memory cut took the editor down before E7i, and now
+//! the parse worker stops it at its deadline or memory limit, which
+//! `replay-unit` shows on the finding's own input. A crash still fails, in
+//! the harness or in the worker.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
@@ -3787,7 +3793,11 @@ struct ReplayConfig {
 fn replay_unit(args: &[String]) -> Result<ExitCode, String> {
     let (_, flags) = Flags::parse(args, 0)?;
     let corpus = flags.path("corpus")?;
-    let findings = flags.one("findings").map(PathBuf::from);
+    let findings: Vec<PathBuf> = flags
+        .all("findings")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
     let max_inputs = usize::try_from(flags.num("max-inputs", 50)?).map_err(|e| e.to_string())?;
     let deadline_ms = flags.num("deadline-ms", 5_000)?;
     let cfg = Arc::new(ReplayConfig {
@@ -3803,7 +3813,7 @@ fn replay_unit(args: &[String]) -> Result<ExitCode, String> {
         hard: Duration::from_millis(deadline_ms + flags.num("grace-ms", 1_000)?),
     });
     std::fs::create_dir_all(&cfg.out).map_err(|e| e.to_string())?;
-    let queue = replay_queue(&flags, &corpus, findings.as_deref(), max_inputs)?;
+    let queue = replay_queue(&flags, &corpus, &findings, max_inputs)?;
     let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
     let queue = Arc::new(Mutex::new(queue));
     let replays = Arc::new(Mutex::new(Vec::new()));
@@ -3856,7 +3866,7 @@ fn replay_unit(args: &[String]) -> Result<ExitCode, String> {
 fn replay_queue(
     flags: &Flags,
     corpus: &Path,
-    findings: Option<&Path>,
+    findings: &[PathBuf],
     max_inputs: usize,
 ) -> Result<Vec<(&'static str, Inputs)>, String> {
     let wanted = flags.all("grammar");
@@ -3879,7 +3889,7 @@ fn replay_queue(
         .filter(|e| wanted.is_empty() || wanted.contains(&e.name))
     {
         let mut inputs = sampled_inputs(&corpus.join(lang.name), max_inputs);
-        if let Some(dir) = findings {
+        for dir in findings {
             inputs.extend(
                 sampled_inputs(&dir.join(lang.name), usize::MAX)
                     .into_iter()
@@ -4042,11 +4052,26 @@ mod tests {
     }
 
     #[test]
-    fn the_accepted_list_names_its_findings_and_no_other() {
-        // E7h fix round 2, the owner's ruling on review 2's High 1: each row
-        // names its findings by the repeated unit of its reproductions.
+    fn the_accepted_list_is_empty_since_its_two_rows_retired() {
+        // E7i.5: #296's and #301's rows retired when the parse worker
+        // stopped both in the editor, their removal condition. Adding a row
+        // is the owner's ruling, and changes this pin in the same commit.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let list = load_accepted(&root.join("fuzz/accepted.tsv")).expect("the list loads");
+        assert!(
+            list.is_empty(),
+            "fuzz/accepted.tsv has rows; adding one is the owner's ruling"
+        );
+    }
+
+    #[test]
+    fn the_accepted_list_names_its_findings_and_no_other() {
+        // E7h fix round 2, the owner's ruling on review 2's High 1: each row
+        // names its findings by the repeated unit of its reproductions. The
+        // two rows as they stood until E7i.5 retired them.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let list = load_accepted(&root.join("tests/e7h_review2/accepted-296-301.tsv"))
+            .expect("the list loads");
         let issues: Vec<u32> = list.iter().map(|e| e.issue).collect();
         assert_eq!(issues, [296, 301]);
         let units = |issue| {

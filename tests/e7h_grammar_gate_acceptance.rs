@@ -604,9 +604,19 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
         line("sanitize=\"-fsanitize=type").ends_with("-fsanitize=type\""),
         "tysan is clang's TypeSanitizer"
     );
+    // Since E7i.5 every arm's harness fails on its crashes alone: a hang
+    // or a memory cut took the editor down before E7i, and the parse worker
+    // now stops it, which the replay through the worker shows on the
+    // finding's own input; the replay itself fails on a crash.
     assert!(
-        script.contains("[ \"$arm\" = tysan ] && fail_on=crashes"),
-        "only the tysan arm's crashes fail it"
+        script.contains("    fail_on=crashes\n") && !script.contains("fail_on=all"),
+        "every arm's harness fails on its crashes alone"
+    );
+    assert!(
+        script.contains("fuzz replay-unit --unit \"$unit\"")
+            && script.contains("--findings \"$out/$arm\"")
+            && script.contains("--findings \"$root/fuzz/regress\""),
+        "and each arm replays its findings and fuzz/regress through the worker"
     );
     let wf = read(".github/workflows/grammar-fuzz.yml");
     assert!(
@@ -664,7 +674,9 @@ struct Fuzz<'a> {
     seeds: &'a [(&'a str, &'a str)],
     hang_ms: u64,
     rss_mb: u64,
-    /// Pass this tree's `fuzz/accepted.tsv`.
+    /// Pass the accepted list as it stood with #296's and #301's rows
+    /// (`tests/e7h_review2/accepted-296-301.tsv`): the real one is empty
+    /// since E7i.5 retired them, and these rows exercise the matching.
     accepted: bool,
     /// The minimizer's budget, if not its default five minutes.
     minimize_secs: Option<u64>,
@@ -707,8 +719,9 @@ fn fuzz_run(f: &Fuzz) -> (i32, Vec<String>, String, String) {
         cmd.env("PMACS_FUZZ_MINIMIZE_SECONDS", secs.to_string());
     }
     if accepted {
-        cmd.arg("--accepted")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/accepted.tsv"));
+        cmd.arg("--accepted").arg(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e7h_review2/accepted-296-301.tsv"),
+        );
     }
     let run = cmd.output().expect("the harness runs");
     let tsv = std::fs::read_to_string(out.join("report.tsv")).unwrap_or_default();

@@ -91,11 +91,14 @@
 #      not in the editor, so each arm also builds that binary with the
 #      arm's compiler and flags and drives it through its protocol as the
 #      editor does (`pmacs_grammar_fuzz replay-unit`): every seed up to
-#      --replay-inputs per grammar, the arm's findings and the accepted
-#      reproductions, each parsed whole and then edited with reads of the
-#      tree before it sent while the edit's parse runs. A worker stopped by
-#      its own memory or time limit is contained, the boundary's job; any
-#      other death is a crash and fails the arm. Under a sanitizer the
+#      --replay-inputs per grammar, the arm's findings, fuzz/regress/ and
+#      the accepted reproductions, each parsed whole and then edited with
+#      reads of the tree before it sent while the edit's parse runs. A
+#      worker stopped by its own memory or time limit is contained, the
+#      boundary's job; any other death is a crash and fails the arm. So the
+#      harness runs with --fail-on crashes in every arm (E7i.5): a parse
+#      that never returns, or one past the memory cap, is reported and
+#      its input replayed, and fails only if the worker does not contain it. Under a sanitizer the
 #      worker's memory is held by its watch (`--memory-enforcement
 #      watch`), since the sanitizer's shadow reservation is address space
 #      RLIMIT_AS would refuse; the plain arm runs it as it ships.
@@ -338,11 +341,11 @@ for arm in $arms; do
     [ "$arm" = "$built" ] || build_arm "$arm"
     built=
     mkdir -p "$out/$arm"
-    # The tysan arm's time and memory are TypeSanitizer's: only its crashes
-    # (a TypeSanitizer report among them) fail it; the ubsan arm rules on
-    # hangs and memory.
-    fail_on=all
-    [ "$arm" = tysan ] && fail_on=crashes
+    # Only crashes fail the harness (a TypeSanitizer report among them).
+    # A hang or a memory cut took the editor down before E7i; now the
+    # parse worker stops it at the deadline or its memory limit, which the
+    # replay below shows on the finding's own input (E7i.5).
+    fail_on=crashes
     set +e
     # shellcheck disable=SC2086
     fuzz run --corpus "$work/corpus" --out "$out/$arm" --seconds "$seconds" --jobs "$jobs" \
@@ -364,7 +367,8 @@ for arm in $arms; do
     done < fuzz/accepted.tsv
     # shellcheck disable=SC2086
     fuzz replay-unit --unit "$unit" --corpus "$work/corpus" --out "$out/$arm/unit" \
-        --max-inputs "$replay_inputs" --findings "$out/$arm" --jobs "$jobs" \
+        --max-inputs "$replay_inputs" --findings "$out/$arm" \
+        --findings "$root/fuzz/regress" --jobs "$jobs" \
         --enforcement "$enforcement" $extras $grammars > /dev/null
     unit_status=$?
     set -e
