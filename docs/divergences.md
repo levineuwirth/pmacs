@@ -162,11 +162,14 @@ whole. Under one cap a growing register squeezes the rules.
   the per-worker limit and the watchdog's total. Measured on #296's
   paragraph (E7i, 2026-10-03, `tests/e7i_parse_containment_acceptance.rs`
   printing each figure, the laptop and PR #309's run 37130407757): the
-  watch stopped a worker 0.19 to 0.21 MB past a 64 MiB allowance on the
-  laptop, 0.07 to 0.62 MB on CI's four Ubuntu legs and 0.52 to 1.33 MB
-  on its two macOS legs; the watchdog held a 256 MiB total over three
-  such workers at worst 7.1 MB over on the laptop, 2.7 to 15.2 MB on
-  Ubuntu and 7.9 to 41.4 MB on macOS. #296 grows at about 1 GB/s, so the
+  watch stopped a worker 0.19 to 0.39 MB past a 64 MiB allowance on the
+  laptop (the upper end E7i review 1's gate, 385,024 bytes), 0.07 to
+  0.62 MB on CI's four Ubuntu legs and 0.52 to 1.33 MB on its two macOS
+  legs; the watchdog held a 256 MiB total over three such workers at
+  worst 7.1 MB over on the laptop, and over every total row of CI's legs,
+  two a leg, 2.7 to 15.2 MB on Ubuntu and 7.9 to 41.4 MB on macOS (each
+  range's lower end is a leg's smaller row, not its larger). #296 grows
+  at about 1 GB/s, so the
   gap is that rate times the interval and the scheduling around it: small
   at these intervals, but a loaded machine or a starved watch thread
   widens it, where a limit has no gap at all.
