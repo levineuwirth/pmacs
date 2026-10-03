@@ -2032,6 +2032,11 @@ fn after_buffer_removed(lua: &Lua, id: BufferId) {
     if let Some(folds) = lua.app_data_ref::<crate::fold::SharedFoldRegistry>() {
         folds.forget_buffer(id);
     }
+    // E7i: the buffer's parse view and its worker process go with it.
+    if let Some(syntax) = lua.app_data_ref::<SharedSyntaxRegistry>() {
+        syntax.detach_view(id);
+    }
+    crate::parse_isolation::forget(id);
     let callbacks = match lua.app_data_ref::<BufferRemoveCallbacks>() {
         Some(callbacks) => callbacks.take(id),
         None => Vec::new(),

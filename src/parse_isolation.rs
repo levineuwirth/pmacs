@@ -280,6 +280,9 @@ struct Slot {
     retiring: Option<Arc<ProcessUnit>>,
     /// Workers replaced after a large parse.
     recycled: u64,
+    /// The buffer was killed: a tree a script still holds answers nothing,
+    /// rather than starting a worker for a buffer that is gone.
+    forgotten: bool,
 }
 
 /// A buffer's slot, and the lock a parse holds for its whole round trip so
@@ -371,6 +374,7 @@ impl Host {
                         recycle_next: false,
                         retiring: None,
                         recycled: 0,
+                        forgotten: false,
                     }),
                     parsing: Mutex::new(()),
                 })
@@ -835,6 +839,9 @@ impl IsolatedHandle {
     fn ask(&self, request: impl Fn(u64) -> Request) -> Option<Response> {
         let unit = {
             let slot = self.cell.slot();
+            if slot.forgotten {
+                return None;
+            }
             let serial = self.unit.load(Ordering::Relaxed);
             let holding = [slot.unit.as_ref(), slot.retiring.as_ref()]
                 .into_iter()
@@ -905,6 +912,31 @@ impl IsolatedHandle {
             }
             _ => None,
         }
+    }
+}
+
+/// A buffer was killed: end its worker, and any it is retiring, and forget
+/// its slot, so a long-lived editor does not keep a worker per buffer it
+/// ever opened. A parse of it still in flight fails as for a dead worker.
+pub fn forget(buffer: BufferId) {
+    let Some(host) = HOST_CELL.get() else {
+        return;
+    };
+    let cell = host
+        .slots
+        .lock()
+        .expect("isolation slots poisoned")
+        .remove(&buffer);
+    let Some(cell) = cell else {
+        return;
+    };
+    let mut slot = cell.slot();
+    slot.forgotten = true;
+    for unit in [slot.unit.take(), slot.retiring.take()]
+        .into_iter()
+        .flatten()
+    {
+        unit.kill_for(Death::Ended("its buffer was killed".into()));
     }
 }
 

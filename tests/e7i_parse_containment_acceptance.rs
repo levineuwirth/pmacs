@@ -1037,3 +1037,29 @@ fn e7i_301_is_stopped_at_the_editor_s_default_deadline() {
     );
     assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
 }
+
+/// A killed buffer's worker goes with it (E7i): with the worker the
+/// default, a long-lived editor must not keep a process per buffer it ever
+/// opened. The worker that parsed the buffer is alive, the buffer is
+/// killed, and the worker is gone and the buffer has no unit any more.
+#[test]
+fn e7i_killing_a_buffer_ends_its_worker() {
+    let probe = "local pid = pmacs.parse._unit_report(b).unit:match('%d+')\n\
+         local function alive()\n\
+           local p = io.popen('kill -0 ' .. pid .. ' 2>/dev/null; echo $?')\n\
+           local code = p:read('*l'); p:close(); return code == '0'\n\
+         end\n\
+         local before = alive()\n\
+         pmacs.buffer.kill(b)\n\
+         local t0 = pmacs.editor.monotonic_ms()\n\
+         while alive() and pmacs.editor.monotonic_ms() - t0 < 5000 do\n\
+           pmacs.workers.sleep(20):await()\n\
+         end\n\
+         return string.format('before=%s after=%s unit=%s', tostring(before), tostring(alive()),\n\
+           tostring(pmacs.parse._unit_report(b)))";
+    let report = probe_in_unit("killed.rs", "fn main() {}\n", probe);
+    assert_eq!(
+        report, "mode=process before=true after=false unit=nil",
+        "the worker ended with its buffer"
+    );
+}
