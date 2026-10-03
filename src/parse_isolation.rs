@@ -236,7 +236,7 @@ struct Host {
     slots: Mutex<HashMap<BufferId, Arc<Mutex<Slot>>>>,
     #[cfg(feature = "wasm-unit")]
     wasm: OnceLock<Result<WasmShared, String>>,
-    cgroup: OnceLock<Option<Cgroup>>,
+    cgroup: OnceLock<CgroupAttempt>,
     trace: Option<Mutex<std::fs::File>>,
     started: Instant,
     #[cfg(feature = "wasm-unit")]
@@ -324,6 +324,7 @@ impl Host {
                 let cgroup = self
                     .cgroup
                     .get_or_init(|| Cgroup::create(limits.total_memory))
+                    .cgroup
                     .as_ref();
                 ProcessUnit::start(limits, cgroup).map(|u| Box::new(u) as Box<dyn Transport>)
             }
@@ -724,9 +725,22 @@ pub fn shutdown() {
             slot.transport = None;
         }
     }
-    if let Some(Some(cgroup)) = host.cgroup.get() {
+    if let Some(Some(cgroup)) = host.cgroup.get().map(|a| a.cgroup.as_ref()) {
         let _ = std::fs::remove_dir(&cgroup.dir);
     }
+}
+
+/// What the editor found about holding its workers to a total: how the
+/// cgroup attempt went (created, or the step that refused and why) and,
+/// when created, how many workers the kernel moved into it. `None` until a
+/// process unit has started, since the attempt is made then.
+#[must_use]
+pub fn isolation_report() -> Option<String> {
+    let attempt = host().cgroup.get()?;
+    Some(match attempt.cgroup.as_ref() {
+        Some(cgroup) => format!("cgroup {}; {}", attempt.report, cgroup.adoption()),
+        None => format!("cgroup {}", attempt.report),
+    })
 }
 
 /// Trace an in-process parse (`syntax.isolation` none) beside the units'
@@ -1006,21 +1020,50 @@ fn sibling(name: &str) -> Option<PathBuf> {
 #[derive(Clone, Debug)]
 struct Cgroup {
     dir: PathBuf,
+    /// Workers the kernel moved into it.
+    adopted: Arc<AtomicU64>,
+    /// Workers it refused to move, which then run outside the total, and
+    /// the first refusal's error.
+    refused: Arc<AtomicU64>,
+    first_refusal: Arc<Mutex<Option<String>>>,
+}
+
+/// What the editor found when it tried to create the workers' cgroup: the
+/// cgroup, or `None` and the step that refused, said in `report`.
+struct CgroupAttempt {
+    cgroup: Option<Cgroup>,
+    report: String,
 }
 
 impl Cgroup {
     /// Create the workers' cgroup beside this process's own (a cgroup
     /// holding processes cannot also hold children with controllers), when
-    /// the subtree is delegated to this user; `None` otherwise, and the
-    /// total is then unenforced, which the trace records.
-    fn create(total: u64) -> Option<Self> {
+    /// the subtree is delegated to this user. Otherwise no cgroup, and the
+    /// report names the step that refused and why.
+    fn create(total: u64) -> CgroupAttempt {
+        let refused = |report: String| CgroupAttempt {
+            cgroup: None,
+            report,
+        };
         if total == 0 {
-            return None;
+            return refused("no total: syntax.parse-memory-total-mb is 0".into());
         }
-        let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-        let rel = own.lines().find_map(|l| l.strip_prefix("0::"))?;
+        let own = match std::fs::read_to_string("/proc/self/cgroup") {
+            Ok(own) => own,
+            Err(e) => return refused(format!("no cgroup: /proc/self/cgroup: {e}")),
+        };
+        let Some(rel) = own.lines().find_map(|l| l.strip_prefix("0::")) else {
+            return refused(format!(
+                "no cgroup v2 entry in /proc/self/cgroup: {:?}",
+                own.trim()
+            ));
+        };
         let mine = PathBuf::from("/sys/fs/cgroup").join(rel.trim_start_matches('/'));
-        let parent = mine.parent()?;
+        let Some(parent) = mine.parent() else {
+            return refused(format!("own cgroup {rel} has no parent"));
+        };
+        let controllers = std::fs::read_to_string(parent.join("cgroup.subtree_control"))
+            .map_or_else(|e| format!("unreadable: {e}"), |s| s.trim().to_owned());
         // A daemon that crashed left its (empty) cgroup; sweep those.
         if let Ok(entries) = std::fs::read_dir(parent) {
             for entry in entries.flatten() {
@@ -1038,21 +1081,76 @@ impl Cgroup {
             }
         }
         let dir = parent.join(format!("pmacs-parse-{}", std::process::id()));
-        let made = std::fs::create_dir(&dir).is_ok()
-            && std::fs::write(dir.join("memory.max"), total.to_string()).is_ok();
-        let _ = std::fs::write(dir.join("memory.swap.max"), "0");
-        let cgroup = Self { dir };
+        let attempt = if let Err(e) = std::fs::create_dir(&dir) {
+            refused(format!(
+                "refused at mkdir {}: {e}; own cgroup {rel}, parent's subtree_control {controllers:?}",
+                dir.display()
+            ))
+        } else if let Err(e) = std::fs::write(dir.join("memory.max"), total.to_string()) {
+            let _ = std::fs::remove_dir(&dir);
+            refused(format!(
+                "refused at memory.max in {}: {e}; parent's subtree_control {controllers:?}",
+                dir.display()
+            ))
+        } else {
+            let swap = std::fs::write(dir.join("memory.swap.max"), "0")
+                .map_or_else(|e| format!("swap.max unset: {e}"), |()| "swap.max 0".into());
+            CgroupAttempt {
+                report: format!(
+                    "created {} with memory.max {total} and {swap}; parent's subtree_control {controllers:?}",
+                    dir.display()
+                ),
+                cgroup: Some(Self {
+                    dir,
+                    adopted: Arc::new(AtomicU64::new(0)),
+                    refused: Arc::new(AtomicU64::new(0)),
+                    first_refusal: Arc::new(Mutex::new(None)),
+                }),
+            }
+        };
         host().trace(&[
             ("event", json_str("cgroup")),
-            ("dir", json_str(&cgroup.dir.display().to_string())),
-            ("ok", made.to_string()),
+            ("ok", attempt.cgroup.is_some().to_string()),
             ("total", total.to_string()),
+            ("report", json_str(&attempt.report)),
         ]);
-        made.then_some(cgroup)
+        attempt
     }
 
+    /// Move `pid` into the cgroup. A refusal leaves that worker outside the
+    /// total; it is counted and its first error kept for the report.
     fn adopt(&self, pid: u32) {
-        let _ = std::fs::write(self.dir.join("cgroup.procs"), pid.to_string());
+        match std::fs::write(self.dir.join("cgroup.procs"), pid.to_string()) {
+            Ok(()) => {
+                self.adopted.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                let mut first = self.first_refusal.lock().expect("refusal poisoned");
+                if first.is_none() {
+                    *first = Some(format!("pid {pid}: {e}"));
+                }
+            }
+        }
+    }
+
+    /// The adoption counts, for the report.
+    fn adoption(&self) -> String {
+        let refused = self.refused.load(Ordering::Relaxed);
+        let mut line = format!(
+            "adopted {}, refused {refused}",
+            self.adopted.load(Ordering::Relaxed)
+        );
+        if let Some(first) = self
+            .first_refusal
+            .lock()
+            .expect("refusal poisoned")
+            .as_ref()
+        {
+            use std::fmt::Write as _;
+            let _ = write!(line, " (first: {first})");
+        }
+        line
     }
 
     fn oom_kills(&self) -> u64 {

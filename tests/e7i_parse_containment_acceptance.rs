@@ -334,3 +334,56 @@ fn e7i_a_wasm_unit_s_previous_parse_answers_after_its_discard() {
     );
     previous_parse_answers_after_its_unit_is_discarded("wasm", Duration::from_mins(2));
 }
+
+/// Condition 2 of the owner's ruling: whether this machine lets the
+/// editor hold its workers to a total with a cgroup. The editor's own
+/// attempt, through a daemon in process mode, goes to this test's stderr
+/// through `io::stderr` directly, which libtest does not capture, so CI's
+/// log carries it on a passing run. Where the gate arms
+/// `PMACS_REQUIRE_CGROUP` (this session's cgroup subtree delegated, with
+/// the memory controller), the cgroup must be created and the worker moved
+/// into it.
+#[test]
+fn e7i_the_workers_total_says_how_this_machine_holds_it() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let typed = dir.join("typed.rs");
+    std::fs::write(&typed, "fn main() {\n    let x = 1;\n}\n").expect("typed");
+    let report = dir.join("report.txt");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         local typed = pmacs.buffer.find_or_open({typed:?})\n\
+         pmacs.async(function()\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 60000 do\n\
+             pmacs.workers.sleep(50):await()\n\
+             local r = pmacs.parse._unit_report(typed)\n\
+             if r and not r.busy and r.unit ~= '' and pmacs.parse.tree(typed) then\n\
+               local f = assert(io.open({report:?}, 'w'))\n\
+               f:write(pmacs.parse._isolation_report() or 'nil')\n\
+               f:close()\n\
+               return\n\
+             end\n\
+           end\n\
+         end)\n",
+        typed = typed.display().to_string(),
+        report = report.display().to_string(),
+    );
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init);
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_mins(1), |t| !t.is_empty());
+    let _ = writeln!(std::io::stderr(), "e7i cgroup capability: {text}");
+    assert!(
+        text.starts_with("cgroup "),
+        "the editor reports its cgroup attempt once a worker has started: {text}"
+    );
+    if std::env::var_os("PMACS_REQUIRE_CGROUP").is_some() {
+        assert!(
+            text.starts_with("cgroup created ")
+                && text.contains("refused 0")
+                && !text.contains("adopted 0,"),
+            "PMACS_REQUIRE_CGROUP is armed, so the workers' cgroup is created and the worker in it: {text}"
+        );
+    }
+}

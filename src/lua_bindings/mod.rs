@@ -8368,6 +8368,12 @@ pub fn install_parse(
         "_unit_memory_total",
         lua.create_function(|_, ()| Ok(crate::parse_isolation::total_unit_memory()))?,
     )?;
+    // E7i: how the workers' total went on this machine (the cgroup created,
+    // or the step that refused), `nil` before the first process unit.
+    parse_mod.set(
+        "_isolation_report",
+        lua.create_function(|_, ()| Ok(crate::parse_isolation::isolation_report()))?,
+    )?;
 
     // Synchronous parse: convenience for tests and one-off scripts.
     // Builds the request, runs the parser inline on the main thread,
