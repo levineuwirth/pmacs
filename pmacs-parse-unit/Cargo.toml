@@ -3,7 +3,7 @@ name = "pmacs-parse-unit"
 version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "pmacs's parse unit: one buffer's parse and capture walks behind a boundary, as a worker process or a wasm module"
+description = "pmacs's parse unit: one buffer's parse and every read of its tree, in a worker process"
 license = "MIT OR Apache-2.0"
 authors = ["Pmacs contributors"]
 readme = "../README.md"
@@ -13,11 +13,9 @@ keywords = ["editor", "emacs", "tree-sitter", "isolation"]
 categories = ["text-editors", "parsing"]
 publish = false
 
-# E7i: one program for both candidates. Built natively it is the worker
-# process `pmacs-parse-unit` (`main.rs` applies the memory limit to
-# itself); built for `wasm32-wasip1` it is the module the editor runs
-# under wasmtime. Either way it reads requests on stdin and answers on
-# stdout, so the two candidates differ only in the boundary.
+# E7i: the worker process the editor spawns per buffer (`main.rs`
+# applies the memory limit to itself). It reads requests on stdin and
+# answers on stdout.
 [dependencies]
 pmacs-syntax = { path = "../pmacs-syntax" }
 tree-sitter = "0.26"

@@ -62,26 +62,25 @@ pmacs.config.define {
   mutability = "live",
 }
 
--- E7i: the comparison's two parse boundaries (`src/parse_isolation.rs`).
--- "none" parses in the editor's own process, as before; "wasm" runs each
--- buffer's parse in a wasm instance of `pmacs-parse-unit`, "process" in a
--- worker process of it. Under either, the memory limits below and the
--- deadline above bound the whole parse, the work the progress callback
--- cannot reach included, and a parse that hits one ends its unit, not the
--- editor. A prototype for the owner's ruling: folds and Lua's node API see
--- no tree under isolation.
+-- E7i: the parse boundary (`src/parse_isolation.rs`), the process the
+-- owner ruled. "none" parses in the editor's own process, as before;
+-- "process" runs each buffer's parse, and every read of its tree, in a
+-- worker process of `pmacs-parse-unit`. There the memory limits below and
+-- the deadline above bound the whole parse, the work the progress
+-- callback cannot reach included, and a parse that hits one ends its
+-- worker, not the editor.
 pmacs.config.define {
   name = "syntax.isolation",
-  description = "Where syntax parses run: none (in the editor), wasm (a wasm instance per buffer) or process (a worker process per buffer). Under wasm or process a parse past its memory or time limit is stopped without taking the editor down.",
+  description = "Where syntax parses run: none (in the editor) or process (a worker process per buffer). Under process a parse past its memory or time limit is stopped without taking the editor down.",
   type = "enum",
-  choices = { "none", "wasm", "process" },
+  choices = { "none", "process" },
   default = "none",
   mutability = "live",
 }
 
 pmacs.config.define {
   name = "syntax.parse-memory-limit-mb",
-  description = "Under syntax.isolation wasm or process: how many MiB one buffer's parse unit may grow by before its parse is stopped.",
+  description = "Under syntax.isolation process: how many MiB one buffer's parse worker may grow by before its parse is stopped.",
   type = "integer",
   default = 1024,
   min = 16,
@@ -90,18 +89,10 @@ pmacs.config.define {
 
 pmacs.config.define {
   name = "syntax.parse-memory-total-mb",
-  description = "Under syntax.isolation wasm or process: how many MiB all parse units together may hold; a parse that would pass it is stopped. 0 leaves the total unbounded.",
+  description = "Under syntax.isolation process: how many MiB all parse workers together may hold; a parse that would pass it is stopped. 0 leaves the total unbounded.",
   type = "integer",
   default = 4096,
   min = 0,
-  mutability = "live",
-}
-
-pmacs.config.define {
-  name = "syntax.isolation-wasm-cache",
-  description = "Under syntax.isolation wasm: keep the compiled parse module in the user's cache directory, so a later start loads it instead of compiling it (about a second). Read when the first buffer's parse unit starts.",
-  type = "boolean",
-  default = false,
   mutability = "live",
 }
 
@@ -122,8 +113,7 @@ function pmacs.parse._dispatch(buf, lang)
   local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"),
     pmacs.config.get("syntax.isolation"),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
-    pmacs.config.get("syntax.parse-memory-total-mb"),
-    pmacs.config.get("syntax.isolation-wasm-cache"))
+    pmacs.config.get("syntax.parse-memory-total-mb"))
   pending_parse_jobs[job_id] = true
   parse_job_buffer_keys[job_id] = key
   inflight_parse_by_buffer[key] = job_id
@@ -139,8 +129,7 @@ function pmacs.parse._parse_now(buf, lang, deadline_ms)
   return raw_parse_now(buf, lang, deadline_ms,
     pmacs.config.get("syntax.isolation"),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
-    pmacs.config.get("syntax.parse-memory-total-mb"),
-    pmacs.config.get("syntax.isolation-wasm-cache"))
+    pmacs.config.get("syntax.parse-memory-total-mb"))
 end
 
 -- Injection language aliases (framing Q#IJ4). The registry holds the

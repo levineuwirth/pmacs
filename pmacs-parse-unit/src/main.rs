@@ -2,14 +2,12 @@
 
 //! Reads requests on stdin and answers on stdout until stdin closes.
 //!
-//! Natively this is the worker process the editor spawns per buffer,
-//! started as `pmacs-parse-unit --memory-limit-mb N`: before serving it
-//! caps its own address space at what it holds now plus `N` MiB
-//! (`RLIMIT_AS`, soft and hard, so it cannot raise it again), so a parse
-//! that grows past the limit gets a failed allocation and the process
-//! aborts, taking only itself down. macOS refuses the limit, and there the
-//! worker runs without one. Under wasmtime the editor bounds the
-//! module's memory instead, and the flag is absent.
+//! This is the worker process the editor spawns per buffer, started as
+//! `pmacs-parse-unit --memory-limit-mb N`: before serving it caps its own
+//! address space at what it holds now plus `N` MiB (`RLIMIT_AS`, soft and
+//! hard, so it cannot raise it again), so a parse that grows past the limit
+//! gets a failed allocation and the process aborts, taking only itself
+//! down. macOS refuses the limit, and there the worker runs without one.
 
 #![forbid(unsafe_code)]
 

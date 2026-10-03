@@ -3,16 +3,14 @@
 //! The parse unit: one buffer's tree-sitter state, its parse and its
 //! capture walks, run outside the editor.
 //!
-//! The editor talks to a unit over a byte stream: a request frame, then a
-//! response frame. The same program is the worker process
-//! (`pmacs-parse-unit`, built natively) and the wasm module the editor runs
-//! under wasmtime (built for `wasm32-wasip1`), so the two isolation
-//! candidates E7i compares run identical code and differ only in the
-//! boundary around it. The parse is `pmacs_syntax::run_parse`, the code
-//! the editor runs in-process; what the unit adds is the text mirror, the
-//! installed tree and the batching: a parse answers with the highlight
-//! spans for the byte ranges the editor is showing, so no capture walk and
-//! no node crosses the boundary one at a time.
+//! The editor talks to a unit, the worker process `pmacs-parse-unit` it
+//! spawns per buffer, over a byte stream: a request frame, then a response
+//! frame. The parse is `pmacs_syntax::run_parse`, the code the editor ran
+//! in-process; what the unit adds is the text mirror, the installed tree
+//! and the batching: a parse answers with the highlight spans for the byte
+//! ranges the editor is showing, and a read of the tree (more spans, folds,
+//! a node and its children) is one request, so no capture walk and no node
+//! crosses the boundary one at a time.
 //!
 //! A frame is a little-endian `u32` length, a postcard header of that
 //! length, a second `u32` length and that many raw payload bytes. Text

@@ -2,8 +2,8 @@
 // request and its bundle, run_parse with its injection layers, the
 // bundled-grammar table, local facts and the highlight capture walk.
 // Moved verbatim out of `src/syntax.rs` at E7i so the same code runs in
-// the editor (the native arm) and inside a parse unit, a worker process
-// or a wasm instance, where no editor state exists.
+// the editor (the native arm) and inside a parse unit, the worker
+// process, where no editor state exists.
 
 //! Tree-sitter parse logic shared by the editor and its parse units.
 //!
@@ -151,9 +151,10 @@ pub struct ParseTreeBundle {
     /// buffer at settle (E7h.2). A root parse past the deadline is
     /// [`ParseError::DeadlineExceeded`] instead and installs nothing.
     pub layers_cut_by_deadline: bool,
-    /// E7i: set when the parse ran in a parse unit, a worker process or a
-    /// wasm instance, which holds the trees; `layers` is then empty and the
-    /// editor reads highlight spans through this instead of walking a tree.
+    /// E7i: set when the parse ran in a parse unit, the worker process
+    /// that holds the trees; `layers` is then empty and the editor reads
+    /// highlight spans, folds and nodes through this instead of walking a
+    /// tree.
     pub isolated: Option<Arc<dyn IsolatedTree>>,
 }
 

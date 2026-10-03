@@ -1,50 +1,36 @@
-// parse_isolation.rs --- E7i: the editor's side of a parse unit, behind a
-// wasm instance or a worker process.
+// parse_isolation.rs --- E7i: the editor's side of a parse unit, a
+// worker process per buffer.
 
-//! Parse containment, the two candidates E7i compares (`syntax.isolation`).
+//! Parse containment (`syntax.isolation`), the process boundary the owner
+//! ruled at E7i.
 //!
 //! A parse unit (`pmacs-parse-unit`) holds one buffer's trees and runs its
-//! parse and capture walks. The editor keeps the buffer's text, the edit
-//! log and the spans that came back; it never holds a tree. Each buffer
-//! gets its own unit, behind one of two boundaries:
+//! parse, its capture walks and every read of its tree. The editor keeps
+//! the buffer's text, the edit log and the spans that came back; it never
+//! holds a tree. Each buffer gets its own unit, a worker process. Memory is
+//! bounded by `RLIMIT_AS`, which the worker applies to itself before
+//! serving, and the total by a cgroup v2 `memory.max` the editor creates
+//! beside its own cgroup when the session's cgroup subtree is delegated;
+//! time by a watchdog here that kills the worker at the deadline. A kill
+//! or an abort ends the process.
 //!
-//! * **wasm** --- the unit built for `wasm32-wasip1` (the tree-sitter
-//!   runtime, every grammar and the unit in one module), run under
-//!   wasmtime on a thread of its own. Memory is bounded by a resource
-//!   limiter that refuses linear-memory growth past the unit's allowance
-//!   and past the editor-wide total; time by epoch interruption, which
-//!   traps the instance wherever its code is, the runtime's included,
-//!   because the runtime is wasm here. A trap ends the instance.
-//! * **process** --- the same unit built natively, one worker process per
-//!   buffer. Memory is bounded by `RLIMIT_AS`, which the worker applies to
-//!   itself before serving, and the total by a cgroup v2 `memory.max` the
-//!   editor creates beside its own cgroup when the session's cgroup
-//!   subtree is delegated; time by a watchdog here that kills the worker
-//!   at the deadline. A kill or an abort ends the process.
+//! The boundary stops the operation, not one call inside it: the parse's
+//! whole memory and the whole request's time are what the limits measure.
+//! A unit that dies is discarded and the next request starts a fresh one
+//! with the whole text. The buffer's previous parse survives the discard
+//! in the editor, as its text and its spans ([`IsolatedHandle`]); a read
+//! those spans do not answer is answered by re-parsing that text into a
+//! fresh unit, which rebuilds the previous tree there.
 //!
-//! Either way the boundary stops the operation, not one call inside it:
-//! the parse's whole memory and the whole request's time are what the
-//! limits measure. A unit that dies is discarded and the next request
-//! starts a fresh one with the whole text. The buffer's previous parse
-//! survives the discard in the editor, as its text and its spans
-//! ([`IsolatedHandle`]); a range those spans do not cover is answered by
-//! re-parsing that text into a fresh unit, which rebuilds the previous
-//! tree there.
-//!
-//! This is the comparison's prototype: highlighting goes through the unit;
-//! folds and Lua's node API see no tree under isolation (designed in the
-//! comparison, not built). `PMACS_E7I_TRACE=<path>` appends one JSON line
-//! per unit event, for the comparison's retained runs.
+//! Highlighting, folds and Lua's node API read the tree through the unit,
+//! batched (the consumer scoping at E7i). `PMACS_E7I_TRACE=<path>` appends
+//! one JSON line per unit event, a measurement hook and not a setting.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-#[cfg(feature = "wasm-unit")]
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "wasm-unit")]
-use std::sync::mpsc::Sender;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -63,19 +49,16 @@ use crate::syntax::{
 pub enum Isolation {
     /// In the editor's own process, as before E7i.
     Native,
-    /// A wasm instance of the unit, under wasmtime.
-    Wasm,
     /// A worker process running the unit.
     Process,
 }
 
 impl Isolation {
-    /// The mode `syntax.isolation` names: `"none"`, `"wasm"`, `"process"`.
+    /// The mode `syntax.isolation` names: `"none"` or `"process"`.
     #[must_use]
     pub fn from_config(value: &str) -> Option<Self> {
         match value {
             "none" => Some(Self::Native),
-            "wasm" => Some(Self::Wasm),
             "process" => Some(Self::Process),
             _ => None,
         }
@@ -84,7 +67,6 @@ impl Isolation {
     fn name(self) -> &'static str {
         match self {
             Self::Native => "none",
-            Self::Wasm => "wasm",
             Self::Process => "process",
         }
     }
@@ -102,10 +84,6 @@ pub struct Limits {
     /// `syntax.parse-deadline-ms`: enforced inside the unit through the
     /// progress callback, and by the boundary [`HARD_GRACE`] after it.
     pub deadline: Option<Duration>,
-    /// `syntax.isolation-wasm-cache`: keep wasmtime's compiled module on
-    /// disk, so a later start loads it instead of compiling it. Read once,
-    /// when the first wasm unit starts.
-    pub wasm_cache: bool,
 }
 
 /// How long after the deadline the boundary stops a unit that has not
@@ -210,9 +188,9 @@ trait Transport: Send {
         payload: &[u8],
         hard: Option<Duration>,
     ) -> Result<Response, Death>;
-    /// What the unit holds now: linear memory for wasm, PSS for a process.
+    /// What the unit holds now, its PSS.
     fn memory_bytes(&self) -> Option<u64>;
-    /// A name for the trace: the worker's pid, or the instance's number.
+    /// A name for the trace: the worker's pid.
     fn id(&self) -> String;
 }
 
@@ -234,16 +212,12 @@ struct Slot {
     fetched: u64,
 }
 
-/// Process-wide state: the units, the wasm engine, the cgroup, the trace.
+/// Process-wide state: the units, the cgroup, the trace.
 struct Host {
     slots: Mutex<HashMap<BufferId, Arc<Mutex<Slot>>>>,
-    #[cfg(feature = "wasm-unit")]
-    wasm: OnceLock<Result<WasmShared, String>>,
     cgroup: OnceLock<CgroupAttempt>,
     trace: Option<Mutex<std::fs::File>>,
     started: Instant,
-    #[cfg(feature = "wasm-unit")]
-    next_instance: AtomicU64,
 }
 
 static HOST_CELL: OnceLock<Host> = OnceLock::new();
@@ -251,8 +225,6 @@ static HOST_CELL: OnceLock<Host> = OnceLock::new();
 fn host() -> &'static Host {
     HOST_CELL.get_or_init(|| Host {
         slots: Mutex::new(HashMap::new()),
-        #[cfg(feature = "wasm-unit")]
-        wasm: OnceLock::new(),
         cgroup: OnceLock::new(),
         trace: std::env::var_os("PMACS_E7I_TRACE").and_then(|path| {
             std::fs::OpenOptions::new()
@@ -263,8 +235,6 @@ fn host() -> &'static Host {
                 .map(Mutex::new)
         }),
         started: Instant::now(),
-        #[cfg(feature = "wasm-unit")]
-        next_instance: AtomicU64::new(1),
     })
 }
 
@@ -309,21 +279,6 @@ impl Host {
 
     fn spawn(&self, limits: &Limits) -> Result<Box<dyn Transport>, Death> {
         match limits.mode {
-            #[cfg(not(feature = "wasm-unit"))]
-            Isolation::Wasm => Err(Death::Unavailable(
-                "this pmacs was built without the wasm parse unit (cargo feature `wasm-unit`)"
-                    .into(),
-            )),
-            #[cfg(feature = "wasm-unit")]
-            Isolation::Wasm => {
-                let shared = self
-                    .wasm
-                    .get_or_init(|| WasmShared::load(limits.wasm_cache))
-                    .as_ref()
-                    .map_err(|e| Death::Unavailable(e.clone()))?;
-                let n = self.next_instance.fetch_add(1, Ordering::Relaxed);
-                WasmUnit::start(shared, n, limits).map(|u| Box::new(u) as Box<dyn Transport>)
-            }
             Isolation::Process => {
                 let cgroup = self
                     .cgroup
@@ -437,8 +392,8 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                 return Err(format!("parse unit answered out of turn: {other:?}"));
             }
             Err(death) => {
-                // Dropping the transport ends the instance or reaps the
-                // worker; its memory goes with it.
+                // Dropping the transport kills and reaps the worker; its
+                // memory goes with it.
                 slot.transport = None;
                 slot.synced = false;
                 slot.deaths += 1;
@@ -769,7 +724,7 @@ impl IsolatedHandle {
     }
 }
 
-/// End every unit (instances return, workers are killed and reaped) and
+/// End every unit (each worker killed and reaped) and
 /// remove the workers' cgroup. The daemon calls this as it stops.
 pub fn shutdown() {
     let Some(host) = HOST_CELL.get() else {
@@ -826,9 +781,9 @@ pub fn trace_native_parse(bytes: usize, layers: usize, root: Duration, total: Du
 /// What the editor can say about a buffer's unit (for Lua and the trace).
 #[derive(Clone, Debug, Default)]
 pub struct UnitReport {
-    /// `"none"`, `"wasm"` or `"process"`.
+    /// `"none"` or `"process"`.
     pub mode: String,
-    /// The worker's pid or the instance's number; empty when none runs.
+    /// The worker's pid; empty when none runs.
     pub unit: String,
     /// What the unit holds now, bytes, when it runs.
     pub memory: Option<u64>,
@@ -877,8 +832,8 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
     })
 }
 
-/// The editor-wide memory the units hold now: wasm linear memory summed,
-/// process PSS summed. For the comparison's steady-state figure.
+/// The editor-wide memory the units hold now, their PSS summed. For the
+/// comparison's steady-state figure.
 #[must_use]
 pub fn total_unit_memory() -> u64 {
     let slots: Vec<Arc<Mutex<Slot>>> = host()
@@ -1242,611 +1197,5 @@ impl Cgroup {
                     .and_then(|n| n.trim().parse().ok())
             })
             .unwrap_or(0)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The wasm boundary
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "wasm-unit")]
-/// The engine and the compiled module, shared by every instance, and the
-/// thread that ticks the engine's epoch.
-struct WasmShared {
-    engine: wasmtime::Engine,
-    module: wasmtime::Module,
-    total: Arc<AtomicUsize>,
-}
-
-#[cfg(feature = "wasm-unit")]
-/// The epoch tick: a deadline of `d` is `d / EPOCH_TICK` ticks.
-const EPOCH_TICK: Duration = Duration::from_millis(1);
-
-#[cfg(feature = "wasm-unit")]
-impl WasmShared {
-    fn load(cache: bool) -> Result<Self, String> {
-        let path = sibling("pmacs-parse-unit.wasm")
-            .ok_or_else(|| "no pmacs-parse-unit.wasm beside pmacs".to_owned())?;
-        let mut config = wasmtime::Config::new();
-        config.epoch_interruption(true);
-        if cache {
-            // wasmtime's own cache, keyed by the module and the engine's
-            // settings, under the user's cache directory.
-            let dir = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-                .ok_or_else(|| "no cache directory".to_owned())?
-                .join("pmacs")
-                .join("wasmtime");
-            let mut cache_config = wasmtime::CacheConfig::new();
-            cache_config.with_directory(dir);
-            let cache = wasmtime::Cache::new(cache_config).map_err(|e| e.to_string())?;
-            config.cache(Some(cache));
-        }
-        let engine = wasmtime::Engine::new(&config).map_err(|e| e.to_string())?;
-        let started = Instant::now();
-        let module = wasmtime::Module::from_file(&engine, &path).map_err(|e| e.to_string())?;
-        host().trace(&[
-            ("event", json_str("wasm-compiled")),
-            ("cache", cache.to_string()),
-            ("path", json_str(&path.display().to_string())),
-            ("compile_us", started.elapsed().as_micros().to_string()),
-        ]);
-        let ticker = engine.clone();
-        thread::Builder::new()
-            .name("pmacs-wasm-epoch".into())
-            .spawn(move || {
-                loop {
-                    thread::sleep(EPOCH_TICK);
-                    ticker.increment_epoch();
-                }
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(Self {
-            engine,
-            module,
-            total: Arc::new(AtomicUsize::new(0)),
-        })
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-/// What a running instance's host functions own.
-struct UnitState {
-    requests: Receiver<(Vec<u8>, u64)>,
-    responses: Sender<Vec<u8>>,
-    input: Vec<u8>,
-    input_at: usize,
-    output: Vec<u8>,
-    limiter: Limiter,
-    stderr: Vec<u8>,
-    rng: u64,
-}
-
-#[cfg(feature = "wasm-unit")]
-/// Refuses linear-memory growth past the unit's allowance and past the
-/// editor-wide total; the refusal makes the guest's allocator fail, and
-/// the guest aborts, which traps and ends the instance.
-struct Limiter {
-    initial: Option<usize>,
-    current: usize,
-    unit: usize,
-    total_max: usize,
-    total: Arc<AtomicUsize>,
-    shown: Arc<AtomicUsize>,
-    hit: Arc<Mutex<Option<Death>>>,
-}
-
-#[cfg(feature = "wasm-unit")]
-impl wasmtime::ResourceLimiter for Limiter {
-    fn memory_growing(
-        &mut self,
-        current: usize,
-        desired: usize,
-        _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
-        let initial = *self
-            .initial
-            .get_or_insert(if current == 0 { desired } else { current });
-        if desired.saturating_sub(initial) > self.unit {
-            *self.hit.lock().expect("limit flag poisoned") = Some(Death::Memory {
-                limit: self.unit as u64,
-            });
-            return Ok(false);
-        }
-        let grow = desired - current;
-        let before = self.total.fetch_add(grow, Ordering::SeqCst);
-        if self.total_max > 0 && before + grow > self.total_max {
-            self.total.fetch_sub(grow, Ordering::SeqCst);
-            *self.hit.lock().expect("limit flag poisoned") = Some(Death::Total {
-                limit: self.total_max as u64,
-            });
-            return Ok(false);
-        }
-        self.current = desired;
-        self.shown.store(desired, Ordering::Relaxed);
-        Ok(true)
-    }
-
-    fn table_growing(
-        &mut self,
-        _current: usize,
-        _desired: usize,
-        _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-impl Drop for Limiter {
-    fn drop(&mut self) {
-        self.total.fetch_sub(self.current, Ordering::SeqCst);
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-/// A wasm instance of the unit on its own thread.
-struct WasmUnit {
-    requests: Option<Sender<(Vec<u8>, u64)>>,
-    responses: Receiver<Vec<u8>>,
-    thread: Option<thread::JoinHandle<Result<(), String>>>,
-    memory: Arc<AtomicUsize>,
-    hit: Arc<Mutex<Option<Death>>>,
-    number: u64,
-}
-
-#[cfg(feature = "wasm-unit")]
-impl WasmUnit {
-    fn start(shared: &WasmShared, number: u64, limits: &Limits) -> Result<Self, Death> {
-        let (req_tx, req_rx) = mpsc::channel::<(Vec<u8>, u64)>();
-        let (resp_tx, resp_rx) = mpsc::channel::<Vec<u8>>();
-        let memory = Arc::new(AtomicUsize::new(0));
-        let hit = Arc::new(Mutex::new(None));
-        let engine = shared.engine.clone();
-        let module = shared.module.clone();
-        let limiter = Limiter {
-            initial: None,
-            current: 0,
-            unit: usize::try_from(limits.unit_memory).unwrap_or(usize::MAX),
-            total_max: usize::try_from(limits.total_memory).unwrap_or(usize::MAX),
-            total: shared.total.clone(),
-            shown: memory.clone(),
-            hit: hit.clone(),
-        };
-        let thread = thread::Builder::new()
-            .name(format!("pmacs-wasm-unit-{number}"))
-            .spawn(move || run_instance(&engine, &module, req_rx, resp_tx, limiter))
-            .map_err(|e| Death::Unavailable(e.to_string()))?;
-        Ok(Self {
-            requests: Some(req_tx),
-            responses: resp_rx,
-            thread: Some(thread),
-            memory,
-            hit,
-            number,
-        })
-    }
-
-    /// Why the instance ended: the limiter's refusal, else the trap.
-    fn death(&mut self, deadline: Option<Duration>, after: Duration) -> Death {
-        self.requests = None;
-        let ended = self.thread.take().map_or_else(
-            || Err("no thread".to_owned()),
-            |t| t.join().unwrap_or_else(|_| Err("panicked".into())),
-        );
-        if let Some(death) = self.hit.lock().expect("limit flag poisoned").take() {
-            return death;
-        }
-        match ended {
-            Err(why) if why.contains("interrupt") => Death::Time {
-                deadline: deadline.unwrap_or_default(),
-                after,
-            },
-            Err(why) => Death::Ended(why),
-            Ok(()) => Death::Ended("instance exited".into()),
-        }
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-fn run_instance(
-    engine: &wasmtime::Engine,
-    module: &wasmtime::Module,
-    requests: Receiver<(Vec<u8>, u64)>,
-    responses: Sender<Vec<u8>>,
-    limiter: Limiter,
-) -> Result<(), String> {
-    let state = UnitState {
-        requests,
-        responses,
-        input: Vec::new(),
-        input_at: 0,
-        output: Vec::new(),
-        limiter,
-        stderr: Vec::new(),
-        rng: 0x9e37_79b9_7f4a_7c15,
-    };
-    let mut store = wasmtime::Store::new(engine, state);
-    store.limiter(|s| &mut s.limiter);
-    store.epoch_deadline_trap();
-    store.set_epoch_deadline(u64::MAX / 2);
-    let mut linker = wasmtime::Linker::new(engine);
-    wasi_shim(&mut linker).map_err(|e| e.to_string())?;
-    let instance = linker
-        .instantiate(&mut store, module)
-        .map_err(|e| format!("{e:#}"))?;
-    let start = instance
-        .get_typed_func::<(), ()>(&mut store, "_start")
-        .map_err(|e| e.to_string())?;
-    match start.call(&mut store, ()) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            if let Some(code) = error.downcast_ref::<ProcExit>() {
-                return if code.0 == 0 {
-                    Ok(())
-                } else {
-                    Err(format!("exit {}", code.0))
-                };
-            }
-            match error.downcast_ref::<wasmtime::Trap>() {
-                Some(wasmtime::Trap::Interrupt) => Err("interrupt".into()),
-                Some(trap) => {
-                    let said = String::from_utf8_lossy(&store.data().stderr).into_owned();
-                    Err(format!(
-                        "trap {trap}: {}",
-                        said.lines().last().unwrap_or("")
-                    ))
-                }
-                None => Err(format!("{error:#}")),
-            }
-        }
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-/// `proc_exit`'s code, carried out of the instance as an error.
-#[derive(Debug)]
-struct ProcExit(i32);
-
-#[cfg(feature = "wasm-unit")]
-impl std::fmt::Display for ProcExit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "proc_exit({})", self.0)
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-impl std::error::Error for ProcExit {}
-
-#[cfg(feature = "wasm-unit")]
-const ERRNO_SUCCESS: i32 = 0;
-#[cfg(feature = "wasm-unit")]
-const ERRNO_BADF: i32 = 8;
-#[cfg(feature = "wasm-unit")]
-const ERRNO_INVAL: i32 = 28;
-#[cfg(feature = "wasm-unit")]
-const ERRNO_SPIPE: i32 = 70;
-
-#[cfg(feature = "wasm-unit")]
-type ShimCaller<'a> = wasmtime::Caller<'a, UnitState>;
-
-#[cfg(feature = "wasm-unit")]
-fn guest_memory(caller: &mut ShimCaller<'_>) -> Option<wasmtime::Memory> {
-    caller
-        .get_export("memory")
-        .and_then(wasmtime::Extern::into_memory)
-}
-
-#[cfg(feature = "wasm-unit")]
-fn read_u32(data: &[u8], at: usize) -> Option<u32> {
-    data.get(at..at + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-#[cfg(feature = "wasm-unit")]
-fn write_bytes(data: &mut [u8], at: usize, bytes: &[u8]) -> bool {
-    match data.get_mut(at..at + bytes.len()) {
-        Some(slot) => {
-            slot.copy_from_slice(bytes);
-            true
-        }
-        None => false,
-    }
-}
-
-/// The nine `wasi_snapshot_preview1` imports the unit's module makes, and
-/// the clock and random source Rust's standard library asks for. Stdin is
-/// the request channel: a read on an empty buffer waits for the next
-/// request and arms that request's epoch deadline. Stdout assembles frames
-/// and sends each complete one back. No file system, no environment.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one shim per import, each a few lines, kept together as the module's whole ABI"
-)]
-#[cfg(feature = "wasm-unit")]
-fn wasi_shim(linker: &mut wasmtime::Linker<UnitState>) -> anyhow::Result<()> {
-    const W: &str = "wasi_snapshot_preview1";
-    linker.func_wrap(
-        W,
-        "fd_read",
-        |mut caller: ShimCaller<'_>, fd: i32, iovs: i32, iovs_len: i32, nread: i32| -> i32 {
-            if fd != 0 {
-                return ERRNO_BADF;
-            }
-            if caller.data().input_at >= caller.data().input.len() {
-                // Idle: no deadline runs while the unit waits.
-                caller.as_context_mut_set_deadline(u64::MAX / 2);
-                let Ok((frame, ticks)) = caller.data().requests.recv() else {
-                    // The editor dropped the unit: end of input.
-                    let Some(mem) = guest_memory(&mut caller) else {
-                        return ERRNO_INVAL;
-                    };
-                    let data = mem.data_mut(&mut caller);
-                    return if write_bytes(data, nread as usize, &0u32.to_le_bytes()) {
-                        ERRNO_SUCCESS
-                    } else {
-                        ERRNO_INVAL
-                    };
-                };
-                let state = caller.data_mut();
-                state.input = frame;
-                state.input_at = 0;
-                caller.as_context_mut_set_deadline(ticks);
-            }
-            let Some(mem) = guest_memory(&mut caller) else {
-                return ERRNO_INVAL;
-            };
-            let (data, state) = mem.data_and_store_mut(&mut caller);
-            let mut total = 0usize;
-            for i in 0..iovs_len as usize {
-                let base = iovs as usize + i * 8;
-                let (Some(ptr), Some(len)) = (read_u32(data, base), read_u32(data, base + 4))
-                else {
-                    return ERRNO_INVAL;
-                };
-                let left = state.input.len() - state.input_at;
-                let n = (len as usize).min(left);
-                if n == 0 {
-                    break;
-                }
-                let chunk = &state.input[state.input_at..state.input_at + n];
-                if !write_bytes(data, ptr as usize, chunk) {
-                    return ERRNO_INVAL;
-                }
-                state.input_at += n;
-                total += n;
-            }
-            if write_bytes(data, nread as usize, &(total as u32).to_le_bytes()) {
-                ERRNO_SUCCESS
-            } else {
-                ERRNO_INVAL
-            }
-        },
-    )?;
-    linker.func_wrap(
-        W,
-        "fd_write",
-        |mut caller: ShimCaller<'_>, fd: i32, iovs: i32, iovs_len: i32, nwritten: i32| -> i32 {
-            let Some(mem) = guest_memory(&mut caller) else {
-                return ERRNO_INVAL;
-            };
-            let (data, state) = mem.data_and_store_mut(&mut caller);
-            let mut total = 0usize;
-            for i in 0..iovs_len as usize {
-                let base = iovs as usize + i * 8;
-                let (Some(ptr), Some(len)) = (read_u32(data, base), read_u32(data, base + 4))
-                else {
-                    return ERRNO_INVAL;
-                };
-                let Some(bytes) = data.get(ptr as usize..ptr as usize + len as usize) else {
-                    return ERRNO_INVAL;
-                };
-                match fd {
-                    1 => state.output.extend_from_slice(bytes),
-                    2 => {
-                        state.stderr.extend_from_slice(bytes);
-                        if state.stderr.len() > 16_384 {
-                            let cut = state.stderr.len() - 8_192;
-                            state.stderr.drain(..cut);
-                        }
-                    }
-                    _ => return ERRNO_BADF,
-                }
-                total += len as usize;
-            }
-            if fd == 1 {
-                while let Some(n) = complete_frame(&state.output) {
-                    let frame: Vec<u8> = state.output.drain(..n).collect();
-                    let _ = state.responses.send(frame);
-                }
-            }
-            if write_bytes(data, nwritten as usize, &(total as u32).to_le_bytes()) {
-                ERRNO_SUCCESS
-            } else {
-                ERRNO_INVAL
-            }
-        },
-    )?;
-    linker.func_wrap(W, "fd_close", |_: ShimCaller<'_>, _fd: i32| -> i32 {
-        ERRNO_SUCCESS
-    })?;
-    linker.func_wrap(
-        W,
-        "fd_seek",
-        |_: ShimCaller<'_>, _fd: i32, _off: i64, _whence: i32, _new: i32| -> i32 { ERRNO_SPIPE },
-    )?;
-    linker.func_wrap(
-        W,
-        "fd_fdstat_get",
-        |_: ShimCaller<'_>, _fd: i32, _buf: i32| -> i32 { ERRNO_BADF },
-    )?;
-    linker.func_wrap(
-        W,
-        "fd_prestat_get",
-        |_: ShimCaller<'_>, _fd: i32, _buf: i32| -> i32 { ERRNO_BADF },
-    )?;
-    linker.func_wrap(
-        W,
-        "fd_prestat_dir_name",
-        |_: ShimCaller<'_>, _fd: i32, _path: i32, _len: i32| -> i32 { ERRNO_BADF },
-    )?;
-    for name in ["environ_sizes_get", "args_sizes_get"] {
-        linker.func_wrap(
-            W,
-            name,
-            |mut caller: ShimCaller<'_>, count: i32, size: i32| -> i32 {
-                let Some(mem) = guest_memory(&mut caller) else {
-                    return ERRNO_INVAL;
-                };
-                let data = mem.data_mut(&mut caller);
-                if write_bytes(data, count as usize, &0u32.to_le_bytes())
-                    && write_bytes(data, size as usize, &0u32.to_le_bytes())
-                {
-                    ERRNO_SUCCESS
-                } else {
-                    ERRNO_INVAL
-                }
-            },
-        )?;
-    }
-    for name in ["environ_get", "args_get"] {
-        linker.func_wrap(W, name, |_: ShimCaller<'_>, _a: i32, _b: i32| -> i32 {
-            ERRNO_SUCCESS
-        })?;
-    }
-    linker.func_wrap(
-        W,
-        "clock_time_get",
-        |mut caller: ShimCaller<'_>, id: i32, _precision: i64, out: i32| -> i32 {
-            let nanos: u64 = if id == 0 {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos() as u64)
-            } else {
-                host().started.elapsed().as_nanos() as u64
-            };
-            let Some(mem) = guest_memory(&mut caller) else {
-                return ERRNO_INVAL;
-            };
-            let data = mem.data_mut(&mut caller);
-            if write_bytes(data, out as usize, &nanos.to_le_bytes()) {
-                ERRNO_SUCCESS
-            } else {
-                ERRNO_INVAL
-            }
-        },
-    )?;
-    linker.func_wrap(
-        W,
-        "random_get",
-        |mut caller: ShimCaller<'_>, buf: i32, len: i32| -> i32 {
-            let Some(mem) = guest_memory(&mut caller) else {
-                return ERRNO_INVAL;
-            };
-            let (data, state) = mem.data_and_store_mut(&mut caller);
-            for i in 0..len as usize {
-                state.rng ^= state.rng << 13;
-                state.rng ^= state.rng >> 7;
-                state.rng ^= state.rng << 17;
-                let Some(byte) = data.get_mut(buf as usize + i) else {
-                    return ERRNO_INVAL;
-                };
-                *byte = state.rng as u8;
-            }
-            ERRNO_SUCCESS
-        },
-    )?;
-    linker.func_wrap(W, "sched_yield", |_: ShimCaller<'_>| -> i32 {
-        ERRNO_SUCCESS
-    })?;
-    linker.func_wrap(
-        W,
-        "proc_exit",
-        |_: ShimCaller<'_>, code: i32| -> anyhow::Result<()> { Err(ProcExit(code).into()) },
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "wasm-unit")]
-/// Setting the epoch deadline from inside a host function.
-trait SetDeadline {
-    fn as_context_mut_set_deadline(&mut self, ticks: u64);
-}
-
-#[cfg(feature = "wasm-unit")]
-impl SetDeadline for ShimCaller<'_> {
-    fn as_context_mut_set_deadline(&mut self, ticks: u64) {
-        use wasmtime::AsContextMut as _;
-        self.as_context_mut().set_epoch_deadline(ticks);
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-/// The length of the first complete frame at the front of `buf`, if one
-/// is there: `u32` header length, header, `u32` payload length, payload.
-fn complete_frame(buf: &[u8]) -> Option<usize> {
-    let head = read_u32(buf, 0)? as usize;
-    let body = read_u32(buf, 4 + head)? as usize;
-    let total = 8 + head + body;
-    (buf.len() >= total).then_some(total)
-}
-
-#[cfg(feature = "wasm-unit")]
-impl Transport for WasmUnit {
-    fn call(
-        &mut self,
-        request: &Request,
-        payload: &[u8],
-        hard: Option<Duration>,
-    ) -> Result<Response, Death> {
-        let started = Instant::now();
-        let mut frame = Vec::with_capacity(payload.len() + 256);
-        if pmacs_parse_unit::write_frame(&mut frame, request, payload).is_err() {
-            return Err(Death::Ended("could not encode the request".into()));
-        }
-        let ticks = hard.map_or(u64::MAX / 2, |d| {
-            (d.as_millis() / EPOCH_TICK.as_millis()).max(1) as u64
-        });
-        let sent = self
-            .requests
-            .as_ref()
-            .is_some_and(|tx| tx.send((frame, ticks)).is_ok());
-        if !sent {
-            return Err(self.death(
-                hard.map(|d| d.saturating_sub(HARD_GRACE)),
-                started.elapsed(),
-            ));
-        }
-        match self.responses.recv() {
-            Ok(bytes) => match pmacs_parse_unit::read_frame::<_, Response>(&mut bytes.as_slice()) {
-                Ok(Some((response, _))) => Ok(response),
-                _ => Err(Death::Ended("unreadable response".into())),
-            },
-            Err(_) => Err(self.death(
-                hard.map(|d| d.saturating_sub(HARD_GRACE)),
-                started.elapsed(),
-            )),
-        }
-    }
-
-    fn memory_bytes(&self) -> Option<u64> {
-        Some(self.memory.load(Ordering::Relaxed) as u64)
-    }
-
-    fn id(&self) -> String {
-        format!("wasm {}", self.number)
-    }
-}
-
-#[cfg(feature = "wasm-unit")]
-impl Drop for WasmUnit {
-    fn drop(&mut self) {
-        // Closing the request channel ends the guest's read; the instance
-        // returns and its store, linear memory included, is dropped.
-        self.requests = None;
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
     }
 }
