@@ -1256,6 +1256,32 @@ fn e7i_review1_the_regress_hang_reaches_its_defect_through_markdown() {
     );
 }
 
+/// Low 2: the two settings whose bound is reactive where the kernel cannot
+/// hold it (macOS, a Linux without a delegated cgroup) read, at `fa176de`,
+/// as preventive everywhere: `syntax.parse-memory-total-mb`'s "a parse
+/// that would pass it is stopped" and `syntax.isolation`'s "a parse past its
+/// memory or time limit is stopped". Fix round 1: each says where it acts
+/// after the memory exists and points to `docs/divergences.md`, as the user
+/// reads it (`pmacs.config.describe`, what the settings help renders).
+#[test]
+fn e7i_review1_the_parse_limit_settings_say_where_they_are_reactive() {
+    let state = pmacs::editor::EditorState::new_with_roots(&common::iso::roots());
+    for name in ["syntax.isolation", "syntax.parse-memory-total-mb"] {
+        let description: String = state
+            .lua_host
+            .lua()
+            .load(format!(
+                "return pmacs.config.describe({name:?}).description"
+            ))
+            .eval()
+            .expect("the setting is described");
+        assert!(
+            description.contains("macOS") && description.contains("docs/divergences.md"),
+            "{name} says where its bound is reactive: {description}"
+        );
+    }
+}
+
 /// `fuzz/regress/markdown/301-hang-596.input` hangs only under the edit
 /// sequence the fuzzer's seed made (`--edits 8 --seed 15703056251634817165`);
 /// its bytes alone parse at once by any route, so at `fa176de` the replay

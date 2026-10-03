@@ -80,7 +80,7 @@ pmacs.config.define {
 -- process, as before E7i, where nothing stops #296 or #301.
 pmacs.config.define {
   name = "syntax.isolation",
-  description = "Where syntax parses run: process (a worker process per buffer, the default) or none (in the editor). Under process a parse past its memory or time limit is stopped without taking the editor down; under none it is not.",
+  description = "Where syntax parses run: process (a worker process per buffer, the default) or none (in the editor). Under process a parse past its time limit, or its memory limit, is stopped without taking the editor down: on Linux before the memory exists, on macOS after it, by up to a few MB (docs/divergences.md). Under none it is not.",
   type = "enum",
   choices = { "process", "none" },
   default = "process",
@@ -128,7 +128,7 @@ pmacs.config.define {
 
 pmacs.config.define {
   name = "syntax.parse-memory-total-mb",
-  description = "Under syntax.isolation process: how many MiB all parse workers together may hold; a parse that would pass it is stopped. 0 leaves the total unbounded.",
+  description = "Under syntax.isolation process: how many MiB all parse workers together may hold. Where the kernel holds them in a cgroup (a Linux session with a delegated subtree) a parse that would pass it is stopped; elsewhere (macOS, other Linux) a watchdog stops the largest worker once the total is passed, by up to tens of MB (docs/divergences.md). 0 leaves the total unbounded.",
   type = "integer",
   default = 4096,
   min = 0,
