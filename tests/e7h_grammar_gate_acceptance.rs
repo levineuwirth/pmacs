@@ -55,8 +55,8 @@ use pmacs::editor::EditorState;
 use pmacs::lua_bindings::{BufferIdLua, StateDir};
 use pmacs::protocol::FrontendId;
 use pmacs::syntax::{
-    BUILTIN_LANGUAGES, ParseError, ParseRequest, ParseTreeBundle, default_injection_aliases,
-    run_parse,
+    BUILTIN_LANGUAGES, ParseError, ParseRequest, ParseTreeBundle, compute_highlight_spans_for,
+    default_injection_aliases, run_parse,
 };
 
 #[path = "common/iso.rs"]
@@ -427,26 +427,42 @@ fn e7h_ordinary_large_files_parse_inside_the_default_deadline() {
     }
 }
 
-/// Every node's kind and byte range, in walk order: two trees agree on
-/// this only if they are the same parse of the same bytes.
-fn node_signature(tree: &tree_sitter::Tree) -> Vec<(u16, usize, usize)> {
-    let mut out = Vec::new();
-    let mut c = tree.walk();
-    loop {
-        let n = c.node();
-        out.push((n.kind_id(), n.start_byte(), n.end_byte()));
-        if c.goto_first_child() {
-            continue;
-        }
-        loop {
-            if c.goto_next_sibling() {
-                break;
-            }
-            if !c.goto_parent() {
-                return out;
-            }
-        }
-    }
+/// The installed tree lives in the buffer's parse worker since E7i, so it
+/// is compared through the worker: its structure (the s-expression) and the
+/// byte range of every node the highlight query captures (the root layer's
+/// spans over the whole file), against a cold in-process parse of the same
+/// text. An incremental parse that lost the cancelled requests' edits would
+/// differ in both.
+fn assert_worker_tree_is_the_cold_parse(
+    s: &EditorState,
+    installed: &ParseTreeBundle,
+    cold: &ParseTreeBundle,
+) {
+    let tree = installed
+        .isolated
+        .as_ref()
+        .expect("the installed tree lives in the buffer's worker");
+    assert_eq!(
+        tree.sexp(&[]).as_deref(),
+        Some(cold.root_tree().root_node().to_sexp().as_str()),
+        "the tree after the cancellations is a cold parse of the same text, node for node"
+    );
+    let cold = s.syntax_registry.resolve_layer_queries(cold);
+    let root = &cold.layers[0];
+    let cold_spans = compute_highlight_spans_for(
+        root.highlight_query.as_ref().expect("rust highlights"),
+        &root.tree,
+        &cold.source,
+        root.local_facts.as_deref(),
+        None,
+    );
+    let spans = tree
+        .spans_for(0..installed.source.len())
+        .expect("the worker answers the whole file's spans");
+    assert_eq!(
+        spans.layers[0].spans, cold_spans,
+        "every captured node's byte range is the cold parse's"
+    );
 }
 
 fn current_bundle(s: &EditorState, buf: BufferIdLua) -> Option<Arc<ParseTreeBundle>> {
@@ -543,11 +559,7 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
         deadline: None,
     })
     .unwrap();
-    assert_eq!(
-        node_signature(installed.root_tree()),
-        node_signature(cold.root_tree()),
-        "the tree after the cancellations is a cold parse of the same text, node for node"
-    );
+    assert_worker_tree_is_the_cold_parse(&s, &installed, &cold);
 
     // The notice re-arms once a parse has installed.
     exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 1)");

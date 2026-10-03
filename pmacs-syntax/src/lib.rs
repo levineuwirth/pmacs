@@ -339,7 +339,8 @@ impl ParseTreeBundle {
     }
 
     /// The root layer's tree (`layers[0]`) — the whole-buffer parse.
-    /// Never panics: [`run_parse`] always seeds the root layer.
+    /// [`run_parse`] always seeds the root layer; a bundle whose trees live
+    /// in a parse unit ([`Self::isolated`]) has none, and this panics on it.
     #[must_use]
     pub fn root_tree(&self) -> &tree_sitter::Tree {
         &self.layers[0].tree
