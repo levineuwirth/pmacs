@@ -41,6 +41,9 @@ local parse_layers_cut_warned = {}
 -- E7i fix round 1: buffers already told that their parse worker crashed,
 -- keyed like the others; re-armed when a parse of the buffer installs.
 local parse_crash_warned = {}
+-- E7i fix round 1: buffers already told that a parse returned and its unit
+-- then ran past the bound on installing it; re-armed like the deadline's.
+local parse_stall_warned = {}
 
 -- E7h.2: a parse is bounded in time where tree-sitter calls its progress
 -- callback, which cancels a parse still running this long after it
@@ -792,6 +795,19 @@ pmacs._async.tick = function(...)
         pmacs.error(string.format("syntax: parsing %s as %s: %s",
           name, tostring(parse_lang_by_buffer[key]), tostring(detail)))
       end
+    elseif key and status == "stalled" then
+      -- E7i fix round 1 (review 1, Low 1): the parse returned inside the
+      -- deadline and the unit then took past its own bound to install the
+      -- tree and answer, so it was stopped. Not the deadline: said in its
+      -- own words, once, like it.
+      if not parse_stall_warned[key] then
+        parse_stall_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format(
+          "syntax: parsing %s returned, but %s; its highlighting stays as it was until a parse finishes",
+          name, tostring(detail)))
+      end
     elseif key and status == "limit" then
       -- E7i: a parse unit stopped at its memory limit; told once, like a
       -- deadline.
@@ -815,6 +831,7 @@ pmacs._async.tick = function(...)
     elseif key and (status == "installed" or status == "installed-cut") then
       parse_deadline_warned[key] = nil
       parse_crash_warned[key] = nil
+      parse_stall_warned[key] = nil
       if status == "installed-cut" then
         if not parse_layers_cut_warned[key] then
           parse_layers_cut_warned[key] = true

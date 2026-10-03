@@ -231,9 +231,10 @@ fn stalling_after_parse_unit(dir: &Path) -> PathBuf {
 /// syntax.parse-deadline-ms", which it did not, and the death's kind cannot
 /// tell the deadline from what follows it. At `fa176de` this stand-in's
 /// buffer reports `time: parse ran past its deadline of 5000 ms and was
-/// cancelled after 10 s`.
+/// cancelled after 10 s`. Fix round 1: the death is `stalled`, told once in
+/// its own words; a read's timeout is `read`, and only a parse that has not
+/// returned is `time`.
 #[test]
-#[ignore = "E7i review 1, Low: a kill after the parse returned is told as the deadline (fails at fa176de)"]
 fn e7i_review1_a_kill_after_the_parse_returned_is_not_called_the_deadline() {
     let dir = tempfile::tempdir().expect("tempdir").keep();
     let unit = stalling_after_parse_unit(&dir);
@@ -247,7 +248,9 @@ fn e7i_review1_a_kill_after_the_parse_returned_is_not_called_the_deadline() {
          pmacs.async(function()\n\
            local t0 = pmacs.editor.monotonic_ms()\n\
            local function report() local r = pmacs.parse._unit_report(b); return r and not r.busy and r end\n\
-           while not (report() and report().deaths >= 1) and pmacs.editor.monotonic_ms() - t0 < 40000 do\n\
+           while pmacs.editor.monotonic_ms() - t0 < 40000 do\n\
+             local r = report()\n\
+             if r and r.deaths >= 1 then break end\n\
              pmacs.workers.sleep(50):await()\n\
            end\n\
            pmacs.workers.sleep(500):await()\n\
@@ -257,8 +260,9 @@ fn e7i_review1_a_kill_after_the_parse_returned_is_not_called_the_deadline() {
            end\n\
            local r = pmacs.parse._unit_report(b)\n\
            local f = assert(io.open('{{report}}', 'w'))\n\
-           f:write(string.format('after=%d death=%s told_deadline=%s\\n', pmacs.editor.monotonic_ms() - t0,\n\
-             tostring(r.last_death), tostring(said:find('ran past syntax.parse-deadline-ms', 1, true) ~= nil)))\n\
+           f:write(string.format('after=%d death=%s told_deadline=%s told_stall=%s\\n', pmacs.editor.monotonic_ms() - t0,\n\
+             tostring(r.last_death), tostring(said:find('ran past syntax.parse-deadline-ms', 1, true) ~= nil),\n\
+             tostring(said:find('returned, but parse unit stalled after its parse returned', 1, true) ~= nil)))\n\
            f:close()\n\
          end)\n",
         unit = unit.display().to_string(),
@@ -269,6 +273,10 @@ fn e7i_review1_a_kill_after_the_parse_returned_is_not_called_the_deadline() {
     assert!(
         text.contains("told_deadline=false"),
         "a parse that returned is not told as one that ran past the deadline: {text}"
+    );
+    assert!(
+        text.contains("death=stalled: ") && text.contains("told_stall=true"),
+        "its death is a stall after the parse, told once as one: {text}"
     );
 }
 

@@ -163,11 +163,27 @@ impl Enforcer {
 /// Why a unit was discarded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Death {
-    /// It ran past the deadline plus [`HARD_GRACE`] and was stopped.
+    /// Its parse ran past the deadline plus [`HARD_GRACE`] without
+    /// returning, and it was stopped.
     Time {
         /// The deadline that applied.
         deadline: Duration,
         /// How long the request had run when it was stopped.
+        after: Duration,
+    },
+    /// Its parse returned, and installing the tree and walking the spans it
+    /// answers with ran past [`AFTER_PARSE_HARD`]; it was stopped. Not the
+    /// deadline, which bounds the parse alone (E7i review 1, Low 1).
+    Stalled {
+        /// How long the request had run when it was stopped.
+        after: Duration,
+    },
+    /// A read of its tree ran past its bound (`READ_HARD`, or `Hello`'s at
+    /// start) and it was stopped.
+    Read {
+        /// The bound.
+        limit: Duration,
+        /// How long the read had run.
         after: Duration,
     },
     /// It grew past its own allowance.
@@ -215,6 +231,16 @@ impl Death {
                 after: *after,
             }
             .to_string(),
+            Self::Stalled { after } => format!(
+                "{STALLED_MESSAGE}: installing and answering it took past {} s, and its unit was stopped after {} ms",
+                AFTER_PARSE_HARD.as_secs(),
+                after.as_millis()
+            ),
+            Self::Read { limit, after } => format!(
+                "a read of the tree ran past {} ms, and its unit was stopped after {} ms",
+                limit.as_millis(),
+                after.as_millis()
+            ),
             Self::Memory { limit, .. } => {
                 format!(
                     "{PARSE_LIMIT_MESSAGE}: its parse unit grew past {} MiB",
@@ -257,6 +283,8 @@ impl Death {
     fn kind(&self) -> &'static str {
         match self {
             Self::Time { .. } => "time",
+            Self::Stalled { .. } => "stalled",
+            Self::Read { .. } => "read",
             Self::Memory { .. } => "memory",
             Self::Total { .. } => "total",
             Self::Crashed { .. } => "crashed",
@@ -284,6 +312,16 @@ impl Death {
             _ => format!("{}: {}", self.kind(), self.message()),
         }
     }
+}
+
+/// How the message of a unit stopped after its parse returned begins.
+pub const STALLED_MESSAGE: &str = "parse unit stalled after its parse returned";
+
+/// Whether a parse job's failure text is a unit stopped after its parse
+/// returned.
+#[must_use]
+pub fn is_stalled_message(message: &str) -> bool {
+    message.starts_with(STALLED_MESSAGE)
 }
 
 /// How a memory stop's message begins, for the settle path.
@@ -1412,8 +1450,10 @@ impl ProcessUnit {
             Err(self.death())
         } else {
             // The bound is the deadline until the parse returns, and
-            // `AFTER_PARSE_HARD` from then on (`Response::ParseReturned`).
+            // `AFTER_PARSE_HARD` from then on (`Response::ParseReturned`);
+            // a timeout says which it was, and a read's says it was a read.
             let mut until = hard.map(|limit| started + limit);
+            let mut returned = false;
             loop {
                 let frame = match until {
                     Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
@@ -1421,13 +1461,24 @@ impl ProcessUnit {
                 };
                 match frame {
                     Ok(Ok(Some((Response::ParseReturned(_), _)))) => {
+                        returned = true;
                         until = until.map(|_| Instant::now() + AFTER_PARSE_HARD);
                     }
                     Ok(Ok(Some((response, _)))) => break Ok(response),
                     Err(RecvTimeoutError::Timeout) => {
-                        let death = Death::Time {
-                            deadline: hard.unwrap_or_default().saturating_sub(HARD_GRACE),
-                            after: started.elapsed(),
+                        let after = started.elapsed();
+                        let death = if !parse {
+                            Death::Read {
+                                limit: hard.unwrap_or_default(),
+                                after,
+                            }
+                        } else if returned {
+                            Death::Stalled { after }
+                        } else {
+                            Death::Time {
+                                deadline: hard.unwrap_or_default().saturating_sub(HARD_GRACE),
+                                after,
+                            }
                         };
                         self.kill_for(death.clone());
                         break Err(death);

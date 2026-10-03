@@ -8585,7 +8585,8 @@ pub fn install_parse(
     // `"deadline"` (the parse ran past `syntax.parse-deadline-ms` and was
     // cancelled; the buffer keeps its tree and parses cold next),
     // `"limit"` and `"unavailable"` (E7i: a memory stop; no worker could
-    // start), `"crashed"`, `"crash-stopped"` and `"held"` (E7i fix round
+    // start), `"stalled"` (E7i fix round 1: the parse returned but its unit
+    // took past its bound to install it), `"crashed"`, `"crash-stopped"` and `"held"` (E7i fix round
     // 1: the worker crashed; it crashed for the last time and the buffer is
     // no longer parsed; a parse refused for an earlier crash), `"failed"`
     // (the same, for any other failure), or `"none"` (the job is unknown or
@@ -8616,6 +8617,8 @@ pub fn install_parse(
                                 ("deadline", None)
                             } else if crate::parse_isolation::is_limit_message(&msg) {
                                 ("limit", None)
+                            } else if crate::parse_isolation::is_stalled_message(&msg) {
+                                ("stalled", Some(msg))
                             } else if crate::parse_isolation::is_unavailable_message(&msg) {
                                 ("unavailable", Some(msg))
                             } else if let Some(status) = crate::parse_isolation::crash_status(&msg)
