@@ -24,7 +24,23 @@
 //!                        [--fail-on all|crashes]
 //! pmacs_grammar_fuzz changed --since REF
 //! pmacs_grammar_fuzz repro GRAMMAR FILE [--edits N --seed N] [--trace 1]
+//! pmacs_grammar_fuzz replay-unit --unit PATH --corpus DIR --out DIR
+//!                        [--grammar NAME]... [--max-inputs N] [--jobs N]
+//!                        [--findings DIR] [--extra GRAMMAR=PATH]...
+//!                        [--memory-mb N] [--enforcement rlimit|watch]
+//!                        [--deadline-ms N] [--grace-ms N]
 //! ```
+//!
+//! `replay-unit` (E7i.2) drives the editor's own parse worker,
+//! `pmacs-parse-unit`, through its protocol as the editor drives it: per
+//! input a whole-text parse, then an edit's parse with reads of the tree
+//! before it (spans, folds, a node and its children, an s-expression) sent
+//! while that parse runs. Since E7i the grammars' C runs in that worker and
+//! not in the editor, so `scripts/fuzz-grammars` builds the worker under
+//! each arm's sanitizers and replays the arm's seeds and findings through
+//! it, and the same command replays them through a shipped worker. A worker
+//! stopped by its own memory or time limit is contained, which is what the
+//! boundary is for; any other death is a crash and fails the replay.
 //!
 //! Each grammar is driven through a worker process (`worker GRAMMAR`,
 //! internal) so an abort, a hang or a runaway allocation costs the worker
@@ -97,7 +113,9 @@ const INPUTS_PER_WORKER: u64 = 500;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = args.split_first() else {
-        eprintln!("usage: pmacs_grammar_fuzz list|collect|run|changed|repro|worker ...");
+        eprintln!(
+            "usage: pmacs_grammar_fuzz list|collect|run|changed|repro|replay-unit|worker ..."
+        );
         return ExitCode::from(2);
     };
     let result = match cmd.as_str() {
@@ -112,6 +130,7 @@ fn main() -> ExitCode {
         "changed" => changed(rest),
         "repro" => repro(rest),
         "worker" => worker(rest),
+        "replay-unit" => replay_unit(rest),
         other => Err(format!("unknown subcommand `{other}`")),
     };
     result.unwrap_or_else(|e| {
@@ -3476,6 +3495,507 @@ fn write_seed(out: &Path, grammar: &str, name: &str, text: &str) -> Result<(), S
     let dir = out.join(grammar);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(name), text).map_err(|e| e.to_string())
+}
+
+// -------------------------------------------------------------------
+// `replay-unit` (E7i.2)
+// -------------------------------------------------------------------
+
+/// How a replay of one input through a parse worker ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnitOutcome {
+    /// The parse and every read were answered.
+    Answered,
+    /// The worker was stopped by its own limit, the boundary's job.
+    Contained(String),
+    /// The worker died otherwise: a crash, with its signature.
+    Crashed(String),
+}
+
+type UnitFrame = std::io::Result<Option<((u64, pmacs_parse_unit::Response), Vec<u8>)>>;
+
+/// Named inputs: a path, and the bytes it holds.
+type Inputs = Vec<(String, Vec<u8>)>;
+
+/// A parse worker driven as the editor drives it.
+struct UnitClient {
+    child: Child,
+    stdin: ChildStdin,
+    answers: Receiver<UnitFrame>,
+    stderr: PathBuf,
+    stderr_seen: u64,
+    next: u64,
+    killed_for_time: bool,
+}
+
+impl UnitClient {
+    fn spawn(unit: &Path, stderr: PathBuf, memory_mb: u64, watch: bool) -> Result<Self, String> {
+        let err = std::fs::File::create(&stderr).map_err(|e| e.to_string())?;
+        let mut command = Command::new(unit);
+        command
+            .envs(pmacs_parse_unit::WORKER_ENV.iter().copied())
+            .args(["--memory-limit-mb", &memory_mb.to_string()]);
+        if watch {
+            command.args(["--memory-enforcement", "watch"]);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(err)
+            .spawn()
+            .map_err(|e| format!("spawn {}: {e}", unit.display()))?;
+        let stdin = child.stdin.take().ok_or("no unit stdin")?;
+        let stdout = child.stdout.take().ok_or("no unit stdout")?;
+        let (tx, answers) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut r = BufReader::new(stdout);
+            loop {
+                let frame = pmacs_parse_unit::read_frame(&mut r);
+                let end = !matches!(frame, Ok(Some(_)));
+                if tx.send(frame).is_err() || end {
+                    break;
+                }
+            }
+        });
+        let mut client = Self {
+            child,
+            stdin,
+            answers,
+            stderr,
+            stderr_seen: 0,
+            next: 1,
+            killed_for_time: false,
+        };
+        let id = client
+            .send(&pmacs_parse_unit::Request::Hello, &[])
+            .map_err(|e| format!("{}: {e}", unit.display()))?;
+        match client.wait(&[id], Duration::from_secs(30)) {
+            Ok(mut got) => match got.pop() {
+                Some(pmacs_parse_unit::Response::Hello { protocol })
+                    if protocol == pmacs_parse_unit::PROTOCOL =>
+                {
+                    Ok(client)
+                }
+                other => Err(format!(
+                    "{} speaks another protocol: {other:?}",
+                    unit.display()
+                )),
+            },
+            Err(()) => Err(format!("{} did not answer", unit.display())),
+        }
+    }
+
+    fn send(
+        &mut self,
+        request: &pmacs_parse_unit::Request,
+        payload: &[u8],
+    ) -> std::io::Result<u64> {
+        let id = self.next;
+        self.next += 1;
+        pmacs_parse_unit::write_frame(&mut self.stdin, &(id, request), payload)?;
+        Ok(id)
+    }
+
+    /// The answers to `ids`, in that order; `Err` when the worker ended or
+    /// did not answer within `hard`, after which it has been killed.
+    fn wait(&mut self, ids: &[u64], hard: Duration) -> Result<Vec<pmacs_parse_unit::Response>, ()> {
+        let started = Instant::now();
+        let mut got: BTreeMap<u64, pmacs_parse_unit::Response> = BTreeMap::new();
+        while ids.iter().any(|id| !got.contains_key(id)) {
+            let left = hard.saturating_sub(started.elapsed());
+            match self.answers.recv_timeout(left) {
+                Ok(Ok(Some(((id, response), _)))) => {
+                    if id != 0 {
+                        got.insert(id, response);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.killed_for_time = true;
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return Err(());
+                }
+                _ => {
+                    let _ = self.child.wait();
+                    return Err(());
+                }
+            }
+        }
+        Ok(ids.iter().filter_map(|id| got.remove(id)).collect())
+    }
+
+    /// A `TypeSanitizer` report of the aliasing class written since the
+    /// last look: that build reports and carries on.
+    fn tysan_since(&mut self) -> Option<String> {
+        let len = std::fs::metadata(&self.stderr).map_or(0, |m| m.len());
+        if len <= self.stderr_seen {
+            return None;
+        }
+        let new = tail(&self.stderr, len - self.stderr_seen);
+        self.stderr_seen = len;
+        tysan_violation(&new).map(|r| crash_signature(r, "tysan report"))
+    }
+
+    /// Why the worker ended: its own limit, or a crash.
+    fn ended(&mut self) -> UnitOutcome {
+        if self.killed_for_time {
+            return UnitOutcome::Contained("time: killed at the deadline".into());
+        }
+        let status = self.child.wait().ok();
+        let log = tail(&self.stderr, STDERR_KEPT as u64);
+        if status.and_then(|s| s.code()) == Some(pmacs_parse_unit::MEMORY_WATCH_EXIT) {
+            return UnitOutcome::Contained("memory: the worker's watch".into());
+        }
+        let sanitizer = log.contains("Sanitizer") || log.contains(": runtime error: ");
+        let allocation = [
+            "failed to allocate",
+            "failed to reallocate",
+            "memory allocation of",
+        ]
+        .iter()
+        .any(|m| log.contains(m));
+        if allocation && !sanitizer && status.and_then(|s| s.signal()) == Some(6) {
+            return UnitOutcome::Contained("memory: RLIMIT_AS".into());
+        }
+        let how = match status {
+            Some(s) => s.signal().map_or_else(
+                || format!("exit {:?}", s.code()),
+                |sig| format!("signal {sig}"),
+            ),
+            None => "ended".into(),
+        };
+        UnitOutcome::Crashed(crash_signature(&log, &how))
+    }
+
+    /// One input as the editor meets it: the whole text parsed, then an
+    /// edit's parse with reads of the tree before it sent while it runs.
+    fn replay(
+        &mut self,
+        grammar: &str,
+        text: &[u8],
+        deadline_ms: u64,
+        hard: Duration,
+    ) -> UnitOutcome {
+        use pmacs_parse_unit::{ParseCall, Request, Response, TextUpdate, WireEdit};
+        let call = |update, edits: Vec<WireEdit>, len: usize| ParseCall {
+            language: grammar.to_owned(),
+            text: update,
+            edits,
+            expect_len: len as u32,
+            aliases: default_injection_aliases().into_iter().collect(),
+            deadline_ms: Some(deadline_ms),
+            interest: vec![(0, 4096)],
+        };
+        let full = call(TextUpdate::Full, Vec::new(), text.len());
+        let Ok(id) = self.send(&Request::Parse(full), text) else {
+            return self.ended();
+        };
+        let generation = match self.wait(&[id], hard) {
+            Ok(mut answers) => match answers.pop() {
+                Some(Response::Parsed(parsed)) => parsed.generation,
+                _ => {
+                    return self
+                        .tysan_since()
+                        .map_or(UnitOutcome::Answered, UnitOutcome::Crashed);
+                }
+            },
+            Err(()) => return self.ended(),
+        };
+        let mid = text.len() / 2;
+        let at = byte_to_point(text, mid);
+        let point = |p: tree_sitter::Point| (p.row as u32, p.column as u32);
+        let edit = WireEdit {
+            start_byte: mid as u32,
+            old_end_byte: mid as u32,
+            new_end_byte: mid as u32 + 1,
+            start: point(at),
+            old_end: point(at),
+            new_end: (at.row as u32, at.column as u32 + 1),
+        };
+        let mut ids = Vec::new();
+        let edited = call(TextUpdate::Edits, vec![edit], text.len() + 1);
+        let mut requests = vec![
+            Request::Spans {
+                generation,
+                ranges: vec![(0, text.len() as u32)],
+            },
+            Request::Folds {
+                generation,
+                at: Some(mid as u64),
+            },
+            Request::Folds {
+                generation,
+                at: None,
+            },
+            Request::Describe {
+                generation,
+                path: Vec::new(),
+                children: true,
+            },
+        ];
+        if text.len() <= 16 * 1024 {
+            requests.push(Request::Sexp {
+                generation,
+                path: Vec::new(),
+            });
+        }
+        match self.send(&Request::Parse(edited), b"x") {
+            Ok(id) => ids.push(id),
+            Err(_) => return self.ended(),
+        }
+        for request in &requests {
+            match self.send(request, &[]) {
+                Ok(id) => ids.push(id),
+                Err(_) => return self.ended(),
+            }
+        }
+        match self.wait(&ids, hard) {
+            Ok(_) => self
+                .tysan_since()
+                .map_or(UnitOutcome::Answered, UnitOutcome::Crashed),
+            Err(()) => self.ended(),
+        }
+    }
+}
+
+impl Drop for UnitClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// One grammar's replay: its counts and what was not simply answered.
+struct UnitReplay {
+    grammar: &'static str,
+    inputs: usize,
+    answered: usize,
+    contained: Vec<(String, String)>,
+    crashed: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+struct ReplayConfig {
+    unit: PathBuf,
+    out: PathBuf,
+    memory_mb: u64,
+    watch: bool,
+    deadline_ms: u64,
+    hard: Duration,
+}
+
+fn replay_unit(args: &[String]) -> Result<ExitCode, String> {
+    let (_, flags) = Flags::parse(args, 0)?;
+    let corpus = flags.path("corpus")?;
+    let findings = flags.one("findings").map(PathBuf::from);
+    let max_inputs = usize::try_from(flags.num("max-inputs", 50)?).map_err(|e| e.to_string())?;
+    let deadline_ms = flags.num("deadline-ms", 5_000)?;
+    let cfg = Arc::new(ReplayConfig {
+        unit: flags.path("unit")?,
+        out: flags.path("out")?,
+        memory_mb: flags.num("memory-mb", 1024)?,
+        watch: match flags.one("enforcement").unwrap_or("rlimit") {
+            "rlimit" => false,
+            "watch" => true,
+            other => return Err(format!("--enforcement {other}: `rlimit` or `watch`")),
+        },
+        deadline_ms,
+        hard: Duration::from_millis(deadline_ms + flags.num("grace-ms", 1_000)?),
+    });
+    std::fs::create_dir_all(&cfg.out).map_err(|e| e.to_string())?;
+    let queue = replay_queue(&flags, &corpus, findings.as_deref(), max_inputs)?;
+    let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
+    let queue = Arc::new(Mutex::new(queue));
+    let replays = Arc::new(Mutex::new(Vec::new()));
+    let threads: Vec<_> = (0..jobs)
+        .map(|_| {
+            let (queue, replays, cfg) = (queue.clone(), replays.clone(), cfg.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut q| q.pop());
+                    let Some((grammar, inputs)) = next else { break };
+                    let replay = replay_grammar(grammar, &inputs, &cfg);
+                    eprintln!(
+                        "{grammar}: {} inputs through the unit, {} answered, {} contained, {} crashed{}",
+                        replay.inputs,
+                        replay.answered,
+                        replay.contained.len(),
+                        replay.crashed.len(),
+                        replay
+                            .error
+                            .as_deref()
+                            .map_or_else(String::new, |e| format!(", ERROR {e}"))
+                    );
+                    if let Ok(mut r) = replays.lock() {
+                        r.push(replay);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().map_err(|_| "a replay thread panicked")?;
+    }
+    let mut replays = std::mem::take(&mut *replays.lock().map_err(|_| "poisoned")?);
+    replays.sort_by_key(|r| r.grammar);
+    let md = unit_report(&cfg, &replays);
+    std::fs::write(cfg.out.join("unit-report.md"), &md).map_err(|e| e.to_string())?;
+    print!("{md}");
+    if replays.iter().any(|r| r.error.is_some()) {
+        return Ok(ExitCode::from(2));
+    }
+    Ok(if replays.iter().any(|r| !r.crashed.is_empty()) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Each grammar's inputs for a replay: a sample of its seeds, the findings
+/// a fuzz run kept for it, and the extras named for it.
+fn replay_queue(
+    flags: &Flags,
+    corpus: &Path,
+    findings: Option<&Path>,
+    max_inputs: usize,
+) -> Result<Vec<(&'static str, Inputs)>, String> {
+    let wanted = flags.all("grammar");
+    for w in &wanted {
+        entry(w)?;
+    }
+    let mut extras: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
+    for extra in flags.all("extra") {
+        let (grammar, path) = extra
+            .split_once('=')
+            .ok_or_else(|| format!("--extra {extra}: GRAMMAR=PATH"))?;
+        extras
+            .entry(entry(grammar)?.name)
+            .or_default()
+            .push(PathBuf::from(path));
+    }
+    let mut queue: Vec<(&'static str, Inputs)> = Vec::new();
+    for lang in BUILTIN_LANGUAGES
+        .iter()
+        .filter(|e| wanted.is_empty() || wanted.contains(&e.name))
+    {
+        let mut inputs = sampled_inputs(&corpus.join(lang.name), max_inputs);
+        if let Some(dir) = findings {
+            inputs.extend(
+                sampled_inputs(&dir.join(lang.name), usize::MAX)
+                    .into_iter()
+                    .filter(|(name, _)| Path::new(name).extension().is_some_and(|e| e == "input")),
+            );
+        }
+        for path in extras.get(lang.name).into_iter().flatten() {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            inputs.push((path.display().to_string(), bytes));
+        }
+        if !inputs.is_empty() {
+            queue.push((lang.name, inputs));
+        }
+    }
+    Ok(queue)
+}
+
+/// The replay's report, in markdown.
+fn unit_report(cfg: &ReplayConfig, replays: &[UnitReplay]) -> String {
+    let mut md = format!(
+        "# Parse worker replay\n\n`{}`, memory {} MiB by {}, deadline {} ms.\n\n\
+         | grammar | inputs | answered | contained | crashed |\n|---|---|---|---|---|\n",
+        cfg.unit.display(),
+        cfg.memory_mb,
+        if cfg.watch { "its watch" } else { "RLIMIT_AS" },
+        cfg.deadline_ms
+    );
+    for r in replays {
+        let _ = writeln!(
+            md,
+            "| {} | {} | {} | {} | {}{} |",
+            r.grammar,
+            r.inputs,
+            r.answered,
+            r.contained.len(),
+            r.crashed.len(),
+            r.error
+                .as_deref()
+                .map_or_else(String::new, |e| format!(" (ERROR {e})"))
+        );
+    }
+    for r in replays {
+        for (input, why) in &r.contained {
+            let _ = writeln!(md, "\n- {} contained: `{input}`, {why}", r.grammar);
+        }
+        for (input, why) in &r.crashed {
+            let _ = writeln!(md, "\n- **{} CRASHED**: `{input}`, {why}", r.grammar);
+        }
+    }
+    md
+}
+
+/// Up to `max` files of `dir`, spread evenly over its sorted listing, with
+/// their names.
+fn sampled_inputs(dir: &Path, max: usize) -> Inputs {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.is_file());
+    files.sort();
+    let step = files.len().div_ceil(max.max(1)).max(1);
+    files
+        .iter()
+        .step_by(step)
+        .filter_map(|p| Some((p.display().to_string(), std::fs::read(p).ok()?)))
+        .collect()
+}
+
+fn replay_grammar(
+    grammar: &'static str,
+    inputs: &[(String, Vec<u8>)],
+    cfg: &ReplayConfig,
+) -> UnitReplay {
+    let mut replay = UnitReplay {
+        grammar,
+        inputs: inputs.len(),
+        answered: 0,
+        contained: Vec::new(),
+        crashed: Vec::new(),
+        error: None,
+    };
+    let mut unit: Option<UnitClient> = None;
+    let mut spawned = 0;
+    for (name, text) in inputs {
+        if unit.is_none() {
+            spawned += 1;
+            let stderr = cfg.out.join(format!("{grammar}-unit-{spawned}.stderr"));
+            match UnitClient::spawn(&cfg.unit, stderr, cfg.memory_mb, cfg.watch) {
+                Ok(u) => unit = Some(u),
+                Err(e) => {
+                    replay.error = Some(e);
+                    return replay;
+                }
+            }
+        }
+        let u = unit.as_mut().expect("spawned above");
+        match u.replay(grammar, text, cfg.deadline_ms, cfg.hard) {
+            UnitOutcome::Answered => replay.answered += 1,
+            UnitOutcome::Contained(why) => {
+                replay.contained.push((name.clone(), why));
+                unit = None;
+            }
+            UnitOutcome::Crashed(why) => {
+                let kept = cfg.out.join(format!(
+                    "{grammar}-crash-{}.input",
+                    replay.crashed.len() + 1
+                ));
+                let _ = std::fs::write(&kept, text);
+                replay
+                    .crashed
+                    .push((name.clone(), format!("{why} (kept as {})", kept.display())));
+                unit = None;
+            }
+        }
+    }
+    replay
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 #                         [--max-seconds N] [--long-since REF]
 #                         [--long-seconds N] [--out DIR]
 #                         [--arm ubsan|asan-strict|tysan|plain]...
-#                         [--plain]
+#                         [--plain] [--replay-inputs N]
 #
 # The grammars are C beside a `#![forbid(unsafe_code)]` editor, and in
 # daemon mode one bad parse takes every buffer the daemon holds. E7e
@@ -86,6 +86,19 @@
 #      runs every grammar long. A finding fuzz/accepted.tsv names is
 #      reported "known, accepted (#N)" and does not fail the run; adding
 #      a row there is the owner's ruling (fuzz/accepted/README.md).
+#   5. Replays through the editor's own parse worker (E7i.2). Since E7i
+#      the grammars' C runs in `pmacs-parse-unit`, a process per buffer,
+#      not in the editor, so each arm also builds that binary with the
+#      arm's compiler and flags and drives it through its protocol as the
+#      editor does (`pmacs_grammar_fuzz replay-unit`): every seed up to
+#      --replay-inputs per grammar, the arm's findings and the accepted
+#      reproductions, each parsed whole and then edited with reads of the
+#      tree before it sent while the edit's parse runs. A worker stopped by
+#      its own memory or time limit is contained, the boundary's job; any
+#      other death is a crash and fails the arm. Under a sanitizer the
+#      worker's memory is held by its watch (`--memory-enforcement
+#      watch`), since the sanitizer's shadow reservation is address space
+#      RLIMIT_AS would refuse; the plain arm runs it as it ships.
 #
 # Exit status is the harness's: 0 no finding, 1 findings, 2 setup
 # (including a grammar with no seeds). The build directory is the
@@ -108,6 +121,7 @@ arms=
 out=
 grammars=
 froms=
+replay_inputs=50
 while [ $# -gt 0 ]; do
     case "$1" in
         --seconds) seconds=${2:?}; shift 2 ;;
@@ -123,6 +137,7 @@ while [ $# -gt 0 ]; do
         --out) out=${2:?}; shift 2 ;;
         --arm) arms="$arms ${2:?}"; shift 2 ;;
         --plain) arms="$arms plain"; shift ;;
+        --replay-inputs) replay_inputs=${2:?}; shift 2 ;;
         -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -234,7 +249,7 @@ EOF
         export RUSTFLAGS="$link"
     fi
     echo "fuzz-grammars: building the $arm arm in $CARGO_TARGET_DIR" >&2
-    cargo build --profile fuzz --target "$host" --bin pmacs_grammar_fuzz
+    cargo build --profile fuzz --target "$host" --workspace --bin pmacs_grammar_fuzz --bin pmacs-parse-unit
     if [ "$arm" != plain ]; then
         # The proof is what the `cc` crate recorded in each grammar crate's
         # build-script output: the compiler it ran, this wrapper, whose name
@@ -257,6 +272,7 @@ EOF
         done
     fi
     bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
+    unit="$CARGO_TARGET_DIR/$host/fuzz/pmacs-parse-unit"
 }
 fuzz() { LD_PRELOAD="$preload" "$bin" "$@"; }
 # shellcheck disable=SC2086
@@ -334,9 +350,28 @@ for arm in $arms; do
         --long-seconds "$long_seconds" --fail-on "$fail_on" \
         --accepted "$root/fuzz/accepted.tsv" $longs $grammars
     arm_status=$?
+    # 5. The same arm's worker binary, driven as the editor drives it.
+    enforcement=watch
+    [ "$arm" = plain ] && enforcement=rlimit
+    extras=
+    while IFS="$tab" read -r issue grammars_cell _ reproductions _; do
+        case "$issue" in ''|'#'*|issue) continue ;; esac
+        for g in $(echo "$grammars_cell" | tr ',' ' '); do
+            for r in $(echo "$reproductions" | tr ',' ' '); do
+                extras="$extras --extra $g=$root/fuzz/$r"
+            done
+        done
+    done < fuzz/accepted.tsv
+    # shellcheck disable=SC2086
+    fuzz replay-unit --unit "$unit" --corpus "$work/corpus" --out "$out/$arm/unit" \
+        --max-inputs "$replay_inputs" --findings "$out/$arm" --jobs "$jobs" \
+        --enforcement "$enforcement" $extras $grammars > /dev/null
+    unit_status=$?
     set -e
-    echo "## arm: $arm (exit $arm_status)"
+    echo "## arm: $arm (exit $arm_status, its parse worker's replay exit $unit_status)"
     cat "$out/$arm/report.md"
+    cat "$out/$arm/unit/unit-report.md" 2>/dev/null || true
+    [ "$unit_status" -le "$arm_status" ] || arm_status=$unit_status
     case "$arm_status" in
         0) ;;
         1) [ "$status" = 2 ] || status=1 ;;

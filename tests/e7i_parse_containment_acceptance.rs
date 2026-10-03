@@ -864,3 +864,82 @@ fn e7i_an_ordinary_file_parses_inside_a_64_mib_worker() {
         "the parse installed inside 64 MiB"
     );
 }
+
+/// `pmacs_grammar_fuzz replay-unit --unit <worker> …` with the run's
+/// corpus, extras and limits; its exit status and report.
+fn replay(unit: &Path, extras: &[&str]) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = dir.path().join("corpus");
+    for (grammar, file) in [("rust", "src/fold.rs"), ("markdown", "docs/invariants.md")] {
+        std::fs::create_dir_all(corpus.join(grammar)).expect("corpus");
+        std::fs::copy(repo().join(file), corpus.join(grammar).join("seed")).expect("seed");
+    }
+    let out = dir.path().join("out");
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"));
+    command.args(["replay-unit", "--unit"]).arg(unit);
+    command.arg("--corpus").arg(&corpus).arg("--out").arg(&out);
+    command.args(["--memory-mb", "64", "--deadline-ms", "1000"]);
+    for extra in extras {
+        command
+            .arg("--extra")
+            .arg(format!("markdown={}", repo().join(extra).display()));
+    }
+    let output = command.output().expect("run the replay");
+    let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
+    (output.status.code(), report)
+}
+
+/// E7i.2: the fuzz harness drives the editor's own worker binary through
+/// its protocol, a parse then reads of the tree before it while an edit's
+/// parse runs; ordinary seeds are answered, #296 and #301 contained by the
+/// worker's memory and time limits, and nothing crashed, so it exits 0.
+#[test]
+fn e7i_the_fuzz_replay_drives_the_worker_and_finds_296_and_301_contained() {
+    let worker = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("target dir")
+        .join("pmacs-parse-unit");
+    let (code, report) = replay(
+        &worker,
+        &[
+            "fuzz/accepted/296-underscores-16k.input",
+            "fuzz/accepted/301-nested-openers-98.input",
+        ],
+    );
+    assert_eq!(code, Some(0), "no crash: {report}");
+    assert!(report.contains("| markdown | 3 | 1 | 2 | 0 |"), "{report}");
+    assert!(report.contains("| rust | 1 | 1 | 0 | 0 |"), "{report}");
+    assert!(
+        report.contains("296-underscores-16k.input`, memory: RLIMIT_AS")
+            || report.contains("296-underscores-16k.input`, memory: the worker's watch"),
+        "#296 contained by its memory limit: {report}"
+    );
+    assert!(
+        report.contains("301-nested-openers-98.input`, time: killed at the deadline"),
+        "#301 contained by its time limit: {report}"
+    );
+}
+
+/// And a worker that crashes fails the replay: a stand-in that answers
+/// the protocol's Hello and dies by SIGSEGV at the first parse.
+#[test]
+fn e7i_the_fuzz_replay_fails_a_worker_that_crashes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake = dir.path().join("crashing-unit");
+    // Hello's request frame is 10 bytes; the answer is (1, Hello { 2 }).
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nhead -c 10 >/dev/null\n\
+         printf '\\003\\000\\000\\000\\001\\000\\002\\000\\000\\000\\000'\n\
+         head -c 1 >/dev/null\nkill -SEGV $$\n",
+    )
+    .expect("fake unit");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let (code, report) = replay(&fake, &[]);
+    assert_eq!(code, Some(1), "a crash fails the replay: {report}");
+    assert!(
+        report.contains("CRASHED") && report.contains("signal 11"),
+        "{report}"
+    );
+}
