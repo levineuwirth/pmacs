@@ -72,6 +72,15 @@ pub const MEMORY_WATCH_EXIT: i32 = 86;
 /// worker's parse and watch threads would spend its allowance before its
 /// parse grew (found by `pmacs_grammar_fuzz replay-unit` at E7i.2: ordinary
 /// files stopped at 64 MiB); with one arena the allowance is the parse's.
+///
+/// One arena is a tuning choice with a measured price, not a free fix.
+/// Every thread then allocates under one lock, and E7i review 1 measured
+/// the worker's own parse, same binary, interleaved rounds, 240 parses an
+/// arm: on the comparison's markdown note p50 221.6 against 229.8 ms but
+/// p95 459.3 against 376.4 ms, about 83 ms at p95; on `src/editor.rs`
+/// 59.8 / 71.5 against 61.7 / 70.5 ms, nothing. The alternatives, two
+/// arenas or the default arenas counted into the allowance, are unmeasured
+/// against the 64 MiB rows this setting exists for.
 pub const WORKER_ENV: &[(&str, &str)] = &[("MALLOC_ARENA_MAX", "1")];
 
 /// Write one frame: `header`, then `payload` as raw bytes.
