@@ -1057,6 +1057,7 @@ impl ProcessUnit {
             .ok_or_else(|| Death::Unavailable("no pmacs-parse-unit beside pmacs".into()))?;
         let mut command = Command::new(&bin);
         command
+            .envs(pmacs_parse_unit::WORKER_ENV.iter().copied())
             .arg("--memory-limit-mb")
             .arg((limits.unit_memory >> 20).max(1).to_string());
         if hook("PMACS_PARSE_UNIT_MEMORY", "watch") {

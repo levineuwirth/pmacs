@@ -56,6 +56,14 @@ pub const PROTOCOL: u32 = 2;
 /// The exit status of a worker its memory watch stopped.
 pub const MEMORY_WATCH_EXIT: i32 = 86;
 
+/// The environment a worker runs in, which the editor and anything else
+/// that drives one set alike. glibc gives each thread that allocates an
+/// arena reserving 64 MiB of address space, which `RLIMIT_AS` counts, so a
+/// worker's parse and watch threads would spend its allowance before its
+/// parse grew (found by `pmacs_grammar_fuzz replay-unit` at E7i.2: ordinary
+/// files stopped at 64 MiB); with one arena the allowance is the parse's.
+pub const WORKER_ENV: &[(&str, &str)] = &[("MALLOC_ARENA_MAX", "1")];
+
 /// Write one frame: `header`, then `payload` as raw bytes.
 pub fn write_frame<W: Write, T: Serialize>(
     w: &mut W,

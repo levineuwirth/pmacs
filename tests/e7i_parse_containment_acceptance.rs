@@ -356,6 +356,11 @@ fn e7i_the_workers_total_says_how_this_machine_holds_it() {
 /// `probe` (Lua with `b` bound to the buffer, returning a string) and
 /// writes `mode=<unit mode> <probe's string>` to the report.
 fn probe_in_unit(name: &str, text: &str, probe: &str) -> String {
+    probe_in_unit_with(name, text, probe, "")
+}
+
+/// [`probe_in_unit`] with `settings` (Lua) run before the file opens.
+fn probe_in_unit_with(name: &str, text: &str, probe: &str, settings: &str) -> String {
     let dir = tempfile::tempdir().expect("tempdir").keep();
     let file = dir.join(name);
     std::fs::write(&file, text).expect("file");
@@ -363,6 +368,7 @@ fn probe_in_unit(name: &str, text: &str, probe: &str) -> String {
     let init = format!(
         "pmacs.lsp.config = {{}}\n\
          pmacs.config.set('syntax.isolation', 'process')\n\
+         {settings}\n\
          local b = pmacs.buffer.find_or_open({file:?})\n\
          local function probe()\n{probe}\nend\n\
          pmacs.async(function()\n\
@@ -829,5 +835,32 @@ fn e7i_a_worker_past_the_recycle_threshold_is_replaced_at_the_next_parse() {
     assert_eq!(
         report, "mode=process same=true new=true newer=true old=source_file recycled=2 gone=true",
         "workers are replaced after a parse past the threshold"
+    );
+}
+
+/// An ordinary file parses inside a 64 MiB worker (E7i.2): the worker's
+/// allowance is its parse's, not its threads' malloc arenas', each of
+/// which reserves 64 MiB of the address space `RLIMIT_AS` counts.
+#[test]
+fn e7i_an_ordinary_file_parses_inside_a_64_mib_worker() {
+    let mut text = String::new();
+    while text.len() < 100_000 {
+        text.push_str(
+            "## A heading\n\nSome *emphasis*, a `code span` and a [link](https://example.org).\n\n",
+        );
+    }
+    let probe = "local t = pmacs.parse.tree(b)\n\
+         local r = pmacs.parse._unit_report(b)\n\
+         return string.format('len=%d deaths=%d', t:source_len(), r.deaths)";
+    let report = probe_in_unit_with(
+        "ordinary.md",
+        &text,
+        probe,
+        "pmacs.config.set('syntax.parse-memory-limit-mb', 64)",
+    );
+    assert_eq!(
+        report,
+        format!("mode=process len={} deaths=0", text.len()),
+        "the parse installed inside 64 MiB"
     );
 }
