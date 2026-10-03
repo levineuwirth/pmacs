@@ -319,37 +319,41 @@ fn e7i_review1_a_worker_does_not_outlive_its_editor() {
     let (daemon, text) = run_init(&init, Duration::from_secs(40), |t| t.ends_with('\n'));
     let worker = text.trim().to_owned();
     std::thread::sleep(Duration::from_secs(1));
-    let stat_of = || std::fs::read_to_string(format!("/proc/{worker}/stat")).unwrap_or_default();
-    let running = |stat: &str| !stat.is_empty() && !stat.contains(") Z ");
+    // The worker's state and CPU time from `ps`, which Linux and macOS both
+    // have; the row read `/proc`, which macOS does not (fix round 1: CI's
+    // macOS legs saw no process at all and failed the precondition below).
+    let ps = |field: &str| {
+        Command::new("ps")
+            .args(["-o", field, "-p", &worker])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    };
+    let running = |state: &str| !state.is_empty() && !state.starts_with('Z');
     assert!(
-        running(&stat_of()),
+        running(&ps("stat=")),
         "the worker is parsing when its daemon is killed"
     );
     let _ = Command::new("kill")
         .args(["-KILL", &daemon.pid().to_string()])
         .status();
     let killed = std::time::Instant::now();
-    let mut stat = stat_of();
-    while running(&stat) && killed.elapsed() < Duration::from_secs(8) {
+    let mut state = ps("stat=");
+    while running(&state) && killed.elapsed() < Duration::from_secs(8) {
         std::thread::sleep(Duration::from_millis(20));
-        stat = stat_of();
+        state = ps("stat=");
     }
     let gone_after = killed.elapsed();
-    let alive = running(&stat);
-    let cpu_ticks: u64 = stat
-        .rsplit(')')
-        .next()
-        .and_then(|rest| rest.split_whitespace().nth(11))
-        .and_then(|t| t.parse().ok())
-        .unwrap_or(0);
+    let alive = running(&state);
+    let cpu = ps("time=");
     let _ = Command::new("kill").args(["-KILL", &worker]).status();
     say(&format!(
-        "after its daemon was killed: worker {worker} alive={alive} after {gone_after:?}, utime {cpu_ticks} ticks"
+        "after its daemon was killed: worker {worker} alive={alive} after {gone_after:?}, cpu {cpu:?}"
     ));
     drop(daemon);
     assert!(
         !alive,
-        "the worker ended with its editor rather than spinning on (utime {cpu_ticks} ticks)"
+        "the worker ended with its editor rather than spinning on (cpu {cpu:?})"
     );
     assert!(
         gone_after < Duration::from_secs(1),
