@@ -27,7 +27,8 @@ Always true:
   below holds, until a release ships the worker. So one bad parse no
   longer takes every buffer the daemon holds: a
   crash ends its worker, a parse past `syntax.parse-deadline-ms` is
-  killed 100 ms after it, and one that grows past
+  killed 100 ms after it, a worker ends when its editor does (its stdin
+  closes), and one that grows past
   `syntax.parse-memory-limit-mb` is stopped, before the memory exists by
   `RLIMIT_AS` on Linux and after it by the worker's own watch on macOS,
   which refuses that limit (`docs/divergences.md` has the overshoot).

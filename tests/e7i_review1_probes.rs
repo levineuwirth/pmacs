@@ -241,9 +241,10 @@ fn e7i_review1_a_kill_after_the_parse_returned_is_not_called_the_deadline() {
 /// worker). Here #301's opener series at 40 rather than 98 bytes' 28
 /// (exponential in them), the daemon killed a second into the parse, the
 /// worker checked 8 s later, past the 5.1 s the editor would have allowed;
-/// then killed by this test.
+/// then killed by this test. Fix round 1: the worker exits when its stdin
+/// ends, which the editor's death closes, so it is polled from the kill on
+/// and must be gone within a second, well inside the deadline it outlived.
 #[test]
-#[ignore = "E7i review 1, Medium: a worker spinning in a never-returning parse outlives its killed editor (fails at fa176de)"]
 fn e7i_review1_a_worker_does_not_outlive_its_editor() {
     let dir = tempfile::tempdir().expect("tempdir").keep();
     let file = dir.join("victim.md");
@@ -270,12 +271,23 @@ fn e7i_review1_a_worker_does_not_outlive_its_editor() {
     let (daemon, text) = run_init(&init, Duration::from_secs(40), |t| t.ends_with('\n'));
     let worker = text.trim().to_owned();
     std::thread::sleep(Duration::from_secs(1));
+    let stat_of = || std::fs::read_to_string(format!("/proc/{worker}/stat")).unwrap_or_default();
+    let running = |stat: &str| !stat.is_empty() && !stat.contains(") Z ");
+    assert!(
+        running(&stat_of()),
+        "the worker is parsing when its daemon is killed"
+    );
     let _ = Command::new("kill")
         .args(["-KILL", &daemon.pid().to_string()])
         .status();
-    std::thread::sleep(Duration::from_secs(8));
-    let stat = std::fs::read_to_string(format!("/proc/{worker}/stat")).unwrap_or_default();
-    let alive = !stat.is_empty() && !stat.contains(") Z ");
+    let killed = std::time::Instant::now();
+    let mut stat = stat_of();
+    while running(&stat) && killed.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(20));
+        stat = stat_of();
+    }
+    let gone_after = killed.elapsed();
+    let alive = running(&stat);
     let cpu_ticks: u64 = stat
         .rsplit(')')
         .next()
@@ -284,12 +296,16 @@ fn e7i_review1_a_worker_does_not_outlive_its_editor() {
         .unwrap_or(0);
     let _ = Command::new("kill").args(["-KILL", &worker]).status();
     say(&format!(
-        "after its daemon was killed: worker {worker} alive={alive}, utime {cpu_ticks} ticks"
+        "after its daemon was killed: worker {worker} alive={alive} after {gone_after:?}, utime {cpu_ticks} ticks"
     ));
     drop(daemon);
     assert!(
         !alive,
         "the worker ended with its editor rather than spinning on (utime {cpu_ticks} ticks)"
+    );
+    assert!(
+        gone_after < Duration::from_secs(1),
+        "the worker ended at once, not at some later bound: {gone_after:?}"
     );
 }
 

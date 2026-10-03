@@ -1,6 +1,9 @@
 // pmacs-parse-unit --- the parse unit's entry point (E7i).
 
-//! Reads requests on stdin and answers on stdout until stdin closes.
+//! Reads requests on stdin and answers on stdout until stdin closes, then
+//! exits at once, abandoning a parse still running: stdin closes when the
+//! editor ends, however it ends, so a worker never outlives its editor
+//! (`pmacs_parse_unit::serve`).
 //!
 //! This is the worker process the editor spawns per buffer, started as
 //! `pmacs-parse-unit --memory-limit-mb N [--memory-enforcement rlimit|watch]

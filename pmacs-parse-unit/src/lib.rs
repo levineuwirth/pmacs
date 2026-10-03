@@ -857,6 +857,18 @@ impl Parsing {
 /// Serve requests from `input` until it ends, answering on `output`. A
 /// parse runs on a thread of its own, in arrival order; every other request
 /// is answered here at once, so reads never wait on a parse.
+///
+/// The end of `input` is how the worker learns its editor is gone. The
+/// editor alone holds the pipe's write end (std opens it close-on-exec, so
+/// no other child inherits it), and the kernel closes it however the editor
+/// ends: an exit, a crash, an out-of-memory kill, `kill -9`. So `serve`
+/// returns at once when its input ends, and never waits for a parse still
+/// running: the deadline that bounded that parse was the editor's, and it
+/// died with the editor (E7i review 1, Medium 2: a worker in #301's
+/// condensation spun on for seconds after its daemon was killed). The
+/// caller exits the process, which ends the parse thread with it. This is
+/// portable and needs no `unsafe`, where a parent-death signal would be
+/// Linux's alone.
 pub fn serve<R: Read, W: Write + Send + 'static>(
     mut input: R,
     output: W,
@@ -931,12 +943,13 @@ pub fn serve<R: Read, W: Write + Send + 'static>(
         }
         Ok(())
     })();
+    // The input ended or broke: the editor is gone or done with this
+    // worker. Neither thread is joined; returning lets the caller exit the
+    // process, which stops a parse still running rather than finishing it
+    // for no one.
     drop(parses);
-    let _ = parser.join();
     parsing.stop();
-    if let Some(watcher) = watcher {
-        let _ = watcher.join();
-    }
+    drop((parser, watcher));
     served
 }
 
