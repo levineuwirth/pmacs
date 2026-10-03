@@ -237,11 +237,7 @@ fn e7g_review1_the_reproductions_inside_markdown_and_html_settle_plain() {
             .view(buffer.0)
             .and_then(|h| h.current())
             .unwrap();
-        let layers: Vec<String> = bundle
-            .layers
-            .iter()
-            .map(|l| l.language_name.clone())
-            .collect();
+        let layers: Vec<String> = bundle.layer_languages();
         assert_eq!(layers.first().map(String::as_str), Some(root), "{name}");
         assert!(
             layers.iter().all(|l| shipped.contains(l.as_str())),

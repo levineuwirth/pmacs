@@ -8202,11 +8202,12 @@ type DispatchArgs = (
 /// (E7i).
 const ISOLATED_INTEREST_MARGIN: u32 = 4096;
 
-/// The boundary `syntax.isolation` names; absent or unknown is in-process.
+/// The boundary `syntax.isolation` names; absent or unknown is the worker
+/// process, the editor's default since E7i.
 fn isolation_mode(isolation: Option<&str>) -> crate::parse_isolation::Isolation {
     isolation
         .and_then(crate::parse_isolation::Isolation::from_config)
-        .unwrap_or(crate::parse_isolation::Isolation::Native)
+        .unwrap_or(crate::parse_isolation::Isolation::Process)
 }
 
 /// The isolated parse of `buffer`'s pending edits, its limits from the

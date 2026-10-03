@@ -324,6 +324,20 @@ pub struct Layer {
 }
 
 impl ParseTreeBundle {
+    /// The layers' languages, the root first, wherever the trees live: the
+    /// in-process layers, or the ones a parse unit reported (E7i).
+    #[must_use]
+    pub fn layer_languages(&self) -> Vec<String> {
+        match self.isolated.as_ref() {
+            Some(isolated) => isolated.layer_languages(),
+            None => self
+                .layers
+                .iter()
+                .map(|l| l.language_name.clone())
+                .collect(),
+        }
+    }
+
     /// The root layer's tree (`layers[0]`) — the whole-buffer parse.
     /// Never panics: [`run_parse`] always seeds the root layer.
     #[must_use]

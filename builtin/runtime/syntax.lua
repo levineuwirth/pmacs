@@ -63,18 +63,18 @@ pmacs.config.define {
 }
 
 -- E7i: the parse boundary (`src/parse_isolation.rs`), the process the
--- owner ruled. "none" parses in the editor's own process, as before;
--- "process" runs each buffer's parse, and every read of its tree, in a
--- worker process of `pmacs-parse-unit`. There the memory limits below and
--- the deadline above bound the whole parse, the work the progress
--- callback cannot reach included, and a parse that hits one ends its
--- worker, not the editor.
+-- owner ruled, and the default. "process" runs each buffer's parse, and
+-- every read of its tree, in a worker process of `pmacs-parse-unit`: the
+-- memory limits below and the deadline above bound the whole parse, the
+-- work the progress callback cannot reach included, and a parse that hits
+-- one ends its worker, not the editor. "none" parses in the editor's own
+-- process, as before E7i, where nothing stops #296 or #301.
 pmacs.config.define {
   name = "syntax.isolation",
-  description = "Where syntax parses run: none (in the editor) or process (a worker process per buffer). Under process a parse past its memory or time limit is stopped without taking the editor down.",
+  description = "Where syntax parses run: process (a worker process per buffer, the default) or none (in the editor). Under process a parse past its memory or time limit is stopped without taking the editor down; under none it is not.",
   type = "enum",
-  choices = { "none", "process" },
-  default = "none",
+  choices = { "process", "none" },
+  default = "process",
   mutability = "live",
 }
 
