@@ -38,6 +38,16 @@ fn underscores(lines: usize) -> String {
 /// `<dir>/report.txt` until the victim's unit has died once and the Rust
 /// buffer has a settled parse from its own unit.
 fn daemon(mode: &str, victim: &str, settings: &str) -> (TestDaemon, PathBuf, PathBuf) {
+    daemon_with_env(mode, victim, settings, &[])
+}
+
+/// [`daemon`] with environment variables for the daemon.
+fn daemon_with_env(
+    mode: &str,
+    victim: &str,
+    settings: &str,
+    env: &[(&str, &str)],
+) -> (TestDaemon, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir").keep();
     let victim_path = dir.join("victim.md");
     std::fs::write(&victim_path, victim).expect("victim");
@@ -78,7 +88,7 @@ fn daemon(mode: &str, victim: &str, settings: &str) -> (TestDaemon, PathBuf, Pat
         typed = typed_path.display().to_string(),
         report = report.display().to_string(),
     );
-    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init);
+    let daemon = TestDaemon::spawn_with_env_and_init(env, &init);
     (daemon, dir, report)
 }
 
@@ -186,11 +196,9 @@ fn e7i_a_process_unit_stops_301_at_the_deadline_and_the_daemon_lives() {
     stops_301_at_the_deadline("process", Duration::from_secs(20));
 }
 
+/// On Linux `RLIMIT_AS` stops it; on macOS, which refuses that limit, the
+/// worker's memory watch does (condition 3).
 #[test]
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "RLIMIT_AS is refused (EINVAL) on macOS, so a worker has no memory limit there"
-)]
 fn e7i_a_process_unit_stops_296_at_its_memory_limit_and_says_so_once() {
     stops_296_at_its_memory_limit("process", Duration::from_secs(25));
 }
@@ -456,27 +464,37 @@ fn e7i_lua_s_node_api_walks_a_tree_in_the_buffer_s_unit() {
     );
 }
 
-/// A tree held across a reparse (E7i): its unit holds the newer tree, so
-/// reads the script had not yet made answer nil and `is_current` is false,
-/// while the buffer's new tree answers.
+/// A tree held across reparses (E7i): its unit keeps the two most recent
+/// trees, so after one reparse the held tree still answers reads it had
+/// not made (the editor may still be showing it while the newer one
+/// settles), and after two it answers nil; `is_current` is false from the
+/// first, and the buffer's new tree answers throughout.
 #[test]
-fn e7i_a_held_tree_answers_nil_once_its_unit_holds_a_newer_one() {
+fn e7i_a_held_tree_answers_for_one_reparse_and_then_nil() {
     let probe = "local t = pmacs.parse.tree(b)\n\
          local before = t:root():type()\n\
-         b:insert(0, '// x\\n')\n\
-         pmacs.parse._dispatch(b, 'rust')\n\
-         local t0 = pmacs.editor.monotonic_ms()\n\
-         while pmacs.editor.monotonic_ms() - t0 < 20000 do\n\
-           pmacs.workers.sleep(50):await()\n\
-           local now = pmacs.parse.tree(b)\n\
-           if now and now:source_len() ~= t:source_len() then break end\n\
+         local function reparse(n)\n\
+           local len = pmacs.parse.tree(b):source_len()\n\
+           b:insert(0, '// x\\n')\n\
+           pmacs.parse._dispatch(b, 'rust')\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 20000 do\n\
+             pmacs.workers.sleep(50):await()\n\
+             local now = pmacs.parse.tree(b)\n\
+             if now and now:source_len() ~= len then return end\n\
+           end\n\
          end\n\
-         return string.format('before=%s current=%s stale=%s new=%s', before,\n\
-           tostring(t:is_current()), tostring(t:root():type()), tostring(pmacs.parse.tree(b):root():type()))";
+         reparse()\n\
+         local once = t:root():type()\n\
+         local current = t:is_current()\n\
+         reparse()\n\
+         return string.format('before=%s once=%s current=%s twice=%s new=%s', before, tostring(once),\n\
+           tostring(current), tostring(t:root():type()), tostring(pmacs.parse.tree(b):root():type()))";
     let report = probe_in_unit("held.rs", "fn main() {}\n", probe);
     assert_eq!(
-        report, "mode=process before=source_file current=false stale=nil new=source_file",
-        "a superseded tree in a unit stops answering"
+        report,
+        "mode=process before=source_file once=source_file current=false twice=nil new=source_file",
+        "a held tree in a unit answers while the unit keeps it, then stops"
     );
 }
 
@@ -602,5 +620,171 @@ fn e7i_the_grid_reads_what_it_shows_from_the_buffer_s_unit() {
         0,
         "the grid's rows came back with the parse; nothing more was fetched (the file is {} bytes)",
         text.len()
+    );
+}
+
+/// Reads never wait on a parse (E7i, the consumer scoping): while the
+/// buffer's unit runs #301's openers to a 4 s deadline, a read of the tree
+/// the editor shows is answered at once from the unit's installed tree,
+/// on the unit's other thread.
+#[test]
+fn e7i_a_read_is_answered_while_the_unit_parses() {
+    let openers = std::fs::read_to_string(repo().join("fuzz/accepted/301-nested-openers-98.input"))
+        .expect("#301's input");
+    let probe = format!(
+        "pmacs.config.set('syntax.parse-deadline-ms', 4000)\n\
+         local t = pmacs.parse.tree(b)\n\
+         b:insert(b:len(), {openers:?})\n\
+         pmacs.parse._dispatch(b, 'markdown')\n\
+         pmacs.workers.sleep(300):await()\n\
+         local busy = pmacs.parse._unit_report(b).busy\n\
+         local t0 = pmacs.editor.monotonic_ms()\n\
+         local kind = t:root():type()\n\
+         local took = pmacs.editor.monotonic_ms() - t0\n\
+         local still = pmacs.parse._unit_report(b).busy\n\
+         return string.format('busy=%s kind=%s quick=%s still=%s', tostring(busy), tostring(kind),\n\
+           tostring(took < 500), tostring(still))"
+    );
+    let report = probe_in_unit("reads.md", "# A heading\n\nSome *emphasis*.\n", &probe);
+    assert_eq!(
+        report, "mode=process busy=true kind=document quick=true still=true",
+        "the read came back while the parse ran"
+    );
+}
+
+/// Condition 3: where `RLIMIT_AS` is not used (macOS refuses it; here the
+/// measurement hook forces it), the worker's memory watch stops #296 at
+/// its 64 MiB allowance, after the fact. How far past the allowance the
+/// worker's peak was goes to this test's stderr for the record, and it must
+/// stay under the bound below, or the watch is too slow for #296's growth.
+#[test]
+fn e7i_the_memory_watch_stops_296_and_says_by_how_much() {
+    use std::io::Write as _;
+    let (mut daemon, _dir, report) = daemon_with_env(
+        "process",
+        &underscores(28),
+        "pmacs.config.set('syntax.parse-memory-limit-mb', 64)\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 20000)",
+        &[("PMACS_PARSE_UNIT_MEMORY", "watch")],
+    );
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_secs(25), victim_died);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("victim"))
+        .expect("victim row");
+    let _ = writeln!(std::io::stderr(), "e7i memory watch: {line}");
+    let over: u64 = line
+        .split("(by watch, ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("#296's worker was stopped by its memory watch: {line}"));
+    assert!(
+        over < 256 << 20,
+        "the watch stopped #296 within 256 MiB of its allowance, not {over} bytes past it"
+    );
+    assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
+}
+
+/// Three #296 buffers parsing at once under a 256 MiB total, each worker
+/// allowed 2 GiB: what stops them is the total, held by the cgroup's OOM
+/// killer where this session's subtree is delegated (`PMACS_REQUIRE_CGROUP`
+/// arms that expectation) and by the editor's watchdog where it is not,
+/// or where `force_watchdog` makes it so. The enforcer and the watchdog's
+/// overshoot go to this test's stderr; the daemon lives.
+fn the_total_holds(force_watchdog: bool) -> String {
+    use std::fmt::Write as _;
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let mut opens = String::new();
+    for i in 0..3 {
+        let path = dir.join(format!("v{i}.md"));
+        std::fs::write(&path, underscores(28)).expect("victim");
+        let _ = writeln!(
+            opens,
+            "victims[#victims + 1] = pmacs.buffer.find_or_open({:?})",
+            path.display().to_string()
+        );
+    }
+    let report = dir.join("report.txt");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         pmacs.config.set('syntax.parse-memory-limit-mb', 2048)\n\
+         pmacs.config.set('syntax.parse-memory-total-mb', 256)\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 20000)\n\
+         local victims = {{}}\n\
+         {opens}\
+         pmacs.async(function()\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 60000 do\n\
+             pmacs.workers.sleep(50):await()\n\
+             local deaths, busy, lines = 0, false, {{}}\n\
+             for _, v in ipairs(victims) do\n\
+               local r = pmacs.parse._unit_report(v)\n\
+               if r then\n\
+                 deaths = deaths + r.deaths\n\
+                 busy = busy or r.busy\n\
+                 lines[#lines + 1] = tostring(r.last_death)\n\
+               end\n\
+             end\n\
+             if deaths >= 1 and not busy then\n\
+               local f = assert(io.open({report:?}, 'w'))\n\
+               f:write(table.concat(lines, '\\n') .. '\\nreport ' .. tostring(pmacs.parse._isolation_report()) .. '\\n')\n\
+               f:close()\n\
+               return\n\
+             end\n\
+           end\n\
+         end)\n",
+        report = report.display().to_string(),
+    );
+    let env: &[(&str, &str)] = if force_watchdog {
+        &[("PMACS_PARSE_UNIT_CGROUP", "off")]
+    } else {
+        &[]
+    };
+    let mut daemon = TestDaemon::spawn_with_env_and_init(env, &init);
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    let text = wait_report(&report, &log, Duration::from_mins(1), |t| {
+        t.contains("\nreport ")
+    });
+    let _ = std::io::Write::write_all(
+        &mut std::io::stderr(),
+        format!("e7i total: {}\n", text.replace('\n', " | ")).as_bytes(),
+    );
+    assert!(
+        text.contains("total: parse stopped at its memory limit"),
+        "a worker was stopped by the total: {text}"
+    );
+    assert!(daemon.is_alive(), "the daemon outlived the stopped parses");
+    text
+}
+
+#[test]
+fn e7i_the_total_holds_three_296_buffers_by_whatever_this_machine_grants() {
+    let text = the_total_holds(false);
+    if std::env::var_os("PMACS_REQUIRE_CGROUP").is_some() {
+        assert!(
+            text.contains("(by cgroup)") && !text.contains("(by watchdog)"),
+            "PMACS_REQUIRE_CGROUP is armed, so the kernel holds the total: {text}"
+        );
+    } else {
+        assert!(
+            text.contains("(by cgroup)") || text.contains("(by watchdog)"),
+            "the total is held by the cgroup or the watchdog: {text}"
+        );
+    }
+}
+
+/// The watchdog alone, as macOS and an undelegated Linux get it (the hook
+/// keeps the editor from making a cgroup here).
+#[test]
+fn e7i_the_watchdog_holds_the_total_where_no_cgroup_does() {
+    let text = the_total_holds(true);
+    assert!(
+        text.contains("(by watchdog)")
+            && text.contains("the watchdog holds the total")
+            && !text.contains("(by cgroup)"),
+        "the watchdog held the total: {text}"
     );
 }

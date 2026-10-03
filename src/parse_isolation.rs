@@ -7,12 +7,19 @@
 //! A parse unit (`pmacs-parse-unit`) holds one buffer's trees and runs its
 //! parse, its capture walks and every read of its tree. The editor keeps
 //! the buffer's text, the edit log and the spans that came back; it never
-//! holds a tree. Each buffer gets its own unit, a worker process. Memory is
-//! bounded by `RLIMIT_AS`, which the worker applies to itself before
-//! serving, and the total by a cgroup v2 `memory.max` the editor creates
-//! beside its own cgroup when the session's cgroup subtree is delegated;
-//! time by a watchdog here that kills the worker at the deadline. A kill
-//! or an abort ends the process.
+//! holds a tree. Each buffer gets its own unit, a worker process, which
+//! answers reads of the tree it shows while it parses a newer text, so no
+//! read waits on a parse. Time is bounded by a watchdog here that kills the
+//! worker at the deadline. Memory is bounded, per worker, by `RLIMIT_AS`,
+//! which the worker applies to itself before serving (Linux), or where that
+//! is refused (macOS) by the worker's own watch of its peak; and in total
+//! by a cgroup v2 `memory.max` the editor creates beside its own cgroup
+//! where the session's cgroup subtree is delegated, or else by a watchdog
+//! here over the sizes the workers report. The limit and the cgroup are
+//! preventive and the kernel's; the watch and the watchdog are reactive
+//! and overshoot by what a parse grows between two looks ([`Enforcer`];
+//! `docs/divergences.md` records the gap). A kill or an abort ends the
+//! process.
 //!
 //! The boundary stops the operation, not one call inside it: the parse's
 //! whole memory and the whole request's time are what the limits measure.
@@ -30,8 +37,8 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -106,6 +113,37 @@ pub struct IsolatedJob {
     pub limits: Limits,
 }
 
+/// What stopped a unit's memory: the limit that applied and how it is
+/// enforced, which the platform decides (E7i's condition 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enforcer {
+    /// `RLIMIT_AS` on the worker: the allocation past it fails, before the
+    /// memory exists (Linux).
+    Rlimit,
+    /// The worker's own watch of its peak, every millisecond while it
+    /// parses: after the memory exists, by up to a millisecond's growth
+    /// (macOS, where `RLIMIT_AS` is refused).
+    Watch,
+    /// A cgroup v2 `memory.max` over every worker: the kernel's OOM killer
+    /// (a Linux session whose cgroup subtree is delegated).
+    Cgroup,
+    /// The editor's watchdog over the workers' reported memory, every
+    /// [`TOTAL_WATCH_EVERY`]: after the memory exists (macOS, and Linux
+    /// without delegation).
+    Watchdog,
+}
+
+impl Enforcer {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rlimit => "rlimit",
+            Self::Watch => "watch",
+            Self::Cgroup => "cgroup",
+            Self::Watchdog => "watchdog",
+        }
+    }
+}
+
 /// Why a unit was discarded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Death {
@@ -120,11 +158,18 @@ pub enum Death {
     Memory {
         /// The allowance, bytes.
         limit: u64,
+        /// What enforced it.
+        by: Enforcer,
+        /// For the memory watch, how far past the allowance the worker's
+        /// peak was when the watch stopped it, bytes: its overshoot.
+        overshoot: Option<u64>,
     },
     /// The units together reached the editor-wide total.
     Total {
         /// The total, bytes.
         limit: u64,
+        /// What enforced it.
+        by: Enforcer,
     },
     /// It ended for another reason (a crash, an exit, a broken pipe).
     Ended(String),
@@ -143,13 +188,13 @@ impl Death {
                 after: *after,
             }
             .to_string(),
-            Self::Memory { limit } => {
+            Self::Memory { limit, .. } => {
                 format!(
                     "{PARSE_LIMIT_MESSAGE}: its parse unit grew past {} MiB",
                     limit >> 20
                 )
             }
-            Self::Total { limit } => format!(
+            Self::Total { limit, .. } => format!(
                 "{PARSE_LIMIT_MESSAGE}: the parse units together reached {} MiB",
                 limit >> 20
             ),
@@ -167,6 +212,26 @@ impl Death {
             Self::Unavailable(_) => "unavailable",
         }
     }
+
+    /// `kind: message`, with the enforcer of a memory stop, for the report.
+    fn describe(&self) -> String {
+        match self {
+            Self::Memory {
+                by,
+                overshoot: Some(over),
+                ..
+            } => format!(
+                "{}: {} (by {}, {over} bytes over)",
+                self.kind(),
+                self.message(),
+                by.name()
+            ),
+            Self::Memory { by, .. } | Self::Total { by, .. } => {
+                format!("{}: {} (by {})", self.kind(), self.message(), by.name())
+            }
+            _ => format!("{}: {}", self.kind(), self.message()),
+        }
+    }
 }
 
 /// How a memory stop's message begins, for the settle path.
@@ -178,29 +243,10 @@ pub fn is_limit_message(message: &str) -> bool {
     message.starts_with(PARSE_LIMIT_MESSAGE)
 }
 
-/// A unit behind its boundary.
-trait Transport: Send {
-    /// One request and its answer, the boundary stopping the unit if it
-    /// has not answered within `hard`.
-    fn call(
-        &mut self,
-        request: &Request,
-        payload: &[u8],
-        hard: Option<Duration>,
-    ) -> Result<Response, Death>;
-    /// What the unit holds now, its PSS.
-    fn memory_bytes(&self) -> Option<u64>;
-    /// A name for the trace: the worker's pid.
-    fn id(&self) -> String;
-}
-
-/// A buffer's unit and what the editor knows about its state.
+/// A buffer's unit and what the editor knows about it.
 struct Slot {
     mode: Isolation,
-    transport: Option<Box<dyn Transport>>,
-    /// Bumped by every installed parse, so a handle can tell whether the
-    /// unit still holds its tree.
-    generation: u64,
+    unit: Option<Arc<ProcessUnit>>,
     /// The unit's text mirror equals the text the editor last sent.
     synced: bool,
     deaths: u64,
@@ -212,10 +258,39 @@ struct Slot {
     fetched: u64,
 }
 
-/// Process-wide state: the units, the cgroup, the trace.
+/// A buffer's slot, and the lock a parse holds for its whole round trip so
+/// two parses of one buffer reach its unit in the order their edits were
+/// taken. Reads take only the slot, briefly, and never wait on a parse.
+struct SlotCell {
+    slot: Mutex<Slot>,
+    parsing: Mutex<()>,
+}
+
+impl SlotCell {
+    fn slot(&self) -> std::sync::MutexGuard<'_, Slot> {
+        self.slot.lock().expect("isolation slot poisoned")
+    }
+
+    /// Forget `unit` after it died, if it is still this slot's.
+    fn bury(&self, unit: &ProcessUnit, death: &Death) {
+        let mut slot = self.slot();
+        if slot.unit.as_ref().is_some_and(|u| u.serial == unit.serial) {
+            slot.unit = None;
+            slot.synced = false;
+            slot.deaths += 1;
+            slot.last_death = Some(death.clone());
+        }
+    }
+}
+
+/// Process-wide state: the units, the cgroup, the total watchdog, the
+/// trace.
 struct Host {
-    slots: Mutex<HashMap<BufferId, Arc<Mutex<Slot>>>>,
+    slots: Mutex<HashMap<BufferId, Arc<SlotCell>>>,
     cgroup: OnceLock<CgroupAttempt>,
+    /// The total's watchdog, started when no cgroup holds the workers.
+    watchdog: OnceLock<Arc<TotalWatchdog>>,
+    next_serial: AtomicU64,
     trace: Option<Mutex<std::fs::File>>,
     started: Instant,
 }
@@ -226,6 +301,8 @@ fn host() -> &'static Host {
     HOST_CELL.get_or_init(|| Host {
         slots: Mutex::new(HashMap::new()),
         cgroup: OnceLock::new(),
+        watchdog: OnceLock::new(),
+        next_serial: AtomicU64::new(1),
         trace: std::env::var_os("PMACS_E7I_TRACE").and_then(|path| {
             std::fs::OpenOptions::new()
                 .create(true)
@@ -238,23 +315,34 @@ fn host() -> &'static Host {
     })
 }
 
+/// A measurement hook, not a setting: `PMACS_PARSE_UNIT_MEMORY=watch`
+/// holds each worker with its memory watch even where `RLIMIT_AS` is
+/// granted, and `PMACS_PARSE_UNIT_CGROUP=off` holds the total with the
+/// watchdog even where a cgroup could be made, so a Linux machine exercises
+/// what macOS and an undelegated Linux get (E7i's condition 3).
+fn hook(name: &str, value: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == value)
+}
+
 impl Host {
-    fn slot(&self, buffer: BufferId, mode: Isolation) -> Arc<Mutex<Slot>> {
+    fn cell(&self, buffer: BufferId, mode: Isolation) -> Arc<SlotCell> {
         self.slots
             .lock()
             .expect("isolation slots poisoned")
             .entry(buffer)
             .or_insert_with(|| {
-                Arc::new(Mutex::new(Slot {
-                    mode,
-                    transport: None,
-                    generation: 0,
-                    synced: false,
-                    deaths: 0,
-                    last_death: None,
-                    reestablished: 0,
-                    fetched: 0,
-                }))
+                Arc::new(SlotCell {
+                    slot: Mutex::new(Slot {
+                        mode,
+                        unit: None,
+                        synced: false,
+                        deaths: 0,
+                        last_death: None,
+                        reestablished: 0,
+                        fetched: 0,
+                    }),
+                    parsing: Mutex::new(()),
+                })
             })
             .clone()
     }
@@ -277,18 +365,56 @@ impl Host {
         }
     }
 
-    fn spawn(&self, limits: &Limits) -> Result<Box<dyn Transport>, Death> {
-        match limits.mode {
-            Isolation::Process => {
-                let cgroup = self
-                    .cgroup
-                    .get_or_init(|| Cgroup::create(limits.total_memory))
-                    .cgroup
-                    .as_ref();
-                ProcessUnit::start(limits, cgroup).map(|u| Box::new(u) as Box<dyn Transport>)
-            }
-            Isolation::Native => Err(Death::Unavailable("native mode has no unit".into())),
+    /// Start a worker under `limits`, in the workers' cgroup when there is
+    /// one and watched by the total's watchdog when there is not.
+    fn spawn(&self, limits: &Limits) -> Result<Arc<ProcessUnit>, Death> {
+        if limits.mode != Isolation::Process {
+            return Err(Death::Unavailable("native mode has no unit".into()));
         }
+        let cgroup = self
+            .cgroup
+            .get_or_init(|| {
+                if hook("PMACS_PARSE_UNIT_CGROUP", "off") {
+                    CgroupAttempt {
+                        cgroup: None,
+                        report: "off: PMACS_PARSE_UNIT_CGROUP=off".into(),
+                    }
+                } else {
+                    Cgroup::create(limits.total_memory)
+                }
+            })
+            .cgroup
+            .as_ref();
+        // Every worker reports its size while it parses when there is a
+        // total, so the watchdog can hold it for any worker the cgroup does
+        // not: all of them where none was made, or one the kernel refused
+        // to move into it.
+        let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let unit = ProcessUnit::start(serial, limits, cgroup, limits.total_memory > 0)?;
+        if limits.total_memory > 0 && !unit.held_by_cgroup {
+            self.watchdog
+                .get_or_init(|| TotalWatchdog::start(limits.total_memory));
+        }
+        self.trace(&[
+            ("event", json_str("spawn")),
+            ("mode", json_str(limits.mode.name())),
+            ("unit", json_str(&unit.id())),
+            ("spawn_us", started.elapsed().as_micros().to_string()),
+        ]);
+        Ok(Arc::new(unit))
+    }
+
+    /// Every live unit, for the watchdog and the steady-state figure.
+    fn units(&self) -> Vec<Arc<ProcessUnit>> {
+        let cells: Vec<Arc<SlotCell>> = self
+            .slots
+            .lock()
+            .expect("isolation slots poisoned")
+            .values()
+            .cloned()
+            .collect();
+        cells.iter().filter_map(|c| c.slot().unit.clone()).collect()
     }
 }
 
@@ -296,58 +422,39 @@ fn json_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Start `slot`'s unit if it has none.
-fn ensure_unit(host: &Host, slot: &mut Slot, job: &IsolatedJob) -> Result<(), String> {
-    if slot.transport.is_some() {
-        return Ok(());
-    }
-    let started = Instant::now();
-    let t = host.spawn(&job.limits).map_err(|death| death.message())?;
-    host.trace(&[
-        ("event", json_str("spawn")),
-        ("mode", json_str(job.limits.mode.name())),
-        ("unit", json_str(&t.id())),
-        ("buffer", job.buffer.raw().to_string()),
-        ("spawn_us", started.elapsed().as_micros().to_string()),
-    ]);
-    slot.transport = Some(t);
-    slot.synced = false;
-    Ok(())
-}
-
 /// Run one isolated parse on the calling (worker) thread and build the
 /// bundle the settle path installs. `Err` carries the message the
 /// in-process path would carry, or a [`Death`]'s.
 pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
     let host = host();
-    let slot_arc = host.slot(job.buffer, job.limits.mode);
-    let mut slot = slot_arc.lock().expect("isolation slot poisoned");
-    if slot.mode != job.limits.mode {
-        slot.transport = None;
-        slot.mode = job.limits.mode;
-        slot.synced = false;
-    }
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        ensure_unit(host, &mut slot, job)?;
-        let full = !slot.synced;
+    let cell = host.cell(job.buffer, job.limits.mode);
+    let _in_order = cell.parsing.lock().expect("parse order poisoned");
+    let hard = job.limits.deadline.map(|d| d + HARD_GRACE);
+    for attempt in 1..=2 {
+        let (unit, full) = {
+            let mut slot = cell.slot();
+            if slot.mode != job.limits.mode {
+                slot.unit = None;
+                slot.mode = job.limits.mode;
+                slot.synced = false;
+            }
+            if slot.unit.is_none() {
+                slot.unit = Some(host.spawn(&job.limits).map_err(|death| death.message())?);
+                slot.synced = false;
+            }
+            (slot.unit.clone().expect("started above"), !slot.synced)
+        };
         let (call, payload) = parse_call(job, full);
-        let hard = job.limits.deadline.map(|d| d + HARD_GRACE);
         let started = Instant::now();
-        let transport = slot.transport.as_mut().expect("spawned above");
-        let unit_id = transport.id();
-        let answer = transport.call(&Request::Parse(call), &payload, hard);
+        let answer = unit.call(&Request::Parse(call), &payload, hard);
         let elapsed = started.elapsed();
-        let memory = slot.transport.as_ref().and_then(|t| t.memory_bytes());
         match answer {
             Ok(Response::Parsed(parsed)) => {
-                slot.synced = true;
-                slot.generation += 1;
+                cell.slot().synced = true;
                 host.trace(&[
                     ("event", json_str("parsed")),
                     ("mode", json_str(job.limits.mode.name())),
-                    ("unit", json_str(&unit_id)),
+                    ("unit", json_str(&unit.id())),
                     ("buffer", job.buffer.raw().to_string()),
                     ("full", full.to_string()),
                     ("bytes", job.request.source.len().to_string()),
@@ -355,14 +462,9 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                     ("root_us", parsed.root_parse_us.to_string()),
                     ("unit_us", parsed.total_us.to_string()),
                     ("call_us", elapsed.as_micros().to_string()),
-                    (
-                        "unit_memory",
-                        memory.map_or("null".into(), |m| m.to_string()),
-                    ),
+                    ("peak", parsed.peak_bytes.to_string()),
                 ]);
-                let generation = slot.generation;
-                drop(slot);
-                return Ok(bundle_from(job, parsed, &slot_arc, generation));
+                return Ok(bundle_from(job, parsed, &cell, &unit));
             }
             Ok(Response::Failed(Failure::Desync { have, want })) if attempt == 1 => {
                 host.trace(&[
@@ -371,16 +473,15 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                     ("have", have.to_string()),
                     ("want", want.to_string()),
                 ]);
-                slot.synced = false;
+                cell.slot().synced = false;
             }
             Ok(Response::Failed(failure)) => {
                 // The unit applied the text and is alive; its tree stays the
                 // previous one and it parses cold next, as in-process.
-                slot.synced = !matches!(failure, Failure::Desync { .. });
+                cell.slot().synced = !matches!(failure, Failure::Desync { .. });
                 host.trace(&[
                     ("event", json_str("failed")),
-                    ("mode", json_str(job.limits.mode.name())),
-                    ("unit", json_str(&unit_id)),
+                    ("unit", json_str(&unit.id())),
                     ("buffer", job.buffer.raw().to_string()),
                     ("failure", json_str(&format!("{failure:?}"))),
                     ("call_us", elapsed.as_micros().to_string()),
@@ -388,33 +489,28 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                 return Err(failure_message(&failure));
             }
             Ok(other) => {
-                slot.transport = None;
-                return Err(format!("parse unit answered out of turn: {other:?}"));
+                let death = Death::Ended(format!("answered out of turn: {other:?}"));
+                unit.kill_for(death.clone());
+                cell.bury(&unit, &death);
+                return Err(death.message());
             }
             Err(death) => {
-                // Dropping the transport kills and reaps the worker; its
-                // memory goes with it.
-                slot.transport = None;
-                slot.synced = false;
-                slot.deaths += 1;
-                slot.last_death = Some(death.clone());
+                // The worker is gone and its memory with it.
+                cell.bury(&unit, &death);
                 host.trace(&[
                     ("event", json_str("death")),
-                    ("mode", json_str(job.limits.mode.name())),
-                    ("unit", json_str(&unit_id)),
+                    ("unit", json_str(&unit.id())),
                     ("buffer", job.buffer.raw().to_string()),
                     ("kind", json_str(death.kind())),
-                    ("message", json_str(&death.message())),
+                    ("message", json_str(&death.describe())),
                     ("call_us", elapsed.as_micros().to_string()),
-                    (
-                        "unit_memory",
-                        memory.map_or("null".into(), |m| m.to_string()),
-                    ),
+                    ("resident", unit.resident().to_string()),
                 ]);
                 return Err(death.message());
             }
         }
     }
+    Err(failure_message(&Failure::Desync { have: 0, want: 0 }))
 }
 
 fn failure_message(failure: &Failure) -> String {
@@ -503,8 +599,8 @@ fn spans_with_names(set: SpanSet, languages: &[String]) -> IsolatedSpans {
 fn bundle_from(
     job: &IsolatedJob,
     parsed: pmacs_parse_unit::Parsed,
-    slot: &Arc<Mutex<Slot>>,
-    generation: u64,
+    cell: &Arc<SlotCell>,
+    unit: &ProcessUnit,
 ) -> ParseTreeBundle {
     let languages: Vec<String> = parsed.layers.iter().map(|l| l.language.clone()).collect();
     let spans = spans_with_names(parsed.spans, &languages);
@@ -516,9 +612,10 @@ fn bundle_from(
         injection_capped: parsed.injection_capped,
         layers_cut_by_deadline: parsed.layers_cut_by_deadline,
         isolated: Some(Arc::new(IsolatedHandle {
-            slot: slot.clone(),
+            cell: cell.clone(),
             buffer: job.buffer,
-            generation: AtomicU64::new(generation),
+            unit: AtomicU64::new(unit.serial),
+            generation: AtomicU64::new(parsed.generation),
             source: job.request.source.clone(),
             language: job.request.language_name.clone(),
             aliases: job
@@ -535,10 +632,14 @@ fn bundle_from(
 }
 
 /// The editor's hold on a parse whose tree lives in a unit: its text, the
-/// spans fetched so far, and the generation the unit gave the tree.
+/// spans fetched so far, and which unit holds the tree under which
+/// generation.
 pub struct IsolatedHandle {
-    slot: Arc<Mutex<Slot>>,
+    cell: Arc<SlotCell>,
     buffer: BufferId,
+    /// The serial of the unit holding the tree.
+    unit: AtomicU64,
+    /// The tree's generation in that unit.
     generation: AtomicU64,
     source: Arc<[u8]>,
     language: String,
@@ -552,6 +653,7 @@ impl std::fmt::Debug for IsolatedHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IsolatedHandle")
             .field("buffer", &self.buffer)
+            .field("unit", &self.unit.load(Ordering::Relaxed))
             .field("generation", &self.generation.load(Ordering::Relaxed))
             .field("bytes", &self.source.len())
             .finish_non_exhaustive()
@@ -561,6 +663,9 @@ impl std::fmt::Debug for IsolatedHandle {
 /// How many fetched span sets a handle keeps (the parse's own and the
 /// most recent fetches).
 const MAX_PIECES: usize = 8;
+
+/// How long a read may take before its unit is discarded.
+const READ_HARD: Duration = Duration::from_secs(2);
 
 impl IsolatedTree for IsolatedHandle {
     fn spans_for(&self, range: std::ops::Range<usize>) -> Option<Arc<IsolatedSpans>> {
@@ -574,32 +679,15 @@ impl IsolatedTree for IsolatedHandle {
         {
             return Some(piece.clone());
         }
-        // Not covered: ask the unit, only if it is idle (a busy unit is
-        // parsing a newer text, and the renderer must not wait on it).
-        let mut slot = self.slot.try_lock().ok()?;
-        slot.fetched += (range.end - range.start) as u64;
+        self.cell.slot().fetched += (range.end - range.start) as u64;
         let want = vec![(range.start as u32, range.end as u32)];
-        let fetched = if slot.transport.is_some()
-            && slot.generation == self.generation.load(Ordering::Relaxed)
-        {
-            let transport = slot.transport.as_mut()?;
-            match transport.call(&Request::Spans { ranges: want }, &[], Some(SPANS_HARD)) {
-                Ok(Response::Spans(set)) => Some(set),
-                Ok(_) => None,
-                Err(death) => {
-                    slot.transport = None;
-                    slot.synced = false;
-                    slot.last_death = Some(death);
-                    None
-                }
-            }
-        } else if slot.transport.is_none() {
-            self.reestablish(&mut slot, want)
-        } else {
-            // The unit holds a newer tree; this parse is about to be
-            // replaced and keeps what it fetched.
-            None
-        }?;
+        let Response::Spans(fetched) = self.ask(|generation| Request::Spans {
+            generation,
+            ranges: want.clone(),
+        })?
+        else {
+            return None;
+        };
         let languages = self.languages.lock().expect("languages poisoned").clone();
         let piece = Arc::new(spans_with_names(fetched, &languages));
         let mut pieces = self.pieces.lock().expect("span pieces poisoned");
@@ -615,32 +703,40 @@ impl IsolatedTree for IsolatedHandle {
     }
 
     fn fold_candidates(&self, pos: u64) -> Option<Vec<(u64, u64)>> {
-        match self.ask(&Request::Folds { at: Some(pos) })? {
+        match self.ask(|generation| Request::Folds {
+            generation,
+            at: Some(pos),
+        })? {
             Response::Folds(ranges) => Some(ranges),
             _ => None,
         }
     }
 
     fn top_level_folds(&self) -> Option<Vec<(u64, u64)>> {
-        match self.ask(&Request::Folds { at: None })? {
+        match self.ask(|generation| Request::Folds {
+            generation,
+            at: None,
+        })? {
             Response::Folds(ranges) => Some(ranges),
             _ => None,
         }
     }
 
     fn describe(&self, path: &[u32], children: bool) -> Option<Vec<NodeFacts>> {
-        let request = Request::Describe {
+        let request = |generation| Request::Describe {
+            generation,
             path: path.to_vec(),
             children,
         };
-        match self.ask(&request)? {
+        match self.ask(request)? {
             Response::Nodes(nodes) => Some(nodes.into_iter().map(NodeFacts::from).collect()),
             _ => None,
         }
     }
 
     fn sexp(&self, path: &[u32]) -> Option<String> {
-        match self.ask(&Request::Sexp {
+        match self.ask(|generation| Request::Sexp {
+            generation,
             path: path.to_vec(),
         })? {
             Response::Text(text) => text,
@@ -649,40 +745,49 @@ impl IsolatedTree for IsolatedHandle {
     }
 }
 
-/// How long a spans request may take before its unit is discarded.
-const SPANS_HARD: Duration = Duration::from_secs(2);
-
 impl IsolatedHandle {
-    /// Ask this tree's unit `request`: the unit holding it if it is idle,
-    /// or a fresh one this tree's text is re-parsed into when the old one
-    /// was discarded. `None` when the unit is busy or holds a newer tree.
-    fn ask(&self, request: &Request) -> Option<Response> {
-        let mut slot = self.slot.try_lock().ok()?;
-        if slot.transport.is_none() {
-            self.reestablish(&mut slot, Vec::new())?;
-        } else if slot.generation != self.generation.load(Ordering::Relaxed) {
-            return None;
-        }
-        let transport = slot.transport.as_mut()?;
-        match transport.call(request, &[], Some(SPANS_HARD)) {
+    /// Ask this tree's unit the read `request` builds for the tree's
+    /// generation: the unit holding it, answering while it parses a newer
+    /// text, or, when that unit was discarded, a fresh one this tree's text
+    /// is re-parsed into. `None` when a newer unit or tree has replaced
+    /// this one, or the unit cannot answer.
+    fn ask(&self, request: impl Fn(u64) -> Request) -> Option<Response> {
+        let unit = {
+            let slot = self.cell.slot();
+            match slot.unit.as_ref() {
+                Some(unit) if unit.serial == self.unit.load(Ordering::Relaxed) => {
+                    Some(unit.clone())
+                }
+                Some(_) => return None,
+                None => None,
+            }
+        };
+        let unit = match unit {
+            Some(unit) => unit,
+            None => self.reestablish()?,
+        };
+        let request = request(self.generation.load(Ordering::Relaxed));
+        match unit.call(&request, &[], Some(READ_HARD)) {
             Ok(Response::Failed(_)) => None,
             Ok(response) => Some(response),
             Err(death) => {
-                slot.transport = None;
-                slot.synced = false;
-                slot.last_death = Some(death);
+                self.cell.bury(&unit, &death);
                 None
             }
         }
     }
 
     /// The unit that held this tree was discarded: start a fresh one and
-    /// parse this tree's text into it, which rebuilds the tree there.
-    fn reestablish(&self, slot: &mut Slot, interest: Vec<(u32, u32)>) -> Option<SpanSet> {
+    /// parse this tree's text into it, which rebuilds the tree there. Not
+    /// while a parse of the buffer runs, which will install a newer tree.
+    fn reestablish(&self) -> Option<Arc<ProcessUnit>> {
+        let _in_order = self.cell.parsing.try_lock().ok()?;
+        if self.cell.slot().unit.is_some() {
+            return None;
+        }
         let host = host();
         let started = Instant::now();
-        let transport = host.spawn(&self.limits).ok()?;
-        slot.transport = Some(transport);
+        let unit = host.spawn(&self.limits).ok()?;
         let call = ParseCall {
             language: self.language.clone(),
             text: TextUpdate::Full,
@@ -690,20 +795,20 @@ impl IsolatedHandle {
             expect_len: self.source.len() as u32,
             aliases: self.aliases.clone(),
             deadline_ms: self.limits.deadline.map(|d| d.as_millis() as u64),
-            interest,
+            interest: Vec::new(),
         };
         let hard = self.limits.deadline.map(|d| d + HARD_GRACE);
-        let answer = slot
-            .transport
-            .as_mut()?
-            .call(&Request::Parse(call), &self.source, hard);
-        match answer {
+        match unit.call(&Request::Parse(call), &self.source, hard) {
             Ok(Response::Parsed(parsed)) => {
-                slot.generation += 1;
-                slot.reestablished += 1;
-                // The unit's mirror is this older text, not the buffer's.
-                slot.synced = false;
-                self.generation.store(slot.generation, Ordering::Relaxed);
+                {
+                    let mut slot = self.cell.slot();
+                    slot.unit = Some(unit.clone());
+                    // The unit's mirror is this older text, not the buffer's.
+                    slot.synced = false;
+                    slot.reestablished += 1;
+                }
+                self.unit.store(unit.serial, Ordering::Relaxed);
+                self.generation.store(parsed.generation, Ordering::Relaxed);
                 *self.languages.lock().expect("languages poisoned") =
                     parsed.layers.iter().map(|l| l.language.clone()).collect();
                 host.trace(&[
@@ -712,34 +817,29 @@ impl IsolatedHandle {
                     ("bytes", self.source.len().to_string()),
                     ("us", started.elapsed().as_micros().to_string()),
                 ]);
-                Some(parsed.spans)
+                Some(unit)
             }
-            Ok(_) => None,
-            Err(death) => {
-                slot.transport = None;
-                slot.last_death = Some(death);
-                None
-            }
+            _ => None,
         }
     }
 }
 
-/// End every unit (each worker killed and reaped) and
-/// remove the workers' cgroup. The daemon calls this as it stops.
+/// End every unit (each worker killed and reaped) and remove the workers'
+/// cgroup. The daemon calls this as it stops.
 pub fn shutdown() {
     let Some(host) = HOST_CELL.get() else {
         return;
     };
-    let slots: Vec<Arc<Mutex<Slot>>> = host
+    let cells: Vec<Arc<SlotCell>> = host
         .slots
         .lock()
         .expect("isolation slots poisoned")
         .drain()
-        .map(|(_, s)| s)
+        .map(|(_, c)| c)
         .collect();
-    for slot in slots {
-        if let Ok(mut slot) = slot.lock() {
-            slot.transport = None;
+    for cell in cells {
+        if let Some(unit) = cell.slot().unit.take() {
+            unit.kill_for(Death::Ended("the editor stopped".into()));
         }
     }
     if let Some(Some(cgroup)) = host.cgroup.get().map(|a| a.cgroup.as_ref()) {
@@ -749,15 +849,24 @@ pub fn shutdown() {
 
 /// What the editor found about holding its workers to a total: how the
 /// cgroup attempt went (created, or the step that refused and why) and,
-/// when created, how many workers the kernel moved into it. `None` until a
-/// process unit has started, since the attempt is made then.
+/// when created, how many workers the kernel moved into it; otherwise
+/// whether the watchdog holds the total. `None` until a worker has
+/// started, since the attempt is made then.
 #[must_use]
 pub fn isolation_report() -> Option<String> {
-    let attempt = host().cgroup.get()?;
-    Some(match attempt.cgroup.as_ref() {
-        Some(cgroup) => format!("cgroup {}; {}", attempt.report, cgroup.adoption()),
-        None => format!("cgroup {}", attempt.report),
-    })
+    let host = host();
+    let attempt = host.cgroup.get()?;
+    let mut report = format!("cgroup {}", attempt.report);
+    if let Some(cgroup) = attempt.cgroup.as_ref() {
+        report.push_str("; ");
+        report.push_str(&cgroup.adoption());
+    }
+    if let Some(watchdog) = host.watchdog.get() {
+        report.push_str("; the watchdog holds the total (");
+        report.push_str(&watchdog.summary());
+        report.push(')');
+    }
+    Some(report)
 }
 
 /// Trace an in-process parse (`syntax.isolation` none) beside the units'
@@ -789,9 +898,10 @@ pub struct UnitReport {
     pub memory: Option<u64>,
     /// Units this buffer has had discarded.
     pub deaths: u64,
-    /// Why the last one was, `kind: message`.
+    /// Why the last one was, `kind: message`, with a memory stop's
+    /// enforcer.
     pub last_death: Option<String>,
-    /// The unit is answering a request now; the other fields are empty.
+    /// A parse of the buffer is in flight.
     pub busy: bool,
     /// Times a discarded unit's previous parse was rebuilt in a fresh one.
     pub reestablished: u64,
@@ -800,35 +910,27 @@ pub struct UnitReport {
     pub fetched: u64,
 }
 
-/// The report for `buffer`'s unit, if it has had one. Never waits: the
-/// main thread must not block on a unit that is parsing (E7i), so a busy
-/// unit reports only that it is busy.
+/// The report for `buffer`'s unit, if it has had one. Never waits on a
+/// parse: the slot is held only briefly.
 #[must_use]
 pub fn report(buffer: BufferId) -> Option<UnitReport> {
-    let slot = host()
+    let cell = host()
         .slots
         .lock()
         .expect("isolation slots poisoned")
         .get(&buffer)?
         .clone();
-    let Ok(slot) = slot.try_lock() else {
-        return Some(UnitReport {
-            busy: true,
-            ..UnitReport::default()
-        });
-    };
+    let busy = cell.parsing.try_lock().is_err();
+    let slot = cell.slot();
     Some(UnitReport {
-        busy: false,
+        busy,
         reestablished: slot.reestablished,
         fetched: slot.fetched,
         mode: slot.mode.name().to_owned(),
-        unit: slot.transport.as_ref().map(|t| t.id()).unwrap_or_default(),
-        memory: slot.transport.as_ref().and_then(|t| t.memory_bytes()),
+        unit: slot.unit.as_ref().map(|u| u.id()).unwrap_or_default(),
+        memory: slot.unit.as_ref().and_then(|u| u.memory_bytes()),
         deaths: slot.deaths,
-        last_death: slot
-            .last_death
-            .as_ref()
-            .map(|d| format!("{}: {}", d.kind(), d.message())),
+        last_death: slot.last_death.as_ref().map(Death::describe),
     })
 }
 
@@ -836,123 +938,232 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
 /// comparison's steady-state figure.
 #[must_use]
 pub fn total_unit_memory() -> u64 {
-    let slots: Vec<Arc<Mutex<Slot>>> = host()
-        .slots
-        .lock()
-        .expect("isolation slots poisoned")
-        .values()
-        .cloned()
-        .collect();
-    // Busy units are skipped rather than waited for.
-    slots
-        .iter()
-        .filter_map(|s| {
-            s.try_lock()
-                .ok()
-                .and_then(|s| s.transport.as_ref()?.memory_bytes())
-        })
-        .sum()
+    host().units().iter().filter_map(|u| u.memory_bytes()).sum()
 }
 
 // ---------------------------------------------------------------------------
-// The process boundary
+// The worker process
 // ---------------------------------------------------------------------------
 
 /// One frame read from a worker, or why none came.
 type FrameRead = io::Result<Option<(Response, Vec<u8>)>>;
 
-/// A worker process running the unit.
+/// The requests a worker has not yet answered, by id; closed once its
+/// output ends, so a request sent after that fails at once.
+#[derive(Default)]
+struct Waiting {
+    by_id: HashMap<u64, mpsc::Sender<FrameRead>>,
+    closed: bool,
+}
+
+/// A worker process running the unit. Shared: a parse on a pool thread and
+/// reads on the main thread send requests at once, each answered by id.
 struct ProcessUnit {
-    child: Child,
-    stdin: ChildStdin,
-    responses: Receiver<FrameRead>,
+    serial: u64,
+    /// The kernel moved it into the workers' cgroup.
+    held_by_cgroup: bool,
+    pid: u32,
+    child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    waiting: Arc<Mutex<Waiting>>,
+    next_id: AtomicU64,
+    /// The resident size the worker last reported, bytes (0 before any).
+    resident: Arc<AtomicU64>,
+    /// A parse is in flight.
+    parsing: AtomicBool,
     stderr: Arc<Mutex<String>>,
     limits: Limits,
     cgroup: Option<Cgroup>,
     oom_before: u64,
+    /// Why the editor killed it, when it did.
+    killed: Mutex<Option<Death>>,
 }
 
 impl ProcessUnit {
-    fn start(limits: &Limits, cgroup: Option<&Cgroup>) -> Result<Self, Death> {
+    fn start(
+        serial: u64,
+        limits: &Limits,
+        cgroup: Option<&Cgroup>,
+        report_memory: bool,
+    ) -> Result<Self, Death> {
         let bin = sibling("pmacs-parse-unit")
             .ok_or_else(|| Death::Unavailable("no pmacs-parse-unit beside pmacs".into()))?;
-        let mut child = Command::new(&bin)
+        let mut command = Command::new(&bin);
+        command
             .arg("--memory-limit-mb")
-            .arg((limits.unit_memory >> 20).max(1).to_string())
+            .arg((limits.unit_memory >> 20).max(1).to_string());
+        if hook("PMACS_PARSE_UNIT_MEMORY", "watch") {
+            command.args(["--memory-enforcement", "watch"]);
+        }
+        if report_memory {
+            command.arg("--report-memory");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Death::Unavailable(format!("{}: {e}", bin.display())))?;
-        if let Some(cg) = cgroup {
-            cg.adopt(child.id());
-        }
+        let held_by_cgroup = cgroup.is_some_and(|cg| cg.adopt(child.id()));
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr_pipe = child.stderr.take().expect("piped stderr");
-        let (tx, responses) = mpsc::channel();
-        thread::Builder::new()
-            .name("pmacs-unit-read".into())
-            .spawn(move || {
-                let mut r = BufReader::new(stdout);
-                loop {
-                    let frame = pmacs_parse_unit::read_frame::<_, Response>(&mut r);
-                    let end = !matches!(frame, Ok(Some(_)));
-                    if tx.send(frame).is_err() || end {
-                        break;
-                    }
-                }
-            })
-            .map_err(|e| Death::Unavailable(e.to_string()))?;
+        let waiting = Arc::new(Mutex::new(Waiting::default()));
+        let resident = Arc::new(AtomicU64::new(0));
+        {
+            let waiting = waiting.clone();
+            let resident = resident.clone();
+            thread::Builder::new()
+                .name("pmacs-unit-read".into())
+                .spawn(move || route_answers(stdout, &waiting, &resident))
+                .map_err(|e| Death::Unavailable(e.to_string()))?;
+        }
         let stderr = Arc::new(Mutex::new(String::new()));
-        let sink = stderr.clone();
-        thread::Builder::new()
-            .name("pmacs-unit-err".into())
-            .spawn(move || {
-                let mut r = BufReader::new(stderr_pipe);
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = r.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    if let Ok(mut s) = sink.lock() {
-                        s.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        if s.len() > 16_384 {
-                            let cut = s.len() - 8_192;
-                            s.drain(..cut);
-                        }
-                    }
-                }
-            })
-            .map_err(|e| Death::Unavailable(e.to_string()))?;
+        {
+            let sink = stderr.clone();
+            thread::Builder::new()
+                .name("pmacs-unit-err".into())
+                .spawn(move || keep_last_words(stderr_pipe, &sink))
+                .map_err(|e| Death::Unavailable(e.to_string()))?;
+        }
         let cgroup = cgroup.cloned();
         let oom_before = cgroup.as_ref().map_or(0, Cgroup::oom_kills);
-        Ok(Self {
-            child,
-            stdin,
-            responses,
+        let unit = Self {
+            serial,
+            held_by_cgroup,
+            pid: child.id(),
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            waiting,
+            next_id: AtomicU64::new(1),
+            resident,
+            parsing: AtomicBool::new(false),
             stderr,
             limits: *limits,
             cgroup,
             oom_before,
-        })
+            killed: Mutex::new(None),
+        };
+        // A worker from another build speaks another protocol: refuse it
+        // rather than misread its frames.
+        match unit.call(&Request::Hello, &[], Some(READ_HARD)) {
+            Ok(Response::Hello { protocol }) if protocol == pmacs_parse_unit::PROTOCOL => Ok(unit),
+            Ok(other) => Err(Death::Unavailable(format!(
+                "{} speaks another protocol ({other:?}); pmacs needs {}; install the two from one build",
+                bin.display(),
+                pmacs_parse_unit::PROTOCOL
+            ))),
+            Err(death) => Err(Death::Unavailable(format!(
+                "{} did not answer: {}",
+                bin.display(),
+                death.message()
+            ))),
+        }
     }
 
-    /// Why the worker ended, read from its exit signal and its last words:
-    /// the cgroup's OOM killer sends `SIGKILL`, and a refused allocation
-    /// under `RLIMIT_AS` makes tree-sitter's or Rust's allocator abort
-    /// (`SIGABRT`) after saying so.
-    fn death(&mut self) -> Death {
-        let status = self.child.wait();
+    /// One request and its answer, the worker killed if it has not answered
+    /// within `hard`. Other requests may be in flight at once.
+    fn call(
+        &self,
+        request: &Request,
+        payload: &[u8],
+        hard: Option<Duration>,
+    ) -> Result<Response, Death> {
+        let started = Instant::now();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut waiting = self.waiting.lock().expect("waiting poisoned");
+            if waiting.closed {
+                drop(waiting);
+                return Err(self.death());
+            }
+            waiting.by_id.insert(id, tx);
+        }
+        let parse = matches!(request, Request::Parse(_));
+        if parse {
+            self.parsing.store(true, Ordering::Relaxed);
+            if let Some(watchdog) = host().watchdog.get() {
+                watchdog.wake();
+            }
+        }
+        let written = {
+            let mut stdin = self.stdin.lock().expect("stdin poisoned");
+            pmacs_parse_unit::write_frame(&mut *stdin, &(id, request), payload)
+        };
+        let answer = if written.is_err() {
+            Err(self.death())
+        } else {
+            let frame = match hard {
+                Some(limit) => rx.recv_timeout(limit),
+                None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match frame {
+                Ok(Ok(Some((response, _)))) => Ok(response),
+                Err(RecvTimeoutError::Timeout) => {
+                    let death = Death::Time {
+                        deadline: hard.unwrap_or_default().saturating_sub(HARD_GRACE),
+                        after: started.elapsed(),
+                    };
+                    self.kill_for(death.clone());
+                    Err(death)
+                }
+                _ => Err(self.death()),
+            }
+        };
+        if parse {
+            self.parsing.store(false, Ordering::Relaxed);
+        }
+        self.waiting
+            .lock()
+            .expect("waiting poisoned")
+            .by_id
+            .remove(&id);
+        answer
+    }
+
+    /// Kill the worker for `why`, which every waiting request then reports.
+    fn kill_for(&self, why: Death) {
+        self.killed
+            .lock()
+            .expect("kill reason poisoned")
+            .get_or_insert(why);
+        let mut child = self.child.lock().expect("child poisoned");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Why the worker ended: the editor's own reason when it killed it,
+    /// else read from its exit and its last words. The memory watch exits
+    /// with [`pmacs_parse_unit::MEMORY_WATCH_EXIT`]; the cgroup's OOM killer
+    /// sends `SIGKILL`; a refused allocation under `RLIMIT_AS` makes
+    /// tree-sitter's or Rust's allocator abort (`SIGABRT`) after saying so.
+    fn death(&self) -> Death {
+        if let Some(why) = self.killed.lock().expect("kill reason poisoned").clone() {
+            return why;
+        }
+        let status = self.child.lock().expect("child poisoned").wait();
+        let code = status
+            .as_ref()
+            .ok()
+            .and_then(std::process::ExitStatus::code);
         let signal = status
             .as_ref()
             .ok()
             .and_then(std::os::unix::process::ExitStatusExt::signal);
         let stderr = self.stderr.lock().map(|s| s.clone()).unwrap_or_default();
+        if code == Some(pmacs_parse_unit::MEMORY_WATCH_EXIT) {
+            return Death::Memory {
+                limit: self.limits.unit_memory,
+                by: Enforcer::Watch,
+                overshoot: watch_overshoot(&stderr),
+            };
+        }
         let oom_now = self.cgroup.as_ref().map_or(0, Cgroup::oom_kills);
         if signal == Some(9) && oom_now > self.oom_before {
             return Death::Total {
                 limit: self.limits.total_memory,
+                by: Enforcer::Cgroup,
             };
         }
         if stderr.contains("failed to allocate")
@@ -961,61 +1172,99 @@ impl ProcessUnit {
         {
             return Death::Memory {
                 limit: self.limits.unit_memory,
+                by: Enforcer::Rlimit,
+                overshoot: None,
             };
         }
         let last = stderr.lines().last().unwrap_or("").to_owned();
         Death::Ended(format!("{status:?} signal {signal:?} {last}"))
     }
-}
 
-impl Transport for ProcessUnit {
-    fn call(
-        &mut self,
-        request: &Request,
-        payload: &[u8],
-        hard: Option<Duration>,
-    ) -> Result<Response, Death> {
-        let started = Instant::now();
-        if pmacs_parse_unit::write_frame(&mut self.stdin, request, payload).is_err() {
-            return Err(self.death());
-        }
-        let answer = match hard {
-            Some(limit) => match self.responses.recv_timeout(limit) {
-                Ok(frame) => frame,
-                Err(RecvTimeoutError::Timeout) => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    return Err(Death::Time {
-                        deadline: limit.saturating_sub(HARD_GRACE),
-                        after: started.elapsed(),
-                    });
-                }
-                Err(RecvTimeoutError::Disconnected) => return Err(self.death()),
-            },
-            None => match self.responses.recv() {
-                Ok(frame) => frame,
-                Err(_) => return Err(self.death()),
-            },
-        };
-        match answer {
-            Ok(Some((response, _))) => Ok(response),
-            _ => Err(self.death()),
-        }
+    /// What the worker holds now: its PSS where `/proc` has it, else the
+    /// resident size it last reported.
+    fn memory_bytes(&self) -> Option<u64> {
+        pss_bytes(self.pid).or_else(|| Some(self.resident()).filter(|&r| r > 0))
     }
 
-    fn memory_bytes(&self) -> Option<u64> {
-        pss_bytes(self.child.id())
+    fn resident(&self) -> u64 {
+        self.resident.load(Ordering::Relaxed)
     }
 
     fn id(&self) -> String {
-        format!("pid {}", self.child.id())
+        format!("pid {}", self.pid)
     }
 }
 
 impl Drop for ProcessUnit {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Route each of a worker's answers to the request that waits for it, and
+/// keep its resident reports; at the end of its output, fail every request
+/// still waiting.
+fn route_answers(
+    stdout: std::process::ChildStdout,
+    waiting: &Mutex<Waiting>,
+    resident: &AtomicU64,
+) {
+    let mut r = BufReader::new(stdout);
+    loop {
+        match pmacs_parse_unit::read_frame::<_, (u64, Response)>(&mut r) {
+            Ok(Some(((0, Response::Resident(bytes)), _))) => {
+                resident.store(bytes, Ordering::Relaxed);
+            }
+            Ok(Some(((id, response), payload))) => {
+                let tx = waiting.lock().expect("waiting poisoned").by_id.remove(&id);
+                if let Some(tx) = tx {
+                    let _ = tx.send(Ok(Some((response, payload))));
+                }
+            }
+            _ => {
+                let mut waiting = waiting.lock().expect("waiting poisoned");
+                waiting.closed = true;
+                waiting.by_id.clear();
+                return;
+            }
+        }
+    }
+}
+
+/// How far past its limit a worker's peak was when its memory watch
+/// stopped it, from its last words (`peak resident P bytes passed the limit
+/// L`).
+fn watch_overshoot(stderr: &str) -> Option<u64> {
+    let line = stderr.lines().rev().find(|l| l.contains("memory watch:"))?;
+    let number = |after: &str| -> Option<u64> {
+        line.split(after)
+            .nth(1)?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    Some(number("peak resident ")?.saturating_sub(number("the limit ")?))
+}
+
+/// Keep the last of a worker's stderr, which says why it ended.
+fn keep_last_words(pipe: std::process::ChildStderr, sink: &Mutex<String>) {
+    let mut r = BufReader::new(pipe);
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = r.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        if let Ok(mut s) = sink.lock() {
+            s.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if s.len() > 16_384 {
+                let cut = s.len() - 8_192;
+                s.drain(..cut);
+            }
+        }
     }
 }
 
@@ -1048,6 +1297,96 @@ fn sibling(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// The total, where no cgroup holds the workers
+// ---------------------------------------------------------------------------
+
+/// How often the total's watchdog sums the workers' memory while any parses.
+pub const TOTAL_WATCH_EVERY: Duration = Duration::from_millis(10);
+
+/// The editor's watchdog over the workers' total where the kernel cannot
+/// hold it (macOS, a Linux session without a delegated cgroup subtree):
+/// while any worker parses, every [`TOTAL_WATCH_EVERY`] it sums the
+/// resident sizes the workers report and, past the total, kills the
+/// largest. Reactive: the total is passed before it acts, by what the
+/// workers grow in a report's interval plus a watch's.
+struct TotalWatchdog {
+    total: u64,
+    wake: Mutex<bool>,
+    woken: std::sync::Condvar,
+    kills: AtomicU64,
+    /// The largest overshoot at a kill, bytes past the total.
+    worst: AtomicU64,
+}
+
+impl TotalWatchdog {
+    fn start(total: u64) -> Arc<Self> {
+        let watchdog = Arc::new(Self {
+            total,
+            wake: Mutex::new(false),
+            woken: std::sync::Condvar::new(),
+            kills: AtomicU64::new(0),
+            worst: AtomicU64::new(0),
+        });
+        let running = watchdog.clone();
+        let _ = thread::Builder::new()
+            .name("pmacs-total-watch".into())
+            .spawn(move || running.watch());
+        watchdog
+    }
+
+    fn wake(&self) {
+        *self.wake.lock().expect("watchdog poisoned") = true;
+        self.woken.notify_all();
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "total {} MiB, {} kills, worst overshoot {} bytes",
+            self.total >> 20,
+            self.kills.load(Ordering::Relaxed),
+            self.worst.load(Ordering::Relaxed)
+        )
+    }
+
+    fn watch(&self) {
+        loop {
+            {
+                let mut woken = self.wake.lock().expect("watchdog poisoned");
+                while !*woken {
+                    woken = self.woken.wait(woken).expect("watchdog poisoned");
+                }
+                *woken = false;
+            }
+            loop {
+                let units = host().units();
+                if !units.iter().any(|u| u.parsing.load(Ordering::Relaxed)) {
+                    break;
+                }
+                let sum: u64 = units.iter().map(|u| u.resident()).sum();
+                if sum > self.total
+                    && let Some(largest) = units.iter().max_by_key(|u| u.resident())
+                {
+                    self.kills.fetch_add(1, Ordering::Relaxed);
+                    self.worst.fetch_max(sum - self.total, Ordering::Relaxed);
+                    host().trace(&[
+                        ("event", json_str("total-kill")),
+                        ("unit", json_str(&largest.id())),
+                        ("sum", sum.to_string()),
+                        ("total", self.total.to_string()),
+                        ("resident", largest.resident().to_string()),
+                    ]);
+                    largest.kill_for(Death::Total {
+                        limit: self.total,
+                        by: Enforcer::Watchdog,
+                    });
+                }
+                thread::sleep(TOTAL_WATCH_EVERY);
+            }
+        }
+    }
 }
 
 /// A cgroup v2 directory holding every worker, its `memory.max` the
@@ -1152,12 +1491,14 @@ impl Cgroup {
         attempt
     }
 
-    /// Move `pid` into the cgroup. A refusal leaves that worker outside the
-    /// total; it is counted and its first error kept for the report.
-    fn adopt(&self, pid: u32) {
+    /// Move `pid` into the cgroup; whether the kernel did. A refusal
+    /// leaves that worker outside the cgroup's total, for the watchdog to
+    /// hold; it is counted and its first error kept for the report.
+    fn adopt(&self, pid: u32) -> bool {
         match std::fs::write(self.dir.join("cgroup.procs"), pid.to_string()) {
             Ok(()) => {
                 self.adopted.fetch_add(1, Ordering::Relaxed);
+                true
             }
             Err(e) => {
                 self.refused.fetch_add(1, Ordering::Relaxed);
@@ -1165,6 +1506,7 @@ impl Cgroup {
                 if first.is_none() {
                     *first = Some(format!("pid {pid}: {e}"));
                 }
+                false
             }
         }
     }

@@ -15,13 +15,25 @@
 //! A frame is a little-endian `u32` length, a postcard header of that
 //! length, a second `u32` length and that many raw payload bytes. Text
 //! travels in the payload, so a file's bytes are copied, not serialized
-//! one element at a time.
+//! one element at a time. A request's header is `(id, Request)` and its
+//! answer's `(id, Response)`, the same id; id 0 is the unit's own word,
+//! [`Response::Resident`], sent while it parses when the editor asks for
+//! it (`--report-memory`).
+//!
+//! A parse runs on a thread of its own, so a read of the installed tree
+//! (spans, folds, a node) is answered while a newer parse runs: the editor
+//! never waits on a parse to read the tree it shows. The unit keeps its
+//! two most recently installed trees, each with the generation its parse
+//! answered with, and a read names the generation it wants; one the unit
+//! no longer keeps answers [`Failure::Stale`].
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -35,6 +47,14 @@ use pmacs_syntax::{
 /// The largest header or payload either side accepts, so a corrupt length
 /// cannot make a reader allocate without bound.
 pub const MAX_FRAME_PART: u32 = 1 << 30;
+
+/// The protocol this unit speaks, answered to [`Request::Hello`]. A worker
+/// beside a `pmacs` built from another tree speaks another one, and the
+/// editor refuses it rather than misreading its frames.
+pub const PROTOCOL: u32 = 2;
+
+/// The exit status of a worker its memory watch stopped.
+pub const MEMORY_WATCH_EXIT: i32 = 86;
 
 /// Write one frame: `header`, then `payload` as raw bytes.
 pub fn write_frame<W: Write, T: Serialize>(
@@ -77,39 +97,58 @@ fn read_part<R: Read>(r: &mut R, len: u32) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// What the editor asks a unit to do.
+/// What the editor asks a unit to do. `Hello` stays the first variant in
+/// every protocol, so any two builds agree on how to ask which one the
+/// other speaks.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    /// Which protocol the unit speaks.
+    Hello,
     /// Bring the unit's text up to date and parse it.
     Parse(ParseCall),
-    /// Highlight spans of the installed tree over these byte ranges.
+    /// Highlight spans of an installed tree over these byte ranges.
     Spans {
-        /// Half-open byte ranges into the installed tree's text.
+        /// The tree's generation, as its parse answered.
+        generation: u64,
+        /// Half-open byte ranges into that tree's text.
         ranges: Vec<(u32, u32)>,
     },
     /// The unit's text length and layer count, for a liveness check.
     Stats,
-    /// The installed tree's fold candidates at a byte, innermost first, or
+    /// An installed tree's fold candidates at a byte, innermost first, or
     /// its top-level fold targets when `at` is `None`
     /// (`pmacs_syntax::fold`).
     Folds {
+        /// The tree's generation.
+        generation: u64,
         /// The byte, or `None` for the top-level targets.
         at: Option<u64>,
     },
-    /// The installed tree's node at `path` (child indices from the root
+    /// An installed tree's node at `path` (child indices from the root
     /// layer's root) and, with `children`, each child after it, for Lua's
     /// node API (`pmacs_syntax::describe_path`).
     Describe {
+        /// The tree's generation.
+        generation: u64,
         /// Child indices from the root.
         path: Vec<u32>,
         /// Describe the node's children too.
         children: bool,
     },
-    /// The s-expression of the installed tree's node at `path`.
+    /// The s-expression of an installed tree's node at `path`.
     Sexp {
+        /// The tree's generation.
+        generation: u64,
         /// Child indices from the root.
         path: Vec<u32>,
     },
+}
+
+impl Request {
+    /// Whether the unit answers this on its parse thread, in order.
+    fn is_parse(&self) -> bool {
+        matches!(self, Self::Parse(_))
+    }
 }
 
 /// How a [`ParseCall`]'s payload brings the unit's text up to date.
@@ -192,20 +231,26 @@ pub struct ParseCall {
     pub interest: Vec<(u32, u32)>,
 }
 
-/// What a unit answers.
+/// What a unit answers. `Hello` stays the first variant in every protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
+    /// The protocol the unit speaks, [`PROTOCOL`].
+    Hello {
+        /// The protocol.
+        protocol: u32,
+    },
     /// The parse installed; its layers and the spans over the interest.
     Parsed(Parsed),
     /// Spans of the installed tree over the requested ranges.
     Spans(SpanSet),
-    /// The request installed nothing; the previous tree stays installed.
+    /// The request installed or read nothing; for a parse, the previous
+    /// tree stays installed.
     Failed(Failure),
     /// The unit's text length and installed layer count.
     Stats {
         /// Bytes in the unit's text mirror.
         source_len: u32,
-        /// Layers in the installed tree, 0 when none is installed.
+        /// Layers in the newest installed tree, 0 when none is installed.
         layers: u32,
     },
     /// Fold ranges, `(start, end)`, as [`Request::Folds`] asked.
@@ -216,6 +261,10 @@ pub enum Response {
     /// Text, as [`Request::Sexp`] asked; `None` when the path names no
     /// node.
     Text(Option<String>),
+    /// The unit's resident memory now, bytes, sent unasked (id 0) while it
+    /// parses when started with `--report-memory`: what the editor's total
+    /// watchdog sums where no cgroup holds the workers.
+    Resident(u64),
 }
 
 /// `pmacs_syntax::NodeFacts` on the wire.
@@ -274,6 +323,11 @@ impl From<WireNode> for pmacs_syntax::NodeFacts {
 /// A parse that installed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Parsed {
+    /// The installed tree's generation, which a read of it names.
+    pub generation: u64,
+    /// The unit's peak resident memory after the parse, bytes, as the
+    /// kernel counts it (`getrusage`); 0 where it cannot be read.
+    pub peak_bytes: u64,
     /// The installed layers: the root first, then injections in depth
     /// order, as `ParseTreeBundle::layers` holds them.
     pub layers: Vec<LayerInfo>,
@@ -340,11 +394,14 @@ pub enum Failure {
         /// The length the editor expected.
         want: u32,
     },
-    /// A spans request reached a unit with no installed tree.
+    /// A read reached a unit with no installed tree.
     NoTreeInstalled,
+    /// A read named a generation the unit no longer keeps: two newer
+    /// parses have installed since.
+    Stale,
 }
 
-/// The installed parse, with each layer's query and local facts resolved
+/// An installed parse, with each layer's query and local facts resolved
 /// as `SyntaxRegistry::resolve_layer_queries` resolves them.
 struct Installed {
     bundle: ParseTreeBundle,
@@ -352,18 +409,54 @@ struct Installed {
     facts: Vec<Option<LocalFacts>>,
 }
 
-/// One buffer's parse state.
+/// The installed trees a read can name: the newest, and the one before it,
+/// which the editor may still be showing between the unit installing the
+/// newest and the editor settling it.
+#[derive(Default)]
+struct Kept {
+    newest: Option<(u64, Arc<Installed>)>,
+    before: Option<(u64, Arc<Installed>)>,
+}
+
+impl Kept {
+    fn get(&self, generation: u64) -> Result<Arc<Installed>, Failure> {
+        for (g, installed) in [&self.newest, &self.before].into_iter().flatten() {
+            if *g == generation {
+                return Ok(installed.clone());
+            }
+        }
+        if self.newest.is_none() {
+            Err(Failure::NoTreeInstalled)
+        } else {
+            Err(Failure::Stale)
+        }
+    }
+
+    /// Install `installed` as `generation`; the tree it evicts comes back,
+    /// for the caller to drop after answering (dropping a large tree takes
+    /// milliseconds the editor need not wait for).
+    fn install(&mut self, generation: u64, installed: Arc<Installed>) -> Option<Arc<Installed>> {
+        let evicted = self.before.take().map(|(_, i)| i);
+        self.before = self.newest.replace((generation, installed));
+        evicted
+    }
+}
+
+/// One buffer's parse state: the text mirror and what a parse needs, and
+/// the installed trees, which reads share.
 #[derive(Default)]
 pub struct Unit {
     source: Vec<u8>,
     language: Option<(String, tree_sitter::Language)>,
-    installed: Option<Installed>,
     /// The last request installed nothing, so the installed tree predates
     /// edits that request applied: the next parse starts cold, as
     /// `ParseViewHandle::mark_unparsed` makes the in-process one.
     cold_next: bool,
     highlights: HashMap<String, Option<Arc<tree_sitter::Query>>>,
     locals: HashMap<String, Option<Arc<tree_sitter::Query>>>,
+    /// The last generation installed.
+    generation: u64,
+    kept: Arc<Mutex<Kept>>,
 }
 
 impl Unit {
@@ -373,43 +466,12 @@ impl Unit {
         Self::default()
     }
 
-    /// Answer one request.
+    /// Answer one request, in order: a parse here, a read from the trees
+    /// kept. [`serve`] answers reads while a parse runs instead.
     pub fn handle(&mut self, request: Request, payload: &[u8]) -> Response {
         match request {
-            Request::Parse(call) => self.parse(&call, payload),
-            Request::Spans { ranges } => match self.installed.as_ref() {
-                Some(installed) => Response::Spans(spans_over(installed, &ranges)),
-                None => Response::Failed(Failure::NoTreeInstalled),
-            },
-            Request::Folds { at } => match self.installed.as_ref() {
-                Some(installed) => Response::Folds(match at {
-                    Some(p) => pmacs_syntax::fold::candidates_at(&installed.bundle, p),
-                    None => pmacs_syntax::fold::top_level_targets(&installed.bundle),
-                }),
-                None => Response::Failed(Failure::NoTreeInstalled),
-            },
-            Request::Describe { path, children } => match self.installed.as_ref() {
-                Some(installed) => Response::Nodes(
-                    pmacs_syntax::describe_path(&installed.bundle, &path, children)
-                        .into_iter()
-                        .map(WireNode::from)
-                        .collect(),
-                ),
-                None => Response::Failed(Failure::NoTreeInstalled),
-            },
-            Request::Sexp { path } => match self.installed.as_ref() {
-                Some(installed) => Response::Text(
-                    pmacs_syntax::node_at_path(&installed.bundle, &path).map(|n| n.to_sexp()),
-                ),
-                None => Response::Failed(Failure::NoTreeInstalled),
-            },
-            Request::Stats => Response::Stats {
-                source_len: self.source.len() as u32,
-                layers: self
-                    .installed
-                    .as_ref()
-                    .map_or(0, |i| i.bundle.layers.len() as u32),
-            },
+            Request::Parse(call) => self.parse(&call, payload).0,
+            read => answer_read(&self.kept, read),
         }
     }
 
@@ -446,20 +508,20 @@ impl Unit {
         }
     }
 
-    fn parse(&mut self, call: &ParseCall, payload: &[u8]) -> Response {
+    /// Parse, install, and answer; the tree the install evicted comes back
+    /// with the answer, to be dropped after it is sent.
+    fn parse(&mut self, call: &ParseCall, payload: &[u8]) -> (Response, Option<Arc<Installed>>) {
         let started = Instant::now();
         if let Err(failure) = self.update_text(call, payload) {
             self.cold_next = true;
-            return Response::Failed(failure);
+            return (Response::Failed(failure), None);
         }
         let language = match &self.language {
             Some((name, language)) if *name == call.language => language.clone(),
             _ => {
                 let Some(entry) = BUILTIN_LANGUAGES.iter().find(|e| e.name == call.language) else {
-                    return Response::Failed(Failure::Language(format!(
-                        "unknown language {}",
-                        call.language
-                    )));
+                    let failure = Failure::Language(format!("unknown language {}", call.language));
+                    return (Response::Failed(failure), None);
                 };
                 let language = (entry.loader)();
                 self.language = Some((call.language.clone(), language.clone()));
@@ -467,12 +529,17 @@ impl Unit {
                 language
             }
         };
+        // The prior tree is a copy (`ts_tree_copy`): the parse edits it,
+        // and a read may be walking the installed one on another thread.
         let prior_tree = if self.cold_next {
             None
         } else {
-            self.installed
+            self.kept
+                .lock()
+                .expect("kept trees poisoned")
+                .newest
                 .as_ref()
-                .map(|i| i.bundle.root_tree().clone())
+                .map(|(_, i)| i.bundle.root_tree().clone())
         };
         let edits = if prior_tree.is_some() {
             call.edits.iter().map(WireEdit::input_edit).collect()
@@ -495,20 +562,26 @@ impl Unit {
             Ok(bundle) => bundle,
             Err(error) => {
                 self.cold_next = true;
-                return Response::Failed(match error {
-                    ParseError::DeadlineExceeded { deadline, after } => Failure::Deadline {
-                        deadline_ms: deadline.as_millis() as u64,
-                        after_ms: after.as_millis() as u64,
-                    },
-                    ParseError::NoTree => Failure::NoTree,
-                    ParseError::Language(message) => Failure::Language(message),
-                });
+                return (
+                    Response::Failed(match error {
+                        ParseError::DeadlineExceeded { deadline, after } => Failure::Deadline {
+                            deadline_ms: deadline.as_millis() as u64,
+                            after_ms: after.as_millis() as u64,
+                        },
+                        ParseError::NoTree => Failure::NoTree,
+                        ParseError::Language(message) => Failure::Language(message),
+                    }),
+                    None,
+                );
             }
         };
         self.cold_next = false;
-        let installed = self.install(bundle);
+        let installed = Arc::new(self.install(bundle));
         let spans = spans_over(&installed, &call.interest);
+        self.generation += 1;
         let parsed = Parsed {
+            generation: self.generation,
+            peak_bytes: peak_resident_bytes(),
             layers: installed
                 .bundle
                 .layers
@@ -524,8 +597,12 @@ impl Unit {
             injection_capped: installed.bundle.injection_capped,
             layers_cut_by_deadline: installed.bundle.layers_cut_by_deadline,
         };
-        self.installed = Some(installed);
-        Response::Parsed(parsed)
+        let evicted = self
+            .kept
+            .lock()
+            .expect("kept trees poisoned")
+            .install(self.generation, installed);
+        (Response::Parsed(parsed), evicted)
     }
 
     fn install(&mut self, bundle: ParseTreeBundle) -> Installed {
@@ -550,6 +627,56 @@ impl Unit {
             queries,
             facts,
         }
+    }
+}
+
+/// Answer a read from the trees `kept`, holding the lock only to take the
+/// named tree: the walk itself runs beside any parse.
+fn answer_read(kept: &Mutex<Kept>, request: Request) -> Response {
+    let tree = |generation: u64| kept.lock().expect("kept trees poisoned").get(generation);
+    let answer = |generation: u64, read: &dyn Fn(&Installed) -> Response| match tree(generation) {
+        Ok(installed) => read(&installed),
+        Err(failure) => Response::Failed(failure),
+    };
+    match request {
+        Request::Hello => Response::Hello { protocol: PROTOCOL },
+        Request::Stats => {
+            let kept = kept.lock().expect("kept trees poisoned");
+            let newest = kept.newest.as_ref().map(|(_, i)| i);
+            Response::Stats {
+                source_len: newest.map_or(0, |i| i.bundle.source.len() as u32),
+                layers: newest.map_or(0, |i| i.bundle.layers.len() as u32),
+            }
+        }
+        Request::Spans { generation, ranges } => answer(generation, &|installed| {
+            Response::Spans(spans_over(installed, &ranges))
+        }),
+        Request::Folds { generation, at } => answer(generation, &|installed| {
+            Response::Folds(match at {
+                Some(p) => pmacs_syntax::fold::candidates_at(&installed.bundle, p),
+                None => pmacs_syntax::fold::top_level_targets(&installed.bundle),
+            })
+        }),
+        Request::Describe {
+            generation,
+            path,
+            children,
+        } => answer(generation, &|installed| {
+            Response::Nodes(
+                pmacs_syntax::describe_path(&installed.bundle, &path, children)
+                    .into_iter()
+                    .map(WireNode::from)
+                    .collect(),
+            )
+        }),
+        Request::Sexp { generation, path } => answer(generation, &|installed| {
+            Response::Text(
+                pmacs_syntax::node_at_path(&installed.bundle, &path).map(|n| n.to_sexp()),
+            )
+        }),
+        Request::Parse(_) => Response::Failed(Failure::Language(
+            "a parse reached the read path".to_owned(),
+        )),
     }
 }
 
@@ -647,12 +774,209 @@ fn spans_over(installed: &Installed, ranges: &[(u32, u32)]) -> SpanSet {
     }
 }
 
-/// Serve requests from `input` until it ends, answering on `output`.
-pub fn serve<R: Read, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
-    let mut unit = Unit::new();
-    while let Some((request, payload)) = read_frame::<_, Request>(&mut input)? {
-        let response = unit.handle(request, &payload);
-        write_frame(&mut output, &response, &[])?;
+/// What [`serve`] watches and reports about the unit's own memory.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ServeOptions {
+    /// Stop the process ([`MEMORY_WATCH_EXIT`]) once its peak resident
+    /// memory passes what it held at start plus this many bytes: the memory
+    /// limit where `RLIMIT_AS` is refused (macOS), checked every
+    /// [`WATCH_EVERY`] while a parse runs. Reactive where `RLIMIT_AS` is
+    /// preventive: it overshoots by what the parse grows between two checks.
+    pub watch_growth: Option<u64>,
+    /// Send [`Response::Resident`] every [`REPORT_EVERY`] while a parse runs
+    /// and once after it, for the editor's total watchdog.
+    pub report_memory: bool,
+}
+
+/// How often the memory watch reads the unit's peak while a parse runs.
+pub const WATCH_EVERY: Duration = Duration::from_millis(1);
+
+/// How often a parsing unit reports its resident memory when asked to.
+pub const REPORT_EVERY: Duration = Duration::from_millis(10);
+
+/// Whether a parse is running, and whether the unit is stopping.
+#[derive(Default)]
+struct Parsing {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl Parsing {
+    fn set(&self, parsing: bool) {
+        self.state.lock().expect("parsing flag poisoned").0 = parsing;
+        self.changed.notify_all();
     }
-    Ok(())
+
+    fn stop(&self) {
+        self.state.lock().expect("parsing flag poisoned").1 = true;
+        self.changed.notify_all();
+    }
+
+    /// Wait until a parse runs (`true`) or the unit stops (`false`).
+    fn wait(&self) -> bool {
+        let mut state = self.state.lock().expect("parsing flag poisoned");
+        loop {
+            if state.1 {
+                return false;
+            }
+            if state.0 {
+                return true;
+            }
+            state = self.changed.wait(state).expect("parsing flag poisoned");
+        }
+    }
+
+    fn running(&self) -> bool {
+        let state = self.state.lock().expect("parsing flag poisoned");
+        state.0 && !state.1
+    }
+}
+
+/// Serve requests from `input` until it ends, answering on `output`. A
+/// parse runs on a thread of its own, in arrival order; every other request
+/// is answered here at once, so reads never wait on a parse.
+pub fn serve<R: Read, W: Write + Send + 'static>(
+    mut input: R,
+    output: W,
+    options: ServeOptions,
+) -> io::Result<()> {
+    let out = Arc::new(Mutex::new(output));
+    let parsing = Arc::new(Parsing::default());
+    let mut unit = Unit::new();
+    let kept = unit.kept.clone();
+    let (parses, queue) = mpsc::channel::<(u64, ParseCall, Vec<u8>)>();
+    let parser = {
+        let out = out.clone();
+        let parsing = parsing.clone();
+        thread::Builder::new()
+            .name("pmacs-parse".into())
+            .spawn(move || {
+                for (id, call, payload) in queue {
+                    parsing.set(true);
+                    let (response, evicted) = unit.parse(&call, &payload);
+                    parsing.set(false);
+                    let mut out = out.lock().expect("output poisoned");
+                    let mut sent = write_frame(&mut *out, &(id, &response), &[]);
+                    if options.report_memory && sent.is_ok() {
+                        sent = write_frame(
+                            &mut *out,
+                            &(0u64, &Response::Resident(resident_bytes())),
+                            &[],
+                        );
+                    }
+                    drop(out);
+                    drop(evicted);
+                    if sent.is_err() {
+                        break;
+                    }
+                }
+            })?
+    };
+    let watcher = if options.watch_growth.is_some() || options.report_memory {
+        let out = out.clone();
+        let parsing = parsing.clone();
+        Some(
+            thread::Builder::new()
+                .name("pmacs-memory-watch".into())
+                .spawn(move || watch_memory(&parsing, &out, options))?,
+        )
+    } else {
+        None
+    };
+    let served = (|| {
+        while let Some(((id, request), payload)) = read_frame::<_, (u64, Request)>(&mut input)? {
+            if request.is_parse() {
+                let Request::Parse(call) = request else {
+                    unreachable!("is_parse")
+                };
+                if parses.send((id, call, payload)).is_err() {
+                    break;
+                }
+                continue;
+            }
+            let response = answer_read(&kept, request);
+            write_frame(
+                &mut *out.lock().expect("output poisoned"),
+                &(id, &response),
+                &[],
+            )?;
+        }
+        Ok(())
+    })();
+    drop(parses);
+    let _ = parser.join();
+    parsing.stop();
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
+    }
+    served
+}
+
+/// The memory watch: while a parse runs, stop the process once its peak
+/// passes the allowance, and report its resident memory when asked to.
+fn watch_memory<W: Write>(parsing: &Parsing, out: &Mutex<W>, options: ServeOptions) {
+    let limit = options
+        .watch_growth
+        .map(|growth| peak_resident_bytes().saturating_add(growth));
+    while parsing.wait() {
+        let mut last_report: Option<Instant> = None;
+        while parsing.running() {
+            if let Some(limit) = limit {
+                let peak = peak_resident_bytes();
+                if peak > limit {
+                    eprintln!(
+                        "pmacs-parse-unit: memory watch: peak resident {peak} bytes passed the limit {limit}"
+                    );
+                    std::process::exit(MEMORY_WATCH_EXIT);
+                }
+            }
+            if options.report_memory && last_report.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
+                last_report = Some(Instant::now());
+                let report = (0u64, Response::Resident(resident_bytes()));
+                if let Ok(mut out) = out.lock() {
+                    let _ = write_frame(&mut *out, &report, &[]);
+                }
+            }
+            thread::sleep(WATCH_EVERY);
+        }
+    }
+}
+
+/// This process's peak resident memory, bytes, as the kernel counts it
+/// (`getrusage`: kibibytes on Linux, bytes on macOS); 0 where unread.
+#[must_use]
+pub fn peak_resident_bytes() -> u64 {
+    #[cfg(unix)]
+    {
+        use nix::sys::resource::{UsageWho, getrusage};
+        let Ok(usage) = getrusage(UsageWho::RUSAGE_SELF) else {
+            return 0;
+        };
+        let max = u64::try_from(usage.max_rss()).unwrap_or(0);
+        if cfg!(target_os = "macos") {
+            max
+        } else {
+            max * 1024
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// This process's resident memory now, bytes: `VmRSS` where `/proc` has it
+/// (Linux), else the peak, which is never below it.
+#[must_use]
+pub fn resident_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .and_then(|v| v.split_whitespace().next())
+                .and_then(|kb| kb.parse::<u64>().ok())
+        })
+        .map_or_else(peak_resident_bytes, |kb| kb * 1024)
 }
