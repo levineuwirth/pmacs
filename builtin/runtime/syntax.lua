@@ -38,6 +38,9 @@ local parse_deadline_warned = {}
 -- build). Told once a session, not per buffer: the cause is the install.
 local parse_unit_unavailable_warned = false
 local parse_layers_cut_warned = {}
+-- E7i fix round 1: buffers already told that their parse worker crashed,
+-- keyed like the others; re-armed when a parse of the buffer installs.
+local parse_crash_warned = {}
 
 -- E7h.2: a parse is bounded in time where tree-sitter calls its progress
 -- callback, which cancels a parse still running this long after it
@@ -773,6 +776,22 @@ pmacs._async.tick = function(...)
           "syntax: %s, so nothing is highlighted. pmacs-parse-unit ships beside pmacs in the release archive: keep the two in one directory, or name the worker in syntax.parse-unit-path (a source build makes it with cargo build --release -p pmacs-parse-unit). Or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
           tostring(detail)))
       end
+    elseif key and (status == "crashed" or status == "crash-stopped" or status == "held") then
+      -- E7i fix round 1 (review 1, Medium 1): the buffer's worker died on
+      -- its own, a crash in the grammar's C most likely, running this
+      -- buffer's bytes. Told as E5.3 tells a crashed server, once a streak
+      -- of crashes, naming the buffer and the grammar, and again when the
+      -- streak stops the buffer's parsing; meanwhile the boundary backs off
+      -- rather than restarting the worker at every keystroke. A parse held
+      -- for a crash no parse reported (one a read of the tree found) tells
+      -- it, so no crash goes untold.
+      if status == "crash-stopped" or not parse_crash_warned[key] then
+        parse_crash_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format("syntax: parsing %s as %s: %s",
+          name, tostring(parse_lang_by_buffer[key]), tostring(detail)))
+      end
     elseif key and status == "limit" then
       -- E7i: a parse unit stopped at its memory limit; told once, like a
       -- deadline.
@@ -795,6 +814,7 @@ pmacs._async.tick = function(...)
       end
     elseif key and (status == "installed" or status == "installed-cut") then
       parse_deadline_warned[key] = nil
+      parse_crash_warned[key] = nil
       if status == "installed-cut" then
         if not parse_layers_cut_warned[key] then
           parse_layers_cut_warned[key] = true

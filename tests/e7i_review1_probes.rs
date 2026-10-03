@@ -88,31 +88,65 @@ fn crashing_unit(dir: &Path) -> PathBuf {
     fake
 }
 
+/// The four-crash sequence, and what follows it. At `fa176de` the open's
+/// parse and three edits 250 ms apart each started a worker that crashed,
+/// four deaths in a second, told to no one. Fix round 1 backs off after a
+/// crash (1 s, then 2 s) and stops parsing the buffer at its third crash in
+/// a row, so the scenario goes on: past the first back-off an edit crashes
+/// a second worker, an edit inside the second back-off starts none, past it
+/// a third crash stops the buffer's parsing, and an edit 5 s later still
+/// starts none. The report counts deaths at each point, each read once
+/// from a report that is not mid-parse, and the `syntax: parsing
+/// <path>/a.rs as rust: parse unit crashed` lines in `*errors*`. (As the
+/// review committed it the wait read `_unit_report` twice per test, and a
+/// parse starting between the two made the second `false` and the
+/// coroutine raise: a probe's own race, found here.)
 const CRASH_INIT: &str = "pmacs.lsp.config = {}\n\
      pmacs.config.set('syntax.isolation', 'process')\n\
      pmacs.config.set('syntax.parse-unit-path', {unit:?})\n\
      local b = pmacs.buffer.find_or_open({file:?})\n\
      pmacs.async(function()\n\
-       local t0 = pmacs.editor.monotonic_ms()\n\
        local function report() local r = pmacs.parse._unit_report(b); return r and not r.busy and r end\n\
-       while not (report() and report().deaths >= 1) and pmacs.editor.monotonic_ms() - t0 < 30000 do\n\
-         pmacs.workers.sleep(50):await()\n\
+       local function deaths(n, ms)\n\
+         local t0 = pmacs.editor.monotonic_ms()\n\
+         while true do\n\
+           local r = report()\n\
+           if r and (r.deaths >= n or pmacs.editor.monotonic_ms() - t0 >= ms) then return r.deaths end\n\
+           if pmacs.editor.monotonic_ms() - t0 >= ms + 5000 then return -1 end\n\
+           pmacs.workers.sleep(20):await()\n\
+         end\n\
        end\n\
-       for i = 1, 3 do\n\
+       local function edit(i)\n\
          b:insert(b:len(), '// ' .. i .. '\\n')\n\
          pmacs.parse._dispatch(b, 'rust')\n\
-         pmacs.workers.sleep(400):await()\n\
        end\n\
+       deaths(1, 30000)\n\
+       for i = 1, 3 do edit(i); pmacs.workers.sleep(250):await() end\n\
+       local burst = deaths(99, 0)\n\
        pmacs.workers.sleep(1000):await()\n\
+       edit(4)\n\
+       local second = deaths(2, 10000)\n\
+       edit(5)\n\
+       pmacs.workers.sleep(300):await()\n\
+       local held = deaths(99, 0)\n\
+       pmacs.workers.sleep(2200):await()\n\
+       edit(6)\n\
+       local third = deaths(3, 10000)\n\
+       pmacs.workers.sleep(5000):await()\n\
+       edit(7)\n\
+       pmacs.workers.sleep(500):await()\n\
+       local r = pmacs.parse._unit_report(b)\n\
        local said = ''\n\
        for _, x in ipairs(pmacs.buffer.list()) do\n\
          if x:name() == '*errors*' then said = x:slice(0, x:len()) end\n\
        end\n\
-       local r = pmacs.parse._unit_report(b)\n\
+       local _, told = said:gsub('/a%.rs as rust: parse unit crashed', '')\n\
        local f = assert(io.open('{report}', 'w'))\n\
-       f:write(string.format('deaths=%d known=%s told=%s\\n', r.deaths,\n\
-         tostring(tostring(r.last_death):find('Some(11)', 1, true) ~= nil),\n\
-         tostring(said:find('syntax:', 1, true) ~= nil)))\n\
+       f:write(string.format('burst=%d second=%d held=%d third=%d deaths=%d known=%s told=%d named=%s stopped=%s\\n',\n\
+         burst, second, held, third, r.deaths,\n\
+         tostring(tostring(r.last_death):find('signal 11 (SIGSEGV)', 1, true) ~= nil), told,\n\
+         tostring(said:find('/a.rs as rust: parse unit crashed: signal 11 (SIGSEGV)', 1, true) ~= nil),\n\
+         tostring(said:find('parsing stopped', 1, true) ~= nil)))\n\
        f:close()\n\
      end)\n";
 
@@ -130,31 +164,37 @@ fn crash_report() -> String {
 }
 
 /// Control, live: the editor knows when a buffer's worker crashed. Its unit
-/// report's last death names signal 11, and every keystroke after it starts
-/// another worker, which crashes again.
+/// report's last death names signal 11. Fix round 1: and it backs off. At
+/// `fa176de` every keystroke started another worker, which crashed again
+/// (four deaths for the open and three edits); now the three edits inside
+/// the first second start none, a second worker starts only after the
+/// back-off, and after the third crash none starts at all.
 #[test]
 fn e7i_review1_the_editor_knows_its_worker_crashed() {
     let text = crash_report();
     assert!(text.contains("known=true"), "{text}");
     assert!(
-        !text.contains("deaths=1 ") && !text.contains("deaths=0 "),
-        "each re-dispatch started a worker that crashed again: {text}"
+        text.contains("burst=1 second=2 held=2 third=3 deaths=3 "),
+        "a crash backs the buffer off, and the third stops its parsing: {text}"
     );
 }
 
 /// A worker that crashes is the event containment exists for: a memory
 /// error in the grammar's C running a crafted file's bytes (CLAUDE.md:
 /// "containment is not safety"). In-process it aborted the editor, loudly.
-/// Behind the boundary `_install_settled` reports it as `"failed"`, and
-/// `syntax.lua` says nothing for `"failed"`: the buffer goes unhighlighted
-/// and every keystroke respawns a worker that crashes again, in silence.
+/// At `fa176de` `_install_settled` reported it as `"failed"`, and
+/// `syntax.lua` said nothing for `"failed"`: the buffer went unhighlighted
+/// and every keystroke respawned a worker that crashed again, in silence.
+/// Fix round 1: it is told in `*errors*`, naming the buffer, the grammar
+/// and the signal, once for the streak of crashes and once when the streak
+/// stops the buffer's parsing.
 #[test]
-#[ignore = "E7i review 1, Medium: a worker's crash is never told to the user (fails at fa176de with told=false)"]
 fn e7i_review1_a_crashing_worker_is_told_to_the_user() {
     let text = crash_report();
     assert!(
-        text.contains("told=true"),
-        "the user is told that the buffer's parse worker crashed: {text}"
+        text.contains("told=2 named=true stopped=true"),
+        "the user is told that the buffer's parse worker crashed, once, and \
+         that its parsing stopped: {text}"
     );
 }
 

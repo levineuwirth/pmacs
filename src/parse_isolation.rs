@@ -24,7 +24,13 @@
 //! The boundary stops the operation, not one call inside it: the parse's
 //! whole memory and the whole request's time are what the limits measure.
 //! A unit that dies is discarded and the next request starts a fresh one
-//! with the whole text. The buffer's previous parse survives the discard
+//! with the whole text. One that dies on its own (a signal, or an exit the
+//! editor did not ask for) crashed, most likely in a grammar's C running
+//! this buffer's bytes: the buffer's next worker waits out a back-off that
+//! doubles from [`CRASH_BACKOFF`], and after [`MAX_CRASHES`] crashes in a
+//! row with no parse installed between them the buffer is not parsed again
+//! until it is killed and opened again, since every restart runs the same
+//! bytes (E7i review 1, Medium 1). The settle path tells the user once. The buffer's previous parse survives the discard
 //! in the editor, as its text and its spans ([`IsolatedHandle`]); a read
 //! those spans do not answer is answered by re-parsing that text into a
 //! fresh unit, which rebuilds the previous tree there.
@@ -181,7 +187,18 @@ pub enum Death {
         /// What enforced it.
         by: Enforcer,
     },
-    /// It ended for another reason (a crash, an exit, a broken pipe).
+    /// It died on its own: by a signal, or an exit the editor did not ask
+    /// for. Most likely the grammar's C crashed running this text.
+    Crashed {
+        /// The signal it died by, if it did.
+        signal: Option<i32>,
+        /// Its exit status, if it exited.
+        code: Option<i32>,
+        /// Its last line on stderr.
+        last: String,
+    },
+    /// The editor ended it for another reason (its buffer was killed, the
+    /// editor stopped, it answered out of turn).
     Ended(String),
     /// It could not be started.
     Unavailable(String),
@@ -208,9 +225,33 @@ impl Death {
                 "{PARSE_LIMIT_MESSAGE}: the parse units together reached {} MiB",
                 limit >> 20
             ),
+            Self::Crashed { .. } => format!("{CRASHED_MESSAGE}: {}", self.how()),
             Self::Ended(why) => format!("parse unit ended: {why}"),
             Self::Unavailable(why) => format!("{UNAVAILABLE_MESSAGE}: {why}"),
         }
+    }
+
+    /// How a crashed unit died: `signal 11 (SIGSEGV)` or `exit 101`, with
+    /// its last words when it left any.
+    fn how(&self) -> String {
+        let Self::Crashed { signal, code, last } = self else {
+            return String::new();
+        };
+        let mut how = match (signal, code) {
+            (Some(sig), _) => match nix::sys::signal::Signal::try_from(*sig) {
+                Ok(name) => format!("signal {sig} ({name})"),
+                Err(_) => format!("signal {sig}"),
+            },
+            (None, Some(code)) => format!("exit {code}"),
+            (None, None) => "ended".to_owned(),
+        };
+        let last = last.trim();
+        if !last.is_empty() {
+            let cut: String = last.chars().take(160).collect();
+            how.push_str(", saying: ");
+            how.push_str(&cut);
+        }
+        how
     }
 
     fn kind(&self) -> &'static str {
@@ -218,6 +259,7 @@ impl Death {
             Self::Time { .. } => "time",
             Self::Memory { .. } => "memory",
             Self::Total { .. } => "total",
+            Self::Crashed { .. } => "crashed",
             Self::Ended(_) => "ended",
             Self::Unavailable(_) => "unavailable",
         }
@@ -252,6 +294,40 @@ pub const PARSE_LIMIT_MESSAGE: &str = "parse stopped at its memory limit";
 /// another build), so the buffer is not highlighted, which the settle path
 /// says once.
 pub const UNAVAILABLE_MESSAGE: &str = "parse unit unavailable";
+
+/// How the message of a parse whose worker crashed begins.
+pub const CRASHED_MESSAGE: &str = "parse unit crashed";
+
+/// How the message of the crash that ends a buffer's parsing begins: its
+/// [`MAX_CRASHES`]th in a row.
+pub const CRASH_STOPPED_MESSAGE: &str = "parse unit crashed; parsing stopped";
+
+/// How the message of a parse refused while its buffer backs off after a
+/// crash, or after the crash that stopped its parsing, begins.
+pub const HELD_MESSAGE: &str = "parse held after its unit crashed";
+
+/// The first back-off after a crash; each crash in a row doubles it.
+pub const CRASH_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Crashes in a row, with no parse installed between them, after which a
+/// buffer is not parsed again until it is killed and opened again.
+pub const MAX_CRASHES: u32 = 3;
+
+/// The settle path's status for a failure text about a crash: `"crashed"`,
+/// `"crash-stopped"` (the crash that ended the buffer's parsing) or
+/// `"held"` (a parse refused for an earlier crash); `None` for any other.
+#[must_use]
+pub fn crash_status(message: &str) -> Option<&'static str> {
+    if message.starts_with(CRASH_STOPPED_MESSAGE) {
+        Some("crash-stopped")
+    } else if message.starts_with(CRASHED_MESSAGE) {
+        Some("crashed")
+    } else if message.starts_with(HELD_MESSAGE) {
+        Some("held")
+    } else {
+        None
+    }
+}
 
 /// Whether a parse job's failure text is a worker that could not start.
 #[must_use]
@@ -289,6 +365,67 @@ struct Slot {
     /// The buffer was killed: a tree a script still holds answers nothing,
     /// rather than starting a worker for a buffer that is gone.
     forgotten: bool,
+    /// Its workers' crashes since a parse of it last installed.
+    crashes: u32,
+    /// No worker starts for it before then: the back-off after a crash.
+    backoff_until: Option<Instant>,
+    /// How its last worker to crash died, for a parse held after it.
+    crash_how: String,
+}
+
+impl Slot {
+    /// Why no worker may start for this buffer now, if none may: it is
+    /// backing off after a crash, or it crashed [`MAX_CRASHES`] times.
+    fn held(&self) -> Option<String> {
+        if self.stopped() {
+            return Some(format!(
+                "{HELD_MESSAGE}: {}, {} crashes in a row; it is not parsed again until it is killed and opened again",
+                self.crash_how, self.crashes
+            ));
+        }
+        let until = self.backoff_until?;
+        let left = until.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then(|| {
+            format!(
+                "{HELD_MESSAGE}: {}; backing off for {} ms more",
+                self.crash_how,
+                left.as_millis()
+            )
+        })
+    }
+
+    /// Its parsing stopped: [`MAX_CRASHES`] crashes in a row.
+    fn stopped(&self) -> bool {
+        self.crashes >= MAX_CRASHES
+    }
+
+    /// Record `death` as this buffer's last, and a crash in its streak;
+    /// the message the settle path receives for it, which says what
+    /// follows a crash.
+    fn note(&mut self, death: &Death) -> String {
+        self.deaths += 1;
+        self.last_death = Some(death.clone());
+        if !matches!(death, Death::Crashed { .. }) {
+            return death.message();
+        }
+        self.crashes += 1;
+        self.crash_how = death.how();
+        if self.stopped() {
+            self.backoff_until = None;
+            return format!(
+                "{CRASH_STOPPED_MESSAGE}: {}, {} crashes in a row; the buffer is not parsed again until it is killed and opened again",
+                death.how(),
+                self.crashes
+            );
+        }
+        let backoff = CRASH_BACKOFF * 2u32.pow(self.crashes - 1);
+        self.backoff_until = Some(Instant::now() + backoff);
+        format!(
+            "{}; the buffer is parsed again in {} s at the earliest, and not after {MAX_CRASHES} crashes in a row",
+            death.message(),
+            backoff.as_secs()
+        )
+    }
 }
 
 /// A buffer's slot, and the lock a parse holds for its whole round trip so
@@ -304,14 +441,16 @@ impl SlotCell {
         self.slot.lock().expect("isolation slot poisoned")
     }
 
-    /// Forget `unit` after it died, if it is still this slot's.
-    fn bury(&self, unit: &ProcessUnit, death: &Death) {
+    /// Forget `unit` after it died, if it is still this slot's, and record
+    /// its death; the message the settle path receives for it.
+    fn bury(&self, unit: &ProcessUnit, death: &Death) -> String {
         let mut slot = self.slot();
         if slot.unit.as_ref().is_some_and(|u| u.serial == unit.serial) {
             slot.unit = None;
             slot.synced = false;
-            slot.deaths += 1;
-            slot.last_death = Some(death.clone());
+            slot.note(death)
+        } else {
+            death.message()
         }
     }
 }
@@ -381,6 +520,9 @@ impl Host {
                         retiring: None,
                         recycled: 0,
                         forgotten: false,
+                        crashes: 0,
+                        backoff_until: None,
+                        crash_how: String::new(),
                     }),
                     parsing: Mutex::new(()),
                 })
@@ -500,6 +642,9 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                     slot.synced = true;
                     slot.recycle_next =
                         job.limits.recycle > 0 && parsed.peak_bytes > job.limits.recycle;
+                    // A parse installed: the buffer's crash streak ends.
+                    slot.crashes = 0;
+                    slot.backoff_until = None;
                 }
                 host.trace(&[
                     ("event", json_str("parsed")),
@@ -541,12 +686,11 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
             Ok(other) => {
                 let death = Death::Ended(format!("answered out of turn: {other:?}"));
                 unit.kill_for(death.clone());
-                cell.bury(&unit, &death);
-                return Err(death.message());
+                return Err(cell.bury(&unit, &death));
             }
             Err(death) => {
                 // The worker is gone and its memory with it.
-                cell.bury(&unit, &death);
+                let message = cell.bury(&unit, &death);
                 host.trace(&[
                     ("event", json_str("death")),
                     ("unit", json_str(&unit.id())),
@@ -556,7 +700,7 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                     ("call_us", elapsed.as_micros().to_string()),
                     ("resident", unit.resident().to_string()),
                 ]);
-                return Err(death.message());
+                return Err(message);
             }
         }
     }
@@ -598,6 +742,12 @@ fn unit_for(
         slot.synced = false;
     }
     if slot.unit.is_none() {
+        // After a crash the buffer's next worker waits out its back-off,
+        // and after the last one none starts: every start runs the bytes
+        // that crashed the last.
+        if let Some(held) = slot.held() {
+            return Err(held);
+        }
         slot.unit = Some(host.spawn(&job.limits).map_err(|death| death.message())?);
         slot.synced = false;
     }
@@ -868,7 +1018,7 @@ impl IsolatedHandle {
             Ok(Response::Failed(_)) => None,
             Ok(response) => Some(response),
             Err(death) => {
-                self.cell.bury(&unit, &death);
+                let _ = self.cell.bury(&unit, &death);
                 None
             }
         }
@@ -879,8 +1029,16 @@ impl IsolatedHandle {
     /// while a parse of the buffer runs, which will install a newer tree.
     fn reestablish(&self) -> Option<Arc<ProcessUnit>> {
         let _in_order = self.cell.parsing.try_lock().ok()?;
-        if self.cell.slot().unit.is_some() {
-            return None;
+        {
+            let slot = self.cell.slot();
+            // Not while a worker holds the buffer, nor once its crashes
+            // stopped its parsing. The back-off does not hold this re-parse:
+            // the back-off keeps a crash's bytes from running again, and this
+            // is the previous text, which parsed; if it crashes too, that
+            // counts toward the stop like any crash.
+            if slot.unit.is_some() || slot.stopped() {
+                return None;
+            }
         }
         let host = host();
         let started = Instant::now();
@@ -916,7 +1074,13 @@ impl IsolatedHandle {
                 ]);
                 Some(unit)
             }
-            _ => None,
+            Err(death) => {
+                // Recorded as any death is, so a text that crashes its
+                // worker backs off here too.
+                let _ = self.cell.slot().note(&death);
+                None
+            }
+            Ok(_) => None,
         }
     }
 }
@@ -1036,6 +1200,10 @@ pub struct UnitReport {
     pub fetched: u64,
     /// Workers replaced after a large parse (E7i.4).
     pub recycled: u64,
+    /// Its workers' crashes since a parse of it last installed.
+    pub crashes: u32,
+    /// Why no worker may start for it now, if none may.
+    pub held: Option<String>,
 }
 
 /// The report for `buffer`'s unit, if it has had one. Never waits on a
@@ -1060,6 +1228,8 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
         memory: slot.unit.as_ref().and_then(|u| u.memory_bytes()),
         deaths: slot.deaths,
         last_death: slot.last_death.as_ref().map(Death::describe),
+        crashes: slot.crashes,
+        held: slot.held(),
     })
 }
 
@@ -1331,8 +1501,13 @@ impl ProcessUnit {
                 overshoot: None,
             };
         }
-        let last = stderr.lines().last().unwrap_or("").to_owned();
-        Death::Ended(format!("{status:?} signal {signal:?} {last}"))
+        // Neither the editor's kill nor a limit: the worker died on its
+        // own.
+        Death::Crashed {
+            signal,
+            code,
+            last: stderr.lines().last().unwrap_or("").to_owned(),
+        }
     }
 
     /// What the worker holds now: its PSS where `/proc` has it, else the

@@ -8418,6 +8418,8 @@ pub fn install_parse(
             t.set("reestablished", report.reestablished)?;
             t.set("fetched", report.fetched)?;
             t.set("recycled", report.recycled)?;
+            t.set("crashes", report.crashes)?;
+            t.set("held", report.held)?;
             Ok(mlua::Value::Table(t))
         })?,
     )?;
@@ -8582,8 +8584,12 @@ pub fn install_parse(
     // (installed, but the deadline dropped some injection layers),
     // `"deadline"` (the parse ran past `syntax.parse-deadline-ms` and was
     // cancelled; the buffer keeps its tree and parses cold next),
-    // `"failed"` (the same, for any other failure), or `"none"` (the job
-    // is unknown or already installed; idempotent).
+    // `"limit"` and `"unavailable"` (E7i: a memory stop; no worker could
+    // start), `"crashed"`, `"crash-stopped"` and `"held"` (E7i fix round
+    // 1: the worker crashed; it crashed for the last time and the buffer is
+    // no longer parsed; a parse refused for an earlier crash), `"failed"`
+    // (the same, for any other failure), or `"none"` (the job is unknown or
+    // already installed; idempotent).
     {
         let s = syntax.clone();
         let rt = runtime.clone();
@@ -8612,6 +8618,9 @@ pub fn install_parse(
                                 ("limit", None)
                             } else if crate::parse_isolation::is_unavailable_message(&msg) {
                                 ("unavailable", Some(msg))
+                            } else if let Some(status) = crate::parse_isolation::crash_status(&msg)
+                            {
+                                (status, Some(msg))
                             } else {
                                 ("failed", None)
                             }
