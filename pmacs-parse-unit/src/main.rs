@@ -7,7 +7,8 @@
 //! caps its own address space at what it holds now plus `N` MiB
 //! (`RLIMIT_AS`, soft and hard, so it cannot raise it again), so a parse
 //! that grows past the limit gets a failed allocation and the process
-//! aborts, taking only itself down. Under wasmtime the editor bounds the
+//! aborts, taking only itself down. macOS refuses the limit, and there the
+//! worker runs without one. Under wasmtime the editor bounds the
 //! module's memory instead, and the flag is absent.
 
 #![forbid(unsafe_code)]
@@ -52,8 +53,16 @@ fn limit_memory(mb: u64) {
         .map_or(0, |pages| pages * 4096);
     let limit = held + mb * 1024 * 1024;
     if let Err(error) = setrlimit(Resource::RLIMIT_AS, limit, limit) {
-        eprintln!("pmacs-parse-unit: setrlimit(RLIMIT_AS, {limit}): {error}");
-        std::process::exit(2);
+        // Linux enforces it, so a refusal there is a fault. macOS refuses
+        // to lower it (EINVAL, measured on CI's runner at E7i): there the
+        // unit runs with the editor's time bound alone and no memory bound.
+        if cfg!(target_os = "linux") {
+            eprintln!("pmacs-parse-unit: setrlimit(RLIMIT_AS, {limit}): {error}");
+            std::process::exit(2);
+        }
+        eprintln!(
+            "pmacs-parse-unit: setrlimit(RLIMIT_AS, {limit}): {error}; no memory limit on this platform"
+        );
     }
 }
 

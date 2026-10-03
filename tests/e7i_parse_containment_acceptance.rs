@@ -194,6 +194,10 @@ fn e7i_a_process_unit_stops_301_at_the_deadline_and_the_daemon_lives() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "RLIMIT_AS is refused (EINVAL) on macOS, so a worker has no memory limit there"
+)]
 fn e7i_a_process_unit_stops_296_at_its_memory_limit_and_says_so_once() {
     stops_296_at_its_memory_limit("process", Duration::from_secs(25));
 }
