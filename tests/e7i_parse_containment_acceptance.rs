@@ -881,7 +881,12 @@ fn replay(unit: &Path, extras: &[&str]) -> (Option<i32>, String) {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"));
     command.args(["replay-unit", "--unit"]).arg(unit);
     command.arg("--corpus").arg(&corpus).arg("--out").arg(&out);
-    command.args(["--memory-mb", "64", "--deadline-ms", "1000"]);
+    // The arms' own deadline. At 1 s a loaded machine let the deadline cut
+    // #296's inline layer before the debug worker grew to 64 MiB, so the
+    // row saw time where it asserts memory (E7i fix round 1: one red in
+    // two runs of this suite beside its own parallel rows; at fa176de the
+    // same cut read "answered" and failed the counts instead).
+    command.args(["--memory-mb", "64", "--deadline-ms", "5000"]);
     for extra in extras {
         command
             .arg("--extra")
