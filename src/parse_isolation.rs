@@ -54,8 +54,8 @@ use pmacs_parse_unit::{Failure, ParseCall, Request, Response, SpanSet, TextUpdat
 
 use crate::buffer::BufferId;
 use crate::syntax::{
-    HighlightSpan, IsolatedLayerSpans, IsolatedSpans, IsolatedTree, ParseError, ParseRequest,
-    ParseTreeBundle,
+    HighlightSpan, IsolatedLayerSpans, IsolatedSpans, IsolatedTree, NodeFacts, ParseError,
+    ParseRequest, ParseTreeBundle,
 };
 
 /// Which boundary a parse runs behind.
@@ -664,6 +664,26 @@ impl IsolatedTree for IsolatedHandle {
     fn top_level_folds(&self) -> Option<Vec<(u64, u64)>> {
         match self.ask(&Request::Folds { at: None })? {
             Response::Folds(ranges) => Some(ranges),
+            _ => None,
+        }
+    }
+
+    fn describe(&self, path: &[u32], children: bool) -> Option<Vec<NodeFacts>> {
+        let request = Request::Describe {
+            path: path.to_vec(),
+            children,
+        };
+        match self.ask(&request)? {
+            Response::Nodes(nodes) => Some(nodes.into_iter().map(NodeFacts::from).collect()),
+            _ => None,
+        }
+    }
+
+    fn sexp(&self, path: &[u32]) -> Option<String> {
+        match self.ask(&Request::Sexp {
+            path: path.to_vec(),
+        })? {
+            Response::Text(text) => text,
             _ => None,
         }
     }

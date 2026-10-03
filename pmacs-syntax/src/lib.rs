@@ -206,6 +206,88 @@ pub trait IsolatedTree: Send + Sync + fmt::Debug {
     /// The top-level fold targets, as [`fold::top_level_targets`] finds
     /// them; `None` when the unit cannot answer now.
     fn top_level_folds(&self) -> Option<Vec<(u64, u64)>>;
+    /// The node at `path` (child indices from the root layer's root) and,
+    /// with `children`, each of its children after it, in order: what
+    /// Lua's node API reads, so a script walks a tree in a unit with one
+    /// request per node whose children it reads. `None` when the unit
+    /// cannot answer now (busy, or holding a newer tree); empty when the
+    /// path names no node.
+    fn describe(&self, path: &[u32], children: bool) -> Option<Vec<NodeFacts>>;
+    /// The s-expression of the node at `path`; `None` when the unit cannot
+    /// answer now or the path names no node.
+    fn sexp(&self, path: &[u32]) -> Option<String>;
+}
+
+/// One node's fields as a parse unit describes it (E7i), the ones Lua's
+/// node API reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeFacts {
+    /// The node's kind.
+    pub kind: String,
+    /// First byte, absolute into the bundle's source.
+    pub start_byte: u64,
+    /// End byte, exclusive.
+    pub end_byte: u64,
+    /// `(row, column)` of the start.
+    pub start: (u64, u64),
+    /// `(row, column)` of the end.
+    pub end: (u64, u64),
+    /// Children, named and anonymous.
+    pub child_count: u32,
+    /// Named children.
+    pub named_child_count: u32,
+    /// The node is named (not anonymous syntax).
+    pub named: bool,
+    /// The parser inserted it to recover from an error.
+    pub missing: bool,
+    /// It or a descendant is an error.
+    pub has_error: bool,
+}
+
+impl NodeFacts {
+    /// The facts of `node`.
+    #[must_use]
+    pub fn of(node: Node<'_>) -> Self {
+        let point = |p: Point| (p.row as u64, p.column as u64);
+        Self {
+            kind: node.kind().to_owned(),
+            start_byte: node.start_byte() as u64,
+            end_byte: node.end_byte() as u64,
+            start: point(node.start_position()),
+            end: point(node.end_position()),
+            child_count: node.child_count() as u32,
+            named_child_count: node.named_child_count() as u32,
+            named: node.is_named(),
+            missing: node.is_missing(),
+            has_error: node.has_error(),
+        }
+    }
+}
+
+/// The node at `path` in `bundle`'s root layer, and with `children` each of
+/// its children after it: the answer to [`IsolatedTree::describe`], read
+/// where the tree is. Empty when the path names no node.
+#[must_use]
+pub fn describe_path(bundle: &ParseTreeBundle, path: &[u32], children: bool) -> Vec<NodeFacts> {
+    let Some(node) = node_at_path(bundle, path) else {
+        return Vec::new();
+    };
+    let mut out = vec![NodeFacts::of(node)];
+    if children {
+        let mut cursor = node.walk();
+        out.extend(node.children(&mut cursor).map(NodeFacts::of));
+    }
+    out
+}
+
+/// The node at `path`, child indices from the root layer's root.
+#[must_use]
+pub fn node_at_path<'tree>(bundle: &'tree ParseTreeBundle, path: &[u32]) -> Option<Node<'tree>> {
+    let mut node = bundle.layers.first()?.tree.root_node();
+    for &index in path {
+        node = node.child(index)?;
+    }
+    Some(node)
 }
 
 /// Lexically-local identifier ranges derived from a grammar's bundled

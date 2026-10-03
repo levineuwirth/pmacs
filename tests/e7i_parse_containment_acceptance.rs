@@ -462,3 +462,65 @@ fn e7i_folds_read_their_tree_from_the_buffer_s_unit() {
         "folds come from the unit's tree"
     );
 }
+
+/// Lua's node API reads a tree that lives in a worker (E7i), batched: the
+/// `pmacs-mcp-ai` fixture's enclosing-function walk finds the function,
+/// with its text, its named children, its parent and the tree's
+/// s-expression, none of which the editor holds a tree for.
+#[test]
+fn e7i_lua_s_node_api_walks_a_tree_in_the_buffer_s_unit() {
+    let text = "fn one() {\n    let a = 1;\n}\n\nfn two() {}\n";
+    let inside = text.find("let a").expect("let a");
+    let probe = format!(
+        "local t = pmacs.parse.tree(b)\n\
+         local root = t:root()\n\
+         local function find(node, pos)\n\
+           local sb, eb = node:start_byte(), node:end_byte()\n\
+           if pos < sb or pos > eb then return nil end\n\
+           for _, c in ipairs(node:children()) do\n\
+             local f = find(c, pos)\n\
+             if f then return f end\n\
+           end\n\
+           if node:type() == 'function_item' then return node end\n\
+         end\n\
+         local f = find(root, {inside})\n\
+         local names = {{}}\n\
+         for _, c in ipairs(f:named_children()) do names[#names + 1] = c:type() end\n\
+         local sexp = t:sexp()\n\
+         return string.format('root=%s n=%d fn=%s text=%q named=%s parent=%s row=%d sexp=%s current=%s',\n\
+           root:type(), root:child_count(), f:type(), f:text(), table.concat(names, ','),\n\
+           f:parent():type(), f:end_position().row, sexp:sub(1, 13), tostring(t:is_current()))"
+    );
+    let report = probe_in_unit("walk.rs", text, &probe);
+    assert_eq!(
+        report,
+        "mode=process root=source_file n=2 fn=function_item \
+         text=\"fn one() {\\\n    let a = 1;\\\n}\" named=identifier,parameters,block \
+         parent=source_file row=2 sexp=(source_file  current=true",
+        "the walk read the unit's tree"
+    );
+}
+
+/// A tree held across a reparse (E7i): its unit holds the newer tree, so
+/// reads the script had not yet made answer nil and `is_current` is false,
+/// while the buffer's new tree answers.
+#[test]
+fn e7i_a_held_tree_answers_nil_once_its_unit_holds_a_newer_one() {
+    let probe = "local t = pmacs.parse.tree(b)\n\
+         local before = t:root():type()\n\
+         b:insert(0, '// x\\n')\n\
+         pmacs.parse._dispatch(b, 'rust')\n\
+         local t0 = pmacs.editor.monotonic_ms()\n\
+         while pmacs.editor.monotonic_ms() - t0 < 20000 do\n\
+           pmacs.workers.sleep(50):await()\n\
+           local now = pmacs.parse.tree(b)\n\
+           if now and now:source_len() ~= t:source_len() then break end\n\
+         end\n\
+         return string.format('before=%s current=%s stale=%s new=%s', before,\n\
+           tostring(t:is_current()), tostring(t:root():type()), tostring(pmacs.parse.tree(b):root():type()))";
+    let report = probe_in_unit("held.rs", "fn main() {}\n", probe);
+    assert_eq!(
+        report, "mode=process before=source_file current=false stale=nil new=source_file",
+        "a superseded tree in a unit stops answering"
+    );
+}

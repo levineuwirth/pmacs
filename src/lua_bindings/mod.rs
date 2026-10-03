@@ -71,7 +71,9 @@ use crate::statusline::{
     SharedStatuslineRegistry, StatuslineProviderFailure, StatuslineProviderId, StatuslineRegistry,
     StatuslineSide,
 };
-use crate::syntax::{self, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry};
+use crate::syntax::{
+    self, NodeFacts, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry,
+};
 use crate::workers_buffer;
 
 // Domain submodules split out of this file (audit F-016). Each owns one
@@ -7962,47 +7964,107 @@ pub fn make_async_runtime(
 
 /// Lua-facing wrapper around an [`Arc<ParseTreeBundle>`]. Cheap to
 /// clone (an `Arc` bump). All methods are read-only --- the bundle
-/// is immutable once installed; a new parse produces a new bundle.
+/// is immutable once installed; a new parse produces a new bundle. The
+/// view it came from, when it came from one, answers `is_current`.
 #[derive(Clone)]
-pub struct ParseTreeLua(Arc<ParseTreeBundle>);
+pub struct ParseTreeLua(Arc<ParseTreeBundle>, Option<ParseViewHandle>);
 
 /// Lua-facing wrapper around a node within a [`ParseTreeLua`]. The
 /// node is identified by a path of child indices from the tree's
-/// root. Every method resolves the path and re-walks the tree, so
-/// the userdata lifetime is decoupled from `tree_sitter::Node`'s
-/// borrow of `Tree`. O(depth) per access, which is fine for the
+/// root. In-process every method resolves the path and re-walks the
+/// tree, so the userdata lifetime is decoupled from `tree_sitter::Node`'s
+/// borrow of `Tree`; O(depth) per access, which is fine for the
 /// shallow-traversal patterns Lua scripts actually use.
+///
+/// E7i: when the tree lives in a parse unit, a node reads the facts the
+/// unit described for it instead: its own on first read, and its
+/// children's all at once when a script asks for them, so a walk costs
+/// one request per node whose children it reads. A tree the unit no
+/// longer holds (a newer parse installed) answers `nil`.
 #[derive(Clone)]
 pub struct ParseNodeLua {
     bundle: Arc<ParseTreeBundle>,
     path: Vec<u32>,
+    /// The node's facts from its unit, once read.
+    facts: Arc<Mutex<Option<NodeFacts>>>,
+    /// Its children's facts from its unit, once read.
+    children: Arc<Mutex<Option<Vec<NodeFacts>>>>,
 }
 
 impl ParseNodeLua {
-    fn resolve(&self) -> Option<tree_sitter::Node<'_>> {
-        // E7i: a tree held by a parse unit has no in-process root.
-        let mut node = self.bundle.layers.first()?.tree.root_node();
-        for &idx in &self.path {
-            node = node.child(idx)?;
+    fn at(bundle: Arc<ParseTreeBundle>, path: Vec<u32>, facts: Option<NodeFacts>) -> Self {
+        Self {
+            bundle,
+            path,
+            facts: Arc::new(Mutex::new(facts)),
+            children: Arc::new(Mutex::new(None)),
         }
-        Some(node)
+    }
+
+    fn resolve(&self) -> Option<tree_sitter::Node<'_>> {
+        syntax::node_at_path(&self.bundle, &self.path)
+    }
+
+    /// The node's facts: from the in-process tree, or from its unit.
+    fn facts(&self) -> Option<NodeFacts> {
+        let Some(isolated) = self.bundle.isolated.as_ref() else {
+            return self.resolve().map(NodeFacts::of);
+        };
+        let mut held = self.facts.lock().expect("node facts poisoned");
+        if held.is_none() {
+            *held = isolated
+                .describe(&self.path, false)
+                .and_then(|nodes| nodes.into_iter().next());
+        }
+        held.clone()
+    }
+
+    /// The node's children, each with its facts: from the in-process tree,
+    /// or from one request to its unit.
+    fn child_nodes(&self) -> Option<Vec<(NodeFacts, ParseNodeLua)>> {
+        let facts: Vec<NodeFacts> = match self.bundle.isolated.as_ref() {
+            None => {
+                let node = self.resolve()?;
+                let mut cursor = node.walk();
+                node.children(&mut cursor).map(NodeFacts::of).collect()
+            }
+            Some(isolated) => {
+                let mut held = self.children.lock().expect("node children poisoned");
+                if held.is_none() {
+                    let mut nodes = isolated.describe(&self.path, true)?.into_iter();
+                    let me = nodes.next()?;
+                    *self.facts.lock().expect("node facts poisoned") = Some(me);
+                    *held = Some(nodes.collect());
+                }
+                held.clone()?
+            }
+        };
+        Some(
+            facts
+                .into_iter()
+                .zip(0u32..)
+                .map(|(f, i)| {
+                    let mut path = self.path.clone();
+                    path.push(i);
+                    let node = ParseNodeLua::at(self.bundle.clone(), path, Some(f.clone()));
+                    (f, node)
+                })
+                .collect(),
+        )
     }
 }
 
-fn point_to_lua(lua: &Lua, p: tree_sitter::Point) -> mlua::Result<mlua::Value> {
+fn point_to_lua(lua: &Lua, (row, column): (u64, u64)) -> mlua::Result<mlua::Value> {
     let t = lua.create_table_with_capacity(0, 2)?;
-    t.set("row", p.row)?;
-    t.set("column", p.column)?;
+    t.set("row", row)?;
+    t.set("column", column)?;
     Ok(mlua::Value::Table(t))
 }
 
 impl UserData for ParseTreeLua {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("root", |_, this, ()| {
-            Ok(ParseNodeLua {
-                bundle: this.0.clone(),
-                path: Vec::new(),
-            })
+            Ok(ParseNodeLua::at(this.0.clone(), Vec::new(), None))
         });
         methods.add_method("language", |_, this, ()| Ok(this.0.language_name.clone()));
         methods.add_method("parse_duration_ms", |_, this, ()| {
@@ -8015,104 +8077,74 @@ impl UserData for ParseTreeLua {
             lua.create_string(this.0.source.as_ref())
         });
         methods.add_method("sexp", |_, this, ()| {
-            Ok(this.0.layers.first().map(|l| l.tree.root_node().to_sexp()))
+            Ok(match this.0.isolated.as_ref() {
+                Some(isolated) => isolated.sexp(&[]),
+                None => this.0.layers.first().map(|l| l.tree.root_node().to_sexp()),
+            })
+        });
+        // Whether this is still the buffer's installed parse. A tree in a
+        // parse unit stops answering once a newer parse replaces it there
+        // (E7i); an in-process one stays readable, but is no longer current.
+        methods.add_method("is_current", |_, this, ()| {
+            Ok(this
+                .1
+                .as_ref()
+                .and_then(ParseViewHandle::current)
+                .is_some_and(|now| Arc::ptr_eq(&now, &this.0)))
         });
     }
 }
 
 impl UserData for ParseNodeLua {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "linear list of read-only Node accessors; splitting into helpers fragments a coherent API surface"
-    )]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("type", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.kind().to_owned()))
-        });
+        methods.add_method("type", |_, this, ()| Ok(this.facts().map(|f| f.kind)));
         methods.add_method("start_byte", |_, this, ()| {
             Ok(this
-                .resolve()
-                .map(|n| i64::try_from(n.start_byte()).unwrap_or(i64::MAX)))
+                .facts()
+                .map(|f| i64::try_from(f.start_byte).unwrap_or(i64::MAX)))
         });
         methods.add_method("end_byte", |_, this, ()| {
             Ok(this
-                .resolve()
-                .map(|n| i64::try_from(n.end_byte()).unwrap_or(i64::MAX)))
+                .facts()
+                .map(|f| i64::try_from(f.end_byte).unwrap_or(i64::MAX)))
         });
         methods.add_method("start_position", |lua, this, ()| {
-            this.resolve()
-                .map(|n| point_to_lua(lua, n.start_position()))
-                .transpose()
+            this.facts().map(|f| point_to_lua(lua, f.start)).transpose()
         });
         methods.add_method("end_position", |lua, this, ()| {
-            this.resolve()
-                .map(|n| point_to_lua(lua, n.end_position()))
-                .transpose()
+            this.facts().map(|f| point_to_lua(lua, f.end)).transpose()
         });
         methods.add_method("child_count", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.child_count()))
+            Ok(this.facts().map(|f| f.child_count))
         });
         methods.add_method("named_child_count", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.named_child_count()))
+            Ok(this.facts().map(|f| f.named_child_count))
         });
         methods.add_method("child", |_, this, idx: u32| {
-            let Some(node) = this.resolve() else {
-                return Ok(None);
-            };
-            if node.child(idx).is_none() {
-                return Ok(None);
-            }
-            let mut path = this.path.clone();
-            path.push(idx);
-            Ok(Some(ParseNodeLua {
-                bundle: this.bundle.clone(),
-                path,
-            }))
+            Ok(this
+                .child_nodes()
+                .and_then(|children| children.into_iter().nth(idx as usize))
+                .map(|(_, node)| node))
         });
         methods.add_method("children", |lua, this, ()| {
-            let Some(node) = this.resolve() else {
+            let Some(children) = this.child_nodes() else {
                 return Ok(mlua::Value::Nil);
             };
-            let count = node.child_count() as u32;
-            let t = lua.create_table_with_capacity(count as usize, 0)?;
-            for i in 0..count {
-                let mut path = this.path.clone();
-                path.push(i);
-                t.set(
-                    i + 1,
-                    ParseNodeLua {
-                        bundle: this.bundle.clone(),
-                        path,
-                    },
-                )?;
+            let t = lua.create_table_with_capacity(children.len(), 0)?;
+            for (i, (_, node)) in children.into_iter().enumerate() {
+                t.set(i + 1, node)?;
             }
             Ok(mlua::Value::Table(t))
         });
         methods.add_method("named_children", |lua, this, ()| {
-            let Some(node) = this.resolve() else {
+            let Some(children) = this.child_nodes() else {
                 return Ok(mlua::Value::Nil);
             };
-            // Walk through children, keep only the named ones, but
-            // record the *child* index (not the named-only index) so
-            // re-resolution from the path works.
-            let count = node.child_count() as u32;
+            // Keep only the named ones, each still addressed by its *child*
+            // index (not the named-only index), so its path resolves.
             let t = lua.create_table()?;
-            let mut out_idx = 0;
-            for i in 0..count {
-                let Some(child) = node.child(i) else { continue };
-                if !child.is_named() {
-                    continue;
-                }
-                let mut path = this.path.clone();
-                path.push(i);
-                out_idx += 1;
-                t.set(
-                    out_idx,
-                    ParseNodeLua {
-                        bundle: this.bundle.clone(),
-                        path,
-                    },
-                )?;
+            for (out_idx, (_, node)) in children.into_iter().filter(|(f, _)| f.named).enumerate() {
+                t.set(out_idx + 1, node)?;
             }
             Ok(mlua::Value::Table(t))
         });
@@ -8122,31 +8154,29 @@ impl UserData for ParseNodeLua {
             }
             let mut path = this.path.clone();
             path.pop();
-            Ok(Some(ParseNodeLua {
-                bundle: this.bundle.clone(),
-                path,
-            }))
+            Ok(Some(ParseNodeLua::at(this.bundle.clone(), path, None)))
         });
-        methods.add_method("is_named", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.is_named()))
-        });
+        methods.add_method("is_named", |_, this, ()| Ok(this.facts().map(|f| f.named)));
         methods.add_method("is_missing", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.is_missing()))
+            Ok(this.facts().map(|f| f.missing))
         });
         methods.add_method("has_error", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.has_error()))
+            Ok(this.facts().map(|f| f.has_error))
         });
         methods.add_method("text", |lua, this, ()| {
-            let Some(node) = this.resolve() else {
+            let Some(f) = this.facts() else {
                 return Ok(None);
             };
-            let start = node.start_byte();
-            let end = node.end_byte().min(this.bundle.source.len());
-            let bytes = &this.bundle.source[start.min(end)..end];
-            Ok(Some(lua.create_string(bytes)?))
+            let len = this.bundle.source.len();
+            let end = (f.end_byte as usize).min(len);
+            let start = (f.start_byte as usize).min(end);
+            Ok(Some(lua.create_string(&this.bundle.source[start..end])?))
         });
         methods.add_method("sexp", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.to_sexp()))
+            Ok(match this.bundle.isolated.as_ref() {
+                Some(isolated) => isolated.sexp(&this.path),
+                None => this.resolve().map(|n| n.to_sexp()),
+            })
         });
     }
 }
@@ -8318,7 +8348,11 @@ pub fn install_parse(
         parse_mod.set(
             "tree",
             lua.create_function(move |_, id: BufferIdLua| {
-                Ok(s.view(id.0).and_then(|h| h.current()).map(ParseTreeLua))
+                let view = s.view(id.0);
+                Ok(view
+                    .as_ref()
+                    .and_then(ParseViewHandle::current)
+                    .map(|bundle| ParseTreeLua(bundle, view)))
             })?,
         )?;
     }
@@ -8404,7 +8438,7 @@ pub fn install_parse(
                     // (framing Q#IJ2 stage 2).
                     let arc = s.resolve_layer_queries(&bundle);
                     handle.install(arc.clone());
-                    Ok(ParseTreeLua(arc))
+                    Ok(ParseTreeLua(arc, Some(handle)))
                 },
             )?,
         )?;

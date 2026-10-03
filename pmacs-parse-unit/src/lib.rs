@@ -98,6 +98,20 @@ pub enum Request {
         /// The byte, or `None` for the top-level targets.
         at: Option<u64>,
     },
+    /// The installed tree's node at `path` (child indices from the root
+    /// layer's root) and, with `children`, each child after it, for Lua's
+    /// node API (`pmacs_syntax::describe_path`).
+    Describe {
+        /// Child indices from the root.
+        path: Vec<u32>,
+        /// Describe the node's children too.
+        children: bool,
+    },
+    /// The s-expression of the installed tree's node at `path`.
+    Sexp {
+        /// Child indices from the root.
+        path: Vec<u32>,
+    },
 }
 
 /// How a [`ParseCall`]'s payload brings the unit's text up to date.
@@ -198,6 +212,65 @@ pub enum Response {
     },
     /// Fold ranges, `(start, end)`, as [`Request::Folds`] asked.
     Folds(Vec<(u64, u64)>),
+    /// Nodes, as [`Request::Describe`] asked; empty when the path names no
+    /// node.
+    Nodes(Vec<WireNode>),
+    /// Text, as [`Request::Sexp`] asked; `None` when the path names no
+    /// node.
+    Text(Option<String>),
+}
+
+/// `pmacs_syntax::NodeFacts` on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireNode {
+    /// The node's kind.
+    pub kind: String,
+    /// First byte.
+    pub start_byte: u64,
+    /// End byte, exclusive.
+    pub end_byte: u64,
+    /// `(row, column)` of the start.
+    pub start: (u64, u64),
+    /// `(row, column)` of the end.
+    pub end: (u64, u64),
+    /// Children, named and anonymous.
+    pub child_count: u32,
+    /// Named children.
+    pub named_child_count: u32,
+    /// Named, missing, has-error.
+    pub flags: (bool, bool, bool),
+}
+
+impl From<pmacs_syntax::NodeFacts> for WireNode {
+    fn from(f: pmacs_syntax::NodeFacts) -> Self {
+        Self {
+            kind: f.kind,
+            start_byte: f.start_byte,
+            end_byte: f.end_byte,
+            start: f.start,
+            end: f.end,
+            child_count: f.child_count,
+            named_child_count: f.named_child_count,
+            flags: (f.named, f.missing, f.has_error),
+        }
+    }
+}
+
+impl From<WireNode> for pmacs_syntax::NodeFacts {
+    fn from(w: WireNode) -> Self {
+        Self {
+            kind: w.kind,
+            start_byte: w.start_byte,
+            end_byte: w.end_byte,
+            start: w.start,
+            end: w.end,
+            child_count: w.child_count,
+            named_child_count: w.named_child_count,
+            named: w.flags.0,
+            missing: w.flags.1,
+            has_error: w.flags.2,
+        }
+    }
 }
 
 /// A parse that installed.
@@ -315,6 +388,21 @@ impl Unit {
                     Some(p) => pmacs_syntax::fold::candidates_at(&installed.bundle, p),
                     None => pmacs_syntax::fold::top_level_targets(&installed.bundle),
                 }),
+                None => Response::Failed(Failure::NoTreeInstalled),
+            },
+            Request::Describe { path, children } => match self.installed.as_ref() {
+                Some(installed) => Response::Nodes(
+                    pmacs_syntax::describe_path(&installed.bundle, &path, children)
+                        .into_iter()
+                        .map(WireNode::from)
+                        .collect(),
+                ),
+                None => Response::Failed(Failure::NoTreeInstalled),
+            },
+            Request::Sexp { path } => match self.installed.as_ref() {
+                Some(installed) => Response::Text(
+                    pmacs_syntax::node_at_path(&installed.bundle, &path).map(|n| n.to_sexp()),
+                ),
                 None => Response::Failed(Failure::NoTreeInstalled),
             },
             Request::Stats => Response::Stats {
