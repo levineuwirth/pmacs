@@ -30,10 +30,21 @@
 //! doubles from [`CRASH_BACKOFF`], and after [`MAX_CRASHES`] crashes in a
 //! row with no parse installed between them the buffer is not parsed again
 //! until it is killed and opened again, since every restart runs the same
-//! bytes (E7i review 1, Medium 1). The settle path tells the user once. The buffer's previous parse survives the discard
-//! in the editor, as its text and its spans ([`IsolatedHandle`]); a read
-//! those spans do not answer is answered by re-parsing that text into a
-//! fresh unit, which rebuilds the previous tree there.
+//! bytes (E7i review 1, Medium 1). The settle path tells the user once.
+//!
+//! The buffer's previous parse survives the discard in the editor, as its
+//! text and its spans ([`IsolatedHandle`]); a read those spans do not
+//! answer is answered by re-parsing that text into a fresh unit, which
+//! rebuilds the previous tree there. That re-parse runs on the thread that
+//! asked, which for the grid, a fold command or Lua's node API is the main
+//! thread: the first such read after a death holds the editor for a cold
+//! parse of the previous text (E7i review 1, Low 4: 186 ms for 120 KB of
+//! Rust inside `paint_frame` in a debug build; the E7i build measured a
+//! release worker's cold parse at 154 ms for `src/editor.rs` and 409 ms
+//! for the comparison's markdown note). It is bounded by the deadline and
+//! then [`AFTER_PARSE_HARD`], not made while another parse of the buffer
+//! runs, and not made at all once the buffer's crashes have stopped its
+//! parsing; a frame painted before it shows what the editor already holds.
 //!
 //! Highlighting, folds and Lua's node API read the tree through the unit,
 //! batched (the consumer scoping at E7i). `PMACS_E7I_TRACE=<path>` appends
@@ -1065,6 +1076,9 @@ impl IsolatedHandle {
     /// The unit that held this tree was discarded: start a fresh one and
     /// parse this tree's text into it, which rebuilds the tree there. Not
     /// while a parse of the buffer runs, which will install a newer tree.
+    /// It runs on the calling thread, the main one for every reader but the
+    /// settle path's, so the read that triggers it waits a cold parse (the
+    /// module doc says how long).
     fn reestablish(&self) -> Option<Arc<ProcessUnit>> {
         let _in_order = self.cell.parsing.try_lock().ok()?;
         {
