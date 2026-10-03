@@ -91,6 +91,13 @@ pub enum Request {
     },
     /// The unit's text length and layer count, for a liveness check.
     Stats,
+    /// The installed tree's fold candidates at a byte, innermost first, or
+    /// its top-level fold targets when `at` is `None`
+    /// (`pmacs_syntax::fold`).
+    Folds {
+        /// The byte, or `None` for the top-level targets.
+        at: Option<u64>,
+    },
 }
 
 /// How a [`ParseCall`]'s payload brings the unit's text up to date.
@@ -189,6 +196,8 @@ pub enum Response {
         /// Layers in the installed tree, 0 when none is installed.
         layers: u32,
     },
+    /// Fold ranges, `(start, end)`, as [`Request::Folds`] asked.
+    Folds(Vec<(u64, u64)>),
 }
 
 /// A parse that installed.
@@ -299,6 +308,13 @@ impl Unit {
             Request::Parse(call) => self.parse(&call, payload),
             Request::Spans { ranges } => match self.installed.as_ref() {
                 Some(installed) => Response::Spans(spans_over(installed, &ranges)),
+                None => Response::Failed(Failure::NoTreeInstalled),
+            },
+            Request::Folds { at } => match self.installed.as_ref() {
+                Some(installed) => Response::Folds(match at {
+                    Some(p) => pmacs_syntax::fold::candidates_at(&installed.bundle, p),
+                    None => pmacs_syntax::fold::top_level_targets(&installed.bundle),
+                }),
                 None => Response::Failed(Failure::NoTreeInstalled),
             },
             Request::Stats => Response::Stats {

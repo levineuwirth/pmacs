@@ -13,6 +13,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod fold;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::ControlFlow;
@@ -197,6 +199,13 @@ pub trait IsolatedTree: Send + Sync + fmt::Debug {
     fn spans_for(&self, range: std::ops::Range<usize>) -> Option<Arc<IsolatedSpans>>;
     /// The layers the unit installed, the root first.
     fn layer_languages(&self) -> Vec<String>;
+    /// The fold candidates at `pos`, innermost first, as
+    /// [`fold::candidates_at`] finds them in the unit's tree; `None` when
+    /// the unit cannot answer now.
+    fn fold_candidates(&self, pos: u64) -> Option<Vec<(u64, u64)>>;
+    /// The top-level fold targets, as [`fold::top_level_targets`] finds
+    /// them; `None` when the unit cannot answer now.
+    fn top_level_folds(&self) -> Option<Vec<(u64, u64)>>;
 }
 
 /// Lexically-local identifier ranges derived from a grammar's bundled

@@ -387,3 +387,78 @@ fn e7i_the_workers_total_says_how_this_machine_holds_it() {
         );
     }
 }
+
+/// A daemon in process mode whose init.lua opens `file` (`name`, its text
+/// `text`), waits until the buffer's parse settles from its unit, runs
+/// `probe` (Lua with `b` bound to the buffer, returning a string) and
+/// writes `mode=<unit mode> <probe's string>` to the report.
+fn probe_in_unit(name: &str, text: &str, probe: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let file = dir.join(name);
+    std::fs::write(&file, text).expect("file");
+    let report = dir.join("report.txt");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         local b = pmacs.buffer.find_or_open({file:?})\n\
+         local function probe()\n{probe}\nend\n\
+         pmacs.async(function()\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 60000 do\n\
+             pmacs.workers.sleep(50):await()\n\
+             local r = pmacs.parse._unit_report(b)\n\
+             if r and not r.busy and r.unit ~= '' and pmacs.parse.tree(b) then\n\
+               local ok, said = pcall(probe)\n\
+               local f = assert(io.open({report:?}, 'w'))\n\
+               f:write('mode=' .. r.mode .. ' ' .. (ok and tostring(said) or ('error ' .. tostring(said))))\n\
+               f:close()\n\
+               return\n\
+             end\n\
+           end\n\
+         end)\n",
+        file = file.display().to_string(),
+        report = report.display().to_string(),
+    );
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init);
+    let log = PathBuf::from(format!("{}.stderr.log", daemon.socket_path().display()));
+    wait_report(&report, &log, Duration::from_mins(1), |t| !t.is_empty())
+}
+
+/// Folds read the tree where it lives (E7i): with the buffer's parse in a
+/// worker, `fold.close` inside a function's body folds that body, and
+/// `fold.close_all` folds both top-level functions, each range the
+/// structural source's (head line kept, closing brace kept).
+#[test]
+fn e7i_folds_read_their_tree_from_the_buffer_s_unit() {
+    let text = "fn one() {\n    let a = 1;\n    let b = 2;\n}\n\nfn two() {\n    let c = 3;\n    let d = 4;\n}\n";
+    let inside = text.find("let a").expect("let a");
+    let probe = format!(
+        "local function list()\n\
+           local out = {{}}\n\
+           for _, r in ipairs(pmacs.fold.folds(b)) do out[#out + 1] = r.start .. '-' .. r['end'] end\n\
+           return table.concat(out, ',')\n\
+         end\n\
+         local closed = pmacs.fold.close(b, {inside})\n\
+         local one = list()\n\
+         pmacs.fold.open_all(b)\n\
+         local n = pmacs.fold.close_all(b)\n\
+         return string.format('close=%s folds=%s all=%d folds=%s', tostring(closed), one, n, list())"
+    );
+    let text_of = |needle: &str| text.find(needle).expect("needle");
+    let one = format!(
+        "{}-{}",
+        text_of("fn one() {") + 10,
+        text_of("\n}\n\nfn two")
+    );
+    let two = format!(
+        "{}-{}",
+        text_of("fn two() {") + 10,
+        text.rfind("\n}\n").expect("last brace")
+    );
+    let report = probe_in_unit("folds.rs", text, &probe);
+    assert_eq!(
+        report,
+        format!("mode=process close=true folds={one} all=2 folds={one},{two}"),
+        "folds come from the unit's tree"
+    );
+}

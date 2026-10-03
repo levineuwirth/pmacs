@@ -152,11 +152,11 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                             return Ok(true);
                         }
                     }
-                    let Some(bundle) = bundle_or_status(lua, id) else {
+                    let Some(candidates) = candidates_or_status(lua, id, p) else {
                         return Ok(false);
                     };
                     let store = store_for(lua, &reg, id)?;
-                    match fold::toggle_at(&mut lock(&store), &bundle, p) {
+                    match fold::toggle_among(&mut lock(&store), &candidates, p) {
                         fold::ToggleOutcome::Folded(r) => {
                             maybe_move_point(lua, id, r);
                             Ok(true)
@@ -182,11 +182,11 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                 move |lua, (buf, pos): (BufferIdLua, i64)| -> mlua::Result<bool> {
                     let id = buf.id();
                     let p = u64_from_lua(pos)?;
-                    let Some(bundle) = bundle_or_status(lua, id) else {
+                    let Some(candidates) = candidates_or_status(lua, id, p) else {
                         return Ok(false);
                     };
                     let store = store_for(lua, &reg, id)?;
-                    if let Some(r) = fold::close_at(&mut lock(&store), &bundle, p) {
+                    if let Some(r) = fold::close_among(&mut lock(&store), &candidates) {
                         maybe_move_point(lua, id, r);
                         Ok(true)
                     } else {
@@ -223,11 +223,11 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                 move |lua, (buf, pos): (BufferIdLua, i64)| -> mlua::Result<bool> {
                     let id = buf.id();
                     let p = u64_from_lua(pos)?;
-                    let Some(bundle) = bundle_or_status(lua, id) else {
+                    let Some(candidates) = candidates_or_status(lua, id, p) else {
                         return Ok(false);
                     };
                     let store = store_for(lua, &reg, id)?;
-                    match fold::cycle_at(&mut lock(&store), &bundle, p) {
+                    match fold::cycle_among(&mut lock(&store), &candidates, p) {
                         fold::CycleOutcome::Closed(r) => {
                             maybe_move_point(lua, id, r);
                             Ok(true)
@@ -252,7 +252,10 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                 let Some(bundle) = bundle_or_status(lua, id) else {
                     return Ok(0);
                 };
-                let targets = fold::top_level_fold_targets(&bundle);
+                let Some(targets) = fold::try_top_level_fold_targets(&bundle) else {
+                    set_status(lua, UNIT_CANNOT_ANSWER);
+                    return Ok(0);
+                };
                 let store = store_for(lua, &reg, id)?;
                 let inserted: Vec<ByteRange> = {
                     let mut s = lock(&store);
@@ -356,6 +359,21 @@ fn store_for(
         let buffer = resolve_mut(r, buf)?;
         Ok(reg.store_or_attach(buffer))
     })
+}
+
+/// What a fold command says when the buffer's tree lives in a parse unit
+/// that cannot answer now (E7i).
+const UNIT_CANNOT_ANSWER: &str = "fold: the buffer's parse unit cannot answer now; try again";
+
+/// The fold candidates at `p` in `buf`'s settled parse, innermost first,
+/// or `None` after telling the user why there are none to read now.
+fn candidates_or_status(lua: &Lua, buf: BufferId, p: u64) -> Option<Vec<ByteRange>> {
+    let bundle = bundle_or_status(lua, buf)?;
+    let found = fold::try_candidates_at(&bundle, p);
+    if found.is_none() {
+        set_status(lua, UNIT_CANNOT_ANSWER);
+    }
+    found
 }
 
 /// The settled parse bundle for `buf`, or `None` after reporting the

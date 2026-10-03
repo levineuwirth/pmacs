@@ -653,12 +653,49 @@ impl IsolatedTree for IsolatedHandle {
     fn layer_languages(&self) -> Vec<String> {
         self.languages.lock().expect("languages poisoned").clone()
     }
+
+    fn fold_candidates(&self, pos: u64) -> Option<Vec<(u64, u64)>> {
+        match self.ask(&Request::Folds { at: Some(pos) })? {
+            Response::Folds(ranges) => Some(ranges),
+            _ => None,
+        }
+    }
+
+    fn top_level_folds(&self) -> Option<Vec<(u64, u64)>> {
+        match self.ask(&Request::Folds { at: None })? {
+            Response::Folds(ranges) => Some(ranges),
+            _ => None,
+        }
+    }
 }
 
 /// How long a spans request may take before its unit is discarded.
 const SPANS_HARD: Duration = Duration::from_secs(2);
 
 impl IsolatedHandle {
+    /// Ask this tree's unit `request`: the unit holding it if it is idle,
+    /// or a fresh one this tree's text is re-parsed into when the old one
+    /// was discarded. `None` when the unit is busy or holds a newer tree.
+    fn ask(&self, request: &Request) -> Option<Response> {
+        let mut slot = self.slot.try_lock().ok()?;
+        if slot.transport.is_none() {
+            self.reestablish(&mut slot, Vec::new())?;
+        } else if slot.generation != self.generation.load(Ordering::Relaxed) {
+            return None;
+        }
+        let transport = slot.transport.as_mut()?;
+        match transport.call(request, &[], Some(SPANS_HARD)) {
+            Ok(Response::Failed(_)) => None,
+            Ok(response) => Some(response),
+            Err(death) => {
+                slot.transport = None;
+                slot.synced = false;
+                slot.last_death = Some(death);
+                None
+            }
+        }
+    }
+
     /// The unit that held this tree was discarded: start a fresh one and
     /// parse this tree's text into it, which rebuilds the tree there.
     fn reestablish(&self, slot: &mut Slot, interest: Vec<(u32, u32)>) -> Option<SpanSet> {
