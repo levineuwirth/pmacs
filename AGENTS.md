@@ -128,7 +128,13 @@ Always true:
   unit of a reproduction, is reported "known, accepted (#N)" and does not
   fail. The list is empty: #296's and #301's rows retired when the
   worker stopped them in the editor, and their reproductions moved to
-  `fuzz/regress/markdown/`, which every arm replays. A row is keyed to
+  `fuzz/regress/markdown/`, which every arm replays through markdown's
+  route: a released worker stops #296's underscore paragraph by its
+  memory limit and #301's three at the deadline (the 596-byte one by the
+  edit sequence recorded beside it, since its bytes alone parse at once),
+  and answers #296's asterisks, a large parse that returns, which only a
+  debug or sanitizer build's overhead stops (`fuzz/regress/README.md`).
+  A row is keyed to
   the defect, not the route. Adding a row is the owner's ruling, never a
   session's; a session that meets a finding it believes known files or
   comments the issue and leaves the run red.

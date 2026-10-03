@@ -1202,9 +1202,12 @@ fn e7i_review1_the_aliasing_guard_reaches_the_worker_s_build() {
 /// paragraph route, and wrapped in a ```` ```markdown_inline ```` fence they
 /// reach the inline grammar verbatim. This row replays the stored input and
 /// the de-indented one through the worker as markdown, 1 s deadline: the
-/// stored one must be contained as the de-indented one is.
+/// stored one must be contained as the de-indented one is. Fix round 1
+/// stores it without the spaces (33 of them, not the 32 this pass said),
+/// and the replay calls a parse the worker cancels at its own deadline
+/// contained by time as it calls one killed past the grace: which of the
+/// two this input meets depends on load, and it was counted answered.
 #[test]
-#[ignore = "E7i review 1, Low: the stored 301-hang-7672 never reaches #301 by the replay's route (fails at fa176de, answered)"]
 fn e7i_review1_the_regress_hang_reaches_its_defect_through_markdown() {
     let stored = repo().join("fuzz/regress/markdown/301-hang-7672.input");
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1236,12 +1239,62 @@ fn e7i_review1_the_regress_hang_reaches_its_defect_through_markdown() {
     let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
     say(&format!("regress route: exit {status:?}\n{report}"));
     assert!(
-        report.contains("strip-7672.input`, time: killed at the deadline"),
+        report.contains("strip-7672.input`, time: "),
         "control: the de-indented input reaches #301 through markdown: {report}"
     );
     assert!(
-        report.contains("301-hang-7672.input`, time: killed at the deadline"),
+        report.contains("301-hang-7672.input`, time: "),
         "the stored input reaches #301 through markdown as well: {report}"
+    );
+}
+
+/// `fuzz/regress/markdown/301-hang-596.input` hangs only under the edit
+/// sequence the fuzzer's seed made (`--edits 8 --seed 15703056251634817165`);
+/// its bytes alone parse at once by any route, so at `fa176de` the replay
+/// answered it and proved nothing about #301. Fix round 1 records the
+/// sequence beside it (`301-hang-596.edits`) and `replay-unit` applies it.
+/// Replayed as every arm replays `fuzz/regress/`, through markdown's route at
+/// a 1 s deadline, the stored input is stopped at the deadline; the same
+/// bytes without their edits, a control, are answered.
+#[test]
+fn e7i_review1_the_regress_edit_sequence_reaches_its_defect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bare = dir.path().join("596-without-edits.input");
+    std::fs::copy(
+        repo().join("fuzz/regress/markdown/301-hang-596.input"),
+        &bare,
+    )
+    .expect("the bare copy");
+    let corpus = dir.path().join("corpus");
+    std::fs::create_dir_all(&corpus).expect("corpus");
+    let out = dir.path().join("out");
+    let worker = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("target dir")
+        .join("pmacs-parse-unit");
+    let status = Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
+        .args(["replay-unit", "--unit"])
+        .arg(&worker)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--out")
+        .arg(&out)
+        .args(["--deadline-ms", "1000", "--grammar", "markdown"])
+        .arg("--findings")
+        .arg(repo().join("fuzz/regress"))
+        .arg("--extra")
+        .arg(format!("markdown={}", bare.display()))
+        .status()
+        .expect("run the replay");
+    let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
+    say(&format!("regress edit sequence: exit {status:?}\n{report}"));
+    assert!(
+        !report.contains("596-without-edits.input`"),
+        "control: the bytes alone are answered, not contained: {report}"
+    );
+    assert!(
+        report.contains("301-hang-596.input`, time: "),
+        "the stored input, with its recorded edits, reaches #301 through markdown: {report}"
     );
 }
 

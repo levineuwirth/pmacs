@@ -45,7 +45,11 @@
 //! each arm's sanitizers and replays the arm's seeds and findings through
 //! it, and the same command replays them through a shipped worker. A worker
 //! stopped by its own memory or time limit is contained, which is what the
-//! boundary is for; any other death is a crash and fails the replay.
+//! boundary is for; any other death is a crash and fails the replay. An
+//! input whose defect is an edit sequence and not its bytes carries the
+//! sequence beside it, `<name>.edits` (E7i fix round 1: `301-hang-596`
+//! returns at once however it is fed whole): the replay parses it whole,
+//! then applies each recorded parse's edits as the editor sends them.
 //!
 //! `race-unit` (E7i fix round 1) drives a worker built under
 //! `ThreadSanitizer`, the `tsan` arm, through the schedules that let its two
@@ -3754,8 +3758,13 @@ impl UnitClient {
         };
         let generation = match self.wait(&[id], hard) {
             Ok(mut answers) => match answers.pop() {
-                Some(Response::Parsed(parsed)) => parsed.generation,
-                _ => {
+                Some(Response::Parsed(parsed)) if !parsed.layers_cut_by_deadline => {
+                    parsed.generation
+                }
+                other => {
+                    if let Some(stopped) = other.as_ref().and_then(cancelled_at_deadline) {
+                        return stopped;
+                    }
                     return self
                         .sanitizer_since()
                         .map_or(UnitOutcome::Answered, UnitOutcome::Crashed);
@@ -3812,11 +3821,186 @@ impl UnitClient {
             }
         }
         match self.wait(&ids, hard) {
-            Ok(_) => self
-                .sanitizer_since()
-                .map_or(UnitOutcome::Answered, UnitOutcome::Crashed),
+            Ok(answers) => match answers.first().and_then(cancelled_at_deadline) {
+                Some(stopped) => stopped,
+                None => self
+                    .sanitizer_since()
+                    .map_or(UnitOutcome::Answered, UnitOutcome::Crashed),
+            },
             Err(()) => self.ended(),
         }
+    }
+}
+
+/// A parse the worker stopped at its own deadline, where tree-sitter calls
+/// the progress callback: the root cancelled (no tree), or an injected
+/// layer cancelled and the tree returned without the layers after it.
+/// Either is containment by time as much as a parse the harness kills past
+/// the grace, which is where one lands that the callback does not reach
+/// (#301's condensation). Which of the three a never-returning parse meets
+/// depends on where it stands when the deadline passes, so the replay
+/// calls all three contained (E7i fix round 1: counted as answered, the
+/// de-indented #301 input flickered between them under load).
+fn cancelled_at_deadline(answer: &pmacs_parse_unit::Response) -> Option<UnitOutcome> {
+    match answer {
+        pmacs_parse_unit::Response::Failed(pmacs_parse_unit::Failure::Deadline {
+            deadline_ms,
+            after_ms,
+        }) => Some(UnitOutcome::Contained(format!(
+            "time: cancelled at the deadline ({deadline_ms} ms, after {after_ms} ms)"
+        ))),
+        pmacs_parse_unit::Response::Parsed(parsed) if parsed.layers_cut_by_deadline => Some(
+            UnitOutcome::Contained("time: injected layers cut at the deadline".to_owned()),
+        ),
+        _ => None,
+    }
+}
+
+/// A recorded edit sequence: one entry per parse, each a batch of edits
+/// `(start, old_end, inserted)` in the text that edit meets, applied in
+/// order.
+type EditScript = Vec<Vec<(usize, usize, String)>>;
+
+/// The edit sequence recorded beside an input (`<name>.edits`, JSON
+/// `[[[start, old_end, "inserted"], ...], ...]`), if it has one.
+fn edit_script(input: &str) -> Result<Option<EditScript>, String> {
+    let path = Path::new(input).with_extension("edits");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Apply one recorded parse's edits to `text`, in order, and return them
+/// as the editor sends them: the wire edits and their inserted bytes.
+fn apply_batch(
+    text: &mut Vec<u8>,
+    batch: &[(usize, usize, String)],
+) -> Result<(Vec<pmacs_parse_unit::WireEdit>, Vec<u8>), String> {
+    let point = |p: tree_sitter::Point| (p.row as u32, p.column as u32);
+    let mut edits = Vec::new();
+    let mut inserted = Vec::new();
+    for (start, old_end, insert) in batch {
+        let (start, old_end) = (*start, *old_end);
+        if start > old_end || old_end > text.len() {
+            return Err(format!(
+                "the recorded edit {start}..{old_end} is outside the text's {} bytes",
+                text.len()
+            ));
+        }
+        let start_at = point(byte_to_point(text, start));
+        let old_end_at = point(byte_to_point(text, old_end));
+        text.splice(start..old_end, insert.bytes());
+        let new_end = start + insert.len();
+        edits.push(pmacs_parse_unit::WireEdit {
+            start_byte: start as u32,
+            old_end_byte: old_end as u32,
+            new_end_byte: new_end as u32,
+            start: start_at,
+            old_end: old_end_at,
+            new_end: point(byte_to_point(text, new_end)),
+        });
+        inserted.extend_from_slice(insert.as_bytes());
+    }
+    Ok((edits, inserted))
+}
+
+impl UnitClient {
+    /// An input whose defect is an edit sequence: the whole text parsed,
+    /// then each recorded parse's edits applied as the editor sends them,
+    /// with reads of the installed tree sent while that parse runs.
+    fn replay_script(
+        &mut self,
+        grammar: &str,
+        text: &[u8],
+        script: &EditScript,
+        deadline_ms: u64,
+        hard: Duration,
+    ) -> UnitOutcome {
+        use pmacs_parse_unit::{ParseCall, Request, Response, TextUpdate, WireEdit};
+        let call = |update, edits: Vec<WireEdit>, len: usize| ParseCall {
+            language: grammar.to_owned(),
+            text: update,
+            edits,
+            expect_len: len as u32,
+            aliases: default_injection_aliases().into_iter().collect(),
+            deadline_ms: Some(deadline_ms),
+            interest: vec![(0, 4096)],
+        };
+        let mut text = text.to_vec();
+        let Ok(id) = self.send(
+            &Request::Parse(call(TextUpdate::Full, Vec::new(), text.len())),
+            &text,
+        ) else {
+            return self.ended();
+        };
+        let mut generation = match self.wait(&[id], hard) {
+            Ok(mut answers) => match answers.pop() {
+                Some(Response::Parsed(parsed)) if !parsed.layers_cut_by_deadline => {
+                    parsed.generation
+                }
+                other => {
+                    if let Some(stopped) = other.as_ref().and_then(cancelled_at_deadline) {
+                        return stopped;
+                    }
+                    0
+                }
+            },
+            Err(()) => return self.ended(),
+        };
+        for batch in script {
+            let (edits, inserted) = match apply_batch(&mut text, batch) {
+                Ok(applied) => applied,
+                Err(e) => return UnitOutcome::Crashed(e),
+            };
+            let mut ids = Vec::new();
+            match self.send(
+                &Request::Parse(call(TextUpdate::Edits, edits, text.len())),
+                &inserted,
+            ) {
+                Ok(id) => ids.push(id),
+                Err(_) => return self.ended(),
+            }
+            for read in [
+                Request::Spans {
+                    generation,
+                    ranges: vec![(0, text.len() as u32)],
+                },
+                Request::Folds {
+                    generation,
+                    at: None,
+                },
+                Request::Describe {
+                    generation,
+                    path: Vec::new(),
+                    children: true,
+                },
+            ] {
+                match self.send(&read, &[]) {
+                    Ok(id) => ids.push(id),
+                    Err(_) => return self.ended(),
+                }
+            }
+            match self.wait(&ids, hard) {
+                Ok(answers) => match answers.first() {
+                    Some(Response::Parsed(parsed)) if !parsed.layers_cut_by_deadline => {
+                        generation = parsed.generation;
+                    }
+                    Some(other) => {
+                        if let Some(stopped) = cancelled_at_deadline(other) {
+                            return stopped;
+                        }
+                    }
+                    None => {}
+                },
+                Err(()) => return self.ended(),
+            }
+        }
+        self.sanitizer_since()
+            .map_or(UnitOutcome::Answered, UnitOutcome::Crashed)
     }
 }
 
@@ -4042,7 +4226,15 @@ fn replay_grammar(
             }
         }
         let u = unit.as_mut().expect("spawned above");
-        match u.replay(grammar, text, cfg.deadline_ms, cfg.hard) {
+        let outcome = match edit_script(name) {
+            Ok(Some(script)) => u.replay_script(grammar, text, &script, cfg.deadline_ms, cfg.hard),
+            Ok(None) => u.replay(grammar, text, cfg.deadline_ms, cfg.hard),
+            Err(e) => {
+                replay.error = Some(e);
+                return replay;
+            }
+        };
+        match outcome {
             UnitOutcome::Answered => replay.answered += 1,
             UnitOutcome::Contained(why) => {
                 replay.contained.push((name.clone(), why));
