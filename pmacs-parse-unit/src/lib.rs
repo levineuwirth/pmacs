@@ -26,6 +26,16 @@
 //! two most recently installed trees, each with the generation its parse
 //! answered with, and a read names the generation it wants; one the unit
 //! no longer keeps answers [`Failure::Stale`].
+//!
+//! Only the parse thread frees a tree. Trees share subtrees, whose
+//! reference counts tree-sitter changes atomically but also tests with
+//! plain reads (`ts_subtree_release`'s assertion, copy-on-write's
+//! `ref_count == 1`), so two threads freeing trees at once is a data race
+//! in C11's sense even where it is benign by argument; a `ThreadSanitizer`
+//! worker reported it (E7i review 1, Medium 4). A read that held the last
+//! handle on a tree two installs evicted hands it back to the parse
+//! thread, which drops it in order with its parses; the serve thread never
+//! changes a reference count.
 
 #![forbid(unsafe_code)]
 
@@ -485,7 +495,7 @@ impl Unit {
     pub fn handle(&mut self, request: Request, payload: &[u8]) -> Response {
         match request {
             Request::Parse(call) => self.parse(&call, payload, &mut || {}).0,
-            read => answer_read(&self.kept, read),
+            read => answer_read(&self.kept, read).0,
         }
     }
 
@@ -653,22 +663,25 @@ impl Unit {
 }
 
 /// Answer a read from the trees `kept`, holding the lock only to take the
-/// named tree: the walk itself runs beside any parse.
-fn answer_read(kept: &Mutex<Kept>, request: Request) -> Response {
+/// named tree: the walk itself runs beside any parse. The handle on the tree
+/// it read comes back with the answer, so that the caller decides which
+/// thread drops it ([`serve`]: the parse thread, should it be the last).
+fn answer_read(kept: &Mutex<Kept>, request: Request) -> (Response, Option<Arc<Installed>>) {
     let tree = |generation: u64| kept.lock().expect("kept trees poisoned").get(generation);
     let answer = |generation: u64, read: &dyn Fn(&Installed) -> Response| match tree(generation) {
-        Ok(installed) => read(&installed),
-        Err(failure) => Response::Failed(failure),
+        Ok(installed) => (read(&installed), Some(installed)),
+        Err(failure) => (Response::Failed(failure), None),
     };
     match request {
-        Request::Hello => Response::Hello { protocol: PROTOCOL },
+        Request::Hello => (Response::Hello { protocol: PROTOCOL }, None),
         Request::Stats => {
             let kept = kept.lock().expect("kept trees poisoned");
             let newest = kept.newest.as_ref().map(|(_, i)| i);
-            Response::Stats {
+            let stats = Response::Stats {
                 source_len: newest.map_or(0, |i| i.bundle.source.len() as u32),
                 layers: newest.map_or(0, |i| i.bundle.layers.len() as u32),
-            }
+            };
+            (stats, None)
         }
         Request::Spans { generation, ranges } => answer(generation, &|installed| {
             Response::Spans(spans_over(installed, &ranges))
@@ -696,10 +709,20 @@ fn answer_read(kept: &Mutex<Kept>, request: Request) -> Response {
                 pmacs_syntax::node_at_path(&installed.bundle, &path).map(|n| n.to_sexp()),
             )
         }),
-        Request::Parse(_) => Response::Failed(Failure::Language(
-            "a parse reached the read path".to_owned(),
-        )),
+        Request::Parse(_) => (
+            Response::Failed(Failure::Language(
+                "a parse reached the read path".to_owned(),
+            )),
+            None,
+        ),
     }
+}
+
+/// What the parse thread does, in order: a parse, or the drop of a tree a
+/// read held last.
+enum Work {
+    Parse(u64, ParseCall, Vec<u8>),
+    Free(Installed),
 }
 
 /// Compile and cache a language's query from its `BUILTIN_LANGUAGES`
@@ -878,14 +901,21 @@ pub fn serve<R: Read, W: Write + Send + 'static>(
     let parsing = Arc::new(Parsing::default());
     let mut unit = Unit::new();
     let kept = unit.kept.clone();
-    let (parses, queue) = mpsc::channel::<(u64, ParseCall, Vec<u8>)>();
+    let (parses, queue) = mpsc::channel::<Work>();
     let parser = {
         let out = out.clone();
         let parsing = parsing.clone();
         thread::Builder::new()
             .name("pmacs-parse".into())
             .spawn(move || {
-                for (id, call, payload) in queue {
+                for work in queue {
+                    let (id, call, payload) = match work {
+                        Work::Parse(id, call, payload) => (id, call, payload),
+                        Work::Free(installed) => {
+                            drop(installed);
+                            continue;
+                        }
+                    };
                     parsing.set(true);
                     let mut returned = || {
                         if let Ok(mut out) = out.lock() {
@@ -929,17 +959,25 @@ pub fn serve<R: Read, W: Write + Send + 'static>(
                 let Request::Parse(call) = request else {
                     unreachable!("is_parse")
                 };
-                if parses.send((id, call, payload)).is_err() {
+                if parses.send(Work::Parse(id, call, payload)).is_err() {
                     break;
                 }
                 continue;
             }
-            let response = answer_read(&kept, request);
+            let (response, read) = answer_read(&kept, request);
             write_frame(
                 &mut *out.lock().expect("output poisoned"),
                 &(id, &response),
                 &[],
             )?;
+            // Only the parse thread frees a tree (the module doc): when this
+            // read held the last handle, the tree goes to that thread. A
+            // handle that is not the last only lowers `Arc`'s own count.
+            if let Some(last) = read.and_then(Arc::into_inner)
+                && parses.send(Work::Free(last)).is_err()
+            {
+                break;
+            }
         }
         Ok(())
     })();

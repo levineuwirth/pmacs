@@ -41,16 +41,28 @@ Always true:
   `fuzz/corpora.tsv`, and the PR cites the report; a `tree-sitter`
   runtime bump runs every grammar, and a change under `vendor/` or
   `builtin/queries/` the grammars it touches. The script builds the C at
-  release optimization three ways and fails if any finds a defect:
+  release optimization four ways and fails if any finds a defect:
   `ubsan`, as it ships (`.cargo/config.toml`'s `-fno-strict-aliasing`)
   under ASan and UBSan; `asan-strict`, ASan alone with strict aliasing
-  restored, so that a compiler may exploit aliasing UB; and `tysan`,
-  clang's TypeSanitizer, which reports an access of the wrong type on any
-  compiler. Each arm also builds the worker binary the same way and
-  replays its seeds, its findings and `fuzz/regress/` through it as the
-  editor drives it, reads of a tree beside a newer parse included
-  (`pmacs_grammar_fuzz replay-unit`, E7i.2): a worker stopped by its own
-  memory or time limit is contained, any other death fails the arm. CI's
+  restored, so that a compiler may exploit aliasing UB; `tysan`, clang's
+  TypeSanitizer, which reports an access of the wrong type on any
+  compiler; and `tsan` (E7i fix round 1), ThreadSanitizer over the worker
+  alone, its Rust with std rebuilt instrumented (`-Zbuild-std` under
+  `RUSTC_BOOTSTRAP`) and the runtime's and every grammar's C under clang.
+  Each arm also builds the worker binary the same way and replays its
+  seeds, its findings and `fuzz/regress/` through it as the editor drives
+  it, reads of a tree beside a newer parse included (`pmacs_grammar_fuzz
+  replay-unit`, E7i.2): a worker stopped by its own memory or time limit
+  is contained, any other death fails the arm. The `tsan` arm fuzzes
+  nothing in-process; it drives its worker through the replay and through
+  `race-unit`'s schedules, reads of both kept trees, of every kind, beside
+  an edit's parse, and a burst of reads behind three queued parses, over
+  each seed grown to 512 KB, so that a read holds the last handle on a
+  tree they evict; its report counts the reads answered past an eviction,
+  and a report in the worker's stderr fails it. Since that round only the parse thread
+  frees a tree; before it, the serve thread could too, and review 1's
+  ThreadSanitizer worker reported their race in tree-sitter's reference
+  counts. CI's
   grammar fuzz runs on every change, fuzzes when one can
   change the grammar set (`scripts/grammar-fuzz-needed`; the touched
   grammars ten minutes, the rest briefly), and builds two arms on
@@ -66,15 +78,18 @@ Always true:
   The `ubsan` arm is blind to
   aliasing UB because it is built with the flag, as it ships, which
   forbids every compiler to exploit it, and UBSan has no aliasing check.
-  Only the laptop's run adds GCC 16, which exploits more of it, and
-  `tysan`, which reports the access on any compiler. Since E7h's fix round 1 no shipped scanner carries the
+  Only the laptop's run adds GCC 16, which exploits more of it,
+  `tysan`, which reports the access on any compiler, and `tsan`, which
+  reports a data race between the worker's serve, parse and memory-watch
+  threads (CI runs no `tsan` arm; adding one is a workflow change). Since E7h's fix round 1 no shipped scanner carries the
   aliasing header (`ALIASING_HEADER_RESIDUAL` is empty), so those arms
   guard the next grammar. Neither run catches an input the mutator does
   not reach, a defect only the release builders' GCC 11 or Apple clang
   would produce, UB no arm instruments (a ctype table read past its
-  end into mapped memory, #302, which a row now forbids), or a data race
-  between the worker's parse and its reads (no arm runs ThreadSanitizer),
-  and a green run is not a proof. `pmacs-syntax`'s build script, which
+  end into mapped memory, #302, which a row now forbids), a data race on
+  an interleaving the `tsan` arm's schedules do not reach or anywhere on
+  CI, or one in the editor's own process, which no arm runs under
+  ThreadSanitizer, and a green run is not a proof. `pmacs-syntax`'s build script, which
   every binary carrying grammar C passes through (the editor and the
   worker alike; the root `build.rs` repeats it), refuses to compile C that
   `-fno-strict-aliasing` does not reach, as in a build cargo did not start

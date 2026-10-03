@@ -582,11 +582,13 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
     // CI ran the first alone until E7h's fix round 2; review 2 found GCC
     // 13.3, CI's, forwards a stored length through a narrower lvalue under
     // ASan, so CI now runs the first two as a matrix whose `ubsan` leg keeps
-    // the job's name, on a pinned image that prints its compiler.
+    // the job's name, on a pinned image that prints its compiler. E7i's fix
+    // round 1 adds a fourth by default, ThreadSanitizer over the parse
+    // worker's threads (review 1, Medium 4).
     let script = read("scripts/fuzz-grammars");
     assert!(
-        script.contains("[ -n \"$arms\" ] || arms=\"ubsan asan-strict tysan\""),
-        "the default run builds all three arms"
+        script.contains("[ -n \"$arms\" ] || arms=\"ubsan asan-strict tysan tsan\""),
+        "the default run builds all four arms"
     );
     let line = |needle: &str| {
         script
@@ -603,6 +605,16 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
     assert!(
         line("sanitize=\"-fsanitize=type").ends_with("-fsanitize=type\""),
         "tysan is clang's TypeSanitizer"
+    );
+    assert!(
+        line("sanitize=\"-fsanitize=thread").contains("-fsanitize=thread")
+            && script.contains("RUSTC_BOOTSTRAP=1 RUSTFLAGS=\"-Zsanitizer=thread")
+            && script.contains(
+                "cargo build -Zbuild-std --profile fuzz --target \"$host\" -p pmacs-parse-unit"
+            )
+            && script.contains("fuzz race-unit --unit \"$unit\""),
+        "tsan is ThreadSanitizer over the worker, its Rust and std and every C source, \
+         driven through race-unit's schedules"
     );
     // Since E7i.5 every arm's harness fails on its crashes alone: a hang
     // or a memory cut took the editor down before E7i, and the parse worker

@@ -7,8 +7,8 @@
 #                         [--max-seed-kb N] [--min-mutations N]
 #                         [--max-seconds N] [--long-since REF]
 #                         [--long-seconds N] [--out DIR]
-#                         [--arm ubsan|asan-strict|tysan|plain]...
-#                         [--plain] [--replay-inputs N]
+#                         [--arm ubsan|asan-strict|tysan|tsan|plain]...
+#                         [--plain] [--replay-inputs N] [--race-inputs N]
 #
 # The grammars are C beside a `#![forbid(unsafe_code)]` editor, and in
 # daemon mode one bad parse takes every buffer the daemon holds. E7e
@@ -30,8 +30,8 @@
 #      any arm's does. The tree-sitter runtime and every grammar's C are
 #      instrumented through a compiler wrapper that recognizes a grammar
 #      by the package it builds, not by its path, and the build fails if
-#      any grammar's C went uninstrumented. The arms, all three run by
-#      default:
+#      any grammar's C went uninstrumented. The arms, all four but plain
+#      run by default:
 #
 #        ubsan        AddressSanitizer and UndefinedBehaviorSanitizer, as
 #                     the grammars ship (E7h.4): a memory error or the UB
@@ -67,6 +67,29 @@
 #                     run. Only its crashes fail it (`run --fail-on
 #                     crashes`): its time and memory are the sanitizer's,
 #                     and the ubsan arm rules on hangs and memory.
+#        tsan         ThreadSanitizer over the parse worker alone (E7i fix
+#                     round 1, on review 1's Medium 4): its Rust under
+#                     -Zsanitizer=thread with std rebuilt instrumented
+#                     (-Zbuild-std, which the pinned stable toolchain allows
+#                     under RUSTC_BOOTSTRAP=1 with its rust-src component),
+#                     and the runtime's and every grammar's C under
+#                     $TSAN_CC (default clang) -fsanitize=thread, keeping
+#                     -fno-strict-aliasing. The worker answers reads on one
+#                     thread while it parses on another, and those threads
+#                     share tree-sitter's subtrees; review 1's TSan worker
+#                     reported a race in their reference counts on its first
+#                     focused run. The harness drives it uninstrumented: no
+#                     `run` (its in-process parse is single-threaded), but
+#                     the replay and `race-unit`, whose schedules send
+#                     reads of both kept trees, every kind, beside an edit's
+#                     parse, and a burst of reads behind three queued
+#                     parses, over each seed grown to 512 KB, so a read
+#                     holds the last handle on a tree they evict (a single
+#                     whole-file read never outlived two installs on the
+#                     seeds, and the arm passed with the race restored).
+#                     Its report counts the reads answered past an
+#                     eviction. TSan reports and carries on; a report in
+#                     the worker's stderr fails the arm.
 #        plain        no sanitizer, byte for byte as released (--plain).
 #   2. Fetches each grammar's own real sources at the commit
 #      fuzz/corpora.tsv pins: its upstream test corpus, or real files
@@ -125,6 +148,7 @@ out=
 grammars=
 froms=
 replay_inputs=50
+race_inputs=8
 while [ $# -gt 0 ]; do
     case "$1" in
         --seconds) seconds=${2:?}; shift 2 ;;
@@ -141,6 +165,7 @@ while [ $# -gt 0 ]; do
         --arm) arms="$arms ${2:?}"; shift 2 ;;
         --plain) arms="$arms plain"; shift ;;
         --replay-inputs) replay_inputs=${2:?}; shift 2 ;;
+        --race-inputs) race_inputs=${2:?}; shift 2 ;;
         -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -156,11 +181,11 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
 # --- 1. build -----------------------------------------------------------
-[ -n "$arms" ] || arms="ubsan asan-strict tysan"
+[ -n "$arms" ] || arms="ubsan asan-strict tysan tsan"
 for arm in $arms; do
     case "$arm" in
-        ubsan|asan-strict|tysan|plain) ;;
-        *) die "unknown arm: $arm (ubsan, asan-strict, tysan or plain)" ;;
+        ubsan|asan-strict|tysan|tsan|plain) ;;
+        *) die "unknown arm: $arm (ubsan, asan-strict, tysan, tsan or plain)" ;;
     esac
 done
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -173,6 +198,7 @@ grammar_crates=$(awk -F '\t' '!/^#/ && NF >= 2 && $1 != "grammar" { print $2 }' 
 grammar_crates="tree-sitter $grammar_crates"
 real_cc=${CC:-cc}
 tysan_cc=${TYSAN_CC:-clang}
+tsan_cc=${TSAN_CC:-clang}
 export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:detect_stack_use_after_return=0"
 export UBSAN_OPTIONS="halt_on_error=1:abort_on_error=1:print_stacktrace=1"
 
@@ -214,6 +240,18 @@ build_arm() {
                 # and this arm exists to do what it refuses.
                 sanitize="-fsanitize=address -fno-omit-frame-pointer -fstrict-aliasing"
                 ;;
+            tsan)
+                printf 'int main(void) { return 0; }\n' > "$work/tsan-probe.c"
+                "$tsan_cc" -fsanitize=thread "$work/tsan-probe.c" -o "$work/tsan-probe" 2>/dev/null \
+                    || die "$tsan_cc has no ThreadSanitizer (set TSAN_CC, or pass --arm)"
+                rustc --print sysroot >/dev/null
+                [ -d "$(rustc --print sysroot)/lib/rustlib/src/rust/library" ] \
+                    || die "the tsan arm rebuilds std (-Zbuild-std): rustup component add rust-src"
+                inst_cc=$tsan_cc
+                runtime_cc=$tsan_cc
+                sanitize="-fsanitize=thread -fno-omit-frame-pointer"
+                link=
+                ;;
             tysan)
                 printf 'int main(void) { return 0; }\n' > "$work/tysan-probe.c"
                 "$tysan_cc" -fsanitize=type "$work/tysan-probe.c" -o "$work/tysan-probe" 2>/dev/null \
@@ -252,7 +290,19 @@ EOF
         export RUSTFLAGS="$link"
     fi
     echo "fuzz-grammars: building the $arm arm in $CARGO_TARGET_DIR" >&2
-    cargo build --profile fuzz --target "$host" --workspace --bin pmacs_grammar_fuzz --bin pmacs-parse-unit
+    if [ "$arm" = tsan ]; then
+        # The driver, uninstrumented: the harness is not this arm's subject,
+        # and a sanitizer in it would only slow the schedules down.
+        (unset RUSTFLAGS; CC="$real_cc" cargo build --profile fuzz --target "$host" --workspace --bin pmacs_grammar_fuzz)
+        driver="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
+        # The worker, instrumented through std, in a target of its own
+        # since its RUSTFLAGS differ.
+        export CARGO_TARGET_DIR="$work/target-tsan-unit"
+        RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Zsanitizer=thread -Cforce-frame-pointers=yes" \
+            cargo build -Zbuild-std --profile fuzz --target "$host" -p pmacs-parse-unit
+    else
+        cargo build --profile fuzz --target "$host" --workspace --bin pmacs_grammar_fuzz --bin pmacs-parse-unit
+    fi
     if [ "$arm" != plain ]; then
         # The proof is what the `cc` crate recorded in each grammar crate's
         # build-script output: the compiler it ran, this wrapper, whose name
@@ -276,6 +326,7 @@ EOF
     fi
     bin="$CARGO_TARGET_DIR/$host/fuzz/pmacs_grammar_fuzz"
     unit="$CARGO_TARGET_DIR/$host/fuzz/pmacs-parse-unit"
+    [ "$arm" != tsan ] || bin=$driver
 }
 fuzz() { LD_PRELOAD="$preload" "$bin" "$@"; }
 # shellcheck disable=SC2086
@@ -347,12 +398,19 @@ for arm in $arms; do
     # replay below shows on the finding's own input (E7i.5).
     fail_on=crashes
     set +e
-    # shellcheck disable=SC2086
-    fuzz run --corpus "$work/corpus" --out "$out/$arm" --seconds "$seconds" --jobs "$jobs" \
-        --min-mutations "$min_mutations" --max-seconds "$max_seconds" \
-        --long-seconds "$long_seconds" --fail-on "$fail_on" \
-        --accepted "$root/fuzz/accepted.tsv" $longs $grammars
-    arm_status=$?
+    if [ "$arm" = tsan ]; then
+        # The harness's own parse is single-threaded and uninstrumented
+        # here: this arm is the worker's, below.
+        echo "The tsan arm runs no in-process fuzzing; its subject is the worker's threads." > "$out/$arm/report.md"
+        arm_status=0
+    else
+        # shellcheck disable=SC2086
+        fuzz run --corpus "$work/corpus" --out "$out/$arm" --seconds "$seconds" --jobs "$jobs" \
+            --min-mutations "$min_mutations" --max-seconds "$max_seconds" \
+            --long-seconds "$long_seconds" --fail-on "$fail_on" \
+            --accepted "$root/fuzz/accepted.tsv" $longs $grammars
+        arm_status=$?
+    fi
     # 5. The same arm's worker binary, driven as the editor drives it.
     enforcement=watch
     [ "$arm" = plain ] && enforcement=rlimit
@@ -365,17 +423,35 @@ for arm in $arms; do
             done
         done
     done < fuzz/accepted.tsv
+    # ThreadSanitizer, in the tsan arm's worker: report every race and go
+    # on, for the harness to read from the worker's stderr.
+    export TSAN_OPTIONS="halt_on_error=0:report_signal_unsafe=0"
+    limits=
+    # Its shadow memory is resident beside the parse's, and it parses
+    # several times slower than a released worker.
+    [ "$arm" = tsan ] && limits="--memory-mb 4096 --deadline-ms 30000"
     # shellcheck disable=SC2086
     fuzz replay-unit --unit "$unit" --corpus "$work/corpus" --out "$out/$arm/unit" \
         --max-inputs "$replay_inputs" --findings "$out/$arm" \
         --findings "$root/fuzz/regress" --jobs "$jobs" \
-        --enforcement "$enforcement" $extras $grammars > /dev/null
+        --enforcement "$enforcement" $limits $extras $grammars > /dev/null
     unit_status=$?
+    race_status=0
+    race_note=
+    if [ "$arm" = tsan ]; then
+        # shellcheck disable=SC2086
+        fuzz race-unit --unit "$unit" --corpus "$work/corpus" --out "$out/$arm/race" \
+            --max-inputs "$race_inputs" --jobs "$jobs" $grammars > /dev/null
+        race_status=$?
+        race_note=", its race schedules exit $race_status"
+    fi
     set -e
-    echo "## arm: $arm (exit $arm_status, its parse worker's replay exit $unit_status)"
+    echo "## arm: $arm (exit $arm_status, its parse worker's replay exit $unit_status$race_note)"
     cat "$out/$arm/report.md"
     cat "$out/$arm/unit/unit-report.md" 2>/dev/null || true
+    [ "$arm" != tsan ] || cat "$out/$arm/race/race-report.md" 2>/dev/null || true
     [ "$unit_status" -le "$arm_status" ] || arm_status=$unit_status
+    [ "$race_status" -le "$arm_status" ] || arm_status=$race_status
     case "$arm_status" in
         0) ;;
         1) [ "$status" = 2 ] || status=1 ;;

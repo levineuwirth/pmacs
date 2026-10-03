@@ -29,6 +29,11 @@
 //!                        [--findings DIR]... [--extra GRAMMAR=PATH]...
 //!                        [--memory-mb N] [--enforcement rlimit|watch]
 //!                        [--deadline-ms N] [--grace-ms N]
+//! pmacs_grammar_fuzz race-unit --unit PATH --corpus DIR --out DIR
+//!                        [--grammar NAME]... [--max-inputs N] [--iters N]
+//!                        [--jobs N] [--extra GRAMMAR=PATH]... [--seed N]
+//!                        [--grow-kb N] [--memory-mb N] [--deadline-ms N]
+//!                        [--grace-ms N]
 //! ```
 //!
 //! `replay-unit` (E7i.2) drives the editor's own parse worker,
@@ -41,6 +46,22 @@
 //! it, and the same command replays them through a shipped worker. A worker
 //! stopped by its own memory or time limit is contained, which is what the
 //! boundary is for; any other death is a crash and fails the replay.
+//!
+//! `race-unit` (E7i fix round 1) drives a worker built under
+//! `ThreadSanitizer`, the `tsan` arm, through the schedules that let its two
+//! threads meet: reads of both trees it keeps, of every kind, sent while an
+//! edit's parse runs, and a whole-file read behind three queued parses, so
+//! that a read can hold the last handle on a tree two installs evicted
+//! (E7i review 1's race, in tree-sitter's reference counts). Behind the
+//! three parses goes a burst of reads of the tree they evict, whole-file
+//! ones among them, and each input is first repeated to `--grow-kb` (512
+//! by default): one whole-file read outlives two installs only where it is
+//! long beside an incremental parse, and with seeds as they are it never
+//! did, so a single read let the arm pass with the race restored. The
+//! report counts the reads answered past their tree's eviction, which says
+//! whether a run reached the interleaving at all. A
+//! `ThreadSanitizer` report, which the worker writes and carries on past, is
+//! read from its stderr and fails the run, as a crash would.
 //!
 //! Each grammar is driven through a worker process (`worker GRAMMAR`,
 //! internal) so an abort, a hang or a runaway allocation costs the worker
@@ -120,7 +141,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = args.split_first() else {
         eprintln!(
-            "usage: pmacs_grammar_fuzz list|collect|run|changed|repro|replay-unit|worker ..."
+            "usage: pmacs_grammar_fuzz list|collect|run|changed|repro|replay-unit|race-unit|worker ..."
         );
         return ExitCode::from(2);
     };
@@ -137,6 +158,7 @@ fn main() -> ExitCode {
         "repro" => repro(rest),
         "worker" => worker(rest),
         "replay-unit" => replay_unit(rest),
+        "race-unit" => race_unit(rest),
         other => Err(format!("unknown subcommand `{other}`")),
     };
     result.unwrap_or_else(|e| {
@@ -1454,6 +1476,9 @@ const GLIBC: [&str; 7] = [
 /// one it was written through: the effective type is the same, which C
 /// permits, and tree-sitter's own lexer does it on every token
 /// (`ts_lexer_finish`, `ts_parser__lex`: hundreds of thousands a run).
+/// How a `ThreadSanitizer` report begins (the `tsan` arm).
+const TSAN_MARKER: &str = "WARNING: ThreadSanitizer: ";
+
 fn tysan_violation(log: &str) -> Option<&str> {
     const MARKER: &str = TYSAN_MARKER;
     let mut starts: Vec<usize> = log.match_indices(MARKER).map(|(i, _)| i).collect();
@@ -1501,6 +1526,20 @@ fn crash_signature(log: &str, how: &str) -> String {
             .and_then(|f| f.split_whitespace().next())
             .map_or("?", |f| f.split('.').next().unwrap_or(f));
         return format!("{short} {what} in {frame}");
+    }
+    // ThreadSanitizer (the `tsan` arm): `WARNING: ThreadSanitizer: <what>
+    // (pid=N)`, then `#0 <function> <file> (<module>+<offset>)`.
+    if let Some(i) = lines.iter().position(|l| l.contains(TSAN_MARKER)) {
+        let what = lines[i]
+            .split(TSAN_MARKER)
+            .nth(1)
+            .map_or("report", |r| r.split(" (").next().unwrap_or(r).trim());
+        let frame = lines[i..]
+            .iter()
+            .find_map(|l| l.trim_start().strip_prefix("#0 "))
+            .and_then(|f| f.split_whitespace().next())
+            .unwrap_or("?");
+        return format!("tsan {what} in {frame}");
     }
     // UBSan (E7h.4): `<file>:<line>:<col>: runtime error: <what>`.
     if let Some(l) = lines.iter().find(|l| l.contains(": runtime error: ")) {
@@ -3532,6 +3571,8 @@ struct UnitClient {
     stderr_seen: u64,
     next: u64,
     killed_for_time: bool,
+    /// The ids answered, in the order their answers arrived.
+    arrived: Vec<u64>,
 }
 
 impl UnitClient {
@@ -3571,6 +3612,7 @@ impl UnitClient {
             stderr_seen: 0,
             next: 1,
             killed_for_time: false,
+            arrived: Vec::new(),
         };
         let id = client
             .send(&pmacs_parse_unit::Request::Hello, &[])
@@ -3619,6 +3661,7 @@ impl UnitClient {
                     // Id 0 is otherwise the unit's memory report, not an
                     // answer.
                     if id != 0 {
+                        self.arrived.push(id);
                         got.insert(id, response);
                     }
                 }
@@ -3637,16 +3680,22 @@ impl UnitClient {
         Ok(ids.iter().filter_map(|id| got.remove(id)).collect())
     }
 
-    /// A `TypeSanitizer` report of the aliasing class written since the
-    /// last look: that build reports and carries on.
-    fn tysan_since(&mut self) -> Option<String> {
+    /// A sanitizer report that does not stop the worker, written since the
+    /// last look: `TypeSanitizer`'s aliasing class (the `tysan` arm), or any
+    /// `ThreadSanitizer` report (the `tsan` arm). Both builds report and
+    /// carry on.
+    fn sanitizer_since(&mut self) -> Option<String> {
         let len = std::fs::metadata(&self.stderr).map_or(0, |m| m.len());
         if len <= self.stderr_seen {
             return None;
         }
         let new = tail(&self.stderr, len - self.stderr_seen);
         self.stderr_seen = len;
-        tysan_violation(&new).map(|r| crash_signature(r, "tysan report"))
+        if let Some(report) = tysan_violation(&new) {
+            return Some(crash_signature(report, "tysan report"));
+        }
+        new.contains(TSAN_MARKER)
+            .then(|| crash_signature(&new, "tsan report"))
     }
 
     /// Why the worker ended: its own limit, or a crash.
@@ -3708,7 +3757,7 @@ impl UnitClient {
                 Some(Response::Parsed(parsed)) => parsed.generation,
                 _ => {
                     return self
-                        .tysan_since()
+                        .sanitizer_since()
                         .map_or(UnitOutcome::Answered, UnitOutcome::Crashed);
                 }
             },
@@ -3764,7 +3813,7 @@ impl UnitClient {
         }
         match self.wait(&ids, hard) {
             Ok(_) => self
-                .tysan_since()
+                .sanitizer_since()
                 .map_or(UnitOutcome::Answered, UnitOutcome::Crashed),
             Err(()) => self.ended(),
         }
@@ -4013,6 +4062,408 @@ fn replay_grammar(
         }
     }
     replay
+}
+
+// -------------------------------------------------------------------
+// `race-unit` (E7i fix round 1: the `tsan` arm)
+// -------------------------------------------------------------------
+
+/// `text` repeated, a newline between copies, until it is at least `kb`
+/// kilobytes: a whole-file read of it is long beside a keystroke's parse.
+fn grown(text: &[u8], kb: usize) -> Vec<u8> {
+    let mut out = text.to_vec();
+    if text.is_empty() {
+        return out;
+    }
+    while out.len() < kb * 1024 {
+        out.push(b'\n');
+        out.extend_from_slice(text);
+    }
+    out
+}
+
+/// The last byte at or before `at` that begins a UTF-8 character.
+fn char_start(text: &[u8], mut at: usize) -> usize {
+    at = at.min(text.len());
+    while at > 0 && at < text.len() && text[at] & 0xC0 == 0x80 {
+        at -= 1;
+    }
+    at
+}
+
+/// Insert one ASCII byte at a character boundary near `at`, as a keystroke
+/// does, and the edit the worker is sent for it.
+fn keystroke(text: &mut Vec<u8>, at: usize, byte: u8) -> pmacs_parse_unit::WireEdit {
+    let at = char_start(text, at);
+    let p = byte_to_point(text, at);
+    text.insert(at, byte);
+    let point = (p.row as u32, p.column as u32);
+    pmacs_parse_unit::WireEdit {
+        start_byte: at as u32,
+        old_end_byte: at as u32,
+        new_end_byte: at as u32 + 1,
+        start: point,
+        old_end: point,
+        new_end: (point.0, point.1 + 1),
+    }
+}
+
+/// Every kind of read a renderer, a fold command or a node walk makes of
+/// `generation`, over a text of `len` bytes.
+fn race_reads(generation: u64, len: usize, rng: &mut Rng) -> Vec<pmacs_parse_unit::Request> {
+    use pmacs_parse_unit::Request;
+    let window = |rng: &mut Rng| {
+        let s = rng.below(len + 1) as u32;
+        (s, (s + 4096).min(len as u32))
+    };
+    let child = rng.below(8) as u32;
+    vec![
+        Request::Spans {
+            generation,
+            ranges: vec![window(rng)],
+        },
+        Request::Spans {
+            generation,
+            ranges: vec![window(rng), window(rng)],
+        },
+        Request::Folds {
+            generation,
+            at: Some(rng.below(len + 1) as u64),
+        },
+        Request::Folds {
+            generation,
+            at: None,
+        },
+        Request::Describe {
+            generation,
+            path: Vec::new(),
+            children: true,
+        },
+        Request::Describe {
+            generation,
+            path: vec![child],
+            children: true,
+        },
+        Request::Sexp {
+            generation,
+            path: vec![child, 0],
+        },
+    ]
+}
+
+/// Reads of a tree sent behind the three parses that evict it.
+const RACE_BURST: usize = 16;
+
+/// How `race-unit` drives each input: schedules an input, the seed of
+/// their edits and reads, and the size each input is grown to.
+#[derive(Clone, Copy)]
+struct Schedule {
+    iters: usize,
+    seed: u64,
+    grow_kb: usize,
+}
+
+impl UnitClient {
+    /// One input through the schedules that let a read meet a parse:
+    /// `iters` times, an edit's parse with reads of both kept trees, every
+    /// kind, sent while it runs; every third time instead three parses
+    /// queued and a whole-file read of the tree they will evict behind them,
+    /// so the read may hold its last handle. The schedules run, or why the
+    /// worker stopped: its own limit, a crash, or a sanitizer's report.
+    fn race(
+        &mut self,
+        grammar: &str,
+        text: &[u8],
+        schedule: Schedule,
+        deadline_ms: u64,
+        hard: Duration,
+        past_eviction: &mut usize,
+    ) -> Result<usize, UnitOutcome> {
+        use pmacs_parse_unit::{ParseCall, Request, Response, TextUpdate, WireEdit};
+        let Schedule {
+            iters,
+            seed,
+            grow_kb,
+        } = schedule;
+        let call = |update, edits: Vec<WireEdit>, len: usize| ParseCall {
+            language: grammar.to_owned(),
+            text: update,
+            edits,
+            expect_len: len as u32,
+            aliases: default_injection_aliases().into_iter().collect(),
+            deadline_ms: Some(deadline_ms),
+            interest: vec![(0, 4096)],
+        };
+        let mut text = grown(text, grow_kb);
+        let mut rng = Rng(seed ^ fnv(&text));
+        let full = call(TextUpdate::Full, Vec::new(), text.len());
+        let id = self
+            .send(&Request::Parse(full), &text)
+            .map_err(|_| self.ended())?;
+        let mut newest = match self.wait(&[id], hard) {
+            Ok(mut answers) => match answers.pop() {
+                Some(Response::Parsed(parsed)) => parsed.generation,
+                _ => return Ok(0),
+            },
+            Err(()) => return Err(self.ended()),
+        };
+        let mut older = newest;
+        for iter in 0..iters {
+            let mut parses = Vec::new();
+            let mut reads = Vec::new();
+            if iter % 3 == 2 {
+                for _ in 0..3 {
+                    let at = rng.below(text.len() + 1);
+                    let edit = keystroke(&mut text, at, b'z');
+                    let edited = call(TextUpdate::Edits, vec![edit], text.len());
+                    parses.push(
+                        self.send(&Request::Parse(edited), b"z")
+                            .map_err(|_| self.ended())?,
+                    );
+                }
+                // A burst of reads of the tree the second parse evicts,
+                // whole-file ones among them: the serve thread is mid-read
+                // when that tree goes, whatever a read costs beside a parse
+                // on this input, so a read can hold its last handle.
+                for k in 0..RACE_BURST {
+                    let read = if k % 2 == 0 {
+                        Request::Spans {
+                            generation: newest,
+                            ranges: vec![(0, text.len() as u32)],
+                        }
+                    } else {
+                        let kinds = race_reads(newest, text.len(), &mut rng);
+                        kinds[k % kinds.len()].clone()
+                    };
+                    reads.push(self.send(&read, &[]).map_err(|_| self.ended())?);
+                }
+            } else {
+                let at = rng.below(text.len() + 1);
+                let edit = keystroke(&mut text, at, b'x');
+                let edited = call(TextUpdate::Edits, vec![edit], text.len());
+                parses.push(
+                    self.send(&Request::Parse(edited), b"x")
+                        .map_err(|_| self.ended())?,
+                );
+                for generation in [newest, older] {
+                    for read in race_reads(generation, text.len(), &mut rng) {
+                        reads.push(self.send(&read, &[]).map_err(|_| self.ended())?);
+                    }
+                }
+            }
+            let ids: Vec<u64> = parses.iter().chain(&reads).copied().collect();
+            self.arrived.clear();
+            let answers = self.wait(&ids, hard).map_err(|()| self.ended())?;
+            for answer in answers.iter().take(parses.len()) {
+                if let Response::Parsed(parsed) = answer {
+                    older = newest;
+                    newest = parsed.generation;
+                }
+            }
+            // A read of the evicted tree answered (not stale) after the
+            // second parse installed held that tree past its eviction.
+            if parses.len() == 3 {
+                let at = |id: &u64| self.arrived.iter().position(|a| a == id);
+                let evicted_at = at(&parses[1]);
+                *past_eviction += reads
+                    .iter()
+                    .zip(&answers[parses.len()..])
+                    .filter(|(id, answer)| {
+                        !matches!(answer, Response::Failed(_)) && at(id) > evicted_at
+                    })
+                    .count();
+            }
+            if let Some(report) = self.sanitizer_since() {
+                return Err(UnitOutcome::Crashed(report));
+            }
+        }
+        Ok(iters)
+    }
+}
+
+/// One grammar's race schedules: its counts, and what a sanitizer reported
+/// or the boundary stopped.
+struct RaceRun {
+    grammar: &'static str,
+    inputs: usize,
+    schedules: usize,
+    /// Reads answered from a tree after the parse that evicted it
+    /// installed: the interleaving the race needs, reached.
+    past_eviction: usize,
+    contained: Vec<(String, String)>,
+    reported: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+fn race_unit(args: &[String]) -> Result<ExitCode, String> {
+    let (_, flags) = Flags::parse(args, 0)?;
+    let corpus = flags.path("corpus")?;
+    let max_inputs = usize::try_from(flags.num("max-inputs", 8)?).map_err(|e| e.to_string())?;
+    let iters = usize::try_from(flags.num("iters", 12)?).map_err(|e| e.to_string())?;
+    let seed = flags.num("seed", 1)?;
+    let grow_kb = usize::try_from(flags.num("grow-kb", 512)?).map_err(|e| e.to_string())?;
+    // A ThreadSanitizer worker parses several times slower than a released
+    // one, and a schedule the deadline cuts short meets nothing.
+    let deadline_ms = flags.num("deadline-ms", 30_000)?;
+    let cfg = Arc::new(ReplayConfig {
+        unit: flags.path("unit")?,
+        out: flags.path("out")?,
+        // The sanitizer's shadow memory is resident beside the parse's.
+        memory_mb: flags.num("memory-mb", 4096)?,
+        // Its shadow reservation is address space RLIMIT_AS would refuse.
+        watch: true,
+        deadline_ms,
+        hard: Duration::from_millis(deadline_ms + flags.num("grace-ms", 1_000)?),
+    });
+    std::fs::create_dir_all(&cfg.out).map_err(|e| e.to_string())?;
+    let queue = replay_queue(&flags, &corpus, &[], max_inputs)?;
+    let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
+    let queue = Arc::new(Mutex::new(queue));
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let threads: Vec<_> = (0..jobs)
+        .map(|_| {
+            let (queue, runs, cfg) = (queue.clone(), runs.clone(), cfg.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut q| q.pop());
+                    let Some((grammar, inputs)) = next else { break };
+                    let schedule = Schedule {
+                        iters,
+                        seed,
+                        grow_kb,
+                    };
+                    let run = race_grammar(grammar, &inputs, schedule, &cfg);
+                    eprintln!(
+                        "{grammar}: {} inputs, {} schedules, {} reads past an eviction, {} contained, {} reported{}",
+                        run.inputs,
+                        run.schedules,
+                        run.past_eviction,
+                        run.contained.len(),
+                        run.reported.len(),
+                        run.error
+                            .as_deref()
+                            .map_or_else(String::new, |e| format!(", ERROR {e}"))
+                    );
+                    if let Ok(mut r) = runs.lock() {
+                        r.push(run);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().map_err(|_| "a race thread panicked")?;
+    }
+    let mut runs = std::mem::take(&mut *runs.lock().map_err(|_| "poisoned")?);
+    runs.sort_by_key(|r| r.grammar);
+    let mut md = format!(
+        "# Parse worker race schedules\n\n`{}`, memory {} MiB by its watch, deadline {} ms, \
+         {iters} schedules an input, each input grown to {grow_kb} KB.\n\n\
+         | grammar | inputs | schedules | reads past an eviction | contained | reported |\n\
+         |---|---|---|---|---|---|\n",
+        cfg.unit.display(),
+        cfg.memory_mb,
+        cfg.deadline_ms
+    );
+    for r in &runs {
+        let _ = writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {}{} |",
+            r.grammar,
+            r.inputs,
+            r.schedules,
+            r.past_eviction,
+            r.contained.len(),
+            r.reported.len(),
+            r.error
+                .as_deref()
+                .map_or_else(String::new, |e| format!(" (ERROR {e})"))
+        );
+    }
+    for r in &runs {
+        for (input, why) in &r.contained {
+            let _ = writeln!(md, "\n- {} contained: `{input}`, {why}", r.grammar);
+        }
+        for (input, why) in &r.reported {
+            let _ = writeln!(md, "\n- **{} REPORTED**: `{input}`, {why}", r.grammar);
+        }
+    }
+    std::fs::write(cfg.out.join("race-report.md"), &md).map_err(|e| e.to_string())?;
+    print!("{md}");
+    if runs.iter().any(|r| r.error.is_some()) {
+        return Ok(ExitCode::from(2));
+    }
+    Ok(if runs.iter().any(|r| !r.reported.is_empty()) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+fn race_grammar(
+    grammar: &'static str,
+    inputs: &[(String, Vec<u8>)],
+    schedule: Schedule,
+    cfg: &ReplayConfig,
+) -> RaceRun {
+    let mut run = RaceRun {
+        grammar,
+        inputs: inputs.len(),
+        schedules: 0,
+        past_eviction: 0,
+        contained: Vec::new(),
+        reported: Vec::new(),
+        error: None,
+    };
+    let mut unit: Option<UnitClient> = None;
+    let mut spawned = 0;
+    for (name, text) in inputs {
+        if unit.is_none() {
+            spawned += 1;
+            let stderr = cfg.out.join(format!("{grammar}-race-{spawned}.stderr"));
+            match UnitClient::spawn(&cfg.unit, stderr, cfg.memory_mb, cfg.watch) {
+                Ok(u) => unit = Some(u),
+                Err(e) => {
+                    run.error = Some(e);
+                    return run;
+                }
+            }
+        }
+        let u = unit.as_mut().expect("spawned above");
+        match u.race(
+            grammar,
+            text,
+            schedule,
+            cfg.deadline_ms,
+            cfg.hard,
+            &mut run.past_eviction,
+        ) {
+            Ok(n) => run.schedules += n,
+            Err(UnitOutcome::Contained(why)) => {
+                run.contained.push((name.clone(), why));
+                unit = None;
+            }
+            Err(outcome) => {
+                let why = match outcome {
+                    UnitOutcome::Crashed(why) => why,
+                    other => format!("{other:?}"),
+                };
+                let kept = cfg
+                    .out
+                    .join(format!("{grammar}-race-{}.input", run.reported.len() + 1));
+                let _ = std::fs::write(&kept, text);
+                run.reported.push((
+                    name.clone(),
+                    format!(
+                        "{why} (kept as {}; the worker's stderr is {grammar}-race-{spawned}.stderr)",
+                        kept.display()
+                    ),
+                ));
+                unit = None;
+            }
+        }
+    }
+    run
 }
 
 #[cfg(test)]
@@ -4467,6 +4918,23 @@ mod tests {
             tysan_violation(&both).map(|r| crash_signature(r, "tysan report")),
             Some("tysan type-aliasing-violation in advance".to_owned()),
             "the pointer over a pointer of another type, after an int over an int"
+        );
+        // The `tsan` arm (E7i fix round 1): review 1's report, as its
+        // worker wrote it.
+        let tsan = "==================\n\
+                    WARNING: ThreadSanitizer: data race (pid=1711474)\n  \
+                    Read of size 4 at 0x7214000028a0 by main thread:\n    \
+                    #0 ts_subtree_release lib.c (pmacs-parse-unit+0x299f2d2)\n    \
+                    #1 ts_tree_delete <null> (pmacs-parse-unit+0x29c1088)\n";
+        assert_eq!(
+            crash_signature(tsan, "tsan report"),
+            "tsan data race in ts_subtree_release"
+        );
+        assert_eq!(grown(b"ab", 1).len(), 1025, "repeated past a kilobyte");
+        assert_eq!(
+            char_start("aé".as_bytes(), 2),
+            1,
+            "back to the é's first byte"
         );
         assert_eq!(
             crash_signature("corrupted size vs. prev_size\n", "signal 6"),
