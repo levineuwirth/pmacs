@@ -40,8 +40,12 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+#[cfg(feature = "wasm-unit")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "wasm-unit")]
+use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -230,10 +234,12 @@ struct Slot {
 /// Process-wide state: the units, the wasm engine, the cgroup, the trace.
 struct Host {
     slots: Mutex<HashMap<BufferId, Arc<Mutex<Slot>>>>,
+    #[cfg(feature = "wasm-unit")]
     wasm: OnceLock<Result<WasmShared, String>>,
     cgroup: OnceLock<Option<Cgroup>>,
     trace: Option<Mutex<std::fs::File>>,
     started: Instant,
+    #[cfg(feature = "wasm-unit")]
     next_instance: AtomicU64,
 }
 
@@ -242,6 +248,7 @@ static HOST_CELL: OnceLock<Host> = OnceLock::new();
 fn host() -> &'static Host {
     HOST_CELL.get_or_init(|| Host {
         slots: Mutex::new(HashMap::new()),
+        #[cfg(feature = "wasm-unit")]
         wasm: OnceLock::new(),
         cgroup: OnceLock::new(),
         trace: std::env::var_os("PMACS_E7I_TRACE").and_then(|path| {
@@ -253,6 +260,7 @@ fn host() -> &'static Host {
                 .map(Mutex::new)
         }),
         started: Instant::now(),
+        #[cfg(feature = "wasm-unit")]
         next_instance: AtomicU64::new(1),
     })
 }
@@ -297,6 +305,12 @@ impl Host {
 
     fn spawn(&self, limits: &Limits) -> Result<Box<dyn Transport>, Death> {
         match limits.mode {
+            #[cfg(not(feature = "wasm-unit"))]
+            Isolation::Wasm => Err(Death::Unavailable(
+                "this pmacs was built without the wasm parse unit (cargo feature `wasm-unit`)"
+                    .into(),
+            )),
+            #[cfg(feature = "wasm-unit")]
             Isolation::Wasm => {
                 let shared = self
                     .wasm
@@ -1057,6 +1071,7 @@ impl Cgroup {
 // The wasm boundary
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "wasm-unit")]
 /// The engine and the compiled module, shared by every instance, and the
 /// thread that ticks the engine's epoch.
 struct WasmShared {
@@ -1065,9 +1080,11 @@ struct WasmShared {
     total: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "wasm-unit")]
 /// The epoch tick: a deadline of `d` is `d / EPOCH_TICK` ticks.
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 
+#[cfg(feature = "wasm-unit")]
 impl WasmShared {
     fn load(cache: bool) -> Result<Self, String> {
         let path = sibling("pmacs-parse-unit.wasm")
@@ -1115,6 +1132,7 @@ impl WasmShared {
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 /// What a running instance's host functions own.
 struct UnitState {
     requests: Receiver<(Vec<u8>, u64)>,
@@ -1127,6 +1145,7 @@ struct UnitState {
     rng: u64,
 }
 
+#[cfg(feature = "wasm-unit")]
 /// Refuses linear-memory growth past the unit's allowance and past the
 /// editor-wide total; the refusal makes the guest's allocator fail, and
 /// the guest aborts, which traps and ends the instance.
@@ -1140,6 +1159,7 @@ struct Limiter {
     hit: Arc<Mutex<Option<Death>>>,
 }
 
+#[cfg(feature = "wasm-unit")]
 impl wasmtime::ResourceLimiter for Limiter {
     fn memory_growing(
         &mut self,
@@ -1180,12 +1200,14 @@ impl wasmtime::ResourceLimiter for Limiter {
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 impl Drop for Limiter {
     fn drop(&mut self) {
         self.total.fetch_sub(self.current, Ordering::SeqCst);
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 /// A wasm instance of the unit on its own thread.
 struct WasmUnit {
     requests: Option<Sender<(Vec<u8>, u64)>>,
@@ -1196,6 +1218,7 @@ struct WasmUnit {
     number: u64,
 }
 
+#[cfg(feature = "wasm-unit")]
 impl WasmUnit {
     fn start(shared: &WasmShared, number: u64, limits: &Limits) -> Result<Self, Death> {
         let (req_tx, req_rx) = mpsc::channel::<(Vec<u8>, u64)>();
@@ -1248,6 +1271,7 @@ impl WasmUnit {
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 fn run_instance(
     engine: &wasmtime::Engine,
     module: &wasmtime::Module,
@@ -1302,36 +1326,47 @@ fn run_instance(
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 /// `proc_exit`'s code, carried out of the instance as an error.
 #[derive(Debug)]
 struct ProcExit(i32);
 
+#[cfg(feature = "wasm-unit")]
 impl std::fmt::Display for ProcExit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "proc_exit({})", self.0)
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 impl std::error::Error for ProcExit {}
 
+#[cfg(feature = "wasm-unit")]
 const ERRNO_SUCCESS: i32 = 0;
+#[cfg(feature = "wasm-unit")]
 const ERRNO_BADF: i32 = 8;
+#[cfg(feature = "wasm-unit")]
 const ERRNO_INVAL: i32 = 28;
+#[cfg(feature = "wasm-unit")]
 const ERRNO_SPIPE: i32 = 70;
 
+#[cfg(feature = "wasm-unit")]
 type ShimCaller<'a> = wasmtime::Caller<'a, UnitState>;
 
+#[cfg(feature = "wasm-unit")]
 fn guest_memory(caller: &mut ShimCaller<'_>) -> Option<wasmtime::Memory> {
     caller
         .get_export("memory")
         .and_then(wasmtime::Extern::into_memory)
 }
 
+#[cfg(feature = "wasm-unit")]
 fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     data.get(at..at + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+#[cfg(feature = "wasm-unit")]
 fn write_bytes(data: &mut [u8], at: usize, bytes: &[u8]) -> bool {
     match data.get_mut(at..at + bytes.len()) {
         Some(slot) => {
@@ -1351,6 +1386,7 @@ fn write_bytes(data: &mut [u8], at: usize, bytes: &[u8]) -> bool {
     clippy::too_many_lines,
     reason = "one shim per import, each a few lines, kept together as the module's whole ABI"
 )]
+#[cfg(feature = "wasm-unit")]
 fn wasi_shim(linker: &mut wasmtime::Linker<UnitState>) -> anyhow::Result<()> {
     const W: &str = "wasi_snapshot_preview1";
     linker.func_wrap(
@@ -1554,11 +1590,13 @@ fn wasi_shim(linker: &mut wasmtime::Linker<UnitState>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "wasm-unit")]
 /// Setting the epoch deadline from inside a host function.
 trait SetDeadline {
     fn as_context_mut_set_deadline(&mut self, ticks: u64);
 }
 
+#[cfg(feature = "wasm-unit")]
 impl SetDeadline for ShimCaller<'_> {
     fn as_context_mut_set_deadline(&mut self, ticks: u64) {
         use wasmtime::AsContextMut as _;
@@ -1566,6 +1604,7 @@ impl SetDeadline for ShimCaller<'_> {
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 /// The length of the first complete frame at the front of `buf`, if one
 /// is there: `u32` header length, header, `u32` payload length, payload.
 fn complete_frame(buf: &[u8]) -> Option<usize> {
@@ -1575,6 +1614,7 @@ fn complete_frame(buf: &[u8]) -> Option<usize> {
     (buf.len() >= total).then_some(total)
 }
 
+#[cfg(feature = "wasm-unit")]
 impl Transport for WasmUnit {
     fn call(
         &mut self,
@@ -1621,6 +1661,7 @@ impl Transport for WasmUnit {
     }
 }
 
+#[cfg(feature = "wasm-unit")]
 impl Drop for WasmUnit {
     fn drop(&mut self) {
         // Closing the request channel ends the guest's read; the instance

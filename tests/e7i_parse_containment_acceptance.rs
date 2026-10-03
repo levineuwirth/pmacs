@@ -5,10 +5,10 @@
 //!
 //! The process arm runs in the gate: `cargo build --workspace` builds
 //! `pmacs-parse-unit` beside `pmacs`, where the editor finds it. The wasm
-//! arm needs `pmacs-parse-unit.wasm` beside `pmacs`, which the gate does
-//! not build (`scripts/build-parse-unit-wasm`, wasi-sdk 29.0), so its rows
-//! are `#[ignore]` and run by hand with the module copied into the
-//! daemon's directory.
+//! arm needs a `pmacs` built with `--features wasm-unit` and
+//! `pmacs-parse-unit.wasm` beside it, neither of which the gate builds
+//! (`scripts/build-parse-unit-wasm`, wasi-sdk 29.0), so its rows are
+//! `#[ignore]` and run by hand.
 //!
 //! #301's nested image openers (`fuzz/accepted/301-nested-openers-98.input`)
 //! never return from `ts_parser__condense_stack` inside a deadline, and
@@ -201,7 +201,7 @@ fn e7i_a_process_unit_stops_296_at_its_memory_limit_and_says_so_once() {
 /// Run by hand: `scripts/build-parse-unit-wasm --profile dev` puts the
 /// module beside the debug `pmacs` (the gate builds no wasm).
 #[test]
-#[ignore = "needs pmacs-parse-unit.wasm beside the debug pmacs (scripts/build-parse-unit-wasm)"]
+#[ignore = "needs a debug pmacs built with --features wasm-unit and pmacs-parse-unit.wasm beside it (scripts/build-parse-unit-wasm)"]
 fn e7i_a_wasm_unit_stops_301_at_the_deadline_and_the_daemon_lives() {
     assert!(
         wasm_module_beside(Path::new(env!("CARGO_BIN_EXE_pmacs"))),
@@ -214,7 +214,7 @@ fn e7i_a_wasm_unit_stops_301_at_the_deadline_and_the_daemon_lives() {
 
 /// Run by hand, as the row above.
 #[test]
-#[ignore = "needs pmacs-parse-unit.wasm beside the debug pmacs (scripts/build-parse-unit-wasm)"]
+#[ignore = "needs a debug pmacs built with --features wasm-unit and pmacs-parse-unit.wasm beside it (scripts/build-parse-unit-wasm)"]
 fn e7i_a_wasm_unit_stops_296_at_its_memory_limit_and_says_so_once() {
     assert!(
         wasm_module_beside(Path::new(env!("CARGO_BIN_EXE_pmacs"))),
@@ -321,7 +321,7 @@ fn e7i_a_process_unit_s_previous_parse_answers_after_its_discard() {
 
 /// Run by hand, as the other wasm rows.
 #[test]
-#[ignore = "needs pmacs-parse-unit.wasm beside the debug pmacs (scripts/build-parse-unit-wasm)"]
+#[ignore = "needs a debug pmacs built with --features wasm-unit and pmacs-parse-unit.wasm beside it (scripts/build-parse-unit-wasm)"]
 fn e7i_a_wasm_unit_s_previous_parse_answers_after_its_discard() {
     assert!(
         wasm_module_beside(Path::new(env!("CARGO_BIN_EXE_pmacs"))),

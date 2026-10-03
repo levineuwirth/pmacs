@@ -8,8 +8,9 @@
 # every grammar in `BUILTIN_LANGUAGES` and the unit's own code, all in one
 # module, the C compiled by wasi-sdk's clang with `-fno-strict-aliasing`
 # (`.cargo/config.toml` passes it through `TARGET_CFLAGS`). The module is
-# copied beside the native binaries as `pmacs-parse-unit.wasm`, where the
-# editor looks for it when `syntax.isolation` is `"wasm"`.
+# copied beside the native binaries as `pmacs-parse-unit.wasm`, where an
+# editor built with `--features wasm-unit` looks for it when
+# `syntax.isolation` is `"wasm"`.
 #
 # Needs: `rustup target add wasm32-wasip1` for the pinned toolchain, and
 # wasi-sdk 29.0 (the version tree-sitter-loader 0.26.8 pins in its

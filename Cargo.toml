@@ -93,6 +93,12 @@ lua54 = ["mlua/lua54", "mlua/vendored"]
 # apply_edit, and the rope-projection redirect keeps the flip invisible
 # to grid frontends and to workers.
 crdt = ["dep:loro", "dep:loro-internal", "pmacs-protocol/crdt"]
+# E7i: the comparison's wasm parse unit (`syntax.isolation = "wasm"`).
+# Not default: it links wasmtime and Cranelift into the `pmacs` library,
+# so every debug test binary gains about 160 MB (`m4_acceptance` 278 to
+# 439 MB) and CI's hosted runners ran out of disk building them (PR #309's
+# first run). Without it a wasm request reports the unit unavailable.
+wasm-unit = ["dep:wasmtime", "dep:anyhow"]
 
 [dependencies]
 crossterm = "0.28"
@@ -151,8 +157,8 @@ pmacs-syntax = { path = "pmacs-syntax" }
 # `src/parse_isolation.rs`), no component model, no caching of compiled
 # code (`Module::deserialize` is `unsafe`).
 pmacs-parse-unit = { path = "pmacs-parse-unit" }
-wasmtime = { version = "36", default-features = false, features = ["runtime", "cranelift", "std", "parallel-compilation", "cache"] }
-anyhow = "1"
+wasmtime = { version = "36", default-features = false, features = ["runtime", "cranelift", "std", "parallel-compilation", "cache"], optional = true }
+anyhow = { version = "1", optional = true }
 # Bundled grammars (T M4.2). Detection is by file extension; loading
 # is lazy --- the C-side language object isn't materialized until the
 # first buffer of that language opens. Adding a new grammar requires
