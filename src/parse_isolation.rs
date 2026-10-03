@@ -1124,8 +1124,15 @@ impl ProcessUnit {
                     path.display()
                 )));
             }
-            None => sibling("pmacs-parse-unit")
-                .ok_or_else(|| Death::Unavailable("no pmacs-parse-unit beside pmacs".into()))?,
+            None => sibling("pmacs-parse-unit").ok_or_else(|| {
+                Death::Unavailable(format!(
+                    "no pmacs-parse-unit beside pmacs{}",
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(|d| format!(" in {}", d.display())))
+                        .unwrap_or_default()
+                ))
+            })?,
         };
         let mut command = Command::new(&bin);
         command

@@ -4,7 +4,8 @@
 //!
 //! This is the worker process the editor spawns per buffer, started as
 //! `pmacs-parse-unit --memory-limit-mb N [--memory-enforcement rlimit|watch]
-//! [--report-memory]`. With `rlimit`, the default, it caps its own address
+//! [--report-memory]`; `--version` prints its version and protocol and
+//! exits, which is how a release checks the worker it stages. With `rlimit`, the default, it caps its own address
 //! space at what it holds now plus `N` MiB before serving (`RLIMIT_AS`, soft
 //! and hard, so it cannot raise it again): a parse that grows past the
 //! limit gets a failed allocation and the process aborts, taking only
@@ -48,6 +49,14 @@ fn main() {
                 }
             },
             "--report-memory" => report_memory = true,
+            "--version" => {
+                println!(
+                    "pmacs-parse-unit {} protocol {}",
+                    env!("CARGO_PKG_VERSION"),
+                    pmacs_parse_unit::PROTOCOL
+                );
+                return;
+            }
             _ => {
                 eprintln!("pmacs-parse-unit: unknown argument {arg}");
                 std::process::exit(2);

@@ -951,10 +951,11 @@ fn e7i_the_fuzz_replay_fails_a_worker_that_crashes() {
     );
 }
 
-/// A missing worker is said once, with both ways out (E7i): with
+/// A missing worker is said once, with the ways out (E7i): with
 /// `syntax.parse-unit-path` naming no file, no buffer can be parsed, and
 /// the user is told once a session, however many buffers try, that nothing
-/// is highlighted, why, and what to install or set.
+/// is highlighted, why, and what to do: keep the worker the release archive
+/// ships beside pmacs, or set `syntax.isolation`.
 #[test]
 fn e7i_a_missing_worker_is_said_once_with_its_remedy() {
     let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -977,9 +978,10 @@ fn e7i_a_missing_worker_is_said_once_with_its_remedy() {
            end\n\
            local _, told = said:gsub('so nothing is highlighted', '')\n\
            local f = assert(io.open({report:?}, 'w'))\n\
-           f:write(string.format('told=%d path=%s remedy=%s\\n', told,\n\
+           f:write(string.format('told=%d path=%s remedy=%s archive=%s\\n', told,\n\
              tostring(said:find('does not exist', 1, true) ~= nil),\n\
-             tostring(said:find('set syntax.isolation to none', 1, true) ~= nil)))\n\
+             tostring(said:find('set syntax.isolation to none', 1, true) ~= nil),\n\
+             tostring(said:find('ships beside pmacs in the release archive', 1, true) ~= nil)))\n\
            f:close()\n\
          end)\n",
         missing = dir.join("no-such-worker").display().to_string(),
@@ -993,8 +995,10 @@ fn e7i_a_missing_worker_is_said_once_with_its_remedy() {
         t.ends_with('\n')
     });
     assert_eq!(
-        text, "told=1 path=true remedy=true\n",
-        "told once, naming the missing path and the way out"
+        text, "told=1 path=true remedy=true archive=true\n",
+        "told once, naming the missing path and the ways out, the first one \
+         the release archive itself (E7i review 1: the remedy named a binary \
+         the archive did not carry)"
     );
 }
 

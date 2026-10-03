@@ -208,7 +208,7 @@ refuses a chord that is already bound, so take one over with
 
 Download an archive from the
 [releases page](https://github.com/levineuwirth/pmacs/releases), unpack
-it, and put both binaries somewhere on your `PATH`.
+it, and put its three binaries somewhere on your `PATH`.
 
 **Keep `pmacs` and `pmacs-gpu` together.** `pmacs --gpu` looks for
 `pmacs-gpu` beside itself first and only then falls back to a `PATH`
@@ -220,11 +220,12 @@ in a worker process of its own, `pmacs-parse-unit`, so a grammar's
 runaway or crashing parse is stopped without taking the editor down
 (`syntax.isolation`; what holds a worker differs by platform, see
 `docs/divergences.md`). `pmacs` looks for the worker beside itself, or at
-`syntax.parse-unit-path`. The release archives do not carry it yet: build
-it from source (below) and put it beside `pmacs`, or set
-`syntax.isolation` to `"none"`, which parses in the editor as releases
-before it did, without that protection. Without either, nothing is
-highlighted, and the editor says so once.
+`syntax.parse-unit-path`. The release archive carries it beside `pmacs`,
+and a release without it fails before upload; a source build makes it
+with `cargo build --release -p pmacs-parse-unit` (below). Without the
+worker nothing is highlighted, and the editor says so once;
+`syntax.isolation` set to `"none"` parses in the editor instead, as
+releases before E7i did, without that protection.
 
 Verify a download:
 

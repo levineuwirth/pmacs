@@ -1033,9 +1033,11 @@ fn e7i_review1_reads_beside_a_parse_agree_with_reads_after_it() {
 /// failure, requires `pmacs-parse-unit` in every archive and checks its
 /// executable bit, so a release that omits the worker fails before upload.
 /// At `fa176de` it requires `pmacs` and `pmacs-gpu` only, and its explicit
-/// staging (layer 2) copies only those, so the omission ships green.
+/// staging (layer 2) copies only those, so the omission ships green. Fix
+/// round 1: the worker is built by a command of its own (`--bin` applies
+/// to every package a command names, so a shared command builds none),
+/// staged, required in both lists, version-checked and glibc-checked.
 #[test]
-#[ignore = "E7i review 1, High (merge disposition): release.yml neither builds, stages nor requires pmacs-parse-unit (fails at fa176de)"]
 fn e7i_review1_the_release_archive_requires_the_parse_worker() {
     let workflow =
         std::fs::read_to_string(repo().join(".github/workflows/release.yml")).expect("release.yml");
@@ -1045,14 +1047,36 @@ fn e7i_review1_the_release_archive_requires_the_parse_worker() {
         .collect();
     assert!(!required.is_empty(), "the archive assertion's lists");
     for line in &required {
+        // A list's last word carries the `;` before `do` (fix round 1: as
+        // first committed this compared `pmacs-parse-unit;`, so the
+        // review's own prescribed line could not pass).
         assert!(
-            line.split_whitespace().any(|w| w == "pmacs-parse-unit"),
+            line.split_whitespace()
+                .any(|w| w.trim_end_matches(';') == "pmacs-parse-unit"),
             "the archive assertion requires the worker: {line}"
         );
     }
     assert!(
         workflow.contains("cp target/release/pmacs-parse-unit"),
         "the archive stages the worker"
+    );
+    let builds: Vec<&str> = workflow
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("cargo build") && l.contains("pmacs-parse-unit"))
+        .collect();
+    assert!(
+        !builds.is_empty() && builds.iter().all(|l| !l.contains("--bin")),
+        "the worker is built by a command naming no --bin, which would select \
+         targets in every package it names and build no worker: {builds:?}"
+    );
+    assert!(
+        workflow.contains("\"staging/$name/pmacs-parse-unit\" --version"),
+        "the staged worker is run and its version checked"
+    );
+    assert!(
+        workflow.contains("for bin in pmacs pmacs-gpu pmacs-parse-unit; do"),
+        "the worker is held to the glibc floor"
     );
 }
 

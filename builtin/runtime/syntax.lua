@@ -762,11 +762,15 @@ pmacs._async.tick = function(...)
     -- re-arms the notice.
     if status == "unavailable" then
       -- E7i: no worker could start, so nothing is highlighted; told once a
-      -- session, with the two ways out.
+      -- session, with the ways out. The release archive carries the worker
+      -- beside pmacs (`release.yml` fails a release without it), so the
+      -- remedy is one a user of an archive can follow: put the two back
+      -- together. What a terminal's echo line cuts is the tail; the
+      -- *errors* buffer keeps it all.
       if not parse_unit_unavailable_warned then
         parse_unit_unavailable_warned = true
         pmacs.error(string.format(
-          "syntax: %s, so nothing is highlighted; install pmacs-parse-unit beside pmacs (or name it in syntax.parse-unit-path), or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
+          "syntax: %s, so nothing is highlighted. pmacs-parse-unit ships beside pmacs in the release archive: keep the two in one directory, or name the worker in syntax.parse-unit-path (a source build makes it with cargo build --release -p pmacs-parse-unit). Or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
           tostring(detail)))
       end
     elseif key and status == "limit" then

@@ -3,8 +3,8 @@ name: Release
 # Distribution Stage 1 — binaries on tag. See
 # the archived distribution-stage1 framing.
 #
-# Scope is deliberately one stage: build the two shipped binaries when a
-# `v*` tag is pushed and attach them to a GitHub Release. There are no
+# Scope is deliberately one stage: build the three shipped binaries when
+# a `v*` tag is pushed and attach them to a GitHub Release. There are no
 # channels, no rollback, no update-in-place, no signing. Those are named
 # as out of scope in the framing's §5 rather than forgotten.
 #
@@ -149,11 +149,19 @@ jobs:
       # produces pmacs-audit, pmacs_fake_lsp and pmacs_fake_mcp -- the
       # last two being test fixtures. Naming targets keeps them from
       # being built at all.
+      #
+      # ONE PACKAGE PER COMMAND. `--bin` selects targets across EVERY
+      # package a command names, so `cargo build --release -p pmacs
+      # --bin pmacs -p pmacs-parse-unit` builds no worker and finishes
+      # green (E7i review 1). The worker is its own command, and it is
+      # built here, inside the checkout, where .cargo/config.toml gives
+      # every grammar's C -fno-strict-aliasing.
       - name: Build the shipped binaries only
         run: |
           set -euo pipefail
           cargo build --release --bin pmacs
           cargo build --release -p pmacs-gpu
+          cargo build --release -p pmacs-parse-unit
 
       # EXPLICIT STAGED ASSET LIST, layer 2 of 2. Layer 1 alone is not
       # enough: a cached target/release can still hold binaries from an
@@ -161,10 +169,14 @@ jobs:
       # Copying named files into a clean staging dir makes the archive's
       # contents a decision rather than a directory's residue.
       #
-      # The two binaries are staged into the SAME directory on purpose.
+      # The three binaries are staged into the SAME directory on purpose.
       # `pmacs --gpu` prefers a co-located pmacs-gpu and only then falls
       # back to a PATH lookup, so co-location is what makes an unpacked
-      # release self-contained for someone who unpacks it off PATH.
+      # release self-contained for someone who unpacks it off PATH. The
+      # parse worker has no PATH fallback at all: since E7i every
+      # buffer's parse runs in a pmacs-parse-unit process the editor
+      # finds beside itself (or at syntax.parse-unit-path), and without
+      # one nothing is highlighted.
       - name: Stage the archive
         id: stage
         run: |
@@ -173,8 +185,9 @@ jobs:
           mkdir -p "staging/$name"
           cp target/release/pmacs "staging/$name/"
           cp target/release/pmacs-gpu "staging/$name/"
+          cp target/release/pmacs-parse-unit "staging/$name/"
           cp README.md LICENSE* "staging/$name/" 2>/dev/null || true
-          chmod +x "staging/$name/pmacs" "staging/$name/pmacs-gpu"
+          chmod +x "staging/$name/pmacs" "staging/$name/pmacs-gpu" "staging/$name/pmacs-parse-unit"
           tar -C staging -czf "$name.tar.gz" "$name"
           echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -182,7 +195,10 @@ jobs:
       # Assert the archive rather than the build command. The build
       # could change, a target could be added, a cache could leak -- the
       # only thing that decides what users receive is what is inside
-      # this file.
+      # this file. The required list names every binary the editor needs
+      # at runtime, so leaving one out fails here, before upload, rather
+      # than reaching a user (tests/e7i_review1_probes.rs reads these
+      # lists and fails a pull request that drops the worker from them).
       - name: Assert archive contents
         run: |
           set -euo pipefail
@@ -199,13 +215,13 @@ jobs:
             fi
           done
 
-          for required in pmacs pmacs-gpu; do
+          for required in pmacs pmacs-gpu pmacs-parse-unit; do
             echo "$members" | grep -qx "$required" \
               || { echo "::error::$required missing from $archive"; exit 1; }
           done
 
           # Executable bits, read back out of the archive itself.
-          for required in pmacs pmacs-gpu; do
+          for required in pmacs pmacs-gpu pmacs-parse-unit; do
             mode=$(tar -tvzf "$archive" | awk -v f="$name/$required" '$NF==f {print $1}')
             case "$mode" in
               *x*) : ;;
@@ -225,13 +241,17 @@ jobs:
 
           got_pmacs=$("staging/$name/pmacs" --version)
           got_gpu=$("staging/$name/pmacs-gpu" --version)
-          echo "pmacs:     $got_pmacs"
-          echo "pmacs-gpu: $got_gpu"
+          got_unit=$("staging/$name/pmacs-parse-unit" --version)
+          echo "pmacs:            $got_pmacs"
+          echo "pmacs-gpu:        $got_gpu"
+          echo "pmacs-parse-unit: $got_unit"
 
           echo "$got_pmacs" | grep -qx "pmacs $base" \
             || { echo "::error::pmacs --version reported '$got_pmacs', expected 'pmacs $base'"; exit 1; }
           echo "$got_gpu" | grep -q "^pmacs-gpu $base " \
             || { echo "::error::pmacs-gpu --version reported '$got_gpu', expected 'pmacs-gpu $base ...'"; exit 1; }
+          echo "$got_unit" | grep -q "^pmacs-parse-unit $base " \
+            || { echo "::error::pmacs-parse-unit --version reported '$got_unit', expected 'pmacs-parse-unit $base ...'"; exit 1; }
 
       # The glibc floor, MACHINE-CHECKED rather than trusted.
       #
@@ -251,7 +271,7 @@ jobs:
           floor="2.35"   # Ubuntu 22.04 / Debian 12; see the framing §1.6
           name="${{ steps.stage.outputs.name }}"
           fail=0
-          for bin in pmacs pmacs-gpu; do
+          for bin in pmacs pmacs-gpu pmacs-parse-unit; do
             max=$(objdump -T "staging/$name/$bin" \
                   | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
                   | sed 's/GLIBC_//' | sort -uV | tail -1)
@@ -314,10 +334,12 @@ jobs:
           cat > notes.md <<'NOTES'
           ## Install
 
-          Download the archive for your platform, unpack it, and put both
-          binaries somewhere on your `PATH` — **keep them together**:
-          `pmacs --gpu` looks for `pmacs-gpu` beside itself first, then
-          falls back to `PATH`.
+          Download the archive for your platform, unpack it, and put its
+          three binaries somewhere on your `PATH` — **keep them
+          together**: `pmacs --gpu` looks for `pmacs-gpu` beside itself
+          first, then falls back to `PATH`, and every buffer's syntax
+          parse runs in a `pmacs-parse-unit` process that `pmacs` finds
+          beside itself; without it nothing is highlighted.
 
           Verify a download against `SHA256SUMS`:
 
