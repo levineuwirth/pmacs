@@ -3604,13 +3604,20 @@ impl UnitClient {
 
     /// The answers to `ids`, in that order; `Err` when the worker ended or
     /// did not answer within `hard`, after which it has been killed.
+    /// As the editor bounds a request (`pmacs::parse_isolation`), `hard`
+    /// holds until the parse returns and `AFTER_PARSE_HARD` from then on.
     fn wait(&mut self, ids: &[u64], hard: Duration) -> Result<Vec<pmacs_parse_unit::Response>, ()> {
-        let started = Instant::now();
+        let mut until = Instant::now() + hard;
         let mut got: BTreeMap<u64, pmacs_parse_unit::Response> = BTreeMap::new();
         while ids.iter().any(|id| !got.contains_key(id)) {
-            let left = hard.saturating_sub(started.elapsed());
+            let left = until.saturating_duration_since(Instant::now());
             match self.answers.recv_timeout(left) {
+                Ok(Ok(Some(((0, pmacs_parse_unit::Response::ParseReturned(_)), _)))) => {
+                    until = Instant::now() + pmacs::parse_isolation::AFTER_PARSE_HARD;
+                }
                 Ok(Ok(Some(((id, response), _)))) => {
+                    // Id 0 is otherwise the unit's memory report, not an
+                    // answer.
                     if id != 0 {
                         got.insert(id, response);
                     }

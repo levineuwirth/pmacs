@@ -97,11 +97,17 @@ pub struct Limits {
     pub recycle: u64,
 }
 
-/// How long after the deadline the boundary stops a unit that has not
-/// answered. A parse the progress callback reaches returns at the
+/// How long after the deadline the boundary stops a unit whose parse has
+/// not returned. A parse the progress callback reaches returns at the
 /// deadline; this is for work it does not reach (#296's accept, #301's
 /// condensation), and a little slack so a clean cancel lands first.
 pub const HARD_GRACE: Duration = Duration::from_millis(100);
+
+/// How long a unit may take after its parse returned: installing the tree
+/// (on a fresh unit, compiling each layer's queries) and walking the spans
+/// it answers with. The deadline bounds the parse, as in-process it did;
+/// this bounds the rest, which in-process ran on the main thread unbounded.
+pub const AFTER_PARSE_HARD: Duration = Duration::from_secs(10);
 
 /// One isolated parse, as the async runtime hands it to a worker thread.
 pub struct IsolatedJob {
@@ -1228,21 +1234,29 @@ impl ProcessUnit {
         let answer = if written.is_err() {
             Err(self.death())
         } else {
-            let frame = match hard {
-                Some(limit) => rx.recv_timeout(limit),
-                None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match frame {
-                Ok(Ok(Some((response, _)))) => Ok(response),
-                Err(RecvTimeoutError::Timeout) => {
-                    let death = Death::Time {
-                        deadline: hard.unwrap_or_default().saturating_sub(HARD_GRACE),
-                        after: started.elapsed(),
-                    };
-                    self.kill_for(death.clone());
-                    Err(death)
+            // The bound is the deadline until the parse returns, and
+            // `AFTER_PARSE_HARD` from then on (`Response::ParseReturned`).
+            let mut until = hard.map(|limit| started + limit);
+            loop {
+                let frame = match until {
+                    Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
+                    None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                };
+                match frame {
+                    Ok(Ok(Some((Response::ParseReturned(_), _)))) => {
+                        until = until.map(|_| Instant::now() + AFTER_PARSE_HARD);
+                    }
+                    Ok(Ok(Some((response, _)))) => break Ok(response),
+                    Err(RecvTimeoutError::Timeout) => {
+                        let death = Death::Time {
+                            deadline: hard.unwrap_or_default().saturating_sub(HARD_GRACE),
+                            after: started.elapsed(),
+                        };
+                        self.kill_for(death.clone());
+                        break Err(death);
+                    }
+                    _ => break Err(self.death()),
                 }
-                _ => Err(self.death()),
             }
         };
         if parse {
@@ -1351,6 +1365,13 @@ fn route_answers(
         match pmacs_parse_unit::read_frame::<_, (u64, Response)>(&mut r) {
             Ok(Some(((0, Response::Resident(bytes)), _))) => {
                 resident.store(bytes, Ordering::Relaxed);
+            }
+            Ok(Some(((0, Response::ParseReturned(id)), _))) => {
+                // Not the answer: the request keeps waiting, under a new bound.
+                let waiting = waiting.lock().expect("waiting poisoned");
+                if let Some(tx) = waiting.by_id.get(&id) {
+                    let _ = tx.send(Ok(Some((Response::ParseReturned(id), Vec::new()))));
+                }
             }
             Ok(Some(((id, response), payload))) => {
                 let tx = waiting.lock().expect("waiting poisoned").by_id.remove(&id);

@@ -929,12 +929,16 @@ fn e7i_the_fuzz_replay_drives_the_worker_and_finds_296_and_301_contained() {
 fn e7i_the_fuzz_replay_fails_a_worker_that_crashes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let fake = dir.path().join("crashing-unit");
-    // Hello's request frame is 10 bytes; the answer is (1, Hello { 2 }).
+    // Hello's request frame is 10 bytes; the answer is (1, Hello { this
+    // build's protocol }), each a one-byte varint.
+    let protocol = u8::try_from(pmacs_parse_unit::PROTOCOL).expect("a one-byte protocol");
     std::fs::write(
         &fake,
-        "#!/bin/sh\nhead -c 10 >/dev/null\n\
-         printf '\\003\\000\\000\\000\\001\\000\\002\\000\\000\\000\\000'\n\
-         head -c 1 >/dev/null\nkill -SEGV $$\n",
+        format!(
+            "#!/bin/sh\nhead -c 10 >/dev/null\n\
+             printf '\\003\\000\\000\\000\\001\\000\\{protocol:03o}\\000\\000\\000\\000'\n\
+             head -c 1 >/dev/null\nkill -SEGV $$\n"
+        ),
     )
     .expect("fake unit");
     std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -1061,5 +1065,30 @@ fn e7i_killing_a_buffer_ends_its_worker() {
     assert_eq!(
         report, "mode=process before=true after=false unit=nil",
         "the worker ended with its buffer"
+    );
+}
+
+/// The deadline bounds the parse, not what follows it (E7i): a fresh
+/// worker's first request also compiles the language's queries and walks
+/// the spans, which in-process ran at settle and under no deadline. A small
+/// LaTeX document's parse returns in under a millisecond in a debug worker
+/// and its first request answers after about half a second, almost all of
+/// it compiling LaTeX's highlight query (measured: 0.3–0.6 ms against
+/// 486–614 ms). Under a 50 ms deadline the request installs: the worker says
+/// when its parse returned, and the editor's kill bounds only what came
+/// before.
+#[test]
+fn e7i_a_fresh_worker_s_query_compile_is_not_under_the_deadline() {
+    let probe = "local r = pmacs.parse._unit_report(b)\n\
+         return string.format('deaths=%d tree=%s', r.deaths, pmacs.parse.tree(b):language())";
+    let report = probe_in_unit_with(
+        "fresh.tex",
+        "\\documentclass{article}\n\\begin{document}\nHello \\emph{world}.\n\\end{document}\n",
+        probe,
+        "pmacs.config.set('syntax.parse-deadline-ms', 50)",
+    );
+    assert_eq!(
+        report, "mode=process deaths=0 tree=latex",
+        "the first parse installed under a 50 ms deadline"
     );
 }

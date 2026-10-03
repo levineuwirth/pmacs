@@ -51,7 +51,7 @@ pub const MAX_FRAME_PART: u32 = 1 << 30;
 /// The protocol this unit speaks, answered to [`Request::Hello`]. A worker
 /// beside a `pmacs` built from another tree speaks another one, and the
 /// editor refuses it rather than misreading its frames.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// The exit status of a worker its memory watch stopped.
 pub const MEMORY_WATCH_EXIT: i32 = 86;
@@ -273,6 +273,12 @@ pub enum Response {
     /// parses when started with `--report-memory`: what the editor's total
     /// watchdog sums where no cgroup holds the workers.
     Resident(u64),
+    /// Sent unasked (id 0) the moment the parse of request `id` returns,
+    /// before the unit installs its tree (compiling the layers' queries on a
+    /// fresh unit) and walks its spans: the editor's deadline bounds the
+    /// parse, as `syntax.parse-deadline-ms` means, and what follows has a
+    /// bound of its own.
+    ParseReturned(u64),
 }
 
 /// `pmacs_syntax::NodeFacts` on the wire.
@@ -478,7 +484,7 @@ impl Unit {
     /// kept. [`serve`] answers reads while a parse runs instead.
     pub fn handle(&mut self, request: Request, payload: &[u8]) -> Response {
         match request {
-            Request::Parse(call) => self.parse(&call, payload).0,
+            Request::Parse(call) => self.parse(&call, payload, &mut || {}).0,
             read => answer_read(&self.kept, read),
         }
     }
@@ -517,8 +523,14 @@ impl Unit {
     }
 
     /// Parse, install, and answer; the tree the install evicted comes back
-    /// with the answer, to be dropped after it is sent.
-    fn parse(&mut self, call: &ParseCall, payload: &[u8]) -> (Response, Option<Arc<Installed>>) {
+    /// with the answer, to be dropped after it is sent. `returned` runs the
+    /// moment the parse itself returns, before the install.
+    fn parse(
+        &mut self,
+        call: &ParseCall,
+        payload: &[u8],
+        returned: &mut dyn FnMut(),
+    ) -> (Response, Option<Arc<Installed>>) {
         let started = Instant::now();
         if let Err(failure) = self.update_text(call, payload) {
             self.cold_next = true;
@@ -566,7 +578,9 @@ impl Unit {
                 .filter(|&ms| ms > 0)
                 .map(Duration::from_millis),
         };
-        let bundle = match run_parse(request) {
+        let parsed = run_parse(request);
+        returned();
+        let bundle = match parsed {
             Ok(bundle) => bundle,
             Err(error) => {
                 self.cold_next = true;
@@ -861,7 +875,13 @@ pub fn serve<R: Read, W: Write + Send + 'static>(
             .spawn(move || {
                 for (id, call, payload) in queue {
                     parsing.set(true);
-                    let (response, evicted) = unit.parse(&call, &payload);
+                    let mut returned = || {
+                        if let Ok(mut out) = out.lock() {
+                            let _ =
+                                write_frame(&mut *out, &(0u64, &Response::ParseReturned(id)), &[]);
+                        }
+                    };
+                    let (response, evicted) = unit.parse(&call, &payload, &mut returned);
                     parsing.set(false);
                     let mut out = out.lock().expect("output poisoned");
                     let mut sent = write_frame(&mut *out, &(id, &response), &[]);
