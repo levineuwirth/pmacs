@@ -8409,6 +8409,7 @@ pub fn install_parse(
             t.set("last_death", report.last_death)?;
             t.set("busy", report.busy)?;
             t.set("reestablished", report.reestablished)?;
+            t.set("fetched", report.fetched)?;
             Ok(mlua::Value::Table(t))
         })?,
     )?;
@@ -8639,7 +8640,8 @@ pub fn install_parse(
                         id.0
                     )));
                 }
-                let overlay = SyntaxHighlightView::new(handle, theme);
+                let overlay =
+                    SyntaxHighlightView::new(handle, theme).with_interest(s.clone(), id.0);
                 win.push_overlay(Box::new(overlay));
                 Ok(true)
             })?,

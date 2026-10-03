@@ -19,6 +19,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -564,4 +565,88 @@ fn e7i_parse_now_runs_in_the_unit_and_is_held_to_its_limit() {
         "the synchronous parse ran in the unit, held to its limit"
     );
     assert!(daemon.is_alive(), "the daemon outlived the stopped parse");
+}
+
+/// The TUI grid reads a tree in a parse unit for what it shows (E7i), not
+/// the whole file: a real `paint_frame` of an in-process editor whose
+/// parses run in a worker styles the first row's `fn`, and the unit is
+/// asked for no spans beyond what came back with the parse, where a
+/// whole-file request would have fetched every byte of the file.
+#[test]
+fn e7i_the_grid_reads_what_it_shows_from_the_buffer_s_unit() {
+    use std::fmt::Write as _;
+
+    use pmacs::cell::{Cell, CellGrid, CellSize, Color};
+    use pmacs::editor::EditorState;
+    use pmacs::protocol::FrontendId;
+
+    const MARK: Color = Color::Rgb(0x7b, 0x1f, 0xa2);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("big.rs");
+    let mut text = String::new();
+    let mut n = 0;
+    while text.len() < 120_000 {
+        let _ = write!(text, "fn f{n}() {{\n    let x = {n};\n}}\n");
+        n += 1;
+    }
+    std::fs::write(&path, &text).expect("big.rs");
+    let mut state = EditorState::new_with_roots(&common::iso::roots());
+    let lua = state.lua_host.lua();
+    lua.load(format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         pmacs.theme.merge {{ keyword = {{ fg = {{ 0x7b, 0x1f, 0xa2 }} }} }}\n\
+         pmacs.buffer.find_or_open({:?})",
+        path.display().to_string()
+    ))
+    .exec()
+    .expect("open big.rs in process mode");
+    let settled = "(function() local b = pmacs.window.buffer() \
+                   local r = pmacs.parse._unit_report(b) \
+                   return r ~= nil and not r.busy and r.unit ~= '' and pmacs.parse.tree(b) ~= nil end)()";
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        state.tick_processes();
+        state.tick_async();
+        let done: bool = state
+            .lua_host
+            .lua()
+            .load(format!("return ({settled}) == true"))
+            .eval()
+            .unwrap_or(false);
+        if done {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the parse never settled from its unit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (rows, cols) = (24u32, 80u32);
+    let size = CellSize::new(rows, cols);
+    let mut cells = vec![Cell::default(); (rows * cols) as usize];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: cols,
+        size,
+    };
+    pmacs::editor::paint_frame(&state, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
+    let marked = cells[..cols as usize]
+        .iter()
+        .filter(|c| c.style.fg == MARK)
+        .count();
+    let fetched: u64 = state
+        .lua_host
+        .lua()
+        .load("return pmacs.parse._unit_report(pmacs.window.buffer()).fetched")
+        .eval()
+        .expect("fetched");
+    assert_eq!(marked, 2, "row 0's `fn` is styled from the unit's spans");
+    assert_eq!(
+        fetched,
+        0,
+        "the grid's rows came back with the parse; nothing more was fetched (the file is {} bytes)",
+        text.len()
+    );
 }

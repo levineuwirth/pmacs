@@ -229,6 +229,9 @@ struct Slot {
     last_death: Option<Death>,
     /// Times a discarded unit's previous parse was rebuilt in a fresh one.
     reestablished: u64,
+    /// Bytes of text whose spans a renderer asked the unit for after its
+    /// parse, beyond what came back with the parse.
+    fetched: u64,
 }
 
 /// Process-wide state: the units, the wasm engine, the cgroup, the trace.
@@ -280,6 +283,7 @@ impl Host {
                     deaths: 0,
                     last_death: None,
                     reestablished: 0,
+                    fetched: 0,
                 }))
             })
             .clone()
@@ -618,6 +622,7 @@ impl IsolatedTree for IsolatedHandle {
         // Not covered: ask the unit, only if it is idle (a busy unit is
         // parsing a newer text, and the renderer must not wait on it).
         let mut slot = self.slot.try_lock().ok()?;
+        slot.fetched += (range.end - range.start) as u64;
         let want = vec![(range.start as u32, range.end as u32)];
         let fetched = if slot.transport.is_some()
             && slot.generation == self.generation.load(Ordering::Relaxed)
@@ -835,6 +840,9 @@ pub struct UnitReport {
     pub busy: bool,
     /// Times a discarded unit's previous parse was rebuilt in a fresh one.
     pub reestablished: u64,
+    /// Bytes of text whose spans renderers asked the unit for beyond what
+    /// came back with each parse.
+    pub fetched: u64,
 }
 
 /// The report for `buffer`'s unit, if it has had one. Never waits: the
@@ -857,6 +865,7 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
     Some(UnitReport {
         busy: false,
         reestablished: slot.reestablished,
+        fetched: slot.fetched,
         mode: slot.mode.name().to_owned(),
         unit: slot.transport.as_ref().map(|t| t.id()).unwrap_or_default(),
         memory: slot.transport.as_ref().and_then(|t| t.memory_bytes()),
@@ -1066,10 +1075,24 @@ pub fn pss_bytes(pid: u32) -> Option<u64> {
         .map(|kb| kb * 1024)
 }
 
-/// A binary beside the running one, as `pmacs --gpu` finds `pmacs-gpu`.
+/// A binary beside the running one, as `pmacs --gpu` finds `pmacs-gpu`;
+/// from a test binary in cargo's `deps/`, the one beside `deps/`, where
+/// `cargo build` puts the workspace's binaries, so an editor a test runs
+/// in-process finds its workers as the daemon does.
 fn sibling(name: &str) -> Option<PathBuf> {
-    let path = std::env::current_exe().ok()?.parent()?.join(name);
-    path.exists().then_some(path)
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let here = dir.join(name);
+    if here.exists() {
+        return Some(here);
+    }
+    if dir.file_name()? == "deps" {
+        let up = dir.parent()?.join(name);
+        if up.exists() {
+            return Some(up);
+        }
+    }
+    None
 }
 
 /// A cgroup v2 directory holding every worker, its `memory.max` the
