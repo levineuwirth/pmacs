@@ -155,7 +155,8 @@ jobs:
       # --bin pmacs -p pmacs-parse-unit` builds no worker and finishes
       # green (E7i review 1). The worker is its own command, and it is
       # built here, inside the checkout, where .cargo/config.toml gives
-      # every grammar's C -fno-strict-aliasing.
+      # every grammar's C -fno-strict-aliasing (pmacs-syntax's build
+      # script refuses a build without it).
       - name: Build the shipped binaries only
         run: |
           set -euo pipefail

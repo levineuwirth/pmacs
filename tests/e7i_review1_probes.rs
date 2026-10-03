@@ -1103,9 +1103,10 @@ fn e7i_review1_the_release_archive_requires_the_parse_worker() {
 /// links the grammars) has no build script, so `cargo install` of the
 /// worker from outside a checkout compiles the grammars without the flag and
 /// without refusal (the review's probe: `HOST_CFLAGS = None` in every grammar's
-/// build record).
+/// build record). Fix round 1: `pmacs-syntax`'s build script makes the
+/// refusal, and a check of the worker started outside the checkout, as
+/// `cargo install --git` starts one, fails in it, naming the flag.
 #[test]
-#[ignore = "E7i review 1, Medium: the aliasing guard does not reach the worker's build (fails at fa176de)"]
 fn e7i_review1_the_aliasing_guard_reaches_the_worker_s_build() {
     let guarded = ["pmacs-syntax/build.rs", "pmacs-parse-unit/build.rs"]
         .iter()
@@ -1114,6 +1115,43 @@ fn e7i_review1_the_aliasing_guard_reaches_the_worker_s_build() {
     assert!(
         guarded,
         "a build script of the worker's own crates runs the strict-aliasing verdict"
+    );
+    // cargo reads `.cargo/config.toml` only from the directory a build
+    // starts in and its ancestors, so a build of this manifest started from
+    // a temporary directory sees no `-fno-strict-aliasing`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(env!("CARGO"))
+        .args([
+            "check",
+            "--offline",
+            "-p",
+            "pmacs-parse-unit",
+            "--manifest-path",
+        ])
+        .arg(repo().join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(dir.path().join("target"))
+        .current_dir(dir.path())
+        // a user config's sccache would wrap the C too, and can fail on its
+        // own
+        .env("RUSTC_WRAPPER", "")
+        .env_remove("CARGO_TARGET_DIR")
+        // this test runs under the checkout's `[env]`; the build it starts
+        // must not inherit it
+        .env_remove("HOST_CFLAGS")
+        .env_remove("TARGET_CFLAGS")
+        .env_remove("CFLAGS")
+        .output()
+        .expect("cargo check from outside the checkout");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && stderr.contains("failed to run custom build command for `pmacs-syntax")
+            && stderr.contains(
+                "refusing to build: the C compiler would not receive -fno-strict-aliasing"
+            ),
+        "the worker's build started outside the checkout is refused by pmacs-syntax's \
+         build script, naming the flag:\n{stderr}"
     );
 }
 

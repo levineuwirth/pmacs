@@ -41,6 +41,14 @@ tree-sitter-css = "0.25"
 arborium-lean = "2.18"
 tree-sitter-haskell = "0.24.1"
 
+# E7i fix round 1: `build.rs` asks `cc` for the C compiler the grammar
+# crates' build scripts will run and refuses a build in which it would not
+# receive `-fno-strict-aliasing` (`../build/strict_aliasing.rs`), as the
+# root package's does; already in the graph as every grammar's
+# build-dependency.
+[build-dependencies]
+cc = "1"
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

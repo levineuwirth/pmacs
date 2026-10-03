@@ -74,7 +74,9 @@ Always true:
   would produce, UB no arm instruments (a ctype table read past its
   end into mapped memory, #302, which a row now forbids), or a data race
   between the worker's parse and its reads (no arm runs ThreadSanitizer),
-  and a green run is not a proof. `build.rs` refuses to compile C that
+  and a green run is not a proof. `pmacs-syntax`'s build script, which
+  every binary carrying grammar C passes through (the editor and the
+  worker alike; the root `build.rs` repeats it), refuses to compile C that
   `-fno-strict-aliasing` does not reach, as in a build cargo did not start
   inside the checkout, which passes it with `CFLAGS`. E7e's lesson: the author's chosen test file parsed while the
   owner's real one, two `{-# LANGUAGE #-}` pragmas, aborted the editor;

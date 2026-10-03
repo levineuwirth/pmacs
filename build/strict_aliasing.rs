@@ -1,9 +1,9 @@
 // build/strict_aliasing.rs --- the verdict behind build.rs's refusal to
 // compile C without -fno-strict-aliasing (E7h fix round 1).
 
-//! `build.rs` asks the `cc` crate for the C compiler it would run, the same
-//! question every grammar crate's build script asks, and hands its
-//! arguments here. `cc` puts the environment's flags last (`CFLAGS`, then
+//! `build.rs` and `pmacs-syntax/build.rs` ask the `cc` crate for the C
+//! compiler it would run, the same question every grammar crate's build
+//! script asks, and hand its arguments here (`aliasing_guard.rs`). `cc` puts the environment's flags last (`CFLAGS`, then
 //! `HOST_CFLAGS` or `TARGET_CFLAGS`, then `CFLAGS_<target>`), so what
 //! reaches a grammar's compile is decided by the last aliasing flag in the
 //! list. `.cargo/config.toml` forces `-fno-strict-aliasing` into
@@ -36,15 +36,16 @@ pub fn verdict(compiler: &str, args: &[String]) -> Result<(), String> {
     Err(format!(
         "pmacs: refusing to build: the C compiler would not receive -fno-strict-aliasing; {why}.\n\
          \n\
-         pmacs compiles tree-sitter's runtime and every bundled grammar's C into the editor, \
-         and in daemon mode one grammar's memory error ends every buffer the daemon holds. \
+         pmacs compiles tree-sitter's runtime and every bundled grammar's C into the editor \
+         and its parse worker, pmacs-parse-unit, where a grammar's memory error runs a \
+         crafted file's bytes with your authority. \
          GCC 16 at -O2 turned the strict-aliasing UB in a grammar's array header into a heap \
          overflow that aborted the editor (E7g); the grammars that carried that header ship \
          from vendored copies with the fixed one, and every C source is still compiled with \
          -fno-strict-aliasing so that no compiler may exploit what no one has yet found.\n\
          \n\
          Build from the repository root, where .cargo/config.toml supplies it, or supply it:\n\
-         \n    CFLAGS=-fno-strict-aliasing cargo install --git <pmacs repository> pmacs\n\
+         \n    CFLAGS=-fno-strict-aliasing cargo install --git <pmacs repository> pmacs pmacs-parse-unit\n\
          \n\
          The compiler cc would run: {compiler} {}",
         args.join(" ")
