@@ -382,6 +382,7 @@ PMACS_REQUIRE_LSP rust-analyzer clangd gopls vscode-json-language-server yaml-la
 PMACS_REQUIRE_SHELLS bash zsh fish sleep false
 PMACS_REQUIRE_LUA lua
 PMACS_REQUIRE_HLS haskell-language-server-wrapper cabal ghc
+PMACS_REQUIRE_CGROUP cgroup-delegation
 EOF
 }
 
@@ -389,6 +390,16 @@ tool_present() {
     case $1 in
         /*) [ -f "$1" ] ;;
         lua) command -v lua >/dev/null 2>&1 || command -v luajit >/dev/null 2>&1 ;;
+        # Not a tool: this session's cgroup subtree delegated to it, with
+        # the memory controller, so the editor can create its parse
+        # workers' cgroup beside its own and the kernel holds them to a
+        # total (E7i). Systemd user sessions on Linux grant it; CI's
+        # runners and macOS may not.
+        cgroup-delegation)
+            _cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+            [ -n "$_cg" ] || return 1
+            _cgp=$(dirname "/sys/fs/cgroup$_cg")
+            [ -w "$_cgp" ] && grep -qw memory "$_cgp/cgroup.subtree_control" 2>/dev/null ;;
         *)  command -v "$1" >/dev/null 2>&1 ;;
     esac
 }

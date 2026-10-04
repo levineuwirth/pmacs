@@ -237,11 +237,7 @@ fn e7g_review1_the_reproductions_inside_markdown_and_html_settle_plain() {
             .view(buffer.0)
             .and_then(|h| h.current())
             .unwrap();
-        let layers: Vec<String> = bundle
-            .layers
-            .iter()
-            .map(|l| l.language_name.clone())
-            .collect();
+        let layers: Vec<String> = bundle.layer_languages();
         assert_eq!(layers.first().map(String::as_str), Some(root), "{name}");
         assert!(
             layers.iter().all(|l| shipped.contains(l.as_str())),
@@ -264,7 +260,8 @@ fn e7g_review1_the_fuzz_job_runs_when_a_query_overlay_changes() {
     // (TOML's quadratic walk, #292, was a query's shape, not a parse's).
     // An edit to the overlay changes what the harness exercises and what
     // ships, and touches no path the job listens on.
-    let syntax = read("src/syntax.rs");
+    // The table moved into `pmacs-syntax` at E7i.
+    let syntax = read("pmacs-syntax/src/lib.rs");
     assert!(
         syntax.contains("builtin/queries/latex/highlights.scm"),
         "control: the overlay is compiled into the table"

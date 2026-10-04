@@ -538,6 +538,8 @@ pub fn run_daemon(socket_path: PathBuf, instance_name: Option<String>) -> Result
     drop(dispatcher_tx);
     let _ = accept_handle.join();
     cleanup(&socket_path, lock);
+    // E7i: end every parse unit and remove the workers' cgroup.
+    crate::parse_isolation::shutdown();
     eprintln!("pmacs: daemon stopped");
     Ok(())
 }

@@ -144,6 +144,9 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
         // the harness's capture walk runs.
         ".cargo/config.toml",
         "src/syntax.rs",
+        // E7i moved the table and `run_parse` into `pmacs-syntax`.
+        "pmacs-syntax/src/lib.rs",
+        "pmacs-syntax/Cargo.toml",
         "src/bin/pmacs_grammar_fuzz.rs",
         "scripts/fuzz-grammars",
         "scripts/grammar-fuzz-needed",

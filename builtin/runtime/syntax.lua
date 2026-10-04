@@ -34,7 +34,16 @@ local injection_cap_warned = {}
 -- those told the deadline dropped some embedded regions; keyed like the
 -- others so the user hears it once, re-armed when a parse installs whole.
 local parse_deadline_warned = {}
+-- E7i: no parse worker could start (none beside pmacs, or one from another
+-- build). Told once a session, not per buffer: the cause is the install.
+local parse_unit_unavailable_warned = false
 local parse_layers_cut_warned = {}
+-- E7i fix round 1: buffers already told that their parse worker crashed,
+-- keyed like the others; re-armed when a parse of the buffer installs.
+local parse_crash_warned = {}
+-- E7i fix round 1: buffers already told that a parse returned and its unit
+-- then ran past the bound on installing it; re-armed like the deadline's.
+local parse_stall_warned = {}
 
 -- E7h.2: a parse is bounded in time where tree-sitter calls its progress
 -- callback, which cancels a parse still running this long after it
@@ -62,6 +71,70 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E7i: the parse boundary (`src/parse_isolation.rs`), the process the
+-- owner ruled, and the default. "process" runs each buffer's parse, and
+-- every read of its tree, in a worker process of `pmacs-parse-unit`: the
+-- memory limits below and the deadline above bound the whole parse, the
+-- work the progress callback cannot reach included, and a parse that hits
+-- one ends its worker, not the editor. "none" parses in the editor's own
+-- process, as before E7i, where nothing stops #296 or #301.
+pmacs.config.define {
+  name = "syntax.isolation",
+  description = "Where syntax parses run: process (a worker process per buffer, the default) or none (in the editor). Under process a parse past its time limit, or its memory limit, is stopped without taking the editor down: on Linux before the memory exists, on macOS after it, by up to a few MB (docs/divergences.md). Under none it is not.",
+  type = "enum",
+  choices = { "process", "none" },
+  default = "process",
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "syntax.parse-memory-limit-mb",
+  description = "Under syntax.isolation process: how many MiB one buffer's parse worker may grow by before its parse is stopped.",
+  type = "integer",
+  default = 1024,
+  min = 16,
+  mutability = "live",
+}
+
+-- E7i.4: a worker is reused from parse to parse, since a fresh one per
+-- parse loses incremental parsing (measured: a cold parse in a new worker
+-- cost 154 ms against 83 ms incremental on a 595 KB Rust file, 409 against
+-- 288 on a 360 KB markdown note), and its memory does not creep under
+-- typing (flat after fifty keystrokes). What it keeps is the high-water
+-- mark of its largest parse: a worker that parsed a pathological 903 MiB
+-- file still held 849 MiB after re-parsing 24 bytes, where a fresh one
+-- holds 6 MiB. So one whose peak passed this in a parse is replaced at the
+-- buffer's next parse; ordinary files peak at 24 to 79 MiB.
+pmacs.config.define {
+  name = "syntax.parse-worker-recycle-mb",
+  description = "Under syntax.isolation process: a parse worker whose memory passed this many MiB in a parse is replaced by a fresh one at the buffer's next parse, releasing what the large parse left behind. 0 keeps a worker for the buffer's life.",
+  type = "integer",
+  default = 256,
+  min = 0,
+  mutability = "live",
+}
+
+-- E7i: where the parse worker is. Empty is beside the running pmacs, as
+-- the release puts it; a packager who installs it elsewhere (a libexec
+-- directory) names it here.
+pmacs.config.define {
+  name = "syntax.parse-unit-path",
+  description = "Under syntax.isolation process: the pmacs-parse-unit binary each buffer's parse worker runs. Empty means the one beside pmacs.",
+  type = "string",
+  default = "",
+  allow_empty = true,
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "syntax.parse-memory-total-mb",
+  description = "Under syntax.isolation process: how many MiB all parse workers together may hold. Where the kernel holds them in a cgroup (a Linux session with a delegated subtree) a parse that would pass it is stopped; elsewhere (macOS, other Linux) a watchdog stops the largest worker once the total is passed, by up to tens of MB (docs/divergences.md). 0 leaves the total unbounded.",
+  type = "integer",
+  default = 4096,
+  min = 0,
+  mutability = "live",
+}
+
 local raw_dispatch = pmacs.parse._dispatch
 
 -- Wrap `_dispatch` so every dispatched parse job lands in our
@@ -76,11 +149,30 @@ function pmacs.parse._dispatch(buf, lang)
     reparse_requested_by_buffer[key] = true
     return inflight
   end
-  local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"))
+  local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"),
+    pmacs.config.get("syntax.isolation"),
+    pmacs.config.get("syntax.parse-memory-limit-mb"),
+    pmacs.config.get("syntax.parse-memory-total-mb"),
+    pmacs.config.get("syntax.parse-worker-recycle-mb"),
+    pmacs.config.get("syntax.parse-unit-path"))
   pending_parse_jobs[job_id] = true
   parse_job_buffer_keys[job_id] = key
   inflight_parse_by_buffer[key] = job_id
   return job_id
+end
+
+-- `_parse_now` parses synchronously where a dispatch would: in the
+-- editor, or in the buffer's parse unit under syntax.isolation (E7i). The
+-- deadline is the caller's, absent leaving the parse unbounded in time as
+-- it always was here.
+local raw_parse_now = pmacs.parse._parse_now
+function pmacs.parse._parse_now(buf, lang, deadline_ms)
+  return raw_parse_now(buf, lang, deadline_ms,
+    pmacs.config.get("syntax.isolation"),
+    pmacs.config.get("syntax.parse-memory-limit-mb"),
+    pmacs.config.get("syntax.parse-memory-total-mb"),
+    pmacs.config.get("syntax.parse-worker-recycle-mb"),
+    pmacs.config.get("syntax.parse-unit-path"))
 end
 
 -- Injection language aliases (framing Q#IJ4). The registry holds the
@@ -670,11 +762,64 @@ pmacs._async.tick = function(...)
   end
   for _, job_id in ipairs(settled) do
     local key = parse_job_buffer_keys[job_id]
-    local status = pmacs.parse._install_settled(job_id)
+    local status, detail = pmacs.parse._install_settled(job_id)
     -- E7h.2: a parse cancelled at its deadline is an outcome, not an error
     -- per keystroke. Tell the user once per buffer; a parse that installs
     -- re-arms the notice.
-    if key and status == "deadline" then
+    if status == "unavailable" then
+      -- E7i: no worker could start, so nothing is highlighted; told once a
+      -- session, with the ways out. The release archive carries the worker
+      -- beside pmacs (`release.yml` fails a release without it), so the
+      -- remedy is one a user of an archive can follow: put the two back
+      -- together. What a terminal's echo line cuts is the tail; the
+      -- *errors* buffer keeps it all.
+      if not parse_unit_unavailable_warned then
+        parse_unit_unavailable_warned = true
+        pmacs.error(string.format(
+          "syntax: %s, so nothing is highlighted. pmacs-parse-unit ships beside pmacs in the release archive: keep the two in one directory, or name the worker in syntax.parse-unit-path (a source build makes it with cargo build --release -p pmacs-parse-unit). Or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
+          tostring(detail)))
+      end
+    elseif key and (status == "crashed" or status == "crash-stopped" or status == "held") then
+      -- E7i fix round 1 (review 1, Medium 1): the buffer's worker died on
+      -- its own, a crash in the grammar's C most likely, running this
+      -- buffer's bytes. Told as E5.3 tells a crashed server, once a streak
+      -- of crashes, naming the buffer and the grammar, and again when the
+      -- streak stops the buffer's parsing; meanwhile the boundary backs off
+      -- rather than restarting the worker at every keystroke. A parse held
+      -- for a crash no parse reported (one a read of the tree found) tells
+      -- it, so no crash goes untold.
+      if status == "crash-stopped" or not parse_crash_warned[key] then
+        parse_crash_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format("syntax: parsing %s as %s: %s",
+          name, tostring(parse_lang_by_buffer[key]), tostring(detail)))
+      end
+    elseif key and status == "stalled" then
+      -- E7i fix round 1 (review 1, Low 1): the parse returned inside the
+      -- deadline and the unit then took past its own bound to install the
+      -- tree and answer, so it was stopped. Not the deadline: said in its
+      -- own words, once, like it.
+      if not parse_stall_warned[key] then
+        parse_stall_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format(
+          "syntax: parsing %s returned, but %s; its highlighting stays as it was until a parse finishes",
+          name, tostring(detail)))
+      end
+    elseif key and status == "limit" then
+      -- E7i: a parse unit stopped at its memory limit; told once, like a
+      -- deadline.
+      if not parse_deadline_warned[key] then
+        parse_deadline_warned[key] = true
+        local b = parse_buffer_by_key[key]
+        local name = b and b:name() or key
+        pmacs.error(string.format(
+          "syntax: parsing %s reached syntax.parse-memory-limit-mb (or the units' total) and was stopped; its highlighting stays as it was until a parse finishes",
+          name))
+      end
+    elseif key and status == "deadline" then
       if not parse_deadline_warned[key] then
         parse_deadline_warned[key] = true
         local b = parse_buffer_by_key[key]
@@ -685,6 +830,8 @@ pmacs._async.tick = function(...)
       end
     elseif key and (status == "installed" or status == "installed-cut") then
       parse_deadline_warned[key] = nil
+      parse_crash_warned[key] = nil
+      parse_stall_warned[key] = nil
       if status == "installed-cut" then
         if not parse_layers_cut_warned[key] then
           parse_layers_cut_warned[key] = true

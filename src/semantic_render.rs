@@ -3395,6 +3395,16 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     if handle.current().is_none() {
         return Vec::new();
     }
+    // E7i: an isolated parse returns the spans over what the renderers
+    // last showed; this is the declared viewport, the minimap's whole-file
+    // pass is not.
+    state.syntax_registry.note_interest(
+        vp.buffer_id,
+        (
+            u32::try_from(vp.visible.start).unwrap_or(u32::MAX),
+            u32::try_from(vp.visible.end).unwrap_or(u32::MAX),
+        ),
+    );
     let grammar = grammar_scoped_style_spans(state, vp);
     if !policy.semantic {
         return grammar;
@@ -3480,6 +3490,38 @@ fn grammar_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec
     let vis_end = vp.visible.end.min(source_len);
     if vis_end <= vis_start {
         return Vec::new();
+    }
+
+    // E7i: a tree held by a parse unit is read through the spans it
+    // returned, per layer in layer order, with the same priorities.
+    if let Some(isolated) = bundle.isolated.as_ref() {
+        let Some(set) = isolated.spans_for(vis_start as usize..vis_end as usize) else {
+            return Vec::new();
+        };
+        let mut styled: Vec<StyledLayerSpan> = Vec::new();
+        for layer in &set.layers {
+            for (order, hs) in layer.spans.iter().enumerate() {
+                let s = u64::from(hs.start_byte).max(vis_start);
+                let e = u64::from(hs.end_byte).min(vis_end);
+                if e <= s {
+                    continue;
+                }
+                let Some(name) = layer.capture_names.get(hs.capture_index as usize) else {
+                    continue;
+                };
+                let style = theme.lookup(name);
+                if style == Style::default() {
+                    continue;
+                }
+                styled.push(StyledLayerSpan {
+                    start: s,
+                    end: e,
+                    style,
+                    priority: layer_span_priority(layer.layer, 0, order),
+                });
+            }
+        }
+        return flatten_layer_spans(&styled);
     }
 
     // Collect the styled spans from every injection layer, scoping each

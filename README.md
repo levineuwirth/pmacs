@@ -208,12 +208,24 @@ refuses a chord that is already bound, so take one over with
 
 Download an archive from the
 [releases page](https://github.com/levineuwirth/pmacs/releases), unpack
-it, and put both binaries somewhere on your `PATH`.
+it, and put its three binaries somewhere on your `PATH`.
 
 **Keep `pmacs` and `pmacs-gpu` together.** `pmacs --gpu` looks for
 `pmacs-gpu` beside itself first and only then falls back to a `PATH`
 lookup, so an unpacked release is self-contained as long as the two
 stay in the same directory.
+
+**And `pmacs-parse-unit` beside them.** Every buffer's syntax parse runs
+in a worker process of its own, `pmacs-parse-unit`, so a grammar's
+runaway or crashing parse is stopped without taking the editor down
+(`syntax.isolation`; what holds a worker differs by platform, see
+`docs/divergences.md`). `pmacs` looks for the worker beside itself, or at
+`syntax.parse-unit-path`. The release archive carries it beside `pmacs`,
+and a release without it fails before upload; a source build makes it
+with `cargo build --release -p pmacs-parse-unit` (below). Without the
+worker nothing is highlighted, and the editor says so once;
+`syntax.isolation` set to `"none"` parses in the editor instead, as
+releases before E7i did, without that protection.
 
 Verify a download:
 
@@ -237,7 +249,8 @@ Builds on the toolchain pinned in `rust-toolchain.toml` (Rust
 `1.95.0`, edition 2024); rustup selects it automatically.
 
 ```sh
-# Root + GPU release build; the default features are luajit and crdt.
+# Root, GPU and parse-worker release build; the default features are
+# luajit and crdt. pmacs finds pmacs-gpu and pmacs-parse-unit beside it.
 cargo build --release --workspace
 
 target/release/pmacs --gpu README.md # one-command managed GPU file launch
@@ -392,6 +405,8 @@ src/                 pmacs — the core + TUI + daemon
 
 pmacs-protocol/      wire types + framing codec shared by all frontends
 pmacs-gpu/           the GPU frontend (wgpu + winit + glyphon)
+pmacs-syntax/        tree-sitter parse logic: grammars, injections, captures, folds
+pmacs-parse-unit/    the parse worker each buffer's parse runs in
 
 builtin/             Lua runtime shipped with the binary
   commands/default.lua  named commands for every editor primitive

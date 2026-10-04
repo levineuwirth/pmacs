@@ -121,6 +121,7 @@ pub mod overlay;
 pub mod overlay_color;
 pub mod overlay_paint;
 pub mod packages;
+pub mod parse_isolation;
 pub mod prepare_rename;
 pub mod presence;
 pub mod process;

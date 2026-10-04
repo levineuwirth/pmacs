@@ -66,12 +66,15 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 /// A scratch repository holding this tree's grammar table at its path and
 /// one other file, committed; returns it and the commit.
+const TABLE: &str = "pmacs-syntax/src/lib.rs";
+
 fn scratch_repo() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     git(dir.path(), &["init", "-q"]);
-    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    // The table moved from `src/syntax.rs` into `pmacs-syntax` at E7i.
+    std::fs::create_dir_all(dir.path().join("pmacs-syntax/src")).unwrap();
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
-    std::fs::write(dir.path().join("src/syntax.rs"), read("src/syntax.rs")).unwrap();
+    std::fs::write(dir.path().join(TABLE), read(TABLE)).unwrap();
     std::fs::write(dir.path().join("docs/notes.md"), "notes\n").unwrap();
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "base"]);
@@ -100,7 +103,7 @@ fn e7h_review2_the_decision_controls_run_on_the_table_and_skip_on_docs() {
     // Control for the row below: an edit to the table in place runs, a
     // docs-only change skips.
     let (repo, base) = scratch_repo();
-    let table = repo.path().join("src/syntax.rs");
+    let table = repo.path().join(TABLE);
     let text = std::fs::read_to_string(&table).unwrap();
     std::fs::write(
         &table,
@@ -121,9 +124,11 @@ fn e7h_review2_the_decision_controls_run_on_the_table_and_skip_on_docs() {
 #[test]
 fn e7h_review2_the_decision_runs_when_the_grammar_table_moves_and_changes() {
     let (repo, base) = scratch_repo();
-    std::fs::create_dir_all(repo.path().join("src/syntax")).unwrap();
-    git(repo.path(), &["mv", "src/syntax.rs", "src/syntax/mod.rs"]);
-    let table = repo.path().join("src/syntax/mod.rs");
+    // Moved to a path that is not itself a trigger, so only the deletion
+    // of the old path can make the decision run.
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    git(repo.path(), &["mv", TABLE, "src/grammars.rs"]);
+    let table = repo.path().join("src/grammars.rs");
     let text = std::fs::read_to_string(&table).unwrap();
     assert!(
         text.contains("name: \"toml\""),
@@ -141,7 +146,7 @@ fn e7h_review2_the_decision_runs_when_the_grammar_table_moves_and_changes() {
     let verdict = decide(repo.path(), &base);
     assert!(
         verdict.starts_with("run=true"),
-        "the commit deletes src/syntax.rs, a trigger path, and changes a registration, \
+        "the commit deletes pmacs-syntax/src/lib.rs, a trigger path, and changes a registration, \
          but the decision was: {verdict}"
     );
 }

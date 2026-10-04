@@ -24,7 +24,48 @@
 //!                        [--fail-on all|crashes]
 //! pmacs_grammar_fuzz changed --since REF
 //! pmacs_grammar_fuzz repro GRAMMAR FILE [--edits N --seed N] [--trace 1]
+//! pmacs_grammar_fuzz replay-unit --unit PATH --corpus DIR --out DIR
+//!                        [--grammar NAME]... [--max-inputs N] [--jobs N]
+//!                        [--findings DIR]... [--extra GRAMMAR=PATH]...
+//!                        [--memory-mb N] [--enforcement rlimit|watch]
+//!                        [--deadline-ms N] [--grace-ms N]
+//! pmacs_grammar_fuzz race-unit --unit PATH --corpus DIR --out DIR
+//!                        [--grammar NAME]... [--max-inputs N] [--iters N]
+//!                        [--jobs N] [--extra GRAMMAR=PATH]... [--seed N]
+//!                        [--grow-kb N] [--memory-mb N] [--deadline-ms N]
+//!                        [--grace-ms N]
 //! ```
+//!
+//! `replay-unit` (E7i.2) drives the editor's own parse worker,
+//! `pmacs-parse-unit`, through its protocol as the editor drives it: per
+//! input a whole-text parse, then an edit's parse with reads of the tree
+//! before it (spans, folds, a node and its children, an s-expression) sent
+//! while that parse runs. Since E7i the grammars' C runs in that worker and
+//! not in the editor, so `scripts/fuzz-grammars` builds the worker under
+//! each arm's sanitizers and replays the arm's seeds and findings through
+//! it, and the same command replays them through a shipped worker. A worker
+//! stopped by its own memory or time limit is contained, which is what the
+//! boundary is for; any other death is a crash and fails the replay. An
+//! input whose defect is an edit sequence and not its bytes carries the
+//! sequence beside it, `<name>.edits` (E7i fix round 1: `301-hang-596`
+//! returns at once however it is fed whole): the replay parses it whole,
+//! then applies each recorded parse's edits as the editor sends them.
+//!
+//! `race-unit` (E7i fix round 1) drives a worker built under
+//! `ThreadSanitizer`, the `tsan` arm, through the schedules that let its two
+//! threads meet: reads of both trees it keeps, of every kind, sent while an
+//! edit's parse runs, and a whole-file read behind three queued parses, so
+//! that a read can hold the last handle on a tree two installs evicted
+//! (E7i review 1's race, in tree-sitter's reference counts). Behind the
+//! three parses goes a burst of reads of the tree they evict, whole-file
+//! ones among them, and each input is first repeated to `--grow-kb` (512
+//! by default): one whole-file read outlives two installs only where it is
+//! long beside an incremental parse, and with seeds as they are it never
+//! did, so a single read let the arm pass with the race restored. The
+//! report counts the reads answered past their tree's eviction, which says
+//! whether a run reached the interleaving at all. A
+//! `ThreadSanitizer` report, which the worker writes and carries on past, is
+//! read from its stderr and fails the run, as a crash would.
 //!
 //! Each grammar is driven through a worker process (`worker GRAMMAR`,
 //! internal) so an abort, a hang or a runaway allocation costs the worker
@@ -69,6 +110,12 @@
 //! the run however it came back (a kill by signal 9, the host reclaiming
 //! memory, excepted). A hang that does not come back alone is a loaded
 //! worker's and is reported, not failed.
+//!
+//! Since E7i.5 `scripts/fuzz-grammars` passes `--fail-on crashes` to every
+//! arm: a hang or a memory cut took the editor down before E7i, and now
+//! the parse worker stops it at its deadline or memory limit, which
+//! `replay-unit` shows on the finding's own input. A crash still fails, in
+//! the harness or in the worker.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
@@ -97,7 +144,9 @@ const INPUTS_PER_WORKER: u64 = 500;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = args.split_first() else {
-        eprintln!("usage: pmacs_grammar_fuzz list|collect|run|changed|repro|worker ...");
+        eprintln!(
+            "usage: pmacs_grammar_fuzz list|collect|run|changed|repro|replay-unit|race-unit|worker ..."
+        );
         return ExitCode::from(2);
     };
     let result = match cmd.as_str() {
@@ -112,6 +161,8 @@ fn main() -> ExitCode {
         "changed" => changed(rest),
         "repro" => repro(rest),
         "worker" => worker(rest),
+        "replay-unit" => replay_unit(rest),
+        "race-unit" => race_unit(rest),
         other => Err(format!("unknown subcommand `{other}`")),
     };
     result.unwrap_or_else(|e| {
@@ -1429,6 +1480,9 @@ const GLIBC: [&str; 7] = [
 /// one it was written through: the effective type is the same, which C
 /// permits, and tree-sitter's own lexer does it on every token
 /// (`ts_lexer_finish`, `ts_parser__lex`: hundreds of thousands a run).
+/// How a `ThreadSanitizer` report begins (the `tsan` arm).
+const TSAN_MARKER: &str = "WARNING: ThreadSanitizer: ";
+
 fn tysan_violation(log: &str) -> Option<&str> {
     const MARKER: &str = TYSAN_MARKER;
     let mut starts: Vec<usize> = log.match_indices(MARKER).map(|(i, _)| i).collect();
@@ -1476,6 +1530,20 @@ fn crash_signature(log: &str, how: &str) -> String {
             .and_then(|f| f.split_whitespace().next())
             .map_or("?", |f| f.split('.').next().unwrap_or(f));
         return format!("{short} {what} in {frame}");
+    }
+    // ThreadSanitizer (the `tsan` arm): `WARNING: ThreadSanitizer: <what>
+    // (pid=N)`, then `#0 <function> <file> (<module>+<offset>)`.
+    if let Some(i) = lines.iter().position(|l| l.contains(TSAN_MARKER)) {
+        let what = lines[i]
+            .split(TSAN_MARKER)
+            .nth(1)
+            .map_or("report", |r| r.split(" (").next().unwrap_or(r).trim());
+        let frame = lines[i..]
+            .iter()
+            .find_map(|l| l.trim_start().strip_prefix("#0 "))
+            .and_then(|f| f.split_whitespace().next())
+            .unwrap_or("?");
+        return format!("tsan {what} in {frame}");
     }
     // UBSan (E7h.4): `<file>:<line>:<col>: runtime error: <what>`.
     if let Some(l) = lines.iter().find(|l| l.contains(": runtime error: ")) {
@@ -3478,6 +3546,1118 @@ fn write_seed(out: &Path, grammar: &str, name: &str, text: &str) -> Result<(), S
     std::fs::write(dir.join(name), text).map_err(|e| e.to_string())
 }
 
+// -------------------------------------------------------------------
+// `replay-unit` (E7i.2)
+// -------------------------------------------------------------------
+
+/// How a replay of one input through a parse worker ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnitOutcome {
+    /// The parse and every read were answered.
+    Answered,
+    /// The worker was stopped by its own limit, the boundary's job.
+    Contained(String),
+    /// The worker died otherwise: a crash, with its signature.
+    Crashed(String),
+}
+
+type UnitFrame = std::io::Result<Option<((u64, pmacs_parse_unit::Response), Vec<u8>)>>;
+
+/// Named inputs: a path, and the bytes it holds.
+type Inputs = Vec<(String, Vec<u8>)>;
+
+/// A parse worker driven as the editor drives it.
+struct UnitClient {
+    child: Child,
+    stdin: ChildStdin,
+    answers: Receiver<UnitFrame>,
+    stderr: PathBuf,
+    stderr_seen: u64,
+    next: u64,
+    killed_for_time: bool,
+    /// The ids answered, in the order their answers arrived.
+    arrived: Vec<u64>,
+}
+
+impl UnitClient {
+    fn spawn(unit: &Path, stderr: PathBuf, memory_mb: u64, watch: bool) -> Result<Self, String> {
+        let err = std::fs::File::create(&stderr).map_err(|e| e.to_string())?;
+        let mut command = Command::new(unit);
+        command
+            .envs(pmacs_parse_unit::WORKER_ENV.iter().copied())
+            .args(["--memory-limit-mb", &memory_mb.to_string()]);
+        if watch {
+            command.args(["--memory-enforcement", "watch"]);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(err)
+            .spawn()
+            .map_err(|e| format!("spawn {}: {e}", unit.display()))?;
+        let stdin = child.stdin.take().ok_or("no unit stdin")?;
+        let stdout = child.stdout.take().ok_or("no unit stdout")?;
+        let (tx, answers) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut r = BufReader::new(stdout);
+            loop {
+                let frame = pmacs_parse_unit::read_frame(&mut r);
+                let end = !matches!(frame, Ok(Some(_)));
+                if tx.send(frame).is_err() || end {
+                    break;
+                }
+            }
+        });
+        let mut client = Self {
+            child,
+            stdin,
+            answers,
+            stderr,
+            stderr_seen: 0,
+            next: 1,
+            killed_for_time: false,
+            arrived: Vec::new(),
+        };
+        let id = client
+            .send(&pmacs_parse_unit::Request::Hello, &[])
+            .map_err(|e| format!("{}: {e}", unit.display()))?;
+        match client.wait(&[id], Duration::from_secs(30)) {
+            Ok(mut got) => match got.pop() {
+                Some(pmacs_parse_unit::Response::Hello { protocol })
+                    if protocol == pmacs_parse_unit::PROTOCOL =>
+                {
+                    Ok(client)
+                }
+                other => Err(format!(
+                    "{} speaks another protocol: {other:?}",
+                    unit.display()
+                )),
+            },
+            Err(()) => Err(format!("{} did not answer", unit.display())),
+        }
+    }
+
+    fn send(
+        &mut self,
+        request: &pmacs_parse_unit::Request,
+        payload: &[u8],
+    ) -> std::io::Result<u64> {
+        let id = self.next;
+        self.next += 1;
+        pmacs_parse_unit::write_frame(&mut self.stdin, &(id, request), payload)?;
+        Ok(id)
+    }
+
+    /// The answers to `ids`, in that order; `Err` when the worker ended or
+    /// did not answer within `hard`, after which it has been killed.
+    /// As the editor bounds a request (`pmacs::parse_isolation`), `hard`
+    /// holds until the parse returns and `AFTER_PARSE_HARD` from then on.
+    fn wait(&mut self, ids: &[u64], hard: Duration) -> Result<Vec<pmacs_parse_unit::Response>, ()> {
+        let mut until = Instant::now() + hard;
+        let mut got: BTreeMap<u64, pmacs_parse_unit::Response> = BTreeMap::new();
+        while ids.iter().any(|id| !got.contains_key(id)) {
+            let left = until.saturating_duration_since(Instant::now());
+            match self.answers.recv_timeout(left) {
+                Ok(Ok(Some(((0, pmacs_parse_unit::Response::ParseReturned(_)), _)))) => {
+                    until = Instant::now() + pmacs::parse_isolation::AFTER_PARSE_HARD;
+                }
+                Ok(Ok(Some(((id, response), _)))) => {
+                    // Id 0 is otherwise the unit's memory report, not an
+                    // answer.
+                    if id != 0 {
+                        self.arrived.push(id);
+                        got.insert(id, response);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.killed_for_time = true;
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return Err(());
+                }
+                _ => {
+                    let _ = self.child.wait();
+                    return Err(());
+                }
+            }
+        }
+        Ok(ids.iter().filter_map(|id| got.remove(id)).collect())
+    }
+
+    /// A sanitizer report that does not stop the worker, written since the
+    /// last look: `TypeSanitizer`'s aliasing class (the `tysan` arm), or any
+    /// `ThreadSanitizer` report (the `tsan` arm). Both builds report and
+    /// carry on.
+    fn sanitizer_since(&mut self) -> Option<String> {
+        let len = std::fs::metadata(&self.stderr).map_or(0, |m| m.len());
+        if len <= self.stderr_seen {
+            return None;
+        }
+        let new = tail(&self.stderr, len - self.stderr_seen);
+        self.stderr_seen = len;
+        if let Some(report) = tysan_violation(&new) {
+            return Some(crash_signature(report, "tysan report"));
+        }
+        new.contains(TSAN_MARKER)
+            .then(|| crash_signature(&new, "tsan report"))
+    }
+
+    /// Why the worker ended: its own limit, or a crash.
+    fn ended(&mut self) -> UnitOutcome {
+        if self.killed_for_time {
+            return UnitOutcome::Contained("time: killed at the deadline".into());
+        }
+        let status = self.child.wait().ok();
+        let log = tail(&self.stderr, STDERR_KEPT as u64);
+        if status.and_then(|s| s.code()) == Some(pmacs_parse_unit::MEMORY_WATCH_EXIT) {
+            return UnitOutcome::Contained("memory: the worker's watch".into());
+        }
+        let sanitizer = log.contains("Sanitizer") || log.contains(": runtime error: ");
+        let allocation = [
+            "failed to allocate",
+            "failed to reallocate",
+            "memory allocation of",
+        ]
+        .iter()
+        .any(|m| log.contains(m));
+        if allocation && !sanitizer && status.and_then(|s| s.signal()) == Some(6) {
+            return UnitOutcome::Contained("memory: RLIMIT_AS".into());
+        }
+        let how = match status {
+            Some(s) => s.signal().map_or_else(
+                || format!("exit {:?}", s.code()),
+                |sig| format!("signal {sig}"),
+            ),
+            None => "ended".into(),
+        };
+        UnitOutcome::Crashed(crash_signature(&log, &how))
+    }
+
+    /// One input as the editor meets it: the whole text parsed, then an
+    /// edit's parse with reads of the tree before it sent while it runs.
+    fn replay(
+        &mut self,
+        grammar: &str,
+        text: &[u8],
+        deadline_ms: u64,
+        hard: Duration,
+    ) -> UnitOutcome {
+        use pmacs_parse_unit::{ParseCall, Request, Response, TextUpdate, WireEdit};
+        let call = |update, edits: Vec<WireEdit>, len: usize| ParseCall {
+            language: grammar.to_owned(),
+            text: update,
+            edits,
+            expect_len: len as u32,
+            aliases: default_injection_aliases().into_iter().collect(),
+            deadline_ms: Some(deadline_ms),
+            interest: vec![(0, 4096)],
+        };
+        let full = call(TextUpdate::Full, Vec::new(), text.len());
+        let Ok(id) = self.send(&Request::Parse(full), text) else {
+            return self.ended();
+        };
+        let generation = match self.wait(&[id], hard) {
+            Ok(mut answers) => match answers.pop() {
+                Some(Response::Parsed(parsed)) if !parsed.layers_cut_by_deadline => {
+                    parsed.generation
+                }
+                other => {
+                    if let Some(stopped) = other.as_ref().and_then(cancelled_at_deadline) {
+                        return stopped;
+                    }
+                    return self
+                        .sanitizer_since()
+                        .map_or(UnitOutcome::Answered, UnitOutcome::Crashed);
+                }
+            },
+            Err(()) => return self.ended(),
+        };
+        let mid = text.len() / 2;
+        let at = byte_to_point(text, mid);
+        let point = |p: tree_sitter::Point| (p.row as u32, p.column as u32);
+        let edit = WireEdit {
+            start_byte: mid as u32,
+            old_end_byte: mid as u32,
+            new_end_byte: mid as u32 + 1,
+            start: point(at),
+            old_end: point(at),
+            new_end: (at.row as u32, at.column as u32 + 1),
+        };
+        let mut ids = Vec::new();
+        let edited = call(TextUpdate::Edits, vec![edit], text.len() + 1);
+        let mut requests = vec![
+            Request::Spans {
+                generation,
+                ranges: vec![(0, text.len() as u32)],
+            },
+            Request::Folds {
+                generation,
+                at: Some(mid as u64),
+            },
+            Request::Folds {
+                generation,
+                at: None,
+            },
+            Request::Describe {
+                generation,
+                path: Vec::new(),
+                children: true,
+            },
+        ];
+        if text.len() <= 16 * 1024 {
+            requests.push(Request::Sexp {
+                generation,
+                path: Vec::new(),
+            });
+        }
+        match self.send(&Request::Parse(edited), b"x") {
+            Ok(id) => ids.push(id),
+            Err(_) => return self.ended(),
+        }
+        for request in &requests {
+            match self.send(request, &[]) {
+                Ok(id) => ids.push(id),
+                Err(_) => return self.ended(),
+            }
+        }
+        match self.wait(&ids, hard) {
+            Ok(answers) => match answers.first().and_then(cancelled_at_deadline) {
+                Some(stopped) => stopped,
+                None => self
+                    .sanitizer_since()
+                    .map_or(UnitOutcome::Answered, UnitOutcome::Crashed),
+            },
+            Err(()) => self.ended(),
+        }
+    }
+}
+
+/// A parse the worker stopped at its own deadline, where tree-sitter calls
+/// the progress callback: the root cancelled (no tree), or an injected
+/// layer cancelled and the tree returned without the layers after it.
+/// Either is containment by time as much as a parse the harness kills past
+/// the grace, which is where one lands that the callback does not reach
+/// (#301's condensation). Which of the three a never-returning parse meets
+/// depends on where it stands when the deadline passes, so the replay
+/// calls all three contained (E7i fix round 1: counted as answered, the
+/// de-indented #301 input flickered between them under load).
+fn cancelled_at_deadline(answer: &pmacs_parse_unit::Response) -> Option<UnitOutcome> {
+    match answer {
+        pmacs_parse_unit::Response::Failed(pmacs_parse_unit::Failure::Deadline {
+            deadline_ms,
+            after_ms,
+        }) => Some(UnitOutcome::Contained(format!(
+            "time: cancelled at the deadline ({deadline_ms} ms, after {after_ms} ms)"
+        ))),
+        pmacs_parse_unit::Response::Parsed(parsed) if parsed.layers_cut_by_deadline => Some(
+            UnitOutcome::Contained("time: injected layers cut at the deadline".to_owned()),
+        ),
+        _ => None,
+    }
+}
+
+/// A recorded edit sequence: one entry per parse, each a batch of edits
+/// `(start, old_end, inserted)` in the text that edit meets, applied in
+/// order.
+type EditScript = Vec<Vec<(usize, usize, String)>>;
+
+/// The edit sequence recorded beside an input (`<name>.edits`, JSON
+/// `[[[start, old_end, "inserted"], ...], ...]`), if it has one.
+fn edit_script(input: &str) -> Result<Option<EditScript>, String> {
+    let path = Path::new(input).with_extension("edits");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Apply one recorded parse's edits to `text`, in order, and return them
+/// as the editor sends them: the wire edits and their inserted bytes.
+fn apply_batch(
+    text: &mut Vec<u8>,
+    batch: &[(usize, usize, String)],
+) -> Result<(Vec<pmacs_parse_unit::WireEdit>, Vec<u8>), String> {
+    let point = |p: tree_sitter::Point| (p.row as u32, p.column as u32);
+    let mut edits = Vec::new();
+    let mut inserted = Vec::new();
+    for (start, old_end, insert) in batch {
+        let (start, old_end) = (*start, *old_end);
+        if start > old_end || old_end > text.len() {
+            return Err(format!(
+                "the recorded edit {start}..{old_end} is outside the text's {} bytes",
+                text.len()
+            ));
+        }
+        let start_at = point(byte_to_point(text, start));
+        let old_end_at = point(byte_to_point(text, old_end));
+        text.splice(start..old_end, insert.bytes());
+        let new_end = start + insert.len();
+        edits.push(pmacs_parse_unit::WireEdit {
+            start_byte: start as u32,
+            old_end_byte: old_end as u32,
+            new_end_byte: new_end as u32,
+            start: start_at,
+            old_end: old_end_at,
+            new_end: point(byte_to_point(text, new_end)),
+        });
+        inserted.extend_from_slice(insert.as_bytes());
+    }
+    Ok((edits, inserted))
+}
+
+impl UnitClient {
+    /// An input whose defect is an edit sequence: the whole text parsed,
+    /// then each recorded parse's edits applied as the editor sends them,
+    /// with reads of the installed tree sent while that parse runs.
+    fn replay_script(
+        &mut self,
+        grammar: &str,
+        text: &[u8],
+        script: &EditScript,
+        deadline_ms: u64,
+        hard: Duration,
+    ) -> UnitOutcome {
+        use pmacs_parse_unit::{ParseCall, Request, Response, TextUpdate, WireEdit};
+        let call = |update, edits: Vec<WireEdit>, len: usize| ParseCall {
+            language: grammar.to_owned(),
+            text: update,
+            edits,
+            expect_len: len as u32,
+            aliases: default_injection_aliases().into_iter().collect(),
+            deadline_ms: Some(deadline_ms),
+            interest: vec![(0, 4096)],
+        };
+        let mut text = text.to_vec();
+        let Ok(id) = self.send(
+            &Request::Parse(call(TextUpdate::Full, Vec::new(), text.len())),
+            &text,
+        ) else {
+            return self.ended();
+        };
+        let mut generation = match self.wait(&[id], hard) {
+            Ok(mut answers) => match answers.pop() {
+                Some(Response::Parsed(parsed)) if !parsed.layers_cut_by_deadline => {
+                    parsed.generation
+                }
+                other => {
+                    if let Some(stopped) = other.as_ref().and_then(cancelled_at_deadline) {
+                        return stopped;
+                    }
+                    0
+                }
+            },
+            Err(()) => return self.ended(),
+        };
+        for batch in script {
+            let (edits, inserted) = match apply_batch(&mut text, batch) {
+                Ok(applied) => applied,
+                Err(e) => return UnitOutcome::Crashed(e),
+            };
+            let mut ids = Vec::new();
+            match self.send(
+                &Request::Parse(call(TextUpdate::Edits, edits, text.len())),
+                &inserted,
+            ) {
+                Ok(id) => ids.push(id),
+                Err(_) => return self.ended(),
+            }
+            for read in [
+                Request::Spans {
+                    generation,
+                    ranges: vec![(0, text.len() as u32)],
+                },
+                Request::Folds {
+                    generation,
+                    at: None,
+                },
+                Request::Describe {
+                    generation,
+                    path: Vec::new(),
+                    children: true,
+                },
+            ] {
+                match self.send(&read, &[]) {
+                    Ok(id) => ids.push(id),
+                    Err(_) => return self.ended(),
+                }
+            }
+            match self.wait(&ids, hard) {
+                Ok(answers) => match answers.first() {
+                    Some(Response::Parsed(parsed)) if !parsed.layers_cut_by_deadline => {
+                        generation = parsed.generation;
+                    }
+                    Some(other) => {
+                        if let Some(stopped) = cancelled_at_deadline(other) {
+                            return stopped;
+                        }
+                    }
+                    None => {}
+                },
+                Err(()) => return self.ended(),
+            }
+        }
+        self.sanitizer_since()
+            .map_or(UnitOutcome::Answered, UnitOutcome::Crashed)
+    }
+}
+
+impl Drop for UnitClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// One grammar's replay: its counts and what was not simply answered.
+struct UnitReplay {
+    grammar: &'static str,
+    inputs: usize,
+    answered: usize,
+    contained: Vec<(String, String)>,
+    crashed: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+struct ReplayConfig {
+    unit: PathBuf,
+    out: PathBuf,
+    memory_mb: u64,
+    watch: bool,
+    deadline_ms: u64,
+    hard: Duration,
+}
+
+fn replay_unit(args: &[String]) -> Result<ExitCode, String> {
+    let (_, flags) = Flags::parse(args, 0)?;
+    let corpus = flags.path("corpus")?;
+    let findings: Vec<PathBuf> = flags
+        .all("findings")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let max_inputs = usize::try_from(flags.num("max-inputs", 50)?).map_err(|e| e.to_string())?;
+    let deadline_ms = flags.num("deadline-ms", 5_000)?;
+    let cfg = Arc::new(ReplayConfig {
+        unit: flags.path("unit")?,
+        out: flags.path("out")?,
+        memory_mb: flags.num("memory-mb", 1024)?,
+        watch: match flags.one("enforcement").unwrap_or("rlimit") {
+            "rlimit" => false,
+            "watch" => true,
+            other => return Err(format!("--enforcement {other}: `rlimit` or `watch`")),
+        },
+        deadline_ms,
+        hard: Duration::from_millis(deadline_ms + flags.num("grace-ms", 1_000)?),
+    });
+    std::fs::create_dir_all(&cfg.out).map_err(|e| e.to_string())?;
+    let queue = replay_queue(&flags, &corpus, &findings, max_inputs)?;
+    let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
+    let queue = Arc::new(Mutex::new(queue));
+    let replays = Arc::new(Mutex::new(Vec::new()));
+    let threads: Vec<_> = (0..jobs)
+        .map(|_| {
+            let (queue, replays, cfg) = (queue.clone(), replays.clone(), cfg.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut q| q.pop());
+                    let Some((grammar, inputs)) = next else { break };
+                    let replay = replay_grammar(grammar, &inputs, &cfg);
+                    eprintln!(
+                        "{grammar}: {} inputs through the unit, {} answered, {} contained, {} crashed{}",
+                        replay.inputs,
+                        replay.answered,
+                        replay.contained.len(),
+                        replay.crashed.len(),
+                        replay
+                            .error
+                            .as_deref()
+                            .map_or_else(String::new, |e| format!(", ERROR {e}"))
+                    );
+                    if let Ok(mut r) = replays.lock() {
+                        r.push(replay);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().map_err(|_| "a replay thread panicked")?;
+    }
+    let mut replays = std::mem::take(&mut *replays.lock().map_err(|_| "poisoned")?);
+    replays.sort_by_key(|r| r.grammar);
+    let md = unit_report(&cfg, &replays);
+    std::fs::write(cfg.out.join("unit-report.md"), &md).map_err(|e| e.to_string())?;
+    print!("{md}");
+    if replays.iter().any(|r| r.error.is_some()) {
+        return Ok(ExitCode::from(2));
+    }
+    Ok(if replays.iter().any(|r| !r.crashed.is_empty()) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Each grammar's inputs for a replay: a sample of its seeds, the findings
+/// a fuzz run kept for it, and the extras named for it.
+fn replay_queue(
+    flags: &Flags,
+    corpus: &Path,
+    findings: &[PathBuf],
+    max_inputs: usize,
+) -> Result<Vec<(&'static str, Inputs)>, String> {
+    let wanted = flags.all("grammar");
+    for w in &wanted {
+        entry(w)?;
+    }
+    let mut extras: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
+    for extra in flags.all("extra") {
+        let (grammar, path) = extra
+            .split_once('=')
+            .ok_or_else(|| format!("--extra {extra}: GRAMMAR=PATH"))?;
+        extras
+            .entry(entry(grammar)?.name)
+            .or_default()
+            .push(PathBuf::from(path));
+    }
+    let mut queue: Vec<(&'static str, Inputs)> = Vec::new();
+    for lang in BUILTIN_LANGUAGES
+        .iter()
+        .filter(|e| wanted.is_empty() || wanted.contains(&e.name))
+    {
+        let mut inputs = sampled_inputs(&corpus.join(lang.name), max_inputs);
+        for dir in findings {
+            inputs.extend(
+                sampled_inputs(&dir.join(lang.name), usize::MAX)
+                    .into_iter()
+                    .filter(|(name, _)| Path::new(name).extension().is_some_and(|e| e == "input")),
+            );
+        }
+        for path in extras.get(lang.name).into_iter().flatten() {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            inputs.push((path.display().to_string(), bytes));
+        }
+        if !inputs.is_empty() {
+            queue.push((lang.name, inputs));
+        }
+    }
+    Ok(queue)
+}
+
+/// The replay's report, in markdown.
+fn unit_report(cfg: &ReplayConfig, replays: &[UnitReplay]) -> String {
+    let mut md = format!(
+        "# Parse worker replay\n\n`{}`, memory {} MiB by {}, deadline {} ms.\n\n\
+         | grammar | inputs | answered | contained | crashed |\n|---|---|---|---|---|\n",
+        cfg.unit.display(),
+        cfg.memory_mb,
+        if cfg.watch { "its watch" } else { "RLIMIT_AS" },
+        cfg.deadline_ms
+    );
+    for r in replays {
+        let _ = writeln!(
+            md,
+            "| {} | {} | {} | {} | {}{} |",
+            r.grammar,
+            r.inputs,
+            r.answered,
+            r.contained.len(),
+            r.crashed.len(),
+            r.error
+                .as_deref()
+                .map_or_else(String::new, |e| format!(" (ERROR {e})"))
+        );
+    }
+    for r in replays {
+        for (input, why) in &r.contained {
+            let _ = writeln!(md, "\n- {} contained: `{input}`, {why}", r.grammar);
+        }
+        for (input, why) in &r.crashed {
+            let _ = writeln!(md, "\n- **{} CRASHED**: `{input}`, {why}", r.grammar);
+        }
+    }
+    md
+}
+
+/// Up to `max` files of `dir`, spread evenly over its sorted listing, with
+/// their names.
+fn sampled_inputs(dir: &Path, max: usize) -> Inputs {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.is_file());
+    files.sort();
+    let step = files.len().div_ceil(max.max(1)).max(1);
+    files
+        .iter()
+        .step_by(step)
+        .filter_map(|p| Some((p.display().to_string(), std::fs::read(p).ok()?)))
+        .collect()
+}
+
+fn replay_grammar(
+    grammar: &'static str,
+    inputs: &[(String, Vec<u8>)],
+    cfg: &ReplayConfig,
+) -> UnitReplay {
+    let mut replay = UnitReplay {
+        grammar,
+        inputs: inputs.len(),
+        answered: 0,
+        contained: Vec::new(),
+        crashed: Vec::new(),
+        error: None,
+    };
+    let mut unit: Option<UnitClient> = None;
+    let mut spawned = 0;
+    for (name, text) in inputs {
+        if unit.is_none() {
+            spawned += 1;
+            let stderr = cfg.out.join(format!("{grammar}-unit-{spawned}.stderr"));
+            match UnitClient::spawn(&cfg.unit, stderr, cfg.memory_mb, cfg.watch) {
+                Ok(u) => unit = Some(u),
+                Err(e) => {
+                    replay.error = Some(e);
+                    return replay;
+                }
+            }
+        }
+        let u = unit.as_mut().expect("spawned above");
+        let outcome = match edit_script(name) {
+            Ok(Some(script)) => u.replay_script(grammar, text, &script, cfg.deadline_ms, cfg.hard),
+            Ok(None) => u.replay(grammar, text, cfg.deadline_ms, cfg.hard),
+            Err(e) => {
+                replay.error = Some(e);
+                return replay;
+            }
+        };
+        match outcome {
+            UnitOutcome::Answered => replay.answered += 1,
+            UnitOutcome::Contained(why) => {
+                replay.contained.push((name.clone(), why));
+                unit = None;
+            }
+            UnitOutcome::Crashed(why) => {
+                let kept = cfg.out.join(format!(
+                    "{grammar}-crash-{}.input",
+                    replay.crashed.len() + 1
+                ));
+                let _ = std::fs::write(&kept, text);
+                replay
+                    .crashed
+                    .push((name.clone(), format!("{why} (kept as {})", kept.display())));
+                unit = None;
+            }
+        }
+    }
+    replay
+}
+
+// -------------------------------------------------------------------
+// `race-unit` (E7i fix round 1: the `tsan` arm)
+// -------------------------------------------------------------------
+
+/// `text` repeated, a newline between copies, until it is at least `kb`
+/// kilobytes: a whole-file read of it is long beside a keystroke's parse.
+fn grown(text: &[u8], kb: usize) -> Vec<u8> {
+    let mut out = text.to_vec();
+    if text.is_empty() {
+        return out;
+    }
+    while out.len() < kb * 1024 {
+        out.push(b'\n');
+        out.extend_from_slice(text);
+    }
+    out
+}
+
+/// The last byte at or before `at` that begins a UTF-8 character.
+fn char_start(text: &[u8], mut at: usize) -> usize {
+    at = at.min(text.len());
+    while at > 0 && at < text.len() && text[at] & 0xC0 == 0x80 {
+        at -= 1;
+    }
+    at
+}
+
+/// Insert one ASCII byte at a character boundary near `at`, as a keystroke
+/// does, and the edit the worker is sent for it.
+fn keystroke(text: &mut Vec<u8>, at: usize, byte: u8) -> pmacs_parse_unit::WireEdit {
+    let at = char_start(text, at);
+    let p = byte_to_point(text, at);
+    text.insert(at, byte);
+    let point = (p.row as u32, p.column as u32);
+    pmacs_parse_unit::WireEdit {
+        start_byte: at as u32,
+        old_end_byte: at as u32,
+        new_end_byte: at as u32 + 1,
+        start: point,
+        old_end: point,
+        new_end: (point.0, point.1 + 1),
+    }
+}
+
+/// Every kind of read a renderer, a fold command or a node walk makes of
+/// `generation`, over a text of `len` bytes.
+fn race_reads(generation: u64, len: usize, rng: &mut Rng) -> Vec<pmacs_parse_unit::Request> {
+    use pmacs_parse_unit::Request;
+    let window = |rng: &mut Rng| {
+        let s = rng.below(len + 1) as u32;
+        (s, (s + 4096).min(len as u32))
+    };
+    let child = rng.below(8) as u32;
+    vec![
+        Request::Spans {
+            generation,
+            ranges: vec![window(rng)],
+        },
+        Request::Spans {
+            generation,
+            ranges: vec![window(rng), window(rng)],
+        },
+        Request::Folds {
+            generation,
+            at: Some(rng.below(len + 1) as u64),
+        },
+        Request::Folds {
+            generation,
+            at: None,
+        },
+        Request::Describe {
+            generation,
+            path: Vec::new(),
+            children: true,
+        },
+        Request::Describe {
+            generation,
+            path: vec![child],
+            children: true,
+        },
+        Request::Sexp {
+            generation,
+            path: vec![child, 0],
+        },
+    ]
+}
+
+/// Reads of a tree sent behind the three parses that evict it.
+const RACE_BURST: usize = 16;
+
+/// How `race-unit` drives each input: schedules an input, the seed of
+/// their edits and reads, and the size each input is grown to.
+#[derive(Clone, Copy)]
+struct Schedule {
+    iters: usize,
+    seed: u64,
+    grow_kb: usize,
+}
+
+impl UnitClient {
+    /// One input through the schedules that let a read meet a parse:
+    /// `iters` times, an edit's parse with reads of both kept trees, every
+    /// kind, sent while it runs; every third time instead three parses
+    /// queued and a whole-file read of the tree they will evict behind them,
+    /// so the read may hold its last handle. The schedules run, or why the
+    /// worker stopped: its own limit, a crash, or a sanitizer's report.
+    fn race(
+        &mut self,
+        grammar: &str,
+        text: &[u8],
+        schedule: Schedule,
+        deadline_ms: u64,
+        hard: Duration,
+        past_eviction: &mut usize,
+    ) -> Result<usize, UnitOutcome> {
+        use pmacs_parse_unit::{ParseCall, Request, Response, TextUpdate, WireEdit};
+        let Schedule {
+            iters,
+            seed,
+            grow_kb,
+        } = schedule;
+        let call = |update, edits: Vec<WireEdit>, len: usize| ParseCall {
+            language: grammar.to_owned(),
+            text: update,
+            edits,
+            expect_len: len as u32,
+            aliases: default_injection_aliases().into_iter().collect(),
+            deadline_ms: Some(deadline_ms),
+            interest: vec![(0, 4096)],
+        };
+        let mut text = grown(text, grow_kb);
+        let mut rng = Rng(seed ^ fnv(&text));
+        let full = call(TextUpdate::Full, Vec::new(), text.len());
+        let id = self
+            .send(&Request::Parse(full), &text)
+            .map_err(|_| self.ended())?;
+        let mut newest = match self.wait(&[id], hard) {
+            Ok(mut answers) => match answers.pop() {
+                Some(Response::Parsed(parsed)) => parsed.generation,
+                _ => return Ok(0),
+            },
+            Err(()) => return Err(self.ended()),
+        };
+        let mut older = newest;
+        for iter in 0..iters {
+            let mut parses = Vec::new();
+            let mut reads = Vec::new();
+            if iter % 3 == 2 {
+                for _ in 0..3 {
+                    let at = rng.below(text.len() + 1);
+                    let edit = keystroke(&mut text, at, b'z');
+                    let edited = call(TextUpdate::Edits, vec![edit], text.len());
+                    parses.push(
+                        self.send(&Request::Parse(edited), b"z")
+                            .map_err(|_| self.ended())?,
+                    );
+                }
+                // A burst of reads of the tree the second parse evicts,
+                // whole-file ones among them: the serve thread is mid-read
+                // when that tree goes, whatever a read costs beside a parse
+                // on this input, so a read can hold its last handle.
+                for k in 0..RACE_BURST {
+                    let read = if k % 2 == 0 {
+                        Request::Spans {
+                            generation: newest,
+                            ranges: vec![(0, text.len() as u32)],
+                        }
+                    } else {
+                        let kinds = race_reads(newest, text.len(), &mut rng);
+                        kinds[k % kinds.len()].clone()
+                    };
+                    reads.push(self.send(&read, &[]).map_err(|_| self.ended())?);
+                }
+            } else {
+                let at = rng.below(text.len() + 1);
+                let edit = keystroke(&mut text, at, b'x');
+                let edited = call(TextUpdate::Edits, vec![edit], text.len());
+                parses.push(
+                    self.send(&Request::Parse(edited), b"x")
+                        .map_err(|_| self.ended())?,
+                );
+                for generation in [newest, older] {
+                    for read in race_reads(generation, text.len(), &mut rng) {
+                        reads.push(self.send(&read, &[]).map_err(|_| self.ended())?);
+                    }
+                }
+            }
+            let ids: Vec<u64> = parses.iter().chain(&reads).copied().collect();
+            self.arrived.clear();
+            let answers = self.wait(&ids, hard).map_err(|()| self.ended())?;
+            for answer in answers.iter().take(parses.len()) {
+                if let Response::Parsed(parsed) = answer {
+                    older = newest;
+                    newest = parsed.generation;
+                }
+            }
+            // A read of the evicted tree answered (not stale) after the
+            // second parse installed held that tree past its eviction.
+            if parses.len() == 3 {
+                let at = |id: &u64| self.arrived.iter().position(|a| a == id);
+                let evicted_at = at(&parses[1]);
+                *past_eviction += reads
+                    .iter()
+                    .zip(&answers[parses.len()..])
+                    .filter(|(id, answer)| {
+                        !matches!(answer, Response::Failed(_)) && at(id) > evicted_at
+                    })
+                    .count();
+            }
+            if let Some(report) = self.sanitizer_since() {
+                return Err(UnitOutcome::Crashed(report));
+            }
+        }
+        Ok(iters)
+    }
+}
+
+/// One grammar's race schedules: its counts, and what a sanitizer reported
+/// or the boundary stopped.
+struct RaceRun {
+    grammar: &'static str,
+    inputs: usize,
+    schedules: usize,
+    /// Reads answered from a tree after the parse that evicted it
+    /// installed: the interleaving the race needs, reached.
+    past_eviction: usize,
+    contained: Vec<(String, String)>,
+    reported: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+fn race_unit(args: &[String]) -> Result<ExitCode, String> {
+    let (_, flags) = Flags::parse(args, 0)?;
+    let corpus = flags.path("corpus")?;
+    let max_inputs = usize::try_from(flags.num("max-inputs", 8)?).map_err(|e| e.to_string())?;
+    let iters = usize::try_from(flags.num("iters", 12)?).map_err(|e| e.to_string())?;
+    let seed = flags.num("seed", 1)?;
+    let grow_kb = usize::try_from(flags.num("grow-kb", 512)?).map_err(|e| e.to_string())?;
+    // A ThreadSanitizer worker parses several times slower than a released
+    // one, and a schedule the deadline cuts short meets nothing.
+    let deadline_ms = flags.num("deadline-ms", 30_000)?;
+    let cfg = Arc::new(ReplayConfig {
+        unit: flags.path("unit")?,
+        out: flags.path("out")?,
+        // The sanitizer's shadow memory is resident beside the parse's.
+        memory_mb: flags.num("memory-mb", 4096)?,
+        // Its shadow reservation is address space RLIMIT_AS would refuse.
+        watch: true,
+        deadline_ms,
+        hard: Duration::from_millis(deadline_ms + flags.num("grace-ms", 1_000)?),
+    });
+    std::fs::create_dir_all(&cfg.out).map_err(|e| e.to_string())?;
+    let queue = replay_queue(&flags, &corpus, &[], max_inputs)?;
+    let jobs = usize::try_from(flags.num("jobs", 4)?.max(1)).map_err(|e| e.to_string())?;
+    let queue = Arc::new(Mutex::new(queue));
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let threads: Vec<_> = (0..jobs)
+        .map(|_| {
+            let (queue, runs, cfg) = (queue.clone(), runs.clone(), cfg.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut q| q.pop());
+                    let Some((grammar, inputs)) = next else { break };
+                    let schedule = Schedule {
+                        iters,
+                        seed,
+                        grow_kb,
+                    };
+                    let run = race_grammar(grammar, &inputs, schedule, &cfg);
+                    eprintln!(
+                        "{grammar}: {} inputs, {} schedules, {} reads past an eviction, {} contained, {} reported{}",
+                        run.inputs,
+                        run.schedules,
+                        run.past_eviction,
+                        run.contained.len(),
+                        run.reported.len(),
+                        run.error
+                            .as_deref()
+                            .map_or_else(String::new, |e| format!(", ERROR {e}"))
+                    );
+                    if let Ok(mut r) = runs.lock() {
+                        r.push(run);
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().map_err(|_| "a race thread panicked")?;
+    }
+    let mut runs = std::mem::take(&mut *runs.lock().map_err(|_| "poisoned")?);
+    runs.sort_by_key(|r| r.grammar);
+    let mut md = format!(
+        "# Parse worker race schedules\n\n`{}`, memory {} MiB by its watch, deadline {} ms, \
+         {iters} schedules an input, each input grown to {grow_kb} KB.\n\n\
+         | grammar | inputs | schedules | reads past an eviction | contained | reported |\n\
+         |---|---|---|---|---|---|\n",
+        cfg.unit.display(),
+        cfg.memory_mb,
+        cfg.deadline_ms
+    );
+    for r in &runs {
+        let _ = writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {}{} |",
+            r.grammar,
+            r.inputs,
+            r.schedules,
+            r.past_eviction,
+            r.contained.len(),
+            r.reported.len(),
+            r.error
+                .as_deref()
+                .map_or_else(String::new, |e| format!(" (ERROR {e})"))
+        );
+    }
+    for r in &runs {
+        for (input, why) in &r.contained {
+            let _ = writeln!(md, "\n- {} contained: `{input}`, {why}", r.grammar);
+        }
+        for (input, why) in &r.reported {
+            let _ = writeln!(md, "\n- **{} REPORTED**: `{input}`, {why}", r.grammar);
+        }
+    }
+    std::fs::write(cfg.out.join("race-report.md"), &md).map_err(|e| e.to_string())?;
+    print!("{md}");
+    if runs.iter().any(|r| r.error.is_some()) {
+        return Ok(ExitCode::from(2));
+    }
+    Ok(if runs.iter().any(|r| !r.reported.is_empty()) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+fn race_grammar(
+    grammar: &'static str,
+    inputs: &[(String, Vec<u8>)],
+    schedule: Schedule,
+    cfg: &ReplayConfig,
+) -> RaceRun {
+    let mut run = RaceRun {
+        grammar,
+        inputs: inputs.len(),
+        schedules: 0,
+        past_eviction: 0,
+        contained: Vec::new(),
+        reported: Vec::new(),
+        error: None,
+    };
+    let mut unit: Option<UnitClient> = None;
+    let mut spawned = 0;
+    for (name, text) in inputs {
+        if unit.is_none() {
+            spawned += 1;
+            let stderr = cfg.out.join(format!("{grammar}-race-{spawned}.stderr"));
+            match UnitClient::spawn(&cfg.unit, stderr, cfg.memory_mb, cfg.watch) {
+                Ok(u) => unit = Some(u),
+                Err(e) => {
+                    run.error = Some(e);
+                    return run;
+                }
+            }
+        }
+        let u = unit.as_mut().expect("spawned above");
+        match u.race(
+            grammar,
+            text,
+            schedule,
+            cfg.deadline_ms,
+            cfg.hard,
+            &mut run.past_eviction,
+        ) {
+            Ok(n) => run.schedules += n,
+            Err(UnitOutcome::Contained(why)) => {
+                run.contained.push((name.clone(), why));
+                unit = None;
+            }
+            Err(outcome) => {
+                let why = match outcome {
+                    UnitOutcome::Crashed(why) => why,
+                    other => format!("{other:?}"),
+                };
+                let kept = cfg
+                    .out
+                    .join(format!("{grammar}-race-{}.input", run.reported.len() + 1));
+                let _ = std::fs::write(&kept, text);
+                run.reported.push((
+                    name.clone(),
+                    format!(
+                        "{why} (kept as {}; the worker's stderr is {grammar}-race-{spawned}.stderr)",
+                        kept.display()
+                    ),
+                ));
+                unit = None;
+            }
+        }
+    }
+    run
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3522,11 +4702,26 @@ mod tests {
     }
 
     #[test]
-    fn the_accepted_list_names_its_findings_and_no_other() {
-        // E7h fix round 2, the owner's ruling on review 2's High 1: each row
-        // names its findings by the repeated unit of its reproductions.
+    fn the_accepted_list_is_empty_since_its_two_rows_retired() {
+        // E7i.5: #296's and #301's rows retired when the parse worker
+        // stopped both in the editor, their removal condition. Adding a row
+        // is the owner's ruling, and changes this pin in the same commit.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let list = load_accepted(&root.join("fuzz/accepted.tsv")).expect("the list loads");
+        assert!(
+            list.is_empty(),
+            "fuzz/accepted.tsv has rows; adding one is the owner's ruling"
+        );
+    }
+
+    #[test]
+    fn the_accepted_list_names_its_findings_and_no_other() {
+        // E7h fix round 2, the owner's ruling on review 2's High 1: each row
+        // names its findings by the repeated unit of its reproductions. The
+        // two rows as they stood until E7i.5 retired them.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let list = load_accepted(&root.join("tests/e7h_review2/accepted-296-301.tsv"))
+            .expect("the list loads");
         let issues: Vec<u32> = list.iter().map(|e| e.issue).collect();
         assert_eq!(issues, [296, 301]);
         let units = |issue| {
@@ -3915,6 +5110,23 @@ mod tests {
             tysan_violation(&both).map(|r| crash_signature(r, "tysan report")),
             Some("tysan type-aliasing-violation in advance".to_owned()),
             "the pointer over a pointer of another type, after an int over an int"
+        );
+        // The `tsan` arm (E7i fix round 1): review 1's report, as its
+        // worker wrote it.
+        let tsan = "==================\n\
+                    WARNING: ThreadSanitizer: data race (pid=1711474)\n  \
+                    Read of size 4 at 0x7214000028a0 by main thread:\n    \
+                    #0 ts_subtree_release lib.c (pmacs-parse-unit+0x299f2d2)\n    \
+                    #1 ts_tree_delete <null> (pmacs-parse-unit+0x29c1088)\n";
+        assert_eq!(
+            crash_signature(tsan, "tsan report"),
+            "tsan data race in ts_subtree_release"
+        );
+        assert_eq!(grown(b"ab", 1).len(), 1025, "repeated past a kilobyte");
+        assert_eq!(
+            char_start("aé".as_bytes(), 2),
+            1,
+            "back to the é's first byte"
         );
         assert_eq!(
             crash_signature("corrupted size vs. prev_size\n", "signal 6"),

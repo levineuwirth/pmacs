@@ -54,8 +54,11 @@ measured and the build it measured it with.
   files a memory cut for it. At `17c3c8f` it exits 1: each input is minimized
   against the first 1 GB limit before the 4 GB confirmation, and only the
   4,123-byte minimum is confirmed. Since E7h's fix round 2 the input as found
-  is confirmed first and `fuzz/accepted.tsv` names #296, so it expects the
-  cut reported "known, accepted (#296)" and the run passing.
+  is confirmed first and `fuzz/accepted.tsv` named #296, so it expected the
+  cut reported "known, accepted (#296)" and the run passing; since E7i.5
+  retired that row it is a memory cut the run fails on its own (`run`
+  alone; `scripts/fuzz-grammars` leaves it to the worker replay), and the
+  script still exits 0 on the cut.
 - `drvp.c` parses a file natively through `ts_parser_parse_with_options` with
   a progress callback (and, given seconds, a deadline as `run_parse` has),
   and prints the parse time, the callbacks, the longest gap between them and

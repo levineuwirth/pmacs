@@ -266,11 +266,7 @@ fn markdown_layer_languages(src: &[u8]) -> Vec<String> {
         .view(buf_id)
         .and_then(|h| h.current())
         .expect("installed bundle");
-    bundle
-        .layers
-        .iter()
-        .map(|l| l.language_name.clone())
-        .collect()
+    bundle.layer_languages()
 }
 
 #[test]
