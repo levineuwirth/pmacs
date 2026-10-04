@@ -480,10 +480,13 @@ fn deadline_notices(s: &EditorState) -> usize {
 fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     // A 595 KB Rust file parses in hundreds of milliseconds; with the
     // deadline at 1 ms every parse of it is cancelled. Typed through the
-    // key path, as a user types: the buffer keeps the tree it had, the user
-    // is told once however many keystrokes follow, nothing aborts, and once
-    // parses finish again the tree is the buffer's (the cancelled request
-    // drained the edits, so the next parse must be cold, not incremental).
+    // key path, as a user types: the buffer keeps the tree it had while no
+    // edit has moved its text (typed at its end), and drops it once one has
+    // (typed at its head), so no span is painted over moved text (E7i fix
+    // round 3); the user is told once however many keystrokes follow,
+    // nothing aborts, and once parses finish again the tree is the
+    // buffer's (the cancelled request drained the edits, so the next parse
+    // must be cold, not incremental).
     let dir = temp_dir("keep");
     let file = dir.join("big.rs");
     std::fs::copy(
@@ -507,16 +510,21 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     let before = current_bundle(&s, buf).unwrap();
 
     exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 1)");
-    type_char(&mut s, 'x');
+    s.core.borrow_mut().move_buffer_end();
+    // A space, which adds no node: the cold parse compared below would
+    // otherwise end in a zero-width node at the end of the file, which no
+    // span request covers.
+    type_char(&mut s, ' ');
     assert!(
         wait(&mut s, 30, |s| deadline_notices(s) == 1),
         "a cancelled parse is reported: {}",
         s.lua_host.errors_buffer_text()
     );
     assert!(
-        Arc::ptr_eq(&before, &current_bundle(&s, buf).unwrap()),
-        "the buffer keeps the tree it had"
+        current_bundle(&s, buf).is_some_and(|now| Arc::ptr_eq(&before, &now)),
+        "the buffer keeps the tree it had: an edit at its end moved none of its text"
     );
+    s.core.borrow_mut().move_buffer_start();
     for ch in "yzw".chars() {
         type_char(&mut s, ch);
         wait(&mut s, 1, |_| false);
@@ -524,18 +532,16 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     wait(&mut s, 3, |_| false);
     assert_eq!(deadline_notices(&s), 1, "told once, not per keystroke");
     assert!(
-        Arc::ptr_eq(&before, &current_bundle(&s, buf).unwrap()),
-        "still the tree it had"
+        current_bundle(&s, buf).is_none(),
+        "the tree it had is dropped once an edit at its head has moved its text"
     );
 
     // Parses finish again: the next is cold, and its tree is the buffer's.
     exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 0)");
     type_char(&mut s, 'v');
     assert!(
-        wait(&mut s, 60, |s| !Arc::ptr_eq(
-            &before,
-            &current_bundle(s, buf).unwrap()
-        )),
+        wait(&mut s, 60, |s| current_bundle(s, buf)
+            .is_some_and(|now| !Arc::ptr_eq(&before, &now))),
         "a parse installs once the deadline allows it"
     );
     assert!(

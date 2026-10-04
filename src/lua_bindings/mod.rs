@@ -8593,7 +8593,8 @@ pub fn install_parse(
     // tell the user once (E7h.2): `"installed"`, `"installed-cut"`
     // (installed, but the deadline dropped some injection layers),
     // `"deadline"` (the parse ran past `syntax.parse-deadline-ms` and was
-    // cancelled; the buffer keeps its tree and parses cold next),
+    // cancelled; the buffer keeps its tree while no edit has moved its
+    // text, and parses cold next),
     // `"limit"` and `"unavailable"` (E7i: a memory stop; no worker could
     // start), `"stalled"` (E7i fix round 1: the parse returned but its unit
     // took past its bound to install it), `"crashed"`, `"crash-stopped"` and `"held"` (E7i fix round
@@ -8620,32 +8621,35 @@ pub fn install_parse(
                     return Ok(("none", None));
                 };
                 let Some(bundle) = bundle else {
-                    return Ok(match outcome {
-                        Some(JobOutcome::Failed(msg)) => {
-                            handle.mark_unparsed();
-                            if syntax::is_deadline_message(&msg) {
-                                ("deadline", None)
-                            } else if crate::parse_isolation::is_limit_message(&msg) {
-                                ("limit", None)
-                            } else if crate::parse_isolation::is_stalled_message(&msg) {
-                                ("stalled", Some(msg))
-                            } else if crate::parse_isolation::is_unavailable_message(&msg) {
-                                ("unavailable", Some(msg))
-                            } else if let Some(status) = crate::parse_isolation::crash_status(&msg)
-                            {
-                                // E7i fix round 2: no parse replaces the
-                                // installed one before the back-off ends,
-                                // and none ever once parsing stopped, so its
-                                // spans are dropped rather than painted over
-                                // moved text.
-                                handle.drop_current(status == "crash-stopped");
-                                (status, Some(msg))
-                            } else {
-                                ("failed", None)
-                            }
-                        }
-                        _ => ("none", None),
-                    });
+                    let Some(JobOutcome::Failed(msg)) = outcome else {
+                        return Ok(("none", None));
+                    };
+                    handle.mark_unparsed();
+                    let (status, detail) = if syntax::is_deadline_message(&msg) {
+                        ("deadline", None)
+                    } else if crate::parse_isolation::is_limit_message(&msg) {
+                        ("limit", None)
+                    } else if crate::parse_isolation::is_stalled_message(&msg) {
+                        ("stalled", Some(msg))
+                    } else if crate::parse_isolation::is_unavailable_message(&msg) {
+                        ("unavailable", Some(msg))
+                    } else if let Some(status) = crate::parse_isolation::crash_status(&msg) {
+                        (status, Some(msg))
+                    } else {
+                        ("failed", None)
+                    };
+                    // Nothing installed, so the installed parse stays until
+                    // one does: until the back-off ends after a crash, never
+                    // once crashes stopped the parsing, and after a stop at
+                    // the deadline or the memory limit until a parse
+                    // finishes, which for a text that stops every parse is
+                    // as long as that text stays (E7i fix rounds 2 and 3).
+                    // Its spans are dropped rather than painted over text an
+                    // edit has moved. A deadline that cut only injected
+                    // layers installed a parse (`installed-cut` below),
+                    // which is current and keeps its spans.
+                    handle.drop_current(status == "crash-stopped");
+                    return Ok((status, detail));
                 };
                 let cut = bundle.layers_cut_by_deadline;
                 // Stage 2 (framing Q#IJ2): resolve each layer's highlight

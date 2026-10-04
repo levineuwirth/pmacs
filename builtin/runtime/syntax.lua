@@ -47,12 +47,20 @@ local parse_layers_cut_warned = {}
 -- E7i fix round 1: buffers already told that their parse worker crashed,
 -- keyed like the others; re-armed when a parse of the buffer installs.
 local parse_crash_warned = {}
--- E7i fix round 2 (review 2, Medium 1): buffers whose parse worker crashed
--- and no parse has installed since, keyed like the others: "crashed" while
--- the buffer backs off, "stopped" once its parsing stopped. The mode
--- segment reads it, so the mark lasts as long as the state does, as E5.3's
--- `LSP:!` does for a crashed server, and not until `*errors*` is read.
-local parse_crash_state = {}
+-- E7i fix round 2 (review 2, Medium 1): buffers whose last parse installed
+-- nothing and no parse has installed since, keyed like the others, by how
+-- it ended and so by when the buffer is parsed again (fix round 3):
+--   "crashed"  its worker crashed; parsed again when the back-off ends;
+--   "stopped"  crashes stopped its parsing; never again until reopened;
+--   "timeout", "memory", "stalled"  stopped at the deadline, the memory
+--              limit or the bound on installing it; parsed again at the
+--              next edit, which a text that stops every parse stops too.
+-- The mode segment reads it, so the mark lasts as long as the state does,
+-- as E5.3's `LSP:!` does for a crashed server, and not until `*errors*` is
+-- read: a stopped buffer whose text an edit moved is painted plain
+-- (`ParseViewHandle::drop_current`), and without the mark nothing would
+-- tell it from one whose parse is still running.
+local parse_state = {}
 -- E7i fix round 1: buffers already told that a parse returned and its unit
 -- then ran past the bound on installing it; re-armed like the deadline's.
 local parse_stall_warned = {}
@@ -60,7 +68,8 @@ local parse_stall_warned = {}
 -- E7h.2: a parse is bounded in time where tree-sitter calls its progress
 -- callback, which cancels a parse still running this long after it
 -- starts, the root and its injection layers together; the buffer keeps
--- the tree it had, the next parse starts cold, and nothing aborts. The
+-- the tree it had while no edit has moved its text (E7i fix round 3), the
+-- next parse starts cold, and nothing aborts. The
 -- line is drawn for a grammar whose parse never returns
 -- (tree-sitter-javascript cycles on 24 bytes of unclosed brackets while
 -- its memory grows): an ordinary large file parses far inside it.
@@ -76,7 +85,7 @@ local parse_stall_warned = {}
 -- 29.5 s and 9.8 GB there at 32 KB under the default (#296).
 pmacs.config.define {
   name = "syntax.parse-deadline-ms",
-  description = "Milliseconds a syntax parse may run before it is cancelled, checked as the parser advances (assembling the finished tree cannot be interrupted). The buffer keeps its previous highlighting and you are told once; 0 never cancels.",
+  description = "Milliseconds a syntax parse may run before it is cancelled, checked as the parser advances (assembling the finished tree cannot be interrupted). The buffer keeps its previous highlighting until an edit moves its text, and is then shown plain until a parse finishes; you are told once. 0 never cancels.",
   type = "integer",
   default = 5000,
   min = 0,
@@ -710,18 +719,22 @@ pmacs.statusline.register {
 -- E7i fix round 2 (review 2, Medium 1): a buffer whose parse worker crashed
 -- says so for as long as no parse has installed since, `parse:crashed`
 -- while it backs off and `parse:stopped` once its parsing stopped, which
--- lasts until the buffer is killed. The shape is E5.3's `LSP:!`, a mark
--- read from the buffer's state rather than from the unread error, so
--- reading `*errors*` does not end it. On the right, where a segment
--- survives a long path on the left: right segments are clipped leftmost
--- first, so above the LSP segment (0) and below the unread count (10).
+-- lasts until the buffer is killed. Fix round 3: a parse stopped at its
+-- deadline or its memory limit says so too, `parse:timeout` or
+-- `parse:memory`, in a word of its own, since the next edit parses it
+-- again where `parse:stopped` never does (`parse_state` lists them all).
+-- The shape is E5.3's `LSP:!`, a mark read from the buffer's state rather
+-- than from the unread error, so reading `*errors*` does not end it. On
+-- the right, where a segment survives a long path on the left: right
+-- segments are clipped leftmost first, so above the LSP segment (0) and
+-- below the unread count (10).
 pmacs.statusline.register {
   name = "parse",
   side = "right",
   priority = 5,
   fn = function(ctx)
-    local crash = parse_crash_state[tostring(ctx.buffer)]
-    if crash then return "parse:" .. crash end
+    local state = parse_state[tostring(ctx.buffer)]
+    if state then return "parse:" .. state end
     return nil
   end,
 }
@@ -819,6 +832,28 @@ end
 local parse_retry_at = {}
 local RETRY_MARGIN_MS = 25
 
+-- E7i fix round 3: a parse stopped at its deadline, its memory limit or
+-- the bound on installing it installed nothing, so the buffer keeps the
+-- last parse only while no edit has moved its text, and is painted plain
+-- once one has (`_install_settled` drops it); the next edit parses it
+-- again. The mark says which stop, and a crash's stop outranks it.
+local AFTER_A_STOP =
+  "the next edit parses it again, and until a parse finishes it is shown plain once an edit has moved its text"
+
+local function mark_stop(key, state)
+  if parse_state[key] ~= "stopped" then
+    parse_state[key] = state
+  end
+end
+
+-- A stopped buffer's names for its notice: the file's short name first,
+-- which a narrow echo line keeps, and the whole path for the end.
+local function stop_names(key)
+  local b = parse_buffer_by_key[key]
+  local name = b and b:name() or key
+  return name:match("[^/]+$") or name, name
+end
+
 local function retry_backed_off_parses()
   if next(parse_retry_at) == nil then return end
   local now = pmacs.editor.monotonic_ms()
@@ -829,7 +864,7 @@ local function retry_backed_off_parses()
   for _, key in ipairs(due) do
     parse_retry_at[key] = nil
     local buf, lang = parse_buffer_by_key[key], parse_lang_by_buffer[key]
-    if buf and lang and parse_crash_state[key] == "crashed" then
+    if buf and lang and parse_state[key] == "crashed" then
       -- A buffer killed meanwhile has no view to parse into.
       pcall(pmacs.parse._dispatch, buf, lang)
     end
@@ -875,9 +910,9 @@ pmacs._async.tick = function(...)
       -- for a crash no parse reported (one a read of the tree found) tells
       -- it, so no crash goes untold.
       if status == "crash-stopped" then
-        parse_crash_state[key] = "stopped"
-      elseif parse_crash_state[key] ~= "stopped" then
-        parse_crash_state[key] = "crashed"
+        parse_state[key] = "stopped"
+      elseif parse_state[key] ~= "stopped" then
+        parse_state[key] = "crashed"
       end
       local b = parse_buffer_by_key[key]
       local report = b and pmacs.parse._unit_report(b)
@@ -893,38 +928,38 @@ pmacs._async.tick = function(...)
       -- deadline and the unit then took past its own bound to install the
       -- tree and answer, so it was stopped. Not the deadline: said in its
       -- own words, once, like it.
+      mark_stop(key, "stalled")
       if not parse_stall_warned[key] then
         parse_stall_warned[key] = true
-        local b = parse_buffer_by_key[key]
-        local name = b and b:name() or key
+        local short, name = stop_names(key)
         pmacs.error(string.format(
-          "syntax: parsing %s returned, but %s; its highlighting stays as it was until a parse finishes",
-          name, tostring(detail)), ERROR_LABEL)
+          "syntax: parsing %s returned, but %s; %s (%s)",
+          short, tostring(detail), AFTER_A_STOP, name), ERROR_LABEL)
       end
     elseif key and status == "limit" then
       -- E7i: a parse unit stopped at its memory limit; told once, like a
       -- deadline.
+      mark_stop(key, "memory")
       if not parse_deadline_warned[key] then
         parse_deadline_warned[key] = true
-        local b = parse_buffer_by_key[key]
-        local name = b and b:name() or key
+        local short, name = stop_names(key)
         pmacs.error(string.format(
-          "syntax: parsing %s reached syntax.parse-memory-limit-mb (or the units' total) and was stopped; its highlighting stays as it was until a parse finishes",
-          name), ERROR_LABEL)
+          "syntax: parsing %s reached syntax.parse-memory-limit-mb (or the units' total) and was stopped; %s (%s)",
+          short, AFTER_A_STOP, name), ERROR_LABEL)
       end
     elseif key and status == "deadline" then
+      mark_stop(key, "timeout")
       if not parse_deadline_warned[key] then
         parse_deadline_warned[key] = true
-        local b = parse_buffer_by_key[key]
-        local name = b and b:name() or key
+        local short, name = stop_names(key)
         pmacs.error(string.format(
-          "syntax: parsing %s ran past syntax.parse-deadline-ms (%d ms) and was stopped; its highlighting stays as it was until a parse finishes",
-          name, pmacs.config.get("syntax.parse-deadline-ms")), ERROR_LABEL)
+          "syntax: parsing %s ran past syntax.parse-deadline-ms (%d ms) and was stopped; %s (%s)",
+          short, pmacs.config.get("syntax.parse-deadline-ms"), AFTER_A_STOP, name), ERROR_LABEL)
       end
     elseif key and (status == "installed" or status == "installed-cut") then
       parse_deadline_warned[key] = nil
       parse_crash_warned[key] = nil
-      parse_crash_state[key] = nil
+      parse_state[key] = nil
       parse_retry_at[key] = nil
       parse_stall_warned[key] = nil
       if status == "installed-cut" then

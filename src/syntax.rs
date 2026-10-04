@@ -258,22 +258,26 @@ impl ParseViewHandle {
         inner.dropped = false;
     }
 
-    /// Drop the installed parse when its text is not the buffer's (E7i fix
-    /// round 2, review 2's Medium 1): after its parse worker crashed, no
-    /// parse replaces it before the back-off ends, and its spans are
-    /// indexed against text an edit has since moved, so a renderer would
-    /// paint each line with its predecessor's colors. Dropped, the buffer
-    /// paints plain until a parse installs, as a diagnostic whose text an
-    /// edit deleted is dropped until the next publish. With `always`, drop
-    /// it even if the text is unchanged: a buffer whose parsing stopped is
-    /// never parsed again, so the next edit would move it. Returns whether
-    /// a parse was dropped.
+    /// Drop the installed parse when an edit has moved its text (E7i fix
+    /// round 2, review 2's Medium 1; fix round 3): a parse that installed
+    /// nothing (its worker crashed, it was stopped at its deadline or its
+    /// memory limit, or killed) leaves the last parse in place, and its
+    /// spans are indexed against text an edit has since moved, so a
+    /// renderer would paint each line with its predecessor's colors.
+    /// Dropped, the buffer paints plain until a parse installs, as a
+    /// diagnostic whose text an edit deleted is dropped until the next
+    /// publish. The text has moved unless the buffer's still begins with
+    /// the parse's whole text: an edit past its end moves no byte it has a
+    /// span for, so the previous tree stays usable after an append (E7i's
+    /// third acceptance item). With `always`, drop it even if nothing
+    /// moved: a buffer whose parsing stopped is never parsed again, so the
+    /// next edit would move it. Returns whether a parse was dropped.
     pub fn drop_current(&self, always: bool) -> bool {
         let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
         let Some(current) = inner.current.as_ref() else {
             return false;
         };
-        if !always && current.source.as_ref() == inner.source.as_slice() {
+        if !always && inner.source.starts_with(current.source.as_ref()) {
             return false;
         }
         inner.current = None;
