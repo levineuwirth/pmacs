@@ -163,14 +163,13 @@ fn marked_rows(cells: &[Cell]) -> Vec<String> {
         .collect()
 }
 
-/// The mode line: the row that carries the buffer's mode segment.
+/// The mode line: one window's, the row above the echo line. Found by
+/// position and not by its text: under load the activity indicator joins
+/// the right group and the left group, the path and `(rust)`, is cut where
+/// the right group begins (the gate at `79d2895` read no row with
+/// `(rust)` on it).
 fn mode_line(cells: &[Cell]) -> String {
-    (0..ROWS)
-        .map(|row| row_text(cells, row))
-        .find(|t| t.contains("(rust)"))
-        .unwrap_or_default()
-        .trim_end()
-        .to_owned()
+    row_text(cells, ROWS - 2).trim_end().to_owned()
 }
 
 /// What a frontend holds of the buffer's styling after applying `msgs`
