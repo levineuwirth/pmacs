@@ -210,6 +210,15 @@ impl PopupFrame {
     }
 }
 
+/// The closing row both frontends show when a popup's text did not all
+/// fit, at the wire's bound or in the box: how many lines were left out
+/// and where the whole text is. One function so the two say the same.
+#[must_use]
+pub fn more_lines_label(n: u32) -> String {
+    let noun = if n == 1 { "line" } else { "lines" };
+    format!("… {n} more {noun} · C-c H opens *lsp-help*")
+}
+
 /// Where a popup of `size` goes beside an anchor inside a window of
 /// `area`, as its top-left corner --- the one placement rule for popups
 /// on both frontends (E7d.3, which E8 inherits rather than restating).

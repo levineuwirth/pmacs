@@ -96,13 +96,7 @@ pub fn make_shared_popup() -> SharedLspPopup {
     Arc::new(Mutex::new(None))
 }
 
-/// The closing row both frontends show when a popup's text did not
-/// all fit: what was left out and where the whole text is.
-#[must_use]
-pub fn more_lines_label(n: u32) -> String {
-    let noun = if n == 1 { "line" } else { "lines" };
-    format!("… {n} more {noun} · C-c H opens *lsp-help*")
-}
+pub use pmacs_protocol::popup::more_lines_label;
 
 /// Server text as bounded popup lines, and how many lines were left out.
 ///

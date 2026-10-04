@@ -626,6 +626,13 @@ const UI_FACES: &[&str] = &[
     "ui.minibuffer",
     "ui.minibuffer.candidate",
     "ui.modeline",
+    // E8.3 — the hover and signature popup: its text and background,
+    // the signature's active parameter, and the closing "more lines"
+    // row. Added by E8 itself (D34); the grid resolves the same names
+    // through the theme's walk, the GPU by exact name from this table.
+    "ui.popup",
+    "ui.popup.active-parameter",
+    "ui.popup.footer",
     "ui.search.match",
     "ui.search.match.active",
     "ui.selection",

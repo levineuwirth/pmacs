@@ -21,6 +21,18 @@ whole. Under one cap a growing register squeezes the rules.
   degradation was accepted. Removed when the daemon carries a session
   identity of its own; until then the acceptance asserts equality only
   where the credential exists, and prints both colors where it does not.
+- **Popup scrolling.** The hover and signature popup (E8) carries the
+  server's whole text up to the wire's bound on both frontends, and
+  both show at most a fraction of the window and say how many lines a
+  bound left out. Past what its box shows, the GPU frontend scrolls the
+  popup under the wheel, a frontend-local view fact the daemon never
+  learns; the grid paints the rows that fit and closes with a row
+  counting the rest and naming `C-c H`, which opens the whole text in
+  `*lsp-help*`, the persistent and searchable form on both. Accepted
+  because a grid popup has no pointer to scroll it with and every key
+  belongs to the buffer the popup describes, so a scroll binding would
+  be a modal surface E8 does not add. Removed when the grid popup gains
+  a scroll gesture, or the popup becomes a focusable panel on both.
 - **Line wrap.** Under `ui.line-wrap = "wrap"` both frontends wrap at
   word boundaries (D35, reversing Q#LL5's character wrap for prose),
   and a word wider than the row breaks by glyph on both, so every
