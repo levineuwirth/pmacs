@@ -102,6 +102,9 @@ impl RenderState {
         terminal_snapshots: &HashMap<WindowId, TerminalSnapshot>,
         other_presences: &[crate::overlay_paint::OtherPresence],
     ) -> Vec<InstanceMessage> {
+        // E8.2: a popup the text or the caret has left is closed before
+        // the grid paints (`EditorCore::lsp_popup_validate`).
+        state.core.borrow_mut().lsp_popup_validate();
         if self.size.rows < 2 || self.size.cols == 0 {
             return Vec::new();
         }

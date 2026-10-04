@@ -1284,6 +1284,18 @@ fn did_change_texts(sink: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// E8: the signature the auto-trigger opened, as the popup holds it ---
+/// what the one-line `LSP: <label>` status echo said before the popup
+/// replaced it. `None` when no signature popup is open.
+fn signature_popup_label(state: &pmacs::editor::EditorState) -> Option<String> {
+    let core = state.core.borrow();
+    let popup = core.lsp_popup.lock().expect("lsp popup");
+    popup
+        .as_ref()
+        .filter(|p| p.kind == pmacs_protocol::PopupKind::Signature)
+        .and_then(|p| p.lines.first().cloned())
+}
+
 #[test]
 fn first_did_change_after_opener_carries_the_pair() {
     let dir = fresh_state_dir();
@@ -1322,14 +1334,15 @@ fn first_did_change_after_opener_carries_the_pair() {
     );
 
     // And the auto-trigger itself still fired with pairing active
-    // (Q#AP8): the fake's signature label reaches the status line.
+    // (Q#AP8): the fake's signature label reaches the popup (E8; the
+    // status line before it).
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw = false;
     while Instant::now() < deadline {
         s.tick_processes();
         s.tick_lsp();
         s.tick_async();
-        if status(&s).contains("fn echo(") {
+        if signature_popup_label(&s).is_some_and(|l| l.contains("fn echo(")) {
             saw = true;
             break;
         }

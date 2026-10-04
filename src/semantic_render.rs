@@ -300,6 +300,17 @@ pub struct SemanticRenderState {
     /// cope" would make negotiation a sender convention rather than a
     /// gate.
     peer_knows_mapped_panel: bool,
+    /// Whether the peer negotiated the v26 hover and signature popup
+    /// (E8, [`pmacs_protocol::POPUP_MIN_VERSION`]). A peer below it gets
+    /// no `Popup` constructed; the daemon's write filter is the
+    /// independent second gate.
+    peer_knows_popup: bool,
+    /// Last emitted `Popup` payload (E8), for the dedup that keeps a
+    /// popup the caret dwells under from being resent every frame.
+    /// Bufferless: the popup belongs to one window, and the producer is
+    /// per frontend. `None` before the first frame, which stays silent
+    /// for a closed popup (nothing to clear).
+    last_popup: Option<pmacs_protocol::PopupPayload>,
     /// Last emitted `CompletionPopup` payload per buffer (Arc 1a
     /// Q#C5), for cached-compare suppression (see
     /// [`CompletionPopupFacts`]).
@@ -691,6 +702,7 @@ impl SemanticRenderState {
         s.peer_knows_panel_frames = negotiated_protocol_version >= PANEL_MIN_VERSION;
         s.peer_knows_mapped_panel =
             negotiated_protocol_version >= pmacs_protocol::PANEL_MAPPING_MIN_VERSION;
+        s.peer_knows_popup = negotiated_protocol_version >= pmacs_protocol::POPUP_MIN_VERSION;
         s
     }
 
@@ -717,6 +729,8 @@ impl SemanticRenderState {
             // Leaving this `false` made `new()` contradict its own doc
             // and emit the LEGACY family to an implicitly v25 peer.
             peer_knows_mapped_panel: true,
+            peer_knows_popup: true,
+            last_popup: None,
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
@@ -1186,6 +1200,10 @@ impl SemanticRenderState {
         self.last_menu_prompt.remove(&buffer_id);
         self.last_completion_popup.remove(&buffer_id);
         self.last_statusline.remove(&buffer_id);
+        // E8: the frontend forgets its popup on a snapshot (its anchor is
+        // a byte of the buffer it left), so the producer forgets what it
+        // sent; a popup still open is shipped again on the next frame.
+        self.last_popup = None;
     }
 
     /// Project one frame.
@@ -1209,6 +1227,9 @@ impl SemanticRenderState {
     /// to say (no hints, no prior non-empty send).
     #[allow(clippy::too_many_lines)]
     pub fn render_frame(&mut self, state: &EditorState) -> Vec<InstanceMessage> {
+        // E8.2: a popup the text or the caret has left is closed before
+        // anything is projected (`EditorCore::lsp_popup_validate`).
+        state.core.borrow_mut().lsp_popup_validate();
         self.mark_presented_errors_read(state);
         // Vterm Stage 3: a terminal window suppresses the whole document
         // projection. It is checked FIRST because the terminal identity
@@ -1439,6 +1460,8 @@ impl SemanticRenderState {
         out.extend(self.minibuffer_prompt_msg(state, vp.buffer_id));
         // --- CompletionPopup (Arc 1a Q#C5, protocol v15) ---
         out.extend(self.completion_popup_msg(state, vp.buffer_id));
+        // --- Popup (E8, protocol v26) ---
+        out.extend(self.popup_msg(state));
         // --- ThemeFacts (UI faces; themes arc Q#TH7, protocol v16) ---
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
@@ -2010,6 +2033,36 @@ impl SemanticRenderState {
         // Advance only after the complete replacement has entered the
         // frame output, including the authoritative-empty invalidation path.
         self.last_statusline.insert(buffer_id, baseline);
+    }
+
+    /// The `Popup` message for this frame (E8.2), or `None` when the
+    /// popup is unchanged since the last send. Present only to the
+    /// frontend whose focused window holds the popup; every other
+    /// frontend sees it absent. A frame that fails its own structural
+    /// check is never sent: the producer cuts every text to the bound
+    /// ([`crate::lsp_popup::popup_lines`]), so a refusal here is a
+    /// defect, said on stderr and shipped as `Absent` rather than as
+    /// bytes a receiver must reject.
+    fn popup_msg(&mut self, state: &EditorState) -> Option<InstanceMessage> {
+        if !self.peer_knows_popup {
+            return None;
+        }
+        let frame = state.core.borrow().lsp_popup_frame_for(self.frontend_id);
+        let payload = match frame.map(|f| f.validate().map(|()| f)) {
+            Some(Ok(frame)) => pmacs_protocol::PopupPayload::Present(frame),
+            Some(Err(e)) => {
+                eprintln!("pmacs: popup frame refused by its own bound: {e}");
+                pmacs_protocol::PopupPayload::Absent
+            }
+            None => pmacs_protocol::PopupPayload::Absent,
+        };
+        if self.last_popup.as_ref() == Some(&payload) {
+            return None;
+        }
+        let first_sight_closed =
+            self.last_popup.is_none() && payload == pmacs_protocol::PopupPayload::Absent;
+        self.last_popup = Some(payload.clone());
+        (!first_sight_closed).then_some(InstanceMessage::Popup(payload))
     }
 
     /// The `CompletionPopup` message for this frame, or `None` when the

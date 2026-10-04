@@ -16,7 +16,12 @@
 //! * On `textDocument/completion`: returns a deterministic
 //!   `CompletionList` with three items so M4.7 tests can read it.
 //! * On `textDocument/hover`: returns a `MarkupContent`-shaped
-//!   markdown payload.
+//!   markdown payload. With `PMACS_FAKE_LSP_HOVER_LINES=N` set (E8) it
+//!   returns instead a fenced code block followed by `N` numbered prose
+//!   lines and no range, and with `N = 0` a `null` result, so a test can
+//!   drive the hover popup's empty, long and past-the-bound behaviours.
+//!   `PMACS_FAKE_LSP_HOVER_DELAY_MS=N` holds every hover answer back
+//!   `N` ms, so a test can move the caret while one is in flight.
 //! * On `textDocument/signatureHelp`: returns a one-signature
 //!   payload with two parameters and the second one active.
 //! * On any other request: replies with `result: {"echo": params}`.
@@ -734,10 +739,28 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/hover", Some(idv)) => {
-                let resp = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": idv,
-                    "result": {
+                if let Some(ms) = std::env::var("PMACS_FAKE_LSP_HOVER_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                let lines = std::env::var("PMACS_FAKE_LSP_HOVER_LINES")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok());
+                let result = match lines {
+                    Some(0) => serde_json::Value::Null,
+                    Some(n) => {
+                        use std::fmt::Write as _;
+                        let mut value = String::from("```rust\nfn hovered()\n```\n\n");
+                        for i in 0..n {
+                            let _ = writeln!(value, "line {i} of the long hover");
+                        }
+                        serde_json::json!({
+                            "contents": { "kind": "markdown", "value": value }
+                        })
+                    }
+                    None => serde_json::json!({
                         "contents": {
                             "kind": "markdown",
                             "value": "# pmacs-fake-lsp\n\nSynthetic hover content for the symbol under cursor."
@@ -746,7 +769,12 @@ fn main() {
                             "start": { "line": 0, "character": 0 },
                             "end":   { "line": 0, "character": 4 }
                         }
-                    }
+                    }),
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": result,
                 });
                 write_frame(&mut stdout, &resp);
             }

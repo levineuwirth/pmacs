@@ -89,8 +89,11 @@ mod config;
 mod diag;
 mod fold;
 mod index;
+mod lsp_popup;
 mod mcp;
 mod window_panel;
+
+pub use lsp_popup::install_lsp_popup;
 // Every `pub` item a moved domain owned is re-exported so its prior
 // `crate::lua_bindings::<item>` path still resolves — the split must not
 // shrink the public API surface. That includes the `install_*` wiring fns:
@@ -14535,6 +14538,8 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
     // primitive able to say "Quit" while a region stayed live.
     register(editor, lua, core, "cancel", |c| {
         c.clear_selection();
+        // E8.2: `C-g` dismisses the hover or signature popup too.
+        c.lsp_popup_close();
         c.status = "Quit".into();
     })?;
     {

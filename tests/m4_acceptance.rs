@@ -4505,9 +4505,22 @@ fn arc1c_semantic_tokens_repull_after_edit_flush() {
     );
 }
 
+/// E8: the signature the auto-trigger opened, as the popup holds it ---
+/// what the one-line `LSP: <label>` status echo said before the popup
+/// replaced it. `None` when no signature popup is open.
+fn signature_popup_label(state: &pmacs::editor::EditorState) -> Option<String> {
+    let core = state.core.borrow();
+    let popup = core.lsp_popup.lock().expect("lsp popup");
+    popup
+        .as_ref()
+        .filter(|p| p.kind == pmacs_protocol::PopupKind::Signature)
+        .and_then(|p| p.lines.first().cloned())
+}
+
 /// Arc 1d — signature help auto-triggers on a server-declared trigger
 /// character. Typing `(` (a one-byte cursor advance, the same typed-char
-/// signature `completion.lua` uses) surfaces the active signature.
+/// signature `completion.lua` uses) surfaces the active signature, in
+/// the popup since E8.
 #[test]
 fn arc1d_signature_help_auto_triggers_on_trigger_char() {
     use pmacs::editor::EditorState;
@@ -4557,7 +4570,7 @@ fn arc1d_signature_help_auto_triggers_on_trigger_char() {
         state.tick_processes();
         state.tick_lsp();
         state.tick_async();
-        if state.core.borrow().status.contains("fn echo(") {
+        if signature_popup_label(&state).is_some_and(|l| l.contains("fn echo(")) {
             saw = true;
             break;
         }
@@ -4616,7 +4629,7 @@ fn arc1d_signature_help_does_not_trigger_on_ordinary_typing() {
         state.tick_lsp();
         state.tick_async();
         assert!(
-            !state.core.borrow().status.contains("fn echo("),
+            !signature_popup_label(&state).is_some_and(|l| l.contains("fn echo(")),
             "ordinary typing must not request signature help"
         );
     }
@@ -4777,7 +4790,7 @@ fn arc1d_signature_help_triggers_on_non_ascii_trigger_char() {
         state.tick_processes();
         state.tick_lsp();
         state.tick_async();
-        if state.core.borrow().status.contains("fn echo(") {
+        if signature_popup_label(&state).is_some_and(|l| l.contains("fn echo(")) {
             saw = true;
             break;
         }
@@ -4848,7 +4861,7 @@ fn arc1d_signature_help_ignores_non_typed_edits() {
         state.tick_lsp();
         state.tick_async();
         assert!(
-            !state.core.borrow().status.contains("fn echo("),
+            !signature_popup_label(&state).is_some_and(|l| l.contains("fn echo(")),
             "a non-typed one-byte '(' insert must not trigger signature help"
         );
     }

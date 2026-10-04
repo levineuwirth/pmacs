@@ -762,6 +762,10 @@ impl EditorState {
             &syntax_registry,
         )
         .expect("install pmacs.lsp");
+        // E8.2: the hover and signature popup, opened from the LSP stores
+        // into the core (`pmacs.lsp._popup_*`).
+        crate::lua_bindings::install_lsp_popup(lua_host.lua(), &core, &lsp_manager)
+            .expect("install pmacs.lsp popup");
         // T M9.1 MCP manager. Wires onto the same supervisor that LSP
         // and `pmacs.process.*` use; the protocol-uniformity claim is
         // that this share is sufficient (no parallel dispatch path).

@@ -38,6 +38,35 @@ use crate::window::{
     QuitAction, Side, Window, WindowId, subtree_min_rows,
 };
 
+/// What a hover or signature request is about (E8.2): the window it was
+/// asked in, the buffer that window showed, the caret and the buffer's
+/// revision, captured before the request goes out and handed back with
+/// the answer, so an answer that lands after the user moved on opens
+/// nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PopupTarget {
+    /// The window the request was made in.
+    pub window_id: WindowId,
+    /// The buffer it showed.
+    pub buffer_id: BufferId,
+    /// The caret.
+    pub cursor: Position,
+    /// The buffer's revision.
+    pub revision: u64,
+}
+
+/// What opening the popup from a server's answer did (E8.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PopupOutcome {
+    /// The popup is open with the answer.
+    Opened,
+    /// The answer carried nothing to show; the caller says so.
+    Nothing,
+    /// The target no longer holds (the caret moved, the text changed,
+    /// the window lost focus); nothing opened and nothing is said.
+    Stale,
+}
+
 /// Why [`EditorCore::write_active_buffer_to`] declined (E1.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteFileRefusal {
@@ -719,6 +748,13 @@ pub struct EditorCore {
     /// same state the dispatch path navigates and the Lua driver
     /// publishes into — the completion twin of `menu`.
     pub completion_popup: crate::completion::SharedCompletionPopup,
+    /// The hover or signature popup at the caret (E8), or `None` when
+    /// closed. Shared `Arc<Mutex>` so the grid's
+    /// [`crate::hover::HoverView`] and [`crate::signature::SignatureView`]
+    /// overlays and the semantic producer read the same state the
+    /// runtime's commands open and every edit or motion closes
+    /// ([`crate::lsp_popup`]).
+    pub lsp_popup: crate::lsp_popup::SharedLspPopup,
     /// Buffers whose input must round-trip (Arc 1b, Q#P6). While one
     /// of these is the active buffer,
     /// [`crate::editor::EditorState::dispatch_idle`] reports `false`,
@@ -828,6 +864,7 @@ impl EditorCore {
             undo_group: HashMap::new(),
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
+            lsp_popup: crate::lsp_popup::make_shared_popup(),
             round_trip_buffers: std::collections::HashSet::new(),
             query_replace: None,
             typed_edit_pending: None,
@@ -5545,6 +5582,241 @@ impl EditorCore {
         if !win.overlay_kinds().contains(&"context-menu") {
             win.push_overlay(Box::new(crate::menu::MenuView::new(menu)));
         }
+    }
+
+    // ---- hover and signature popup (E8) -----------------------------------
+
+    /// The kind of the open popup, or `None` when closed.
+    #[must_use]
+    pub fn lsp_popup_kind(&self) -> Option<pmacs_protocol::PopupKind> {
+        self.lsp_popup
+            .lock()
+            .expect("lsp popup poisoned")
+            .as_ref()
+            .map(|p| p.kind)
+    }
+
+    /// Close the popup, whatever it shows. The overlays then
+    /// self-suppress and the producer ships `Absent`.
+    pub fn lsp_popup_close(&mut self) {
+        *self.lsp_popup.lock().expect("lsp popup poisoned") = None;
+    }
+
+    /// What a hover or signature request about to be sent is about: the
+    /// active window, its buffer, the caret and the buffer's revision.
+    /// `None` when the active buffer is gone.
+    #[must_use]
+    pub fn lsp_popup_target(&self) -> Option<PopupTarget> {
+        let win = self.active_window();
+        let revision = self.registry.borrow().get(win.buffer_id).ok()?.revision();
+        Some(PopupTarget {
+            window_id: win.id,
+            buffer_id: win.buffer_id,
+            cursor: win.cursor,
+            revision,
+        })
+    }
+
+    /// Whether `window_id` is the focused window of some frontend.
+    fn window_is_focused(&self, window_id: WindowId) -> bool {
+        self.views.values().any(|v| v.active == window_id)
+    }
+
+    /// Whether `target` still describes the editor: the window still
+    /// focused and showing its buffer, the caret where it was and the
+    /// text unchanged.
+    fn lsp_popup_target_holds(&self, target: &PopupTarget) -> bool {
+        let Some(win) = self.windows.get(&target.window_id) else {
+            return false;
+        };
+        win.buffer_id == target.buffer_id
+            && win.cursor == target.cursor
+            && self.window_is_focused(target.window_id)
+            && self
+                .registry
+                .borrow()
+                .get(target.buffer_id)
+                .is_ok_and(|b| b.revision() == target.revision)
+    }
+
+    /// Open the hover popup for `target` from the server's `hover`
+    /// (E8.2), anchored at the start of the symbol the server named, or
+    /// of the word under the caret, and held while the caret stays in
+    /// it. An answer for a target that no longer holds opens nothing
+    /// ([`PopupOutcome::Stale`]); an empty answer closes any popup, the
+    /// user having asked for this place and not the last one
+    /// ([`PopupOutcome::Nothing`]).
+    pub fn lsp_popup_open_hover(
+        &mut self,
+        target: PopupTarget,
+        hover: Option<&crate::hover::Hover>,
+    ) -> PopupOutcome {
+        if !self.lsp_popup_target_holds(&target) {
+            return PopupOutcome::Stale;
+        }
+        let (lines, omitted) = hover.map_or((Vec::new(), 0), |h| {
+            crate::lsp_popup::popup_lines(&h.contents)
+        });
+        if lines.is_empty() {
+            self.lsp_popup_close();
+            return PopupOutcome::Nothing;
+        }
+        let text = self.buffer_bytes(target.buffer_id);
+        let offsets = crate::diag::compute_line_offsets(&text);
+        let caret = (target.cursor as usize).min(text.len());
+        let line = crate::diag::line_at_offset(&offsets, caret as u32) as usize;
+        let line_start = offsets[line] as usize;
+        let line_end = offsets
+            .get(line + 1)
+            .map_or(text.len(), |&next| (next as usize).saturating_sub(1));
+        let word = crate::lsp_popup::word_range(
+            &text[line_start..line_end],
+            line_start as u64,
+            caret - line_start,
+        );
+        // The server's range is a line and a byte column (the absorb
+        // path rewrites its positions to bytes), against the text it
+        // holds, which a flushed request makes this text.
+        let at = |l: u32, col: u32| -> Option<u64> {
+            let start = *offsets.get(l as usize)? as usize;
+            let end = offsets
+                .get(l as usize + 1)
+                .map_or(text.len(), |&next| (next as usize).saturating_sub(1));
+            Some((start + col as usize).min(end) as u64)
+        };
+        let range = hover
+            .and_then(|h| h.range)
+            .and_then(|r| Some((at(r.start_line, r.start_col)?, at(r.end_line, r.end_col)?)))
+            .filter(|&(s, e)| s <= target.cursor && target.cursor <= e)
+            .unwrap_or(word);
+        self.lsp_popup_open(crate::lsp_popup::LspPopup {
+            kind: pmacs_protocol::PopupKind::Hover,
+            buffer_id: target.buffer_id,
+            window_id: target.window_id,
+            anchor: range.0,
+            range,
+            revision: target.revision,
+            len: text.len() as u64,
+            lines,
+            active_range: None,
+            omitted_lines: omitted,
+        });
+        PopupOutcome::Opened
+    }
+
+    /// Open the signature popup for `target` from the server's `help`,
+    /// anchored at the call's open parenthesis and held from just after
+    /// it to its matching `)`. `quiet` is the auto-trigger's: an empty
+    /// answer then leaves an open popup alone, where an asked-for one
+    /// closes it.
+    pub fn lsp_popup_open_signature(
+        &mut self,
+        target: PopupTarget,
+        help: Option<&crate::signature::SignatureHelp>,
+        quiet: bool,
+    ) -> PopupOutcome {
+        if !self.lsp_popup_target_holds(&target) {
+            return PopupOutcome::Stale;
+        }
+        let Some((lines, active_range, omitted)) = help.and_then(crate::lsp_popup::signature_lines)
+        else {
+            if !quiet {
+                self.lsp_popup_close();
+            }
+            return PopupOutcome::Nothing;
+        };
+        let text = self.buffer_bytes(target.buffer_id);
+        let offsets = crate::diag::compute_line_offsets(&text);
+        let caret = (target.cursor as usize).min(text.len());
+        let line = crate::diag::line_at_offset(&offsets, caret as u32) as usize;
+        let line_start = offsets[line] as usize;
+        let line_end = offsets
+            .get(line + 1)
+            .map_or(text.len(), |&next| (next as usize).saturating_sub(1));
+        let (range, anchor) = crate::lsp_popup::call_range(
+            &text[line_start..line_end],
+            line_start as u64,
+            caret - line_start,
+        );
+        self.lsp_popup_open(crate::lsp_popup::LspPopup {
+            kind: pmacs_protocol::PopupKind::Signature,
+            buffer_id: target.buffer_id,
+            window_id: target.window_id,
+            anchor,
+            range,
+            revision: target.revision,
+            len: text.len() as u64,
+            lines,
+            active_range,
+            omitted_lines: omitted,
+        });
+        PopupOutcome::Opened
+    }
+
+    /// Install `popup` and attach the grid's self-suppressing hover and
+    /// signature overlays to its window on first use (deduped by kind,
+    /// like the completion popup's).
+    fn lsp_popup_open(&mut self, popup: crate::lsp_popup::LspPopup) {
+        let wid = popup.window_id;
+        *self.lsp_popup.lock().expect("lsp popup poisoned") = Some(popup);
+        let shared = self.lsp_popup.clone();
+        let theme = self.theme.clone();
+        if let Some(win) = self.windows.get_mut(&wid) {
+            let kinds = win.overlay_kinds();
+            let (has_hover, has_signature) = (
+                kinds.contains(&crate::hover::HOVER_POPUP_KIND),
+                kinds.contains(&crate::signature::SIGNATURE_POPUP_KIND),
+            );
+            if !has_hover {
+                win.push_overlay(Box::new(crate::hover::HoverView::new(
+                    shared.clone(),
+                    wid,
+                    theme.clone(),
+                )));
+            }
+            if !has_signature {
+                win.push_overlay(Box::new(crate::signature::SignatureView::new(
+                    shared, wid, theme,
+                )));
+            }
+        }
+    }
+
+    /// Close the popup unless it still describes the editor (E8.2): its
+    /// window focused and showing its buffer, the buffer at its revision,
+    /// the caret inside its range. Closed, not hidden, so the caret
+    /// coming back does not bring it back. Both projections call this
+    /// before they paint, which is what reaches every path an edit or a
+    /// caret can arrive by: a key, an optimistic edit's import, a
+    /// pointer gesture, a runtime callback.
+    pub fn lsp_popup_validate(&mut self) {
+        let Some(popup) = self.lsp_popup.lock().expect("lsp popup poisoned").clone() else {
+            return;
+        };
+        let holds = self.windows.get(&popup.window_id).is_some_and(|win| {
+            win.buffer_id == popup.buffer_id
+                && popup.range.0 <= win.cursor
+                && win.cursor <= popup.range.1
+        }) && self.window_is_focused(popup.window_id)
+            && self
+                .registry
+                .borrow()
+                .get(popup.buffer_id)
+                .is_ok_and(|b| b.revision() == popup.revision);
+        if !holds {
+            self.lsp_popup_close();
+        }
+    }
+
+    /// The popup as `frontend`'s focused window shows it, or `None`.
+    #[must_use]
+    pub fn lsp_popup_frame_for(&self, frontend: FrontendId) -> Option<pmacs_protocol::PopupFrame> {
+        let own = self.views.get(&frontend).map(|v| v.active)?;
+        let guard = self.lsp_popup.lock().expect("lsp popup poisoned");
+        guard
+            .as_ref()
+            .filter(|p| p.window_id == own)
+            .map(crate::lsp_popup::LspPopup::frame)
     }
 
     // ---- in-buffer completion popup (Arc 1a, Q#C2/Q#C3) --------------------

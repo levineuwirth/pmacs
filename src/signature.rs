@@ -6,19 +6,23 @@
 //! sends `textDocument/signatureHelp` to find out what the call's
 //! parameters are. The reply lists candidate signatures (overloads),
 //! with optional pointers to which signature and parameter are
-//! "active" given the current cursor position. The
-//! [`SignatureView`] renders the active signature with the active
-//! parameter highlighted.
+//! "active" given the current cursor position. Since E8 the active
+//! signature shows in the popup at the caret ([`crate::lsp_popup`]),
+//! drawn in the grid by [`SignatureView`] and on the wire as
+//! `InstanceMessage::Popup`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use pmacs_protocol::PopupKind;
 use serde_json::Value;
-use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::Buffer;
-use crate::cell::{Cell, CellCoord, CellGrid, Glyph, Style};
+use crate::cell::CellGrid;
+use crate::highlight::ThemeHandle;
+use crate::lsp_popup::{LspPopup, SharedLspPopup};
 use crate::view::{View, Viewport};
+use crate::window::WindowId;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -251,175 +255,59 @@ pub fn make_shared_store() -> SharedSignatureStore {
 // View
 // ---------------------------------------------------------------------------
 
-/// Style for the active parameter --- bold + underline so the
-/// emphasis carries on monochrome and palette terminals alike.
-fn active_parameter_style() -> Style {
-    Style {
-        bold: true,
-        underline: crate::cell::UnderlineStyle::Single,
-        ..Style::default()
-    }
-}
+/// [`View::kind`] of [`SignatureView`], which dedupes it per window.
+pub const SIGNATURE_POPUP_KIND: &str = "signature-popup";
 
-/// Popup view that renders the active signature, highlighting the
-/// active parameter.
+/// The grid's signature popup (E8): a self-suppressing overlay on the
+/// window a signature was asked in, reading the core's one popup
+/// ([`crate::lsp_popup`]) and drawing only while that popup is a
+/// signature for this window and the buffer it shows, its active
+/// parameter marked. Attached by [`crate::editor_core::EditorCore`] when
+/// a signature first opens there, and persistent after.
 pub struct SignatureView {
-    key: SignatureKey,
-    store: SharedSignatureStore,
+    popup: SharedLspPopup,
+    window_id: WindowId,
+    /// The theme its `ui.popup` faces resolve through; `None` in a bare
+    /// core, which paints the grid's own defaults.
+    #[allow(dead_code, reason = "read by the grid painter (E8.4)")]
+    theme: Option<ThemeHandle>,
 }
 
 impl SignatureView {
-    /// Construct a signature view for `key` against `store`.
+    /// An overlay for `window_id` reading `popup`.
     #[must_use]
-    pub fn new(key: SignatureKey, store: SharedSignatureStore) -> Self {
-        Self { key, store }
+    pub fn new(popup: SharedLspPopup, window_id: WindowId, theme: Option<ThemeHandle>) -> Self {
+        Self {
+            popup,
+            window_id,
+            theme,
+        }
     }
 
-    /// The key this view is keyed under.
-    #[must_use]
-    pub fn key(&self) -> &SignatureKey {
-        &self.key
-    }
-}
-
-/// Snapshot of just the bits the renderer needs --- avoids holding
-/// the lock across the render loop.
-struct SignatureSnapshot {
-    label: String,
-    /// Optional `(start, end)` byte span of the active parameter
-    /// inside `label`.
-    active_span: Option<(u32, u32)>,
-    /// Active parameter label (used when there's no span).
-    active_label: Option<String>,
-    /// Optional documentation line for the active signature.
-    documentation: Option<String>,
-}
-
-impl SignatureView {
-    fn snapshot(&self) -> Option<SignatureSnapshot> {
-        let guard = self.store.lock().expect("signature store poisoned");
-        let help = guard.get(&self.key)?;
-        let sig = help.active()?;
-        let active_idx = help.active_parameter_index();
-        let (active_span, active_label) = match active_idx {
-            Some(i) => match sig.parameters.get(i as usize) {
-                Some(p) => (p.span, Some(p.label.clone())),
-                None => (None, None),
-            },
-            None => (None, None),
-        };
-        Some(SignatureSnapshot {
-            label: sig.label.clone(),
-            active_span,
-            active_label,
-            documentation: sig.documentation.clone(),
-        })
+    /// The popup this overlay draws now, if any.
+    fn shown(&self, buf: &Buffer) -> Option<LspPopup> {
+        self.popup
+            .lock()
+            .expect("lsp popup poisoned")
+            .as_ref()
+            .filter(|p| {
+                p.kind == PopupKind::Signature
+                    && p.window_id == self.window_id
+                    && p.buffer_id == buf.id()
+            })
+            .cloned()
     }
 }
 
 impl View for SignatureView {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        let snap = self.snapshot();
-        let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
-        let origin = viewport.cell_origin;
-
-        for r in 0..max_rows {
-            for c in 0..max_cols {
-                *cells.at(CellCoord::new(origin.row + r, origin.col + c)) = Cell::default();
-            }
-        }
-        let Some(snap) = snap else {
-            return;
-        };
-
-        // Resolve the active span. Prefer offsets when present;
-        // otherwise locate the active parameter's substring in the
-        // label.
-        let active_byte_range: Option<(usize, usize)> = match (snap.active_span, &snap.active_label)
-        {
-            (Some((s, e)), _) => Some((s as usize, e as usize)),
-            (None, Some(lbl)) => snap.label.find(lbl.as_str()).map(|i| (i, i + lbl.len())),
-            (None, None) => None,
-        };
-
-        // Row 0: signature label, with the active parameter range
-        // styled. Row 1+: optional documentation, one line each
-        // (truncated at viewport).
-        if max_rows > 0 {
-            let label_bytes = snap.label.as_bytes();
-            let mut col: u32 = 0;
-            let mut byte_idx: usize = 0;
-            for ch in snap.label.chars() {
-                if col >= max_cols {
-                    break;
-                }
-                let width = char_display_width(ch);
-                if width == 0 {
-                    byte_idx += ch.len_utf8();
-                    continue;
-                }
-                let in_active =
-                    active_byte_range.is_some_and(|(s, e)| byte_idx >= s && byte_idx < e);
-                let style = if in_active {
-                    active_parameter_style()
-                } else {
-                    Style::default()
-                };
-                let cell = cells.at(CellCoord::new(origin.row, origin.col + col));
-                cell.glyph = Glyph::Char(ch);
-                cell.style = style;
-                cell.attachment = None;
-                col += 1;
-                if width == 2 && col < max_cols {
-                    let cont = cells.at(CellCoord::new(origin.row, origin.col + col));
-                    cont.glyph = Glyph::Continuation;
-                    cont.style = style;
-                    cont.attachment = None;
-                    col += 1;
-                }
-                byte_idx += ch.len_utf8();
-                let _ = label_bytes; // silence unused-field on minor refactors
-            }
-        }
-
-        if max_rows > 1
-            && let Some(doc) = snap.documentation.as_deref()
-        {
-            for (i, line) in doc.lines().enumerate() {
-                let row_idx = i as u32 + 1;
-                if row_idx >= max_rows {
-                    break;
-                }
-                let mut col: u32 = 0;
-                for ch in line.chars() {
-                    if col >= max_cols {
-                        break;
-                    }
-                    let width = char_display_width(ch);
-                    if width == 0 {
-                        continue;
-                    }
-                    let cell = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
-                    cell.glyph = Glyph::Char(ch);
-                    cell.style = Style::default();
-                    cell.attachment = None;
-                    col += 1;
-                    if width == 2 && col < max_cols {
-                        let cont = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
-                        cont.glyph = Glyph::Continuation;
-                        cont.style = Style::default();
-                        cont.attachment = None;
-                        col += 1;
-                    }
-                }
-            }
-        }
+    fn kind(&self) -> &'static str {
+        SIGNATURE_POPUP_KIND
     }
-}
 
-fn char_display_width(ch: char) -> u32 {
-    UnicodeWidthChar::width(ch).unwrap_or(0) as u32
+    fn render(&mut self, buf: &Buffer, _viewport: Viewport<'_>, _cells: &mut CellGrid<'_>) {
+        // The grid's painter arrives with E8.4.
+        let _ = self.shown(buf);
+    }
 }
 
 // ---------------------------------------------------------------------------

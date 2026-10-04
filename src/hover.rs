@@ -5,8 +5,10 @@
 //! Per spec §M4.7: the editor sends `textDocument/hover` on demand
 //! (e.g. a key chord or mouse event). The reply carries documentation
 //! for the symbol under the cursor; pmacs collapses LSP's
-//! `MarkupContent` / `MarkedString[]` shapes into plain UTF-8 text and
-//! displays it in a popup view.
+//! `MarkupContent` / `MarkedString[]` shapes into plain UTF-8 text, and
+//! since E8 shows it in the popup at the caret ([`crate::lsp_popup`]),
+//! drawn in the grid by [`HoverView`] and on the wire as
+//! `InstanceMessage::Popup`.
 //!
 //! # Why a separate module
 //!
@@ -16,12 +18,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use pmacs_protocol::PopupKind;
 use serde_json::Value;
-use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::Buffer;
-use crate::cell::{Cell, CellCoord, CellGrid, Glyph, Style};
+use crate::cell::CellGrid;
+use crate::highlight::ThemeHandle;
+use crate::lsp_popup::{LspPopup, SharedLspPopup};
 use crate::view::{View, Viewport};
+use crate::window::WindowId;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -186,80 +191,59 @@ pub fn make_shared_store() -> SharedHoverStore {
 // View
 // ---------------------------------------------------------------------------
 
-/// Popup view that renders the most-recent hover for `key`. Owns
-/// every cell inside its viewport.
+/// [`View::kind`] of [`HoverView`], which dedupes it per window.
+pub const HOVER_POPUP_KIND: &str = "hover-popup";
+
+/// The grid's hover popup (E8): a self-suppressing overlay on the window
+/// a hover was asked in, reading the core's one popup
+/// ([`crate::lsp_popup`]) and drawing only while that popup is a hover
+/// for this window and the buffer it shows. Attached by
+/// [`crate::editor_core::EditorCore`] when a hover first opens there,
+/// and persistent after, like the completion popup's overlay.
 pub struct HoverView {
-    key: HoverKey,
-    store: SharedHoverStore,
+    popup: SharedLspPopup,
+    window_id: WindowId,
+    /// The theme its `ui.popup` faces resolve through; `None` in a bare
+    /// core, which paints the grid's own defaults.
+    #[allow(dead_code, reason = "read by the grid painter (E8.4)")]
+    theme: Option<ThemeHandle>,
 }
 
 impl HoverView {
-    /// Construct a hover view for `key` against `store`.
+    /// An overlay for `window_id` reading `popup`.
     #[must_use]
-    pub fn new(key: HoverKey, store: SharedHoverStore) -> Self {
-        Self { key, store }
+    pub fn new(popup: SharedLspPopup, window_id: WindowId, theme: Option<ThemeHandle>) -> Self {
+        Self {
+            popup,
+            window_id,
+            theme,
+        }
     }
 
-    /// The key this view is keyed under.
-    #[must_use]
-    pub fn key(&self) -> &HoverKey {
-        &self.key
+    /// The popup this overlay draws now, if any.
+    fn shown(&self, buf: &Buffer) -> Option<LspPopup> {
+        self.popup
+            .lock()
+            .expect("lsp popup poisoned")
+            .as_ref()
+            .filter(|p| {
+                p.kind == PopupKind::Hover
+                    && p.window_id == self.window_id
+                    && p.buffer_id == buf.id()
+            })
+            .cloned()
     }
 }
 
 impl View for HoverView {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        let lines: Vec<String> = {
-            let guard = self.store.lock().expect("hover store poisoned");
-            guard
-                .get(&self.key)
-                .map(|h| h.contents.lines().map(str::to_owned).collect())
-                .unwrap_or_default()
-        };
-
-        let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
-        let origin = viewport.cell_origin;
-
-        // Clear the popup region first (own every cell).
-        for r in 0..max_rows {
-            for c in 0..max_cols {
-                *cells.at(CellCoord::new(origin.row + r, origin.col + c)) = Cell::default();
-            }
-        }
-        if lines.is_empty() {
-            return;
-        }
-
-        for row in 0..max_rows.min(lines.len() as u32) {
-            let mut col: u32 = 0;
-            for ch in lines[row as usize].chars() {
-                if col >= max_cols {
-                    break;
-                }
-                let width = char_display_width(ch);
-                if width == 0 {
-                    continue;
-                }
-                let cell = cells.at(CellCoord::new(origin.row + row, origin.col + col));
-                cell.glyph = Glyph::Char(ch);
-                cell.style = Style::default();
-                cell.attachment = None;
-                col += 1;
-                if width == 2 && col < max_cols {
-                    let cont = cells.at(CellCoord::new(origin.row + row, origin.col + col));
-                    cont.glyph = Glyph::Continuation;
-                    cont.style = Style::default();
-                    cont.attachment = None;
-                    col += 1;
-                }
-            }
-        }
+    fn kind(&self) -> &'static str {
+        HOVER_POPUP_KIND
     }
-}
 
-fn char_display_width(ch: char) -> u32 {
-    UnicodeWidthChar::width(ch).unwrap_or(0) as u32
+    fn render(&mut self, buf: &Buffer, _viewport: Viewport<'_>, _cells: &mut CellGrid<'_>) {
+        // The grid's painter arrives with E8.4.
+        let _ = self.shown(buf);
+    }
 }
 
 // ---------------------------------------------------------------------------
