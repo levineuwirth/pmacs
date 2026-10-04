@@ -3357,6 +3357,12 @@ fn grammar_style_parse_not_ready(state: &EditorState, buffer_id: BufferId) -> bo
     let Some(handle) = state.syntax_registry.view(buffer_id) else {
         return false;
     };
+    // E7i fix round 2: a parse dropped after its worker crashed is not a
+    // parse on its way; holding would keep the frontend's spans on text
+    // they no longer describe.
+    if handle.dropped() {
+        return false;
+    }
     handle.current().is_none()
         || handle.pending_edit_count() > 0
         || state.syntax_registry.has_pending_parse_job_for(buffer_id)
@@ -3393,7 +3399,13 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
         };
     };
     if handle.current().is_none() {
-        return Vec::new();
+        // A dropped parse (E7i fix round 2) leaves the tokens, as the grid's
+        // `LspStyleView` still paints them over no grammar spans.
+        return if handle.dropped() && policy.semantic {
+            lsp_scoped_style_spans(state, vp)
+        } else {
+            Vec::new()
+        };
     }
     // E7i: an isolated parse returns the spans over what the renderers
     // last showed; this is the declared viewport, the minimap's whole-file

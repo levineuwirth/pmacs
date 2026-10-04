@@ -597,6 +597,7 @@ impl Unit {
                 .filter(|&ms| ms > 0)
                 .map(Duration::from_millis),
         };
+        crash_on_demand(&call.language, &self.source);
         let parsed = run_parse(request);
         returned();
         let bundle = match parsed {
@@ -733,6 +734,31 @@ enum Work {
     Parse(u64, ParseCall, Vec<u8>),
     Free(Installed),
 }
+
+/// A debug build's crash on demand, for the editor's crash witnesses (E7i
+/// fix round 2): with `PMACS_PARSE_UNIT_TEST_CRASH` set to
+/// `<language>:<marker>`, the worker aborts as it starts parsing a layer of
+/// `<language>` in a text that holds `<marker>`, as a grammar's C would
+/// crash on those bytes, after a parse of the text without them installed.
+/// A release build carries no such hook.
+#[cfg(debug_assertions)]
+fn crash_on_demand(language: &str, text: &[u8]) {
+    static WANT: std::sync::OnceLock<Option<(String, Vec<u8>)>> = std::sync::OnceLock::new();
+    let want = WANT.get_or_init(|| {
+        let spec = std::env::var("PMACS_PARSE_UNIT_TEST_CRASH").ok()?;
+        let (language, marker) = spec.split_once(':')?;
+        (!marker.is_empty()).then(|| (language.to_owned(), marker.as_bytes().to_vec()))
+    });
+    if let Some((want_language, marker)) = want
+        && want_language == language
+        && text.windows(marker.len()).any(|w| w == marker.as_slice())
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn crash_on_demand(_language: &str, _text: &[u8]) {}
 
 /// Compile and cache a language's query from its `BUILTIN_LANGUAGES`
 /// fragments, joined with a newline as the registry joins them.

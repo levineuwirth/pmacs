@@ -41,6 +41,12 @@ local parse_layers_cut_warned = {}
 -- E7i fix round 1: buffers already told that their parse worker crashed,
 -- keyed like the others; re-armed when a parse of the buffer installs.
 local parse_crash_warned = {}
+-- E7i fix round 2 (review 2, Medium 1): buffers whose parse worker crashed
+-- and no parse has installed since, keyed like the others: "crashed" while
+-- the buffer backs off, "stopped" once its parsing stopped. The mode
+-- segment reads it, so the mark lasts as long as the state does, as E5.3's
+-- `LSP:!` does for a crashed server, and not until `*errors*` is read.
+local parse_crash_state = {}
 -- E7i fix round 1: buffers already told that a parse returned and its unit
 -- then ran past the bound on installing it; re-armed like the deadline's.
 local parse_stall_warned = {}
@@ -695,6 +701,25 @@ pmacs.statusline.register {
   end,
 }
 
+-- E7i fix round 2 (review 2, Medium 1): a buffer whose parse worker crashed
+-- says so for as long as no parse has installed since, `parse:crashed`
+-- while it backs off and `parse:stopped` once its parsing stopped, which
+-- lasts until the buffer is killed. The shape is E5.3's `LSP:!`, a mark
+-- read from the buffer's state rather than from the unread error, so
+-- reading `*errors*` does not end it. On the right, where a segment
+-- survives a long path on the left: right segments are clipped leftmost
+-- first, so above the LSP segment (0) and below the unread count (10).
+pmacs.statusline.register {
+  name = "parse",
+  side = "right",
+  priority = 5,
+  fn = function(ctx)
+    local crash = parse_crash_state[tostring(ctx.buffer)]
+    if crash then return "parse:" .. crash end
+    return nil
+  end,
+}
+
 local function reparse_active_buffer_after_edit()
   local buf = pmacs.window.buffer()
   if not buf then return end
@@ -788,6 +813,11 @@ pmacs._async.tick = function(...)
       -- rather than restarting the worker at every keystroke. A parse held
       -- for a crash no parse reported (one a read of the tree found) tells
       -- it, so no crash goes untold.
+      if status == "crash-stopped" then
+        parse_crash_state[key] = "stopped"
+      elseif parse_crash_state[key] ~= "stopped" then
+        parse_crash_state[key] = "crashed"
+      end
       if status == "crash-stopped" or not parse_crash_warned[key] then
         parse_crash_warned[key] = true
         local b = parse_buffer_by_key[key]
@@ -831,6 +861,7 @@ pmacs._async.tick = function(...)
     elseif key and (status == "installed" or status == "installed-cut") then
       parse_deadline_warned[key] = nil
       parse_crash_warned[key] = nil
+      parse_crash_state[key] = nil
       parse_stall_warned[key] = nil
       if status == "installed-cut" then
         if not parse_layers_cut_warned[key] then

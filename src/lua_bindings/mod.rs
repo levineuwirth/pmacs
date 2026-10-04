@@ -8623,6 +8623,12 @@ pub fn install_parse(
                                 ("unavailable", Some(msg))
                             } else if let Some(status) = crate::parse_isolation::crash_status(&msg)
                             {
+                                // E7i fix round 2: no parse replaces the
+                                // installed one before the back-off ends,
+                                // and none ever once parsing stopped, so its
+                                // spans are dropped rather than painted over
+                                // moved text.
+                                handle.drop_current(status == "crash-stopped");
                                 (status, Some(msg))
                             } else {
                                 ("failed", None)

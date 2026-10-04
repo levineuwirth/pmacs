@@ -417,6 +417,10 @@ impl SyntaxHighlightView {
     /// spans for every layer that carries a highlight query.
     fn refresh_cache_if_stale(&mut self, viewport: &Viewport<'_>) {
         let Some(bundle) = self.parse.current() else {
+            // E7i fix round 2: a parse dropped after its worker crashed
+            // (`ParseViewHandle::drop_current`) takes its spans with it;
+            // before the first parse the cache is empty already.
+            self.cache = HighlightCache::empty();
             return;
         };
         let stale = self
