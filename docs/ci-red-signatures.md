@@ -2748,7 +2748,7 @@ under `asan-strict` (cmake three, cuda, python).
   ignored**; no daemon survived. The one is #311. R7's row passed, which is
   non-reproduction and nothing more.
 
-#### #311, first sample, local: this laptop's GHC, and not #291
+#### #311, deterministic since the upgrade, local: this laptop's GHC, and not #291
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`
 on both gates above, filed as **#311**. It is the same test as #291 and not
@@ -2767,13 +2767,91 @@ fails on the trivial module and succeeds with `-dynamic`, and the ghcup 9.10.3
 first on `PATH` succeeds, so the fixture's pin is what meets the break. It is
 the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
-installed or the fixture passes `-dynamic`. #311 is at one.
+installed or the fixture passes `-dynamic`.
+
+Tally (311-runs): 3 items in the list below.
+
+- `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
+- `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
+- `20261004T145947Z-40985` at `db697a2` (E7i review round 3's gate, the second
+  occurrence recorded, below).
+
+#311 is **deterministic, not intermittent**: every local gate on this laptop fails
+it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
+list counts is gate runs read, three of them, and no occurrence count or rate is
+claimed for it --- unlike every intermittent row in this file, where a count is the
+whole point. Fix round 2's section below recorded its first two runs together as
+the sample that filed it.
 
 So, at E7i's fix round 2: #283 moves to eleven and R7 to twenty-three; #311
-is at one. #291 is **not sampled and cannot be** on this laptop while #311
+is recorded and deterministic, its runs listed in its own block (three read by
+review round 3, below). #291 is **not sampled and cannot be** on this laptop while #311
 stands, since #311 takes the same row first; #256 stands at three
 (`6193b67`), #282, #298, #300 and #303 to #308 are not sampled, and every
 other count above stands.
+
+### E7i's review round 3: the record of `a3ea968`'s push, #311's second, and #312
+
+Recorded 2026-10-04 by the owner, after the narrow review round 3 of fix
+round 2's four core commits at `db697a2`. The round found no High and no
+Medium and ran no CI of its own; its probes are on `e7i/review-3` at
+`ae63d6f` with no pull request, so the only runs here are the registry
+push's own and the round's one gate.
+
+#### The push of `9904d79` and `a3ea968` to `main`
+
+Tally (push-a3ea968-jobs): 15 = 6 + 9.
+
+`CI` 37209683738 at `a3ea968`, attempt 1 of 1, conclusion success: six jobs
+succeeded and nine were skipped, the form every `push` run to `main` takes
+(the matrix legs are a `pull_request` trigger). `Docs consistency` succeeded,
+which is what asserts both commits' tallies. `Grammar fuzz` 37209683763 at
+the same head is green.
+
+Review 3's Low 2 was written against this run: the owner's close, and resume
+§5 and PR #309's body after it, read it as "green, 15 of 15", having grouped
+the jobs endpoint's rows by `status` --- where every row of a finished run
+reads `completed` --- rather than by `conclusion`. The four registry pushes
+before it are each recorded "green 15 = 6 + 9 skipped", so the correct form
+stood in the rows above the wrong one. Both records are corrected and this
+paragraph is the file's copy of the figure.
+
+#### `scripts/gate` `20261004T145947Z-40985` at `db697a2`: #311's second and #312's first
+
+Five of six. Sweep: 188 targets, 5,207 passed, 2 failed, 62 ignored; no
+daemon survived, and the other five stages ok. The two failures:
+
+- **#311's second occurrence**, in its list above: the laptop's GHC, expected
+  on every local gate here until `ghc-static` is installed or the fixture
+  passes `-dynamic`.
+- **#312's first sample**, below.
+
+#### #312, first sample, local
+
+`-p pmacs --lib process::tests::pty_mode_child_sees_a_tty`, with the fragments
+`tty(1) should report a pty path in PTY mode; got ""` and `test result:
+FAILED. 2250 passed; 1 failed; 12 ignored`. The panic site `src/process.rs:3845`
+moves with the file and is not a fragment. No row named this selector, so the
+round filed it as **#312**. `src/process.rs` has no diff on `db697a2` against
+`a013d46`, which is an argument from untouched files and not a measurement.
+
+It is filed alone and not folded into **#289**
+(`m6_1_pty_mode_lifecycle_started_then_exited`, 2026-09-26), because the
+matching rule keys a row to its selector and fragments and these differ. Read
+from the code the two share a mechanism, which neither has measured: both call
+`drain_until(&mut sup, id, Duration::from_secs(5), has_exited)` and then assert
+on the PTY's stdout, and `has_exited` ends the drain on the first `Exited` or
+`Signaled` event, while the output reaches the queue through a reader thread ---
+so an exit reaped before that thread delivers its line ends the drain with the
+output in flight. Ten rows in `src/process.rs` wait that way. What would settle
+it is a drain that waits for the reader's EOF as well as the exit, or a second
+sample under the same fragments; until one of those, the shared mechanism is a
+reading and the rows stay separate. #312 is at one.
+
+So, at E7i's review round 3: a third run of #311 is read and #312 is at one; R7 passed
+its row in this gate, which is non-reproduction and nothing more, and #283,
+#291, #256, #282, #298, #300 and #303 to #308 are not sampled. Every other
+count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
