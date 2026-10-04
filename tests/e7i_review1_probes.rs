@@ -89,61 +89,75 @@ fn crashing_unit(dir: &Path) -> PathBuf {
 }
 
 /// The four-crash sequence, and what follows it. At `fa176de` the open's
-/// parse and three edits 250 ms apart each started a worker that crashed,
-/// four deaths in a second, told to no one. Fix round 1 backs off after a
-/// crash (1 s, then 2 s) and stops parsing the buffer at its third crash in
-/// a row, so the scenario goes on: past the first back-off an edit crashes
-/// a second worker, an edit inside the second back-off starts none, past it
-/// a third crash stops the buffer's parsing, and an edit 5 s later still
-/// starts none. The report counts deaths at each point, each read once
-/// from a report that is not mid-parse, and the `syntax: parsing
-/// <path>/a.rs as rust: parse unit crashed` lines in `*errors*`. (As the
-/// review committed it the wait read `_unit_report` twice per test, and a
-/// parse starting between the two made the second `false` and the
-/// coroutine raise: a probe's own race, found here.)
+/// parse and three edits after it each started a worker that crashed, four
+/// deaths in a second, told to no one. Fix round 1 backs off after a crash
+/// (1 s, then 2 s) and stops parsing the buffer at its third crash in a row.
+/// The scenario edits one keystroke at a time, each after the last settled,
+/// and judges each by the back-off it met, read from the unit report just
+/// before it: an edit made with more than 200 ms of back-off left, or after
+/// the stop, must start no worker (`held_bad=0`). It edits three times after
+/// the first crash, then until the third crash, then once 5 s after the
+/// stop. Judging by what each edit met, not by a schedule, keeps it true on
+/// a runner slow enough that three edits outlast the first second (CI's
+/// macOS lua54 leg read `burst=2` under the schedule this replaced).
 const CRASH_INIT: &str = "pmacs.lsp.config = {}\n\
      pmacs.config.set('syntax.isolation', 'process')\n\
      pmacs.config.set('syntax.parse-unit-path', {unit:?})\n\
      local b = pmacs.buffer.find_or_open({file:?})\n\
      pmacs.async(function()\n\
-       local function report() local r = pmacs.parse._unit_report(b); return r and not r.busy and r end\n\
-       local function deaths(n, ms)\n\
-         local t0 = pmacs.editor.monotonic_ms()\n\
-         while true do\n\
-           local r = report()\n\
-           if r and (r.deaths >= n or pmacs.editor.monotonic_ms() - t0 >= ms) then return r.deaths end\n\
-           if pmacs.editor.monotonic_ms() - t0 >= ms + 5000 then return -1 end\n\
+       local now = pmacs.editor.monotonic_ms\n\
+       local function settled()\n\
+         local t0 = now()\n\
+         while now() - t0 < 10000 do\n\
+           local r = pmacs.parse._unit_report(b)\n\
+           if r and not r.busy then return r end\n\
            pmacs.workers.sleep(20):await()\n\
          end\n\
+         return pmacs.parse._unit_report(b)\n\
        end\n\
-       local function edit(i)\n\
-         b:insert(b:len(), '// ' .. i .. '\\n')\n\
+       local function left(r)\n\
+         if not r.held then return 0 end\n\
+         local ms = r.held:match('backing off for (%d+) ms more')\n\
+         return ms and tonumber(ms) or 1e9\n\
+       end\n\
+       local held, held_bad, n = 0, 0, 0\n\
+       local function step()\n\
+         n = n + 1\n\
+         local r = settled()\n\
+         local margin, before = left(r), r.deaths\n\
+         b:insert(b:len(), '// ' .. n .. '\\n')\n\
          pmacs.parse._dispatch(b, 'rust')\n\
+         pmacs.workers.sleep(150):await()\n\
+         local after = settled().deaths\n\
+         if margin > 200 then\n\
+           held = held + 1\n\
+           if after ~= before then held_bad = held_bad + 1 end\n\
+         end\n\
        end\n\
-       deaths(1, 30000)\n\
-       for i = 1, 3 do edit(i); pmacs.workers.sleep(250):await() end\n\
-       local burst = deaths(99, 0)\n\
-       pmacs.workers.sleep(1000):await()\n\
-       edit(4)\n\
-       local second = deaths(2, 10000)\n\
-       edit(5)\n\
-       pmacs.workers.sleep(300):await()\n\
-       local held = deaths(99, 0)\n\
-       pmacs.workers.sleep(2200):await()\n\
-       edit(6)\n\
-       local third = deaths(3, 10000)\n\
+       local t0 = now()\n\
+       while now() - t0 < 30000 do\n\
+         local r = settled()\n\
+         if r and r.deaths >= 1 then break end\n\
+         pmacs.workers.sleep(20):await()\n\
+       end\n\
+       for _ = 1, 3 do step() end\n\
+       local burst = settled().deaths\n\
+       while settled().deaths < 3 and now() - t0 < 30000 do\n\
+         step()\n\
+         pmacs.workers.sleep(150):await()\n\
+       end\n\
+       local third = settled().deaths\n\
        pmacs.workers.sleep(5000):await()\n\
-       edit(7)\n\
-       pmacs.workers.sleep(500):await()\n\
-       local r = pmacs.parse._unit_report(b)\n\
+       step()\n\
+       local r = settled()\n\
        local said = ''\n\
        for _, x in ipairs(pmacs.buffer.list()) do\n\
          if x:name() == '*errors*' then said = x:slice(0, x:len()) end\n\
        end\n\
        local _, told = said:gsub('/a%.rs as rust: parse unit crashed', '')\n\
        local f = assert(io.open('{report}', 'w'))\n\
-       f:write(string.format('burst=%d second=%d held=%d third=%d deaths=%d known=%s told=%d named=%s stopped=%s\\n',\n\
-         burst, second, held, third, r.deaths,\n\
+       f:write(string.format('burst=%d held=%d held_bad=%d third=%d deaths=%d known=%s told=%d named=%s stopped=%s\\n',\n\
+         burst, held, held_bad, third, r.deaths,\n\
          tostring(tostring(r.last_death):find('signal 11 (SIGSEGV)', 1, true) ~= nil), told,\n\
          tostring(said:find('/a.rs as rust: parse unit crashed: signal 11 (SIGSEGV)', 1, true) ~= nil),\n\
          tostring(said:find('parsing stopped', 1, true) ~= nil)))\n\
@@ -166,16 +180,32 @@ fn crash_report() -> String {
 /// Control, live: the editor knows when a buffer's worker crashed. Its unit
 /// report's last death names signal 11. Fix round 1: and it backs off. At
 /// `fa176de` every keystroke started another worker, which crashed again
-/// (four deaths for the open and three edits); now the three edits inside
-/// the first second start none, a second worker starts only after the
-/// back-off, and after the third crash none starts at all.
+/// (four deaths for the open and three edits); now no edit made inside a
+/// back-off starts one, several edits met one, and after the third crash
+/// none starts at all.
 #[test]
 fn e7i_review1_the_editor_knows_its_worker_crashed() {
     let text = crash_report();
     assert!(text.contains("known=true"), "{text}");
+    let field = |name: &str| -> u64 {
+        text.split_whitespace()
+            .find_map(|w| w.strip_prefix(&format!("{name}=")))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(u64::MAX)
+    };
+    assert_eq!(
+        field("held_bad"),
+        0,
+        "no edit made inside a back-off started a worker: {text}"
+    );
     assert!(
-        text.contains("burst=1 second=2 held=2 third=3 deaths=3 "),
-        "a crash backs the buffer off, and the third stops its parsing: {text}"
+        field("held") >= 3,
+        "the back-off and the stop were met, not stepped around: {text}"
+    );
+    assert!(
+        field("third") == 3 && field("deaths") == 3,
+        "the third crash stopped the buffer's parsing, and an edit 5 s later \
+         started no worker: {text}"
     );
 }
 
