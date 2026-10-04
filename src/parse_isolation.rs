@@ -435,6 +435,9 @@ struct Slot {
     backoff_until: Option<Instant>,
     /// The length of that back-off, for the report.
     backoff: Duration,
+    /// When its last worker to crash was found dead, the instant its
+    /// back-off is measured from.
+    crashed_at: Option<Instant>,
     /// How its last worker to crash died, for a parse held after it.
     crash_how: String,
     /// The same, shortest: `SIGSEGV` or `exit 101` (E7i fix round 2).
@@ -479,6 +482,8 @@ impl Slot {
         self.crashes += 1;
         self.crash_how = death.how();
         self.crash_signal = death.signal_name();
+        let now = Instant::now();
+        self.crashed_at = Some(now);
         if self.stopped() {
             self.backoff_until = None;
             self.backoff = Duration::ZERO;
@@ -489,7 +494,7 @@ impl Slot {
             );
         }
         let backoff = CRASH_BACKOFF * 2u32.pow(self.crashes - 1);
-        self.backoff_until = Some(Instant::now() + backoff);
+        self.backoff_until = Some(now + backoff);
         self.backoff = backoff;
         format!(
             "{}; the buffer is parsed again in {} s at the earliest, and not after {MAX_CRASHES} crashes in a row",
@@ -594,6 +599,7 @@ impl Host {
                         crashes: 0,
                         backoff_until: None,
                         backoff: Duration::ZERO,
+                        crashed_at: None,
                         crash_how: String::new(),
                         crash_signal: String::new(),
                     }),
@@ -1287,6 +1293,11 @@ pub struct UnitReport {
     pub backoff_ms: u64,
     /// What is left of that back-off, ms.
     pub backoff_left_ms: u64,
+    /// When its last worker to crash was found dead, ms since the editor's
+    /// first unit: the instant its back-off runs from, so two crashes'
+    /// difference is at least the back-off between them (E7i fix round 2,
+    /// review 2's Low 1).
+    pub crashed_at_ms: Option<u64>,
     /// How its last worker to crash died: `signal 11 (SIGSEGV)`, with its
     /// last words when it left any.
     pub crash_how: String,
@@ -1325,6 +1336,9 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
         }),
         crash_how: slot.crash_how.clone(),
         crash_signal: slot.crash_signal.clone(),
+        crashed_at_ms: slot
+            .crashed_at
+            .map(|at| at.saturating_duration_since(host().started).as_millis() as u64),
     })
 }
 

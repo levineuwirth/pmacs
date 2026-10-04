@@ -95,7 +95,12 @@ fn crashing_unit(dir: &Path) -> PathBuf {
 /// fix round 2 parses it again when each back-off ends, with no edit. The
 /// scenario edits one keystroke every 100 ms until the third crash, each
 /// judged by the back-off it met (more than 200 ms left, `held`), then once
-/// after the stop, and waits 4 s, longer than any back-off.
+/// after the stop, and waits 4 s, longer than any back-off. It records each
+/// crash's instant and the back-off it set from the editor's own clock
+/// (review 2's Low 1: with the back-off cut to 250 ms the rows still passed,
+/// pinning the notice and not the interval): the back-offs are 1 s and 2 s,
+/// and each crash comes at least its predecessor's back-off later, which no
+/// worker started by an edit inside a back-off allows.
 const CRASH_INIT: &str = "pmacs.lsp.config = {}\n\
      pmacs.config.set('syntax.isolation', 'process')\n\
      pmacs.config.set('syntax.parse-unit-path', {unit:?})\n\
@@ -109,16 +114,30 @@ const CRASH_INIT: &str = "pmacs.lsp.config = {}\n\
          if r and r.deaths >= 1 then break end\n\
          pmacs.workers.sleep(20):await()\n\
        end\n\
+       local crashes = {}\n\
+       local function note(r)\n\
+         if r.deaths > #crashes then\n\
+           crashes[#crashes + 1] = { at = r.crashed_at_ms, backoff = r.backoff_ms }\n\
+         end\n\
+       end\n\
+       note(report())\n\
        local held, n = 0, 0\n\
        while not report().stopped and now() - t0 < 30000 do\n\
          local r = report()\n\
+         note(r)\n\
          if r.backoff_left_ms > 200 then held = held + 1 end\n\
          n = n + 1\n\
          b:insert(b:len(), '// ' .. n .. '\\n')\n\
          pmacs.parse._dispatch(b, 'rust')\n\
          pmacs.workers.sleep(100):await()\n\
        end\n\
+       note(report())\n\
        local third = report().deaths\n\
+       local function gap(i)\n\
+         local a, b = crashes[i], crashes[i + 1]\n\
+         return (a and b and a.at and b.at) and (b.at - a.at) or -1\n\
+       end\n\
+       local function backoff(i) return crashes[i] and crashes[i].backoff or -1 end\n\
        b:insert(b:len(), '// after the stop\\n')\n\
        pmacs.parse._dispatch(b, 'rust')\n\
        pmacs.workers.sleep(4000):await()\n\
@@ -130,8 +149,8 @@ const CRASH_INIT: &str = "pmacs.lsp.config = {}\n\
        local _, told = said:gsub('rust crashed %(SIGSEGV%)', '')\n\
        local function has(text) return tostring(said:find(text, 1, true) ~= nil) end\n\
        local f = assert(io.open('{report}', 'w'))\n\
-       f:write(string.format('held=%d third=%d deaths=%d stopped=%s known=%s told=%d first=%s named=%s stop=%s\\n',\n\
-         held, third, r.deaths, tostring(r.stopped),\n\
+       f:write(string.format('held=%d third=%d deaths=%d stopped=%s b1=%d b2=%d g12=%d g23=%d known=%s told=%d first=%s named=%s stop=%s\\n',\n\
+         held, third, r.deaths, tostring(r.stopped), backoff(1), backoff(2), gap(1), gap(2),\n\
          tostring(tostring(r.last_death):find('signal 11 (SIGSEGV)', 1, true) ~= nil), told,\n\
          has('syntax: rust crashed (SIGSEGV) parsing a.rs; parsing again in 1 s, and not after 3 crashes in a row'),\n\
          has('/a.rs: signal 11 (SIGSEGV)'),\n\
@@ -172,6 +191,20 @@ fn e7i_review1_the_editor_knows_its_worker_crashed() {
     assert!(
         field("held") >= 3,
         "the back-offs were met, not stepped around: {text}"
+    );
+    assert!(
+        field("b1") == 1000 && field("b2") == 2000,
+        "the first crash backs off 1 s and the second 2 s: {text}"
+    );
+    assert!(
+        field("g12") >= 1000 && field("g23") >= 2000,
+        "no worker started inside a back-off: each crash came at least its \
+         predecessor's back-off later: {text}"
+    );
+    assert!(
+        field("g12") <= 4000 && field("g23") <= 5000,
+        "each back-off ended in a parse of its own, within 3 s of its end \
+         on a slow runner: {text}"
     );
     assert!(
         field("third") == 3 && text.contains("stopped=true"),
