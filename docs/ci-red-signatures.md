@@ -149,16 +149,24 @@ Tally (266): 2 items in the list below.
 - run 34452014666 at `450ef26`, `Test (ubuntu-latest / luajit, no
   crdt)`, `67.007468 ms`, `1 polls`
 
-### #256 at TWO, with no row until the owner rules on the archived rate
+### #256 at THREE, with no row until the owner rules on the archived rate
 
 `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`,
-`live runtime probe`, both local Linux under full-sweep load.
+`live runtime probe`, all three local Linux under full-sweep load.
 
-Tally (256): 2 items in the list below.
+Tally (256): 3 items in the list below.
 
 - gate log `20260908T104328Z-2589144`, `05-sweep`
 - gate log `20260910T115801Z-321737`, `06-sweep` (passed in the same
   run's `sweep-luajit`)
+- gate log `20261003T181411Z-1242042`, `05-sweep`, E7i review 1's gate at
+  `fa176de` (PR #309), niced with `CARGO_BUILD_JOBS=6` beside the owner's
+  own use (load 8.7 to 10.6 on sixteen threads): panicked at
+  `src/process.rs:5155:53`, `2250 passed; 1 failed; 12 ignored` in the
+  `--lib` target, the sweep's only red over 186 targets (5,177 passed, 1
+  failed, 62 ignored); `src/process.rs` has no diff between `a013d46`
+  and `fa176de`; commented on the issue, not re-run; the log is kept
+  under `~/build/e7i-review1/gate-logs/`
 
 The project's own archive
 (`docs/archive/framings/ci-crdt-coverage-framing.md:622-629`) parked
