@@ -527,6 +527,9 @@ fn e7i_review2_the_echo_line_keeps_the_signal_and_the_state_at_80_columns() {
 /// grammar, so the owner looking for the grammar to unship is pointed at
 /// the wrong one. Fix round 2: the worker says on stderr which injected
 /// layer's grammar it starts, and the editor names the one it died in.
+/// And review 2's Low 3: `*errors*` labeled every syntax notice
+/// `[pmacs/builtin/runtime/mcp.lua:216]`, the caller of the tick that
+/// raised it; each is `[syntax]` now.
 #[test]
 fn e7i_review2_a_crash_in_an_injected_layer_names_the_layer_s_grammar() {
     let _one = one_editor();
@@ -574,5 +577,13 @@ fn e7i_review2_a_crash_in_an_injected_layer_names_the_layer_s_grammar() {
     assert!(
         errors.contains("parsing an injected bash layer"),
         "the full text says so too: {errors}"
+    );
+    let mislabeled: Vec<&str> = errors
+        .lines()
+        .filter(|l| l.contains("] syntax") && !l.starts_with("[syntax] "))
+        .collect();
+    assert!(
+        errors.contains("[syntax] syntax: bash in markdown crashed") && mislabeled.is_empty(),
+        "every syntax notice is labeled [syntax]: {mislabeled:?}"
     );
 }

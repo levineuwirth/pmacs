@@ -18,6 +18,12 @@
 -- step.
 local pending_parse_jobs = {}
 local parse_job_buffer_keys = {}
+-- E7i fix round 2 (review 2, Low 3): every notice this file reports is
+-- labeled `[syntax]` in `*errors*`. `pmacs.error`'s default label is its
+-- caller's caller, and the settle path's notices are raised inside
+-- `pmacs._async.tick`, whose caller is mcp.lua's wrapper of it, so each
+-- read `[pmacs/builtin/runtime/mcp.lua:216]`.
+local ERROR_LABEL = "syntax"
 local inflight_parse_by_buffer = {}
 local parse_buffer_by_key = {}
 local parse_lang_by_buffer = {}
@@ -662,7 +668,7 @@ pmacs.hook.add("buffer.after-load", function()
   -- mustn't poison the rest of the after-load chain.
   local ok, err = pcall(function() attach_for_active_buffer(true) end)
   if not ok then
-    pmacs.error("syntax.after-load: " .. tostring(err))
+    pmacs.error("syntax.after-load: " .. tostring(err), ERROR_LABEL)
   end
 end)
 
@@ -681,7 +687,7 @@ pmacs.hook.add("buffer.after-switch", function()
     attach_for_active_buffer(false)
   end)
   if not ok then
-    pmacs.error("syntax.after-switch: " .. tostring(err))
+    pmacs.error("syntax.after-switch: " .. tostring(err), ERROR_LABEL)
   end
 end)
 
@@ -743,7 +749,7 @@ pmacs.hook.add("buffer.after-edit", function()
   -- highlight overlays only see new spans after a fresh parse settles.
   local ok, err = pcall(reparse_active_buffer_after_edit)
   if not ok then
-    pmacs.error("syntax.after-edit: " .. tostring(err))
+    pmacs.error("syntax.after-edit: " .. tostring(err), ERROR_LABEL)
   end
 end)
 
@@ -857,7 +863,7 @@ pmacs._async.tick = function(...)
         parse_unit_unavailable_warned = true
         pmacs.error(string.format(
           "syntax: %s, so nothing is highlighted. pmacs-parse-unit ships beside pmacs in the release archive: keep the two in one directory, or name the worker in syntax.parse-unit-path (a source build makes it with cargo build --release -p pmacs-parse-unit). Or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
-          tostring(detail)))
+          tostring(detail)), ERROR_LABEL)
       end
     elseif key and (status == "crashed" or status == "crash-stopped" or status == "held") then
       -- E7i fix round 1 (review 1, Medium 1): the buffer's worker died on
@@ -880,7 +886,7 @@ pmacs._async.tick = function(...)
       end
       if status == "crash-stopped" or not parse_crash_warned[key] then
         parse_crash_warned[key] = true
-        pmacs.error(crash_notice(key, b, report, detail))
+        pmacs.error(crash_notice(key, b, report, detail), ERROR_LABEL)
       end
     elseif key and status == "stalled" then
       -- E7i fix round 1 (review 1, Low 1): the parse returned inside the
@@ -893,7 +899,7 @@ pmacs._async.tick = function(...)
         local name = b and b:name() or key
         pmacs.error(string.format(
           "syntax: parsing %s returned, but %s; its highlighting stays as it was until a parse finishes",
-          name, tostring(detail)))
+          name, tostring(detail)), ERROR_LABEL)
       end
     elseif key and status == "limit" then
       -- E7i: a parse unit stopped at its memory limit; told once, like a
@@ -904,7 +910,7 @@ pmacs._async.tick = function(...)
         local name = b and b:name() or key
         pmacs.error(string.format(
           "syntax: parsing %s reached syntax.parse-memory-limit-mb (or the units' total) and was stopped; its highlighting stays as it was until a parse finishes",
-          name))
+          name), ERROR_LABEL)
       end
     elseif key and status == "deadline" then
       if not parse_deadline_warned[key] then
@@ -913,7 +919,7 @@ pmacs._async.tick = function(...)
         local name = b and b:name() or key
         pmacs.error(string.format(
           "syntax: parsing %s ran past syntax.parse-deadline-ms (%d ms) and was stopped; its highlighting stays as it was until a parse finishes",
-          name, pmacs.config.get("syntax.parse-deadline-ms")))
+          name, pmacs.config.get("syntax.parse-deadline-ms")), ERROR_LABEL)
       end
     elseif key and (status == "installed" or status == "installed-cut") then
       parse_deadline_warned[key] = nil
@@ -925,7 +931,8 @@ pmacs._async.tick = function(...)
         if not parse_layers_cut_warned[key] then
           parse_layers_cut_warned[key] = true
           pmacs.error(
-            "syntax: an embedded region's parse ran past syntax.parse-deadline-ms; the regions after it are unhighlighted")
+            "syntax: an embedded region's parse ran past syntax.parse-deadline-ms; the regions after it are unhighlighted",
+            ERROR_LABEL)
         end
       else
         parse_layers_cut_warned[key] = nil
@@ -939,7 +946,8 @@ pmacs._async.tick = function(...)
       if not injection_cap_warned[key] then
         injection_cap_warned[key] = true
         pmacs.error(
-          "syntax: injection layer cap reached; some embedded regions are unhighlighted")
+          "syntax: injection layer cap reached; some embedded regions are unhighlighted",
+          ERROR_LABEL)
       end
     elseif key then
       injection_cap_warned[key] = nil
