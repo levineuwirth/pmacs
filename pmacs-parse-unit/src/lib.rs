@@ -51,8 +51,17 @@ use serde::{Deserialize, Serialize};
 
 use pmacs_syntax::{
     BUILTIN_LANGUAGES, LocalFacts, ParseError, ParseRequest, ParseTreeBundle,
-    compute_highlight_spans_for, compute_local_facts, query_uses_local_predicates, run_parse,
+    compute_highlight_spans_for, compute_local_facts, query_uses_local_predicates,
+    run_parse_observed,
 };
+
+/// How the worker's stderr line begins that says an injected layer's parse
+/// is starting; the layer's language follows it. With [`LAYERS_DONE`] it
+/// lets the editor name the grammar a worker died running.
+pub const LAYER_STARTED: &str = "pmacs-parse-unit: parsing an injected layer of ";
+
+/// The worker's stderr line after a parse's injected layers.
+pub const LAYERS_DONE: &str = "pmacs-parse-unit: injected layers parsed";
 
 /// The largest header or payload either side accepts, so a corrupt length
 /// cannot make a reader allocate without bound.
@@ -598,7 +607,7 @@ impl Unit {
                 .map(Duration::from_millis),
         };
         crash_on_demand(&call.language, &self.source);
-        let parsed = run_parse(request);
+        let parsed = parse_announcing_layers(request, &self.source);
         returned();
         let bundle = match parsed {
             Ok(bundle) => bundle,
@@ -733,6 +742,28 @@ fn answer_read(kept: &Mutex<Kept>, request: Request) -> (Response, Option<Arc<In
 enum Work {
     Parse(u64, ParseCall, Vec<u8>),
     Free(Installed),
+}
+
+/// [`run_parse_observed`], saying on stderr which injected layer's grammar
+/// starts, once a run of layers of one grammar, and the end of the layers
+/// after them, so a death's last words name the grammar it ran (E7i fix
+/// round 2, review 2's Low 2).
+fn parse_announcing_layers(
+    request: ParseRequest,
+    source: &[u8],
+) -> Result<ParseTreeBundle, ParseError> {
+    let mut layer = String::new();
+    let parsed = run_parse_observed(request, &mut |language| {
+        if language != layer {
+            let _ = writeln!(io::stderr(), "{LAYER_STARTED}{language}");
+            language.clone_into(&mut layer);
+        }
+        crash_on_demand(language, source);
+    });
+    if !layer.is_empty() {
+        let _ = writeln!(io::stderr(), "{LAYERS_DONE}");
+    }
+    parsed
 }
 
 /// A debug build's crash on demand, for the editor's crash witnesses (E7i

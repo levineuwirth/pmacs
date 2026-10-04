@@ -6,6 +6,8 @@
 //! marker: the worker aborts as it starts parsing a layer of that grammar
 //! in a text that holds the marker, so the buffer is highlighted until an
 //! edit brings the marker in, as a grammar whose C crashes on some bytes.
+//! The hook is a debug build's alone, so these rows run in the debug test
+//! profile, as every sweep runs them.
 //! Rows read the grid `paint_frame` paints, the TUI's own frame, and the
 //! semantic frames the GPU frontend receives.
 
@@ -16,6 +18,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use common::ready::{self, Probe};
@@ -31,6 +34,15 @@ const MARK: Color = Color::Rgb(0x7b, 0x1f, 0xa2);
 
 const ROWS: u32 = 30;
 const COLS: u32 = 100;
+
+/// One in-process editor at a time: the parse units' host is the process's
+/// (`syntax.parse-unit-path` among its state), so two rows' editors each
+/// naming their own worker would race for it.
+static ONE_EDITOR: Mutex<()> = Mutex::new(());
+
+fn one_editor() -> MutexGuard<'static, ()> {
+    ONE_EDITOR.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn say(line: &str) {
     let _ = writeln!(std::io::stderr(), "e7i review 2: {line}");
@@ -280,6 +292,7 @@ fn quiesce(state: &mut EditorState) {
 #[test]
 #[allow(clippy::too_many_lines)] // one user's path, frame by frame
 fn e7i_review2_a_crashed_buffer_paints_no_stale_span_and_keeps_its_mark() {
+    let _one = one_editor();
     let dir = tempfile::tempdir().expect("tempdir");
     let unit = crashing_on(dir.path(), "rust", "CRASHME");
     let path = dir.path().join("a.rs");
@@ -453,6 +466,7 @@ fn echo_line_at_80(state: &EditorState) -> String {
 /// ends, so the stop arrives with no edit after the crash's.
 #[test]
 fn e7i_review2_the_echo_line_keeps_the_signal_and_the_state_at_80_columns() {
+    let _one = one_editor();
     let dir = tempfile::tempdir().expect("tempdir");
     let unit = crashing_on(dir.path(), "rust", "CRASHME");
     let deep = dir
@@ -504,5 +518,61 @@ fn e7i_review2_the_echo_line_keeps_the_signal_and_the_state_at_80_columns() {
     assert!(
         stopped.contains("parsing stopped: rust crashed (SIGABRT) 3 times in a row"),
         "the stop and the signal survive the width: {stopped:?}"
+    );
+}
+
+/// Review 2's Low 2. The reviewer's crash in bash's scanner, inside a
+/// ```` ```bash ```` fence of a `.md` file, was told "as markdown": the
+/// editor named the buffer's language, and a fence can name any bundled
+/// grammar, so the owner looking for the grammar to unship is pointed at
+/// the wrong one. Fix round 2: the worker says on stderr which injected
+/// layer's grammar it starts, and the editor names the one it died in.
+#[test]
+fn e7i_review2_a_crash_in_an_injected_layer_names_the_layer_s_grammar() {
+    let _one = one_editor();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let unit = crashing_on(dir.path(), "bash", "CRASHME");
+    let path = dir.path().join("README.md");
+    std::fs::write(
+        &path,
+        "# Deploy\n\nRun it:\n\n```bash\necho CRASHME\n```\n\nThen wait.\n",
+    )
+    .expect("README.md");
+    let mut state = EditorState::new_with_roots(&common::iso::roots());
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config = {{}}\n\
+             pmacs.config.set('syntax.isolation', 'process')\n\
+             pmacs.config.set('syntax.parse-unit-path', {:?})\n\
+             pmacs.buffer.find_or_open({:?})",
+            unit.display().to_string(),
+            path.display().to_string()
+        ),
+    );
+    let errors = ready::tick_until(&mut state, "the crash told", Duration::from_secs(30), |s| {
+        let errors = s.lua_host.errors_buffer_text();
+        if errors.contains("crashed") {
+            Probe::Ready(errors)
+        } else {
+            Probe::Pending(report(s))
+        }
+    });
+    let layer = eval(
+        &state,
+        "return pmacs.parse._unit_report(pmacs.window.buffer()).crash_layer",
+    );
+    say(&format!(
+        "a crash in a bash fence: layer {layer:?}; {}",
+        errors.trim()
+    ));
+    assert_eq!(layer, "bash", "the report names the layer's grammar");
+    assert!(
+        errors.contains("syntax: bash in markdown crashed (SIGABRT) parsing README.md"),
+        "the notice names the grammar that crashed, inside the buffer's: {errors}"
+    );
+    assert!(
+        errors.contains("parsing an injected bash layer"),
+        "the full text says so too: {errors}"
     );
 }

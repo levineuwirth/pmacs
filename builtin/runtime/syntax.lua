@@ -785,6 +785,11 @@ local function crash_notice(key, buf, report, detail)
   local name = buf and buf:name() or key
   local short = name:match("[^/]+$") or name
   local grammar = tostring(parse_lang_by_buffer[key])
+  -- A crash inside an injected layer is the layer's grammar's (review 2's
+  -- Low 2): a fence can name any bundled grammar.
+  if report and report.crash_layer ~= "" then
+    grammar = report.crash_layer .. " in " .. grammar
+  end
   if not report or report.crash_signal == "" then
     return string.format("syntax: %s's parse worker crashed parsing %s: %s",
       grammar, short, tostring(detail))

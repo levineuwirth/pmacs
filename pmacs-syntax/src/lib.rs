@@ -374,6 +374,17 @@ impl ParseTreeBundle {
 /// (ABI mismatch, almost always a build issue), if the deadline cut the
 /// root parse short, or if the parser returns no tree otherwise.
 pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, ParseError> {
+    run_parse_observed(req, &mut |_| {})
+}
+
+/// [`run_parse`], calling `on_layer` with an injected layer's language
+/// just before that layer's parse starts (E7i fix round 2): the parse
+/// unit says which grammar it is running, so a crash inside an injected
+/// layer is told under that layer's grammar and not the buffer's.
+pub fn run_parse_observed(
+    req: ParseRequest,
+    on_layer: &mut dyn FnMut(&str),
+) -> Result<ParseTreeBundle, ParseError> {
     let started = Instant::now();
     let deadline_at = req.deadline.map(|d| started + d);
     let mut parser = tree_sitter::Parser::new();
@@ -423,6 +434,7 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, ParseError> {
         req.source.as_ref(),
         &req.injection_aliases,
         deadline_at,
+        on_layer,
     );
     Ok(ParseTreeBundle {
         layers,
@@ -539,6 +551,7 @@ fn build_injection_layers(
     source: &[u8],
     aliases: &HashMap<String, String>,
     deadline_at: Option<Instant>,
+    on_layer: &mut dyn FnMut(&str),
 ) -> (bool, bool) {
     let mut query_cache: HashMap<String, Option<Arc<tree_sitter::Query>>> = HashMap::new();
     let mut visited: HashSet<(String, Vec<(usize, usize)>)> = HashSet::new();
@@ -578,6 +591,7 @@ fn build_injection_layers(
                     cut_by_deadline = true;
                     break 'parents; // E7h.2: the deadline is spent; tail dropped
                 }
+                on_layer(child_lang);
                 let Some(tree) = parse_child(child_lang, &ranges, source, deadline_at) else {
                     if deadline_at.is_some_and(|at| Instant::now() >= at) {
                         cut_by_deadline = true;

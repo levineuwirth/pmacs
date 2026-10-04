@@ -221,8 +221,12 @@ pub enum Death {
         signal: Option<i32>,
         /// Its exit status, if it exited.
         code: Option<i32>,
-        /// Its last line on stderr.
+        /// Its last line on stderr, not counting the lines that say which
+        /// layer it is parsing.
         last: String,
+        /// The injected layer's grammar it was parsing, if it was parsing
+        /// one (E7i fix round 2, review 2's Low 2); `None` for the root.
+        layer: Option<String>,
     },
     /// The editor ended it for another reason (its buffer was killed, the
     /// editor stopped, it answered out of turn).
@@ -271,7 +275,13 @@ impl Death {
     /// How a crashed unit died: `signal 11 (SIGSEGV)` or `exit 101`, with
     /// its last words when it left any.
     fn how(&self) -> String {
-        let Self::Crashed { signal, code, last } = self else {
+        let Self::Crashed {
+            signal,
+            code,
+            last,
+            layer,
+        } = self
+        else {
             return String::new();
         };
         let mut how = match (signal, code) {
@@ -282,6 +292,11 @@ impl Death {
             (None, Some(code)) => format!("exit {code}"),
             (None, None) => "ended".to_owned(),
         };
+        if let Some(layer) = layer {
+            how.push_str(" parsing an injected ");
+            how.push_str(layer);
+            how.push_str(" layer");
+        }
         let last = last.trim();
         if !last.is_empty() {
             let cut: String = last.chars().take(160).collect();
@@ -442,6 +457,8 @@ struct Slot {
     crash_how: String,
     /// The same, shortest: `SIGSEGV` or `exit 101` (E7i fix round 2).
     crash_signal: String,
+    /// The injected layer's grammar it was parsing, or empty for the root.
+    crash_layer: String,
 }
 
 impl Slot {
@@ -482,6 +499,12 @@ impl Slot {
         self.crashes += 1;
         self.crash_how = death.how();
         self.crash_signal = death.signal_name();
+        self.crash_layer = match death {
+            Death::Crashed {
+                layer: Some(layer), ..
+            } => layer.clone(),
+            _ => String::new(),
+        };
         let now = Instant::now();
         self.crashed_at = Some(now);
         if self.stopped() {
@@ -602,6 +625,7 @@ impl Host {
                         crashed_at: None,
                         crash_how: String::new(),
                         crash_signal: String::new(),
+                        crash_layer: String::new(),
                     }),
                     parsing: Mutex::new(()),
                 })
@@ -1303,6 +1327,9 @@ pub struct UnitReport {
     pub crash_how: String,
     /// The same, shortest: `SIGSEGV` or `exit 101`.
     pub crash_signal: String,
+    /// The injected layer's grammar it was parsing when it crashed, or
+    /// empty when it was parsing the buffer's own.
+    pub crash_layer: String,
 }
 
 /// The report for `buffer`'s unit, if it has had one. Never waits on a
@@ -1336,6 +1363,7 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
         }),
         crash_how: slot.crash_how.clone(),
         crash_signal: slot.crash_signal.clone(),
+        crash_layer: slot.crash_layer.clone(),
         crashed_at_ms: slot
             .crashed_at
             .map(|at| at.saturating_duration_since(host().started).as_millis() as u64),
@@ -1624,11 +1652,13 @@ impl ProcessUnit {
             };
         }
         // Neither the editor's kill nor a limit: the worker died on its
-        // own.
+        // own, in the grammar its last layer line names, if one names any.
+        let (layer, last) = last_words(&stderr);
         Death::Crashed {
             signal,
             code,
-            last: stderr.lines().last().unwrap_or("").to_owned(),
+            last,
+            layer,
         }
     }
 
@@ -1707,6 +1737,29 @@ fn watch_overshoot(stderr: &str) -> Option<u64> {
             .ok()
     };
     Some(number("peak resident ")?.saturating_sub(number("the limit ")?))
+}
+
+/// A crashed worker's stderr read for the injected layer it was parsing
+/// (the last [`pmacs_parse_unit::LAYER_STARTED`] line, unless
+/// [`pmacs_parse_unit::LAYERS_DONE`] follows it) and its last line that is
+/// neither.
+fn last_words(stderr: &str) -> (Option<String>, String) {
+    let is_layer_line = |l: &str| {
+        l.starts_with(pmacs_parse_unit::LAYER_STARTED) || l == pmacs_parse_unit::LAYERS_DONE
+    };
+    let layer = stderr
+        .lines()
+        .rev()
+        .find(|l| is_layer_line(l))
+        .and_then(|l| l.strip_prefix(pmacs_parse_unit::LAYER_STARTED))
+        .map(str::to_owned);
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !is_layer_line(l))
+        .unwrap_or("")
+        .to_owned();
+    (layer, last)
 }
 
 /// Keep the last of a worker's stderr, which says why it ended.

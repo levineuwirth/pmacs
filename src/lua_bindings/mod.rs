@@ -8429,6 +8429,7 @@ pub fn install_parse(
             t.set("crash_signal", report.crash_signal)?;
             t.set("max_crashes", crate::parse_isolation::MAX_CRASHES)?;
             t.set("crashed_at_ms", report.crashed_at_ms)?;
+            t.set("crash_layer", report.crash_layer)?;
             Ok(mlua::Value::Table(t))
         })?,
     )?;
