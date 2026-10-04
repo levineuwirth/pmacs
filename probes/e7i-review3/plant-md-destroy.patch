@@ -1,0 +1,21 @@
+diff --git a/vendor/tree-sitter-md/tree-sitter-markdown/src/scanner.c b/vendor/tree-sitter-md/tree-sitter-markdown/src/scanner.c
+index ac5c52f..709d12d 100644
+--- a/vendor/tree-sitter-md/tree-sitter-markdown/src/scanner.c
++++ b/vendor/tree-sitter-md/tree-sitter-markdown/src/scanner.c
+@@ -1,5 +1,6 @@
+ #include "tree_sitter/parser.h"
+ #include <assert.h>
++#include <stdlib.h>
+ #include <ctype.h>
+ #include <string.h>
+ #include <wchar.h>
+@@ -1614,6 +1615,9 @@ void tree_sitter_markdown_external_scanner_deserialize(void *payload,
+ 
+ void tree_sitter_markdown_external_scanner_destroy(void *payload) {
+     Scanner *scanner = (Scanner *)payload;
++    /* E7i review 3 plant: the root grammar's scanner dies at teardown, as
++       a free() of state a scanner bug corrupted aborts. */
++    abort();
+     free(scanner->open_blocks.items);
+     free(scanner);
+ }
