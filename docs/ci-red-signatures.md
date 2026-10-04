@@ -2786,8 +2786,14 @@ the sample that filed it.
 
 So, at E7i's fix round 2: #283 moves to eleven and R7 to twenty-three; #311
 is recorded and deterministic, its runs listed in its own block (three read by
-review round 3, below). #291 is **not sampled and cannot be** on this laptop while #311
-stands, since #311 takes the same row first; #256 stands at three
+review round 3, below). #291 is not sampled here. **This paragraph read "#291 is not
+sampled and cannot be on this laptop while #311 stands, since #311 takes the same row
+first"; fix round 3's gate falsified it**, and that section below carries the
+falsification beside the occurrence. The claim was an inference about which of two
+signatures a broken toolchain must produce first, written into this file as a record:
+when the server never processes the typed edit, the row fails on #291's fragments
+before the GHC break can show, so both shapes are reachable while the toolchain
+stands. #256 stands at three
 (`6193b67`), #282, #298, #300 and #303 to #308 are not sampled, and every
 other count above stands.
 
