@@ -205,7 +205,6 @@ pub struct HoverView {
     window_id: WindowId,
     /// The theme its `ui.popup` faces resolve through; `None` in a bare
     /// core, which paints the grid's own defaults.
-    #[allow(dead_code, reason = "read by the grid painter (E8.4)")]
     theme: Option<ThemeHandle>,
 }
 
@@ -240,9 +239,10 @@ impl View for HoverView {
         HOVER_POPUP_KIND
     }
 
-    fn render(&mut self, buf: &Buffer, _viewport: Viewport<'_>, _cells: &mut CellGrid<'_>) {
-        // The grid's painter arrives with E8.4.
-        let _ = self.shown(buf);
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        if let Some(popup) = self.shown(buf) {
+            crate::lsp_popup::paint_grid_popup(buf, viewport, cells, &popup, self.theme.as_ref());
+        }
     }
 }
 

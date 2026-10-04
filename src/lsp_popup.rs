@@ -267,6 +267,182 @@ pub fn word_range(line: &[u8], line_start: u64, caret_in_line: usize) -> (u64, u
     (line_start + start as u64, line_start + end as u64)
 }
 
+/// Most columns the grid popup is wide, before the window's own width
+/// clamps it: a hover's prose reads at a line length, not a window's.
+const GRID_POPUP_MAX_COLS: u32 = 80;
+
+/// One painted row of the grid popup: the text, the bytes of it the
+/// active parameter covers, and whether it is the closing "more" row.
+struct GridRow {
+    text: String,
+    active: Option<(usize, usize)>,
+    footer: bool,
+}
+
+/// `line` broken into rows of at most `cols` display columns, at the
+/// last space that fits and by character where none does, as
+/// `(start, end)` byte ranges.
+fn wrap_columns(line: &str, cols: u32) -> Vec<(usize, usize)> {
+    use unicode_width::UnicodeWidthChar;
+    let cols = cols.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0usize;
+    let mut width = 0u32;
+    let mut last_space: Option<usize> = None;
+    for (i, ch) in line.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u32;
+        if width + w > cols && i > start {
+            let cut = last_space.filter(|&s| s > start).unwrap_or(i);
+            rows.push((start, cut));
+            start = if cut == i { i } else { cut + 1 };
+            width = line[start..i]
+                .chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) as u32)
+                .sum();
+            last_space = None;
+        }
+        if ch == ' ' {
+            last_space = Some(i);
+        }
+        width += w;
+    }
+    rows.push((start, line.len()));
+    rows
+}
+
+/// The popup's rows for a box `cols` wide and at most `max_rows` tall:
+/// every line wrapped, then cut to fit with a closing row naming what
+/// was left out --- the lines past the wire's bound plus the lines this
+/// box could not show --- and where the whole text is.
+fn grid_rows(popup: &LspPopup, cols: u32, max_rows: u32) -> Vec<GridRow> {
+    let mut rows: Vec<(usize, GridRow)> = Vec::new();
+    for (index, line) in popup.lines.iter().enumerate() {
+        let active = popup
+            .active_range
+            .filter(|r| r.line as usize == index)
+            .map(|r| (r.start as usize, r.end as usize));
+        for (s, e) in wrap_columns(line, cols) {
+            let clipped = active.and_then(|(a, b)| {
+                let (a, b) = (a.max(s), b.min(e));
+                (a < b).then_some((a - s, b - s))
+            });
+            rows.push((
+                index,
+                GridRow {
+                    text: line[s..e].to_owned(),
+                    active: clipped,
+                    footer: false,
+                },
+            ));
+        }
+    }
+    let max_rows = max_rows.max(1) as usize;
+    if rows.len() <= max_rows && popup.omitted_lines == 0 {
+        return rows.into_iter().map(|(_, r)| r).collect();
+    }
+    // Keep a row for the closing one; the first line it drops, whole or
+    // in part, is how many lines show whole.
+    let keep = rows.len().min(max_rows - 1);
+    let shown_whole = rows.get(keep).map_or(popup.lines.len(), |&(i, _)| i);
+    let left = (popup.lines.len() - shown_whole) as u32 + popup.omitted_lines;
+    rows.truncate(keep);
+    rows.push((
+        usize::MAX,
+        GridRow {
+            text: more_lines_label(left),
+            active: None,
+            footer: true,
+        },
+    ));
+    rows.into_iter().map(|(_, r)| r).collect()
+}
+
+/// A face from the theme, or the grid's own default for it (also when
+/// there is no theme, as in a bare core).
+fn face_or(
+    theme: Option<&crate::highlight::ThemeHandle>,
+    name: &str,
+    default: crate::cell::Style,
+) -> crate::cell::Style {
+    theme
+        .and_then(|t| t.lock().expect("theme mutex poisoned").face(name))
+        .unwrap_or(default)
+}
+
+/// Paint `popup` into a window's cells (E8.4): the completion popup's
+/// anchor walk, row window and row painter, placed by the one popup
+/// rule ([`pmacs_protocol::place_popup`], E7d.3) in cells --- below the
+/// anchor's row when it fits there, else above, else on the roomier
+/// side, clamped into the window --- and themed by the `ui.popup` faces.
+pub fn paint_grid_popup(
+    buf: &crate::buffer::Buffer,
+    viewport: crate::view::Viewport<'_>,
+    cells: &mut crate::cell::CellGrid<'_>,
+    popup: &LspPopup,
+    theme: Option<&crate::highlight::ThemeHandle>,
+) {
+    let (win_rows, win_cols) = (viewport.cell_size.rows, viewport.cell_size.cols);
+    if win_rows == 0 || win_cols < 3 {
+        return;
+    }
+    let Some((anchor_row, anchor_col)) =
+        crate::completion::anchor_cell(buf, viewport, popup.anchor)
+    else {
+        return; // the anchor is scrolled out or folded away
+    };
+    let width = GRID_POPUP_MAX_COLS.min(win_cols);
+    // The text sits two columns in, as a completion row's label does.
+    let text_cols = width - 2;
+    let max_rows = (win_rows / 2).max(3).min(win_rows);
+    let rows = grid_rows(popup, text_cols, max_rows);
+    let (start, len) = crate::completion::popup_window(rows.len(), 0, max_rows as usize);
+    let shown = &rows[start..start + len];
+    let widest = shown
+        .iter()
+        .map(|r| crate::display_width::byte_to_column(r.text.as_bytes(), r.text.len()))
+        .max()
+        .unwrap_or(0);
+    let width = (widest + 3).min(width).max(3);
+    let height = shown.len() as u32;
+    let (x, y) = pmacs_protocol::place_popup(
+        (
+            anchor_col as f32,
+            anchor_row as f32,
+            (anchor_row + 1) as f32,
+        ),
+        (width as f32, height as f32),
+        (win_cols as f32, win_rows as f32),
+    );
+    let (left, top) = (x as u32, y as u32);
+    let base = face_or(theme, "ui.popup", crate::completion::popup_style());
+    // The mark is structural and the face is color: a theme that sets
+    // only `ui.popup` resolves `ui.popup.active-parameter` to it by the
+    // dotted-prefix walk, and the parameter must still stand out.
+    let active = crate::cell::Style {
+        bold: true,
+        underline: crate::cell::UnderlineStyle::Single,
+        ..face_or(theme, "ui.popup.active-parameter", base)
+    };
+    let footer = face_or(theme, "ui.popup.footer", crate::completion::kind_style());
+    let origin = viewport.cell_origin;
+    for (i, row) in shown.iter().enumerate() {
+        let r = origin.row + top + i as u32;
+        if top + i as u32 >= win_rows {
+            break;
+        }
+        crate::completion::paint_text_row(
+            cells,
+            ' ',
+            &row.text,
+            r,
+            origin.col + left,
+            width.min(win_cols - left),
+            if row.footer { footer } else { base },
+            row.active.map(|(s, e)| (s, e, active)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +522,46 @@ mod tests {
             "… 1 more line · C-c H opens *lsp-help*"
         );
         assert!(more_lines_label(412).starts_with("… 412 more lines"));
+    }
+
+    fn popup_of(lines: &[&str], omitted: u32) -> LspPopup {
+        LspPopup {
+            kind: PopupKind::Hover,
+            buffer_id: BufferId::from_raw(1),
+            window_id: crate::window::WindowId::next(),
+            anchor: 0,
+            range: (0, 0),
+            revision: 0,
+            len: 0,
+            lines: lines.iter().map(|l| (*l).to_owned()).collect(),
+            active_range: None,
+            omitted_lines: omitted,
+        }
+    }
+
+    #[test]
+    fn grid_rows_wrap_at_spaces_and_close_with_what_they_left_out() {
+        // A short text fits whole, no closing row.
+        let rows = grid_rows(&popup_of(&["one two", "three"], 0), 20, 5);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, ["one two", "three"]);
+        // Wrapped at the last space that fits.
+        let rows = grid_rows(&popup_of(&["alpha beta gamma"], 0), 11, 5);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, ["alpha beta", "gamma"]);
+        // Ten lines in a five-row box: four shown, the fifth row says the
+        // other six, plus what the wire's bound left out.
+        let lines: Vec<String> = (0..10).map(|i| format!("l{i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let rows = grid_rows(&popup_of(&refs, 7), 20, 5);
+        assert_eq!(rows.len(), 5);
+        assert!(rows[4].footer);
+        assert_eq!(rows[4].text, more_lines_label(6 + 7));
+        // A text that fits but was cut at the wire's bound still says so.
+        let rows = grid_rows(&popup_of(&["only"], 3), 20, 5);
+        assert_eq!(
+            rows.last().map(|r| r.text.clone()),
+            Some(more_lines_label(3))
+        );
     }
 }

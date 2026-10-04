@@ -6107,6 +6107,10 @@ pub fn paint_frame(
     // geometry, and a panel the frame can no longer satisfy has already
     // surrendered focus and its terminal controller.
     state.sync_frame_geometry(frontend_id, term_size);
+    // E8: a popup the text or the caret has left is closed before the
+    // grid paints (`EditorCore::lsp_popup_validate`), on every grid path:
+    // the daemon's, the in-process TUI's and a test's.
+    state.core.borrow_mut().lsp_popup_validate();
     mark_errors_read_if_presented(state, frontend_id);
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow
