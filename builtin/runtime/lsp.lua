@@ -1862,6 +1862,19 @@ local function signature_trigger_chars(sid)
   return chars
 end
 
+-- E8: every popup request (hover or signature, asked for or automatic)
+-- takes the next generation, and only the latest may open the popup or
+-- say anything. A second `C-c h` while the first is in flight supersedes
+-- it --- the manager cancels the first awaiter --- and that cancellation
+-- is not "server unavailable": it is the user's own newer question. The
+-- answer that lands first for an older request, should one land, is
+-- dropped the same way.
+local popup_generation = 0
+local function next_popup_generation()
+  popup_generation = popup_generation + 1
+  return popup_generation
+end
+
 -- Like `pmacs.lsp.signature_help_at_cursor`, but silent: an auto-trigger
 -- that announced "no signature help" on every `(` in a comment would be
 -- unusable. Only a real signature opens the popup (E8.2); an empty
@@ -1873,6 +1886,7 @@ local function signature_help_quiet(rec)
   flush_did_change_for(rec)
   local target = pmacs.lsp._popup_target()
   if not target then return end
+  local generation = next_popup_generation()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.signature.clear(rec.server, rec.uri)
@@ -1880,7 +1894,7 @@ local function signature_help_quiet(rec)
     local ok = pcall(function()
       pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
     end)
-    if not ok then return end
+    if not ok or generation ~= popup_generation then return end
     pmacs.lsp._popup_signature(rec.server, rec.uri, target, true)
   end)
 end
@@ -4056,6 +4070,7 @@ local function hover_popup(rec, quiet)
   flush_did_change_for(rec)
   local target = pmacs.lsp._popup_target()
   if not target then return end
+  local generation = next_popup_generation()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.hover.clear(rec.server, rec.uri)
@@ -4063,6 +4078,7 @@ local function hover_popup(rec, quiet)
     local ok, err = pcall(function()
       pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
     end)
+    if generation ~= popup_generation then return end
     if not ok then
       if not quiet then
         pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
@@ -4132,6 +4148,7 @@ function pmacs.lsp.signature_help_at_cursor()
   flush_did_change_for(rec)
   local target = pmacs.lsp._popup_target()
   if not target then return end
+  local generation = next_popup_generation()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.signature.clear(rec.server, rec.uri)
@@ -4139,6 +4156,7 @@ function pmacs.lsp.signature_help_at_cursor()
     local ok, err = pcall(function()
       pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
     end)
+    if generation ~= popup_generation then return end
     if not ok then
       pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
       return

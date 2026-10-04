@@ -527,3 +527,35 @@ fn e8_5_the_active_parameter_is_converted_from_the_servers_encoding() {
         "UTF-16 offsets 9..17 are bytes 11..20 of this label"
     );
 }
+
+/// A second `C-c h` while the first is in flight supersedes it, and the
+/// superseded request says nothing: its cancellation is the user's own
+/// newer question, not "server unavailable". Found by the witness on
+/// `src/editor.rs`, where a probe asking every half second left that
+/// status beside a good popup. The fake holds each answer 400 ms.
+#[test]
+fn e8_2_a_superseded_hover_says_nothing_and_the_latest_opens() {
+    let (daemon, _dir) = daemon_with("hover", &[("PMACS_FAKE_LSP_HOVER_DELAY_MS", "400")], "");
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
+    session.ask_until_present('h');
+    session.key(Key::Char('g'), Modifiers::CTRL);
+    session.wait_absent("C-g");
+    session.chord('h');
+    session.chord('h');
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut opened = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match session.rx.recv_timeout(left) {
+            Ok(InstanceMessage::Popup(PopupPayload::Present(_))) => opened = true,
+            Ok(InstanceMessage::StatusFacts {
+                message: Some(m), ..
+            }) => assert!(
+                !m.contains("unavailable") && !m.contains("cancelled"),
+                "a superseded request must say nothing; the status said {m:?}"
+            ),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(opened, "the latest request opens the popup");
+}
