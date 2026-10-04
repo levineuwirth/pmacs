@@ -26,16 +26,21 @@ markdown's inline injection, the way the editor parses it.
 What the replay (`pmacs_grammar_fuzz replay-unit`, as every arm runs it:
 a 5 s deadline, 1 GiB) shows of each, through markdown's route, the way
 a `.md` file meets them. Measured at E7i's fix round 1 with a release
-worker and a debug one; under the sanitizer arms the parse is slower and
-larger, so what the deadline or the watch stops there is a superset.
+worker and a debug one; under the ASan arms the parse is slower and
+larger, so what the deadline or the watch stops there is a superset. The
+`tsan` arm is not: it replays at a 30 s deadline and 4 GiB by the watch,
+its shadow memory resident beside the parse, so it stops less. Its column
+was measured at E7i's fix round 2 with fix round 1's TSan worker
+(`79ca25d2`, kept under `~/build/e7i-fix1/tsan-workers/`) at those
+limits, as E7i review 2 had found it.
 
-| file | released worker | debug worker |
-|---|---|---|
-| `296-underscores-16k.input` | stopped by the memory limit (`RLIMIT_AS`) | the same |
-| `296-asterisks-8k.input` | **answered**: it returns, in about 1.8 s | stopped at the deadline |
-| `301-nested-openers-98.input` | stopped at the deadline (it returns after 23 s) | the same |
-| `301-hang-596.input` with its edits | stopped at the deadline (in-process, the third recorded parse never returns) | the same |
-| `301-hang-7672.input` | stopped at the deadline | the same |
+| file | released worker | debug worker | `tsan` arm (30 s, 4 GiB) |
+|---|---|---|---|
+| `296-underscores-16k.input` | stopped by the memory limit (`RLIMIT_AS`) | the same | stopped at the deadline |
+| `296-asterisks-8k.input` | **answered**: it returns, in about 1.8 s | stopped at the deadline | **answered** |
+| `301-nested-openers-98.input` | stopped at the deadline (it returns after 23 s) | the same | the same |
+| `301-hang-596.input` with its edits | stopped at the deadline (in-process, the third recorded parse never returns) | the same | the same |
+| `301-hang-7672.input` | stopped at the deadline | the same | the same |
 
 "Stopped at the deadline" is any of three things the replay reports as
 contained by time: the worker cancelling the parse where tree-sitter
@@ -48,8 +53,9 @@ depends on where it stands when the deadline passes.
 So the replay proves the worker contains #296's underscore paragraph by
 its memory limit and #301 by the deadline, three ways. It does not prove
 #296's asterisks contained in a shipped worker: there they are a large
-parse that returns, and only the overhead of a debug build or a sanitizer
-(the watch, under ASan in CI) stops them.
+parse that returns, and only the overhead of a debug build or an ASan arm
+(the watch, in CI) stops them; the `tsan` arm answers them, and stops the
+underscores by time and not by memory.
 
 Two records corrected at E7i's fix round 1 (review 1, Low 3). The 7,672
 bytes as found began with 33 spaces, so markdown read them as an indented
