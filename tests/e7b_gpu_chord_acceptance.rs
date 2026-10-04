@@ -21,6 +21,11 @@
 //! The machine this was written on has one layout (US); the German and
 //! other `AltGr` layouts are exercised by naming what winit reports for
 //! them, not by pressing their keys --- said in the record.
+//!
+//! CRDT-only, as every suite that drives the GPU probe is: the probe is
+//! a semantic replica, which a daemon can host only with the feature, so
+//! a daemon built without it refuses the attach before a key is pressed.
+#![cfg(feature = "crdt")]
 
 use std::path::Path;
 
