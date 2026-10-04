@@ -1020,7 +1020,13 @@ fn e7i_review3_twelve_buffers_back_off_together_and_each_stops() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let to_stop_ms = started.elapsed().as_millis();
-    // Then a quiet second: no worker, no crash, no notice.
+    // The slots say "stopped" on the jobs' threads a tick before the last
+    // stop is told in Lua: let the settles land, then a quiet second and a
+    // half: no worker, no crash, no notice.
+    for _ in 0..20 {
+        one_tick(&mut state);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let notices_at_stop = errors_text(&state).matches("[syntax]").count();
     let quiet = Instant::now();
     let mut live_after = 0;
@@ -1061,7 +1067,67 @@ fn e7i_review3_twelve_buffers_back_off_together_and_each_stops() {
     }
     assert_eq!(live_after, 0, "no worker after the stops");
     assert_eq!(
+        notices_at_stop, 24,
+        "each buffer told twice: its first crash and its stop"
+    );
+    assert_eq!(
         notices, notices_at_stop,
         "nothing more is told after the stops"
+    );
+}
+
+/// Charge 5, `862b57f`, the sink. `death()` reads the worker's stderr
+/// sink after `wait()`, and the thread that fills the sink is never
+/// joined, so the layer line the worker wrote just before it died can be
+/// missing from what the editor reads (the notice then names the
+/// buffer's grammar). The debug hook aborts right after the layer line,
+/// the narrowest window there is. Forty fresh buffers, one crash each;
+/// `PMACS_R3_SINK_ROUNDS` sets the count. The row reports how many
+/// crashes were told without their layer and fails on any.
+#[test]
+fn e7i_review3_a_crashed_layer_s_name_reaches_the_editor_every_time() {
+    let _one = one_editor();
+    let rounds: usize = std::env::var("PMACS_R3_SINK_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let unit = crashing_on(dir.path(), "bash", "CRASHME");
+    let mut state = EditorState::new_with_roots(&common::iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    let mut missing = Vec::new();
+    for i in 0..rounds {
+        let path = dir.path().join(format!("r{i:03}.md"));
+        std::fs::write(&path, "# T\n\n```bash\necho CRASHME\n```\n").expect("md");
+        open_with(&state, &path, &unit);
+        exec(
+            &state,
+            &format!(
+                "pmacs.window.switch_buffer(pmacs.buffer.find_or_open({:?}))",
+                path.display().to_string()
+            ),
+        );
+        let layer = ready::tick_until(&mut state, "the crash", Duration::from_secs(30), |s| {
+            let r = eval(
+                s,
+                "local r = pmacs.parse._unit_report(pmacs.window.buffer()) \
+                 if r and r.crashes > 0 then return 'L' .. r.crash_layer end return ''",
+            );
+            match r.strip_prefix('L') {
+                Some(layer) => Probe::Ready(layer.to_owned()),
+                None => Probe::Pending(report(s)),
+            }
+        });
+        if layer != "bash" {
+            missing.push((i, layer));
+        }
+    }
+    say(&format!(
+        "{rounds} crashes in a bash layer: told without their layer {}: {missing:?}",
+        missing.len()
+    ));
+    assert!(
+        missing.is_empty(),
+        "every crash names its layer: {missing:?}"
     );
 }
