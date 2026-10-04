@@ -1250,26 +1250,32 @@ fn e7i_review1_the_aliasing_guard_reaches_the_worker_s_build() {
     );
 }
 
-/// `fuzz/regress/markdown/301-hang-7672.input` begins with 32 spaces, so
-/// markdown reads its line as an indented code block and never injects
-/// `markdown_inline`: the replay "answers" it and proves nothing about #301.
-/// Without the indent (`strip-7672`) the same bytes hang through markdown's
-/// paragraph route, and wrapped in a ```` ```markdown_inline ```` fence they
-/// reach the inline grammar verbatim. This row replays the stored input and
-/// the de-indented one through the worker as markdown, 1 s deadline: the
-/// stored one must be contained as the de-indented one is. Fix round 1
-/// stores it without the spaces (33 of them, not the 32 this pass said),
-/// and the replay calls a parse the worker cancels at its own deadline
-/// contained by time as it calls one killed past the grace: which of the
-/// two this input meets depends on load, and it was counted answered.
+/// `fuzz/regress/markdown/301-hang-7672.input` began with 33 spaces at
+/// `fa176de`, so markdown read its line as an indented code block and never
+/// injected `markdown_inline`: the replay "answered" it and proved nothing
+/// about #301. Fix round 1 stores it without them, and the replay calls a
+/// parse the worker cancels at its own deadline contained by time, as it
+/// calls one killed past the grace. Replayed through the worker as markdown
+/// at a 1 s deadline beside a control, the bytes as `fa176de` stored them
+/// (the 33 spaces restored), the stored input is contained by time and the
+/// control answered. Until fix round 2 the control was the stored bytes
+/// with their leading spaces stripped, which since fix round 1 are none, so
+/// it was the subject byte for byte and could not fail apart from it
+/// (review 2's Low 4); the count line now says one of the two is answered.
 #[test]
 fn e7i_review1_the_regress_hang_reaches_its_defect_through_markdown() {
     let stored = repo().join("fuzz/regress/markdown/301-hang-7672.input");
     let dir = tempfile::tempdir().expect("tempdir");
     let bytes = std::fs::read(&stored).expect("stored input");
-    let start = bytes.iter().position(|&b| b != b' ').unwrap_or(0);
-    let stripped = dir.path().join("strip-7672.input");
-    std::fs::write(&stripped, &bytes[start..]).expect("stripped");
+    assert_ne!(
+        bytes.first(),
+        Some(&b' '),
+        "the stored input begins at its first image opener, not in an indent"
+    );
+    let as_found = dir.path().join("as-found-7672.input");
+    let mut indented = vec![b' '; 33];
+    indented.extend_from_slice(&bytes);
+    std::fs::write(&as_found, &indented).expect("as found");
     let corpus = dir.path().join("corpus");
     std::fs::create_dir_all(&corpus).expect("corpus");
     let out = dir.path().join("out");
@@ -1288,18 +1294,18 @@ fn e7i_review1_the_regress_hang_reaches_its_defect_through_markdown() {
         .arg("--extra")
         .arg(format!("markdown={}", stored.display()))
         .arg("--extra")
-        .arg(format!("markdown={}", stripped.display()))
+        .arg(format!("markdown={}", as_found.display()))
         .status()
         .expect("run the replay");
     let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
     say(&format!("regress route: exit {status:?}\n{report}"));
     assert!(
-        report.contains("strip-7672.input`, time: "),
-        "control: the de-indented input reaches #301 through markdown: {report}"
+        report.contains("| markdown | 2 | 1 | 1 | 0 |") && !report.contains("as-found-7672.input`"),
+        "control: the bytes as found, an indented code block, are answered: {report}"
     );
     assert!(
         report.contains("301-hang-7672.input`, time: "),
-        "the stored input reaches #301 through markdown as well: {report}"
+        "the stored input reaches #301 through markdown: {report}"
     );
 }
 
@@ -1335,8 +1341,10 @@ fn e7i_review1_the_parse_limit_settings_say_where_they_are_reactive() {
 /// answered it and proved nothing about #301. Fix round 1 records the
 /// sequence beside it (`301-hang-596.edits`) and `replay-unit` applies it.
 /// Replayed as every arm replays `fuzz/regress/`, through markdown's route at
-/// a 1 s deadline, the stored input is stopped at the deadline; the same
-/// bytes without their edits, a control, are answered.
+/// a 1 s deadline, the stored input is stopped at the deadline. The control,
+/// the same bytes without their edits, replays alone and is answered: until
+/// fix round 2 it was judged by its absence from the report, with no count,
+/// so a copy never replayed passed (review 2's Low 4).
 #[test]
 fn e7i_review1_the_regress_edit_sequence_reaches_its_defect() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1348,30 +1356,38 @@ fn e7i_review1_the_regress_edit_sequence_reaches_its_defect() {
     .expect("the bare copy");
     let corpus = dir.path().join("corpus");
     std::fs::create_dir_all(&corpus).expect("corpus");
-    let out = dir.path().join("out");
     let worker = Path::new(env!("CARGO_BIN_EXE_pmacs"))
         .parent()
         .expect("target dir")
         .join("pmacs-parse-unit");
-    let status = Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
-        .args(["replay-unit", "--unit"])
-        .arg(&worker)
-        .arg("--corpus")
-        .arg(&corpus)
-        .arg("--out")
-        .arg(&out)
-        .args(["--deadline-ms", "1000", "--grammar", "markdown"])
-        .arg("--findings")
-        .arg(repo().join("fuzz/regress"))
-        .arg("--extra")
-        .arg(format!("markdown={}", bare.display()))
-        .status()
-        .expect("run the replay");
-    let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
-    say(&format!("regress edit sequence: exit {status:?}\n{report}"));
+    let replay = |out: &Path, inputs: &[&str]| -> String {
+        let status = Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
+            .args(["replay-unit", "--unit"])
+            .arg(&worker)
+            .arg("--corpus")
+            .arg(&corpus)
+            .arg("--out")
+            .arg(out)
+            .args(["--deadline-ms", "1000", "--grammar", "markdown"])
+            .args(inputs)
+            .status()
+            .expect("run the replay");
+        let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
+        say(&format!("regress edit sequence: exit {status:?}\n{report}"));
+        report
+    };
+    let control = replay(
+        &dir.path().join("out-control"),
+        &["--extra", &format!("markdown={}", bare.display())],
+    );
     assert!(
-        !report.contains("596-without-edits.input`"),
-        "control: the bytes alone are answered, not contained: {report}"
+        control.contains("| markdown | 1 | 1 | 0 | 0 |"),
+        "control: the bytes alone, one input, are answered: {control}"
+    );
+    let regress = repo().join("fuzz/regress");
+    let report = replay(
+        &dir.path().join("out"),
+        &["--findings", &regress.display().to_string()],
     );
     assert!(
         report.contains("301-hang-596.input`, time: "),
