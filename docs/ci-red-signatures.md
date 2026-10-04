@@ -2810,8 +2810,18 @@ push's own and the round's one gate.
 Tally (push-a3ea968-jobs): 15 = 6 + 9.
 
 `CI` 37209683738 at `a3ea968`, attempt 1 of 1, conclusion success: six jobs
-succeeded and nine were skipped, the form every `push` run to `main` takes
-(the matrix legs are a `pull_request` trigger). `Docs consistency` succeeded,
+succeeded and nine were skipped. **This sentence first read "the form every
+`push` run to `main` takes (the matrix legs are a `pull_request` trigger)",
+which is false**, and E7i's merge push falsified it the same day: `CI`
+37223480185 at `9780407` runs nineteen jobs on a `push` to `main`. The real
+mechanism, read from `.github/workflows/ci.yml` rather than inferred, is the
+`changes` job (`name: Changed paths`): it classifies the push's own diff and
+exports `code`, and every test, perf and GPU job carries
+`if: needs.changes.outputs.code == 'true'`, with one job guarded on `'false'`
+so that a required check still reports. A docs-only push to `main` therefore
+skips the nine and runs six; a push that touches code runs them all. So
+`15 = 6 + 9` is the shape of a **registry push**, not of a push.
+`Docs consistency` succeeded,
 which is what asserts both commits' tallies. `Grammar fuzz` 37209683763 at
 the same head is green.
 
