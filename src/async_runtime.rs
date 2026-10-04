@@ -1201,6 +1201,28 @@ impl AsyncRuntime {
         id
     }
 
+    /// Dispatch a parse to the buffer's parse unit (E7i) instead of
+    /// parsing on the worker: the worker thread sends the request across
+    /// the unit's boundary and waits, and the bundle it parks in the same
+    /// handoff map carries the unit's spans instead of trees. Settle and
+    /// install are [`Self::dispatch_parse`]'s.
+    pub fn dispatch_isolated_parse(&self, job: crate::parse_isolation::IsolatedJob) -> JobId {
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::Parse,
+            supersede: None,
+            stream: None,
+            resource: None,
+            purpose: format!("parse {}", job.request.language_name),
+            quiet: false,
+        });
+        let bus = self.workers.clone();
+        let handoff = self.parse_handoff.clone();
+        self.pool.dispatch(move |_pool| {
+            run_isolated_parse(&cancel, &bus, &handoff, id, &job);
+        });
+        id
+    }
+
     /// Dispatch a `read_dir(path)` job. The worker enumerates
     /// `path`, returning one [`FsDirEntry`] per child with
     /// `lstat`-style metadata. Polls cancel every batch of
@@ -2101,7 +2123,10 @@ pub fn run_grep(cancel: &CancellationToken, bus: &BusEnd, id: JobId, spec: GrepS
 /// can outlive its token and its deadline both. [`syntax_mod::run_parse`]
 /// names that work; #296 (a markdown paragraph, 9.8 GB at 32 KB) and
 /// #301 (nested image openers, exponential in their depth) are
-/// instances, and the wasm phase's limits are what bound them.
+/// instances. Nothing bounds them in-process: grammar-only wasm would not,
+/// since that work is the runtime's native C and not the grammar's. The
+/// process boundary does (`syntax.isolation`, E7i), where the parse runs
+/// in a worker held to the deadline and a memory limit.
 fn run_parse(
     cancel: &CancellationToken,
     bus: &BusEnd,
@@ -2119,8 +2144,18 @@ fn run_parse(
         );
         return;
     }
+    let bytes = spec.source.len();
+    let started = std::time::Instant::now();
     let kind = match syntax_mod::run_parse(spec) {
         Ok(bundle) => {
+            // E7i: the in-process arm's parse, timed as a unit's is, so the
+            // comparison reads both from one trace.
+            crate::parse_isolation::trace_native_parse(
+                bytes,
+                bundle.layers.len(),
+                bundle.parse_duration,
+                started.elapsed(),
+            );
             let duration_ms = u64::try_from(bundle.parse_duration.as_millis()).unwrap_or(u64::MAX);
             handoff
                 .lock()
@@ -2131,6 +2166,39 @@ fn run_parse(
         // A parse cancelled at its deadline travels as its message, which
         // the settle path recognizes (`syntax::is_deadline_message`).
         Err(e) => ReplyKind::Error(e.to_string()),
+    };
+    let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+}
+
+/// Worker body for [`AsyncRuntime::dispatch_isolated_parse`] (E7i): the
+/// parse runs in the buffer's unit; the reply is [`run_parse`]'s.
+fn run_isolated_parse(
+    cancel: &CancellationToken,
+    bus: &BusEnd,
+    handoff: &Mutex<HashMap<JobId, Arc<ParseTreeBundle>>>,
+    id: JobId,
+    job: &crate::parse_isolation::IsolatedJob,
+) {
+    if cancel.is_cancelled() {
+        let _ = bus.send(
+            ASYNC_REPLY_TOPIC,
+            &WorkerReply {
+                job_id: id,
+                kind: ReplyKind::Cancelled,
+            },
+        );
+        return;
+    }
+    let kind = match crate::parse_isolation::run(job) {
+        Ok(bundle) => {
+            let duration_ms = u64::try_from(bundle.parse_duration.as_millis()).unwrap_or(u64::MAX);
+            handoff
+                .lock()
+                .expect("parse_handoff mutex poisoned")
+                .insert(id, Arc::new(bundle));
+            ReplyKind::Parse { duration_ms }
+        }
+        Err(message) => ReplyKind::Error(message),
     };
     let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
 }

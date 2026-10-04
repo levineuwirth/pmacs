@@ -55,8 +55,8 @@ use pmacs::editor::EditorState;
 use pmacs::lua_bindings::{BufferIdLua, StateDir};
 use pmacs::protocol::FrontendId;
 use pmacs::syntax::{
-    BUILTIN_LANGUAGES, ParseError, ParseRequest, ParseTreeBundle, default_injection_aliases,
-    run_parse,
+    BUILTIN_LANGUAGES, ParseError, ParseRequest, ParseTreeBundle, compute_highlight_spans_for,
+    default_injection_aliases, run_parse,
 };
 
 #[path = "common/iso.rs"]
@@ -427,26 +427,42 @@ fn e7h_ordinary_large_files_parse_inside_the_default_deadline() {
     }
 }
 
-/// Every node's kind and byte range, in walk order: two trees agree on
-/// this only if they are the same parse of the same bytes.
-fn node_signature(tree: &tree_sitter::Tree) -> Vec<(u16, usize, usize)> {
-    let mut out = Vec::new();
-    let mut c = tree.walk();
-    loop {
-        let n = c.node();
-        out.push((n.kind_id(), n.start_byte(), n.end_byte()));
-        if c.goto_first_child() {
-            continue;
-        }
-        loop {
-            if c.goto_next_sibling() {
-                break;
-            }
-            if !c.goto_parent() {
-                return out;
-            }
-        }
-    }
+/// The installed tree lives in the buffer's parse worker since E7i, so it
+/// is compared through the worker: its structure (the s-expression) and the
+/// byte range of every node the highlight query captures (the root layer's
+/// spans over the whole file), against a cold in-process parse of the same
+/// text. An incremental parse that lost the cancelled requests' edits would
+/// differ in both.
+fn assert_worker_tree_is_the_cold_parse(
+    s: &EditorState,
+    installed: &ParseTreeBundle,
+    cold: &ParseTreeBundle,
+) {
+    let tree = installed
+        .isolated
+        .as_ref()
+        .expect("the installed tree lives in the buffer's worker");
+    assert_eq!(
+        tree.sexp(&[]).as_deref(),
+        Some(cold.root_tree().root_node().to_sexp().as_str()),
+        "the tree after the cancellations is a cold parse of the same text, node for node"
+    );
+    let cold = s.syntax_registry.resolve_layer_queries(cold);
+    let root = &cold.layers[0];
+    let cold_spans = compute_highlight_spans_for(
+        root.highlight_query.as_ref().expect("rust highlights"),
+        &root.tree,
+        &cold.source,
+        root.local_facts.as_deref(),
+        None,
+    );
+    let spans = tree
+        .spans_for(0..installed.source.len())
+        .expect("the worker answers the whole file's spans");
+    assert_eq!(
+        spans.layers[0].spans, cold_spans,
+        "every captured node's byte range is the cold parse's"
+    );
 }
 
 fn current_bundle(s: &EditorState, buf: BufferIdLua) -> Option<Arc<ParseTreeBundle>> {
@@ -464,10 +480,13 @@ fn deadline_notices(s: &EditorState) -> usize {
 fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     // A 595 KB Rust file parses in hundreds of milliseconds; with the
     // deadline at 1 ms every parse of it is cancelled. Typed through the
-    // key path, as a user types: the buffer keeps the tree it had, the user
-    // is told once however many keystrokes follow, nothing aborts, and once
-    // parses finish again the tree is the buffer's (the cancelled request
-    // drained the edits, so the next parse must be cold, not incremental).
+    // key path, as a user types: the buffer keeps the tree it had while no
+    // edit has moved its text (typed at its end), and drops it once one has
+    // (typed at its head), so no span is painted over moved text (E7i fix
+    // round 3); the user is told once however many keystrokes follow,
+    // nothing aborts, and once parses finish again the tree is the
+    // buffer's (the cancelled request drained the edits, so the next parse
+    // must be cold, not incremental).
     let dir = temp_dir("keep");
     let file = dir.join("big.rs");
     std::fs::copy(
@@ -491,16 +510,21 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     let before = current_bundle(&s, buf).unwrap();
 
     exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 1)");
-    type_char(&mut s, 'x');
+    s.core.borrow_mut().move_buffer_end();
+    // A space, which adds no node: the cold parse compared below would
+    // otherwise end in a zero-width node at the end of the file, which no
+    // span request covers.
+    type_char(&mut s, ' ');
     assert!(
         wait(&mut s, 30, |s| deadline_notices(s) == 1),
         "a cancelled parse is reported: {}",
         s.lua_host.errors_buffer_text()
     );
     assert!(
-        Arc::ptr_eq(&before, &current_bundle(&s, buf).unwrap()),
-        "the buffer keeps the tree it had"
+        current_bundle(&s, buf).is_some_and(|now| Arc::ptr_eq(&before, &now)),
+        "the buffer keeps the tree it had: an edit at its end moved none of its text"
     );
+    s.core.borrow_mut().move_buffer_start();
     for ch in "yzw".chars() {
         type_char(&mut s, ch);
         wait(&mut s, 1, |_| false);
@@ -508,18 +532,16 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
     wait(&mut s, 3, |_| false);
     assert_eq!(deadline_notices(&s), 1, "told once, not per keystroke");
     assert!(
-        Arc::ptr_eq(&before, &current_bundle(&s, buf).unwrap()),
-        "still the tree it had"
+        current_bundle(&s, buf).is_none(),
+        "the tree it had is dropped once an edit at its head has moved its text"
     );
 
     // Parses finish again: the next is cold, and its tree is the buffer's.
     exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 0)");
     type_char(&mut s, 'v');
     assert!(
-        wait(&mut s, 60, |s| !Arc::ptr_eq(
-            &before,
-            &current_bundle(s, buf).unwrap()
-        )),
+        wait(&mut s, 60, |s| current_bundle(s, buf)
+            .is_some_and(|now| !Arc::ptr_eq(&before, &now))),
         "a parse installs once the deadline allows it"
     );
     assert!(
@@ -543,11 +565,7 @@ fn e7h_a_parse_past_its_deadline_keeps_the_tree_and_says_so_once() {
         deadline: None,
     })
     .unwrap();
-    assert_eq!(
-        node_signature(installed.root_tree()),
-        node_signature(cold.root_tree()),
-        "the tree after the cancellations is a cold parse of the same text, node for node"
-    );
+    assert_worker_tree_is_the_cold_parse(&s, &installed, &cold);
 
     // The notice re-arms once a parse has installed.
     exec(&s, "pmacs.config.set('syntax.parse-deadline-ms', 1)");
@@ -570,11 +588,13 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
     // CI ran the first alone until E7h's fix round 2; review 2 found GCC
     // 13.3, CI's, forwards a stored length through a narrower lvalue under
     // ASan, so CI now runs the first two as a matrix whose `ubsan` leg keeps
-    // the job's name, on a pinned image that prints its compiler.
+    // the job's name, on a pinned image that prints its compiler. E7i's fix
+    // round 1 adds a fourth by default, ThreadSanitizer over the parse
+    // worker's threads (review 1, Medium 4).
     let script = read("scripts/fuzz-grammars");
     assert!(
-        script.contains("[ -n \"$arms\" ] || arms=\"ubsan asan-strict tysan\""),
-        "the default run builds all three arms"
+        script.contains("[ -n \"$arms\" ] || arms=\"ubsan asan-strict tysan tsan\""),
+        "the default run builds all four arms"
     );
     let line = |needle: &str| {
         script
@@ -593,8 +613,28 @@ fn e7h_the_fuzz_script_builds_an_arm_that_can_see_aliasing_ub_by_default() {
         "tysan is clang's TypeSanitizer"
     );
     assert!(
-        script.contains("[ \"$arm\" = tysan ] && fail_on=crashes"),
-        "only the tysan arm's crashes fail it"
+        line("sanitize=\"-fsanitize=thread").contains("-fsanitize=thread")
+            && script.contains("RUSTC_BOOTSTRAP=1 RUSTFLAGS=\"-Zsanitizer=thread")
+            && script.contains(
+                "cargo build -Zbuild-std --profile fuzz --target \"$host\" -p pmacs-parse-unit"
+            )
+            && script.contains("fuzz race-unit --unit \"$unit\""),
+        "tsan is ThreadSanitizer over the worker, its Rust and std and every C source, \
+         driven through race-unit's schedules"
+    );
+    // Since E7i.5 every arm's harness fails on its crashes alone: a hang
+    // or a memory cut took the editor down before E7i, and the parse worker
+    // now stops it, which the replay through the worker shows on the
+    // finding's own input; the replay itself fails on a crash.
+    assert!(
+        script.contains("    fail_on=crashes\n") && !script.contains("fail_on=all"),
+        "every arm's harness fails on its crashes alone"
+    );
+    assert!(
+        script.contains("fuzz replay-unit --unit \"$unit\"")
+            && script.contains("--findings \"$out/$arm\"")
+            && script.contains("--findings \"$root/fuzz/regress\""),
+        "and each arm replays its findings and fuzz/regress through the worker"
     );
     let wf = read(".github/workflows/grammar-fuzz.yml");
     assert!(
@@ -652,7 +692,9 @@ struct Fuzz<'a> {
     seeds: &'a [(&'a str, &'a str)],
     hang_ms: u64,
     rss_mb: u64,
-    /// Pass this tree's `fuzz/accepted.tsv`.
+    /// Pass the accepted list as it stood with #296's and #301's rows
+    /// (`tests/e7h_review2/accepted-296-301.tsv`): the real one is empty
+    /// since E7i.5 retired them, and these rows exercise the matching.
     accepted: bool,
     /// The minimizer's budget, if not its default five minutes.
     minimize_secs: Option<u64>,
@@ -695,8 +737,9 @@ fn fuzz_run(f: &Fuzz) -> (i32, Vec<String>, String, String) {
         cmd.env("PMACS_FUZZ_MINIMIZE_SECONDS", secs.to_string());
     }
     if accepted {
-        cmd.arg("--accepted")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/accepted.tsv"));
+        cmd.arg("--accepted").arg(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e7h_review2/accepted-296-301.tsv"),
+        );
     }
     let run = cmd.output().expect("the harness runs");
     let tsv = std::fs::read_to_string(out.join("report.tsv")).unwrap_or_default();

@@ -71,7 +71,9 @@ use crate::statusline::{
     SharedStatuslineRegistry, StatuslineProviderFailure, StatuslineProviderId, StatuslineRegistry,
     StatuslineSide,
 };
-use crate::syntax::{self, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry};
+use crate::syntax::{
+    self, NodeFacts, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry,
+};
 use crate::workers_buffer;
 
 // Domain submodules split out of this file (audit F-016). Each owns one
@@ -2030,6 +2032,11 @@ fn after_buffer_removed(lua: &Lua, id: BufferId) {
     if let Some(folds) = lua.app_data_ref::<crate::fold::SharedFoldRegistry>() {
         folds.forget_buffer(id);
     }
+    // E7i: the buffer's parse view and its worker process go with it.
+    if let Some(syntax) = lua.app_data_ref::<SharedSyntaxRegistry>() {
+        syntax.detach_view(id);
+    }
+    crate::parse_isolation::forget(id);
     let callbacks = match lua.app_data_ref::<BufferRemoveCallbacks>() {
         Some(callbacks) => callbacks.take(id),
         None => Vec::new(),
@@ -7962,46 +7969,107 @@ pub fn make_async_runtime(
 
 /// Lua-facing wrapper around an [`Arc<ParseTreeBundle>`]. Cheap to
 /// clone (an `Arc` bump). All methods are read-only --- the bundle
-/// is immutable once installed; a new parse produces a new bundle.
+/// is immutable once installed; a new parse produces a new bundle. The
+/// view it came from, when it came from one, answers `is_current`.
 #[derive(Clone)]
-pub struct ParseTreeLua(Arc<ParseTreeBundle>);
+pub struct ParseTreeLua(Arc<ParseTreeBundle>, Option<ParseViewHandle>);
 
 /// Lua-facing wrapper around a node within a [`ParseTreeLua`]. The
 /// node is identified by a path of child indices from the tree's
-/// root. Every method resolves the path and re-walks the tree, so
-/// the userdata lifetime is decoupled from `tree_sitter::Node`'s
-/// borrow of `Tree`. O(depth) per access, which is fine for the
+/// root. In-process every method resolves the path and re-walks the
+/// tree, so the userdata lifetime is decoupled from `tree_sitter::Node`'s
+/// borrow of `Tree`; O(depth) per access, which is fine for the
 /// shallow-traversal patterns Lua scripts actually use.
+///
+/// E7i: when the tree lives in a parse unit, a node reads the facts the
+/// unit described for it instead: its own on first read, and its
+/// children's all at once when a script asks for them, so a walk costs
+/// one request per node whose children it reads. A tree the unit no
+/// longer holds (a newer parse installed) answers `nil`.
 #[derive(Clone)]
 pub struct ParseNodeLua {
     bundle: Arc<ParseTreeBundle>,
     path: Vec<u32>,
+    /// The node's facts from its unit, once read.
+    facts: Arc<Mutex<Option<NodeFacts>>>,
+    /// Its children's facts from its unit, once read.
+    children: Arc<Mutex<Option<Vec<NodeFacts>>>>,
 }
 
 impl ParseNodeLua {
-    fn resolve(&self) -> Option<tree_sitter::Node<'_>> {
-        let mut node = self.bundle.root_tree().root_node();
-        for &idx in &self.path {
-            node = node.child(idx)?;
+    fn at(bundle: Arc<ParseTreeBundle>, path: Vec<u32>, facts: Option<NodeFacts>) -> Self {
+        Self {
+            bundle,
+            path,
+            facts: Arc::new(Mutex::new(facts)),
+            children: Arc::new(Mutex::new(None)),
         }
-        Some(node)
+    }
+
+    fn resolve(&self) -> Option<tree_sitter::Node<'_>> {
+        syntax::node_at_path(&self.bundle, &self.path)
+    }
+
+    /// The node's facts: from the in-process tree, or from its unit.
+    fn facts(&self) -> Option<NodeFacts> {
+        let Some(isolated) = self.bundle.isolated.as_ref() else {
+            return self.resolve().map(NodeFacts::of);
+        };
+        let mut held = self.facts.lock().expect("node facts poisoned");
+        if held.is_none() {
+            *held = isolated
+                .describe(&self.path, false)
+                .and_then(|nodes| nodes.into_iter().next());
+        }
+        held.clone()
+    }
+
+    /// The node's children, each with its facts: from the in-process tree,
+    /// or from one request to its unit.
+    fn child_nodes(&self) -> Option<Vec<(NodeFacts, ParseNodeLua)>> {
+        let facts: Vec<NodeFacts> = match self.bundle.isolated.as_ref() {
+            None => {
+                let node = self.resolve()?;
+                let mut cursor = node.walk();
+                node.children(&mut cursor).map(NodeFacts::of).collect()
+            }
+            Some(isolated) => {
+                let mut held = self.children.lock().expect("node children poisoned");
+                if held.is_none() {
+                    let mut nodes = isolated.describe(&self.path, true)?.into_iter();
+                    let me = nodes.next()?;
+                    *self.facts.lock().expect("node facts poisoned") = Some(me);
+                    *held = Some(nodes.collect());
+                }
+                held.clone()?
+            }
+        };
+        Some(
+            facts
+                .into_iter()
+                .zip(0u32..)
+                .map(|(f, i)| {
+                    let mut path = self.path.clone();
+                    path.push(i);
+                    let node = ParseNodeLua::at(self.bundle.clone(), path, Some(f.clone()));
+                    (f, node)
+                })
+                .collect(),
+        )
     }
 }
 
-fn point_to_lua(lua: &Lua, p: tree_sitter::Point) -> mlua::Result<mlua::Value> {
+fn point_to_lua(lua: &Lua, (row, column): (u64, u64)) -> mlua::Result<mlua::Value> {
     let t = lua.create_table_with_capacity(0, 2)?;
-    t.set("row", p.row)?;
-    t.set("column", p.column)?;
+    t.set("row", row)?;
+    t.set("column", column)?;
     Ok(mlua::Value::Table(t))
 }
 
 impl UserData for ParseTreeLua {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("root", |_, this, ()| {
-            Ok(ParseNodeLua {
-                bundle: this.0.clone(),
-                path: Vec::new(),
-            })
+            Ok(ParseNodeLua::at(this.0.clone(), Vec::new(), None))
         });
         methods.add_method("language", |_, this, ()| Ok(this.0.language_name.clone()));
         methods.add_method("parse_duration_ms", |_, this, ()| {
@@ -8014,104 +8082,74 @@ impl UserData for ParseTreeLua {
             lua.create_string(this.0.source.as_ref())
         });
         methods.add_method("sexp", |_, this, ()| {
-            Ok(this.0.root_tree().root_node().to_sexp())
+            Ok(match this.0.isolated.as_ref() {
+                Some(isolated) => isolated.sexp(&[]),
+                None => this.0.layers.first().map(|l| l.tree.root_node().to_sexp()),
+            })
+        });
+        // Whether this is still the buffer's installed parse. A tree in a
+        // parse unit stops answering once a newer parse replaces it there
+        // (E7i); an in-process one stays readable, but is no longer current.
+        methods.add_method("is_current", |_, this, ()| {
+            Ok(this
+                .1
+                .as_ref()
+                .and_then(ParseViewHandle::current)
+                .is_some_and(|now| Arc::ptr_eq(&now, &this.0)))
         });
     }
 }
 
 impl UserData for ParseNodeLua {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "linear list of read-only Node accessors; splitting into helpers fragments a coherent API surface"
-    )]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("type", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.kind().to_owned()))
-        });
+        methods.add_method("type", |_, this, ()| Ok(this.facts().map(|f| f.kind)));
         methods.add_method("start_byte", |_, this, ()| {
             Ok(this
-                .resolve()
-                .map(|n| i64::try_from(n.start_byte()).unwrap_or(i64::MAX)))
+                .facts()
+                .map(|f| i64::try_from(f.start_byte).unwrap_or(i64::MAX)))
         });
         methods.add_method("end_byte", |_, this, ()| {
             Ok(this
-                .resolve()
-                .map(|n| i64::try_from(n.end_byte()).unwrap_or(i64::MAX)))
+                .facts()
+                .map(|f| i64::try_from(f.end_byte).unwrap_or(i64::MAX)))
         });
         methods.add_method("start_position", |lua, this, ()| {
-            this.resolve()
-                .map(|n| point_to_lua(lua, n.start_position()))
-                .transpose()
+            this.facts().map(|f| point_to_lua(lua, f.start)).transpose()
         });
         methods.add_method("end_position", |lua, this, ()| {
-            this.resolve()
-                .map(|n| point_to_lua(lua, n.end_position()))
-                .transpose()
+            this.facts().map(|f| point_to_lua(lua, f.end)).transpose()
         });
         methods.add_method("child_count", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.child_count()))
+            Ok(this.facts().map(|f| f.child_count))
         });
         methods.add_method("named_child_count", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.named_child_count()))
+            Ok(this.facts().map(|f| f.named_child_count))
         });
         methods.add_method("child", |_, this, idx: u32| {
-            let Some(node) = this.resolve() else {
-                return Ok(None);
-            };
-            if node.child(idx).is_none() {
-                return Ok(None);
-            }
-            let mut path = this.path.clone();
-            path.push(idx);
-            Ok(Some(ParseNodeLua {
-                bundle: this.bundle.clone(),
-                path,
-            }))
+            Ok(this
+                .child_nodes()
+                .and_then(|children| children.into_iter().nth(idx as usize))
+                .map(|(_, node)| node))
         });
         methods.add_method("children", |lua, this, ()| {
-            let Some(node) = this.resolve() else {
+            let Some(children) = this.child_nodes() else {
                 return Ok(mlua::Value::Nil);
             };
-            let count = node.child_count() as u32;
-            let t = lua.create_table_with_capacity(count as usize, 0)?;
-            for i in 0..count {
-                let mut path = this.path.clone();
-                path.push(i);
-                t.set(
-                    i + 1,
-                    ParseNodeLua {
-                        bundle: this.bundle.clone(),
-                        path,
-                    },
-                )?;
+            let t = lua.create_table_with_capacity(children.len(), 0)?;
+            for (i, (_, node)) in children.into_iter().enumerate() {
+                t.set(i + 1, node)?;
             }
             Ok(mlua::Value::Table(t))
         });
         methods.add_method("named_children", |lua, this, ()| {
-            let Some(node) = this.resolve() else {
+            let Some(children) = this.child_nodes() else {
                 return Ok(mlua::Value::Nil);
             };
-            // Walk through children, keep only the named ones, but
-            // record the *child* index (not the named-only index) so
-            // re-resolution from the path works.
-            let count = node.child_count() as u32;
+            // Keep only the named ones, each still addressed by its *child*
+            // index (not the named-only index), so its path resolves.
             let t = lua.create_table()?;
-            let mut out_idx = 0;
-            for i in 0..count {
-                let Some(child) = node.child(i) else { continue };
-                if !child.is_named() {
-                    continue;
-                }
-                let mut path = this.path.clone();
-                path.push(i);
-                out_idx += 1;
-                t.set(
-                    out_idx,
-                    ParseNodeLua {
-                        bundle: this.bundle.clone(),
-                        path,
-                    },
-                )?;
+            for (out_idx, (_, node)) in children.into_iter().filter(|(f, _)| f.named).enumerate() {
+                t.set(out_idx + 1, node)?;
             }
             Ok(mlua::Value::Table(t))
         });
@@ -8121,37 +8159,92 @@ impl UserData for ParseNodeLua {
             }
             let mut path = this.path.clone();
             path.pop();
-            Ok(Some(ParseNodeLua {
-                bundle: this.bundle.clone(),
-                path,
-            }))
+            Ok(Some(ParseNodeLua::at(this.bundle.clone(), path, None)))
         });
-        methods.add_method("is_named", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.is_named()))
-        });
+        methods.add_method("is_named", |_, this, ()| Ok(this.facts().map(|f| f.named)));
         methods.add_method("is_missing", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.is_missing()))
+            Ok(this.facts().map(|f| f.missing))
         });
         methods.add_method("has_error", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.has_error()))
+            Ok(this.facts().map(|f| f.has_error))
         });
         methods.add_method("text", |lua, this, ()| {
-            let Some(node) = this.resolve() else {
+            let Some(f) = this.facts() else {
                 return Ok(None);
             };
-            let start = node.start_byte();
-            let end = node.end_byte().min(this.bundle.source.len());
-            let bytes = &this.bundle.source[start.min(end)..end];
-            Ok(Some(lua.create_string(bytes)?))
+            let len = this.bundle.source.len();
+            let end = (f.end_byte as usize).min(len);
+            let start = (f.start_byte as usize).min(end);
+            Ok(Some(lua.create_string(&this.bundle.source[start..end])?))
         });
         methods.add_method("sexp", |_, this, ()| {
-            Ok(this.resolve().map(|n| n.to_sexp()))
+            Ok(match this.bundle.isolated.as_ref() {
+                Some(isolated) => isolated.sexp(&this.path),
+                None => this.resolve().map(|n| n.to_sexp()),
+            })
         });
     }
 }
 
 /// The parse deadline a dispatch carries (E7h.2): `syntax.lua` passes
 /// `syntax.parse-deadline-ms`; absent or 0 leaves the parse unbounded.
+/// `pmacs.parse._dispatch`'s arguments: the buffer, its language, then
+/// `syntax.parse-deadline-ms` and E7i's `syntax.isolation`,
+/// `syntax.parse-memory-limit-mb`, `syntax.parse-memory-total-mb`,
+/// `syntax.parse-worker-recycle-mb` and `syntax.parse-unit-path`.
+type DispatchArgs = (
+    BufferIdLua,
+    String,
+    Option<u64>,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+);
+
+/// How far beyond what a buffer's renderers last showed an isolated parse
+/// returns spans, each side, so the scroll an edit causes stays covered
+/// (E7i).
+const ISOLATED_INTEREST_MARGIN: u32 = 4096;
+
+/// The boundary `syntax.isolation` names; absent or unknown is the worker
+/// process, the editor's default since E7i.
+fn isolation_mode(isolation: Option<&str>) -> crate::parse_isolation::Isolation {
+    isolation
+        .and_then(crate::parse_isolation::Isolation::from_config)
+        .unwrap_or(crate::parse_isolation::Isolation::Process)
+}
+
+/// The isolated parse of `buffer`'s pending edits, its limits from the
+/// dispatch's arguments: `syntax.parse-memory-limit-mb`,
+/// `syntax.parse-memory-total-mb` and `syntax.parse-worker-recycle-mb`.
+fn isolated_job(
+    s: &SharedSyntaxRegistry,
+    buffer: BufferId,
+    handle: &ParseViewHandle,
+    deadline_ms: Option<u64>,
+    mode: crate::parse_isolation::Isolation,
+    (unit_mb, total_mb, recycle_mb): (Option<u64>, Option<u64>, Option<u64>),
+) -> crate::parse_isolation::IsolatedJob {
+    let (mut req, inserted) = handle.make_isolated_request();
+    req.injection_aliases = s.injection_alias_snapshot();
+    req.deadline = parse_deadline(deadline_ms);
+    crate::parse_isolation::IsolatedJob {
+        buffer,
+        interest: s.interest_for(buffer, ISOLATED_INTEREST_MARGIN),
+        request: req,
+        inserted,
+        limits: crate::parse_isolation::Limits {
+            mode,
+            unit_memory: unit_mb.unwrap_or(1024) << 20,
+            total_memory: total_mb.unwrap_or(0) << 20,
+            deadline: parse_deadline(deadline_ms),
+            recycle: recycle_mb.unwrap_or(0) << 20,
+        },
+    }
+}
+
 fn parse_deadline(deadline_ms: Option<u64>) -> Option<std::time::Duration> {
     deadline_ms
         .filter(|&ms| ms > 0)
@@ -8298,10 +8391,80 @@ pub fn install_parse(
         parse_mod.set(
             "tree",
             lua.create_function(move |_, id: BufferIdLua| {
-                Ok(s.view(id.0).and_then(|h| h.current()).map(ParseTreeLua))
+                let view = s.view(id.0);
+                Ok(view
+                    .as_ref()
+                    .and_then(ParseViewHandle::current)
+                    .map(|bundle| ParseTreeLua(bundle, view)))
             })?,
         )?;
     }
+
+    // E7i: what the buffer's parse unit is doing, for the comparison's
+    // measurements. `nil` when the buffer never had a unit.
+    parse_mod.set(
+        "_unit_report",
+        lua.create_function(|lua, id: BufferIdLua| {
+            let Some(report) = crate::parse_isolation::report(id.0) else {
+                return Ok(mlua::Value::Nil);
+            };
+            let t = lua.create_table()?;
+            t.set("mode", report.mode)?;
+            t.set("unit", report.unit)?;
+            t.set("memory", report.memory)?;
+            t.set("deaths", report.deaths)?;
+            t.set("last_death", report.last_death)?;
+            t.set("busy", report.busy)?;
+            t.set("reestablished", report.reestablished)?;
+            t.set("fetched", report.fetched)?;
+            t.set("recycled", report.recycled)?;
+            t.set("crashes", report.crashes)?;
+            t.set("held", report.held)?;
+            // E7i fix round 2: the crash streak's state, for the notice
+            // `syntax.lua` composes and the retry it schedules.
+            t.set("stopped", report.stopped)?;
+            t.set("backoff_ms", report.backoff_ms)?;
+            t.set("backoff_left_ms", report.backoff_left_ms)?;
+            t.set("crash_how", report.crash_how)?;
+            t.set("crash_signal", report.crash_signal)?;
+            t.set("max_crashes", crate::parse_isolation::MAX_CRASHES)?;
+            t.set("crashed_at_ms", report.crashed_at_ms)?;
+            t.set("crash_layer", report.crash_layer)?;
+            Ok(mlua::Value::Table(t))
+        })?,
+    )?;
+    // E7i: how many highlight spans the buffer's current parse has over
+    // `[start, end)` when its tree lives in a unit, fetching them as a
+    // renderer would (from what came back, from the idle unit, or by
+    // rebuilding a discarded unit's previous parse); `nil` when there is
+    // no isolated parse or no answer now.
+    {
+        let s = syntax.clone();
+        parse_mod.set(
+            "_isolated_spans",
+            lua.create_function(move |_, (id, start, end): (BufferIdLua, usize, usize)| {
+                let Some(bundle) = s.view(id.0).and_then(|h| h.current()) else {
+                    return Ok(None);
+                };
+                let Some(isolated) = bundle.isolated.as_ref() else {
+                    return Ok(None);
+                };
+                Ok(isolated
+                    .spans_for(start..end)
+                    .map(|set| set.layers.iter().map(|l| l.spans.len()).sum::<usize>()))
+            })?,
+        )?;
+    }
+    parse_mod.set(
+        "_unit_memory_total",
+        lua.create_function(|_, ()| Ok(crate::parse_isolation::total_unit_memory()))?,
+    )?;
+    // E7i: how the workers' total went on this machine (the cgroup created,
+    // or the step that refused), `nil` before the first process unit.
+    parse_mod.set(
+        "_isolation_report",
+        lua.create_function(|_, ()| Ok(crate::parse_isolation::isolation_report()))?,
+    )?;
 
     // Synchronous parse: convenience for tests and one-off scripts.
     // Builds the request, runs the parser inline on the main thread,
@@ -8313,15 +8476,45 @@ pub fn install_parse(
         parse_mod.set(
             "_parse_now",
             lua.create_function(
-                move |_, (id, lang, deadline_ms): (BufferIdLua, String, Option<u64>)| {
+                move |_,
+                      (
+                    id,
+                    lang,
+                    deadline_ms,
+                    isolation,
+                    unit_mb,
+                    total_mb,
+                    recycle_mb,
+                    unit_path,
+                ): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
-                    let mut req = handle.make_request();
-                    // Snapshot the alias map on the sync path too (framing Q#IJ4)
-                    // — otherwise a `py` fence or a Lua-added alias would resolve
-                    // asynchronously but not through `_parse_now`.
-                    req.injection_aliases = s.injection_alias_snapshot();
-                    req.deadline = parse_deadline(deadline_ms);
-                    let bundle = syntax::run_parse(req).map_err(|e| {
+                    crate::parse_isolation::set_unit_path(unit_path.as_deref());
+                    // Under `syntax.isolation` (E7i) the parse runs in the
+                    // buffer's unit, waited for here as the in-process one is.
+                    let bundle = match isolation_mode(isolation.as_deref()) {
+                        crate::parse_isolation::Isolation::Native => {
+                            let mut req = handle.make_request();
+                            // Snapshot the alias map on the sync path too
+                            // (framing Q#IJ4) — otherwise a `py` fence or a
+                            // Lua-added alias would resolve asynchronously but
+                            // not through `_parse_now`.
+                            req.injection_aliases = s.injection_alias_snapshot();
+                            req.deadline = parse_deadline(deadline_ms);
+                            syntax::run_parse(req).map_err(|e| e.to_string())
+                        }
+                        mode @ crate::parse_isolation::Isolation::Process => {
+                            let job = isolated_job(
+                                &s,
+                                id.0,
+                                &handle,
+                                deadline_ms,
+                                mode,
+                                (unit_mb, total_mb, recycle_mb),
+                            );
+                            crate::parse_isolation::run(&job)
+                        }
+                    }
+                    .map_err(|e| {
                         // The request drained the view's edits; keep its tree and
                         // parse cold next time (E7h.2).
                         handle.mark_unparsed();
@@ -8332,7 +8525,7 @@ pub fn install_parse(
                     // (framing Q#IJ2 stage 2).
                     let arc = s.resolve_layer_queries(&bundle);
                     handle.install(arc.clone());
-                    Ok(ParseTreeLua(arc))
+                    Ok(ParseTreeLua(arc, Some(handle)))
                 },
             )?,
         )?;
@@ -8348,8 +8541,35 @@ pub fn install_parse(
         parse_mod.set(
             "_dispatch",
             lua.create_function(
-                move |_, (id, lang, deadline_ms): (BufferIdLua, String, Option<u64>)| {
+                move |_,
+                      (
+                    id,
+                    lang,
+                    deadline_ms,
+                    isolation,
+                    unit_mb,
+                    total_mb,
+                    recycle_mb,
+                    unit_path,
+                ): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
+                    crate::parse_isolation::set_unit_path(unit_path.as_deref());
+                    // `syntax.isolation` (E7i): "none" parses here, as before;
+                    // "process" sends the parse to the buffer's unit.
+                    let mode = isolation_mode(isolation.as_deref());
+                    if mode != crate::parse_isolation::Isolation::Native {
+                        let job = isolated_job(
+                            &s,
+                            id.0,
+                            &handle,
+                            deadline_ms,
+                            mode,
+                            (unit_mb, total_mb, recycle_mb),
+                        );
+                        let job_id = rt.dispatch_isolated_parse(job);
+                        s.record_parse_job(job_id, id.0);
+                        return Ok(job_id);
+                    }
                     let mut req = handle.make_request();
                     // Snapshot the alias map into the request so the worker can
                     // resolve dynamic fence names off the main thread (Q#IJ4).
@@ -8373,9 +8593,16 @@ pub fn install_parse(
     // tell the user once (E7h.2): `"installed"`, `"installed-cut"`
     // (installed, but the deadline dropped some injection layers),
     // `"deadline"` (the parse ran past `syntax.parse-deadline-ms` and was
-    // cancelled; the buffer keeps its tree and parses cold next),
-    // `"failed"` (the same, for any other failure), or `"none"` (the job
-    // is unknown or already installed; idempotent).
+    // cancelled; the buffer keeps its tree while no edit has moved its
+    // text, and parses cold next),
+    // `"limit"` and `"unavailable"` (E7i: a memory stop; no worker could
+    // start), `"stalled"` (E7i fix round 1: the parse returned but its unit
+    // took past its bound to install it), `"crashed"`, `"crash-stopped"` and `"held"` (E7i fix round
+    // 1: the worker crashed; it crashed for the last time and the buffer is
+    // no longer parsed; a parse refused for an earlier crash), `"killed"`
+    // (fix round 3: a `SIGKILL` the editor did not send), `"failed"`
+    // (the same, for any other failure), or `"none"` (the job is unknown or
+    // already installed; idempotent).
     {
         let s = syntax.clone();
         let rt = runtime.clone();
@@ -8389,30 +8616,51 @@ pub fn install_parse(
                 // or still-running id; that's a benign no-op.
                 let outcome = rt.take_result(job_id);
                 let Some(buf_id) = buf_id else {
-                    return Ok("none");
+                    return Ok(("none", None));
                 };
                 let Some(handle) = s.view(buf_id) else {
-                    return Ok("none");
+                    return Ok(("none", None));
                 };
                 let Some(bundle) = bundle else {
-                    return Ok(match outcome {
-                        Some(JobOutcome::Failed(msg)) => {
-                            handle.mark_unparsed();
-                            if syntax::is_deadline_message(&msg) {
-                                "deadline"
-                            } else {
-                                "failed"
-                            }
-                        }
-                        _ => "none",
-                    });
+                    let Some(JobOutcome::Failed(msg)) = outcome else {
+                        return Ok(("none", None));
+                    };
+                    handle.mark_unparsed();
+                    let (status, detail) = if syntax::is_deadline_message(&msg) {
+                        ("deadline", None)
+                    } else if crate::parse_isolation::is_limit_message(&msg) {
+                        ("limit", None)
+                    } else if crate::parse_isolation::is_stalled_message(&msg) {
+                        ("stalled", Some(msg))
+                    } else if crate::parse_isolation::is_unavailable_message(&msg) {
+                        ("unavailable", Some(msg))
+                    } else if crate::parse_isolation::is_killed_message(&msg) {
+                        ("killed", Some(msg))
+                    } else if let Some(status) = crate::parse_isolation::crash_status(&msg) {
+                        (status, Some(msg))
+                    } else {
+                        ("failed", None)
+                    };
+                    // Nothing installed, so the installed parse stays until
+                    // one does: until the back-off ends after a crash, never
+                    // once crashes stopped the parsing, and after a stop at
+                    // the deadline or the memory limit, or a kill, until a
+                    // parse finishes, which for a text that stops every
+                    // parse is as long as that text stays (E7i fix rounds 2
+                    // and 3).
+                    // Its spans are dropped rather than painted over text an
+                    // edit has moved. A deadline that cut only injected
+                    // layers installed a parse (`installed-cut` below),
+                    // which is current and keeps its spans.
+                    handle.drop_current(status == "crash-stopped");
+                    return Ok((status, detail));
                 };
                 let cut = bundle.layers_cut_by_deadline;
                 // Stage 2 (framing Q#IJ2): resolve each layer's highlight
                 // query on the main thread before install.
                 let resolved = s.resolve_layer_queries(&bundle);
                 handle.install(resolved);
-                Ok(if cut { "installed-cut" } else { "installed" })
+                Ok((if cut { "installed-cut" } else { "installed" }, None))
             })?,
         )?;
     }
@@ -8458,7 +8706,8 @@ pub fn install_parse(
                         id.0
                     )));
                 }
-                let overlay = SyntaxHighlightView::new(handle, theme);
+                let overlay =
+                    SyntaxHighlightView::new(handle, theme).with_interest(s.clone(), id.0);
                 win.push_overlay(Box::new(overlay));
                 Ok(true)
             })?,

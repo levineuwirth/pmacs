@@ -35,6 +35,8 @@ fuzzed() {
     case "$1" in
         Cargo.lock | Cargo.toml | .cargo/config.toml) return 0 ;;
         src/syntax.rs | src/bin/pmacs_grammar_fuzz.rs) return 0 ;;
+        # The table and run_parse, moved out of src/syntax.rs at E7i.
+        pmacs-syntax/*) return 0 ;;
         scripts/fuzz-grammars | scripts/grammar-fuzz-needed) return 0 ;;
         fuzz/* | vendor/* | builtin/queries/*) return 0 ;;
         .github/workflows/grammar-fuzz.yml) return 0 ;;

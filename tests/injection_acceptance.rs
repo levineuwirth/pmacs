@@ -80,15 +80,12 @@ fn lua_alias_override_resolves_on_async_parse() {
         .view(buf_id)
         .and_then(|h| h.current())
         .expect("settled bundle");
+    // Wherever the trees live (the buffer's parse worker, by default).
+    let layers = bundle.layer_languages();
     assert!(
-        bundle.layers.iter().any(|l| l.language_name == "rust"),
+        layers.iter().any(|l| l == "rust"),
         "the Lua-set `mydsl` alias resolved the fence to a rust child layer; \
-         layers: {:?}",
-        bundle
-            .layers
-            .iter()
-            .map(|l| l.language_name.as_str())
-            .collect::<Vec<_>>()
+         layers: {layers:?}"
     );
 }
 
@@ -124,7 +121,7 @@ fn sync_parse_now_resolves_alias() {
         .and_then(|h| h.current())
         .expect("installed bundle");
     assert!(
-        bundle.layers.iter().any(|l| l.language_name == "python"),
+        bundle.layer_languages().iter().any(|l| l == "python"),
         "the `py` fence resolved to python on the synchronous `_parse_now` path"
     );
 }

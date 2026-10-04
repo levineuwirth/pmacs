@@ -33,75 +33,12 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use pmacs_protocol::{BufferId, ByteRange};
-use tree_sitter::Node;
+use pmacs_syntax::fold::{line_at_offset, line_content_end, line_offsets as compute_line_offsets};
 
 use crate::buffer::{Buffer, BufferError, ViewId};
 use crate::rope::Edit;
 use crate::syntax::ParseTreeBundle;
 use crate::view::View;
-
-const OPEN_DELIMS: &[u8] = b"{[(";
-const CLOSE_DELIMS: &[u8] = b"}])";
-
-// ---------------------------------------------------------------------------
-// Line math (a self-contained copy of the `highlight.rs` scan — kept private
-// so the fold source has no cross-module coupling).
-// ---------------------------------------------------------------------------
-
-/// `out[n]` = start byte of line `n`; `out` always begins with `0`. The
-/// number of lines is `out.len()` (a trailing entry past the final `\n`
-/// is included, mirroring `highlight::compute_line_offsets`).
-fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(source.len() / 32 + 1);
-    out.push(0);
-    for (i, b) in source.iter().enumerate() {
-        if *b == b'\n' {
-            out.push(i as u32 + 1);
-        }
-    }
-    out
-}
-
-/// Index of the line containing byte `offset`.
-fn line_at_offset(line_offsets: &[u32], offset: u32) -> usize {
-    match line_offsets.binary_search(&offset) {
-        Ok(i) => i,
-        Err(i) => i.saturating_sub(1),
-    }
-}
-
-/// The byte offset just past line `row`'s last *visible* character — i.e.
-/// the position of the row's terminating `\n`, or `source.len()` for the
-/// final unterminated line. This is the "end of line" the stored range
-/// uses for both its head and tail.
-fn line_content_end(source: &[u8], line_offsets: &[u32], row: usize) -> u64 {
-    let start = line_offsets
-        .get(row)
-        .copied()
-        .unwrap_or(source.len() as u32) as usize;
-    let next = line_offsets
-        .get(row + 1)
-        .copied()
-        .unwrap_or(source.len() as u32) as usize;
-    let mut end = next.min(source.len());
-    if end > start && source[end - 1] == b'\n' {
-        end -= 1;
-    }
-    end as u64
-}
-
-/// True iff line `row`'s first non-whitespace byte is a closing delimiter
-/// (`}`, `)`, `]`) — the closer-aware tail test.
-fn line_starts_with_closer(source: &[u8], line_offsets: &[u32], row: usize) -> bool {
-    let Some(&ls) = line_offsets.get(row) else {
-        return false;
-    };
-    let mut i = ls as usize;
-    while i < source.len() && (source[i] == b' ' || source[i] == b'\t') {
-        i += 1;
-    }
-    i < source.len() && CLOSE_DELIMS.contains(&source[i])
-}
 
 // ---------------------------------------------------------------------------
 // FoldStore — the per-buffer set of collapsed ranges.
@@ -385,8 +322,14 @@ impl FoldRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Structural fold source.
+// Structural fold source. The walk itself is `pmacs_syntax::fold`, which
+// runs where the tree is: over an in-process bundle here, or inside the
+// buffer's parse unit, which answers it as a request (E7i).
 // ---------------------------------------------------------------------------
+
+fn to_range((start, end): (u64, u64)) -> ByteRange {
+    ByteRange { start, end }
+}
 
 /// The innermost foldable region at `pos`, or `None` — the fold target the
 /// data-API `toggle` and a bare "fold this" use.
@@ -397,166 +340,41 @@ pub fn fold_target_at(bundle: &ParseTreeBundle, pos: u64) -> Option<ByteRange> {
 
 /// Every foldable region enclosing `pos`, **innermost first**. The
 /// state-aware commands walk this list against the store to decide what to
-/// close (innermost open) or open (outermost closed).
+/// close (innermost open) or open (outermost closed). Empty when the
+/// bundle's parse unit cannot answer; [`try_candidates_at`] says so.
 #[must_use]
 pub fn candidates_at(bundle: &ParseTreeBundle, pos: u64) -> Vec<ByteRange> {
-    let source: &[u8] = &bundle.source;
-    let line_offsets = compute_line_offsets(source);
-    let Some(node) = innermost_named_node(bundle, pos) else {
-        return Vec::new();
+    try_candidates_at(bundle, pos).unwrap_or_default()
+}
+
+/// [`candidates_at`], or `None` when the bundle's tree lives in a parse
+/// unit that cannot answer now.
+#[must_use]
+pub fn try_candidates_at(bundle: &ParseTreeBundle, pos: u64) -> Option<Vec<ByteRange>> {
+    let found = match bundle.isolated.as_ref() {
+        Some(isolated) => isolated.fold_candidates(pos)?,
+        None => pmacs_syntax::fold::candidates_at(bundle, pos),
     };
-    let mut out = Vec::new();
-    let mut cur = Some(node);
-    while let Some(n) = cur {
-        if let Some(r) = fold_from_node(n, source, &line_offsets)
-            && !out.contains(&r)
-        {
-            out.push(r);
-        }
-        cur = n.parent();
-    }
-    out
+    Some(found.into_iter().map(to_range).collect())
 }
 
 /// The top-level foldable regions in the buffer — what `fold.close-all`
 /// collapses (Emacs `hs-hide-all`: top level only, nested not auto-folded).
+/// Empty when the bundle's parse unit cannot answer.
 #[must_use]
 pub fn top_level_fold_targets(bundle: &ParseTreeBundle) -> Vec<ByteRange> {
-    let source: &[u8] = &bundle.source;
-    let line_offsets = compute_line_offsets(source);
-    let root = bundle.root_tree().root_node();
-    let mut out = Vec::new();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        if let Some(r) = fold_from_node(child, source, &line_offsets)
-            && !out.contains(&r)
-        {
-            out.push(r);
-        }
-    }
-    out
+    try_top_level_fold_targets(bundle).unwrap_or_default()
 }
 
-/// The innermost named node at `pos`, resolved through injection layers:
-/// the deepest layer whose root span covers `pos` wins (a fenced code block
-/// inside markdown resolves to the inner block, not the markdown node).
-fn innermost_named_node(bundle: &ParseTreeBundle, pos: u64) -> Option<Node<'_>> {
-    let p = pos as usize;
-    let mut best: Option<&crate::syntax::Layer> = None;
-    for layer in &bundle.layers {
-        let root = layer.tree.root_node();
-        if root.start_byte() <= p && p <= root.end_byte() {
-            best = match best {
-                Some(b) if b.depth >= layer.depth => Some(b),
-                _ => Some(layer),
-            };
-        }
-    }
-    best?.tree.root_node().named_descendant_for_byte_range(p, p)
-}
-
-/// Compute the fold range a single node yields, or `None` if it is not a
-/// foldable structure (< 2 source lines, no block-like body, or a
-/// normalized interior with < 1 hidden line).
-fn fold_from_node(n: Node<'_>, source: &[u8], line_offsets: &[u32]) -> Option<ByteRange> {
-    // Match condition: the node spans >= 2 source lines.
-    if n.end_position().row <= n.start_position().row {
-        return None;
-    }
-    let (b, introduced) = resolve_body(n, source)?;
-
-    let b_start_row = b.start_position().row;
-    let b_end_row = b.end_position().row;
-    let b_start_byte = b.start_byte();
-    if b_start_byte >= source.len() {
-        return None;
-    }
-    let is_brace = OPEN_DELIMS.contains(&source[b_start_byte]);
-
-    // Head line = the line immediately above the first hidden line. For a
-    // brace body that is the `{` line (the introducer's own line, or the
-    // `) -> bool {` line when a signature wraps). For an *introduced*
-    // delimiter-less body (a Python `block`) the introducer's header ends
-    // on the line above, so it is `b_start_row - 1`.
-    let head_row = if is_brace {
-        b_start_row
-    } else if introduced && b_start_row > 0 {
-        b_start_row - 1
-    } else {
-        b_start_row
+/// [`top_level_fold_targets`], or `None` when the bundle's tree lives in a
+/// parse unit that cannot answer now.
+#[must_use]
+pub fn try_top_level_fold_targets(bundle: &ParseTreeBundle) -> Option<Vec<ByteRange>> {
+    let found = match bundle.isolated.as_ref() {
+        Some(isolated) => isolated.top_level_folds()?,
+        None => pmacs_syntax::fold::top_level_targets(bundle),
     };
-
-    // Tail: a closing-delimiter line stays visible (`} else {`); a
-    // delimiter-less body hides through its last line.
-    let last_hidden_row = if line_starts_with_closer(source, line_offsets, b_end_row) {
-        if b_end_row == 0 {
-            return None;
-        }
-        b_end_row - 1
-    } else {
-        b_end_row
-    };
-
-    // Foldability = the normalized interior has >= 1 hidden line.
-    if last_hidden_row < head_row + 1 {
-        return None;
-    }
-    let start = line_content_end(source, line_offsets, head_row);
-    let end = line_content_end(source, line_offsets, last_hidden_row);
-    if end <= start {
-        return None;
-    }
-    Some(ByteRange { start, end })
-}
-
-/// Resolve the interior-defining body `B` and whether it is *introduced*
-/// (its parent is an introducer whose body field is `B`). If `n` is itself
-/// a body, use it; if it is an introducer with a block-like body child,
-/// descend to that child (Q#FD1 step 2 — matching/`close-all` association).
-fn resolve_body<'tree>(n: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, bool)> {
-    if is_body_kind(n, source) {
-        return Some((n, is_introduced(n)));
-    }
-    if let Some(b) = body_child(n)
-        && is_body_kind(b, source)
-    {
-        return Some((b, true));
-    }
-    None
-}
-
-fn body_child(n: Node) -> Option<Node> {
-    n.child_by_field_name("body")
-        .or_else(|| n.child_by_field_name("consequence"))
-}
-
-fn is_introduced(n: Node<'_>) -> bool {
-    if let Some(p) = n.parent()
-        && let Some(b) = body_child(p)
-    {
-        return b.id() == n.id();
-    }
-    false
-}
-
-/// A node is a fold *body* if it opens with a bracket delimiter (a brace
-/// body) or is a grammar block node (an indentation body). The delimiter
-/// probe generalizes across grammars without a per-language kind list.
-fn is_body_kind(n: Node<'_>, source: &[u8]) -> bool {
-    let sb = n.start_byte();
-    if sb < source.len() && OPEN_DELIMS.contains(&source[sb]) {
-        return true;
-    }
-    matches!(
-        n.kind(),
-        "block"
-            | "statement_block"
-            | "declaration_list"
-            | "field_declaration_list"
-            | "enum_variant_list"
-            | "block_mapping"
-            | "block_sequence"
-    ) || n.kind().ends_with("_body")
+    Some(found.into_iter().map(to_range).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +385,12 @@ fn is_body_kind(n: Node<'_>, source: &[u8]) -> bool {
 /// Close the innermost still-open foldable region at `p`; returns the newly
 /// folded range. Repeated calls walk outward.
 pub fn close_at(store: &mut FoldStore, bundle: &ParseTreeBundle, p: u64) -> Option<ByteRange> {
-    for c in candidates_at(bundle, p) {
+    close_among(store, &candidates_at(bundle, p))
+}
+
+/// [`close_at`] over candidates already found.
+pub fn close_among(store: &mut FoldStore, candidates: &[ByteRange]) -> Option<ByteRange> {
+    for &c in candidates {
         if !store.contains_exact(c) {
             store.insert(c);
             return Some(c);
@@ -602,9 +425,13 @@ pub enum CycleOutcome {
 /// close the innermost open one; once all are closed, one more press opens
 /// them all. Every press has a visible effect (Q#FD4/R3-2).
 pub fn cycle_at(store: &mut FoldStore, bundle: &ParseTreeBundle, p: u64) -> CycleOutcome {
-    let candidates = candidates_at(bundle, p);
+    cycle_among(store, &candidates_at(bundle, p), p)
+}
+
+/// [`cycle_at`] over candidates already found.
+pub fn cycle_among(store: &mut FoldStore, candidates: &[ByteRange], p: u64) -> CycleOutcome {
     if candidates.iter().any(|c| !store.contains_exact(*c)) {
-        for c in &candidates {
+        for c in candidates {
             if !store.contains_exact(*c) {
                 store.insert(*c);
                 return CycleOutcome::Closed(*c);
@@ -633,10 +460,15 @@ pub enum ToggleOutcome {
 /// Data-API `toggle`: unfold if a stored fold contains `pos`, else fold the
 /// innermost tree target at `pos`.
 pub fn toggle_at(store: &mut FoldStore, bundle: &ParseTreeBundle, p: u64) -> ToggleOutcome {
+    toggle_among(store, &candidates_at(bundle, p), p)
+}
+
+/// [`toggle_at`] over candidates already found.
+pub fn toggle_among(store: &mut FoldStore, candidates: &[ByteRange], p: u64) -> ToggleOutcome {
     if !store.containing(p).is_empty() {
         return ToggleOutcome::Unfolded(store.unfold_containing(p));
     }
-    match fold_target_at(bundle, p) {
+    match candidates.first().copied() {
         Some(t) => {
             store.insert(t);
             ToggleOutcome::Folded(t)

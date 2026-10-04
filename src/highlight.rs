@@ -346,6 +346,10 @@ struct HighlightCache {
     /// Per-row first-byte offsets into `bundle.source`. `Vec<u32>`
     /// because pmacs files cap at 4 GiB.
     line_offsets: Vec<u32>,
+    /// E7i: for a tree in a parse unit, the byte ranges `layers` covers
+    /// (what the grid has shown of this parse); empty in-process, where
+    /// `layers` covers the whole file.
+    covered: Vec<(u32, u32)>,
 }
 
 impl HighlightCache {
@@ -354,6 +358,7 @@ impl HighlightCache {
             bundle: None,
             layers: Vec::new(),
             line_offsets: Vec::new(),
+            covered: Vec::new(),
         }
     }
 }
@@ -367,6 +372,9 @@ pub struct SyntaxHighlightView {
     parse: ParseViewHandle,
     theme: ThemeHandle,
     cache: HighlightCache,
+    /// E7i: where the grid declares what it shows, so the buffer's next
+    /// isolated parse returns spans for it, as the semantic path does.
+    interest: Option<(crate::syntax::SharedSyntaxRegistry, crate::buffer::BufferId)>,
 }
 
 impl SyntaxHighlightView {
@@ -381,7 +389,20 @@ impl SyntaxHighlightView {
             parse,
             theme,
             cache: HighlightCache::empty(),
+            interest: None,
         }
+    }
+
+    /// Declare what the grid shows of `buffer` to `registry`, which an
+    /// isolated parse reads its interest from (E7i).
+    #[must_use]
+    pub fn with_interest(
+        mut self,
+        registry: crate::syntax::SharedSyntaxRegistry,
+        buffer: crate::buffer::BufferId,
+    ) -> Self {
+        self.interest = Some((registry, buffer));
+        self
     }
 
     /// Test helper: total cached highlight spans across all layers.
@@ -394,8 +415,12 @@ impl SyntaxHighlightView {
     /// differs from the cached one. No-op when the bundle pointer
     /// is unchanged --- the steady-state cost between parses. Rebuilds
     /// spans for every layer that carries a highlight query.
-    fn refresh_cache_if_stale(&mut self) {
+    fn refresh_cache_if_stale(&mut self, viewport: &Viewport<'_>) {
         let Some(bundle) = self.parse.current() else {
+            // E7i fix round 2: a parse dropped after its worker crashed
+            // (`ParseViewHandle::drop_current`) takes its spans with it;
+            // before the first parse the cache is empty already.
+            self.cache = HighlightCache::empty();
             return;
         };
         let stale = self
@@ -403,6 +428,10 @@ impl SyntaxHighlightView {
             .bundle
             .as_ref()
             .is_none_or(|prev| !Arc::ptr_eq(prev, &bundle));
+        if bundle.isolated.is_some() {
+            self.refresh_isolated(bundle, stale, viewport);
+            return;
+        }
         if !stale {
             return;
         }
@@ -437,6 +466,64 @@ impl SyntaxHighlightView {
             bundle: Some(bundle),
             layers,
             line_offsets,
+            covered: Vec::new(),
+        };
+    }
+
+    /// E7i: a tree held by a parse unit is read for what the grid shows,
+    /// not the whole file. The visible bytes are declared as the buffer's
+    /// interest, so the next parse returns their spans with it; the spans
+    /// are taken from what came back with this parse, or asked of the unit
+    /// when the view has moved past them. While the unit cannot answer,
+    /// the spans the grid has stay, and the next render asks again.
+    fn refresh_isolated(
+        &mut self,
+        bundle: Arc<ParseTreeBundle>,
+        stale: bool,
+        viewport: &Viewport<'_>,
+    ) {
+        let Some(isolated) = bundle.isolated.clone() else {
+            return;
+        };
+        let line_offsets = if stale {
+            compute_line_offsets(&bundle.source)
+        } else {
+            std::mem::take(&mut self.cache.line_offsets)
+        };
+        let want = visible_bytes(&line_offsets, bundle.source.len(), viewport);
+        if let Some((registry, buffer)) = self.interest.as_ref() {
+            registry.note_interest(*buffer, (want.start as u32, want.end as u32));
+        }
+        let covered = !stale
+            && self
+                .cache
+                .covered
+                .iter()
+                .any(|&(s, e)| s as usize <= want.start && want.end <= e as usize);
+        if covered {
+            self.cache.line_offsets = line_offsets;
+            return;
+        }
+        let Some(set) = isolated.spans_for(want) else {
+            if !stale {
+                self.cache.line_offsets = line_offsets;
+            }
+            return;
+        };
+        let layers = set
+            .layers
+            .iter()
+            .filter(|layer| !layer.spans.is_empty())
+            .map(|layer| LayerSpans {
+                spans: layer.spans.clone(),
+                capture_names: layer.capture_names.clone(),
+            })
+            .collect();
+        self.cache = HighlightCache {
+            bundle: Some(bundle),
+            layers,
+            line_offsets,
+            covered: set.covered.clone(),
         };
     }
 
@@ -457,7 +544,7 @@ impl View for SyntaxHighlightView {
     }
 
     fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        self.refresh_cache_if_stale();
+        self.refresh_cache_if_stale(&viewport);
         let Some(bundle) = self.cache.bundle.clone() else {
             return;
         };
@@ -551,6 +638,26 @@ impl View for SyntaxHighlightView {
 /// `out[0] == 0` always; `out.len() == number of lines`. A trailing
 /// newline produces one extra empty line, matching
 /// [`crate::text_view::TextView`]'s convention.
+/// The bytes a grid viewport shows: from its first line to the end of the
+/// line on its last row, folded lines between included.
+fn visible_bytes(
+    line_offsets: &[u32],
+    source_len: usize,
+    viewport: &Viewport<'_>,
+) -> std::ops::Range<usize> {
+    if line_offsets.is_empty() {
+        return 0..source_len;
+    }
+    let start_line = line_at_offset(line_offsets, viewport.buffer_start as u32) as usize;
+    let last_row = viewport.cell_size.rows.saturating_sub(1);
+    let last_line = viewport.line_at_row_offset(start_line, last_row);
+    let start = line_offsets[start_line.min(line_offsets.len() - 1)] as usize;
+    let end = line_offsets
+        .get(last_line + 1)
+        .map_or(source_len, |&o| o as usize);
+    start.min(source_len)..end.clamp(start.min(source_len), source_len)
+}
+
 fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
     let mut out = Vec::with_capacity(source.len() / 32 + 1);
     out.push(0);
