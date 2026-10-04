@@ -8,9 +8,12 @@
 //! Each row drives a real worker, the debug build's, through an
 //! in-process editor on a real file, and reads the grid `paint_frame`
 //! paints, the TUI's own frame, and the semantic frames the GPU frontend
-//! receives. The stops are real: the repository's own markdown with
-//! #301's nested openers or #296's underscore paragraph put in it, the
-//! regress inputs every fuzz arm replays (`fuzz/regress/markdown/`).
+//! receives; the last runs a daemon, whose watchdog the in-process host
+//! cannot be made to use. The stops are real: the repository's own
+//! markdown with #301's nested openers or #296's underscore paragraph put
+//! in it, the regress inputs every fuzz arm replays
+//! (`fuzz/regress/markdown/`); the kills are `kill -KILL`, as the
+//! system's OOM killer sends it.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -708,4 +711,454 @@ fn e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans() {
         "a parse that installed carries no mark: {:?}",
         mode_line(&cells)
     );
+}
+
+/// A Rust file of `n` functions, a keyword at the head of every line.
+fn rust_text(n: usize) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for i in 0..n {
+        let _ = write!(text, "fn f{i}() {{\n    let x = {i};\n}}\n");
+    }
+    text
+}
+
+/// `kill -KILL <pid>`, as the system's out-of-memory killer sends it.
+fn kill_from_outside(pid: &str) {
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", pid])
+        .status()
+        .expect("kill");
+    assert!(killed.success(), "killed the worker {pid} from outside");
+}
+
+/// What `*errors*` says of kills and of crashes.
+fn told_killed(state: &EditorState) -> usize {
+    errors_text(state)
+        .matches("killed from outside pmacs (SIGKILL)")
+        .count()
+}
+
+/// Fix round 3, item 2: a worker killed by a `SIGKILL` the editor did not
+/// send died of something outside pmacs (under memory pressure the
+/// system's OOM killer takes the largest processes first, and the parse
+/// workers are among them), not of its grammar, which cannot raise
+/// `SIGKILL`. At `db697a2` it was told "rust crashed (SIGKILL)", backed off
+/// and counted toward the three-crash stop, so three such kills ended the
+/// buffer's highlighting for good. Here the idle worker is killed three
+/// times, each found by the parse a buffer switch dispatches: each is told
+/// as a kill, counts no crash and holds nothing, so the parse the switch
+/// requested after it starts a worker at once and installs, as does the
+/// next edit's; the buffer never stops.
+#[test]
+#[allow(clippy::too_many_lines)] // one user's path, kill by kill
+fn e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer() {
+    let _one = one_editor();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("a.rs");
+    std::fs::write(&path, rust_text(20)).expect("a.rs");
+    let other = dir.path().join("notes.txt");
+    std::fs::write(&other, "plain\n").expect("notes.txt");
+    let mut state = EditorState::new_with_roots(&common::iso::roots());
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config = {{}}\n\
+             pmacs.config.set('syntax.isolation', 'process')\n\
+             pmacs.config.set('syntax.parse-unit-path', {:?})\n\
+             pmacs.theme.merge {{ keyword = {{ fg = {{ 0x7b, 0x1f, 0xa2 }} }} }}\n\
+             pmacs.buffer.find_or_open({:?})",
+            real_unit().display().to_string(),
+            path.display().to_string()
+        ),
+    );
+    wait_installed(&mut state, "the first parse installed");
+    let mut rows = Vec::new();
+    for kill in 1..=3 {
+        let r = report(&state);
+        let pid = field(&r, "unit").trim_start_matches("pid_").to_owned();
+        assert!(!pid.is_empty(), "kill {kill}: a worker lives: {r}");
+        kill_from_outside(&pid);
+        std::thread::sleep(Duration::from_millis(200));
+        // A switch away and back dispatches a parse with no edit, which
+        // finds the worker gone.
+        exec(
+            &state,
+            &format!(
+                "pmacs.window.switch_buffer(pmacs.buffer.find_or_open({:?}))\n\
+                 pmacs.window.switch_buffer(pmacs.buffer.find_or_open({:?}))",
+                other.display().to_string(),
+                path.display().to_string()
+            ),
+        );
+        let deaths = kill.to_string();
+        ready::tick_until(&mut state, "the kill found", Duration::from_mins(1), |s| {
+            let r = report(s);
+            if field(&r, "deaths") == deaths && field(&r, "busy") == "false" {
+                Probe::Ready(())
+            } else {
+                Probe::Pending(r)
+            }
+        });
+        quiesce(&mut state);
+        let found = report(&state);
+        let found_line = mode_line(&paint(&state));
+        // The next edit: a line entered at the head.
+        exec(&state, "pmacs.editor.goto_byte(0)");
+        type_keys(&mut state, "\n");
+        let edited = Instant::now();
+        let installed = ready::tick_until(
+            &mut state,
+            "the edit's parse installs",
+            Duration::from_mins(1),
+            |s| {
+                let r = report(s);
+                let current = eval(
+                    s,
+                    "local b = pmacs.window.buffer() local t = pmacs.parse.tree(b) \
+                     return tostring(t ~= nil and t:source_len() == b:len())",
+                );
+                if current == "true" && field(&r, "busy") == "false" {
+                    Probe::Ready(r)
+                } else {
+                    Probe::Pending(r)
+                }
+            },
+        );
+        let install_ms = edited.elapsed().as_millis();
+        quiesce(&mut state);
+        let cells = paint(&state);
+        say(&format!(
+            "kill {kill}: found {found}, mode line {found_line:?}; the edit's parse installed in \
+             {install_ms} ms: {installed}, mode line {:?}",
+            mode_line(&cells)
+        ));
+        rows.push((found, found_line, install_ms, installed, mode_line(&cells)));
+    }
+    let errors = errors_text(&state);
+    say(&format!("*errors*:\n{errors}"));
+
+    for (i, (found, found_line, install_ms, installed, line)) in rows.iter().enumerate() {
+        let kill = i + 1;
+        assert_eq!(
+            (
+                field(found, "death").as_str(),
+                field(found, "crashes").as_str(),
+                field(found, "held").as_str(),
+                field(found, "stopped").as_str()
+            ),
+            ("killed", "0", "false", "false"),
+            "kill {kill} is told as a kill, not a crash: no streak, no back-off: {found}"
+        );
+        assert!(
+            field(found, "unit").starts_with("pid_") && !found_line.contains("parse:"),
+            "kill {kill}: nothing held the switch's follow-up parse, which started a worker \
+             at once and installed (the mark is witnessed where no parse follows, below): \
+             {found}, {found_line:?}"
+        );
+        assert!(
+            *install_ms < 900,
+            "kill {kill}: the next edit's parse starts a worker at once, not after a back-off \
+             ({install_ms} ms): {installed}"
+        );
+        assert!(
+            !line.contains("parse:"),
+            "kill {kill}: the install clears the mark: {line:?}"
+        );
+    }
+    assert!(
+        !errors.contains("crashed"),
+        "no kill is told as a crash: {errors}"
+    );
+    assert_eq!(
+        told_killed(&state),
+        3,
+        "each kill told once, the install between them re-arming the notice: {errors}"
+    );
+    assert!(
+        errors.contains("not a crash of rust"),
+        "the notice clears the grammar: {errors}"
+    );
+}
+
+/// Fix round 3, item 2: the editor's own kills send `SIGKILL` too, and
+/// know they did, so the witness tells the two sources apart rather than
+/// two signals. #296's paragraph is pasted at the head of a real markdown
+/// file under a 20 s deadline, and each time its parse grows past 64 MiB
+/// the worker is killed from outside, as the system's OOM killer would
+/// take it, three times in a row with no parse installed between: each is
+/// told as a kill (once), its moved spans dropped, and none counts toward
+/// the three-crash stop, which at `db697a2` the third reached. Then under
+/// a 300 ms deadline the editor kills the next worker itself
+/// (`Death::Time`, a `SIGKILL` it sent): told as the deadline it is. Once
+/// the paragraph is out a parse installs.
+#[test]
+#[allow(clippy::too_many_lines)] // one user's path, kill by kill
+fn e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart() {
+    let _one = one_editor();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut state, _path) = editor_on_notes(
+        dir.path(),
+        &real_unit(),
+        "pmacs.config.set('syntax.parse-deadline-ms', 20000)",
+    );
+    let before_cells = paint(&state);
+    let before = marks(&before_cells);
+    let paragraph = underscores(14) + "\n";
+    exec(
+        &state,
+        &format!(
+            "pmacs.editor.goto_byte(0)\n\
+             pmacs.window.buffer():insert(0, {paragraph:?})"
+        ),
+    );
+    let mut inserted = paragraph.len();
+    let settled = |state: &mut EditorState, deaths: usize, what: &str| {
+        let deaths = deaths.to_string();
+        ready::tick_until(state, what, Duration::from_mins(1), |s| {
+            let r = report(s);
+            if field(&r, "deaths") == deaths
+                && field(&r, "busy") == "false"
+                && field(&r, "pending") == "0"
+            {
+                Probe::Ready(())
+            } else {
+                Probe::Pending(r)
+            }
+        });
+        quiesce(state);
+    };
+    for kill in 1..=3 {
+        // The next edit dispatches the paragraph's parse.
+        type_keys(&mut state, "x");
+        inserted += 1;
+        let pid = ready::tick_until(
+            &mut state,
+            "the paragraph's parse grows past 64 MiB",
+            Duration::from_mins(1),
+            |s| {
+                let grown = eval(
+                    s,
+                    "local r = pmacs.parse._unit_report(pmacs.window.buffer()) \
+                     if r and r.busy and (r.memory or 0) > 64 * 1024 * 1024 then \
+                       return (r.unit:match('%d+')) end return ''",
+                );
+                if grown.is_empty() {
+                    Probe::Pending(report(s))
+                } else {
+                    Probe::Ready(grown)
+                }
+            },
+        );
+        kill_from_outside(&pid);
+        settled(&mut state, kill, "the kill found");
+        let found = report(&state);
+        let cells = paint(&state);
+        let line = mode_line(&cells);
+        let stale = stale_cells(&before, &marks(&cells), shift(&before_cells, &cells));
+        say(&format!(
+            "kill {kill} from outside at 64 MiB: {found}, mode line {line:?}, stale {stale}"
+        ));
+        assert_eq!(
+            (
+                field(&found, "death").as_str(),
+                field(&found, "crashes").as_str(),
+                field(&found, "held").as_str(),
+                field(&found, "stopped").as_str()
+            ),
+            ("killed", "0", "false", "false"),
+            "kill {kill}: an outside SIGKILL is a kill, not a crash: no streak, no back-off, no stop"
+        );
+        assert!(
+            line.contains("parse:killed") && stale == 0,
+            "kill {kill}: the kill drops the moved spans and marks the buffer: {line:?}, {stale} stale"
+        );
+    }
+
+    // The editor's own kill: the deadline's, 100 ms past 300 ms.
+    exec(&state, "pmacs.config.set('syntax.parse-deadline-ms', 300)");
+    type_keys(&mut state, "x");
+    inserted += 1;
+    settled(&mut state, 4, "the deadline's kill");
+    let own = report(&state);
+    let own_line = mode_line(&paint(&state));
+    say(&format!(
+        "killed by the deadline: {own}, mode line {own_line:?}"
+    ));
+    assert_eq!(
+        (
+            field(&own, "death").as_str(),
+            field(&own, "crashes").as_str()
+        ),
+        ("time", "0"),
+        "the editor's own SIGKILL at the deadline stays the deadline's: {own}"
+    );
+    assert!(
+        own_line.contains("parse:timeout"),
+        "and is marked as one: {own_line:?}"
+    );
+
+    // The paragraph out: a parse installs, and the mark goes.
+    exec(
+        &state,
+        &format!(
+            "local b = pmacs.window.buffer()\n\
+             b:delete(0, {inserted})\n\
+             pmacs.parse._dispatch(b, 'markdown')"
+        ),
+    );
+    wait_installed(&mut state, "a parse installs once the paragraph is out");
+    quiesce(&mut state);
+    let cells = paint(&state);
+    let errors = errors_text(&state);
+    say(&format!(
+        "the paragraph out: {}, mode line {:?}\n*errors*:\n{errors}",
+        report(&state),
+        mode_line(&cells)
+    ));
+    assert_eq!(
+        marked(&marks(&cells)),
+        marked(&before),
+        "the notes are painted again"
+    );
+    assert!(
+        !mode_line(&cells).contains("parse:"),
+        "the install clears the mark: {:?}",
+        mode_line(&cells)
+    );
+    assert!(
+        told_killed(&state) == 1
+            && errors.contains("ran past syntax.parse-deadline-ms")
+            && !errors.contains("crashed"),
+        "the three kills told once, the deadline once, no crash: {errors}"
+    );
+}
+
+/// Fix round 3, item 2, the two sources through one door. A worker that
+/// dies under the editor's own kill and one killed from outside both die
+/// by `SIGKILL`, and both reach `ProcessUnit::death` when the parse thread
+/// finds the worker gone: the editor's watchdog kills the largest worker
+/// from its own thread once the units pass their total, as it does where
+/// no cgroup holds them (macOS, an undelegated Linux; the hook keeps the
+/// daemon from making one here). One daemon holds three buffers of #296's
+/// paragraph, which the watchdog stops at a 256 MiB total, and a Rust
+/// buffer whose idle worker is then killed from outside and found by its
+/// next parse. The watchdog's kills are the total's; the outside one is a
+/// kill, and no crash is counted.
+#[test]
+#[allow(clippy::too_many_lines)] // one daemon's script and its reading
+fn e7i_review3_the_watchdog_s_sigkill_and_an_outside_one_reach_death_and_are_told_apart() {
+    use std::fmt::Write as _;
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let mut opens = String::new();
+    for i in 0..3 {
+        let path = dir.join(format!("v{i}.md"));
+        std::fs::write(&path, underscores(28)).expect("victim");
+        let _ = writeln!(
+            opens,
+            "victims[#victims + 1] = pmacs.buffer.find_or_open({:?})",
+            path.display().to_string()
+        );
+    }
+    let typed = dir.join("typed.rs");
+    std::fs::write(&typed, rust_text(5)).expect("typed.rs");
+    let report = dir.join("report.txt");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         pmacs.config.set('syntax.parse-memory-limit-mb', 2048)\n\
+         pmacs.config.set('syntax.parse-memory-total-mb', 256)\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 20000)\n\
+         local typed = pmacs.buffer.find_or_open({typed:?})\n\
+         local victims = {{}}\n\
+         {opens}\
+         local function write(text)\n\
+           local f = assert(io.open({report:?}, 'w')); f:write(text); f:close()\n\
+         end\n\
+         pmacs.async(function()\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           local function wait(ok)\n\
+             while not ok() do\n\
+               if pmacs.editor.monotonic_ms() - t0 > 60000 then return false end\n\
+               pmacs.workers.sleep(50):await()\n\
+             end\n\
+             return true\n\
+           end\n\
+           local function settled(b, deaths)\n\
+             local r = pmacs.parse._unit_report(b)\n\
+             return r and not r.busy and r.deaths >= deaths\n\
+           end\n\
+           if not wait(function()\n\
+             local deaths, busy = 0, false\n\
+             for _, v in ipairs(victims) do\n\
+               local r = pmacs.parse._unit_report(v)\n\
+               if r then deaths = deaths + r.deaths; busy = busy or r.busy end\n\
+             end\n\
+             return deaths >= 1 and not busy\n\
+           end) then write('the watchdog stopped nothing\\n') return end\n\
+           if not wait(function() local r = pmacs.parse._unit_report(typed); return r and r.unit ~= '' and not r.busy end) then\n\
+             write('the Rust buffer has no worker\\n') return\n\
+           end\n\
+           local pid = pmacs.parse._unit_report(typed).unit:match('%d+')\n\
+           local p = io.popen('kill -KILL ' .. pid .. '; echo $?'); local code = p:read('*l'); p:close()\n\
+           pmacs.workers.sleep(200):await()\n\
+           typed:insert(0, '// a line\\n')\n\
+           pmacs.parse._dispatch(typed, 'rust')\n\
+           if not wait(function() return settled(typed, 1) end) then write('the kill was never found\\n') return end\n\
+           local lines = {{}}\n\
+           for _, v in ipairs(victims) do\n\
+             local r = pmacs.parse._unit_report(v)\n\
+             lines[#lines + 1] = string.format('victim crashes=%d death=%s', r.crashes, tostring(r.last_death))\n\
+           end\n\
+           local r = pmacs.parse._unit_report(typed)\n\
+           lines[#lines + 1] = string.format('typed kill=%s crashes=%d held=%s death=%s', code, r.crashes,\n\
+             tostring(r.held ~= nil), tostring(r.last_death))\n\
+           lines[#lines + 1] = 'report ' .. tostring(pmacs.parse._isolation_report())\n\
+           write(table.concat(lines, '\\n') .. '\\n')\n\
+         end)\n",
+        typed = typed.display().to_string(),
+        report = report.display().to_string(),
+    );
+    let mut daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
+        &[("PMACS_PARSE_UNIT_CGROUP", "off")],
+        &init,
+    );
+    let started = Instant::now();
+    let text = loop {
+        if let Ok(text) = std::fs::read_to_string(&report)
+            && text.ends_with('\n')
+        {
+            break text;
+        }
+        assert!(
+            started.elapsed() < Duration::from_mins(2),
+            "the daemon's report never came: {}",
+            std::fs::read_to_string(format!("{}.stderr.log", daemon.socket_path().display()))
+                .unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    say(&format!("one daemon, two sources:\n{text}"));
+    let victims: Vec<&str> = text.lines().filter(|l| l.starts_with("victim ")).collect();
+    let typed_line = text
+        .lines()
+        .find(|l| l.starts_with("typed "))
+        .unwrap_or_else(|| panic!("no Rust buffer's line: {text}"));
+    assert!(
+        victims
+            .iter()
+            .any(|l| l.contains("death=total:") && l.contains("(by watchdog)")),
+        "the watchdog's own SIGKILL is the total's: {text}"
+    );
+    assert!(
+        victims
+            .iter()
+            .all(|l| l.contains("crashes=0") && !l.contains("death=killed:")),
+        "no watchdog kill is told as an outside one or counted as a crash: {text}"
+    );
+    assert!(
+        typed_line.starts_with("typed kill=0 crashes=0 held=false death=killed: "),
+        "the outside SIGKILL is a kill, holds nothing and counts no crash: {typed_line}"
+    );
+    assert!(daemon.is_alive(), "the daemon outlived both");
 }

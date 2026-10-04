@@ -8599,7 +8599,8 @@ pub fn install_parse(
     // start), `"stalled"` (E7i fix round 1: the parse returned but its unit
     // took past its bound to install it), `"crashed"`, `"crash-stopped"` and `"held"` (E7i fix round
     // 1: the worker crashed; it crashed for the last time and the buffer is
-    // no longer parsed; a parse refused for an earlier crash), `"failed"`
+    // no longer parsed; a parse refused for an earlier crash), `"killed"`
+    // (fix round 3: a `SIGKILL` the editor did not send), `"failed"`
     // (the same, for any other failure), or `"none"` (the job is unknown or
     // already installed; idempotent).
     {
@@ -8633,6 +8634,8 @@ pub fn install_parse(
                         ("stalled", Some(msg))
                     } else if crate::parse_isolation::is_unavailable_message(&msg) {
                         ("unavailable", Some(msg))
+                    } else if crate::parse_isolation::is_killed_message(&msg) {
+                        ("killed", Some(msg))
                     } else if let Some(status) = crate::parse_isolation::crash_status(&msg) {
                         (status, Some(msg))
                     } else {
@@ -8641,9 +8644,10 @@ pub fn install_parse(
                     // Nothing installed, so the installed parse stays until
                     // one does: until the back-off ends after a crash, never
                     // once crashes stopped the parsing, and after a stop at
-                    // the deadline or the memory limit until a parse
-                    // finishes, which for a text that stops every parse is
-                    // as long as that text stays (E7i fix rounds 2 and 3).
+                    // the deadline or the memory limit, or a kill, until a
+                    // parse finishes, which for a text that stops every
+                    // parse is as long as that text stays (E7i fix rounds 2
+                    // and 3).
                     // Its spans are dropped rather than painted over text an
                     // edit has moved. A deadline that cut only injected
                     // layers installed a parse (`installed-cut` below),

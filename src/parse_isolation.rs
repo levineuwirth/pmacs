@@ -31,6 +31,9 @@
 //! row with no parse installed between them the buffer is not parsed again
 //! until it is killed and opened again, since every restart runs the same
 //! bytes (E7i review 1, Medium 1). The settle path tells the user once.
+//! A `SIGKILL` the editor did not send is not a crash: a grammar's defect
+//! cannot raise it, and the system's out-of-memory killer, which takes the
+//! largest processes first, sends it ([`Death::Killed`], E7i fix round 3).
 //!
 //! The buffer's previous parse survives the discard in the editor, as its
 //! text and its spans ([`IsolatedHandle`]); a read those spans do not
@@ -214,8 +217,9 @@ pub enum Death {
         /// What enforced it.
         by: Enforcer,
     },
-    /// It died on its own: by a signal, or an exit the editor did not ask
-    /// for. Most likely the grammar's C crashed running this text.
+    /// It died on its own: by a signal other than a `SIGKILL` from outside
+    /// ([`Self::Killed`]), or an exit the editor did not ask for. Most
+    /// likely the grammar's C crashed running this text.
     Crashed {
         /// The signal it died by, if it did.
         signal: Option<i32>,
@@ -228,6 +232,16 @@ pub enum Death {
         /// one (E7i fix round 2, review 2's Low 2); `None` for the root.
         layer: Option<String>,
     },
+    /// It was killed by a `SIGKILL` the editor did not send, its own
+    /// kills ([`ProcessUnit::kill_for`]) recording why before they signal,
+    /// and its cgroup's limit not reached: from outside pmacs, most likely
+    /// by the system's out-of-memory killer, which takes the largest
+    /// processes first, and a worker that parsed a large text is among
+    /// them (E7i fix round 3). Not a crash: a defect in a grammar's C
+    /// raises `SIGSEGV`, `SIGBUS`, `SIGABRT`, `SIGILL` or `SIGFPE`, never
+    /// `SIGKILL`, so it counts nothing toward the buffer's crash streak and
+    /// holds no parse back; the next one starts a fresh worker.
+    Killed,
     /// The editor ended it for another reason (its buffer was killed, the
     /// editor stopped, it answered out of turn).
     Ended(String),
@@ -267,6 +281,9 @@ impl Death {
                 limit >> 20
             ),
             Self::Crashed { .. } => format!("{CRASHED_MESSAGE}: {}", self.how()),
+            Self::Killed => format!(
+                "{KILLED_MESSAGE}: signal 9 (SIGKILL), which pmacs did not send; the system's out-of-memory killer, most likely"
+            ),
             Self::Ended(why) => format!("parse unit ended: {why}"),
             Self::Unavailable(why) => format!("{UNAVAILABLE_MESSAGE}: {why}"),
         }
@@ -329,6 +346,7 @@ impl Death {
             Self::Memory { .. } => "memory",
             Self::Total { .. } => "total",
             Self::Crashed { .. } => "crashed",
+            Self::Killed => "killed",
             Self::Ended(_) => "ended",
             Self::Unavailable(_) => "unavailable",
         }
@@ -376,6 +394,16 @@ pub const UNAVAILABLE_MESSAGE: &str = "parse unit unavailable";
 
 /// How the message of a parse whose worker crashed begins.
 pub const CRASHED_MESSAGE: &str = "parse unit crashed";
+
+/// How the message of a parse whose worker was killed from outside the
+/// editor begins ([`Death::Killed`]).
+pub const KILLED_MESSAGE: &str = "parse unit killed from outside pmacs";
+
+/// Whether a parse job's failure text is a worker killed from outside.
+#[must_use]
+pub fn is_killed_message(message: &str) -> bool {
+    message.starts_with(KILLED_MESSAGE)
+}
 
 /// How the message of the crash that ends a buffer's parsing begins: its
 /// [`MAX_CRASHES`]th in a row.
@@ -1410,7 +1438,9 @@ struct ProcessUnit {
     stderr: Arc<Mutex<String>>,
     limits: Limits,
     cgroup: Option<Cgroup>,
-    oom_before: u64,
+    /// Its cgroup's `memory.max` reached, as `memory.events` counted it
+    /// when the worker started.
+    limit_hits_before: u64,
     /// Why the editor killed it, when it did.
     killed: Mutex<Option<Death>>,
 }
@@ -1481,7 +1511,7 @@ impl ProcessUnit {
                 .map_err(|e| Death::Unavailable(e.to_string()))?;
         }
         let cgroup = cgroup.cloned();
-        let oom_before = cgroup.as_ref().map_or(0, Cgroup::oom_kills);
+        let limit_hits_before = cgroup.as_ref().map_or(0, Cgroup::limit_hits);
         let unit = Self {
             serial,
             held_by_cgroup,
@@ -1495,7 +1525,7 @@ impl ProcessUnit {
             stderr,
             limits: *limits,
             cgroup,
-            oom_before,
+            limit_hits_before,
             killed: Mutex::new(None),
         };
         // A worker from another build speaks another protocol: refuse it
@@ -1611,8 +1641,11 @@ impl ProcessUnit {
     /// Why the worker ended: the editor's own reason when it killed it,
     /// else read from its exit and its last words. The memory watch exits
     /// with [`pmacs_parse_unit::MEMORY_WATCH_EXIT`]; the cgroup's OOM killer
-    /// sends `SIGKILL`; a refused allocation under `RLIMIT_AS` makes
-    /// tree-sitter's or Rust's allocator abort (`SIGABRT`) after saying so.
+    /// sends `SIGKILL` once the cgroup's limit is reached; a refused
+    /// allocation under `RLIMIT_AS` makes tree-sitter's or Rust's allocator
+    /// abort (`SIGABRT`) after saying so. Any other `SIGKILL` came from
+    /// outside pmacs ([`Death::Killed`]): the editor's own kills are told
+    /// by the reason they record first, not by the signal, which they share.
     fn death(&self) -> Death {
         if let Some(why) = self.killed.lock().expect("kill reason poisoned").clone() {
             return why;
@@ -1634,12 +1667,20 @@ impl ProcessUnit {
                 overshoot: watch_overshoot(&stderr),
             };
         }
-        let oom_now = self.cgroup.as_ref().map_or(0, Cgroup::oom_kills);
-        if signal == Some(9) && oom_now > self.oom_before {
-            return Death::Total {
-                limit: self.limits.total_memory,
-                by: Enforcer::Cgroup,
-            };
+        if signal == Some(nix::sys::signal::Signal::SIGKILL as i32) {
+            // The kernel acting for the editor's own total: the workers'
+            // cgroup reached its `memory.max` while this worker lived.
+            // `memory.events` counts that as `oom`; its `oom_kill` counts a
+            // kill by any OOM killer of a process inside, the system's
+            // included, so it cannot tell the two apart.
+            let hits = self.cgroup.as_ref().map_or(0, Cgroup::limit_hits);
+            if hits > self.limit_hits_before {
+                return Death::Total {
+                    limit: self.limits.total_memory,
+                    by: Enforcer::Cgroup,
+                };
+            }
+            return Death::Killed;
         }
         if stderr.contains("failed to allocate")
             || stderr.contains("failed to reallocate")
@@ -2042,12 +2083,16 @@ impl Cgroup {
         line
     }
 
-    fn oom_kills(&self) -> u64 {
+    /// Times the cgroup's usage reached its `memory.max` and the kernel's
+    /// OOM killer was called for it (`oom` in `memory.events`; Linux's
+    /// `Documentation/admin-guide/cgroup-v2.rst`), which a kill by the
+    /// system's OOM killer does not count.
+    fn limit_hits(&self) -> u64 {
         std::fs::read_to_string(self.dir.join("memory.events"))
             .ok()
             .and_then(|t| {
                 t.lines()
-                    .find_map(|l| l.strip_prefix("oom_kill "))
+                    .find_map(|l| l.strip_prefix("oom "))
                     .and_then(|n| n.trim().parse().ok())
             })
             .unwrap_or(0)

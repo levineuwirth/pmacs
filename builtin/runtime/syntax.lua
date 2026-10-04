@@ -54,7 +54,10 @@ local parse_crash_warned = {}
 --   "stopped"  crashes stopped its parsing; never again until reopened;
 --   "timeout", "memory", "stalled"  stopped at the deadline, the memory
 --              limit or the bound on installing it; parsed again at the
---              next edit, which a text that stops every parse stops too.
+--              next edit, which a text that stops every parse stops too;
+--   "killed"   its worker was killed from outside pmacs (a SIGKILL the
+--              editor did not send, the system's OOM killer most likely);
+--              not a crash, so it holds nothing back: the next edit.
 -- The mode segment reads it, so the mark lasts as long as the state does,
 -- as E5.3's `LSP:!` does for a crashed server, and not until `*errors*` is
 -- read: a stopped buffer whose text an edit moved is painted plain
@@ -64,6 +67,9 @@ local parse_state = {}
 -- E7i fix round 1: buffers already told that a parse returned and its unit
 -- then ran past the bound on installing it; re-armed like the deadline's.
 local parse_stall_warned = {}
+-- E7i fix round 3: buffers already told that their worker was killed from
+-- outside; re-armed like the deadline's.
+local parse_kill_warned = {}
 
 -- E7h.2: a parse is bounded in time where tree-sitter calls its progress
 -- callback, which cancels a parse still running this long after it
@@ -721,8 +727,9 @@ pmacs.statusline.register {
 -- while it backs off and `parse:stopped` once its parsing stopped, which
 -- lasts until the buffer is killed. Fix round 3: a parse stopped at its
 -- deadline or its memory limit says so too, `parse:timeout` or
--- `parse:memory`, in a word of its own, since the next edit parses it
--- again where `parse:stopped` never does (`parse_state` lists them all).
+-- `parse:memory`, and a worker killed from outside `parse:killed`, each in
+-- a word of its own, since the next edit parses it again where
+-- `parse:stopped` never does (`parse_state` lists them all).
 -- The shape is E5.3's `LSP:!`, a mark read from the buffer's state rather
 -- than from the unread error, so reading `*errors*` does not end it. On
 -- the right, where a segment survives a long path on the left: right
@@ -833,10 +840,11 @@ local parse_retry_at = {}
 local RETRY_MARGIN_MS = 25
 
 -- E7i fix round 3: a parse stopped at its deadline, its memory limit or
--- the bound on installing it installed nothing, so the buffer keeps the
--- last parse only while no edit has moved its text, and is painted plain
--- once one has (`_install_settled` drops it); the next edit parses it
--- again. The mark says which stop, and a crash's stop outranks it.
+-- the bound on installing it, or killed from outside, installed nothing,
+-- so the buffer keeps the last parse only while no edit has moved its
+-- text, and is painted plain once one has (`_install_settled` drops it);
+-- the next edit parses it again. The mark says which stop, and a crash's
+-- stop outranks it.
 local AFTER_A_STOP =
   "the next edit parses it again, and until a parse finishes it is shown plain once an edit has moved its text"
 
@@ -923,6 +931,20 @@ pmacs._async.tick = function(...)
         parse_crash_warned[key] = true
         pmacs.error(crash_notice(key, b, report, detail), ERROR_LABEL)
       end
+    elseif key and status == "killed" then
+      -- E7i fix round 3 (review 3's first observation): a SIGKILL the
+      -- editor did not send came from outside it, the system's OOM killer
+      -- most likely, which takes the largest processes first, and the
+      -- parse workers are among them. No grammar raises SIGKILL, so it is
+      -- not told as a crash and counts nothing toward the crash stop.
+      mark_stop(key, "killed")
+      if not parse_kill_warned[key] then
+        parse_kill_warned[key] = true
+        local short, name = stop_names(key)
+        pmacs.error(string.format(
+          "syntax: parse worker killed from outside pmacs (SIGKILL) parsing %s, not a crash of %s: the system's out-of-memory killer, most likely; %s (%s)",
+          short, tostring(parse_lang_by_buffer[key]), AFTER_A_STOP, name), ERROR_LABEL)
+      end
     elseif key and status == "stalled" then
       -- E7i fix round 1 (review 1, Low 1): the parse returned inside the
       -- deadline and the unit then took past its own bound to install the
@@ -962,6 +984,7 @@ pmacs._async.tick = function(...)
       parse_state[key] = nil
       parse_retry_at[key] = nil
       parse_stall_warned[key] = nil
+      parse_kill_warned[key] = nil
       if status == "installed-cut" then
         if not parse_layers_cut_warned[key] then
           parse_layers_cut_warned[key] = true
