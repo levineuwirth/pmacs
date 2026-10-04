@@ -2951,6 +2951,29 @@ condition stands; #312 stays at one; #283 and R7 passed their rows, which is
 non-reproduction; #256, #282, #298, #300 and #303 to #308 are not sampled.
 Every other count above stands.
 
+### `main` after E7i: run 37223480185 at `9780407`, RED on attempt 1, green on attempt 2
+
+Read 2026-10-04 at the merge's close from the jobs endpoint by `conclusion`
+and from the job logs. `9780407` is E7i's squash merge (PR #309 at `b1c36d7`,
+merged 18:11:55Z, pinned with `--match-head-commit`).
+
+Tally (main-after-e7i-attempt1): 19 = 17 + 1 + 1.
+
+| field | value |
+|---|---|
+| run | 37223480185, `push`, **two attempts** |
+| attempt 1 | `cancelled`: seventeen success, `Docs consistency` skipped, and `Test (macos-latest / lua54)` (job 111498310951) cut by its own `timeout-minutes: 45` |
+| attempt 2 | `success`: the same job rerun alone (job 111510684534), 19:17:38Z to 19:38:49Z, 182 `test result: ok`, no orphan terminated |
+| `Grammar fuzz` | 37223480135 at the same head, green on both legs |
+
+Attempt 1's one red is **#313's first sample**, filed: `r6_every_spawned_fallback_server_is_bounded` in `tests/lean4_server_acceptance.rs` printed its sixty-second notice and then no result line at all, and because `cargo test --all-targets` runs each target's binary in turn, nothing behind it completed either. All 100 of that job's passing lines landed inside the first 10m44s of its test step and none in the thirty minutes after.
+
+**This entry's first draft, and #313's, called it a throughput regression** --- "100 targets in 41 minutes against 182 in 16" --- which is wrong in method: it divided a total by a count while all the lost time sat in one test. Partitioned by timestamp the two runs are the same speed, and to the 99th target `main` was 24 seconds **faster** than the pull request (+10m44s against +11m08s). Corrected before a second sample, on review. The cold `rust-cache` on attempt 1 (`No cache found`, its key taking in `pmacs-parse-unit/Cargo.toml`, which E7i added, so E7h's cache could not match) cost about a minute: attempt 2 hit the cache and still spent 16m22s in its test step against the pull request's 15m52s.
+
+**Attempt 2 is non-reproduction and nothing more**, and a rerun re-executes the same commit, so it is recorded beside attempt 1 rather than in place of it. #313 stays open on one sample.
+
+`main`'s tip after the merge is `60bfee7`, two registry commits above it, whose own `CI` 37223720891 is green at 15 = 6 + 9 skipped and `Grammar fuzz` 37223720906 green --- the registry-push shape described under `a3ea968` above.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
