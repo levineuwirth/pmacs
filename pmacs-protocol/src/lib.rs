@@ -42,6 +42,7 @@ pub mod crdt;
 pub mod ids;
 pub mod message;
 pub mod panel;
+pub mod popup;
 pub mod scroll;
 pub mod terminal;
 pub mod transport;
@@ -75,6 +76,10 @@ pub use message::{
 };
 pub use panel::{
     MAX_PANEL_VISIBLE_CELLS, PANEL_MIN_VERSION, PanelFrame, PanelFrameError, PanelFramePayload,
+};
+pub use popup::{
+    MAX_POPUP_LINE_BYTES, MAX_POPUP_LINES, MAX_POPUP_TEXT_BYTES, POPUP_MIN_VERSION,
+    PopupActiveRange, PopupFrame, PopupFrameError, PopupKind, PopupPayload, place_popup,
 };
 pub use terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_FRAME_GLYPH_BYTES, MAX_TERMINAL_GRAPHEME_BYTES,

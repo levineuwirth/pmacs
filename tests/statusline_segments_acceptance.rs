@@ -822,7 +822,7 @@ fn a13_17_26_protocol_semantic_init_late_join_and_version_cost() {
     // three lines on purpose. The ceiling assertion is the load-bearing
     // one — it says the supported set ENDS here, which is what makes an
     // accidentally-widened set a failure rather than a silent pass.
-    assert_eq!(PROTOCOL_VERSION, 25);
+    assert_eq!(PROTOCOL_VERSION, 26);
     for version in 6..=PROTOCOL_VERSION {
         assert!(is_supported_protocol_version(version));
     }

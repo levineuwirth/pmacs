@@ -973,6 +973,19 @@ fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) 
     protocol_version >= PANEL_MIN_VERSION || !matches!(message, InstanceMessage::PanelFrame(_))
 }
 
+/// The same belt-and-braces write-loop gate for the additive
+/// protocol-v26 hover and signature popup (E8).
+///
+/// The producer already skips construction for a peer below
+/// [`pmacs_protocol::POPUP_MIN_VERSION`]; this filter independently
+/// prevents an unknown discriminant reaching one, so neither gate alone
+/// is load-bearing. Both read the protocol crate's constant, as the
+/// GPU frontend's gates do.
+fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
+        || !matches!(message, InstanceMessage::Popup(_))
+}
+
 /// Whether an authenticated source may send the v21 panel event family
 /// (Q#BP9's "every gate keys on the daemon's own state").
 ///
@@ -1816,6 +1829,11 @@ fn dispatcher_loop(
                     // peer receives no band and, per Q#BP13, is never
                     // placed in a side window either.
                     if !peer_accepts_panel_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
+                    // E8 — Popup gated at v26. A v25 peer keeps no popup;
+                    // `*lsp-help*` (`C-c H`) still carries the whole text.
+                    if !peer_accepts_popup_message(negotiated_protocol_version, msg) {
                         continue;
                     }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
@@ -10936,6 +10954,22 @@ mod tests {
                 &InstanceMessage::DispatchIdle { idle: true }
             ),
             "the filter must be scoped to the panel variant"
+        );
+    }
+
+    /// E8's write-loop gate, independent of the producer's own flag.
+    #[test]
+    fn the_popup_write_gate_rejects_v25_independently() {
+        let absent = InstanceMessage::Popup(pmacs_protocol::PopupPayload::Absent);
+        assert!(!peer_accepts_popup_message(25, &absent));
+        assert!(peer_accepts_popup_message(26, &absent));
+        assert!(peer_accepts_popup_message(
+            pmacs_protocol::POPUP_MIN_VERSION,
+            &absent
+        ));
+        assert!(
+            peer_accepts_popup_message(25, &InstanceMessage::DispatchIdle { idle: true }),
+            "the filter must be scoped to the popup variant"
         );
     }
 }

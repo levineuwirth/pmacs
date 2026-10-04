@@ -710,33 +710,11 @@ const CURRENT_LINE_WASH_ALPHA: f32 = 0.22;
 /// everywhere, as `docs/divergences.md`'s Line wrap entry states.
 const DOCUMENT_WRAP: Wrap = Wrap::WordOrGlyph;
 
-/// Where a popup of `size` goes beside an anchor inside a window of
-/// `area` (both in logical pixels), as its top-left corner --- the one
-/// placement rule for popups (E7d.3, the shape E8.3 specifies for the
-/// hover popup: *"positioned above or below the caret by available
-/// space"*).
-///
-/// `anchor` is `(x, top, bottom)`: a click is a point, so its top and
-/// bottom coincide; a caret is its line's top and bottom. The popup goes
-/// below the anchor when it fits there, else above it when it fits
-/// there, else on the roomier side, and is then clamped into the window
-/// on both axes; horizontally it starts at the anchor and is pulled left
-/// until its right edge is inside. A popup larger than the window keeps
-/// its top-left corner inside it, so its first row and left edge stay
-/// on screen and the rest is clipped.
-fn place_popup(anchor: (f32, f32, f32), size: (f32, f32), area: (f32, f32)) -> (f32, f32) {
-    let (ax, top, bottom) = anchor;
-    let (w, h) = size;
-    let (width, height) = area;
-    let x = ax.min(width - w).max(0.0);
-    let room_below = height - bottom;
-    let room_above = top;
-    // Above only when it fits there and not below, or when it fits
-    // neither side and above is roomier; the clamp settles the rest.
-    let above = h > room_below && (h <= room_above || room_above > room_below);
-    let y = if above { top - h } else { bottom };
-    (x, y.min(height - h).max(0.0))
-}
+/// The one placement rule for popups (E7d.3), in logical pixels here:
+/// the context menu and, since E8, the hover and signature popup. It
+/// lives in `pmacs-protocol` so the grid places its popup cells by the
+/// same rule rather than a second implementation of it.
+use pmacs_protocol::place_popup;
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -17940,6 +17918,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
         InstanceMessage::PanelFrame(_) => "PanelFrame",
+        InstanceMessage::Popup(_) => "Popup",
     }
 }
 

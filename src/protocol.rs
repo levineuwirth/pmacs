@@ -1741,11 +1741,12 @@ mod tests {
         // minibuffer at all. `MinibufferPrompt` is therefore frozen and
         // pinned by literal bytes below.
         //
-        // v24 is `FrontendEvent::TextInput` (GUI arc Stage 1a) and v25
-        // is the mapped panel family (bottom-panel §5b) — both APPENDED
-        // variants, which is why the freeze above survives them
+        // v24 is `FrontendEvent::TextInput` (GUI arc Stage 1a), v25
+        // is the mapped panel family (bottom-panel §5b) and v26 is the
+        // hover and signature `InstanceMessage::Popup` (E8) — all
+        // APPENDED variants, which is why the freeze above survives them
         // untouched: nothing in `MinibufferPrompt`'s encoding moved.
-        assert_eq!(PROTOCOL_VERSION, 25);
+        assert_eq!(PROTOCOL_VERSION, 26);
     }
 
     #[test]
@@ -2127,10 +2128,11 @@ mod tests {
     }
 
     /// §5b G14a — the version constants move together, and the
-    /// advertised baseline does not move at all.
+    /// advertised baseline does not move at all. The mapped family keeps
+    /// v25 after E8 took v26 for the popup: a feature's gate is its own
+    /// literal, never the current wire version.
     #[test]
     fn the_mapping_slice_takes_v25_and_the_advertised_baseline_stays_pinned() {
-        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 25);
         assert_eq!(pmacs_protocol::PANEL_MAPPING_MIN_VERSION, 25);
         assert!(
             pmacs_protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&pmacs_protocol::PROTOCOL_VERSION),
@@ -2150,8 +2152,9 @@ mod tests {
     #[test]
     fn the_supported_set_ends_at_the_current_wire_version() {
         assert!(pmacs_protocol::is_supported_protocol_version(25));
+        assert!(pmacs_protocol::is_supported_protocol_version(26));
         assert!(
-            !pmacs_protocol::is_supported_protocol_version(26),
+            !pmacs_protocol::is_supported_protocol_version(27),
             "an unreleased version must not negotiate"
         );
         // The family boundary is stated against a LITERAL, not against
@@ -2169,6 +2172,105 @@ mod tests {
             "the mapped family must not share v24's gate — that would \
              admit it on sessions that negotiated only TextInput"
         );
+    }
+
+    /// E8 — the popup family takes v26 and its gate is its own literal;
+    /// the advertised baseline does not move.
+    #[test]
+    fn the_popup_family_takes_v26_and_the_advertised_baseline_stays_pinned() {
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 26);
+        // A literal, not `PROTOCOL_VERSION`: stated arithmetically the
+        // gate would follow the next bump and admit sessions that never
+        // negotiated the popup.
+        assert_eq!(26, pmacs_protocol::POPUP_MIN_VERSION);
+        assert_ne!(
+            pmacs_protocol::POPUP_MIN_VERSION,
+            pmacs_protocol::PANEL_MAPPING_MIN_VERSION,
+            "the popup must not share v25's gate — that would send it to \
+             sessions that negotiated only the mapped panel family"
+        );
+        assert!(
+            pmacs_protocol::SUPPORTED_PROTOCOL_VERSIONS
+                .contains(&pmacs_protocol::POPUP_MIN_VERSION)
+        );
+        assert_eq!(
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            20,
+            "the advertised baseline is PERMANENT — it is not bumped to \
+             chase the wire version"
+        );
+    }
+
+    /// E8 placement pin: `Popup` must be APPENDED after
+    /// `MinibufferPromptRows`, the final v25 variant. The new variant's
+    /// own round-trip cannot see a discriminant shift, so the pin sits on
+    /// the PREVIOUS final variant, as literal bytes, decoded back too.
+    /// `cursor` (1), `selected` (0) and `total` (7) differ so a swap of
+    /// adjacent integer fields is visible.
+    #[test]
+    fn minibuffer_prompt_rows_encoding_is_unchanged_by_the_v26_build() {
+        const WIRE: [u8; 20] = [
+            30, 1, 4, b'M', b'-', b'x', b' ', 2, b'e', b'd', 1, 1, 1, b'a', 1, 1, b'b', 1, 0, 7,
+        ];
+        let msg = InstanceMessage::MinibufferPromptRows {
+            prompt: Some("M-x ".to_owned()),
+            input: "ed".to_owned(),
+            cursor: 1,
+            rows: vec![MinibufferRow {
+                label: "a".to_owned(),
+                detail: Some("b".to_owned()),
+            }],
+            selected: Some(0),
+            total: 7,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            WIRE,
+            "MinibufferPromptRows' v23 wire bytes changed — a variant was \
+             inserted before it; append new InstanceMessage variants at \
+             the end"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, msg, "the frozen bytes must decode back");
+    }
+
+    /// E8 — exact **encode and decode** for the popup, both payloads.
+    /// Every adjacent integer differs (`buffer_id` 5, `anchor_byte` 300 as
+    /// a two-byte varint, the active range 0/2/3, `omitted_lines` 9), so a
+    /// field reordering is visible, which a round-trip alone never shows.
+    #[test]
+    fn popup_encodes_and_decodes_exactly() {
+        const PRESENT: [u8; 17] = [
+            31, 0, 5, 172, 2, 1, 1, 4, b'f', b'(', b'a', b')', 1, 0, 2, 3, 9,
+        ];
+        let present = InstanceMessage::Popup(pmacs_protocol::PopupPayload::Present(
+            pmacs_protocol::PopupFrame {
+                buffer_id: pmacs_protocol::BufferId::from_raw(5),
+                anchor_byte: 300,
+                kind: pmacs_protocol::PopupKind::Signature,
+                lines: vec!["f(a)".to_owned()],
+                active_range: Some(pmacs_protocol::PopupActiveRange {
+                    line: 0,
+                    start: 2,
+                    end: 3,
+                }),
+                omitted_lines: 9,
+            },
+        ));
+        assert_eq!(
+            postcard::to_allocvec(&present).expect("encode"),
+            PRESENT,
+            "Popup's v26 wire bytes changed — it must be APPENDED after \
+             MinibufferPromptRows, with its fields in the order the \
+             roadmap's E8.1 row and this fixture fix"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&PRESENT).expect("decode");
+        assert_eq!(decoded, present, "the frozen bytes must decode back");
+
+        let absent = InstanceMessage::Popup(pmacs_protocol::PopupPayload::Absent);
+        assert_eq!(postcard::to_allocvec(&absent).expect("encode"), [31, 1]);
+        let decoded: InstanceMessage = postcard::from_bytes(&[31, 1]).expect("decode");
+        assert_eq!(decoded, absent);
     }
 
     #[test]
