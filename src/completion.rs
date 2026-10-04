@@ -794,20 +794,66 @@ pub(crate) fn anchor_cell(
     let line_offsets = crate::diag::compute_line_offsets(&source);
     let start_line = crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
     let anchor_line = crate::diag::line_at_offset(&line_offsets, anchor);
-    let anchor_row = viewport.row_offset_of(start_line as usize, anchor_line as usize)?;
+    let line_start = |l: u32| line_offsets[l as usize];
+    let line_end = |l: u32| {
+        line_offsets
+            .get(l as usize + 1)
+            .copied()
+            .unwrap_or(source.len() as u32)
+    };
+    let (anchor_row, anchor_col) = if viewport.wrap == crate::view::WrapMode::Wrap {
+        // E8: under wrap a screen row is not a line. The anchor sits
+        // below every row the lines above it occupy, less the rows of the
+        // first line scrolled off the top, on its own visual row: the
+        // reckoning `window_cursor_cell` makes for the caret.
+        let cols = viewport.cell_size.cols;
+        let text = |l: u32| {
+            let bytes = &source[line_start(l) as usize..line_end(l) as usize];
+            let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+            std::str::from_utf8(bytes).unwrap_or("")
+        };
+        if anchor_line < start_line
+            || viewport
+                .folds
+                .is_some_and(|m| m.is_hidden(anchor_line as usize))
+        {
+            return None; // scrolled above the viewport, or collapsed
+        }
+        let skip = crate::text_view::place_in_line(
+            text(start_line),
+            u64::from((viewport.buffer_start as u32).saturating_sub(line_start(start_line))),
+            cols,
+        )
+        .0;
+        let mut rows = 0u64;
+        let mut l = start_line as usize;
+        while l < anchor_line as usize {
+            let t = text(l as u32);
+            rows += u64::from(crate::text_view::place_in_line(t, t.len() as u64, cols).0) + 1;
+            l = viewport.folds.map_or(l + 1, |m| m.next_visible(l));
+        }
+        let (sub, col) = crate::text_view::place_in_line(
+            text(anchor_line),
+            u64::from(anchor - line_start(anchor_line)),
+            cols,
+        );
+        let row = (rows + u64::from(sub)).checked_sub(u64::from(skip))?;
+        (u32::try_from(row).ok()?, col)
+    } else {
+        // Arc 6 Stage 2: the popup anchors on the anchor byte's VISIBLE
+        // row, so a completion below a collapsed region lands on the
+        // right row; an anchor inside a collapse has no row.
+        let row = viewport.row_offset_of(start_line as usize, anchor_line as usize)?;
+        let line_bytes = &source[line_start(anchor_line) as usize..line_end(anchor_line) as usize];
+        (
+            row,
+            display_col_for_byte(line_bytes, anchor - line_start(anchor_line)),
+        )
+    };
     if anchor_row >= viewport.cell_size.rows || viewport.cell_size.cols == 0 {
         return None; // anchor scrolled below the viewport
     }
-    let line_start = line_offsets[anchor_line as usize];
-    let line_end = line_offsets
-        .get(anchor_line as usize + 1)
-        .copied()
-        .unwrap_or(source.len() as u32);
-    let line_bytes = &source[line_start as usize..line_end as usize];
-    Some((
-        anchor_row,
-        display_col_for_byte(line_bytes, anchor - line_start),
-    ))
+    Some((anchor_row, anchor_col))
 }
 
 /// Map the popup's byte anchor to a clamped on-screen rectangle:

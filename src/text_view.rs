@@ -202,30 +202,7 @@ impl TextView {
         let Ok(s) = std::str::from_utf8(&bytes) else {
             return (0, 0);
         };
-        let (mut row, mut col) = (0u32, 0u32);
-        let mut found = None;
-        walk_line(s, max_cols, true, |p| {
-            // `within` is this character's start, or falls inside it:
-            // project to where the character is drawn.
-            if (p.idx + p.ch.len_utf8()) as u64 > within {
-                found = Some((p.start_row, p.start_col));
-                return false;
-            }
-            row = p.end_row;
-            col = p.end_col;
-            true
-        });
-        let (row, col) = found.unwrap_or((row, col));
-        // A position at or past the row's right edge --- the end of a
-        // full row, or a space hanging past it --- belongs to column 0 of
-        // the NEXT row (framing §7: the wrap position is owned
-        // downstream). The downstream cell always exists; `(row,
-        // max_cols)` does not.
-        if col >= max_cols {
-            (row.saturating_add(1), 0)
-        } else {
-            (row, col)
-        }
+        place_in_line(s, within, max_cols)
     }
 
     /// Translate a LINE column to a SCREEN column at horizontal offset
@@ -552,6 +529,40 @@ fn measure_word(s: &str, from: usize, col: u32) -> (u32, usize) {
         }
     }
     (c - col, s.len())
+}
+
+/// Where byte `within` of one line's text `s` (no line break) sits under
+/// word wrap at `max_cols`, as `(visual row, column)`: the walk
+/// [`TextView::place_of_byte`] performs, on text the caller already holds.
+/// Shared with the grid's popups (E8), which place their anchor on the
+/// row the painter drew it on.
+pub(crate) fn place_in_line(s: &str, within: u64, max_cols: u32) -> (u32, u32) {
+    if max_cols == 0 {
+        return (0, 0);
+    }
+    let (mut row, mut col) = (0u32, 0u32);
+    let mut found = None;
+    walk_line(s, max_cols, true, |p| {
+        // `within` is this character's start, or falls inside it:
+        // project to where the character is drawn.
+        if (p.idx + p.ch.len_utf8()) as u64 > within {
+            found = Some((p.start_row, p.start_col));
+            return false;
+        }
+        row = p.end_row;
+        col = p.end_col;
+        true
+    });
+    let (row, col) = found.unwrap_or((row, col));
+    // A position at or past the row's right edge --- the end of a full
+    // row, or a space hanging past it --- belongs to column 0 of the NEXT
+    // row (framing §7: the wrap position is owned downstream). The
+    // downstream cell always exists; `(row, max_cols)` does not.
+    if col >= max_cols {
+        (row.saturating_add(1), 0)
+    } else {
+        (row, col)
+    }
 }
 
 /// Lay out one line and hand each character's place to `visit`, which

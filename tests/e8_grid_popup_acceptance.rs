@@ -339,3 +339,28 @@ fn e8_5_the_active_parameter_stays_marked_under_a_theme_that_sets_only_ui_popup(
         "and takes the popup's face"
     );
 }
+
+/// Under word wrap a screen row is not a line: a 300-column line above
+/// the caret's takes four rows of an 80-column window, and the popup must
+/// open below the row the caret's line is drawn on, not below the row a
+/// line count would put it on, which lands it in the wrapped text above
+/// and over the caret's own line. Found probing the prose path the brief
+/// named; the completion popup shared the walk.
+#[test]
+fn e8_4_under_wrap_the_popup_opens_below_the_carets_drawn_row() {
+    let long = "x".repeat(300);
+    let (mut state, _dir) = editor(&format!("{long}\nfn main() {{}}\n"), "hover", &[]);
+    key(&mut state, 'n', KeyModifiers::CONTROL);
+    let cells = ask_until_painted(&mut state, 'h', "Synthetic hover content");
+    let caret = find_row(&cells, "fn main").expect("the caret's line is not covered");
+    let title = find_row(&cells, "# pmacs-fake-lsp").expect("the popup");
+    assert!(
+        caret >= 3,
+        "the long line wraps over the rows above it: {caret}"
+    );
+    assert_eq!(
+        title,
+        caret + 1,
+        "the popup opens on the row below the caret's"
+    );
+}
