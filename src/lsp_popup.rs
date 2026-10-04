@@ -25,7 +25,11 @@
 //! the window losing focus or showing another buffer, a kill. Closing
 //! rather than hiding is what makes motion out of the range a dismissal:
 //! a hidden popup would come back when the caret returned. `C-g` closes
-//! it too.
+//! it too. The one edit a popup survives is a typed character inside a
+//! signature's call, which the runtime carries forward
+//! ([`crate::editor_core::EditorCore::lsp_popup_carry`], E8.5) so the
+//! user can type the argument the popup describes; a typed `)` closes
+//! it.
 //!
 //! # The bound
 //!
@@ -176,9 +180,14 @@ fn cap_line(line: &str) -> String {
     cut
 }
 
-/// The active signature as popup lines: its label first, then the
-/// active parameter's documentation, then the signature's. `None` when
-/// the help carries no signature.
+/// The active signature as popup lines: its label first, with the
+/// active parameter's byte range in it (E8.5), then the parameter's
+/// documentation, then the signature's. `None` when the help carries no
+/// signature.
+///
+/// The range survives only when the label reaches the popup unchanged
+/// (no control character, no tab, not cut at the bound), since its
+/// offsets index the label as the server sent it.
 #[must_use]
 pub fn signature_lines(
     help: &crate::signature::SignatureHelp,
@@ -202,7 +211,41 @@ pub fn signature_lines(
     if lines.is_empty() {
         return None;
     }
-    Some((lines, None, omitted))
+    let range = param
+        .and_then(|p| parameter_byte_range(&sig.label, p))
+        .filter(|_| lines[0] == sig.label)
+        .map(|(start, end)| PopupActiveRange {
+            line: 0,
+            start: start as u32,
+            end: end as u32,
+        });
+    Some((lines, range, omitted))
+}
+
+/// The parameter's bytes in its signature's label: the server's own
+/// offsets when it gave them (already bytes, [`crate::signature`]
+/// converts them at absorb), else the parameter's label found after the
+/// label's first `(`, so a parameter named like its function is not
+/// found in the function's name.
+fn parameter_byte_range(
+    label: &str,
+    param: &crate::signature::SignatureParameter,
+) -> Option<(usize, usize)> {
+    if let Some((s, e)) = param.span {
+        let (s, e) = (s as usize, e as usize);
+        return (s < e
+            && e <= label.len()
+            && label.is_char_boundary(s)
+            && label.is_char_boundary(e))
+        .then_some((s, e));
+    }
+    if param.label.is_empty() {
+        return None;
+    }
+    let from = label.find('(').map_or(0, |i| i + 1);
+    label[from..]
+        .find(param.label.as_str())
+        .map(|i| (from + i, from + i + param.label.len()))
 }
 
 /// The bytes a signature popup holds the caret within, on the caret's
@@ -562,6 +605,51 @@ mod tests {
         assert_eq!(
             rows.last().map(|r| r.text.clone()),
             Some(more_lines_label(3))
+        );
+    }
+
+    #[test]
+    fn the_active_parameter_is_its_span_or_its_label_after_the_paren() {
+        use crate::signature::{Signature, SignatureHelp, SignatureParameter};
+        let help = |param: SignatureParameter| SignatureHelp {
+            signatures: vec![Signature {
+                label: "fn x(x: u8, y: u8)".to_owned(),
+                documentation: None,
+                parameters: vec![param],
+                active_parameter: None,
+            }],
+            active_signature: 0,
+            active_parameter: Some(0),
+        };
+        // By label: found after the `(`, not in the function's name.
+        let (_, range, _) = signature_lines(&help(SignatureParameter {
+            label: "x".to_owned(),
+            span: None,
+            documentation: None,
+        }))
+        .expect("lines");
+        assert_eq!(
+            range,
+            Some(PopupActiveRange {
+                line: 0,
+                start: 5,
+                end: 6
+            })
+        );
+        // By the server's span.
+        let (_, range, _) = signature_lines(&help(SignatureParameter {
+            label: "y: u8".to_owned(),
+            span: Some((12, 17)),
+            documentation: None,
+        }))
+        .expect("lines");
+        assert_eq!(
+            range,
+            Some(PopupActiveRange {
+                line: 0,
+                start: 12,
+                end: 17
+            })
         );
     }
 }

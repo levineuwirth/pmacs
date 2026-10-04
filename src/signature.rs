@@ -79,13 +79,29 @@ impl SignatureHelp {
     /// help (no signatures) for `null`.
     #[must_use]
     pub fn from_lsp_value(v: &Value) -> Self {
+        Self::from_lsp_value_in(v, crate::lsp::PositionEncoding::Utf8)
+    }
+
+    /// [`Self::from_lsp_value`] for a server that negotiated `encoding`
+    /// (E8.5): a parameter's `[start, end]` label offsets count units of
+    /// the negotiated encoding, as a `Position`'s do, and are converted
+    /// here to bytes of the signature's label, so the span the popup
+    /// marks is the parameter on a non-ASCII label too. The absorb path
+    /// rewrites `Position`s to bytes; these offsets are not positions,
+    /// so it never reached them.
+    #[must_use]
+    pub fn from_lsp_value_in(v: &Value, encoding: crate::lsp::PositionEncoding) -> Self {
         if v.is_null() {
             return Self::default();
         }
         let signatures = v
             .get("signatures")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(parse_signature).collect::<Vec<_>>())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| parse_signature(s, encoding))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let active_signature = v
             .get("activeSignature")
@@ -119,7 +135,7 @@ impl SignatureHelp {
     }
 }
 
-fn parse_signature(v: &Value) -> Option<Signature> {
+fn parse_signature(v: &Value, encoding: crate::lsp::PositionEncoding) -> Option<Signature> {
     let label = v.get("label")?.as_str()?.to_owned();
     let documentation = v.get("documentation").and_then(extract_markup_text);
     let parameters = v
@@ -127,7 +143,7 @@ fn parse_signature(v: &Value) -> Option<Signature> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|p| parse_parameter(p, &label))
+                .filter_map(|p| parse_parameter(p, &label, encoding))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -143,7 +159,11 @@ fn parse_signature(v: &Value) -> Option<Signature> {
     })
 }
 
-fn parse_parameter(v: &Value, parent_label: &str) -> Option<SignatureParameter> {
+fn parse_parameter(
+    v: &Value,
+    parent_label: &str,
+    encoding: crate::lsp::PositionEncoding,
+) -> Option<SignatureParameter> {
     let label_field = v.get("label")?;
     let documentation = v.get("documentation").and_then(extract_markup_text);
     if let Some(s) = label_field.as_str() {
@@ -156,15 +176,12 @@ fn parse_parameter(v: &Value, parent_label: &str) -> Option<SignatureParameter> 
     if let Some(arr) = label_field.as_array()
         && arr.len() == 2
     {
-        let start = arr[0].as_u64()? as u32;
-        let end = arr[1].as_u64()? as u32;
-        let s = parent_label
-            .get(start as usize..end as usize)
-            .unwrap_or("")
-            .to_owned();
+        let start = crate::lsp::char_to_byte(parent_label, arr[0].as_u64()? as u32, encoding);
+        let end = crate::lsp::char_to_byte(parent_label, arr[1].as_u64()? as u32, encoding);
+        let s = parent_label.get(start..end).unwrap_or("").to_owned();
         return Some(SignatureParameter {
             label: s,
-            span: Some((start, end)),
+            span: Some((start as u32, end as u32)),
             documentation,
         });
     }
@@ -418,5 +435,28 @@ mod tests {
             SignatureHelp::from_lsp_value(&json!({"signatures": [], "activeSignature": 0})),
         );
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn utf16_label_offsets_become_byte_offsets_of_the_label() {
+        // "fn größe(höhe: u8, b: u8)": `höhe: u8` is UTF-16 units 9..17
+        // (ö and ß are one unit each) and bytes 11..20.
+        let label = "fn größe(höhe: u8, b: u8)";
+        let v = json!({
+            "signatures": [{
+                "label": label,
+                "parameters": [{ "label": [9, 17] }, { "label": [19, 24] }],
+            }],
+            "activeParameter": 0,
+        });
+        let h = SignatureHelp::from_lsp_value_in(&v, crate::lsp::PositionEncoding::Utf16);
+        let p = &h.signatures[0].parameters[0];
+        assert_eq!(p.label, "höhe: u8");
+        assert_eq!(p.span, Some((11, 20)));
+        assert_eq!(&label[11..20], "höhe: u8");
+        // Read as bytes, the same offsets land inside `ö`: the defect the
+        // conversion closes.
+        let raw = SignatureHelp::from_lsp_value(&v);
+        assert_ne!(raw.signatures[0].parameters[0].label, "höhe: u8");
     }
 }

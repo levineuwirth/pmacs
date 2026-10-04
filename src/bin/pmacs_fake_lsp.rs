@@ -23,7 +23,11 @@
 //!   `PMACS_FAKE_LSP_HOVER_DELAY_MS=N` holds every hover answer back
 //!   `N` ms, so a test can move the caret while one is in flight.
 //! * On `textDocument/signatureHelp`: returns a one-signature
-//!   payload with two parameters and the second one active.
+//!   payload with two parameters and the second one active. With
+//!   `PMACS_FAKE_LSP_SIG_NONASCII` set (E8.5) the label is
+//!   `fn größe(höhe: u8, b: u8)`, its parameters given as label offsets
+//!   in UTF-16 units (this server negotiates no encoding, so UTF-16 is
+//!   the spec's default) and the first active.
 //! * On any other request: replies with `result: {"echo": params}`.
 //! * On `shutdown`: replies with `null` and waits for `exit`.
 //! * On `exit`: exits 0.
@@ -775,6 +779,23 @@ fn main() {
                     "jsonrpc": "2.0",
                     "id": idv,
                     "result": result,
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("textDocument/signatureHelp", Some(idv))
+                if std::env::var_os("PMACS_FAKE_LSP_SIG_NONASCII").is_some() =>
+            {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": {
+                        "signatures": [{
+                            "label": "fn größe(höhe: u8, b: u8)",
+                            "parameters": [{ "label": [9, 17] }, { "label": [19, 24] }],
+                        }],
+                        "activeSignature": 0,
+                        "activeParameter": 0
+                    }
                 });
                 write_frame(&mut stdout, &resp);
             }

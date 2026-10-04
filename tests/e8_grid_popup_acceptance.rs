@@ -282,3 +282,60 @@ fn e8_4_the_grid_paints_the_signature() {
     let cells = ask_until_painted(&mut state, 's', "fn echo(name: &str, count: usize)");
     assert!(find_row(&cells, "Echoes `name` `count` times.").is_some());
 }
+
+/// E8.5 in the grid: the signature's active parameter is drawn in its
+/// own face (bold and underlined when the theme sets none), and nothing
+/// else on the label is.
+#[test]
+fn e8_5_the_grid_marks_the_active_parameter() {
+    let (mut state, _dir) = editor("fn main() { let value = 1; }\n", "sighelp", &[]);
+    for _ in 0..8 {
+        key(&mut state, 'f', KeyModifiers::CONTROL);
+    }
+    let cells = ask_until_painted(&mut state, 's', "fn echo(name: &str, count: usize)");
+    let row = find_row(&cells, "fn echo(").expect("the label");
+    let text = row_text(&cells, row);
+    let start = text.find("count: usize").expect("the parameter") as u32;
+    let marked = |col: u32| {
+        let style = cells[(row * COLS + col) as usize].style;
+        style.bold && style.underline != pmacs::cell::UnderlineStyle::None
+    };
+    assert!(
+        (start..start + 12).all(marked),
+        "every cell of the active parameter is marked: {text:?}"
+    );
+    let name = text.find("name: &str").expect("the other parameter") as u32;
+    assert!(
+        !(name..name + 10).any(marked),
+        "the other parameter is not: {text:?}"
+    );
+}
+
+/// E8.5: the mark survives a theme. A theme that sets only `ui.popup`
+/// resolves `ui.popup.active-parameter` to it (the faces' dotted-prefix
+/// walk), and the active parameter must still be marked.
+#[test]
+fn e8_5_the_active_parameter_stays_marked_under_a_theme_that_sets_only_ui_popup() {
+    let (mut state, _dir) = editor("fn main() { let value = 1; }\n", "sighelp", &[]);
+    exec(
+        &state,
+        "pmacs.theme.set { [\"ui.popup\"] = { fg = { 255, 255, 255 }, bg = { 0, 0, 120 } } }",
+    );
+    for _ in 0..8 {
+        key(&mut state, 'f', KeyModifiers::CONTROL);
+    }
+    let cells = ask_until_painted(&mut state, 's', "fn echo(name: &str, count: usize)");
+    let row = find_row(&cells, "fn echo(").expect("the label");
+    let text = row_text(&cells, row);
+    let start = text.find("count: usize").expect("the parameter") as u32;
+    let style = cells[(row * COLS + start) as usize].style;
+    assert!(
+        style.bold && style.underline != pmacs::cell::UnderlineStyle::None,
+        "the active parameter stays marked under ui.popup alone: {style:?}"
+    );
+    assert_eq!(
+        style.bg,
+        Color::Rgb(0, 0, 120),
+        "and takes the popup's face"
+    );
+}

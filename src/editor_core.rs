@@ -5808,6 +5808,40 @@ impl EditorCore {
         }
     }
 
+    /// A typed character inside a signature's call (E8.5): the popup
+    /// takes the buffer's new revision and its range's end moves by
+    /// what the character inserted, so the user can type the argument
+    /// the popup describes. Anything but a growth of the buffer with
+    /// the caret still in the range carries nothing, and the next
+    /// validation closes the popup. Returns whether it carried.
+    pub fn lsp_popup_carry(&mut self) -> bool {
+        let mut guard = self.lsp_popup.lock().expect("lsp popup poisoned");
+        let Some(popup) = guard.as_mut() else {
+            return false;
+        };
+        if popup.kind != pmacs_protocol::PopupKind::Signature {
+            return false;
+        }
+        let reg = self.registry.borrow();
+        let Ok(buf) = reg.get(popup.buffer_id) else {
+            return false;
+        };
+        let Some(win) = self.windows.get(&popup.window_id) else {
+            return false;
+        };
+        let Some(grown) = buf.len().checked_sub(popup.len) else {
+            return false;
+        };
+        let end = popup.range.1 + grown;
+        if win.cursor < popup.range.0 || win.cursor > end {
+            return false;
+        }
+        popup.revision = buf.revision();
+        popup.len = buf.len();
+        popup.range.1 = end;
+        true
+    }
+
     /// The popup as `frontend`'s focused window shows it, or `None`.
     #[must_use]
     pub fn lsp_popup_frame_for(&self, frontend: FrontendId) -> Option<pmacs_protocol::PopupFrame> {

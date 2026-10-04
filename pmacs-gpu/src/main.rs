@@ -1818,6 +1818,12 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
     use std::fmt::Write as _;
     let open = state.popup_open_for_current_buffer();
     let _ = writeln!(out, "{label}.open={open}");
+    let status = state
+        .status_facts
+        .as_ref()
+        .and_then(|f| f.message.clone())
+        .unwrap_or_default();
+    let _ = writeln!(out, "{label}.status={status:?}");
     let Some(popup) = state.popup.clone().filter(|_| open) else {
         return;
     };
@@ -1861,6 +1867,15 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
         let _ = writeln!(out, "{label}.anchor_px={ax},{top},{h}");
     }
     let [text, active, footer] = state.popup_colors();
+    // E8.5 — the glyphs shaped in the active parameter's color: the mark
+    // as the buffer will draw it.
+    let active_glyphs = state
+        .popup_buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter())
+        .filter(|glyph| glyph.color_opt == Some(active))
+        .count();
+    let _ = writeln!(out, "{label}.active_glyphs={active_glyphs}");
     let _ = writeln!(
         out,
         "{label}.colors={:?};{:?};{:?}",

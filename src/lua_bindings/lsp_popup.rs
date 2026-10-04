@@ -157,5 +157,15 @@ pub fn install_lsp_popup(
         )?;
     }
 
+    {
+        // _popup_carry() -> bool: a typed character inside a signature's
+        // call keeps the popup (crate::lsp_popup's one surviving edit).
+        let cc = core.clone();
+        lsp.set(
+            "_popup_carry",
+            lua.create_function(move |_, ()| Ok(cc.borrow_mut().lsp_popup_carry()))?,
+        )?;
+    }
+
     Ok(())
 }

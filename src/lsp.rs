@@ -3053,7 +3053,13 @@ impl LspManager {
                 }
             }
             ResponseRoute::Signature { uri } => {
-                let help = crate::signature::SignatureHelp::from_lsp_value(result);
+                // E8.5: a parameter's label offsets count the negotiated
+                // encoding's units, which `inbound_converted` does not
+                // reach (they are not `Position`s).
+                let help = crate::signature::SignatureHelp::from_lsp_value_in(
+                    result,
+                    self.position_encoding(sid),
+                );
                 let key = crate::signature::SignatureKey::new(server_key, uri.clone());
                 let mut guard = self
                     .signature_store

@@ -1936,6 +1936,19 @@ pmacs.hook.add("buffer.after-edit", function()
   if not typed then return end
   local ch = char_before(buf, pmacs.editor.cursor())
   if not ch then return end
+  -- E8.5: the signature popup survives typing inside its call. A typed
+  -- `)` dismisses it; any other typed character carries it to the new
+  -- text (the edit would otherwise close it at the next frame), and a
+  -- trigger character then asks again, so `,` moves the active
+  -- parameter. Anything that is not a typed character --- a paste, an
+  -- undo, a kill --- carries nothing and closes it.
+  if pmacs.lsp.popup_kind() == "signature" then
+    if ch == ")" then
+      pmacs.lsp.popup_close()
+      return
+    end
+    pmacs.lsp._popup_carry()
+  end
   local triggers = signature_trigger_chars(rec.server)
   if not (triggers and triggers[ch]) then return end
   pcall(signature_help_quiet, rec)

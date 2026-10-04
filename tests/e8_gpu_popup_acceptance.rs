@@ -322,4 +322,13 @@ fn e8_3_the_gpu_shows_the_signature_popup() {
         "Some(\"fn echo(name: &str, count: usize) -> String\")"
     );
     assert_eq!(fact(&facts, "sig.anchor"), "7");
+    // E8.5: the active parameter, `count: usize` (bytes 20..32 of the
+    // label), reaches the GPU and is shaped in its own color, glyph by
+    // glyph.
+    assert_eq!(fact(&facts, "sig.active"), "0:20:32");
+    assert_eq!(
+        fact(&facts, "sig.active_glyphs"),
+        "12",
+        "every glyph of `count: usize` in the active color: {facts:?}"
+    );
 }

@@ -199,10 +199,20 @@ fn init_for(file: &Path, mode: &str, env: &[(&str, &str)], extra: &str) -> Strin
 /// A daemon visiting a fresh `a.rs` holding [`SOURCE`] in a cargo
 /// project, semantic and multi-frontend.
 fn daemon_with(mode: &str, env: &[(&str, &str)], extra: &str) -> (TestDaemon, tempfile::TempDir) {
+    daemon_with_source(SOURCE, mode, env, extra)
+}
+
+/// [`daemon_with`] on `source`.
+fn daemon_with_source(
+    source: &str,
+    mode: &str,
+    env: &[(&str, &str)],
+    extra: &str,
+) -> (TestDaemon, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("Cargo.toml"), b"[package]\nname=\"x\"\n").expect("write");
     let file = dir.path().join("a.rs");
-    std::fs::write(&file, SOURCE).expect("write a.rs");
+    std::fs::write(&file, source).expect("write a.rs");
     let daemon = TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
@@ -436,4 +446,84 @@ fn e8_2_dwell_opens_after_motion_only_once_and_not_when_off() {
     session.key(Key::Char('f'), Modifiers::CTRL);
     let off = session.popups_within(Duration::from_millis(1500));
     assert!(off.is_empty(), "dwell is off by default; got {off:?}");
+}
+
+/// E8.5: typing a trigger character opens the signature popup with its
+/// active parameter marked; the popup survives the characters typed
+/// inside the call and `,`, which asks again; and a typed `)` closes
+/// it. Auto-pairing is off, so `)` is typed and not stepped over: with
+/// pairing on the step-over is a motion out of the range, which closes
+/// it anyway.
+#[test]
+fn e8_5_the_signature_marks_its_parameter_survives_typing_and_closes_on_paren() {
+    let (daemon, _dir) = daemon_with_source(
+        "\n",
+        "sighelp",
+        &[],
+        "pmacs.config.set('editing.auto-pair', false)",
+    );
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
+    // The server answers once it has initialized; the first `(` may come
+    // too early, so ask by typing until the popup opens.
+    for ch in "echo".chars() {
+        session.key(Key::Char(ch), Modifiers::NONE);
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let frame = loop {
+        assert!(
+            Instant::now() < deadline,
+            "typing `(` never opened the signature"
+        );
+        session.key(Key::Char('('), Modifiers::NONE);
+        let got = session.popups_within(Duration::from_millis(800));
+        if let Some(PopupPayload::Present(frame)) = got.into_iter().last() {
+            break frame;
+        }
+    };
+    assert_eq!(frame.kind, PopupKind::Signature);
+    let label = &frame.lines[0];
+    assert_eq!(label, "fn echo(name: &str, count: usize) -> String");
+    let active = frame.active_range.expect("the active parameter is marked");
+    assert_eq!(active.line, 0);
+    assert_eq!(
+        &label[active.start as usize..active.end as usize],
+        "count: usize",
+        "the server's active parameter, found after the `(`"
+    );
+
+    // Typing the argument keeps it: no `Absent`.
+    session.key(Key::Char('a'), Modifiers::NONE);
+    session.key(Key::Char(','), Modifiers::NONE);
+    session.key(Key::Char('b'), Modifiers::NONE);
+    let kept = session.popups_within(Duration::from_millis(1200));
+    assert!(
+        !kept.contains(&PopupPayload::Absent),
+        "typing inside the call must not close the signature; got {kept:?}"
+    );
+
+    // `)` closes it.
+    session.key(Key::Char(')'), Modifiers::NONE);
+    session.wait_absent("a typed `)` closes the signature popup");
+}
+
+/// E8.5: a server's parameter offsets count its position encoding's
+/// units, not bytes. Against a UTF-16 server (the fake negotiates none)
+/// and a label with `ö` and `ß` before the parameter, the popup marks
+/// `höhe: u8`; read as bytes, the same offsets would mark `e(höhe:`.
+#[test]
+fn e8_5_the_active_parameter_is_converted_from_the_servers_encoding() {
+    let (daemon, _dir) = daemon_with("sighelp", &[("PMACS_FAKE_LSP_SIG_NONASCII", "1")], "");
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
+    for _ in 0..8 {
+        session.key(Key::Char('f'), Modifiers::CTRL);
+    }
+    let frame = session.ask_until_present('s');
+    let label = &frame.lines[0];
+    assert_eq!(label, "fn größe(höhe: u8, b: u8)");
+    let active = frame.active_range.expect("the active parameter is marked");
+    assert_eq!(
+        &label[active.start as usize..active.end as usize],
+        "höhe: u8",
+        "UTF-16 offsets 9..17 are bytes 11..20 of this label"
+    );
 }
