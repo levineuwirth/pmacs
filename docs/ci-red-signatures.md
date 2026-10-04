@@ -2179,11 +2179,11 @@ Tally (283): 11 items in the list below.
 
 #283 is at eleven (ten until E7i's fix round 2); the list above is the one the count is read from.
 
-#### #291, ten occurrences, all local
+#### #291, eleven occurrences, all local
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
 
-Tally (291): 10 items in the list below.
+Tally (291): 11 items in the list below.
 
 - 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
 - 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
@@ -2194,9 +2194,10 @@ Tally (291): 10 items in the list below.
 - 2026-10-03, `scripts/gate` on `e7i/parse-containment` at `2d4c848`, `20261002T233722Z-2508081`, 125.51 s;
 - 2026-10-03, `scripts/gate` at `0e2998b`, `20261003T004422Z-2872349` (recorded at C7i, below, with a base control: `a013d46` 5 of 8, `0e2998b` 2 of 8);
 - 2026-10-03, `scripts/gate` on `e7i/parse-containment` at `45186c9`, `20261003T150924Z-395472`, the owner gaming beside it (load 6 to 78), 129.81 s (recorded at the E7i build, below);
-- 2026-10-04, `scripts/gate` on `e7i/parse-containment` at `12c3a6c`, `20261003T230816Z-2486117`, 125.43 s (recorded at E7i's fix round 1, below).
+- 2026-10-04, `scripts/gate` on `e7i/parse-containment` at `12c3a6c`, `20261003T230816Z-2486117`, 125.43 s (recorded at E7i's fix round 1, below);
+- 2026-10-04, `scripts/gate` on `e7i/parse-containment` at `b1c36d7`, `20261004T170334Z-438134`, 126.00 s, with #311's condition holding on the laptop (recorded at E7i's fix round 3, below).
 
-#291 is at ten; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+#291 is at eleven; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
 #### #298, first sample, local
 
@@ -2852,6 +2853,87 @@ So, at E7i's review round 3: a third run of #311 is read and #312 is at one; R7 
 its row in this gate, which is non-reproduction and nothing more, and #283,
 #291, #256, #282, #298, #300 and #303 to #308 are not sampled. Every other
 count above stands.
+
+### E7i's fix round 3: the head at `b1c36d7`, `0c7aa43`'s push, and #291's eleventh with #311's condition holding
+
+Recorded 2026-10-04 by E7i's fix round 3, on review 3's two observations ruled
+into a round. Each run is read from the jobs endpoint by conclusion, at
+attempt 1 of 1.
+
+#### The push of `0c7aa43` to `main`
+
+Tally (push-0c7aa43-jobs): 15 = 6 + 9.
+
+`CI` 37215279845 at `0c7aa43`, attempt 1 of 1, conclusion success: six jobs
+succeeded and nine were skipped, as every `push` run to `main` does. `Docs
+consistency` succeeded, which is what asserts that commit's tallies. `Grammar
+fuzz` 37215279899 at the same head is green, both of its jobs success.
+
+#### PR #309's runs at the round's head
+
+Tally (pr309-fix3-runs): 2 rows in the table below.
+
+| run | workflow | head | verdict |
+|---|---|---|---|
+| 37219072957 | CI | `b1c36d7` | success |
+| 37219072953 | Grammar fuzz | `b1c36d7` | success |
+
+Tally (run-37219072957-jobs): 19 = 18 + 1.
+
+`CI` 37219072957: eighteen success and `Docs consistency` skipped; no failure.
+Each test leg's `ok` count, read from its log with its `running` lines paired
+(each macOS leg's log carries one more `running` line, the workflow's own
+`grep -q 'running 1 test'` in its adapter probe):
+
+| leg | job | `ok` |
+|---|---|---|
+| `Test (crdt)` | 111485550287 | 180 |
+| `luajit, no crdt` | 111485550431 | 181 |
+| `ubuntu lua54` | 111485550361 | 181 |
+| `ubuntu luajit` | 111485550345 | 181 |
+| `macos lua54` | 111485550403 | 182 |
+| `macos luajit` | 111485550427 | 182 |
+
+Zero `FAILED`, and the round's six new rows `ok` on every leg. #283's row passed
+on both macOS legs, which is non-reproduction and nothing more.
+
+#### `Grammar fuzz` 37219072953 at `b1c36d7`: green on both legs
+
+`Grammar fuzz` 111485522860, 56 min, and `Grammar fuzz (asan-strict)`
+111485522670, 51 min: no crash, no hang, no memory cut, no unconfirmed and no
+accepted finding. The replay sent 941 and 942 inputs through each arm's worker
+(929 and 927 answered, 12 and 15 contained) and crashed none. All five
+`fuzz/regress/markdown/` inputs were contained on both legs: the underscores
+and the asterisks by the worker's watch, 596, 7672 and the nested openers
+killed at the deadline. Slow findings: five under `ubsan` (cmake three, cuda,
+python) and six under `asan-strict` (cmake three, cuda, lua, python).
+
+#### `scripts/gate` `20261004T170334Z-438134` at `b1c36d7`: #291's eleventh, not #311
+
+Five of six. Sweep: 189 targets, 189 `running` lines and 189 result lines,
+5,219 passed, 1 failed, 62 ignored; no daemon survived, and the other five
+stages ok. The one failure is
+`e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` on all
+three of **#291's** fragments: `HLS reports the type error; store []`, a trace
+reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0
+ignored`, 126.00 s. It is **#291's eleventh**, in its list above, and is
+commented on #291. It is not #311's shape, whose store holds `Could not find
+module ‘Prelude’` and whose trace reaches `processi`.
+
+#311's condition held all the same. Checked at the gate's close, the system
+`/usr/bin/ghc` 9.6.7-1, with no `ghc-static`, still fails `main = print (1 ::
+Int)` with `Could not find module ‘Prelude’`. So the sentence above, at E7i's
+fix round 2, that #291 "cannot be sampled on this laptop while #311 stands,
+since #311 takes the same row first", is **falsified**. When the server never
+processes the typed edit, the row fails before the GHC break can show, on
+#291's fragments. #311's list of gate runs read is unchanged at three, since
+this run's red is not its shape. #312's row ran `ok`, which is
+non-reproduction and nothing more.
+
+So, at E7i's fix round 3: #291 moves to eleven; #311 is not sampled and its
+condition stands; #312 stays at one; #283 and R7 passed their rows, which is
+non-reproduction; #256, #282, #298, #300 and #303 to #308 are not sampled.
+Every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
