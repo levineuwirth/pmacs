@@ -152,9 +152,11 @@ fn a01_04_registry_contract_limits_epochs_and_results() {
         // `errors.lua` is the first runtime chunk loaded; `activity` is
         // worker identity Stage 1's fourth adopter and follows because
         // `async.lua` is loaded before `syntax.lua`, `terminal.lua` and
-        // `lsp.lua`. This is an INVENTORY assertion: it grows when a
-        // builtin provider is added, which is exactly what it is for.
-        ["errors", "activity", "mode", "terminal", "lsp"],
+        // `lsp.lua`. `parse` is `syntax.lua`'s mark for a buffer whose
+        // parse worker crashed (E7i fix round 2). This is an INVENTORY
+        // assertion: it grows when a builtin provider is added, which is
+        // exactly what it is for.
+        ["errors", "activity", "mode", "parse", "terminal", "lsp"],
         "built-in providers are discoverable in registration order"
     );
     let before_epochs = {
