@@ -776,9 +776,59 @@ end
 -- being typed into (every append fires `buffer.after-edit`, which
 -- re-requests the active buffer's parse, so many settles dispatched a
 -- follow-up mid-traversal).
+-- E7i fix round 2 (review 2, Medium 1): the notice for a crashed parse
+-- worker, ordered so that what a narrow echo line keeps is what matters:
+-- the grammar, the signal and what follows (parsed again when, or parsing
+-- stopped), under the file's short name, before the full path and the
+-- worker's own words. `*errors*` keeps the whole.
+local function crash_notice(key, buf, report, detail)
+  local name = buf and buf:name() or key
+  local short = name:match("[^/]+$") or name
+  local grammar = tostring(parse_lang_by_buffer[key])
+  if not report or report.crash_signal == "" then
+    return string.format("syntax: %s's parse worker crashed parsing %s: %s",
+      grammar, short, tostring(detail))
+  end
+  if report.stopped then
+    return string.format(
+      "syntax: parsing stopped: %s crashed (%s) %d times in a row parsing %s; reopen the file to parse it again (%s: %s)",
+      grammar, report.crash_signal, report.crashes, short, name, report.crash_how)
+  end
+  return string.format(
+    "syntax: %s crashed (%s) parsing %s; parsing again in %s s, and not after %d crashes in a row (%s: %s)",
+    grammar, report.crash_signal, short, string.format("%g", report.backoff_ms / 1000),
+    report.max_crashes, name, report.crash_how)
+end
+
+-- E7i fix round 2: a buffer backing off after a crash is parsed again when
+-- its back-off ends, not at the next edit after it, so "parsing again in
+-- 1 s" is what happens; keyed like the others, the time in the editor's
+-- monotonic ms. The tick checks it: the daemon ticks every frame, idle or
+-- not, and no sleep job stands on the activity indicator meanwhile.
+local parse_retry_at = {}
+local RETRY_MARGIN_MS = 25
+
+local function retry_backed_off_parses()
+  if next(parse_retry_at) == nil then return end
+  local now = pmacs.editor.monotonic_ms()
+  local due = {}
+  for key, at in pairs(parse_retry_at) do
+    if at <= now then due[#due + 1] = key end
+  end
+  for _, key in ipairs(due) do
+    parse_retry_at[key] = nil
+    local buf, lang = parse_buffer_by_key[key], parse_lang_by_buffer[key]
+    if buf and lang and parse_crash_state[key] == "crashed" then
+      -- A buffer killed meanwhile has no view to parse into.
+      pcall(pmacs.parse._dispatch, buf, lang)
+    end
+  end
+end
+
 local prior_tick = pmacs._async.tick
 pmacs._async.tick = function(...)
   local ret = prior_tick(...)
+  retry_backed_off_parses()
   local settled = {}
   for job_id in pairs(pending_parse_jobs) do
     if pmacs._async._is_complete(job_id) then
@@ -818,12 +868,14 @@ pmacs._async.tick = function(...)
       elseif parse_crash_state[key] ~= "stopped" then
         parse_crash_state[key] = "crashed"
       end
+      local b = parse_buffer_by_key[key]
+      local report = b and pmacs.parse._unit_report(b)
+      if report and not report.stopped and report.backoff_left_ms > 0 then
+        parse_retry_at[key] = pmacs.editor.monotonic_ms() + report.backoff_left_ms + RETRY_MARGIN_MS
+      end
       if status == "crash-stopped" or not parse_crash_warned[key] then
         parse_crash_warned[key] = true
-        local b = parse_buffer_by_key[key]
-        local name = b and b:name() or key
-        pmacs.error(string.format("syntax: parsing %s as %s: %s",
-          name, tostring(parse_lang_by_buffer[key]), tostring(detail)))
+        pmacs.error(crash_notice(key, b, report, detail))
       end
     elseif key and status == "stalled" then
       -- E7i fix round 1 (review 1, Low 1): the parse returned inside the
@@ -862,6 +914,7 @@ pmacs._async.tick = function(...)
       parse_deadline_warned[key] = nil
       parse_crash_warned[key] = nil
       parse_crash_state[key] = nil
+      parse_retry_at[key] = nil
       parse_stall_warned[key] = nil
       if status == "installed-cut" then
         if not parse_layers_cut_warned[key] then

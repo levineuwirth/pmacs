@@ -419,3 +419,90 @@ fn e7i_review2_a_crashed_buffer_paints_no_stale_span_and_keeps_its_mark() {
         "the GPU frontend holds no keyword span after the stop: {held:?}"
     );
 }
+
+/// The echo line of an 80-column grid: its last row.
+fn echo_line_at_80(state: &EditorState) -> String {
+    let (rows, cols) = (24u32, 80u32);
+    let size = CellSize::new(rows, cols);
+    let mut cells = vec![Cell::default(); (rows * cols) as usize];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: cols,
+        size,
+    };
+    pmacs::editor::paint_frame(state, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
+    (0..cols)
+        .map(
+            |col| match cells[((rows - 1) * cols + col) as usize].glyph {
+                Glyph::Char(c) => c,
+                _ => ' ',
+            },
+        )
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+/// Review 2, Medium 1, the half that follows. The echo line shows the
+/// first 80 columns of the last unread error, and at `cd6cd52` the notice
+/// led with the buffer's absolute path, so a path of 63 characters left
+/// `parse unit crashed: signal` on 120 columns, without the signal's number
+/// or the back-off, and the stop's `parsing stopped` fitted only under 54.
+/// Fix round 2 leads with the grammar, the signal and what follows, under
+/// the file's short name, and parses the buffer again when each back-off
+/// ends, so the stop arrives with no edit after the crash's.
+#[test]
+fn e7i_review2_the_echo_line_keeps_the_signal_and_the_state_at_80_columns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let unit = crashing_on(dir.path(), "rust", "CRASHME");
+    let deep = dir
+        .path()
+        .join("a-project-with-a-long-name/src/and/a/nested/module");
+    std::fs::create_dir_all(&deep).expect("deep dir");
+    let path = deep.join("a.rs");
+    assert!(
+        path.display().to_string().len() >= 63,
+        "the path is at least the reviewer's 63 characters: {}",
+        path.display()
+    );
+    std::fs::write(&path, rust_text(5)).expect("a.rs");
+    let mut state = editor_on(&path, &unit);
+    type_keys(&mut state, "CRASHME");
+    let crashed = ready::tick_until(
+        &mut state,
+        "the crash told on the echo line",
+        Duration::from_secs(30),
+        |s| {
+            let echo = echo_line_at_80(s);
+            if echo.contains("crashed") {
+                Probe::Ready(echo)
+            } else {
+                Probe::Pending(format!("{} echo {echo:?}", report(s)))
+            }
+        },
+    );
+    let stopped = ready::tick_until(
+        &mut state,
+        "the stop told on the echo line, with no edit",
+        Duration::from_secs(30),
+        |s| {
+            let echo = echo_line_at_80(s);
+            if echo.contains("stopped") {
+                Probe::Ready(echo)
+            } else {
+                Probe::Pending(format!("{} echo {echo:?}", report(s)))
+            }
+        },
+    );
+    say(&format!(
+        "the echo line at 80 columns: after the crash {crashed:?}; at the stop {stopped:?}"
+    ));
+    assert!(
+        crashed.contains("rust crashed (SIGABRT) parsing a.rs; parsing again in 1 s"),
+        "the grammar, the signal and the back-off survive the width: {crashed:?}"
+    );
+    assert!(
+        stopped.contains("parsing stopped: rust crashed (SIGABRT) 3 times in a row"),
+        "the stop and the signal survive the width: {stopped:?}"
+    );
+}

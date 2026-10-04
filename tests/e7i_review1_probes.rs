@@ -91,76 +91,51 @@ fn crashing_unit(dir: &Path) -> PathBuf {
 /// The four-crash sequence, and what follows it. At `fa176de` the open's
 /// parse and three edits after it each started a worker that crashed, four
 /// deaths in a second, told to no one. Fix round 1 backs off after a crash
-/// (1 s, then 2 s) and stops parsing the buffer at its third crash in a row.
-/// The scenario edits one keystroke at a time, each after the last settled,
-/// and judges each by the back-off it met, read from the unit report just
-/// before it: an edit made with more than 200 ms of back-off left, or after
-/// the stop, must start no worker (`held_bad=0`). It edits three times after
-/// the first crash, then until the third crash, then once 5 s after the
-/// stop. Judging by what each edit met, not by a schedule, keeps it true on
-/// a runner slow enough that three edits outlast the first second (CI's
-/// macOS lua54 leg read `burst=2` under the schedule this replaced).
+/// (1 s, then 2 s) and stops parsing the buffer at its third crash in a row;
+/// fix round 2 parses it again when each back-off ends, with no edit. The
+/// scenario edits one keystroke every 100 ms until the third crash, each
+/// judged by the back-off it met (more than 200 ms left, `held`), then once
+/// after the stop, and waits 4 s, longer than any back-off.
 const CRASH_INIT: &str = "pmacs.lsp.config = {}\n\
      pmacs.config.set('syntax.isolation', 'process')\n\
      pmacs.config.set('syntax.parse-unit-path', {unit:?})\n\
      local b = pmacs.buffer.find_or_open({file:?})\n\
      pmacs.async(function()\n\
        local now = pmacs.editor.monotonic_ms\n\
-       local function settled()\n\
-         local t0 = now()\n\
-         while now() - t0 < 10000 do\n\
-           local r = pmacs.parse._unit_report(b)\n\
-           if r and not r.busy then return r end\n\
-           pmacs.workers.sleep(20):await()\n\
-         end\n\
-         return pmacs.parse._unit_report(b)\n\
-       end\n\
-       local function left(r)\n\
-         if not r.held then return 0 end\n\
-         local ms = r.held:match('backing off for (%d+) ms more')\n\
-         return ms and tonumber(ms) or 1e9\n\
-       end\n\
-       local held, held_bad, n = 0, 0, 0\n\
-       local function step()\n\
-         n = n + 1\n\
-         local r = settled()\n\
-         local margin, before = left(r), r.deaths\n\
-         b:insert(b:len(), '// ' .. n .. '\\n')\n\
-         pmacs.parse._dispatch(b, 'rust')\n\
-         pmacs.workers.sleep(150):await()\n\
-         local after = settled().deaths\n\
-         if margin > 200 then\n\
-           held = held + 1\n\
-           if after ~= before then held_bad = held_bad + 1 end\n\
-         end\n\
-       end\n\
+       local function report() return pmacs.parse._unit_report(b) end\n\
        local t0 = now()\n\
        while now() - t0 < 30000 do\n\
-         local r = settled()\n\
+         local r = report()\n\
          if r and r.deaths >= 1 then break end\n\
          pmacs.workers.sleep(20):await()\n\
        end\n\
-       for _ = 1, 3 do step() end\n\
-       local burst = settled().deaths\n\
-       while settled().deaths < 3 and now() - t0 < 30000 do\n\
-         step()\n\
-         pmacs.workers.sleep(150):await()\n\
+       local held, n = 0, 0\n\
+       while not report().stopped and now() - t0 < 30000 do\n\
+         local r = report()\n\
+         if r.backoff_left_ms > 200 then held = held + 1 end\n\
+         n = n + 1\n\
+         b:insert(b:len(), '// ' .. n .. '\\n')\n\
+         pmacs.parse._dispatch(b, 'rust')\n\
+         pmacs.workers.sleep(100):await()\n\
        end\n\
-       local third = settled().deaths\n\
-       pmacs.workers.sleep(5000):await()\n\
-       step()\n\
-       local r = settled()\n\
+       local third = report().deaths\n\
+       b:insert(b:len(), '// after the stop\\n')\n\
+       pmacs.parse._dispatch(b, 'rust')\n\
+       pmacs.workers.sleep(4000):await()\n\
+       local r = report()\n\
        local said = ''\n\
        for _, x in ipairs(pmacs.buffer.list()) do\n\
          if x:name() == '*errors*' then said = x:slice(0, x:len()) end\n\
        end\n\
-       local _, told = said:gsub('/a%.rs as rust: parse unit crashed', '')\n\
+       local _, told = said:gsub('rust crashed %(SIGSEGV%)', '')\n\
+       local function has(text) return tostring(said:find(text, 1, true) ~= nil) end\n\
        local f = assert(io.open('{report}', 'w'))\n\
-       f:write(string.format('burst=%d held=%d held_bad=%d third=%d deaths=%d known=%s told=%d named=%s stopped=%s\\n',\n\
-         burst, held, held_bad, third, r.deaths,\n\
+       f:write(string.format('held=%d third=%d deaths=%d stopped=%s known=%s told=%d first=%s named=%s stop=%s\\n',\n\
+         held, third, r.deaths, tostring(r.stopped),\n\
          tostring(tostring(r.last_death):find('signal 11 (SIGSEGV)', 1, true) ~= nil), told,\n\
-         tostring(said:find('/a.rs as rust: parse unit crashed: signal 11 (SIGSEGV)', 1, true) ~= nil),\n\
-         tostring(said:find('parsing stopped', 1, true) ~= nil)))\n\
+         has('syntax: rust crashed (SIGSEGV) parsing a.rs; parsing again in 1 s, and not after 3 crashes in a row'),\n\
+         has('/a.rs: signal 11 (SIGSEGV)'),\n\
+         has('syntax: parsing stopped: rust crashed (SIGSEGV) 3 times in a row parsing a.rs; reopen the file')))\n\
        f:close()\n\
      end)\n";
 
@@ -180,9 +155,10 @@ fn crash_report() -> String {
 /// Control, live: the editor knows when a buffer's worker crashed. Its unit
 /// report's last death names signal 11. Fix round 1: and it backs off. At
 /// `fa176de` every keystroke started another worker, which crashed again
-/// (four deaths for the open and three edits); now no edit made inside a
-/// back-off starts one, several edits met one, and after the third crash
-/// none starts at all.
+/// (four deaths for the open and three edits); now several edits met a
+/// back-off, and after the third crash none starts at all. Fix round 2:
+/// the third crash comes with no edit after the first back-off's, each
+/// back-off ending in a parse of its own.
 #[test]
 fn e7i_review1_the_editor_knows_its_worker_crashed() {
     let text = crash_report();
@@ -193,19 +169,19 @@ fn e7i_review1_the_editor_knows_its_worker_crashed() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(u64::MAX)
     };
-    assert_eq!(
-        field("held_bad"),
-        0,
-        "no edit made inside a back-off started a worker: {text}"
-    );
     assert!(
         field("held") >= 3,
-        "the back-off and the stop were met, not stepped around: {text}"
+        "the back-offs were met, not stepped around: {text}"
     );
     assert!(
-        field("third") == 3 && field("deaths") == 3,
-        "the third crash stopped the buffer's parsing, and an edit 5 s later \
-         started no worker: {text}"
+        field("third") == 3 && text.contains("stopped=true"),
+        "the buffer was parsed again after each back-off until its third \
+         crash stopped it: {text}"
+    );
+    assert_eq!(
+        field("deaths"),
+        3,
+        "an edit after the stop, and 4 s, started no worker: {text}"
     );
 }
 
@@ -217,14 +193,18 @@ fn e7i_review1_the_editor_knows_its_worker_crashed() {
 /// and every keystroke respawned a worker that crashed again, in silence.
 /// Fix round 1: it is told in `*errors*`, naming the buffer, the grammar
 /// and the signal, once for the streak of crashes and once when the streak
-/// stops the buffer's parsing.
+/// stops the buffer's parsing. Fix round 2 (review 2's Medium 1): each
+/// notice leads with the grammar, the signal and what follows, under the
+/// file's short name, so a narrow echo line keeps them; the full path and
+/// the worker's words come after.
 #[test]
 fn e7i_review1_a_crashing_worker_is_told_to_the_user() {
     let text = crash_report();
     assert!(
-        text.contains("told=2 named=true stopped=true"),
+        text.contains("told=2 first=true named=true stop=true"),
         "the user is told that the buffer's parse worker crashed, once, and \
-         that its parsing stopped: {text}"
+         that its parsing stopped, grammar, signal and what follows first: \
+         {text}"
     );
 }
 

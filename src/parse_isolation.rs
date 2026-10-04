@@ -291,6 +291,21 @@ impl Death {
         how
     }
 
+    /// How a crashed unit died, shortest: the signal's name (`SIGSEGV`),
+    /// or `exit 101`; for the first words of the notice, which a narrow
+    /// echo line keeps (E7i fix round 2).
+    fn signal_name(&self) -> String {
+        let Self::Crashed { signal, code, .. } = self else {
+            return String::new();
+        };
+        match (signal, code) {
+            (Some(sig), _) => nix::sys::signal::Signal::try_from(*sig)
+                .map_or_else(|_| format!("signal {sig}"), |name| name.to_string()),
+            (None, Some(code)) => format!("exit {code}"),
+            (None, None) => "ended".to_owned(),
+        }
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Self::Time { .. } => "time",
@@ -418,8 +433,12 @@ struct Slot {
     crashes: u32,
     /// No worker starts for it before then: the back-off after a crash.
     backoff_until: Option<Instant>,
+    /// The length of that back-off, for the report.
+    backoff: Duration,
     /// How its last worker to crash died, for a parse held after it.
     crash_how: String,
+    /// The same, shortest: `SIGSEGV` or `exit 101` (E7i fix round 2).
+    crash_signal: String,
 }
 
 impl Slot {
@@ -459,8 +478,10 @@ impl Slot {
         }
         self.crashes += 1;
         self.crash_how = death.how();
+        self.crash_signal = death.signal_name();
         if self.stopped() {
             self.backoff_until = None;
+            self.backoff = Duration::ZERO;
             return format!(
                 "{CRASH_STOPPED_MESSAGE}: {}, {} crashes in a row; the buffer is not parsed again until it is killed and opened again",
                 death.how(),
@@ -469,6 +490,7 @@ impl Slot {
         }
         let backoff = CRASH_BACKOFF * 2u32.pow(self.crashes - 1);
         self.backoff_until = Some(Instant::now() + backoff);
+        self.backoff = backoff;
         format!(
             "{}; the buffer is parsed again in {} s at the earliest, and not after {MAX_CRASHES} crashes in a row",
             death.message(),
@@ -571,7 +593,9 @@ impl Host {
                         forgotten: false,
                         crashes: 0,
                         backoff_until: None,
+                        backoff: Duration::ZERO,
                         crash_how: String::new(),
+                        crash_signal: String::new(),
                     }),
                     parsing: Mutex::new(()),
                 })
@@ -694,6 +718,7 @@ pub fn run(job: &IsolatedJob) -> Result<ParseTreeBundle, String> {
                     // A parse installed: the buffer's crash streak ends.
                     slot.crashes = 0;
                     slot.backoff_until = None;
+                    slot.backoff = Duration::ZERO;
                 }
                 host.trace(&[
                     ("event", json_str("parsed")),
@@ -1256,6 +1281,17 @@ pub struct UnitReport {
     pub crashes: u32,
     /// Why no worker may start for it now, if none may.
     pub held: Option<String>,
+    /// Its parsing stopped: [`MAX_CRASHES`] crashes in a row.
+    pub stopped: bool,
+    /// The back-off its last crash set, ms; 0 when none holds it.
+    pub backoff_ms: u64,
+    /// What is left of that back-off, ms.
+    pub backoff_left_ms: u64,
+    /// How its last worker to crash died: `signal 11 (SIGSEGV)`, with its
+    /// last words when it left any.
+    pub crash_how: String,
+    /// The same, shortest: `SIGSEGV` or `exit 101`.
+    pub crash_signal: String,
 }
 
 /// The report for `buffer`'s unit, if it has had one. Never waits on a
@@ -1282,6 +1318,13 @@ pub fn report(buffer: BufferId) -> Option<UnitReport> {
         last_death: slot.last_death.as_ref().map(Death::describe),
         crashes: slot.crashes,
         held: slot.held(),
+        stopped: slot.stopped(),
+        backoff_ms: slot.backoff.as_millis() as u64,
+        backoff_left_ms: slot.backoff_until.map_or(0, |until| {
+            until.saturating_duration_since(Instant::now()).as_millis() as u64
+        }),
+        crash_how: slot.crash_how.clone(),
+        crash_signal: slot.crash_signal.clone(),
     })
 }
 

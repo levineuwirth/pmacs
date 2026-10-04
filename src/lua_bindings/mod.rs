@@ -8420,6 +8420,14 @@ pub fn install_parse(
             t.set("recycled", report.recycled)?;
             t.set("crashes", report.crashes)?;
             t.set("held", report.held)?;
+            // E7i fix round 2: the crash streak's state, for the notice
+            // `syntax.lua` composes and the retry it schedules.
+            t.set("stopped", report.stopped)?;
+            t.set("backoff_ms", report.backoff_ms)?;
+            t.set("backoff_left_ms", report.backoff_left_ms)?;
+            t.set("crash_how", report.crash_how)?;
+            t.set("crash_signal", report.crash_signal)?;
+            t.set("max_crashes", crate::parse_isolation::MAX_CRASHES)?;
             Ok(mlua::Value::Table(t))
         })?,
     )?;
