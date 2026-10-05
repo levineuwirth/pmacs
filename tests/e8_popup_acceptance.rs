@@ -533,6 +533,36 @@ fn e8_2_dwell_opens_after_motion_only_once_and_not_when_off() {
     assert!(off.is_empty(), "dwell is off by default; got {off:?}");
 }
 
+/// E8 fix round 1: the dwell is `lsp.hover-dwell-ms`, a registered
+/// setting (the owner's ruling: the delay is what a person wants to
+/// change once dwell is on). Set to 3 s, a motion and a rest of 1.5 s
+/// open nothing, where the 500 ms the delay was would have opened it, and
+/// the hover opens once the 3 s have passed.
+#[test]
+fn fr1_dwell_waits_for_lsp_hover_dwell_ms() {
+    let (daemon, _dir) = daemon_with(
+        "hover",
+        &[],
+        "pmacs.config.set('lsp.hover-on-dwell', true)\n\
+         pmacs.config.set('lsp.hover-dwell-ms', 3000)",
+    );
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
+    session.ask_until_present('h'); // the server is up
+    session.key(Key::Char('g'), Modifiers::CTRL);
+    session.wait_absent("C-g");
+    session.key(Key::Char('f'), Modifiers::CTRL);
+    let early = session.popups_within(Duration::from_millis(1500));
+    assert!(
+        early.is_empty(),
+        "a 1.5 s rest is short of a 3 s dwell; got {early:?}"
+    );
+    let later = session.popups_within(Duration::from_millis(3000));
+    assert!(
+        matches!(later.first(), Some(PopupPayload::Present(frame)) if frame.lines == FAKE_HOVER),
+        "the hover opens once the 3 s have passed; got {later:?}"
+    );
+}
+
 /// E8.5: typing a trigger character opens the signature popup with its
 /// active parameter marked; the popup survives the characters typed
 /// inside the call and `,`, which asks again; and a typed `)` closes

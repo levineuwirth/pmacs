@@ -4190,7 +4190,8 @@ end
 
 -- E8.2: hover on caret dwell, behind `lsp.hover-on-dwell` (default off).
 -- When the caret has rested on one byte of an attached buffer for
--- DWELL_MS after a MOTION, the hover is asked for as `C-c h` would ask,
+-- `lsp.hover-dwell-ms` (500 by default, a registered knob since E8's fix
+-- round 1) after a MOTION, the hover is asked for as `C-c h` would ask,
 -- but quietly: no "no hover info", no request error on the status line.
 -- An edit does not arm it (typing must not summon documentation), and
 -- neither does the first sight of a window, so opening a file pops
@@ -4213,13 +4214,22 @@ end
 --    `attached_for_active` may.
 pmacs.config.define {
   name = "lsp.hover-on-dwell",
-  description = "Show the hover popup when the caret rests on a symbol for half a second after moving, as C-c h would.",
+  description = "Show the hover popup when the caret rests on a symbol for lsp.hover-dwell-ms after moving, as C-c h would.",
   type = "boolean",
   default = false,
   mutability = "live",
 }
 
-local DWELL_MS = 500
+pmacs.config.define {
+  name = "lsp.hover-dwell-ms",
+  description = "Milliseconds the caret must rest on a symbol after moving before lsp.hover-on-dwell asks for its hover.",
+  type = "integer",
+  default = 500,
+  min = 50,
+  max = 10000,
+  mutability = "live",
+}
+
 -- { place = "<buffer>:<cursor>", rev = revision, since = ms, asked = bool }
 local dwell = {}
 
@@ -4243,7 +4253,9 @@ pmacs.hook.add("process.after-tick", function()
     dwell = { place = place, rev = rev, key = key, since = now, asked = not moved }
     return
   end
-  if dwell.asked or now - dwell.since < DWELL_MS then return end
+  if dwell.asked or now - dwell.since < pmacs.config.get("lsp.hover-dwell-ms") then
+    return
+  end
   dwell.asked = true
   if pmacs.lsp.popup_kind() ~= nil then return end
   -- An asked request in flight is the user's question for this place;
