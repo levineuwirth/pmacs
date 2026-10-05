@@ -556,7 +556,7 @@ fn fr1_dwell_waits_for_lsp_hover_dwell_ms() {
         early.is_empty(),
         "a 1.5 s rest is short of a 3 s dwell; got {early:?}"
     );
-    let later = session.popups_within(Duration::from_millis(3000));
+    let later = session.popups_within(Duration::from_secs(3));
     assert!(
         matches!(later.first(), Some(PopupPayload::Present(frame)) if frame.lines == FAKE_HOVER),
         "the hover opens once the 3 s have passed; got {later:?}"
