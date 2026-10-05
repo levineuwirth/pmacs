@@ -38,13 +38,16 @@ impl FromLua for PopupTargetLua {
     }
 }
 
-/// `(opened, status)` for Lua: the status line a caller shows, when
-/// there is one to show.
-fn outcome_to_lua(outcome: PopupOutcome, nothing: &str) -> (bool, Option<String>) {
+/// `(opened, status, told)` for Lua: `status` is the line a caller
+/// shows for an empty answer unless it is quiet; `told` is the answer
+/// itself, said on the status line for a frontend that cannot show the
+/// popup ([`PopupOutcome::Told`]), quiet or not.
+fn outcome_to_lua(outcome: PopupOutcome, nothing: &str) -> (bool, Option<String>, Option<String>) {
     match outcome {
-        PopupOutcome::Opened => (true, None),
-        PopupOutcome::Nothing => (false, Some(nothing.to_owned())),
-        PopupOutcome::Stale => (false, None),
+        PopupOutcome::Opened => (true, None, None),
+        PopupOutcome::Nothing => (false, Some(nothing.to_owned()), None),
+        PopupOutcome::Stale => (false, None, None),
+        PopupOutcome::Told(answer) => (false, None, Some(answer)),
     }
 }
 
@@ -70,7 +73,7 @@ pub fn install_lsp_popup(
     }
 
     {
-        // _popup_hover(server, uri, target) -> opened, status|nil
+        // _popup_hover(server, uri, target) -> opened, status|nil, told|nil
         let cc = core.clone();
         let mgr = manager.clone();
         lsp.set(
@@ -94,7 +97,8 @@ pub fn install_lsp_popup(
     }
 
     {
-        // _popup_signature(server, uri, target, quiet) -> opened, status|nil
+        // _popup_signature(server, uri, target, quiet)
+        //   -> opened, status|nil, told|nil
         //
         // `quiet` is the auto-trigger's: an empty answer leaves an open
         // signature popup as it is, where an asked-for one closes it.

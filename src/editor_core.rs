@@ -56,7 +56,7 @@ pub struct PopupTarget {
 }
 
 /// What opening the popup from a server's answer did (E8.2).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PopupOutcome {
     /// The popup is open with the answer.
     Opened,
@@ -65,6 +65,13 @@ pub enum PopupOutcome {
     /// The target no longer holds (the caret moved, the text changed,
     /// the window lost focus); nothing opened and nothing is said.
     Stale,
+    /// The window that asked belongs to a frontend that cannot show the
+    /// popup (a semantic session below
+    /// [`pmacs_protocol::POPUP_MIN_VERSION`], E8 fix round 1): nothing
+    /// opened, and the caller says this instead --- the answer's first
+    /// line, as every frontend was told before E8 --- even where it
+    /// would stay quiet about an empty answer.
+    Told(String),
 }
 
 /// Why [`EditorCore::write_active_buffer_to`] declined (E1.5).
@@ -755,6 +762,14 @@ pub struct EditorCore {
     /// runtime's commands open and every edit or motion closes
     /// ([`crate::lsp_popup`]).
     pub lsp_popup: crate::lsp_popup::SharedLspPopup,
+    /// Frontends sent no popup: semantic sessions that negotiated below
+    /// [`pmacs_protocol::POPUP_MIN_VERSION`] (E8 fix round 1). Set by the
+    /// daemon in the attach transaction that decides the producer's
+    /// peer flag, from the same negotiated state, and dropped with the
+    /// view. An answer asked in such a frontend's window is said on the
+    /// status line ([`PopupOutcome::Told`]); a grid frontend, of any
+    /// version, paints the popup itself and is never here.
+    pub frontends_without_popup: HashSet<FrontendId>,
     /// Buffers whose input must round-trip (Arc 1b, Q#P6). While one
     /// of these is the active buffer,
     /// [`crate::editor::EditorState::dispatch_idle`] reports `false`,
@@ -865,6 +880,7 @@ impl EditorCore {
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
             lsp_popup: crate::lsp_popup::make_shared_popup(),
+            frontends_without_popup: HashSet::new(),
             round_trip_buffers: std::collections::HashSet::new(),
             query_replace: None,
             typed_edit_pending: None,
@@ -1131,6 +1147,7 @@ impl EditorCore {
         // trail dies with its view — its `WindowId`s are gone, and no
         // other frontend may pop or destroy those entries.
         self.jump_ring.remove(&fid);
+        self.frontends_without_popup.remove(&fid);
         if self.active_frontend == fid {
             self.active_frontend = FrontendId::LOCAL;
         }
@@ -5622,6 +5639,28 @@ impl EditorCore {
         self.views.values().any(|v| v.active == window_id)
     }
 
+    /// Record whether `fid` is shown the popup (E8 fix round 1): `false`
+    /// for a semantic session below [`pmacs_protocol::POPUP_MIN_VERSION`].
+    pub fn set_frontend_shows_popup(&mut self, fid: FrontendId, shows: bool) {
+        if shows {
+            self.frontends_without_popup.remove(&fid);
+        } else {
+            self.frontends_without_popup.insert(fid);
+        }
+    }
+
+    /// Whether no frontend focused on `window_id` can show the popup, so
+    /// an answer asked there must be said instead.
+    fn popup_unseen_in(&self, window_id: WindowId) -> bool {
+        let mut focused = self
+            .views
+            .iter()
+            .filter(|(_, v)| v.active == window_id)
+            .peekable();
+        focused.peek().is_some()
+            && focused.all(|(fid, _)| self.frontends_without_popup.contains(fid))
+    }
+
     /// Whether `target` still describes the editor: the window still
     /// focused and showing its buffer, the caret where it was and the
     /// text unchanged.
@@ -5645,7 +5684,8 @@ impl EditorCore {
     /// it. An answer for a target that no longer holds opens nothing
     /// ([`PopupOutcome::Stale`]); an empty answer closes any popup, the
     /// user having asked for this place and not the last one
-    /// ([`PopupOutcome::Nothing`]).
+    /// ([`PopupOutcome::Nothing`]); an answer for a frontend that cannot
+    /// show it opens nothing and is told ([`PopupOutcome::Told`]).
     pub fn lsp_popup_open_hover(
         &mut self,
         target: PopupTarget,
@@ -5660,6 +5700,9 @@ impl EditorCore {
         if lines.is_empty() {
             self.lsp_popup_close();
             return PopupOutcome::Nothing;
+        }
+        if self.popup_unseen_in(target.window_id) {
+            return PopupOutcome::Told(format!("LSP: {}", lines[0]));
         }
         let text = self.buffer_bytes(target.buffer_id);
         let offsets = crate::diag::compute_line_offsets(&text);
@@ -5725,6 +5768,9 @@ impl EditorCore {
             }
             return PopupOutcome::Nothing;
         };
+        if self.popup_unseen_in(target.window_id) {
+            return PopupOutcome::Told(format!("LSP: {}", lines[0]));
+        }
         let text = self.buffer_bytes(target.buffer_id);
         let offsets = crate::diag::compute_line_offsets(&text);
         let caret = (target.cursor as usize).min(text.len());

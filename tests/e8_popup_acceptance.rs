@@ -235,7 +235,7 @@ const FAKE_HOVER: [&str; 3] = [
 /// sent ONCE while unchanged, not once a frame; motion out of its range,
 /// `C-g` and an edit each close it with an explicit `Absent`. And a v25
 /// session, which never negotiated the variant, receives none of it,
-/// even for a popup it opened itself.
+/// and is told its own hover on its status line instead.
 #[test]
 fn e8_2_hover_opens_once_closes_on_motion_cg_and_edit_and_never_reaches_v25() {
     let (daemon, _dir) = daemon_with("hover", &[], "");
@@ -282,17 +282,38 @@ fn e8_2_hover_opens_once_closes_on_motion_cg_and_edit_and_never_reaches_v25() {
         "a closed popup stays closed; got {after:?}"
     );
 
-    // A v25 session: its own hover opens (the v26 session's open popup
-    // closes, the one popup having moved to the v25 window, which is
-    // the positive control) and the v25 session receives no `Popup`.
+    // A v25 session: its own hover opens nothing and is told on its
+    // status line instead (E8 fix round 1: the positive control, which
+    // was the one popup moving to the v25 window until that window was
+    // found told nothing); it receives no `Popup`, and the v26 session's
+    // popup, in its own window, is left as it was.
     current.ask_until_present('h');
     let mut legacy = Session::attach(&daemon, 25);
     legacy.chord('h');
-    current.wait_absent("the popup moved to the v25 session's window");
-    let leaked = legacy.popups_within(Duration::from_millis(1500));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (mut leaked, mut told) = (Vec::new(), Vec::new());
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match legacy.rx.recv_timeout(left) {
+            Ok(InstanceMessage::Popup(p)) => leaked.push(p),
+            Ok(InstanceMessage::StatusFacts {
+                message: Some(m), ..
+            }) => told.push(m),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
     assert!(
         leaked.is_empty(),
         "a v25 session must never receive the v26 variant; got {leaked:?}"
+    );
+    assert!(
+        told.iter().any(|m| m == "LSP: # pmacs-fake-lsp"),
+        "a v25 session is told the hover's first line; it was told {told:?}"
+    );
+    let moved = current.popups_within(Duration::from_millis(800));
+    assert!(
+        moved.is_empty(),
+        "the v26 session's popup stays as it was; got {moved:?}"
     );
 }
 

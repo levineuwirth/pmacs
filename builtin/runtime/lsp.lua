@@ -1895,7 +1895,10 @@ local function signature_help_quiet(rec)
       pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
     end)
     if not ok or generation ~= popup_generation then return end
-    pmacs.lsp._popup_signature(rec.server, rec.uri, target, true)
+    -- A frontend that cannot show the popup is told the signature, as
+    -- it was before E8; quiet means no "no signature help", not silence.
+    local _, _, told = pmacs.lsp._popup_signature(rec.server, rec.uri, target, true)
+    if told then pmacs.editor.set_status(told) end
   end)
 end
 
@@ -4063,7 +4066,8 @@ end
 -- "LSP: no hover info" and closes any popup; a text past the bound shows
 -- its first lines and a closing "… N more lines · C-c H opens *lsp-help*"
 -- row; an answer that lands after the caret moved or the text changed
--- opens nothing and says nothing.
+-- opens nothing and says nothing; a frontend that cannot show the popup
+-- (a GPU below protocol v26) is told the answer's first line instead.
 local function hover_popup(rec, quiet)
   -- The server must hold the text the caret is in before it is asked
   -- about it, or its answer names a symbol that is not there.
@@ -4085,8 +4089,12 @@ local function hover_popup(rec, quiet)
       end
       return
     end
-    local _, msg = pmacs.lsp._popup_hover(rec.server, rec.uri, target)
-    if msg and not quiet then pmacs.editor.set_status(msg) end
+    local _, msg, told = pmacs.lsp._popup_hover(rec.server, rec.uri, target)
+    if told then
+      pmacs.editor.set_status(told)
+    elseif msg and not quiet then
+      pmacs.editor.set_status(msg)
+    end
   end)
 end
 
@@ -4161,8 +4169,8 @@ function pmacs.lsp.signature_help_at_cursor()
       pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
       return
     end
-    local _, msg = pmacs.lsp._popup_signature(rec.server, rec.uri, target, false)
-    if msg then pmacs.editor.set_status(msg) end
+    local _, msg, told = pmacs.lsp._popup_signature(rec.server, rec.uri, target, false)
+    if told or msg then pmacs.editor.set_status(told or msg) end
   end)
 end
 

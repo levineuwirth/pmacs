@@ -955,6 +955,16 @@ fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> 
         || session_state.negotiated_protocol_version >= PANEL_MIN_VERSION
 }
 
+/// Whether a session is shown the hover and signature popup (E8 fix
+/// round 1): a grid session paints it from cells at any version; a
+/// semantic one needs [`pmacs_protocol::POPUP_MIN_VERSION`], the same
+/// constant the producer's peer flag and the write filter read. One that
+/// is not is told the answer on its status line instead.
+fn peer_shows_popup(session_state: crate::presence::SessionState) -> bool {
+    !session_state.negotiated_capabilities.semantic_render
+        || session_state.negotiated_protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
+}
+
 /// The same belt-and-braces write-loop gate for the additive
 /// protocol-v19 terminal frame. The semantic producer skips construction
 /// for an older peer; this filter independently prevents an unknown
@@ -1832,7 +1842,9 @@ fn dispatcher_loop(
                         continue;
                     }
                     // E8 — Popup gated at v26. A v25 peer keeps no popup;
-                    // `*lsp-help*` (`C-c H`) still carries the whole text.
+                    // it is told the answer's first line on its status
+                    // line instead (`peer_shows_popup`), and `*lsp-help*`
+                    // (`C-c H`) still carries the whole text.
                     if !peer_accepts_popup_message(negotiated_protocol_version, msg) {
                         continue;
                     }
@@ -2342,6 +2354,10 @@ fn handle_session_established(
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
+        // E8 fix round 1: decided here, from the same negotiated state as
+        // the producer's popup flag, so a v25 GPU is told on its status
+        // line what a v26 one is shown.
+        core.set_frontend_shows_popup(frontend_id, peer_shows_popup(session_state));
         core.active_frontend = frontend_id;
     }
 

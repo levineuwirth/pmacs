@@ -303,6 +303,44 @@ fn review1_a_v25_session_is_told_its_own_hover_and_signature() {
     );
 }
 
+/// E8 fix round 1 (review 1's Medium 2): the signature a v25 session's
+/// own typing asks for is told too. Typing `(` asks quietly (the
+/// server's trigger character); before E8 that set `LSP: <label>` on
+/// every frontend, and at `1ace8b3` a v25 session got neither the popup
+/// nor the line. Quiet means no "no signature help", not silence. The
+/// control is a v26 session typing the same, which is sent the popup.
+#[test]
+fn fr1_a_v25_session_is_told_the_signature_its_typing_asks_for() {
+    let (daemon, _dir) = daemon_with(SOURCE, "sighelp", &[], "");
+    let mut current = Session::attach(&daemon, PROTOCOL_VERSION);
+    for _ in 0..7 {
+        current.ctrl('f');
+    }
+    current.typed("(");
+    let shown = current.popups_within(Duration::from_secs(3));
+    assert!(
+        shown
+            .iter()
+            .any(|p| matches!(p, PopupPayload::Present(f) if f.kind == PopupKind::Signature)),
+        "control: a v26 session typing `(` is sent the signature popup: {shown:?}"
+    );
+    current.ctrl('g');
+    let _ = current.drain(Duration::from_millis(500));
+
+    let mut legacy = Session::attach(&daemon, 25);
+    for _ in 0..7 {
+        legacy.ctrl('f');
+    }
+    legacy.typed("(");
+    let seen = legacy.drain(Duration::from_secs(3));
+    assert!(popups(&seen).is_empty(), "no Popup reaches v25");
+    let told = statuses(&seen);
+    assert!(
+        told.iter().any(|m| m.contains("fn echo(")),
+        "a v25 session typing `(` must be told the signature; it was told {told:?}"
+    );
+}
+
 /// PASSES at `1ace8b3`; the handoff states this close and witnesses
 /// none. Focus leaving the popup's window closes it with an explicit
 /// `Absent`, and focus coming back does not bring it back.
