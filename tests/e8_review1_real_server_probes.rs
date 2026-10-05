@@ -90,7 +90,8 @@ fn open(tag: &str, source: &str) -> (EditorState, tempfile::TempDir, PathBuf) {
 }
 
 /// [`open`] for any file: `rel` under a fresh project (a cargo project
-/// when it is Rust, a `pyproject.toml` root when it is Python).
+/// when it is Rust, a `go.mod` module when it is Go, a `pyproject.toml`
+/// root when it is Python).
 fn open_file(tag: &str, rel: &str, source: &str) -> (EditorState, tempfile::TempDir, PathBuf) {
     let dir = tempfile::Builder::new()
         .prefix(&format!("e8r1-{tag}-"))
@@ -105,6 +106,11 @@ fn open_file(tag: &str, rel: &str, source: &str) -> (EditorState, tempfile::Temp
             "[package]\nname = \"e8r1\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
         )
         .expect("Cargo.toml");
+    } else if std::path::Path::new(rel)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("go"))
+    {
+        std::fs::write(dir.path().join("go.mod"), "module e8r1\n\ngo 1.22\n").expect("go.mod");
     } else {
         std::fs::write(
             dir.path().join("pyproject.toml"),
@@ -511,5 +517,232 @@ y = größe(7, 8)\n";
             start, second,
             "{call:?}: the span is the second parameter's"
         );
+    }
+}
+
+// ---- E8 fix round 1 (review 1's Medium 1 with Low 3) ----------------------
+//
+// pmacs now declares `labelOffsetSupport`, so a server that honours it
+// sends each parameter's place in the label and the popup marks that
+// place; one that ignores it sends strings, searched in order. Each row
+// names the path the server took (the store's parameters carry a span
+// or do not), then checks the mark on both frontends: the grid's painted
+// cells and the frame the semantic producer sends a GPU session.
+
+/// The parameters of the active signature in the store, as
+/// `(label, span)`: a span is the offset path, none the string path.
+fn stored_parameters(state: &EditorState) -> Vec<(String, Option<(u32, u32)>)> {
+    let store = state.lsp_manager.borrow().signature_store();
+    let guard = store.lock().expect("signature store");
+    let keys: Vec<_> = guard.keys().cloned().collect();
+    let help = keys
+        .iter()
+        .find_map(|k| guard.get(k).filter(|h| h.active().is_some()))
+        .expect("an answer in the store");
+    help.active()
+        .expect("an active signature")
+        .parameters
+        .iter()
+        .map(|p| (p.label.clone(), p.span))
+        .collect()
+}
+
+/// Each painted row holding cells marked as the active parameter (bold
+/// and underlined), with the marked characters in order. A wide
+/// character's second cell carries no character and is skipped.
+fn marked_rows(cells: &[Cell]) -> Vec<(u32, String)> {
+    (0..ROWS)
+        .filter_map(|r| {
+            let text: String = (0..COLS)
+                .filter_map(|c| {
+                    let cell = &cells[(r * COLS + c) as usize];
+                    let marked = cell.style.bold
+                        && cell.style.underline != pmacs::cell::UnderlineStyle::None;
+                    match (&cell.glyph, marked) {
+                        (Glyph::Char(ch), true) => Some(*ch),
+                        _ => None,
+                    }
+                })
+                .collect();
+            (!text.is_empty()).then_some((r, text))
+        })
+        .collect()
+}
+
+/// Ask for the signature of the call ending `call` in `source` (the
+/// caret after it) and check, on both frontends, that the parameter
+/// marked is `want`; returns the stored parameters, so the caller can
+/// say which path the server took.
+fn mark_on_both_frontends(
+    state: &mut EditorState,
+    source: &str,
+    call: &str,
+    want: &str,
+) -> Vec<(String, Option<(u32, u32)>)> {
+    goto(state, after(source, call));
+    let p = ask_until(state, 's', 120, |p| {
+        p.kind == PopupKind::Signature && p.active_range.is_some()
+    });
+    let label = p.lines[0].clone();
+    let r = p.active_range.expect("marked");
+    assert_eq!(
+        &label[r.start as usize..r.end as usize],
+        want,
+        "{call:?}: the popup's mark in {label:?}"
+    );
+    let frame = wire_frame(state).expect("the producer sends the popup");
+    assert_eq!(
+        (frame.lines.first(), frame.active_range),
+        (Some(&label), p.active_range),
+        "{call:?}: a GPU session is sent the same label and mark"
+    );
+    let cells = paint(state);
+    let marked = marked_rows(&cells);
+    assert_eq!(
+        marked.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+        [want],
+        "{call:?}: the grid marks the parameter and nothing else"
+    );
+    let stored = stored_parameters(state);
+    eprintln!("e8fr1: {call:?} label {label:?} marked {want:?}; stored {stored:?}");
+    key(state, 'g', KeyModifiers::CONTROL);
+    tick(state);
+    stored
+}
+
+/// The signatures the offset rows open: alike and contained labels, a
+/// non-ASCII function and parameter, a wide-character one, and multi-
+/// byte text before a call.
+const OFFSET_SIGNATURES: &str = "struct Pair(i32, i32);\n\
+fn clamp_len(max_len: usize, len: usize) -> usize { max_len.min(len) }\n\
+fn pick(first: u8, second: u8) -> u8 { first + second }\n\
+fn größe(höhe: u8, b: u8) -> u8 { höhe + b }\n\
+fn 名前(数: u8, b: u8) -> u8 { 数 + b }\n\
+fn main() {\n\
+    let _ = Pair(1, 2);\n\
+    let _ = clamp_len(1, 2);\n\
+    let _ = (\"😀😀\", pick(3, 4));\n\
+    /* 中文注释 */ let _ = pick(5, 6);\n\
+    let _ = größe(7, 8);\n\
+    let _ = 名前(7, 8);\n\
+}\n";
+
+/// The offset path on a UTF-8 server. rust-analyzer negotiates UTF-8
+/// positions with pmacs and, given `labelOffsetSupport`, sends every
+/// parameter as offsets --- counted in UTF-16 units, the spec's words,
+/// not the negotiated bytes. Read as bytes they cut `größe` and `名前`;
+/// the row fails if the offsets are read in the negotiated encoding
+/// alone, if the capability is not declared (no span arrives), and on
+/// the alike labels if the search were first-match.
+#[test]
+fn fr1_rust_analyzer_sends_label_offsets_and_both_frontends_mark_them() {
+    if !on_path("rust-analyzer") {
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+        return;
+    }
+    let (mut state, _dir, _file) = open("offsets", OFFSET_SIGNATURES);
+    let encoding: String = eval(
+        &state,
+        "local caps = pmacs.lsp.capabilities(pmacs.lsp.list()[1].id) \
+         return tostring(caps and caps.positionEncoding)",
+    );
+    assert_eq!(encoding, "utf-8", "the row is about a UTF-8 server");
+    for (call, want) in [
+        ("Pair(1, ", "i32"),
+        ("clamp_len(1, ", "len: usize"),
+        ("pick(3, ", "second: u8"),
+        ("pick(5, ", "second: u8"),
+        ("größe(7, ", "b: u8"),
+        ("名前(7, ", "b: u8"),
+    ] {
+        let stored = mark_on_both_frontends(&mut state, OFFSET_SIGNATURES, call, want);
+        assert!(
+            stored.iter().all(|(_, span)| span.is_some()),
+            "{call:?}: rust-analyzer honours labelOffsetSupport: {stored:?}"
+        );
+    }
+    // The mark is the SECOND `i32`: offsets place it where a search for
+    // the text would not.
+    goto(&mut state, after(OFFSET_SIGNATURES, "Pair(1, "));
+    let p = ask_until(&mut state, 's', 120, |p| p.active_range.is_some());
+    assert_eq!(
+        p.active_range.map(|r| r.start),
+        Some(17),
+        "{:?}",
+        p.lines[0]
+    );
+}
+
+/// The offset path on a UTF-16 server. basedpyright negotiates no
+/// encoding (UTF-16) and sends offsets in UTF-16 units: the one reading
+/// there is, converted to bytes of a label with `ö`, `ß` and a CJK
+/// default inside the marked parameter itself. Named for basedpyright, so the gate's `--skip basedpyright`
+/// skips it; run by hand.
+#[test]
+fn fr1_basedpyright_sends_label_offsets_and_both_frontends_mark_them() {
+    if !on_path("basedpyright-langserver") {
+        support::skip_or_fail("basedpyright-langserver", "PMACS_REQUIRE_PYRIGHT");
+        return;
+    }
+    let source = "def größe(höhe, b):\n    return höhe + b\n\n\
+def pick(first, second=\"中文\"):\n    return first\n\n\
+x = (\"😀😀\", pick(3, 4))\n\
+y = größe(7, 8)\n";
+    let (mut state, _dir, _file) = open_file("pyoffsets", "main.py", source);
+    for (call, want) in [
+        ("pick(3, ", "second: str = \"中文\""),
+        ("größe(7, ", "b: Unknown"),
+    ] {
+        let stored = mark_on_both_frontends(&mut state, source, call, want);
+        assert!(
+            stored.iter().all(|(_, span)| span.is_some()),
+            "{call:?}: basedpyright honours labelOffsetSupport: {stored:?}"
+        );
+    }
+}
+
+/// The fallback on a server that ignores the capability. gopls sends
+/// every parameter label as a string whatever the client declares, so
+/// the popup searches for it in order: the second of `add(int, int)`,
+/// and `len int` after `max_len int` rather than inside it. Fails with
+/// the first-match search.
+#[test]
+fn fr1_gopls_sends_string_labels_and_the_ordered_search_marks_them() {
+    if !on_path("gopls") || !on_path("go") {
+        support::skip_or_fail("gopls", "PMACS_REQUIRE_LSP");
+        return;
+    }
+    let source = "package main\n\n\
+func add(int, int) int { return 0 }\n\
+func clamp_len(max_len int, len int) int { return max_len }\n\
+func größe(höhe int, b int) int { return höhe + b }\n\n\
+func main() {\n\
+\t_ = add(1, 2)\n\
+\t_ = clamp_len(1, 2)\n\
+\t_ = größe(7, 8)\n\
+}\n";
+    let (mut state, _dir, _file) = open_file("gopls", "main.go", source);
+    for (call, want, second_at) in [
+        ("add(1, ", "int", 9),
+        ("clamp_len(1, ", "len int", 23),
+        ("größe(7, ", "b int", 0),
+    ] {
+        let stored = mark_on_both_frontends(&mut state, source, call, want);
+        assert!(
+            stored.iter().all(|(_, span)| span.is_none()),
+            "{call:?}: gopls ignores labelOffsetSupport: {stored:?}"
+        );
+        if second_at > 0 {
+            goto(&mut state, after(source, call));
+            let p = ask_until(&mut state, 's', 120, |p| p.active_range.is_some());
+            assert_eq!(
+                p.active_range.map(|r| r.start),
+                Some(second_at),
+                "{call:?}: the second parameter, not the first: {:?}",
+                p.lines[0]
+            );
+            key(&mut state, 'g', KeyModifiers::CONTROL);
+            tick(&mut state);
+        }
     }
 }

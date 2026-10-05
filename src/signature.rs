@@ -83,12 +83,21 @@ impl SignatureHelp {
     }
 
     /// [`Self::from_lsp_value`] for a server that negotiated `encoding`
-    /// (E8.5): a parameter's `[start, end]` label offsets count units of
-    /// the negotiated encoding, as a `Position`'s do, and are converted
+    /// (E8.5): a parameter's `[start, end]` label offsets are converted
     /// here to bytes of the signature's label, so the span the popup
     /// marks is the parameter on a non-ASCII label too. The absorb path
     /// rewrites `Position`s to bytes; these offsets are not positions,
     /// so it never reached them.
+    ///
+    /// Which units they count is read from the offsets themselves (E8
+    /// fix round 1). The spec says UTF-16, "as `Position` and `Range`
+    /// does", and servers that negotiated UTF-8 take that both ways:
+    /// rust-analyzer counts UTF-16 units, clangd its negotiated bytes.
+    /// So the offsets are read in the negotiated encoding and then in
+    /// UTF-16, and the first reading under which every parameter is a
+    /// whole run of the label ([`coherent`]) is the one kept; under
+    /// none, no parameter carries a span and the popup marks nothing
+    /// rather than the wrong text.
     #[must_use]
     pub fn from_lsp_value_in(v: &Value, encoding: crate::lsp::PositionEncoding) -> Self {
         if v.is_null() {
@@ -138,15 +147,42 @@ impl SignatureHelp {
 fn parse_signature(v: &Value, encoding: crate::lsp::PositionEncoding) -> Option<Signature> {
     let label = v.get("label")?.as_str()?.to_owned();
     let documentation = v.get("documentation").and_then(extract_markup_text);
-    let parameters = v
+    let raw: Vec<RawParameter> = v
         .get("parameters")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| parse_parameter(p, &label, encoding))
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().filter_map(parse_parameter).collect())
         .unwrap_or_default();
+    let offsets: Vec<(u32, u32)> = raw.iter().filter_map(|p| p.offsets).collect();
+    let mut readings = vec![encoding];
+    if encoding != crate::lsp::PositionEncoding::Utf16 {
+        readings.push(crate::lsp::PositionEncoding::Utf16);
+    }
+    let spans = readings.into_iter().find_map(|enc| {
+        let spans = offsets
+            .iter()
+            .map(|&(s, e)| Some((label_byte(&label, s, enc)?, label_byte(&label, e, enc)?)))
+            .collect::<Option<Vec<_>>>()?;
+        coherent(&label, &spans).then_some(spans)
+    });
+    let mut spans = spans.map(Vec::into_iter);
+    let parameters = raw
+        .into_iter()
+        .map(|p| {
+            let (label, span) = match (p.offsets, &mut spans) {
+                (None, _) => (p.label, None),
+                (Some(_), Some(spans)) => {
+                    let (s, e) = spans.next().expect("one span per offset pair");
+                    (label[s..e].to_owned(), Some((s as u32, e as u32)))
+                }
+                (Some(_), None) => (String::new(), None),
+            };
+            SignatureParameter {
+                label,
+                span,
+                documentation: p.documentation,
+            }
+        })
+        .collect();
     let active_parameter = v
         .get("activeParameter")
         .and_then(Value::as_u64)
@@ -159,33 +195,82 @@ fn parse_signature(v: &Value, encoding: crate::lsp::PositionEncoding) -> Option<
     })
 }
 
-fn parse_parameter(
-    v: &Value,
-    parent_label: &str,
-    encoding: crate::lsp::PositionEncoding,
-) -> Option<SignatureParameter> {
+/// A parameter as the server sent it: its label string, or its label's
+/// `[start, end]` offsets in units not yet known.
+struct RawParameter {
+    label: String,
+    offsets: Option<(u32, u32)>,
+    documentation: Option<String>,
+}
+
+fn parse_parameter(v: &Value) -> Option<RawParameter> {
     let label_field = v.get("label")?;
     let documentation = v.get("documentation").and_then(extract_markup_text);
     if let Some(s) = label_field.as_str() {
-        return Some(SignatureParameter {
+        return Some(RawParameter {
             label: s.to_owned(),
-            span: None,
+            offsets: None,
             documentation,
         });
     }
     if let Some(arr) = label_field.as_array()
         && arr.len() == 2
     {
-        let start = crate::lsp::char_to_byte(parent_label, arr[0].as_u64()? as u32, encoding);
-        let end = crate::lsp::char_to_byte(parent_label, arr[1].as_u64()? as u32, encoding);
-        let s = parent_label.get(start..end).unwrap_or("").to_owned();
-        return Some(SignatureParameter {
-            label: s,
-            span: Some((start as u32, end as u32)),
+        let unit = |v: &Value| v.as_u64().and_then(|n| u32::try_from(n).ok());
+        return Some(RawParameter {
+            label: String::new(),
+            offsets: Some((unit(&arr[0])?, unit(&arr[1])?)),
             documentation,
         });
     }
     None
+}
+
+/// The byte of `label` that `units` units of `enc` reach, or `None` when
+/// they fall inside a character or past the end. Exact, unlike
+/// [`crate::lsp::char_to_byte`], which snaps: a reading in the wrong
+/// units must show as one.
+fn label_byte(label: &str, units: u32, enc: crate::lsp::PositionEncoding) -> Option<usize> {
+    let units = units as usize;
+    match enc {
+        crate::lsp::PositionEncoding::Utf8 => label.is_char_boundary(units).then_some(units),
+        crate::lsp::PositionEncoding::Utf16 => {
+            let mut counted = 0usize;
+            for (byte, ch) in label.char_indices() {
+                if counted == units {
+                    return Some(byte);
+                }
+                if counted > units {
+                    return None;
+                }
+                counted += ch.len_utf16();
+            }
+            (counted == units).then_some(label.len())
+        }
+    }
+}
+
+/// Whether `spans` (bytes of `label`, in the parameters' order) each mark
+/// a whole run of the label: non-empty, in order and apart, starting
+/// and ending on no whitespace, and cutting no word at either edge (a
+/// letter, digit or `_` on both sides of it). Offsets read in the wrong
+/// units shift by the bytes and units the characters before them differ
+/// by, which lands an edge inside a word or a character.
+fn coherent(label: &str, spans: &[(usize, usize)]) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let cuts =
+        |at: usize| word(label[..at].chars().next_back()) && word(label[at..].chars().next());
+    let mut end_of_last = 0usize;
+    spans.iter().all(|&(s, e)| {
+        let ok = s < e
+            && s >= end_of_last
+            && !label[s..e].starts_with(char::is_whitespace)
+            && !label[s..e].ends_with(char::is_whitespace)
+            && !cuts(s)
+            && !cuts(e);
+        end_of_last = e;
+        ok
+    })
 }
 
 fn extract_markup_text(v: &Value) -> Option<String> {
@@ -454,9 +539,54 @@ mod tests {
         assert_eq!(p.label, "höhe: u8");
         assert_eq!(p.span, Some((11, 20)));
         assert_eq!(&label[11..20], "höhe: u8");
-        // Read as bytes, the same offsets land inside `ö`: the defect the
-        // conversion closes.
-        let raw = SignatureHelp::from_lsp_value(&v);
-        assert_ne!(raw.signatures[0].parameters[0].label, "höhe: u8");
+        // A server that negotiated UTF-8 and counts these offsets in
+        // UTF-16 anyway (rust-analyzer does): read as bytes they cut
+        // `größe` and `u8`, so the UTF-16 reading is the one kept.
+        let h = SignatureHelp::from_lsp_value(&v);
+        let p = &h.signatures[0].parameters;
+        assert_eq!(
+            (p[0].label.as_str(), p[0].span),
+            ("höhe: u8", Some((11, 20)))
+        );
+        assert_eq!((p[1].label.as_str(), p[1].span), ("b: u8", Some((22, 27))));
+    }
+
+    /// E8 fix round 1: clangd negotiates UTF-8 and counts its label
+    /// offsets in bytes, so the negotiated reading is kept; read as
+    /// UTF-16 the same offsets would cut `int` and `höhe`.
+    #[test]
+    fn utf8_label_offsets_from_a_server_that_counts_bytes_are_kept() {
+        let label = "größe(int höhe, int b) -> int";
+        let v = json!({
+            "signatures": [{
+                "label": label,
+                "parameters": [{ "label": [8, 17] }, { "label": [19, 24] }],
+            }],
+            "activeParameter": 1,
+        });
+        let h = SignatureHelp::from_lsp_value_in(&v, crate::lsp::PositionEncoding::Utf8);
+        let p = &h.signatures[0].parameters;
+        assert_eq!(
+            (p[0].label.as_str(), p[0].span),
+            ("int höhe", Some((8, 17)))
+        );
+        assert_eq!((p[1].label.as_str(), p[1].span), ("int b", Some((19, 24))));
+    }
+
+    /// Offsets no reading makes whole carry no span: the popup marks
+    /// nothing rather than the wrong text.
+    #[test]
+    fn label_offsets_no_reading_makes_whole_mark_nothing() {
+        let v = json!({
+            "signatures": [{
+                "label": "fn f(ab: u8, cd: u8)",
+                "parameters": [{ "label": [6, 9] }, { "label": [14, 18] }],
+            }],
+            "activeParameter": 1,
+        });
+        let h = SignatureHelp::from_lsp_value_in(&v, crate::lsp::PositionEncoding::Utf8);
+        let p = &h.signatures[0].parameters;
+        assert_eq!(p.len(), 2, "each parameter is kept, with its documentation");
+        assert!(p.iter().all(|p| p.span.is_none() && p.label.is_empty()));
     }
 }

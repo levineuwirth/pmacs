@@ -193,9 +193,11 @@ pub fn signature_lines(
     help: &crate::signature::SignatureHelp,
 ) -> Option<(Vec<String>, Option<PopupActiveRange>, u32)> {
     let sig = help.active()?;
-    let param = help
+    let index = help
         .active_parameter_index()
-        .and_then(|i| sig.parameters.get(i as usize));
+        .map(|i| i as usize)
+        .filter(|&i| i < sig.parameters.len());
+    let param = index.map(|i| &sig.parameters[i]);
     let mut text = sig.label.clone();
     for doc in [
         param.and_then(|p| p.documentation.as_deref()),
@@ -211,8 +213,8 @@ pub fn signature_lines(
     if lines.is_empty() {
         return None;
     }
-    let range = param
-        .and_then(|p| parameter_byte_range(&sig.label, p))
+    let range = index
+        .and_then(|i| parameter_byte_range(sig, i))
         .filter(|_| lines[0] == sig.label)
         .map(|(start, end)| PopupActiveRange {
             line: 0,
@@ -222,30 +224,43 @@ pub fn signature_lines(
     Some((lines, range, omitted))
 }
 
-/// The parameter's bytes in its signature's label: the server's own
-/// offsets when it gave them (already bytes, [`crate::signature`]
-/// converts them at absorb), else the parameter's label found after the
-/// label's first `(`, so a parameter named like its function is not
-/// found in the function's name.
-fn parameter_byte_range(
-    label: &str,
-    param: &crate::signature::SignatureParameter,
-) -> Option<(usize, usize)> {
-    if let Some((s, e)) = param.span {
+/// The bytes of parameter `index` in its signature's label: the
+/// server's own offsets when it gave them (pmacs declares
+/// `labelOffsetSupport`, and [`crate::signature`] converts them to bytes
+/// at absorb), else the parameter's label searched for **in order**: each
+/// parameter from the first is found after the end of the one before it,
+/// starting just after the label's first `(`. So a later parameter is
+/// never found inside an earlier one --- `len: usize` inside
+/// `max_len: usize`, the second `i32` of `Pair(i32, i32)` --- and a
+/// parameter named like its function is not found in the function's
+/// name. A server that ignores the capability and sends strings takes
+/// this path.
+fn parameter_byte_range(sig: &crate::signature::Signature, index: usize) -> Option<(usize, usize)> {
+    let label = sig.label.as_str();
+    let valid = |(s, e): (u32, u32)| {
         let (s, e) = (s as usize, e as usize);
-        return (s < e
-            && e <= label.len()
-            && label.is_char_boundary(s)
-            && label.is_char_boundary(e))
-        .then_some((s, e));
+        (s < e && e <= label.len() && label.is_char_boundary(s) && label.is_char_boundary(e))
+            .then_some((s, e))
+    };
+    let mut from = label.find('(').map_or(0, |i| i + 1);
+    for (i, param) in sig.parameters.iter().enumerate().take(index + 1) {
+        let found = match param.span {
+            Some(span) => valid(span),
+            None if param.label.is_empty() => None,
+            None => label[from..]
+                .find(param.label.as_str())
+                .map(|at| (from + at, from + at + param.label.len())),
+        };
+        if i == index {
+            return found;
+        }
+        // A parameter not found leaves the search where it was: the next
+        // is still after every parameter that was.
+        if let Some((_, end)) = found {
+            from = from.max(end);
+        }
     }
-    if param.label.is_empty() {
-        return None;
-    }
-    let from = label.find('(').map_or(0, |i| i + 1);
-    label[from..]
-        .find(param.label.as_str())
-        .map(|i| (from + i, from + i + param.label.len()))
+    None
 }
 
 /// The bytes a signature popup holds the caret within, on the caret's
@@ -650,6 +665,52 @@ mod tests {
                 start: 12,
                 end: 17
             })
+        );
+    }
+
+    /// E8 fix round 1 (review 1's Medium 1): a server that sends string
+    /// labels has them searched in order, so a later parameter is found
+    /// after the one before it and never inside it.
+    #[test]
+    fn a_string_label_is_found_after_the_parameter_before_it() {
+        use crate::signature::{Signature, SignatureHelp, SignatureParameter};
+        let marked = |label: &str, params: &[&str], active: u32| {
+            let help = SignatureHelp {
+                signatures: vec![Signature {
+                    label: label.to_owned(),
+                    documentation: None,
+                    parameters: params
+                        .iter()
+                        .map(|p| SignatureParameter {
+                            label: (*p).to_owned(),
+                            span: None,
+                            documentation: None,
+                        })
+                        .collect(),
+                    active_parameter: None,
+                }],
+                active_signature: 0,
+                active_parameter: Some(active),
+            };
+            let (_, range, _) = signature_lines(&help).expect("lines");
+            range.map(|r| {
+                let (s, e) = (r.start as usize, r.end as usize);
+                (s, label[s..e].to_owned())
+            })
+        };
+        let pair = "struct Pair(i32, i32)";
+        assert_eq!(marked(pair, &["i32", "i32"], 0), Some((12, "i32".into())));
+        assert_eq!(marked(pair, &["i32", "i32"], 1), Some((17, "i32".into())));
+        let clamp = "fn clamp_len(max_len: usize, len: usize) -> usize";
+        let params = ["max_len: usize", "len: usize"];
+        assert_eq!(marked(clamp, &params, 1), Some((29, "len: usize".into())));
+        // A parameter the label does not hold marks nothing, and the one
+        // after it is still found after the parameters that were.
+        let three = "fn f(a: u8, b: u8, a: u8)";
+        assert_eq!(marked(three, &["a: u8", "zz", "a: u8"], 1), None);
+        assert_eq!(
+            marked(three, &["a: u8", "zz", "a: u8"], 2),
+            Some((19, "a: u8".into()))
         );
     }
 }
