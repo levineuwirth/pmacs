@@ -407,7 +407,14 @@ impl View for SignatureView {
 
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         if let Some(popup) = self.shown(buf) {
-            crate::lsp_popup::paint_grid_popup(buf, viewport, cells, &popup, self.theme.as_ref());
+            crate::lsp_popup::paint_grid_popup_into(
+                &self.popup,
+                buf,
+                viewport,
+                cells,
+                &popup,
+                self.theme.as_ref(),
+            );
         }
     }
 }

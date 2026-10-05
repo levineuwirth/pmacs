@@ -16,7 +16,7 @@ mod iso;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use pmacs::cell::{Cell, CellGrid, CellSize, Color, Glyph};
 use pmacs::editor::EditorState;
 use pmacs::protocol::FrontendId;
@@ -362,5 +362,93 @@ fn e8_4_under_wrap_the_popup_opens_below_the_carets_drawn_row() {
         title,
         caret + 1,
         "the popup opens on the row below the caret's"
+    );
+}
+
+/// A pointer event at a frame cell, through the grid's own mouse
+/// dispatch, then a tick.
+fn mouse(state: &mut EditorState, kind: MouseEventKind, row: u32, col: u32) {
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        MouseEvent {
+            kind,
+            column: u16::try_from(col).expect("column"),
+            row: u16::try_from(row).expect("row"),
+            modifiers: KeyModifiers::NONE,
+        },
+        CellSize::new(ROWS, COLS),
+    );
+    tick(state);
+}
+
+/// E8 fix round 1 (review 1's Medium 3, as the owner ruled it): the
+/// grid's left button and wheel inside its popup are the popup's, as
+/// `pmacs-gpu`'s are. At `ccc6be7` a wheel turn there scrolled the
+/// window beneath, the caret followed and the popup closed, and a click
+/// moved the caret to the text under it and closed it. The control is
+/// the same wheel turn outside the popup, which still scrolls the text
+/// and, the caret following it, closes the popup; a right click inside
+/// it reaches the text, as on the GPU.
+#[test]
+fn fr1_the_grids_left_button_and_wheel_inside_the_popup_are_the_popups() {
+    let mut source = String::from("fn main() { let value = 1; }\n");
+    for i in 0..200 {
+        let _ = writeln!(source, "// line {i}");
+    }
+    let (mut state, _dir) = editor(&source, "hover", &[]);
+    let cells = ask_until_painted(&mut state, 'h', "Synthetic hover content");
+    let body = find_row(&cells, "Synthetic hover content").expect("the body");
+    let col = row_text(&cells, body)
+        .find("Synthetic")
+        .expect("its column") as u32
+        + 3;
+    let top = row_text(&cells, 0);
+    let caret = state.core.borrow().cursor();
+    for kind in [
+        MouseEventKind::ScrollDown,
+        MouseEventKind::ScrollUp,
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        mouse(&mut state, kind, body, col);
+        let cells = paint(&state);
+        assert!(
+            find_row(&cells, "Synthetic hover content").is_some(),
+            "{kind:?} inside the popup keeps it open"
+        );
+        assert_eq!(
+            state.core.borrow().cursor(),
+            caret,
+            "{kind:?} inside the popup moves no caret"
+        );
+        assert_eq!(row_text(&cells, 0), top, "{kind:?} inside scrolls nothing");
+    }
+    // The control: outside the popup the wheel is the text's.
+    mouse(&mut state, MouseEventKind::ScrollDown, ROWS - 5, COLS - 2);
+    let cells = paint(&state);
+    assert_ne!(
+        row_text(&cells, 0),
+        top,
+        "outside, the wheel scrolls the window"
+    );
+    assert!(
+        find_row(&cells, "Synthetic hover content").is_none(),
+        "and the caret following it closes the popup"
+    );
+    // A right click inside the popup reaches the text under it, as the
+    // GPU's does: it opens the context menu there.
+    key(&mut state, '<', KeyModifiers::ALT);
+    let cells = ask_until_painted(&mut state, 'h', "Synthetic hover content");
+    let body = find_row(&cells, "Synthetic hover content").expect("the body");
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        body,
+        col,
+    );
+    assert!(
+        state.core.borrow().menu_is_open(),
+        "a right click inside the popup opens the context menu"
     );
 }

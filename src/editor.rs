@@ -4340,6 +4340,30 @@ impl EditorState {
             return;
         }
 
+        // E8 fix round 1 (review 1's Medium 3): the left button and the
+        // wheel over the grid's hover or signature popup are the popup's,
+        // as `pmacs-gpu`'s are. A click or a wheel turn inside it neither
+        // moves the caret beneath nor scrolls the window, either of which
+        // would close the popup the user is reading; a right click reaches
+        // the text under it, as the GPU's does.
+        if matches!(
+            ev.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) && self
+            .core
+            .borrow()
+            .lsp_popup_grid_hit(frontend_id, cell_row, cell_col)
+        {
+            self.mouse_click = None;
+            return;
+        }
+
         let Some((win_id, rect)) = window_at_cell(
             &self.core.borrow(),
             frontend_id,

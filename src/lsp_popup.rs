@@ -73,6 +73,10 @@ pub struct LspPopup {
     pub active_range: Option<PopupActiveRange>,
     /// Lines left out at the bound.
     pub omitted_lines: u32,
+    /// Where the grid last painted it, in its frontend's frame cells, or
+    /// `None` when it is not painted there (E8 fix round 1). The grid's
+    /// pointer inside it is the popup's ([`paint_grid_popup_into`]).
+    pub grid_cells: Option<crate::window::Rect>,
 }
 
 impl LspPopup {
@@ -432,21 +436,22 @@ fn face_or(
 /// rule ([`pmacs_protocol::place_popup`], E7d.3) in cells --- below the
 /// anchor's row when it fits there, else above, else on the roomier
 /// side, clamped into the window --- and themed by the `ui.popup` faces.
+/// Returns the cells it painted, in the frame's coordinates.
 pub fn paint_grid_popup(
     buf: &crate::buffer::Buffer,
     viewport: crate::view::Viewport<'_>,
     cells: &mut crate::cell::CellGrid<'_>,
     popup: &LspPopup,
     theme: Option<&crate::highlight::ThemeHandle>,
-) {
+) -> Option<crate::window::Rect> {
     let (win_rows, win_cols) = (viewport.cell_size.rows, viewport.cell_size.cols);
     if win_rows == 0 || win_cols < 3 {
-        return;
+        return None;
     }
     let Some((anchor_row, anchor_col)) =
         crate::completion::anchor_cell(buf, viewport, popup.anchor)
     else {
-        return; // the anchor is scrolled out or folded away
+        return None; // the anchor is scrolled out or folded away
     };
     let width = GRID_POPUP_MAX_COLS.min(win_cols);
     // The text sits two columns in, as a completion row's label does.
@@ -483,6 +488,7 @@ pub fn paint_grid_popup(
     };
     let footer = face_or(theme, "ui.popup.footer", crate::completion::kind_style());
     let origin = viewport.cell_origin;
+    let mut painted = 0u32;
     for (i, row) in shown.iter().enumerate() {
         let r = origin.row + top + i as u32;
         if top + i as u32 >= win_rows {
@@ -498,6 +504,34 @@ pub fn paint_grid_popup(
             if row.footer { footer } else { base },
             row.active.map(|(s, e)| (s, e, active)),
         );
+        painted += 1;
+    }
+    Some(crate::window::Rect {
+        origin: crate::cell::CellCoord::new(origin.row + top, origin.col + left),
+        size: crate::cell::CellSize::new(painted, width.min(win_cols - left)),
+    })
+}
+
+/// [`paint_grid_popup`], recording on `shared` where it painted while the
+/// popup there is still the one painted, so the grid's pointer inside it
+/// is the popup's ([`crate::editor_core::EditorCore::lsp_popup_grid_hit`],
+/// E8 fix round 1), as `pmacs-gpu`'s is.
+pub fn paint_grid_popup_into(
+    shared: &SharedLspPopup,
+    buf: &crate::buffer::Buffer,
+    viewport: crate::view::Viewport<'_>,
+    cells: &mut crate::cell::CellGrid<'_>,
+    popup: &LspPopup,
+    theme: Option<&crate::highlight::ThemeHandle>,
+) {
+    let painted = paint_grid_popup(buf, viewport, cells, popup, theme);
+    if let Some(open) = shared.lock().expect("lsp popup poisoned").as_mut()
+        && open.window_id == popup.window_id
+        && open.kind == popup.kind
+        && open.revision == popup.revision
+        && open.anchor == popup.anchor
+    {
+        open.grid_cells = painted;
     }
 }
 
@@ -594,6 +628,7 @@ mod tests {
             lines: lines.iter().map(|l| (*l).to_owned()).collect(),
             active_range: None,
             omitted_lines: omitted,
+            grid_cells: None,
         }
     }
 

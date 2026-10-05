@@ -5743,6 +5743,7 @@ impl EditorCore {
             lines,
             active_range: None,
             omitted_lines: omitted,
+            grid_cells: None,
         });
         PopupOutcome::Opened
     }
@@ -5795,6 +5796,7 @@ impl EditorCore {
             lines,
             active_range,
             omitted_lines: omitted,
+            grid_cells: None,
         });
         PopupOutcome::Opened
     }
@@ -5886,6 +5888,25 @@ impl EditorCore {
         popup.len = buf.len();
         popup.range.1 = end;
         true
+    }
+
+    /// Whether the cell `(row, col)` of `frontend`'s frame is inside the
+    /// popup the grid last painted there (E8 fix round 1): the grid's
+    /// pointer over it is the popup's, as `pmacs-gpu`'s is.
+    #[must_use]
+    pub fn lsp_popup_grid_hit(&self, frontend: FrontendId, row: u32, col: u32) -> bool {
+        let Some(own) = self.views.get(&frontend).map(|v| v.active) else {
+            return false;
+        };
+        let guard = self.lsp_popup.lock().expect("lsp popup poisoned");
+        guard
+            .as_ref()
+            .filter(|p| p.window_id == own)
+            .and_then(|p| p.grid_cells)
+            .is_some_and(|r| {
+                (r.origin.row..r.origin.row + r.size.rows).contains(&row)
+                    && (r.origin.col..r.origin.col + r.size.cols).contains(&col)
+            })
     }
 
     /// The popup as `frontend`'s focused window shows it, or `None`.
