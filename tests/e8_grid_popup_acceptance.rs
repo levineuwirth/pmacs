@@ -20,6 +20,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use pmacs::cell::{Cell, CellGrid, CellSize, Color, Glyph};
 use pmacs::editor::EditorState;
 use pmacs::protocol::FrontendId;
+use pmacs_protocol::{MAX_POPUP_LINE_BYTES, MAX_POPUP_LINES};
 
 const ROWS: u32 = 24;
 const COLS: u32 = 80;
@@ -160,10 +161,26 @@ fn e8_4_the_grid_paints_the_hover_below_the_caret_and_clears_it() {
     );
 }
 
+/// The open popup, as the grid paints it.
+fn open_popup(state: &EditorState) -> pmacs::lsp_popup::LspPopup {
+    state
+        .core
+        .borrow()
+        .lsp_popup
+        .lock()
+        .expect("lsp popup")
+        .clone()
+        .expect("a popup is open")
+}
+
 /// The bound in the grid: two hundred lines show the rows that fit in
 /// half the window and close with a row counting the rest; three
 /// hundred, past the wire's bound, count what the bound left out too;
-/// and `*lsp-help*` holds every line.
+/// a line past its byte bound is cut and marked; and `*lsp-help*` holds
+/// every line. The lines the popup holds and the lines the bound left
+/// out are asserted apart (E8 fix round 1, review 1's Low 2): the
+/// closing row's one number is the same for 302 lines with none left
+/// out as for 256 with 46, so it alone could not see the cut.
 #[test]
 fn e8_4_a_long_hover_shows_what_fits_counts_the_rest_and_lsp_help_holds_it_all() {
     let (mut state, _dir) = editor(
@@ -193,11 +210,18 @@ fn e8_4_a_long_hover_shows_what_fits_counts_the_rest_and_lsp_help_holds_it_all()
         &[("PMACS_FAKE_LSP_HOVER_LINES", "300")],
     );
     let cells = ask_until_painted(&mut state, 'h', "more lines");
+    let popup = open_popup(&state);
+    assert_eq!(popup.lines.len(), MAX_POPUP_LINES, "held: the line bound");
+    assert_eq!(popup.omitted_lines, 46, "left out: the 302 less the 256");
     let footer = find_row(&cells, "more lines").expect("the closing row");
     let shown = footer - 1;
     assert!(
+        row_text(&cells, footer - 1).contains(&popup.lines[shown as usize - 1]),
+        "the rows above the closing one are the popup's first {shown} lines"
+    );
+    assert!(
         row_text(&cells, footer).contains(&format!("… {} more lines", 256 - shown + 46)),
-        "the 256 sent less the {shown} shown, and the 46 the bound left out: {:?}",
+        "the 256 held less the {shown} shown, and the 46 the bound left out: {:?}",
         row_text(&cells, footer)
     );
 
@@ -225,6 +249,29 @@ fn e8_4_a_long_hover_shows_what_fits_counts_the_rest_and_lsp_help_holds_it_all()
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(lines, 300, "*lsp-help* holds every line the server sent");
+    drop(state);
+
+    // A line past its byte bound: held cut at a character and marked,
+    // nothing left out.
+    let (mut state, _dir) = editor(
+        "fn main() {}\n",
+        "hover",
+        &[
+            ("PMACS_FAKE_LSP_HOVER_LINES", "3"),
+            ("PMACS_FAKE_LSP_HOVER_LINE_BYTES", "5000"),
+        ],
+    );
+    // The line wraps at its last space, before the padding.
+    ask_until_painted(&mut state, 'h', "line 0 of the long");
+    let popup = open_popup(&state);
+    assert_eq!((popup.lines.len(), popup.omitted_lines), (5, 0));
+    for line in &popup.lines[2..] {
+        assert!(
+            line.len() <= MAX_POPUP_LINE_BYTES && line.ends_with('…'),
+            "a 5,000-byte line held cut at the line bound: {} bytes",
+            line.len()
+        );
+    }
 }
 
 /// The one placement rule in cells: with no room below the caret's line

@@ -22,7 +22,10 @@ use pmacs_protocol::message::{
     InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION, SessionBootstrapRequest,
 };
 use pmacs_protocol::transport::{read_message, write_message};
-use pmacs_protocol::{ByteRange, FrontendId, MAX_POPUP_LINES, PopupFrame, PopupKind, PopupPayload};
+use pmacs_protocol::{
+    ByteRange, FrontendId, MAX_POPUP_LINE_BYTES, MAX_POPUP_LINES, MAX_POPUP_TEXT_BYTES, PopupFrame,
+    PopupKind, PopupPayload,
+};
 
 use common::daemon::{TestDaemon, build_default_caps};
 
@@ -319,7 +322,10 @@ fn e8_2_hover_opens_once_closes_on_motion_cg_and_edit_and_never_reaches_v25() {
 
 /// The named behaviours at the bound: two hundred lines arrive whole;
 /// a text past the bound arrives cut at it with the rest counted, never
-/// silently ended; and an empty answer opens nothing and says so.
+/// silently ended; and an empty answer opens nothing and says so. Each
+/// case asserts the lines shown and the lines omitted apart (E8 fix
+/// round 1, review 1's Low 2), and the line and text byte bounds have
+/// cases of their own, so each cut fails a case of its own when removed.
 #[test]
 fn e8_2_a_long_hover_arrives_whole_one_past_the_bound_is_counted_and_none_is_said() {
     let (daemon, _dir) = daemon_with("hover", &[("PMACS_FAKE_LSP_HOVER_LINES", "200")], "");
@@ -338,8 +344,66 @@ fn e8_2_a_long_hover_arrives_whole_one_past_the_bound_is_counted_and_none_is_sai
     let (daemon, _dir) = daemon_with("hover", &[("PMACS_FAKE_LSP_HOVER_LINES", "300")], "");
     let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
     let frame = session.ask_until_present('h');
-    assert_eq!(frame.lines.len(), MAX_POPUP_LINES);
-    assert_eq!(frame.omitted_lines as usize, 302 - MAX_POPUP_LINES);
+    assert_eq!(frame.lines.len(), MAX_POPUP_LINES, "shown: the line bound");
+    assert_eq!(frame.omitted_lines, 46, "omitted: the 302 less the 256");
+    assert_eq!(frame.validate(), Ok(()));
+    drop(session);
+    drop(daemon);
+
+    // A line past its byte bound is cut at a character and says so; it
+    // is still shown, and nothing is omitted.
+    let (daemon, _dir) = daemon_with(
+        "hover",
+        &[
+            ("PMACS_FAKE_LSP_HOVER_LINES", "3"),
+            ("PMACS_FAKE_LSP_HOVER_LINE_BYTES", "5000"),
+        ],
+        "",
+    );
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
+    let frame = session.ask_until_present('h');
+    assert_eq!(
+        frame.lines.len(),
+        5,
+        "shown: the code line, a blank, 3 lines"
+    );
+    assert_eq!(frame.omitted_lines, 0, "omitted: none");
+    for line in &frame.lines[2..] {
+        assert!(
+            line.len() <= MAX_POPUP_LINE_BYTES && line.len() + 8 > MAX_POPUP_LINE_BYTES,
+            "a 5,000-byte line cut at the line bound: {} bytes",
+            line.len()
+        );
+        assert!(line.ends_with('…'), "and marked as cut");
+    }
+    assert_eq!(frame.validate(), Ok(()));
+    drop(session);
+    drop(daemon);
+
+    // The text's byte bound binds before the line bound: a hundred lines
+    // of 400 bytes stop where the next would pass it.
+    let (daemon, _dir) = daemon_with(
+        "hover",
+        &[
+            ("PMACS_FAKE_LSP_HOVER_LINES", "100"),
+            ("PMACS_FAKE_LSP_HOVER_LINE_BYTES", "400"),
+        ],
+        "",
+    );
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION);
+    let frame = session.ask_until_present('h');
+    let total: usize = frame.lines.iter().map(String::len).sum();
+    assert!(
+        total <= MAX_POPUP_TEXT_BYTES && total + 400 > MAX_POPUP_TEXT_BYTES,
+        "shown: {} lines, {total} bytes, to the text bound",
+        frame.lines.len()
+    );
+    assert!(frame.lines.len() < MAX_POPUP_LINES);
+    assert_eq!(
+        frame.omitted_lines as usize,
+        102 - frame.lines.len(),
+        "omitted: the rest of the 102"
+    );
     assert_eq!(frame.validate(), Ok(()));
     drop(session);
     drop(daemon);

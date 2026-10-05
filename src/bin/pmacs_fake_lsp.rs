@@ -22,6 +22,9 @@
 //!   drive the hover popup's empty, long and past-the-bound behaviours.
 //!   `PMACS_FAKE_LSP_HOVER_DELAY_MS=N` holds every hover answer back
 //!   `N` ms, so a test can move the caret while one is in flight.
+//!   `PMACS_FAKE_LSP_HOVER_LINE_BYTES=W` pads each numbered line with
+//!   `é` to at most `W` bytes, so a test can drive the byte bounds of a
+//!   line and of the whole text (E8 fix round 1).
 //! * On `textDocument/signatureHelp`: returns a one-signature
 //!   payload with two parameters and the second one active. With
 //!   `PMACS_FAKE_LSP_SIG_NONASCII` set (E8.5) the label is
@@ -756,9 +759,18 @@ fn main() {
                     Some(0) => serde_json::Value::Null,
                     Some(n) => {
                         use std::fmt::Write as _;
+                        let width = std::env::var("PMACS_FAKE_LSP_HOVER_LINE_BYTES")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok());
                         let mut value = String::from("```rust\nfn hovered()\n```\n\n");
                         for i in 0..n {
-                            let _ = writeln!(value, "line {i} of the long hover");
+                            let mut line = format!("line {i} of the long hover");
+                            if let Some(width) = width {
+                                while line.len() + 'é'.len_utf8() <= width {
+                                    line.push('é');
+                                }
+                            }
+                            let _ = writeln!(value, "{line}");
                         }
                         serde_json::json!({
                             "contents": { "kind": "markdown", "value": value }
