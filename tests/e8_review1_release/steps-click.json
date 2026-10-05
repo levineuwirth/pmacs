@@ -1,0 +1,1 @@
+[["keys", "C-f", "C-f", "C-f", "C-f", "C-f", "C-f", "C-f", "C-f", "C-f", "C-f"], ["ask", "h", "more lines", 240], ["capture", "open"], ["raw", "\u001b[<0;40;8M"], ["raw", "\u001b[<0;40;8m"], ["sleep", 1.5], ["capture", "clicked"]]
