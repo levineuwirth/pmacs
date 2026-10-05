@@ -4078,6 +4078,14 @@ end
 -- row; an answer that lands after the caret moved or the text changed
 -- opens nothing and says nothing; a frontend that cannot show the popup
 -- (a GPU below protocol v26) is told the answer's first line instead.
+-- E8 fix round 1 (review 1's Medium 3, as the owner ruled): the last
+-- hover popup shown in a buffer, its window and its whole text. The
+-- popup's closing row names `C-c H`; once a motion has carried the caret
+-- off the symbol (a `C-v`, a wheel turn outside the popup), the popup is
+-- gone and the caret's new place may have no hover at all, so `C-c H`
+-- there opens this one rather than saying "no hover info".
+local last_hover_popup = {}
+
 local function hover_popup(rec, quiet)
   -- The server must hold the text the caret is in before it is asked
   -- about it, or its answer names a symbol that is not there.
@@ -4086,6 +4094,7 @@ local function hover_popup(rec, quiet)
   if not target then return end
   local generation = next_popup_generation()
   if not quiet then asked_generation = generation end
+  local window = pmacs.window.current()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.hover.clear(rec.server, rec.uri)
@@ -4101,7 +4110,13 @@ local function hover_popup(rec, quiet)
       end
       return
     end
-    local _, msg, told = pmacs.lsp._popup_hover(rec.server, rec.uri, target)
+    local opened, msg, told = pmacs.lsp._popup_hover(rec.server, rec.uri, target)
+    if opened then
+      local hover = pmacs.hover.current(rec.server, rec.uri)
+      if hover and hover.contents and hover.contents ~= "" then
+        last_hover_popup[rec.uri] = { window = window, contents = hover.contents }
+      end
+    end
     if told then
       pmacs.editor.set_status(told)
     elseif msg and not quiet then
@@ -4122,13 +4137,17 @@ end
 -- Arc 1b phase 2: the full (multi-line) hover body in a *lsp-help*
 -- panel --- `lsp.hover` keeps its one-line echo-area summary; this is
 -- the "show me everything" companion. Rows are non-visitable
--- (item = nil, so RET is a no-op); q restores the source buffer.
+-- (item = nil, so RET is a no-op); q restores the source buffer. Where
+-- the caret's place has no hover, it opens the last hover popup this
+-- window showed for the buffer (E8 fix round 1), which the popup's
+-- closing row named this command for.
 function pmacs.lsp.hover_doc()
   local rec = attached_for_active()
   if not rec then
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
+  local window = pmacs.window.current()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.hover.clear(rec.server, rec.uri)
@@ -4141,17 +4160,27 @@ function pmacs.lsp.hover_doc()
       return
     end
     local hover = pmacs.hover.current(rec.server, rec.uri)
-    if not hover or not hover.contents or hover.contents == "" then
-      pmacs.editor.set_status("LSP: no hover info")
-      return
+    local contents = hover and hover.contents
+    local header = "hover documentation   q quit"
+    if not contents or contents == "" then
+      -- Nothing here: the last hover popup this window showed for this
+      -- buffer, if there was one (`last_hover_popup`), whose closing row
+      -- sent the user to this command.
+      local last = last_hover_popup[rec.uri]
+      if not last or last.window ~= window then
+        pmacs.editor.set_status("LSP: no hover info")
+        return
+      end
+      contents = last.contents
+      header = "hover documentation, the last popup's (none at the caret)   q quit"
     end
     local rows = {}
-    for l in (hover.contents .. "\n"):gmatch("(.-)\n") do
+    for l in (contents .. "\n"):gmatch("(.-)\n") do
       rows[#rows + 1] = { text = l }
     end
     pmacs.listview.open {
       name = "*lsp-help*",
-      header = "hover documentation   q quit",
+      header = header,
       rows = rows,
     }
   end)

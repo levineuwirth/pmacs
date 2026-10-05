@@ -746,3 +746,81 @@ func main() {\n\
         }
     }
 }
+
+/// E8 fix round 1 (review 1's Medium 3, the state the owner ruled
+/// fixed on its own): `C-c H`, which the popup's closing row names,
+/// still opens the popup's whole text once a motion has carried the
+/// caret off the symbol and closed it. `C-v` here lands the caret on a
+/// comment rust-analyzer has no hover for; at `a9fb6df` `C-c H` asked
+/// there and said "LSP: no hover info".
+#[test]
+fn fr1_c_c_h_opens_the_last_popup_after_a_motion_closed_it() {
+    if !on_path("rust-analyzer") {
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+        return;
+    }
+    let mut source = String::from("use std::fmt;\n\n");
+    for i in 0..120 {
+        let _ = writeln!(source, "// filler line {i}");
+    }
+    source.push_str("fn main() {\n    let _ = fmt::Error;\n}\n");
+    let (mut state, _dir, _file) = open("lasthover", &source);
+    goto(&mut state, after(&source, "use std::fm"));
+    let p = ask_until(&mut state, 'h', 120, |p| {
+        p.kind == PopupKind::Hover && p.lines.len() > 50
+    });
+    let _ = paint(&state);
+    key(&mut state, 'v', KeyModifiers::CONTROL);
+    tick(&mut state);
+    let _ = paint(&state);
+    assert!(popup(&state).is_none(), "the motion closed the popup");
+    let line: i64 = eval(&state, "return pmacs.editor.cursor_line()");
+    assert!(
+        line >= 2,
+        "the caret left `fmt` for the comments: line {line}"
+    );
+    let distinctive = p
+        .lines
+        .iter()
+        .find(|l| l.len() > 40)
+        .expect("a line of the module's documentation")
+        .clone();
+    key(&mut state, 'c', KeyModifiers::CONTROL);
+    key(&mut state, 'H', KeyModifiers::SHIFT);
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let opened = loop {
+        tick(&mut state);
+        let text: Option<String> = state
+            .lua_host
+            .lua()
+            .load(
+                "local b = pmacs.window.buffer()\n\
+                 if b:name() ~= '*lsp-help*' then return nil end\n\
+                 return b:slice(0, b:len())",
+            )
+            .eval()
+            .expect("lua eval");
+        if let Some(text) = text {
+            break Some(text);
+        }
+        let status = state.core.borrow().status.clone();
+        assert!(
+            status != "LSP: no hover info",
+            "C-c H answered for the caret's place, not the popup the user read"
+        );
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let text = opened.expect("C-c H opens *lsp-help*");
+    assert!(
+        text.contains(&distinctive),
+        "*lsp-help* holds the popup's text: {distinctive:?}"
+    );
+    assert!(
+        text.lines().count() > p.lines.len(),
+        "and all of it, past the popup's bound: {} lines",
+        text.lines().count()
+    );
+}
