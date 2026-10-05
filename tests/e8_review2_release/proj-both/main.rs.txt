@@ -1,0 +1,10 @@
+type T = u8;
+fn f(名前: u8, a: u8) -> u8 { 名前 + a }
+fn g(名前: u8, größe: &str, a: T) -> usize { 名前 as usize + a as usize + größe.len() }
+fn 长度计算<'a, U>(a: i32, b: i32) -> i32 { a + b }
+fn main() {
+    let _ = f(1, 2);
+    let _ = f(3, 4);
+    let _ = g(1, "x", 3);
+    let _ = 长度计算::<u8>(1, 2);
+}
