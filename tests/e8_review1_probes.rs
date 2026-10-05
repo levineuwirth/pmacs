@@ -331,6 +331,11 @@ fn review1_a_v25_session_is_told_its_own_hover_and_signature() {
 fn fr1_a_v25_session_is_told_the_signature_its_typing_asks_for() {
     let (daemon, _dir) = daemon_with(SOURCE, "sighelp", &[], "");
     let mut current = Session::attach(&daemon, PROTOCOL_VERSION);
+    // The server is up once a hover is answered: the auto-trigger asks
+    // nothing of a server that has not initialized.
+    current.ask_until_present('h');
+    current.ctrl('g');
+    let _ = current.drain(Duration::from_millis(500));
     for _ in 0..7 {
         current.ctrl('f');
     }
@@ -395,6 +400,20 @@ fn snapshot_in(msgs: &[InstanceMessage]) -> bool {
         .any(|m| matches!(m, InstanceMessage::BufferSnapshot { .. }))
 }
 
+/// How many messages of each variant `msgs` holds, by name, for a
+/// failure to say what did arrive.
+fn kinds(msgs: &[InstanceMessage]) -> std::collections::BTreeMap<String, usize> {
+    let mut out = std::collections::BTreeMap::new();
+    for m in msgs {
+        let name: String = format!("{m:?}")
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        *out.entry(name).or_insert(0) += 1;
+    }
+    out
+}
+
 fn presents(msgs: &[InstanceMessage]) -> usize {
     popups(msgs)
         .iter()
@@ -403,8 +422,8 @@ fn presents(msgs: &[InstanceMessage]) -> usize {
 }
 
 /// PASSES at `1ace8b3`; the handoff states this close and witnesses
-/// none. The popup's window showing another buffer (`C-x b`, as a user
-/// switches) ends the popup: the switch's `BufferSnapshot` clears it on
+/// none. The popup's window showing another buffer (`C-x <right>`, as a
+/// user switches) ends the popup: the switch's `BufferSnapshot` clears it on
 /// the frontend, no `Present` follows, and switching back does not bring
 /// it back (closed in the core, not hidden). No `Absent` is sent --- the
 /// snapshot is the close, which the variant's doc comment in
@@ -414,15 +433,30 @@ fn presents(msgs: &[InstanceMessage]) -> usize {
 fn review1_switching_the_windows_buffer_closes_the_popup() {
     let (daemon, _dir) = daemon_with(SOURCE, "hover", &[], "");
     let mut s = Session::attach(&daemon, PROTOCOL_VERSION);
-    s.ask_until_present('h');
+    let opened = s.ask_until_present('h');
+    // E8 fix round 1: `C-x <right>` (`editor.next-buffer`) puts another
+    // buffer in the window. The review's `C-x b b.rs RET` did not on CI's
+    // runners: `C-x b` takes the top candidate and buffers are named by
+    // path, so `b.rs` also matches `a.rs`'s path as a subsequence and the
+    // window kept `a.rs` on four of six test legs.
     s.ctrl('x');
-    s.typed("b");
-    let mut seen = s.drain(Duration::from_millis(500));
-    s.typed("b.rs");
-    s.key(Key::Enter, Modifiers::NONE);
+    let mut seen = s.drain(Duration::from_millis(300));
+    s.key(Key::Right, Modifiers::NONE);
     let mut after = Vec::new();
     s.until_snapshot(&mut after);
-    assert!(snapshot_in(&after), "the window switched buffers");
+    let cursors: std::collections::HashSet<_> = after
+        .iter()
+        .filter_map(|m| match m {
+            InstanceMessage::CursorByte { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        snapshot_in(&after),
+        "the window switched buffers; saw {:?}, cursors in {cursors:?}, the popup in {:?}",
+        kinds(&after),
+        opened.buffer_id
+    );
     seen.extend(after);
     assert_eq!(
         presents(&seen),
@@ -431,10 +465,8 @@ fn review1_switching_the_windows_buffer_closes_the_popup() {
         popups(&seen)
     );
     s.ctrl('x');
-    s.typed("b");
-    let mut back = s.drain(Duration::from_millis(500));
-    s.typed("a.rs");
-    s.key(Key::Enter, Modifiers::NONE);
+    let mut back = s.drain(Duration::from_millis(300));
+    s.key(Key::Left, Modifiers::NONE);
     back.extend(s.drain(Duration::from_millis(1500)));
     // The session already holds `a.rs`'s replica, so the switch back
     // arrives as cursor traffic, not a snapshot.
