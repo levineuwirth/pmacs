@@ -1875,6 +1875,16 @@ local function next_popup_generation()
   return popup_generation
 end
 
+-- E8 fix round 1 (review 1's Low 1): the generation of the asked-for
+-- request in flight (`C-c h`, `C-c s`), or nil. An asked request always
+-- wins: dwell fires nothing while one is in flight, so a quiet request
+-- never supersedes it and swallows the answer the user asked for. Each
+-- request clears it when its own answer, error or supersession lands.
+local asked_generation = nil
+local function popup_request_done(generation)
+  if asked_generation == generation then asked_generation = nil end
+end
+
 -- Like `pmacs.lsp.signature_help_at_cursor`, but silent: an auto-trigger
 -- that announced "no signature help" on every `(` in a comment would be
 -- unusable. Only a real signature opens the popup (E8.2); an empty
@@ -4075,6 +4085,7 @@ local function hover_popup(rec, quiet)
   local target = pmacs.lsp._popup_target()
   if not target then return end
   local generation = next_popup_generation()
+  if not quiet then asked_generation = generation end
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.hover.clear(rec.server, rec.uri)
@@ -4082,6 +4093,7 @@ local function hover_popup(rec, quiet)
     local ok, err = pcall(function()
       pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
     end)
+    popup_request_done(generation)
     if generation ~= popup_generation then return end
     if not ok then
       if not quiet then
@@ -4157,6 +4169,7 @@ function pmacs.lsp.signature_help_at_cursor()
   local target = pmacs.lsp._popup_target()
   if not target then return end
   local generation = next_popup_generation()
+  asked_generation = generation
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.signature.clear(rec.server, rec.uri)
@@ -4164,6 +4177,7 @@ function pmacs.lsp.signature_help_at_cursor()
     local ok, err = pcall(function()
       pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
     end)
+    popup_request_done(generation)
     if generation ~= popup_generation then return end
     if not ok then
       pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
@@ -4192,9 +4206,11 @@ end
 --    (`C-g`, an empty answer) stays dismissed while the caret rests.
 --  * a backoff that must not reset: there is none to reset, since a
 --    resting place is asked at most once and a request in flight blocks
---    the next; the dwell path reads `attachments` directly and never
---    rebuilds a dead server's attachment, so it cannot drive a restart
---    loop the way a command's `attached_for_active` may.
+--    the next (an asked one, `C-c h` within the dwell, blocks dwell
+--    outright, E8 fix round 1); the dwell path reads `attachments`
+--    directly and never rebuilds a dead server's attachment, so it
+--    cannot drive a restart loop the way a command's
+--    `attached_for_active` may.
 pmacs.config.define {
   name = "lsp.hover-on-dwell",
   description = "Show the hover popup when the caret rests on a symbol for half a second after moving, as C-c h would.",
@@ -4230,6 +4246,9 @@ pmacs.hook.add("process.after-tick", function()
   if dwell.asked or now - dwell.since < DWELL_MS then return end
   dwell.asked = true
   if pmacs.lsp.popup_kind() ~= nil then return end
+  -- An asked request in flight is the user's question for this place;
+  -- dwell asking again would supersede it and swallow its answer.
+  if asked_generation ~= nil then return end
   if not server_is_initialized(rec.server) then return end
   hover_popup(rec, true)
 end)
