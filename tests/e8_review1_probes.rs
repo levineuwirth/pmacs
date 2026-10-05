@@ -157,6 +157,24 @@ impl Session {
         seen
     }
 
+    /// Messages, appended to `seen`, until a `BufferSnapshot` arrives
+    /// (within 20 s), then one second more. A buffer change is closed by
+    /// its snapshot, and a fixed window was short of it on four of CI's
+    /// six test legs (run 37358723033, E8 fix round 1).
+    fn until_snapshot(&self, seen: &mut Vec<InstanceMessage>) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !snapshot_in(seen) {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            match self.rx.recv_timeout(left) {
+                Ok(msg) => seen.push(msg),
+                Err(_) => break,
+            }
+        }
+        seen.extend(self.drain(Duration::from_secs(1)));
+    }
+
     fn popups_within(&self, window: Duration) -> Vec<PopupPayload> {
         popups(&self.drain(window))
     }
@@ -402,8 +420,10 @@ fn review1_switching_the_windows_buffer_closes_the_popup() {
     let mut seen = s.drain(Duration::from_millis(500));
     s.typed("b.rs");
     s.key(Key::Enter, Modifiers::NONE);
-    seen.extend(s.drain(Duration::from_millis(1500)));
-    assert!(snapshot_in(&seen), "the window switched buffers");
+    let mut after = Vec::new();
+    s.until_snapshot(&mut after);
+    assert!(snapshot_in(&after), "the window switched buffers");
+    seen.extend(after);
     assert_eq!(
         presents(&seen),
         0,
@@ -439,11 +459,13 @@ fn review1_killing_the_buffer_closes_the_popup() {
     s.typed("k");
     let mut seen = s.drain(Duration::from_millis(500));
     s.key(Key::Enter, Modifiers::NONE);
-    seen.extend(s.drain(Duration::from_secs(2)));
+    let mut after = Vec::new();
+    s.until_snapshot(&mut after);
     assert!(
-        snapshot_in(&seen),
+        snapshot_in(&after),
         "the killed buffer's window shows another"
     );
+    seen.extend(after);
     assert_eq!(
         presents(&seen),
         0,

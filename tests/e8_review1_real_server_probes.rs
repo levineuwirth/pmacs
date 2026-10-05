@@ -49,6 +49,26 @@ fn on_path(name: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
 }
 
+/// Whether the rust-analyzer rows run here: the server on PATH, and
+/// Linux, where CI provisions and arms the language servers
+/// (`PMACS_REQUIRE_LSP`). On CI's macOS runners the toolchain's own
+/// `rust-analyzer` component is on PATH and initializes, but answers no
+/// hover or signature help for these fixtures in 120 s (#317, `CI`
+/// 37358723033 at E8's fix round 1), so the rows skip there unless the
+/// variable is armed, which runs them anywhere.
+fn rust_analyzer_provisioned() -> bool {
+    if !on_path("rust-analyzer") {
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+        return false;
+    }
+    let armed = std::env::var_os("PMACS_REQUIRE_LSP").is_some_and(|v| !v.is_empty());
+    if !cfg!(target_os = "linux") && !armed {
+        eprintln!("rust-analyzer rows run on Linux, where CI provisions them (#317); skipping");
+        return false;
+    }
+    true
+}
+
 fn exec(state: &EditorState, src: &str) {
     state
         .lua_host
@@ -250,8 +270,7 @@ fn after(source: &str, needle: &str) -> usize {
 /// what the user reads. The handoff's largest real hover was 219.
 #[test]
 fn review1_rust_analyzer_hover_on_use_std_fmt_passes_the_line_bound() {
-    if !on_path("rust-analyzer") {
-        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+    if !rust_analyzer_provisioned() {
         return;
     }
     let source = "use std::fmt;\n\nfn main() {\n    let _ = fmt::Error;\n}\n";
@@ -294,8 +313,7 @@ fn review1_rust_analyzer_hover_on_use_std_fmt_passes_the_line_bound() {
 /// so the user sees a popup and a closing row, not nothing.
 #[test]
 fn review1_rust_analyzer_hover_past_the_line_and_text_byte_bounds() {
-    if !on_path("rust-analyzer") {
-        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+    if !rust_analyzer_provisioned() {
         return;
     }
     let mut doc = String::new();
@@ -411,8 +429,7 @@ fn second_parameter_in(
 /// wrong argument is the one being typed.
 #[test]
 fn review1_rust_analyzer_marks_the_second_of_two_alike_parameters() {
-    if !on_path("rust-analyzer") {
-        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+    if !rust_analyzer_provisioned() {
         return;
     }
     let (mut state, _dir, _file) = open("alike", SIGNATURES);
@@ -443,8 +460,7 @@ fn review1_rust_analyzer_marks_the_second_of_two_alike_parameters() {
 /// is searched as bytes, so it lands on the second parameter's bytes.
 #[test]
 fn review1_rust_analyzer_marks_the_parameter_after_multi_byte_text() {
-    if !on_path("rust-analyzer") {
-        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+    if !rust_analyzer_provisioned() {
         return;
     }
     let (mut state, _dir, _file) = open("multibyte", SIGNATURES);
@@ -636,8 +652,7 @@ fn main() {\n\
 /// the alike labels if the search were first-match.
 #[test]
 fn fr1_rust_analyzer_sends_label_offsets_and_both_frontends_mark_them() {
-    if !on_path("rust-analyzer") {
-        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+    if !rust_analyzer_provisioned() {
         return;
     }
     let (mut state, _dir, _file) = open("offsets", OFFSET_SIGNATURES);
@@ -755,8 +770,7 @@ func main() {\n\
 /// there and said "LSP: no hover info".
 #[test]
 fn fr1_c_c_h_opens_the_last_popup_after_a_motion_closed_it() {
-    if !on_path("rust-analyzer") {
-        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
+    if !rust_analyzer_provisioned() {
         return;
     }
     let mut source = String::from("use std::fmt;\n\n");
@@ -785,12 +799,12 @@ fn fr1_c_c_h_opens_the_last_popup_after_a_motion_closed_it() {
         .find(|l| l.len() > 40)
         .expect("a line of the module's documentation")
         .clone();
-    key(&mut state, 'c', KeyModifiers::CONTROL);
-    key(&mut state, 'H', KeyModifiers::SHIFT);
-    let deadline = Instant::now() + Duration::from_mins(1);
-    let opened = loop {
-        tick(&mut state);
-        let text: Option<String> = state
+    // `C-c H`, pressed again as a user would if an answer is slow or the
+    // server answers an error (on CI the first press can meet a
+    // rust-analyzer still reloading its workspace); what must never come
+    // back is "no hover info" for the caret's place.
+    let lsp_help = |state: &EditorState| -> Option<String> {
+        state
             .lua_host
             .lua()
             .load(
@@ -799,21 +813,34 @@ fn fr1_c_c_h_opens_the_last_popup_after_a_motion_closed_it() {
                  return b:slice(0, b:len())",
             )
             .eval()
-            .expect("lua eval");
-        if let Some(text) = text {
-            break Some(text);
-        }
-        let status = state.core.borrow().status.clone();
-        assert!(
-            status != "LSP: no hover info",
-            "C-c H answered for the caret's place, not the popup the user read"
-        );
-        if Instant::now() >= deadline {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+            .expect("lua eval")
     };
-    let text = opened.expect("C-c H opens *lsp-help*");
+    let mut statuses: Vec<String> = Vec::new();
+    let mut opened = None;
+    'presses: for _ in 0..6 {
+        key(&mut state, 'c', KeyModifiers::CONTROL);
+        key(&mut state, 'H', KeyModifiers::SHIFT);
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until {
+            tick(&mut state);
+            if let Some(text) = lsp_help(&state) {
+                opened = Some(text);
+                break 'presses;
+            }
+            let status = state.core.borrow().status.clone();
+            assert!(
+                status != "LSP: no hover info",
+                "C-c H answered for the caret's place, not the popup the user read"
+            );
+            if statuses.last() != Some(&status) {
+                statuses.push(status);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let text = opened.unwrap_or_else(|| {
+        panic!("C-c H opens *lsp-help* within six presses; statuses seen {statuses:?}")
+    });
     assert!(
         text.contains(&distinctive),
         "*lsp-help* holds the popup's text: {distinctive:?}"
