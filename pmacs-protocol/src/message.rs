@@ -1495,11 +1495,15 @@ pub enum InstanceMessage {
     /// E8 (protocol v26): the hover or signature popup at the caret of
     /// the receiving frontend's own window, or its authoritative absence.
     ///
-    /// `Absent` is sent when the popup closes --- on an edit, on motion
-    /// out of its range, on `C-g`, on a buffer or window change --- since
-    /// the receiver keeps its last popup and silence would leave it on
-    /// screen. Both `Present` and `Absent` are suppressed while unchanged:
-    /// a popup the caret dwells under is sent once, not once a frame.
+    /// `Absent` is sent when the popup closes while its buffer stays
+    /// shown --- on an edit, on motion out of its range, on `C-g`, on its
+    /// window losing focus --- since the receiver keeps its last popup and
+    /// silence would leave it on screen. A buffer switch or a kill sends
+    /// no `Absent`: the `BufferSnapshot` that follows is the close, the
+    /// receiver forgetting its popup there and the producer its last
+    /// payload. Both `Present` and `Absent` are suppressed while
+    /// unchanged: a popup the caret dwells under is sent once, not once a
+    /// frame.
     ///
     /// The payload is bounded ([`crate::popup::MAX_POPUP_TEXT_BYTES`] and
     /// its siblings); the producer cuts a longer text to fit and counts

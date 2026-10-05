@@ -10,8 +10,11 @@
 //! how far it is scrolled.
 //!
 //! Presence is explicit, as for the panel band: [`PopupPayload::Absent`]
-//! is authoritative and is sent when the popup closes, because a
-//! receiver keeps its last popup and silence would leave it on screen.
+//! is authoritative and is sent when the popup closes while its buffer
+//! stays shown, because a receiver keeps its last popup and silence
+//! would leave it on screen; a buffer switch or a kill closes it with
+//! the `BufferSnapshot` that follows instead, at which a receiver
+//! forgets its popup.
 //!
 //! # The bound
 //!
