@@ -1,0 +1,6 @@
+fn main() { let _ = Pair(1, 2); let _ = clamp_len(1, 2); }
+fn emoji() { let _ = ("😀😀", pick(3, 4)); }
+fn cjk() { /* 中文注释 */ let _ = pick(5, 6); }
+struct Pair(i32, i32);
+fn clamp_len(max_len: usize, len: usize) -> usize { max_len.min(len) }
+fn pick(first: u8, second: u8) -> u8 { first + second }

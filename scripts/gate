@@ -1052,6 +1052,49 @@ mkdir -p "$GATE_RUNTIME_DIR"
 chmod 700 "$GATE_RUNTIME_DIR"
 export XDG_RUNTIME_DIR="$GATE_RUNTIME_DIR"
 
+# --- sccache: a durable TMPDIR ---------------------------------------
+#
+# NOT E8'S: found on the gate itself, which hands sccache a directory it
+# deletes. A `rustc-wrapper = "sccache"` client that finds no server
+# starts one, and the server keeps the TMPDIR of the process that started
+# it for as long as it lives. Inside a gate that is GATE_TMPDIR --- a
+# compile at any stage, or a `cargo check` a test's language server runs
+# mid-sweep after the server idled out --- and the exit trap above removes
+# it, so every later compile on the machine, for every session, fails
+# with "sccache: Failed to create temp dir" until someone stops the
+# server. sccache has no variable for its own temporary directory, so the
+# gate puts a shim named `sccache` first on PATH that runs the real one
+# with TMPDIR pointed at a durable directory beside the gate's targets:
+# a server any of this run's compiles starts keeps a directory that
+# outlives the run. The compiles see that directory too, not the run's:
+# sccache runs a compile in its client's environment, and the client is
+# the shim's own process (E8 review 2 measured it with a rustc that logs
+# its TMPDIR, and fix round 2 again, twelve calls of twelve), so a
+# compile's temporary files land beside the server's and are not this
+# run's to reap. A hand run outside the gate gets none of this unless
+# it puts a shim of its own first on PATH (the runbook's recipe). A
+# wrapper a config names by absolute path never looks at PATH, so
+# RUSTC_WRAPPER naming sccache is pointed at the shim too; an absolute
+# path in a config file is not reached, which is stated rather than
+# papered over.
+GATE_SCCACHE_TMPDIR="$(gate_root)/sccache-tmp"
+if GATE_REAL_SCCACHE=$(command -v sccache 2>/dev/null) && [ -n "$GATE_REAL_SCCACHE" ]; then
+    mkdir -p "$GATE_SCCACHE_TMPDIR" "$GATE_TMPDIR/bin"
+    gate_sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+    {
+        echo '#!/bin/sh'
+        echo "TMPDIR=$(gate_sh_quote "$GATE_SCCACHE_TMPDIR") exec $(gate_sh_quote "$GATE_REAL_SCCACHE") \"\$@\""
+    } > "$GATE_TMPDIR/bin/sccache"
+    chmod 755 "$GATE_TMPDIR/bin/sccache"
+    export PATH="$GATE_TMPDIR/bin:$PATH"
+    case "${RUSTC_WRAPPER:-}" in
+        sccache|*/sccache) export RUSTC_WRAPPER="$GATE_TMPDIR/bin/sccache" ;;
+    esac
+    GATE_SCCACHE_NOTE="$GATE_SCCACHE_TMPDIR (a server started here keeps it)"
+else
+    GATE_SCCACHE_NOTE="not on PATH"
+fi
+
 echo "gate: worktree   $WT"
 echo "gate: target dir $TARGET"
 echo "gate: logs       $LOGDIR"
@@ -1063,6 +1106,7 @@ echo "gate: ambient    $AMBIENT"
 # observable, and the exit trap removes this too.
 echo "gate: tmpdir     $GATE_TMPDIR"
 echo "gate: runtime    $GATE_RUNTIME_DIR"
+echo "gate: sccache    $GATE_SCCACHE_NOTE"
 [ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (the luajit-only clippy and sweep are added)"
 [ "$PERF" = 1 ] && echo "gate: perf       yes (scripts/perf-budgets is added)"
 [ "$DOCS" = 1 ] && echo "gate: docs       yes (fmt, doc, docs-test and diff-check only)"

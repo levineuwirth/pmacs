@@ -762,6 +762,10 @@ impl EditorState {
             &syntax_registry,
         )
         .expect("install pmacs.lsp");
+        // E8.2: the hover and signature popup, opened from the LSP stores
+        // into the core (`pmacs.lsp._popup_*`).
+        crate::lua_bindings::install_lsp_popup(lua_host.lua(), &core, &lsp_manager)
+            .expect("install pmacs.lsp popup");
         // T M9.1 MCP manager. Wires onto the same supervisor that LSP
         // and `pmacs.process.*` use; the protocol-uniformity claim is
         // that this share is sufficient (no parallel dispatch path).
@@ -4336,6 +4340,30 @@ impl EditorState {
             return;
         }
 
+        // E8 fix round 1 (review 1's Medium 3): the left button and the
+        // wheel over the grid's hover or signature popup are the popup's,
+        // as `pmacs-gpu`'s are. A click or a wheel turn inside it neither
+        // moves the caret beneath nor scrolls the window, either of which
+        // would close the popup the user is reading; a right click reaches
+        // the text under it, as the GPU's does.
+        if matches!(
+            ev.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) && self
+            .core
+            .borrow()
+            .lsp_popup_grid_hit(frontend_id, cell_row, cell_col)
+        {
+            self.mouse_click = None;
+            return;
+        }
+
         let Some((win_id, rect)) = window_at_cell(
             &self.core.borrow(),
             frontend_id,
@@ -6103,6 +6131,10 @@ pub fn paint_frame(
     // geometry, and a panel the frame can no longer satisfy has already
     // surrendered focus and its terminal controller.
     state.sync_frame_geometry(frontend_id, term_size);
+    // E8: a popup the text or the caret has left is closed before the
+    // grid paints (`EditorCore::lsp_popup_validate`), on every grid path:
+    // the daemon's, the in-process TUI's and a test's.
+    state.core.borrow_mut().lsp_popup_validate();
     mark_errors_read_if_presented(state, frontend_id);
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow

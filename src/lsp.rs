@@ -3053,7 +3053,13 @@ impl LspManager {
                 }
             }
             ResponseRoute::Signature { uri } => {
-                let help = crate::signature::SignatureHelp::from_lsp_value(result);
+                // E8.5: a parameter's label offsets count the negotiated
+                // encoding's units, which `inbound_converted` does not
+                // reach (they are not `Position`s).
+                let help = crate::signature::SignatureHelp::from_lsp_value_in(
+                    result,
+                    self.position_encoding(sid),
+                );
                 let key = crate::signature::SignatureKey::new(server_key, uri.clone());
                 let mut guard = self
                     .signature_store
@@ -4284,7 +4290,18 @@ fn default_capabilities() -> Value {
                 "dynamicRegistration": false,
                 "contentFormat": ["plaintext", "markdown"],
             },
-            "signatureHelp": { "dynamicRegistration": false },
+            // E8 fix round 1: a parameter's label as `[start, end]` in
+            // its signature's label, so the popup marks the active
+            // parameter by its place and not by searching for its text,
+            // which finds the first of two alike labels
+            // (`Pair(i32, i32)`). A server that sends strings anyway gets
+            // an ordered search (`crate::lsp_popup`).
+            "signatureHelp": {
+                "dynamicRegistration": false,
+                "signatureInformation": {
+                    "parameterInformation": { "labelOffsetSupport": true },
+                },
+            },
             "definition": { "dynamicRegistration": false, "linkSupport": true },
             "formatting": { "dynamicRegistration": false },
             // T M4.5: client-side rename. `prepareSupport: true` —

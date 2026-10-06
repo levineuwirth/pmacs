@@ -1862,14 +1862,41 @@ local function signature_trigger_chars(sid)
   return chars
 end
 
+-- E8: every popup request (hover or signature, asked for or automatic)
+-- takes the next generation, and only the latest may open the popup or
+-- say anything. A second `C-c h` while the first is in flight supersedes
+-- it --- the manager cancels the first awaiter --- and that cancellation
+-- is not "server unavailable": it is the user's own newer question. The
+-- answer that lands first for an older request, should one land, is
+-- dropped the same way.
+local popup_generation = 0
+local function next_popup_generation()
+  popup_generation = popup_generation + 1
+  return popup_generation
+end
+
+-- E8 fix round 1 (review 1's Low 1): the generation of the asked-for
+-- request in flight (`C-c h`, `C-c s`), or nil. An asked request always
+-- wins: dwell fires nothing while one is in flight, so a quiet request
+-- never supersedes it and swallows the answer the user asked for. Each
+-- request clears it when its own answer, error or supersession lands.
+local asked_generation = nil
+local function popup_request_done(generation)
+  if asked_generation == generation then asked_generation = nil end
+end
+
 -- Like `pmacs.lsp.signature_help_at_cursor`, but silent: an auto-trigger
 -- that announced "no signature help" on every `(` in a comment would be
--- unusable. Only a real signature reaches the status line.
+-- unusable. Only a real signature opens the popup (E8.2); an empty
+-- answer leaves an open one as it is.
 local function signature_help_quiet(rec)
   if not server_is_initialized(rec.server) then return end
   -- The server must see the character we just typed before it can tell
   -- us which parameter we are inside of.
   flush_did_change_for(rec)
+  local target = pmacs.lsp._popup_target()
+  if not target then return end
+  local generation = next_popup_generation()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.signature.clear(rec.server, rec.uri)
@@ -1877,13 +1904,11 @@ local function signature_help_quiet(rec)
     local ok = pcall(function()
       pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
     end)
-    if not ok then return end
-    local help = pmacs.signature.current(rec.server, rec.uri)
-    if not help or not help.signatures or #help.signatures == 0 then return end
-    local active = help.signatures[(help.active_signature or 0) + 1]
-    if active and active.label then
-      pmacs.editor.set_status("LSP: " .. active.label)
-    end
+    if not ok or generation ~= popup_generation then return end
+    -- A frontend that cannot show the popup is told the signature, as
+    -- it was before E8; quiet means no "no signature help", not silence.
+    local _, _, told = pmacs.lsp._popup_signature(rec.server, rec.uri, target, true)
+    if told then pmacs.editor.set_status(told) end
   end)
 end
 
@@ -1938,6 +1963,19 @@ pmacs.hook.add("buffer.after-edit", function()
   if not typed then return end
   local ch = char_before(buf, pmacs.editor.cursor())
   if not ch then return end
+  -- E8.5: the signature popup survives typing inside its call. A typed
+  -- `)` dismisses it; any other typed character carries it to the new
+  -- text (the edit would otherwise close it at the next frame), and a
+  -- trigger character then asks again, so `,` moves the active
+  -- parameter. Anything that is not a typed character --- a paste, an
+  -- undo, a kill --- carries nothing and closes it.
+  if pmacs.lsp.popup_kind() == "signature" then
+    if ch == ")" then
+      pmacs.lsp.popup_close()
+      return
+    end
+    pmacs.lsp._popup_carry()
+  end
   local triggers = signature_trigger_chars(rec.server)
   if not (triggers and triggers[ch]) then return end
   pcall(signature_help_quiet, rec)
@@ -4031,46 +4069,96 @@ function pmacs.lsp.code_actions()
   end)
 end
 
+-- E8.2: the hover for the symbol at the caret, as a popup at the caret
+-- on both frontends carrying the server's whole text up to the wire's
+-- bound (`crate::lsp_popup`); `C-c H` keeps *lsp-help* as the persistent,
+-- searchable form. What the user sees: the server returning nothing says
+-- "LSP: no hover info" and closes any popup; a text past the bound shows
+-- its first lines and a closing "… N more lines · C-c H opens *lsp-help*"
+-- row; an answer that lands after the caret moved or the text changed
+-- opens nothing and says nothing; a frontend that cannot show the popup
+-- (a GPU below protocol v26) is told the answer's first line instead.
+-- E8 fix round 1 (review 1's Medium 3, as the owner ruled): the last
+-- hover popup shown in a buffer, its window and its whole text. The
+-- popup's closing row names `C-c H`; once a motion has carried the caret
+-- off the symbol (a `C-v`, a wheel turn outside the popup), the popup is
+-- gone and the caret's new place may have no hover at all, so `C-c H`
+-- there opens this one rather than saying "no hover info". Fix round 2
+-- (review 2's Low 1): it carries the place it was asked at, which the
+-- header names, and the buffer's revision then; once the buffer has been
+-- edited the text may describe what is no longer there, so it is dropped.
+local last_hover_popup = {}
+
+local function hover_popup(rec, quiet)
+  -- The server must hold the text the caret is in before it is asked
+  -- about it, or its answer names a symbol that is not there.
+  flush_did_change_for(rec)
+  local target = pmacs.lsp._popup_target()
+  if not target then return end
+  local generation = next_popup_generation()
+  if not quiet then asked_generation = generation end
+  local window = pmacs.window.current()
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  pmacs.hover.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
+    end)
+    popup_request_done(generation)
+    if generation ~= popup_generation then return end
+    if not ok then
+      if not quiet then
+        pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      end
+      return
+    end
+    local opened, msg, told = pmacs.lsp._popup_hover(rec.server, rec.uri, target)
+    if opened then
+      local hover = pmacs.hover.current(rec.server, rec.uri)
+      if hover and hover.contents and hover.contents ~= "" then
+        local ok_path, path = pcall(function() return rec.buffer:path() end)
+        local file = ok_path and type(path) == "string" and path:match("[^/]+$") or "?"
+        local ok_rev, revision = pcall(function() return rec.buffer:revision() end)
+        last_hover_popup[rec.uri] = {
+          window = window,
+          contents = hover.contents,
+          place = string.format("%s:%d", file, line + 1),
+          revision = ok_rev and revision or nil,
+        }
+      end
+    end
+    if told then
+      pmacs.editor.set_status(told)
+    elseif msg and not quiet then
+      pmacs.editor.set_status(msg)
+    end
+  end)
+end
+
 function pmacs.lsp.hover_at_cursor()
   local rec = attached_for_active()
   if not rec then
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
-  local line = pmacs.editor.cursor_line()
-  local col = pmacs.editor.cursor_col()
-  pmacs.hover.clear(rec.server, rec.uri)
-  pmacs.async(function()
-    local ok, err = pcall(function()
-      pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
-    end)
-    if not ok then
-      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
-      return
-    end
-    local hover = pmacs.hover.current(rec.server, rec.uri)
-    if not hover then
-      pmacs.editor.set_status("LSP: no hover info")
-      return
-    end
-    -- Surface the first line of the hover body in the modeline. The
-    -- popup view subscribes to the same store; a panel can wire in
-    -- here when the keybinding is meant to surface one.
-    local first = (hover.contents or ""):match("^[^\n]*") or ""
-    pmacs.editor.set_status(first ~= "" and ("LSP: " .. first) or "LSP: hover empty")
-  end)
+  hover_popup(rec, false)
 end
 
 -- Arc 1b phase 2: the full (multi-line) hover body in a *lsp-help*
 -- panel --- `lsp.hover` keeps its one-line echo-area summary; this is
 -- the "show me everything" companion. Rows are non-visitable
--- (item = nil, so RET is a no-op); q restores the source buffer.
+-- (item = nil, so RET is a no-op); q restores the source buffer. Where
+-- the caret's place has no hover, it opens the last hover popup this
+-- window showed for the buffer (E8 fix round 1), which the popup's
+-- closing row named this command for.
 function pmacs.lsp.hover_doc()
   local rec = attached_for_active()
   if not rec then
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
+  local window = pmacs.window.current()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.hover.clear(rec.server, rec.uri)
@@ -4083,28 +4171,51 @@ function pmacs.lsp.hover_doc()
       return
     end
     local hover = pmacs.hover.current(rec.server, rec.uri)
-    if not hover or not hover.contents or hover.contents == "" then
-      pmacs.editor.set_status("LSP: no hover info")
-      return
+    local contents = hover and hover.contents
+    local header = "hover documentation   q quit"
+    if not contents or contents == "" then
+      -- Nothing here: the last hover popup this window showed for this
+      -- buffer, if there was one (`last_hover_popup`), whose closing row
+      -- sent the user to this command.
+      local last = last_hover_popup[rec.uri]
+      local ok_rev, revision = pcall(function() return rec.buffer:revision() end)
+      if last and (not ok_rev or last.revision ~= revision) then
+        last_hover_popup[rec.uri] = nil
+        last = nil
+      end
+      if not last or last.window ~= window then
+        pmacs.editor.set_status("LSP: no hover info")
+        return
+      end
+      contents = last.contents
+      header = "hover documentation, the last popup's (none at the caret), from "
+        .. last.place .. "   q quit"
     end
     local rows = {}
-    for l in (hover.contents .. "\n"):gmatch("(.-)\n") do
+    for l in (contents .. "\n"):gmatch("(.-)\n") do
       rows[#rows + 1] = { text = l }
     end
     pmacs.listview.open {
       name = "*lsp-help*",
-      header = "hover documentation   q quit",
+      header = header,
       rows = rows,
     }
   end)
 end
 
+-- E8.2: the signature of the call at the caret, as a popup anchored at
+-- the call's open parenthesis.
 function pmacs.lsp.signature_help_at_cursor()
   local rec = attached_for_active()
   if not rec then
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
+  flush_did_change_for(rec)
+  local target = pmacs.lsp._popup_target()
+  if not target then return end
+  local generation = next_popup_generation()
+  asked_generation = generation
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.signature.clear(rec.server, rec.uri)
@@ -4112,19 +4223,93 @@ function pmacs.lsp.signature_help_at_cursor()
     local ok, err = pcall(function()
       pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
     end)
+    popup_request_done(generation)
+    if generation ~= popup_generation then return end
     if not ok then
       pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
       return
     end
-    local help = pmacs.signature.current(rec.server, rec.uri)
-    if not help or not help.signatures or #help.signatures == 0 then
-      pmacs.editor.set_status("LSP: no signature help")
-      return
-    end
-    local active = help.signatures[(help.active_signature or 0) + 1]
-    pmacs.editor.set_status(active and ("LSP: " .. active.label) or "LSP: signature unknown")
+    local _, msg, told = pmacs.lsp._popup_signature(rec.server, rec.uri, target, false)
+    if told or msg then pmacs.editor.set_status(told or msg) end
   end)
 end
+
+-- E8.2: hover on caret dwell, behind `lsp.hover-on-dwell` (default off).
+-- When the caret has rested on one byte of an attached buffer for
+-- `lsp.hover-dwell-ms` (500 by default, a registered knob since E8's fix
+-- round 1) after a MOTION, the hover is asked for as `C-c h` would ask,
+-- but quietly: no "no hover info", no request error on the status line.
+-- An edit does not arm it (typing must not summon documentation), and
+-- neither does the first sight of a window, so opening a file pops
+-- nothing. One `process.after-tick` subscription, autosave's idiom: a
+-- clock read and a compare per frame, no timer, no worker parked.
+--
+-- The three edges a per-keystroke timer must settle:
+--  * a killed buffer: the state is re-read from the focused window each
+--    tick, so a killed buffer is simply never seen again; an answer in
+--    flight for it is refused at open, its target no longer holding.
+--  * a state that must not re-arm: one request per resting place. After
+--    it fires, nothing re-fires until the caret moves; a dismissed popup
+--    (`C-g`, an empty answer) stays dismissed while the caret rests.
+--  * a backoff that must not reset: there is none to reset, since a
+--    resting place is asked at most once and a request in flight blocks
+--    the next (an asked one, `C-c h` within the dwell, blocks dwell
+--    outright, E8 fix round 1); the dwell path reads `attachments`
+--    directly and never rebuilds a dead server's attachment, so it
+--    cannot drive a restart loop the way a command's
+--    `attached_for_active` may.
+pmacs.config.define {
+  name = "lsp.hover-on-dwell",
+  description = "Show the hover popup when the caret rests on a symbol for lsp.hover-dwell-ms after moving, as C-c h would.",
+  type = "boolean",
+  default = false,
+  mutability = "live",
+}
+
+pmacs.config.define {
+  name = "lsp.hover-dwell-ms",
+  description = "Milliseconds the caret must rest on a symbol after moving before lsp.hover-on-dwell asks for its hover.",
+  type = "integer",
+  default = 500,
+  min = 50,
+  max = 10000,
+  mutability = "live",
+}
+
+-- { place = "<buffer>:<cursor>", rev = revision, since = ms, asked = bool }
+local dwell = {}
+
+pmacs.hook.add("process.after-tick", function()
+  if not pmacs.config.get("lsp.hover-on-dwell") then
+    dwell = {}
+    return
+  end
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local key = tostring(buf)
+  local rec = attachments[key]
+  local ok_rev, rev = pcall(function() return buf:revision() end)
+  if not rec or not ok_rev then return end
+  local place = key .. ":" .. tostring(pmacs.editor.cursor())
+  local now = pmacs.editor.monotonic_ms()
+  if dwell.place ~= place or dwell.rev ~= rev then
+    -- A motion arms; an edit, or the first sight of a buffer, does not.
+    local moved = dwell.place ~= nil and dwell.rev == rev
+      and dwell.key == key
+    dwell = { place = place, rev = rev, key = key, since = now, asked = not moved }
+    return
+  end
+  if dwell.asked or now - dwell.since < pmacs.config.get("lsp.hover-dwell-ms") then
+    return
+  end
+  dwell.asked = true
+  if pmacs.lsp.popup_kind() ~= nil then return end
+  -- An asked request in flight is the user's question for this place;
+  -- dwell asking again would supersede it and swallow its answer.
+  if asked_generation ~= nil then return end
+  if not server_is_initialized(rec.server) then return end
+  hover_popup(rec, true)
+end)
 
 -- Default commands + keymap entries --------------------------------------
 

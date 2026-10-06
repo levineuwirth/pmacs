@@ -955,6 +955,16 @@ fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> 
         || session_state.negotiated_protocol_version >= PANEL_MIN_VERSION
 }
 
+/// Whether a session is shown the hover and signature popup (E8 fix
+/// round 1): a grid session paints it from cells at any version; a
+/// semantic one needs [`pmacs_protocol::POPUP_MIN_VERSION`], the same
+/// constant the producer's peer flag and the write filter read. One that
+/// is not is told the answer on its status line instead.
+fn peer_shows_popup(session_state: crate::presence::SessionState) -> bool {
+    !session_state.negotiated_capabilities.semantic_render
+        || session_state.negotiated_protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
+}
+
 /// The same belt-and-braces write-loop gate for the additive
 /// protocol-v19 terminal frame. The semantic producer skips construction
 /// for an older peer; this filter independently prevents an unknown
@@ -971,6 +981,19 @@ fn peer_accepts_terminal_message(protocol_version: u32, message: &InstanceMessag
 /// discriminant reaching one, so neither gate alone is load-bearing.
 fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) -> bool {
     protocol_version >= PANEL_MIN_VERSION || !matches!(message, InstanceMessage::PanelFrame(_))
+}
+
+/// The same belt-and-braces write-loop gate for the additive
+/// protocol-v26 hover and signature popup (E8).
+///
+/// The producer already skips construction for a peer below
+/// [`pmacs_protocol::POPUP_MIN_VERSION`]; this filter independently
+/// prevents an unknown discriminant reaching one, so neither gate alone
+/// is load-bearing. Both read the protocol crate's constant, as the
+/// GPU frontend's gates do.
+fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
+        || !matches!(message, InstanceMessage::Popup(_))
 }
 
 /// Whether an authenticated source may send the v21 panel event family
@@ -1818,6 +1841,13 @@ fn dispatcher_loop(
                     if !peer_accepts_panel_message(negotiated_protocol_version, msg) {
                         continue;
                     }
+                    // E8 — Popup gated at v26. A v25 peer keeps no popup;
+                    // it is told the answer's first line on its status
+                    // line instead (`peer_shows_popup`), and `*lsp-help*`
+                    // (`C-c H`) still carries the whole text.
+                    if !peer_accepts_popup_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
                     // jitter site: render-write latency.
                     //
@@ -2324,6 +2354,10 @@ fn handle_session_established(
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
+        // E8 fix round 1: decided here, from the same negotiated state as
+        // the producer's popup flag, so a v25 GPU is told on its status
+        // line what a v26 one is shown.
+        core.set_frontend_shows_popup(frontend_id, peer_shows_popup(session_state));
         core.active_frontend = frontend_id;
     }
 
@@ -10936,6 +10970,22 @@ mod tests {
                 &InstanceMessage::DispatchIdle { idle: true }
             ),
             "the filter must be scoped to the panel variant"
+        );
+    }
+
+    /// E8's write-loop gate, independent of the producer's own flag.
+    #[test]
+    fn the_popup_write_gate_rejects_v25_independently() {
+        let absent = InstanceMessage::Popup(pmacs_protocol::PopupPayload::Absent);
+        assert!(!peer_accepts_popup_message(25, &absent));
+        assert!(peer_accepts_popup_message(26, &absent));
+        assert!(peer_accepts_popup_message(
+            pmacs_protocol::POPUP_MIN_VERSION,
+            &absent
+        ));
+        assert!(
+            peer_accepts_popup_message(25, &InstanceMessage::DispatchIdle { idle: true }),
+            "the filter must be scoped to the popup variant"
         );
     }
 }

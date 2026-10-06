@@ -104,6 +104,7 @@ pub mod keymap_tree;
 pub mod locations;
 pub mod lockfile;
 pub mod lsp;
+pub mod lsp_popup;
 pub mod lsp_status;
 pub mod lua;
 pub mod lua_bindings;

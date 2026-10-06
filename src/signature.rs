@@ -6,19 +6,23 @@
 //! sends `textDocument/signatureHelp` to find out what the call's
 //! parameters are. The reply lists candidate signatures (overloads),
 //! with optional pointers to which signature and parameter are
-//! "active" given the current cursor position. The
-//! [`SignatureView`] renders the active signature with the active
-//! parameter highlighted.
+//! "active" given the current cursor position. Since E8 the active
+//! signature shows in the popup at the caret ([`crate::lsp_popup`]),
+//! drawn in the grid by [`SignatureView`] and on the wire as
+//! `InstanceMessage::Popup`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use pmacs_protocol::PopupKind;
 use serde_json::Value;
-use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::Buffer;
-use crate::cell::{Cell, CellCoord, CellGrid, Glyph, Style};
+use crate::cell::CellGrid;
+use crate::highlight::ThemeHandle;
+use crate::lsp_popup::{LspPopup, SharedLspPopup};
 use crate::view::{View, Viewport};
+use crate::window::WindowId;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,13 +79,38 @@ impl SignatureHelp {
     /// help (no signatures) for `null`.
     #[must_use]
     pub fn from_lsp_value(v: &Value) -> Self {
+        Self::from_lsp_value_in(v, crate::lsp::PositionEncoding::Utf8)
+    }
+
+    /// [`Self::from_lsp_value`] for a server that negotiated `encoding`
+    /// (E8.5): a parameter's `[start, end]` label offsets are converted
+    /// here to bytes of the signature's label, so the span the popup
+    /// marks is the parameter on a non-ASCII label too. The absorb path
+    /// rewrites `Position`s to bytes; these offsets are not positions,
+    /// so it never reached them.
+    ///
+    /// Which units they count is read from the offsets themselves (E8
+    /// fix round 1). The spec says UTF-16, "as `Position` and `Range`
+    /// does", and servers that negotiated UTF-8 take that both ways:
+    /// rust-analyzer counts UTF-16 units, clangd its negotiated bytes.
+    /// So the offsets are read in the negotiated encoding and in UTF-16,
+    /// and the reading under which every parameter is delimited and
+    /// balanced in the label ([`coherent`]) is the one kept. Under
+    /// none, or under two that differ, no parameter carries a span and
+    /// the popup marks nothing rather than text that may be wrong.
+    #[must_use]
+    pub fn from_lsp_value_in(v: &Value, encoding: crate::lsp::PositionEncoding) -> Self {
         if v.is_null() {
             return Self::default();
         }
         let signatures = v
             .get("signatures")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(parse_signature).collect::<Vec<_>>())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| parse_signature(s, encoding))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let active_signature = v
             .get("activeSignature")
@@ -115,18 +144,49 @@ impl SignatureHelp {
     }
 }
 
-fn parse_signature(v: &Value) -> Option<Signature> {
+fn parse_signature(v: &Value, encoding: crate::lsp::PositionEncoding) -> Option<Signature> {
     let label = v.get("label")?.as_str()?.to_owned();
     let documentation = v.get("documentation").and_then(extract_markup_text);
-    let parameters = v
+    let raw: Vec<RawParameter> = v
         .get("parameters")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| parse_parameter(p, &label))
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().filter_map(parse_parameter).collect())
         .unwrap_or_default();
+    let offsets: Vec<(u32, u32)> = raw.iter().filter_map(|p| p.offsets).collect();
+    let mut readings = vec![encoding];
+    if encoding != crate::lsp::PositionEncoding::Utf16 {
+        readings.push(crate::lsp::PositionEncoding::Utf16);
+    }
+    let mut whole = readings.into_iter().filter_map(|enc| {
+        let spans = offsets
+            .iter()
+            .map(|&(s, e)| Some((label_byte(&label, s, enc)?, label_byte(&label, e, enc)?)))
+            .collect::<Option<Vec<_>>>()?;
+        coherent(&label, &spans).then_some(spans)
+    });
+    let spans = match (whole.next(), whole.next()) {
+        (Some(one), Some(other)) if one != other => None,
+        (one, _) => one,
+    };
+    let mut spans = spans.map(Vec::into_iter);
+    let parameters = raw
+        .into_iter()
+        .map(|p| {
+            let (label, span) = match (p.offsets, &mut spans) {
+                (None, _) => (p.label, None),
+                (Some(_), Some(spans)) => {
+                    let (s, e) = spans.next().expect("one span per offset pair");
+                    (label[s..e].to_owned(), Some((s as u32, e as u32)))
+                }
+                (Some(_), None) => (String::new(), None),
+            };
+            SignatureParameter {
+                label,
+                span,
+                documentation: p.documentation,
+            }
+        })
+        .collect();
     let active_parameter = v
         .get("activeParameter")
         .and_then(Value::as_u64)
@@ -139,32 +199,125 @@ fn parse_signature(v: &Value) -> Option<Signature> {
     })
 }
 
-fn parse_parameter(v: &Value, parent_label: &str) -> Option<SignatureParameter> {
+/// A parameter as the server sent it: its label string, or its label's
+/// `[start, end]` offsets in units not yet known.
+struct RawParameter {
+    label: String,
+    offsets: Option<(u32, u32)>,
+    documentation: Option<String>,
+}
+
+fn parse_parameter(v: &Value) -> Option<RawParameter> {
     let label_field = v.get("label")?;
     let documentation = v.get("documentation").and_then(extract_markup_text);
     if let Some(s) = label_field.as_str() {
-        return Some(SignatureParameter {
+        return Some(RawParameter {
             label: s.to_owned(),
-            span: None,
+            offsets: None,
             documentation,
         });
     }
     if let Some(arr) = label_field.as_array()
         && arr.len() == 2
     {
-        let start = arr[0].as_u64()? as u32;
-        let end = arr[1].as_u64()? as u32;
-        let s = parent_label
-            .get(start as usize..end as usize)
-            .unwrap_or("")
-            .to_owned();
-        return Some(SignatureParameter {
-            label: s,
-            span: Some((start, end)),
+        let unit = |v: &Value| v.as_u64().and_then(|n| u32::try_from(n).ok());
+        return Some(RawParameter {
+            label: String::new(),
+            offsets: Some((unit(&arr[0])?, unit(&arr[1])?)),
             documentation,
         });
     }
     None
+}
+
+/// The byte of `label` that `units` units of `enc` reach, or `None` when
+/// they fall inside a character or past the end. Exact, unlike
+/// [`crate::lsp::char_to_byte`], which snaps: a reading in the wrong
+/// units must show as one.
+fn label_byte(label: &str, units: u32, enc: crate::lsp::PositionEncoding) -> Option<usize> {
+    let units = units as usize;
+    match enc {
+        crate::lsp::PositionEncoding::Utf8 => label.is_char_boundary(units).then_some(units),
+        crate::lsp::PositionEncoding::Utf16 => {
+            let mut counted = 0usize;
+            for (byte, ch) in label.char_indices() {
+                if counted == units {
+                    return Some(byte);
+                }
+                if counted > units {
+                    return None;
+                }
+                counted += ch.len_utf16();
+            }
+            (counted == units).then_some(label.len())
+        }
+    }
+}
+
+/// Whether `spans` (bytes of `label`, in the parameters' order) each mark
+/// what a parameter is: non-empty, in order and apart, starting and
+/// ending on no whitespace, opened (past whitespace) by the label's start
+/// or one of `( , < [ { |` and closed by its end or one of `, ) > ] } |`,
+/// with its own brackets balanced. Offsets read in the wrong units shift
+/// by the bytes and units the characters before them differ by; a run
+/// that is merely whole (E8 fix round 1's test) is reached that way by
+/// ordinary non-ASCII code, `u8, a` or `名前` alone, and a delimited,
+/// balanced one is not (review 2's Medium 1).
+fn coherent(label: &str, spans: &[(usize, usize)]) -> bool {
+    let opened = |at: usize| {
+        label[..at]
+            .trim_end()
+            .chars()
+            .next_back()
+            .is_none_or(|c| "(,<[{|".contains(c))
+    };
+    let closed = |at: usize| {
+        label[at..]
+            .trim_start()
+            .chars()
+            .next()
+            .is_none_or(|c| ",)>]}|".contains(c))
+    };
+    let mut end_of_last = 0usize;
+    spans.iter().all(|&(s, e)| {
+        let ok = s < e
+            && s >= end_of_last
+            && !label[s..e].starts_with(char::is_whitespace)
+            && !label[s..e].ends_with(char::is_whitespace)
+            && opened(s)
+            && closed(e)
+            && balanced(&label[s..e]);
+        end_of_last = e;
+        ok
+    })
+}
+
+/// Whether every bracket in `run` closes the one it opened, in order and
+/// all of them: `(`, `[`, `{` and `<`, an arrow's `>` (`->`, `=>`)
+/// closing none.
+fn balanced(run: &str) -> bool {
+    let mut open = Vec::new();
+    let mut last = None;
+    for c in run.chars() {
+        match c {
+            '(' | '[' | '{' | '<' => open.push(c),
+            '>' if matches!(last, Some('-' | '=')) => {}
+            ')' | ']' | '}' | '>' => {
+                let opener = match c {
+                    ')' => '(',
+                    ']' => '[',
+                    '}' => '{',
+                    _ => '<',
+                };
+                if open.pop() != Some(opener) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        last = Some(c);
+    }
+    open.is_empty()
 }
 
 fn extract_markup_text(v: &Value) -> Option<String> {
@@ -251,175 +404,66 @@ pub fn make_shared_store() -> SharedSignatureStore {
 // View
 // ---------------------------------------------------------------------------
 
-/// Style for the active parameter --- bold + underline so the
-/// emphasis carries on monochrome and palette terminals alike.
-fn active_parameter_style() -> Style {
-    Style {
-        bold: true,
-        underline: crate::cell::UnderlineStyle::Single,
-        ..Style::default()
-    }
-}
+/// [`View::kind`] of [`SignatureView`], which dedupes it per window.
+pub const SIGNATURE_POPUP_KIND: &str = "signature-popup";
 
-/// Popup view that renders the active signature, highlighting the
-/// active parameter.
+/// The grid's signature popup (E8): a self-suppressing overlay on the
+/// window a signature was asked in, reading the core's one popup
+/// ([`crate::lsp_popup`]) and drawing only while that popup is a
+/// signature for this window and the buffer it shows, its active
+/// parameter marked. Attached by [`crate::editor_core::EditorCore`] when
+/// a signature first opens there, and persistent after.
 pub struct SignatureView {
-    key: SignatureKey,
-    store: SharedSignatureStore,
+    popup: SharedLspPopup,
+    window_id: WindowId,
+    /// The theme its `ui.popup` faces resolve through; `None` in a bare
+    /// core, which paints the grid's own defaults.
+    theme: Option<ThemeHandle>,
 }
 
 impl SignatureView {
-    /// Construct a signature view for `key` against `store`.
+    /// An overlay for `window_id` reading `popup`.
     #[must_use]
-    pub fn new(key: SignatureKey, store: SharedSignatureStore) -> Self {
-        Self { key, store }
+    pub fn new(popup: SharedLspPopup, window_id: WindowId, theme: Option<ThemeHandle>) -> Self {
+        Self {
+            popup,
+            window_id,
+            theme,
+        }
     }
 
-    /// The key this view is keyed under.
-    #[must_use]
-    pub fn key(&self) -> &SignatureKey {
-        &self.key
-    }
-}
-
-/// Snapshot of just the bits the renderer needs --- avoids holding
-/// the lock across the render loop.
-struct SignatureSnapshot {
-    label: String,
-    /// Optional `(start, end)` byte span of the active parameter
-    /// inside `label`.
-    active_span: Option<(u32, u32)>,
-    /// Active parameter label (used when there's no span).
-    active_label: Option<String>,
-    /// Optional documentation line for the active signature.
-    documentation: Option<String>,
-}
-
-impl SignatureView {
-    fn snapshot(&self) -> Option<SignatureSnapshot> {
-        let guard = self.store.lock().expect("signature store poisoned");
-        let help = guard.get(&self.key)?;
-        let sig = help.active()?;
-        let active_idx = help.active_parameter_index();
-        let (active_span, active_label) = match active_idx {
-            Some(i) => match sig.parameters.get(i as usize) {
-                Some(p) => (p.span, Some(p.label.clone())),
-                None => (None, None),
-            },
-            None => (None, None),
-        };
-        Some(SignatureSnapshot {
-            label: sig.label.clone(),
-            active_span,
-            active_label,
-            documentation: sig.documentation.clone(),
-        })
+    /// The popup this overlay draws now, if any.
+    fn shown(&self, buf: &Buffer) -> Option<LspPopup> {
+        self.popup
+            .lock()
+            .expect("lsp popup poisoned")
+            .as_ref()
+            .filter(|p| {
+                p.kind == PopupKind::Signature
+                    && p.window_id == self.window_id
+                    && p.buffer_id == buf.id()
+            })
+            .cloned()
     }
 }
 
 impl View for SignatureView {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        let snap = self.snapshot();
-        let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
-        let origin = viewport.cell_origin;
+    fn kind(&self) -> &'static str {
+        SIGNATURE_POPUP_KIND
+    }
 
-        for r in 0..max_rows {
-            for c in 0..max_cols {
-                *cells.at(CellCoord::new(origin.row + r, origin.col + c)) = Cell::default();
-            }
-        }
-        let Some(snap) = snap else {
-            return;
-        };
-
-        // Resolve the active span. Prefer offsets when present;
-        // otherwise locate the active parameter's substring in the
-        // label.
-        let active_byte_range: Option<(usize, usize)> = match (snap.active_span, &snap.active_label)
-        {
-            (Some((s, e)), _) => Some((s as usize, e as usize)),
-            (None, Some(lbl)) => snap.label.find(lbl.as_str()).map(|i| (i, i + lbl.len())),
-            (None, None) => None,
-        };
-
-        // Row 0: signature label, with the active parameter range
-        // styled. Row 1+: optional documentation, one line each
-        // (truncated at viewport).
-        if max_rows > 0 {
-            let label_bytes = snap.label.as_bytes();
-            let mut col: u32 = 0;
-            let mut byte_idx: usize = 0;
-            for ch in snap.label.chars() {
-                if col >= max_cols {
-                    break;
-                }
-                let width = char_display_width(ch);
-                if width == 0 {
-                    byte_idx += ch.len_utf8();
-                    continue;
-                }
-                let in_active =
-                    active_byte_range.is_some_and(|(s, e)| byte_idx >= s && byte_idx < e);
-                let style = if in_active {
-                    active_parameter_style()
-                } else {
-                    Style::default()
-                };
-                let cell = cells.at(CellCoord::new(origin.row, origin.col + col));
-                cell.glyph = Glyph::Char(ch);
-                cell.style = style;
-                cell.attachment = None;
-                col += 1;
-                if width == 2 && col < max_cols {
-                    let cont = cells.at(CellCoord::new(origin.row, origin.col + col));
-                    cont.glyph = Glyph::Continuation;
-                    cont.style = style;
-                    cont.attachment = None;
-                    col += 1;
-                }
-                byte_idx += ch.len_utf8();
-                let _ = label_bytes; // silence unused-field on minor refactors
-            }
-        }
-
-        if max_rows > 1
-            && let Some(doc) = snap.documentation.as_deref()
-        {
-            for (i, line) in doc.lines().enumerate() {
-                let row_idx = i as u32 + 1;
-                if row_idx >= max_rows {
-                    break;
-                }
-                let mut col: u32 = 0;
-                for ch in line.chars() {
-                    if col >= max_cols {
-                        break;
-                    }
-                    let width = char_display_width(ch);
-                    if width == 0 {
-                        continue;
-                    }
-                    let cell = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
-                    cell.glyph = Glyph::Char(ch);
-                    cell.style = Style::default();
-                    cell.attachment = None;
-                    col += 1;
-                    if width == 2 && col < max_cols {
-                        let cont = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
-                        cont.glyph = Glyph::Continuation;
-                        cont.style = Style::default();
-                        cont.attachment = None;
-                        col += 1;
-                    }
-                }
-            }
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        if let Some(popup) = self.shown(buf) {
+            crate::lsp_popup::paint_grid_popup_into(
+                &self.popup,
+                buf,
+                viewport,
+                cells,
+                &popup,
+                self.theme.as_ref(),
+            );
         }
     }
-}
-
-fn char_display_width(ch: char) -> u32 {
-    UnicodeWidthChar::width(ch).unwrap_or(0) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -530,5 +574,144 @@ mod tests {
             SignatureHelp::from_lsp_value(&json!({"signatures": [], "activeSignature": 0})),
         );
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn utf16_label_offsets_become_byte_offsets_of_the_label() {
+        // "fn größe(höhe: u8, b: u8)": `höhe: u8` is UTF-16 units 9..17
+        // (ö and ß are one unit each) and bytes 11..20.
+        let label = "fn größe(höhe: u8, b: u8)";
+        let v = json!({
+            "signatures": [{
+                "label": label,
+                "parameters": [{ "label": [9, 17] }, { "label": [19, 24] }],
+            }],
+            "activeParameter": 0,
+        });
+        let h = SignatureHelp::from_lsp_value_in(&v, crate::lsp::PositionEncoding::Utf16);
+        let p = &h.signatures[0].parameters[0];
+        assert_eq!(p.label, "höhe: u8");
+        assert_eq!(p.span, Some((11, 20)));
+        assert_eq!(&label[11..20], "höhe: u8");
+        // A server that negotiated UTF-8 and counts these offsets in
+        // UTF-16 anyway (rust-analyzer does): read as bytes they cut
+        // `größe` and `u8`, so the UTF-16 reading is the one kept.
+        let h = SignatureHelp::from_lsp_value(&v);
+        let p = &h.signatures[0].parameters;
+        assert_eq!(
+            (p[0].label.as_str(), p[0].span),
+            ("höhe: u8", Some((11, 20)))
+        );
+        assert_eq!((p[1].label.as_str(), p[1].span), ("b: u8", Some((22, 27))));
+    }
+
+    /// E8 fix round 1: clangd negotiates UTF-8 and counts its label
+    /// offsets in bytes, so the negotiated reading is kept; read as
+    /// UTF-16 the same offsets would cut `int` and `höhe`.
+    #[test]
+    fn utf8_label_offsets_from_a_server_that_counts_bytes_are_kept() {
+        let label = "größe(int höhe, int b) -> int";
+        let v = json!({
+            "signatures": [{
+                "label": label,
+                "parameters": [{ "label": [8, 17] }, { "label": [19, 24] }],
+            }],
+            "activeParameter": 1,
+        });
+        let h = SignatureHelp::from_lsp_value_in(&v, crate::lsp::PositionEncoding::Utf8);
+        let p = &h.signatures[0].parameters;
+        assert_eq!(
+            (p[0].label.as_str(), p[0].span),
+            ("int höhe", Some((8, 17)))
+        );
+        assert_eq!((p[1].label.as_str(), p[1].span), ("int b", Some((19, 24))));
+    }
+
+    /// Offsets no reading makes whole carry no span: the popup marks
+    /// nothing rather than the wrong text.
+    #[test]
+    fn label_offsets_no_reading_makes_whole_mark_nothing() {
+        let v = json!({
+            "signatures": [{
+                "label": "fn f(ab: u8, cd: u8)",
+                "parameters": [{ "label": [6, 9] }, { "label": [14, 18] }],
+            }],
+            "activeParameter": 1,
+        });
+        let h = SignatureHelp::from_lsp_value_in(&v, crate::lsp::PositionEncoding::Utf8);
+        let p = &h.signatures[0].parameters;
+        assert_eq!(p.len(), 2, "each parameter is kept, with its documentation");
+        assert!(p.iter().all(|p| p.span.is_none() && p.label.is_empty()));
+    }
+
+    /// The marked text of each parameter of `v`'s first signature, read
+    /// for a server that negotiated UTF-8.
+    fn marks_utf8(v: &Value) -> Vec<Option<String>> {
+        let h = SignatureHelp::from_lsp_value_in(v, crate::lsp::PositionEncoding::Utf8);
+        let label = &h.signatures[0].label;
+        h.signatures[0]
+            .parameters
+            .iter()
+            .map(|p| {
+                p.span
+                    .map(|(s, e)| label[s as usize..e as usize].to_owned())
+            })
+            .collect()
+    }
+
+    /// E8 fix round 2 (review 2's Medium 1): two readings under which
+    /// every parameter is delimited and balanced, and which differ, mark
+    /// nothing. `struct S<名é, T, U>(T, U)`'s UTF-16 offsets (19..20,
+    /// 22..23) read as bytes are the generic `U` and the field `T`, each
+    /// opened by a `,` or `(` and closed by a `>` or `,`; read as UTF-16
+    /// they are the fields. Either may be the server's, so neither is
+    /// kept. (The generic `名é` names no field, so this is not Rust that
+    /// compiles; the generated sweep reached no such label.)
+    #[test]
+    fn two_readings_that_differ_mark_nothing() {
+        let v = json!({
+            "signatures": [{
+                "label": "struct S<名é, T, U>(T, U)",
+                "parameters": [{ "label": [19, 20] }, { "label": [22, 23] }],
+            }],
+            "activeParameter": 1,
+        });
+        assert_eq!(marks_utf8(&v), [None, None]);
+    }
+
+    /// E8 fix round 2: a reading whose span leaves a bracket open is not
+    /// a parameter. `fn move_to(現在地: (i32, i32))` from rust-analyzer
+    /// (UTF-16 offsets 11..26 on a UTF-8 server): read as bytes they are
+    /// `現在地: (i32`, opened by the `(` and closed by the tuple's `,`,
+    /// whole but unbalanced; refused, the UTF-16 reading is the only one
+    /// left and is marked.
+    #[test]
+    fn a_reading_that_leaves_a_bracket_open_is_not_a_parameter() {
+        let v = json!({
+            "signatures": [{
+                "label": "fn move_to(現在地: (i32, i32))",
+                "parameters": [{ "label": [11, 26] }],
+            }],
+            "activeParameter": 0,
+        });
+        assert_eq!(marks_utf8(&v), [Some("現在地: (i32, i32)".to_owned())]);
+    }
+
+    /// The brackets a parameter's run must close, an arrow's `>` closing
+    /// none.
+    #[test]
+    fn balanced_counts_brackets_and_not_arrows() {
+        for run in [
+            "f: impl Fn(u8) -> u8",
+            "cb: (x: number) => void",
+            "m: HashMap<K, Vec<(u8, u8)>>",
+            "xs: [u8; 4]",
+            "d: dict = {}",
+        ] {
+            assert!(balanced(run), "{run:?}");
+        }
+        for run in ["a: (i32", "Vec<T", "u8)", "x: [u8; 4", "(a]"] {
+            assert!(!balanced(run), "{run:?}");
+        }
     }
 }

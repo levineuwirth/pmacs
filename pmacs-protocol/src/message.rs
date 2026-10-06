@@ -1492,6 +1492,29 @@ pub enum InstanceMessage {
         /// Total candidate count (the window is a slice of this).
         total: u32,
     },
+    /// E8 (protocol v26): the hover or signature popup at the caret of
+    /// the receiving frontend's own window, or its authoritative absence.
+    ///
+    /// `Absent` is sent when the popup closes while its buffer stays
+    /// shown --- on an edit, on motion out of its range, on `C-g`, on its
+    /// window losing focus --- since the receiver keeps its last popup and
+    /// silence would leave it on screen. A buffer switch or a kill sends
+    /// no `Absent`: the `BufferSnapshot` that follows is the close, the
+    /// receiver forgetting its popup there and the producer its last
+    /// payload. Both `Present` and `Absent` are suppressed while
+    /// unchanged: a popup the caret dwells under is sent once, not once a
+    /// frame.
+    ///
+    /// The payload is bounded ([`crate::popup::MAX_POPUP_TEXT_BYTES`] and
+    /// its siblings); the producer cuts a longer text to fit and counts
+    /// what it left out, and [`crate::popup::PopupFrame::validate`] is
+    /// the receiver's check.
+    ///
+    /// Appended after [`Self::MinibufferPromptRows`], the final v25
+    /// variant, so no existing postcard discriminant moves; a literal
+    /// byte fixture of that variant guards the placement. Gated at
+    /// [`crate::popup::POPUP_MIN_VERSION`] on both sides.
+    Popup(crate::popup::PopupPayload),
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1999,7 +2022,14 @@ pub enum ResourceBody {
 /// not reinterpreted. [`crate::panel::PanelFramePayload::Absent`] remains
 /// common because hiding a band carries no mapping. The advertised
 /// baseline remains 20.
-pub const PROTOCOL_VERSION: u32 = 25;
+///
+/// E8: bumped 25 → 26 for [`InstanceMessage::Popup`], the hover and
+/// signature popup at the caret, appended after `MinibufferPromptRows`,
+/// the final v25 `InstanceMessage` variant, so no existing discriminant
+/// moves. Outbound only, gated at [`crate::popup::POPUP_MIN_VERSION`] by
+/// the daemon's producer and write filter and by the GPU frontend's
+/// apply and paint gates. The advertised baseline remains 20.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -2195,8 +2225,12 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// direction; a peer compiled from this crate can encode either variant,
 /// so receiver-side refusal is load-bearing. `Absent` is common, and
 /// [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
+///
+/// E8: extended to `[6, ..., 26]` for [`InstanceMessage::Popup`].
+/// Additive and outbound only: a v25 peer negotiates v25 and never
+/// receives the variant. [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
 ];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if

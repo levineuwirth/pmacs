@@ -451,6 +451,11 @@ impl Frontend {
             // message is for semantic frontends that lay out locally
             // and would otherwise never hear the setting at all.
             | InstanceMessage::LineWrapFacts { .. }
+            // E8 — Popup is the semantic frontend's hover and signature
+            // surface; the grid TUI paints the same popup through its
+            // HoverView and SignatureView cell overlays, so it drops
+            // this silently like CompletionPopup.
+            | InstanceMessage::Popup(_)
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

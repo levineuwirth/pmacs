@@ -52,6 +52,7 @@ use pmacs_protocol::{
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
     panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload},
+    popup::{POPUP_MIN_VERSION, PopupFrame, PopupKind, PopupPayload},
 };
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
@@ -710,33 +711,11 @@ const CURRENT_LINE_WASH_ALPHA: f32 = 0.22;
 /// everywhere, as `docs/divergences.md`'s Line wrap entry states.
 const DOCUMENT_WRAP: Wrap = Wrap::WordOrGlyph;
 
-/// Where a popup of `size` goes beside an anchor inside a window of
-/// `area` (both in logical pixels), as its top-left corner --- the one
-/// placement rule for popups (E7d.3, the shape E8.3 specifies for the
-/// hover popup: *"positioned above or below the caret by available
-/// space"*).
-///
-/// `anchor` is `(x, top, bottom)`: a click is a point, so its top and
-/// bottom coincide; a caret is its line's top and bottom. The popup goes
-/// below the anchor when it fits there, else above it when it fits
-/// there, else on the roomier side, and is then clamped into the window
-/// on both axes; horizontally it starts at the anchor and is pulled left
-/// until its right edge is inside. A popup larger than the window keeps
-/// its top-left corner inside it, so its first row and left edge stay
-/// on screen and the rest is clipped.
-fn place_popup(anchor: (f32, f32, f32), size: (f32, f32), area: (f32, f32)) -> (f32, f32) {
-    let (ax, top, bottom) = anchor;
-    let (w, h) = size;
-    let (width, height) = area;
-    let x = ax.min(width - w).max(0.0);
-    let room_below = height - bottom;
-    let room_above = top;
-    // Above only when it fits there and not below, or when it fits
-    // neither side and above is roomier; the clamp settles the rest.
-    let above = h > room_below && (h <= room_above || room_above > room_below);
-    let y = if above { top - h } else { bottom };
-    (x, y.min(height - h).max(0.0))
-}
+/// The one placement rule for popups (E7d.3), in logical pixels here:
+/// the context menu and, since E8, the hover and signature popup. It
+/// lives in `pmacs-protocol` so the grid places its popup cells by the
+/// same rule rather than a second implementation of it.
+use pmacs_protocol::place_popup;
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -789,6 +768,31 @@ const BASE_MB_DROP_LINE_HEIGHT: f32 = 20.0;
 const MB_DROP_PAD_X: f32 = 10.0;
 const MB_DROP_MIN_WIDTH: f32 = 160.0;
 const MB_DROP_MAX_WIDTH: f32 = 480.0;
+/// E8.3 — the hover and signature popup's widest box, in logical
+/// pixels: wider than the completion dropdown because a hover is prose
+/// and a signature a long line, but a reading measure, not the window.
+const POPUP_MAX_WIDTH: f32 = 640.0;
+/// E8.3 — the popup's fewest and most visible rows; between them it
+/// takes up to [`POPUP_HEIGHT_FRACTION`] of the document area, and
+/// scrolls past that.
+const POPUP_MIN_ROWS: usize = 3;
+/// See [`POPUP_MIN_ROWS`].
+const POPUP_MAX_ROWS: usize = 20;
+/// See [`POPUP_MIN_ROWS`].
+const POPUP_HEIGHT_FRACTION: f32 = 0.45;
+/// E8.3 — rows one wheel notch scrolls the popup.
+const POPUP_WHEEL_ROWS: f32 = 3.0;
+/// E8.3 — the popup's text when no `ui.popup` face sets it: the
+/// completion dropdown's row color.
+const POPUP_TEXT_DEFAULT: Color = Color::rgb(232, 232, 238);
+/// E8.3 — the active parameter's color when no
+/// `ui.popup.active-parameter` face sets it (drawn bold too).
+const POPUP_ACTIVE_DEFAULT: Color = Color::rgb(250, 200, 90);
+/// E8.3 — the closing "more lines" row's color when no
+/// `ui.popup.footer` face sets it.
+const POPUP_FOOTER_DEFAULT: Color = Color::rgb(150, 150, 165);
+/// E8.3 — the popup's scroll thumb, drawn when its text overflows.
+const POPUP_THUMB: [f32; 4] = [0.45, 0.45, 0.55, 0.9];
 
 /// Visible slice of the completion dropdown given `n` shaped candidates,
 /// the `selected` index, and `band_top` pixels available above the status
@@ -1598,6 +1602,9 @@ fn run_probe(socket: &Path, report: &Path) -> i32 {
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "chord") => {
             run_chord_probe(socket, report, &text)
         }
+        Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "popup") => {
+            run_popup_probe(socket, report, &text)
+        }
         Some(text) => run_typing_probe(socket, report, &text),
         None => run_headless_probe(socket, report),
     }
@@ -1753,6 +1760,290 @@ fn run_chord_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         popup_open_at.map_or(String::from("none"), |t| ms(t).to_string())
     );
     let _ = writeln!(out, "popup_open={popup_now}");
+    let _ = writeln!(out, "disconnect={}", disconnect.unwrap_or_default());
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!(
+            "pmacs-gpu probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
+    0
+}
+
+/// Drain attach events into `app` until `done` holds or `until` passes.
+/// `Err` carries the reason the daemon disconnected.
+fn pump_probe_events(
+    app: &mut App,
+    rx: &std::sync::mpsc::Receiver<AttachEvent>,
+    until: std::time::Instant,
+    mut done: impl FnMut(&App) -> bool,
+) -> Result<bool, String> {
+    loop {
+        if done(app) {
+            return Ok(true);
+        }
+        let now = std::time::Instant::now();
+        if now >= until {
+            return Ok(false);
+        }
+        let wait = (until - now).min(std::time::Duration::from_millis(20));
+        if let Ok(event) = rx.recv_timeout(wait) {
+            if let AttachEvent::Disconnected(reason) = &event {
+                return Err(reason.clone());
+            }
+            app.dispatch_app_event(AppEvent::Attach(event));
+        }
+    }
+}
+
+/// Press one key through the production dispatch: `<k>` a character,
+/// `C-<k>` with Control held, `ret` Enter.
+fn press_probe_key(app: &mut App, key: &str) {
+    if key == "ret" {
+        app.apply_keyboard(&Key::Named(NamedKey::Enter), None, None);
+    } else if let Some(k) = key.strip_prefix("C-") {
+        app.modifiers = winit::keyboard::ModifiersState::CONTROL;
+        app.apply_keyboard(&Key::Character(k.into()), None, None);
+        app.modifiers = winit::keyboard::ModifiersState::empty();
+    } else {
+        app.apply_keyboard(&Key::Character(key.into()), Some(key), None);
+    }
+}
+
+/// The popup's facts under `label`, one `key=value` line each, the box
+/// measured as the next frame paints it and a pixel of its background
+/// read back from that frame.
+fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let open = state.popup_open_for_current_buffer();
+    let _ = writeln!(out, "{label}.open={open}");
+    let status = state
+        .status_facts
+        .as_ref()
+        .and_then(|f| f.message.clone())
+        .unwrap_or_default();
+    let _ = writeln!(out, "{label}.status={status:?}");
+    let Some(popup) = state.popup.clone().filter(|_| open) else {
+        return;
+    };
+    let frame = &popup.frame;
+    let kind = match frame.kind {
+        PopupKind::Hover => "hover",
+        PopupKind::Signature => "signature",
+    };
+    let _ = writeln!(out, "{label}.kind={kind}");
+    let _ = writeln!(out, "{label}.lines={}", frame.lines.len());
+    let _ = writeln!(out, "{label}.first={:?}", frame.lines.first());
+    let _ = writeln!(out, "{label}.omitted={}", frame.omitted_lines);
+    let _ = writeln!(out, "{label}.anchor={}", frame.anchor_byte);
+    let _ = writeln!(
+        out,
+        "{label}.active={}",
+        frame.active_range.map_or_else(
+            || "none".to_owned(),
+            |r| format!("{}:{}:{}", r.line, r.start, r.end)
+        )
+    );
+    state.refresh_popup_buffer();
+    let anchor = state.byte_anchor_px(frame.anchor_byte);
+    let Some(b) = state.popup_box() else {
+        let _ = writeln!(out, "{label}.box=none");
+        return;
+    };
+    let band_top = document_text_bottom(state.layout.height, state.fm, state.band_inset());
+    let _ = writeln!(out, "{label}.box={},{},{},{}", b.x, b.y, b.w, b.h);
+    let _ = writeln!(out, "{label}.rows={}", b.rows);
+    let _ = writeln!(out, "{label}.shown={}", b.shown);
+    let _ = writeln!(out, "{label}.scroll={}", b.scroll);
+    let _ = writeln!(out, "{label}.above={}", b.above);
+    let _ = writeln!(out, "{label}.band_top={band_top}");
+    let _ = writeln!(
+        out,
+        "{label}.window={},{}",
+        state.layout.width, state.layout.height
+    );
+    if let Some((ax, top, h)) = anchor {
+        let _ = writeln!(out, "{label}.anchor_px={ax},{top},{h}");
+    }
+    let [text, active, footer] = state.popup_colors();
+    // E8.5 — the glyphs shaped in the active parameter's color: the mark
+    // as the buffer will draw it.
+    let active_glyphs = state
+        .popup_buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter())
+        .filter(|glyph| glyph.color_opt == Some(active))
+        .count();
+    let _ = writeln!(out, "{label}.active_glyphs={active_glyphs}");
+    let _ = writeln!(
+        out,
+        "{label}.colors={:?};{:?};{:?}",
+        text.as_rgba_tuple(),
+        active.as_rgba_tuple(),
+        footer.as_rgba_tuple()
+    );
+    // A background pixel: inside the left padding, clear of glyphs and
+    // of the scroll thumb at the right edge.
+    let pixels = state.render_offscreen();
+    let scale = state.scale;
+    let (px, py) = (
+        ((b.x + 3.0) * scale) as usize,
+        ((b.y + 3.0) * scale) as usize,
+    );
+    let width = state.config.width as usize;
+    let at = (py * width + px) * 4;
+    if let Some(&[r, g, b, _]) = pixels.get(at..at + 4) {
+        let _ = writeln!(out, "{label}.pixel={r},{g},{b}");
+    }
+}
+
+/// E8.3 --- the hover and signature popup through the production `App`
+/// dispatch against a real daemon. `PMACS_GPU_PROBE_TYPE_TEXT` is a
+/// script of space-separated steps, each run once the one before it
+/// has settled; the report says what the popup was at each `report:`
+/// step, and the probe asserts nothing.
+///
+/// Steps: `key:<k>` presses one key ([`press_probe_key`]); `ask:<k>`
+/// presses `C-c <k>` every half second until a popup is paintable (the
+/// server answers only once it has initialized); `closed` waits for the
+/// popup to go; `quiet:<ms>` drains events that long; `wheel:<n>` turns
+/// the wheel `n` notches down (up when negative) over the popup;
+/// `click` presses and releases the left button over the popup;
+/// `report:<label>` writes the popup's facts under `label`. A step that
+/// times out is reported as `step.<i>=timeout` and the script goes on.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-script-report session, step by step"
+)]
+fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let session = client.session_protocol_version();
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: Some(client),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+    };
+    let deadline_ms = std::env::var("PMACS_GPU_PROBE_DEADLINE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000);
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(deadline_ms);
+    let mut out = String::new();
+    let _ = writeln!(out, "session_protocol_version={session}");
+    let mut disconnect = None;
+
+    // Ready: the snapshot applied, the daemon idle, the caret known.
+    let ready = pump_probe_events(&mut app, &rx, deadline, |app| {
+        app.state.as_ref().is_some_and(|s| {
+            s.current_buffer_id.is_some() && s.dispatch_idle && s.own_cursor.is_some()
+        })
+    });
+    let _ = writeln!(out, "ready={}", matches!(ready, Ok(true)));
+
+    for (i, step) in script.split_whitespace().enumerate() {
+        let settle = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        let (verb, arg) = step.split_once(':').unwrap_or((step, ""));
+        let outcome = match verb {
+            "key" => {
+                press_probe_key(&mut app, arg);
+                pump_probe_events(&mut app, &rx, settle, |_| false)
+            }
+            "ask" => {
+                let mut got = Ok(false);
+                while std::time::Instant::now() < deadline {
+                    press_probe_key(&mut app, "C-c");
+                    press_probe_key(&mut app, arg);
+                    let half = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                    got = pump_probe_events(&mut app, &rx, half, |app| {
+                        app.state
+                            .as_ref()
+                            .is_some_and(State::popup_open_for_current_buffer)
+                    });
+                    if !matches!(got, Ok(false)) {
+                        break;
+                    }
+                }
+                got
+            }
+            "closed" => {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                pump_probe_events(&mut app, &rx, until, |app| {
+                    app.state.as_ref().is_some_and(|s| s.popup.is_none())
+                })
+            }
+            "quiet" => {
+                let ms = arg.parse::<u64>().unwrap_or(500);
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                pump_probe_events(&mut app, &rx, until, |_| false).map(|_| true)
+            }
+            "wheel" | "click" => {
+                let centre = app.state.as_mut().and_then(|s| {
+                    s.refresh_popup_buffer();
+                    s.popup_box()
+                        .map(|b| (f64::from(b.x + b.w / 2.0), f64::from(b.y + b.h / 2.0)))
+                });
+                if let (Some((x, y)), Some(s)) = (centre, app.state.as_mut()) {
+                    s.pointer_pos = Some((x, y));
+                }
+                if verb == "wheel" {
+                    let notches = arg.parse::<f32>().unwrap_or(1.0);
+                    app.apply_wheel(MouseScrollDelta::LineDelta(0.0, -notches));
+                } else {
+                    app.apply_left_button(ElementState::Pressed);
+                    app.apply_left_button(ElementState::Released);
+                }
+                pump_probe_events(&mut app, &rx, settle, |_| false).map(|_| centre.is_some())
+            }
+            "report" => {
+                if let Some(state) = app.state.as_mut() {
+                    popup_probe_facts(state, arg, &mut out);
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        };
+        match outcome {
+            Ok(true) => {}
+            Ok(false) if matches!(verb, "key") => {}
+            Ok(false) => {
+                let _ = writeln!(out, "step.{i}=timeout {step}");
+            }
+            Err(reason) => {
+                disconnect = Some(reason);
+                break;
+            }
+        }
+    }
     let _ = writeln!(out, "disconnect={}", disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
         eprintln!(
@@ -4142,6 +4433,23 @@ struct State {
     completion_text_renderer: TextRenderer,
     /// Completion dropdown background + selection quads.
     completion_bg_vertex_buffer: ReusableVertexBuffer,
+    /// E8.3 — the hover or signature popup (protocol v26), or `None`.
+    popup: Option<PopupLocal>,
+    /// E8.3 — whether this session negotiated the popup family: the
+    /// apply and paint gates, set beside the panel wire from the same
+    /// negotiated version ([`POPUP_MIN_VERSION`]).
+    popup_wire: bool,
+    /// E8.3 — the popup's lines, word-wrapped to the popup's width.
+    popup_buffer: Buffer,
+    /// E8.3 — what `popup_buffer` was last shaped for.
+    popup_shaped: Option<PopupShapeKey>,
+    /// E8.3 — a trackpad's scroll over the popup not yet a whole row.
+    popup_scroll_residual: f32,
+    /// E8.3 — the popup's own glyph layer, under the completion
+    /// dropdown and the context menu.
+    popup_text_renderer: TextRenderer,
+    /// E8.3 — the popup's background and scroll-thumb quads.
+    popup_bg_vertex_buffer: ReusableVertexBuffer,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
@@ -4781,6 +5089,54 @@ struct CompletionLocal {
         reason = "shipped on the wire for the i/total hint refinement"
     )]
     total: u32,
+}
+
+/// E8.3 — the live hover or signature popup (protocol v26), mirrored
+/// from a `Popup(Present(..))` the daemon sent for the buffer this
+/// window shows. Validated on receipt
+/// ([`pmacs_protocol::PopupFrame::validate`]); an invalid frame closes
+/// the popup rather than keeping one the daemon no longer describes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PopupLocal {
+    /// The frame as the daemon sent it.
+    frame: PopupFrame,
+    /// The first visual row shown, moved by the wheel over the popup
+    /// and kept while the same popup is resent; a frontend-local view
+    /// fact the daemon never learns (`docs/divergences.md`).
+    scroll: usize,
+}
+
+/// What the popup's text buffer was last shaped for: a frame, a width,
+/// a font size and its colors. An unchanged key skips the reshape.
+#[derive(Clone, Debug, PartialEq)]
+struct PopupShapeKey {
+    frame: PopupFrame,
+    text_width: f32,
+    font_size: f32,
+    colors: [Color; 3],
+}
+
+/// The popup's resolved box for one frame, in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PopupBox {
+    /// Left edge.
+    x: f32,
+    /// Top edge.
+    y: f32,
+    /// Width.
+    w: f32,
+    /// Height: the rows shown times a row's height.
+    h: f32,
+    /// One visual row's height.
+    row_h: f32,
+    /// Visual rows the wrapped text has.
+    rows: usize,
+    /// Visual rows the box shows.
+    shown: usize,
+    /// The first row shown, clamped.
+    scroll: usize,
+    /// Whether the box went above the anchor's line.
+    above: bool,
 }
 
 /// The live context menu (Q#CM1, protocol v11), mirrored from a
@@ -5493,6 +5849,12 @@ impl App {
             }
             return;
         }
+        // E8.3 — a press or release over the popup is the popup's: it
+        // reaches the daemon as nothing, so reading it never moves the
+        // caret out from under it, which would close it.
+        if state.popup_hit(x, y) {
+            return;
+        }
         let mods = translate_mods(self.modifiers);
         // Bottom panel Stage 2B-3 — the divider strip and the band
         // claim the gesture before either document path sees it.
@@ -5818,6 +6180,22 @@ impl App {
     /// that fall out.
     #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
     fn apply_wheel(&mut self, delta: MouseScrollDelta) {
+        // E8.3 — a wheel turn over the popup scrolls the popup, by
+        // [`POPUP_WHEEL_ROWS`] a notch, and nothing under it.
+        if let Some(state) = self.state.as_mut()
+            && let Some((x, y)) = state.pointer_pos
+            && state.popup_hit(x, y)
+        {
+            let row_h = state.fm.mb_drop_line_height();
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, dy) => -dy * POPUP_WHEEL_ROWS,
+                MouseScrollDelta::PixelDelta(p) => -(p.y as f32) / state.scale / row_h,
+            };
+            if state.scroll_popup(rows) {
+                state.request_redraw();
+            }
+            return;
+        }
         let Some(state) = self.state.as_ref() else {
             return;
         };
@@ -9869,6 +10247,9 @@ impl State {
         // Arc 1a Q#C5 — a renderer for the completion dropdown layer.
         let completion_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // E8.3 — a renderer for the hover and signature popup's layer.
+        let popup_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         // UX gutter — a renderer for the line-number layer.
         let gutter_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
@@ -9968,6 +10349,14 @@ impl State {
             Some(config.height as f32),
         );
         completion_buffer.set_wrap(&mut font_system, Wrap::None);
+        // E8.3 — the popup's buffer: the dropdown's metrics, its own
+        // width, and word wrap, since a hover is prose. Sized and shaped
+        // again whenever what it shows changes (`refresh_popup_buffer`).
+        let mut popup_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height()),
+        );
+        popup_buffer.set_wrap(&mut font_system, Wrap::WordOrGlyph);
         // Line-number gutter buffer (UX gutter arc): same font size + line
         // height as the code buffer so its rows align one-for-one.
         let mut gutter_buffer = Buffer::new(
@@ -10087,6 +10476,13 @@ impl State {
             completion_buffer,
             completion_text_renderer,
             completion_bg_vertex_buffer: ReusableVertexBuffer::new(),
+            popup: None,
+            popup_wire: false,
+            popup_buffer,
+            popup_shaped: None,
+            popup_scroll_residual: 0.0,
+            popup_text_renderer,
+            popup_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
             line_numbers: LineNumberMode::Off,
             faces: HashMap::new(),
@@ -10653,6 +11049,10 @@ impl State {
                 // keep hijacking Esc/RET/TAB. The daemon-side session
                 // was already invalidated by the switch.
                 self.completion = None;
+                // E8.3 — the popup too: its anchor is a byte in the
+                // prior buffer, and the producer forgets what it sent at
+                // the snapshot, so a popup still open is sent again.
+                self.popup = None;
                 // PR #120 round 3 finding 1 — the remaining
                 // buffer-scoped facts, same reasoning: search and menu
                 // popups anchor in the prior buffer AND gate key and
@@ -11236,6 +11636,38 @@ impl State {
                 self.request_redraw();
                 None
             }
+            // E8.3 — the hover and signature popup. `Absent` always
+            // applies, as a completion close does. A `Present` reaches
+            // only a session that negotiated the family (the apply gate,
+            // beside the daemon's own send filter), is validated whole,
+            // and is dropped for a buffer this window isn't showing. The
+            // scroll survives a resend of the same popup.
+            InstanceMessage::Popup(payload) => {
+                match payload {
+                    PopupPayload::Absent => self.popup = None,
+                    PopupPayload::Present(frame) => {
+                        if !self.popup_wire {
+                            return None;
+                        }
+                        if let Err(error) = frame.validate() {
+                            eprintln!("pmacs-gpu: refused a popup frame: {error}");
+                            self.popup = None;
+                        } else if self.current_buffer_id == Some(frame.buffer_id) {
+                            let scroll = self
+                                .popup
+                                .as_ref()
+                                .filter(|p| {
+                                    p.frame.anchor_byte == frame.anchor_byte
+                                        && p.frame.kind == frame.kind
+                                })
+                                .map_or(0, |p| p.scroll);
+                            self.popup = Some(PopupLocal { frame, scroll });
+                        }
+                    }
+                }
+                self.request_redraw();
+                None
+            }
             // Arc 4 stage 3 (Q#SL7/Q#SL10) — validate the entire
             // untrusted replacement before changing either side.
             InstanceMessage::StatuslineSegments {
@@ -11643,13 +12075,22 @@ impl State {
     // Bottom panel band (Stage 2B-3)
     // -----------------------------------------------------------------
 
-    /// Whether this session negotiated the panel wire.
+    /// Whether this session negotiated the panel wire, and since E8 the
+    /// popup's.
     ///
     /// Set once from the negotiated session version, never from the
     /// `Hello` baseline: the baseline stays at the compatibility floor
     /// forever, so reading it here would leave the band permanently dark.
     fn set_panel_wire(&mut self, session_protocol_version: u32) {
         self.panel_family = PanelFamily::from_session_version(session_protocol_version);
+        // E8.3 — the popup's gates come from the same negotiated version
+        // at the same moment, every entry point included (the window,
+        // the probes), so the apply and paint gates cannot disagree with
+        // the daemon's send filter about what this session negotiated.
+        self.popup_wire = session_protocol_version >= POPUP_MIN_VERSION;
+        if !self.popup_wire {
+            self.popup = None;
+        }
     }
 
     /// The band inset the document boundary is computed from.
@@ -14446,6 +14887,14 @@ impl State {
             return None; // never paint against a foreign buffer's rope
         }
         let anchor = self.completion.as_ref()?.anchor;
+        self.byte_anchor_px(anchor)
+    }
+
+    /// The pixel position of byte `anchor` of the buffer this window
+    /// shows, as [`Self::completion_anchor_px`] describes it; shared
+    /// with the hover and signature popup (E8.3), so both popups find
+    /// their byte the same way. `None` when the byte is scrolled out.
+    fn byte_anchor_px(&mut self, anchor: u64) -> Option<(f32, f32, f32)> {
         let (vstart, vend) = self.view_range;
         if vend <= vstart || anchor < vstart || anchor > vend {
             return None;
@@ -14580,6 +15029,220 @@ impl State {
                 w: width,
                 h: self.fm.mb_drop_row_height(),
                 color: MENU_SELECTED_BG,
+            });
+        }
+        rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
+    }
+
+    /// E8.3 — whether a popup this window may paint is open: the
+    /// session negotiated the family (the paint gate) and the popup is
+    /// for the buffer this window shows.
+    fn popup_open_for_current_buffer(&self) -> bool {
+        self.popup_wire
+            && self
+                .popup
+                .as_ref()
+                .is_some_and(|p| Some(p.frame.buffer_id) == self.current_buffer_id)
+    }
+
+    /// E8.3 — the popup's text, active-parameter and closing-row colors:
+    /// the `ui.popup`, `ui.popup.active-parameter` and `ui.popup.footer`
+    /// faces' foregrounds where the theme sets them, else the defaults.
+    fn popup_colors(&self) -> [Color; 3] {
+        [
+            self.face_fg_or("ui.popup", POPUP_TEXT_DEFAULT),
+            self.face_fg_or("ui.popup.active-parameter", POPUP_ACTIVE_DEFAULT),
+            self.face_fg_or("ui.popup.footer", POPUP_FOOTER_DEFAULT),
+        ]
+    }
+
+    /// E8.3 — the width the popup's text wraps at: its widest box, or
+    /// the window when that is narrower, less the padding.
+    fn popup_text_width(&self) -> f32 {
+        let widest_box = POPUP_MAX_WIDTH.min(self.layout.width as f32);
+        (widest_box - 2.0 * MB_DROP_PAD_X).max(MB_DROP_MIN_WIDTH - 2.0 * MB_DROP_PAD_X)
+    }
+
+    /// E8.3 — shape the popup's lines into its buffer, word-wrapped to
+    /// [`Self::popup_text_width`], the active parameter in its color and
+    /// bold, and, when the daemon left lines out at the wire's bound, a
+    /// closing row saying how many and where the whole text is. Skipped
+    /// while nothing it depends on changed.
+    fn refresh_popup_buffer(&mut self) {
+        if !self.popup_open_for_current_buffer() {
+            return;
+        }
+        let Some(frame) = self.popup.as_ref().map(|p| p.frame.clone()) else {
+            return;
+        };
+        let key = PopupShapeKey {
+            frame,
+            text_width: self.popup_text_width(),
+            font_size: self.fm.mb_drop_font_size(),
+            colors: self.popup_colors(),
+        };
+        if self.popup_shaped.as_ref() == Some(&key) {
+            return;
+        }
+        let family = self.resolved_family.clone();
+        let base = Attrs::new().family(Family::Name(&family));
+        let [text, active, footer] = key.colors;
+        let mut spans: Vec<(String, Attrs)> = Vec::new();
+        for (i, line) in key.frame.lines.iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_owned(), base.clone().color(text)));
+            }
+            match key.frame.active_range.filter(|r| r.line as usize == i) {
+                Some(range) => {
+                    let (a, b) = (range.start as usize, range.end as usize);
+                    spans.push((line[..a].to_owned(), base.clone().color(text)));
+                    spans.push((
+                        line[a..b].to_owned(),
+                        base.clone()
+                            .color(active)
+                            .weight(glyphon::cosmic_text::Weight::BOLD),
+                    ));
+                    spans.push((line[b..].to_owned(), base.clone().color(text)));
+                }
+                None => spans.push((line.clone(), base.clone().color(text))),
+            }
+        }
+        if key.frame.omitted_lines > 0 {
+            spans.push((
+                format!(
+                    "\n{}",
+                    pmacs_protocol::popup::more_lines_label(key.frame.omitted_lines)
+                ),
+                base.clone().color(footer),
+            ));
+        }
+        self.popup_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            Metrics::new(self.fm.mb_drop_font_size(), self.fm.mb_drop_line_height()),
+            Some(key.text_width),
+            None,
+        );
+        self.popup_buffer
+            .set_wrap(&mut self.font_system, Wrap::WordOrGlyph);
+        self.popup_buffer.set_rich_text(
+            &mut self.font_system,
+            spans.iter().map(|(t, a)| (t.as_str(), a.clone())),
+            &base,
+            Shaping::Advanced,
+            None,
+        );
+        self.popup_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.popup_shaped = Some(key);
+    }
+
+    /// E8.3 — the popup's box this frame, placed by the one popup rule
+    /// ([`place_popup`], E7d.3): below the anchor's line when it fits,
+    /// else above, else on the roomier side, clamped into the document
+    /// area above the status band and pulled left at the right edge. As
+    /// many rows as the text has, up to [`POPUP_HEIGHT_FRACTION`] of the
+    /// document area (between [`POPUP_MIN_ROWS`] and [`POPUP_MAX_ROWS`]);
+    /// the rest scrolls. `None` when no popup is paintable or its anchor
+    /// is scrolled out (hidden, not closed: the daemon owns closing).
+    fn popup_box(&mut self) -> Option<PopupBox> {
+        if !self.popup_open_for_current_buffer() {
+            return None;
+        }
+        let anchor = self.popup.as_ref()?.frame.anchor_byte;
+        let (ax, line_top, line_h) = self.byte_anchor_px(anchor)?;
+        let row_h = self.fm.mb_drop_line_height();
+        let (rows, widest) = self
+            .popup_buffer
+            .layout_runs()
+            .fold((0usize, 0.0f32), |(n, w), run| (n + 1, w.max(run.line_w)));
+        let rows = rows.max(1);
+        let band_top = document_text_bottom(self.layout.height, self.fm, self.band_inset());
+        let fit = ((band_top - TEXT_TOP) * POPUP_HEIGHT_FRACTION / row_h).floor() as usize;
+        let shown = rows.min(fit.clamp(POPUP_MIN_ROWS, POPUP_MAX_ROWS));
+        let w = (widest + 2.0 * MB_DROP_PAD_X)
+            .clamp(MB_DROP_MIN_WIDTH, POPUP_MAX_WIDTH)
+            .min(self.layout.width as f32);
+        let h = shown as f32 * row_h;
+        let (x, y) = place_popup(
+            (ax, line_top, line_top + line_h),
+            (w, h),
+            (self.layout.width as f32, band_top),
+        );
+        let scroll = self
+            .popup
+            .as_ref()
+            .map_or(0, |p| p.scroll)
+            .min(rows - shown);
+        Some(PopupBox {
+            x,
+            y,
+            w,
+            h,
+            row_h,
+            rows,
+            shown,
+            scroll,
+            above: y + h <= line_top + 0.5,
+        })
+    }
+
+    /// E8.3 — whether the logical pixel `(x, y)` is inside the popup:
+    /// the hit test that keeps a click or a wheel turn over it the
+    /// popup's own.
+    fn popup_hit(&mut self, x: f64, y: f64) -> bool {
+        self.popup_box().is_some_and(|b| {
+            x >= f64::from(b.x)
+                && x < f64::from(b.x + b.w)
+                && y >= f64::from(b.y)
+                && y < f64::from(b.y + b.h)
+        })
+    }
+
+    /// E8.3 — scroll the popup by `rows` visual rows, clamped to its
+    /// text. A trackpad's fractions of a row accumulate in
+    /// `popup_scroll_residual` until they make a whole one. Returns
+    /// whether it moved.
+    fn scroll_popup(&mut self, rows: f32) -> bool {
+        let Some(b) = self.popup_box() else {
+            return false;
+        };
+        self.popup_scroll_residual += rows;
+        let whole = self.popup_scroll_residual.trunc();
+        self.popup_scroll_residual -= whole;
+        let max = b.rows - b.shown;
+        let next = (b.scroll as f32 + whole).clamp(0.0, max as f32) as usize;
+        let Some(popup) = self.popup.as_mut() else {
+            return false;
+        };
+        let moved = next != popup.scroll.min(max);
+        popup.scroll = next;
+        moved
+    }
+
+    /// E8.3 — the popup's background quad, `ui.popup`'s background where
+    /// the theme sets it, and, when its text overflows, a scroll thumb
+    /// at its right edge. Empty when no popup is paintable.
+    fn popup_vertex_bytes(&mut self) -> Vec<u8> {
+        let Some(b) = self.popup_box() else {
+            return Vec::new();
+        };
+        let mut rects = vec![MinimapRect {
+            x: b.x,
+            y: b.y,
+            w: b.w,
+            h: b.h,
+            color: self.face_wash_or("ui.popup", MENU_BG),
+        }];
+        if b.rows > b.shown {
+            let thumb_h = (b.h * b.shown as f32 / b.rows as f32).max(4.0);
+            let travel = b.h - thumb_h;
+            let at = b.scroll as f32 / (b.rows - b.shown) as f32;
+            rects.push(MinimapRect {
+                x: b.x + b.w - 4.0,
+                y: b.y + travel * at,
+                w: 3.0,
+                h: thumb_h,
+                color: POPUP_THUMB,
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -15478,6 +16141,21 @@ impl State {
         // `refresh_completion_buffer` first so the width measurement in
         // `completion_dropdown_vertex_bytes` is current.
         self.refresh_completion_buffer();
+        // E8.3 — the popup's quads, a layer under the completion
+        // dropdown; `refresh_popup_buffer` first so the box measures the
+        // text as it is now shaped.
+        self.refresh_popup_buffer();
+        let popup_vertices = self.popup_vertex_bytes();
+        let popup_vertex_count = (popup_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let popup_bg_buffer = self
+            .popup_bg_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu popup",
+                &popup_vertices,
+            )
+            .cloned();
         let completion_vertices = self.completion_dropdown_vertex_bytes();
         let completion_vertex_count =
             (completion_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
@@ -15935,6 +16613,40 @@ impl State {
             )
             .expect("completion text_renderer prepare");
 
+        // E8.3 — the popup's glyphs: the buffer holds every wrapped row;
+        // the area is lifted by the scroll and `bounds` clips to the box.
+        let popup_box = self.popup_box();
+        let popup_areas: Vec<TextArea> = popup_box
+            .map(|b| TextArea {
+                buffer: &self.popup_buffer,
+                left: b.x + MB_DROP_PAD_X,
+                top: b.y - b.scroll as f32 * b.row_h,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: b.x as i32,
+                    top: b.y as i32,
+                    right: (b.x + b.w).round() as i32,
+                    bottom: (b.y + b.h).round() as i32,
+                },
+                default_color: POPUP_TEXT_DEFAULT,
+                custom_glyphs: &[],
+            })
+            .into_iter()
+            .collect();
+        self.popup_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                popup_areas
+                    .into_iter()
+                    .map(|area| scale_text_area(&area, scale)),
+                &mut self.swash_cache,
+            )
+            .expect("popup text_renderer prepare");
+
         // Vterm Stage 3 — one TextArea per planned run, each pinned to
         // its own cell origin and clipped to its declared footprint.
         // Per-run areas are the point: a row-wide area would let one
@@ -16138,6 +16850,16 @@ impl State {
             // code at its byte anchor: bg + selection quads, then its
             // row glyphs on top (under the context menu, which stays
             // the topmost surface).
+            // E8.3 — the hover and signature popup floats over the code
+            // at its byte, under the completion dropdown (which the user
+            // may be choosing from inside the same call) and the menu.
+            if let Some(vertex_buffer) = popup_bg_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, popup_vertex_count);
+            }
+            self.popup_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("popup text_renderer render");
             if let Some(vertex_buffer) = completion_bg_buffer.as_ref() {
                 self.quad_renderer
                     .render(&mut pass, vertex_buffer, completion_vertex_count);
@@ -17940,6 +18662,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
         InstanceMessage::PanelFrame(_) => "PanelFrame",
+        InstanceMessage::Popup(_) => "Popup",
     }
 }
 
@@ -23497,6 +24220,79 @@ mod tests {
             region(&washed, 480, bl as u32, br.ceil() as u32, y0, y1),
             region(&unwashed, 480, bl as u32, br.ceil() as u32, y0, y1),
             "the wash tints the box's reserved rectangle"
+        );
+    }
+
+    /// E8.3 — the popup's apply gate and its forgetting: a session that
+    /// negotiated v25 drops a `Present` it can decode but never agreed to
+    /// (the gate that moves with the panel wire); a v26 one applies it,
+    /// refuses an invalid frame whole, drops one for a buffer it isn't
+    /// showing, clears on `Absent`, and forgets the popup at a snapshot,
+    /// whose anchor indexed the buffer it left.
+    #[test]
+    fn e8_3_the_popup_applies_on_a_v26_session_only_and_is_forgotten_at_a_snapshot() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let own = BufferId::next();
+        state.current_buffer_id = Some(own);
+        let frame = |buffer_id, lines: &[&str]| PopupFrame {
+            buffer_id,
+            anchor_byte: 0,
+            kind: PopupKind::Hover,
+            lines: lines.iter().map(|l| (*l).to_owned()).collect(),
+            active_range: None,
+            omitted_lines: 0,
+        };
+        let present = |f| InstanceMessage::Popup(PopupPayload::Present(f));
+
+        state.set_panel_wire(25);
+        let _ = state.apply_attach_message(present(frame(own, &["doc"])));
+        assert!(
+            state.popup.is_none(),
+            "a v25 session never agreed to the variant"
+        );
+
+        state.set_panel_wire(POPUP_MIN_VERSION);
+        let _ = state.apply_attach_message(present(frame(own, &["doc"])));
+        assert!(
+            state.popup_open_for_current_buffer(),
+            "a v26 session applies it"
+        );
+
+        let _ = state.apply_attach_message(present(frame(own, &["bad\nline"])));
+        assert!(
+            state.popup.is_none(),
+            "an invalid frame closes, never paints"
+        );
+
+        let _ = state.apply_attach_message(present(frame(BufferId::next(), &["doc"])));
+        assert!(state.popup.is_none(), "a foreign buffer's popup is dropped");
+
+        let _ = state.apply_attach_message(present(frame(own, &["doc"])));
+        let _ = state.apply_attach_message(InstanceMessage::Popup(PopupPayload::Absent));
+        assert!(state.popup.is_none(), "Absent clears");
+
+        let _ = state.apply_attach_message(present(frame(own, &["doc"])));
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, "other")
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert!(state.popup.is_none(), "a snapshot forgets the popup");
+
+        // Dropping back below the family (a reattach to an older daemon)
+        // forgets an open popup too.
+        state.current_buffer_id = Some(own);
+        let _ = state.apply_attach_message(present(frame(own, &["doc"])));
+        assert!(state.popup.is_some());
+        state.set_panel_wire(25);
+        assert!(
+            state.popup.is_none(),
+            "an unnegotiated session keeps nothing"
         );
     }
 

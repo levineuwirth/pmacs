@@ -695,7 +695,7 @@ fn selected_style() -> Style {
 }
 
 /// Style for the kind-glyph column (dim foreground).
-fn kind_style() -> Style {
+pub(crate) fn kind_style() -> Style {
     Style {
         fg: Color::Indexed(8),
         bg: Color::Indexed(236),
@@ -706,7 +706,7 @@ fn kind_style() -> Style {
 /// Popup background (non-selected rows) --- the same dim fill as the
 /// context menu, so the popup reads as a floating surface over the
 /// buffer text it occludes.
-fn popup_style() -> Style {
+pub(crate) fn popup_style() -> Style {
     Style {
         fg: Color::Indexed(252),
         bg: Color::Indexed(236),
@@ -772,18 +772,17 @@ struct PopupRect {
     shown: u32,
 }
 
-/// Map the popup's byte anchor to a clamped on-screen rectangle:
-/// below the anchor row when at least one row fits, flipped above
-/// otherwise; left edge at the anchor's display column, shifted back
-/// from the right margin. `None` when the anchor is scrolled out of
-/// the viewport or nothing fits.
-fn resolve_popup_rect(
+/// The window-relative `(row, display column)` of byte `anchor`: the
+/// diag view's walk, on the anchor's visible row so a popup below a
+/// collapsed region lands on the right row. `None` when the anchor is
+/// scrolled out of the viewport, collapsed away, or the window has no
+/// columns. Shared by the completion popup and the hover and signature
+/// popup (E8.4), so both find their byte the same way.
+pub(crate) fn anchor_cell(
     buf: &Buffer,
     viewport: Viewport<'_>,
     anchor: Position,
-    rows: &[PopupCandidate],
-) -> Option<PopupRect> {
-    // Anchor byte → (screen row, display col), the diag-view walk.
+) -> Option<(u32, u32)> {
     let source: Vec<u8> = {
         let mut bytes = vec![0u8; buf.len() as usize];
         if !bytes.is_empty() {
@@ -795,25 +794,82 @@ fn resolve_popup_rect(
     let line_offsets = crate::diag::compute_line_offsets(&source);
     let start_line = crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
     let anchor_line = crate::diag::line_at_offset(&line_offsets, anchor);
-    // Arc 6 Stage 2: the popup anchors on the anchor byte's VISIBLE row,
-    // so a completion below a collapsed region lands on the right row;
-    // an anchor inside a collapse has no row and paints nothing.
-    let Some(anchor_row) = viewport.row_offset_of(start_line as usize, anchor_line as usize) else {
-        return None; // anchor scrolled above the viewport, or collapsed
+    let line_start = |l: u32| line_offsets[l as usize];
+    let line_end = |l: u32| {
+        line_offsets
+            .get(l as usize + 1)
+            .copied()
+            .unwrap_or(source.len() as u32)
     };
-    let max_rows = viewport.cell_size.rows;
-    let max_cols = viewport.cell_size.cols;
-    if anchor_row >= max_rows || max_cols == 0 {
+    let (anchor_row, anchor_col) = if viewport.wrap == crate::view::WrapMode::Wrap {
+        // E8: under wrap a screen row is not a line. The anchor sits
+        // below every row the lines above it occupy, less the rows of the
+        // first line scrolled off the top, on its own visual row: the
+        // reckoning `window_cursor_cell` makes for the caret.
+        let cols = viewport.cell_size.cols;
+        let text = |l: u32| {
+            let bytes = &source[line_start(l) as usize..line_end(l) as usize];
+            let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+            std::str::from_utf8(bytes).unwrap_or("")
+        };
+        if anchor_line < start_line
+            || viewport
+                .folds
+                .is_some_and(|m| m.is_hidden(anchor_line as usize))
+        {
+            return None; // scrolled above the viewport, or collapsed
+        }
+        let skip = crate::text_view::place_in_line(
+            text(start_line),
+            u64::from((viewport.buffer_start as u32).saturating_sub(line_start(start_line))),
+            cols,
+        )
+        .0;
+        let mut rows = 0u64;
+        let mut l = start_line as usize;
+        while l < anchor_line as usize {
+            let t = text(l as u32);
+            rows += u64::from(crate::text_view::place_in_line(t, t.len() as u64, cols).0) + 1;
+            l = viewport.folds.map_or(l + 1, |m| m.next_visible(l));
+        }
+        let (sub, col) = crate::text_view::place_in_line(
+            text(anchor_line),
+            u64::from(anchor - line_start(anchor_line)),
+            cols,
+        );
+        let row = (rows + u64::from(sub)).checked_sub(u64::from(skip))?;
+        (u32::try_from(row).ok()?, col)
+    } else {
+        // Arc 6 Stage 2: the popup anchors on the anchor byte's VISIBLE
+        // row, so a completion below a collapsed region lands on the
+        // right row; an anchor inside a collapse has no row.
+        let row = viewport.row_offset_of(start_line as usize, anchor_line as usize)?;
+        let line_bytes = &source[line_start(anchor_line) as usize..line_end(anchor_line) as usize];
+        (
+            row,
+            display_col_for_byte(line_bytes, anchor - line_start(anchor_line)),
+        )
+    };
+    if anchor_row >= viewport.cell_size.rows || viewport.cell_size.cols == 0 {
         return None; // anchor scrolled below the viewport
     }
-    let line_start = line_offsets[anchor_line as usize];
-    let line_end = line_offsets
-        .get(anchor_line as usize + 1)
-        .copied()
-        .unwrap_or(source.len() as u32);
-    let line_bytes = &source[line_start as usize..line_end as usize];
-    let anchor_col = display_col_for_byte(line_bytes, anchor - line_start);
+    Some((anchor_row, anchor_col))
+}
 
+/// Map the popup's byte anchor to a clamped on-screen rectangle:
+/// below the anchor row when at least one row fits, flipped above
+/// otherwise; left edge at the anchor's display column, shifted back
+/// from the right margin. `None` when the anchor is scrolled out of
+/// the viewport or nothing fits.
+fn resolve_popup_rect(
+    buf: &Buffer,
+    viewport: Viewport<'_>,
+    anchor: Position,
+    rows: &[PopupCandidate],
+) -> Option<PopupRect> {
+    let (anchor_row, anchor_col) = anchor_cell(buf, viewport, anchor)?;
+    let max_rows = viewport.cell_size.rows;
+    let max_cols = viewport.cell_size.cols;
     // Vertical placement: below the anchor row when at least one row
     // fits, else flipped above.
     let want_rows = rows.len() as u32;
@@ -897,6 +953,39 @@ pub(crate) fn paint_band_row(
     } else {
         popup_style()
     };
+    // Columns 2..: label, optionally followed by the detail.
+    let mut text = String::with_capacity(label.len() + 4);
+    text.push_str(label);
+    if let Some(detail) = detail {
+        text.push_str("  ");
+        text.push_str(detail);
+    }
+    paint_text_row(cells, glyph, &text, r, abs_left, width, row_style, None);
+    // Column 0: the glyph, dimmed unless the row is selected.
+    if !selected {
+        cells.at(CellCoord::new(r, abs_left)).style = kind_style();
+    }
+}
+
+/// One row of a popup, the row painter [`paint_band_row`] is built on
+/// and the hover and signature popup paints with (E8.4): the whole row's
+/// background in `row_style`, `glyph` in column 0 and `text` from column
+/// 2, clipped to `width`, the bytes `highlight` names (a signature's
+/// active parameter) in its own style.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one row of a cell grid: the geometry is the signature"
+)]
+pub(crate) fn paint_text_row(
+    cells: &mut CellGrid<'_>,
+    glyph: char,
+    text: &str,
+    r: u32,
+    abs_left: u32,
+    width: u32,
+    row_style: Style,
+    highlight: Option<(usize, usize, Style)>,
+) {
     // Paint the whole row's background first so the selected row's
     // reverse video covers the trailing whitespace.
     for c in 0..width {
@@ -905,23 +994,12 @@ pub(crate) fn paint_band_row(
         cell.style = row_style;
         cell.attachment = None;
     }
-    // Column 0: the glyph.
-    let kind_cell = cells.at(CellCoord::new(r, abs_left));
-    kind_cell.glyph = Glyph::Char(glyph);
-    kind_cell.style = if selected {
-        selected_style()
-    } else {
-        kind_style()
-    };
-    // Columns 2..: label, optionally followed by the detail.
-    let mut text = String::with_capacity(label.len() + 4);
-    text.push_str(label);
-    if let Some(detail) = detail {
-        text.push_str("  ");
-        text.push_str(detail);
+    if width == 0 {
+        return;
     }
+    cells.at(CellCoord::new(r, abs_left)).glyph = Glyph::Char(glyph);
     let mut col: u32 = 2;
-    for ch in text.chars() {
+    for (i, ch) in text.char_indices() {
         if col >= width {
             break;
         }
@@ -929,15 +1007,18 @@ pub(crate) fn paint_band_row(
         if cw == 0 {
             continue;
         }
+        let style = highlight
+            .filter(|&(start, end, _)| i >= start && i < end)
+            .map_or(row_style, |(_, _, style)| style);
         let cell = cells.at(CellCoord::new(r, abs_left + col));
         cell.glyph = Glyph::Char(ch);
-        cell.style = row_style;
+        cell.style = style;
         cell.attachment = None;
         col += 1;
         if cw == 2 && col < width {
             let cont = cells.at(CellCoord::new(r, abs_left + col));
             cont.glyph = Glyph::Continuation;
-            cont.style = row_style;
+            cont.style = style;
             cont.attachment = None;
             col += 1;
         }

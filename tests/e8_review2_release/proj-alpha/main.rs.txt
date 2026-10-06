@@ -1,0 +1,14 @@
+/// Alpha adds one to its argument.
+fn alpha(x: u8) -> u8 {
+    x + 1
+}
+
+/// Beta doubles its argument.
+fn beta(y: u8) -> u8 {
+
+    y * 2
+}
+
+fn main() {
+    let _ = alpha(1) + beta(2);
+}
