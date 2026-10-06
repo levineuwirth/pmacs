@@ -93,11 +93,11 @@ impl SignatureHelp {
     /// fix round 1). The spec says UTF-16, "as `Position` and `Range`
     /// does", and servers that negotiated UTF-8 take that both ways:
     /// rust-analyzer counts UTF-16 units, clangd its negotiated bytes.
-    /// So the offsets are read in the negotiated encoding and then in
-    /// UTF-16, and the first reading under which every parameter is a
-    /// whole run of the label ([`coherent`]) is the one kept; under
-    /// none, no parameter carries a span and the popup marks nothing
-    /// rather than the wrong text.
+    /// So the offsets are read in the negotiated encoding and in UTF-16,
+    /// and the reading under which every parameter is delimited and
+    /// balanced in the label ([`coherent`]) is the one kept. Under
+    /// none, or under two that differ, no parameter carries a span and
+    /// the popup marks nothing rather than text that may be wrong.
     #[must_use]
     pub fn from_lsp_value_in(v: &Value, encoding: crate::lsp::PositionEncoding) -> Self {
         if v.is_null() {
@@ -157,13 +157,17 @@ fn parse_signature(v: &Value, encoding: crate::lsp::PositionEncoding) -> Option<
     if encoding != crate::lsp::PositionEncoding::Utf16 {
         readings.push(crate::lsp::PositionEncoding::Utf16);
     }
-    let spans = readings.into_iter().find_map(|enc| {
+    let mut whole = readings.into_iter().filter_map(|enc| {
         let spans = offsets
             .iter()
             .map(|&(s, e)| Some((label_byte(&label, s, enc)?, label_byte(&label, e, enc)?)))
             .collect::<Option<Vec<_>>>()?;
         coherent(&label, &spans).then_some(spans)
     });
+    let spans = match (whole.next(), whole.next()) {
+        (Some(one), Some(other)) if one != other => None,
+        (one, _) => one,
+    };
     let mut spans = spans.map(Vec::into_iter);
     let parameters = raw
         .into_iter()
@@ -251,26 +255,69 @@ fn label_byte(label: &str, units: u32, enc: crate::lsp::PositionEncoding) -> Opt
 }
 
 /// Whether `spans` (bytes of `label`, in the parameters' order) each mark
-/// a whole run of the label: non-empty, in order and apart, starting
-/// and ending on no whitespace, and cutting no word at either edge (a
-/// letter, digit or `_` on both sides of it). Offsets read in the wrong
-/// units shift by the bytes and units the characters before them differ
-/// by, which lands an edge inside a word or a character.
+/// what a parameter is: non-empty, in order and apart, starting and
+/// ending on no whitespace, opened (past whitespace) by the label's start
+/// or one of `( , < [ { |` and closed by its end or one of `, ) > ] } |`,
+/// with its own brackets balanced. Offsets read in the wrong units shift
+/// by the bytes and units the characters before them differ by; a run
+/// that is merely whole (E8 fix round 1's test) is reached that way by
+/// ordinary non-ASCII code, `u8, a` or `名前` alone, and a delimited,
+/// balanced one is not (review 2's Medium 1).
 fn coherent(label: &str, spans: &[(usize, usize)]) -> bool {
-    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-    let cuts =
-        |at: usize| word(label[..at].chars().next_back()) && word(label[at..].chars().next());
+    let opened = |at: usize| {
+        label[..at]
+            .trim_end()
+            .chars()
+            .next_back()
+            .is_none_or(|c| "(,<[{|".contains(c))
+    };
+    let closed = |at: usize| {
+        label[at..]
+            .trim_start()
+            .chars()
+            .next()
+            .is_none_or(|c| ",)>]}|".contains(c))
+    };
     let mut end_of_last = 0usize;
     spans.iter().all(|&(s, e)| {
         let ok = s < e
             && s >= end_of_last
             && !label[s..e].starts_with(char::is_whitespace)
             && !label[s..e].ends_with(char::is_whitespace)
-            && !cuts(s)
-            && !cuts(e);
+            && opened(s)
+            && closed(e)
+            && balanced(&label[s..e]);
         end_of_last = e;
         ok
     })
+}
+
+/// Whether every bracket in `run` closes the one it opened, in order and
+/// all of them: `(`, `[`, `{` and `<`, an arrow's `>` (`->`, `=>`)
+/// closing none.
+fn balanced(run: &str) -> bool {
+    let mut open = Vec::new();
+    let mut last = None;
+    for c in run.chars() {
+        match c {
+            '(' | '[' | '{' | '<' => open.push(c),
+            '>' if matches!(last, Some('-' | '=')) => {}
+            ')' | ']' | '}' | '>' => {
+                let opener = match c {
+                    ')' => '(',
+                    ']' => '[',
+                    '}' => '{',
+                    _ => '<',
+                };
+                if open.pop() != Some(opener) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        last = Some(c);
+    }
+    open.is_empty()
 }
 
 fn extract_markup_text(v: &Value) -> Option<String> {
@@ -595,5 +642,76 @@ mod tests {
         let p = &h.signatures[0].parameters;
         assert_eq!(p.len(), 2, "each parameter is kept, with its documentation");
         assert!(p.iter().all(|p| p.span.is_none() && p.label.is_empty()));
+    }
+
+    /// The marked text of each parameter of `v`'s first signature, read
+    /// for a server that negotiated UTF-8.
+    fn marks_utf8(v: &Value) -> Vec<Option<String>> {
+        let h = SignatureHelp::from_lsp_value_in(v, crate::lsp::PositionEncoding::Utf8);
+        let label = &h.signatures[0].label;
+        h.signatures[0]
+            .parameters
+            .iter()
+            .map(|p| {
+                p.span
+                    .map(|(s, e)| label[s as usize..e as usize].to_owned())
+            })
+            .collect()
+    }
+
+    /// E8 fix round 2 (review 2's Medium 1): two readings under which
+    /// every parameter is delimited and balanced, and which differ, mark
+    /// nothing. `struct S<名é, T, U>(T, U)`'s UTF-16 offsets (19..20,
+    /// 22..23) read as bytes are the generic `U` and the field `T`, each
+    /// opened by a `,` or `(` and closed by a `>` or `,`; read as UTF-16
+    /// they are the fields. Either may be the server's, so neither is
+    /// kept. (The generic `名é` names no field, so this is not Rust that
+    /// compiles; the generated sweep reached no such label.)
+    #[test]
+    fn two_readings_that_differ_mark_nothing() {
+        let v = json!({
+            "signatures": [{
+                "label": "struct S<名é, T, U>(T, U)",
+                "parameters": [{ "label": [19, 20] }, { "label": [22, 23] }],
+            }],
+            "activeParameter": 1,
+        });
+        assert_eq!(marks_utf8(&v), [None, None]);
+    }
+
+    /// E8 fix round 2: a reading whose span leaves a bracket open is not
+    /// a parameter. `fn move_to(現在地: (i32, i32))` from rust-analyzer
+    /// (UTF-16 offsets 11..26 on a UTF-8 server): read as bytes they are
+    /// `現在地: (i32`, opened by the `(` and closed by the tuple's `,`,
+    /// whole but unbalanced; refused, the UTF-16 reading is the only one
+    /// left and is marked.
+    #[test]
+    fn a_reading_that_leaves_a_bracket_open_is_not_a_parameter() {
+        let v = json!({
+            "signatures": [{
+                "label": "fn move_to(現在地: (i32, i32))",
+                "parameters": [{ "label": [11, 26] }],
+            }],
+            "activeParameter": 0,
+        });
+        assert_eq!(marks_utf8(&v), [Some("現在地: (i32, i32)".to_owned())]);
+    }
+
+    /// The brackets a parameter's run must close, an arrow's `>` closing
+    /// none.
+    #[test]
+    fn balanced_counts_brackets_and_not_arrows() {
+        for run in [
+            "f: impl Fn(u8) -> u8",
+            "cb: (x: number) => void",
+            "m: HashMap<K, Vec<(u8, u8)>>",
+            "xs: [u8; 4]",
+            "d: dict = {}",
+        ] {
+            assert!(balanced(run), "{run:?}");
+        }
+        for run in ["a: (i32", "Vec<T", "u8)", "x: [u8; 4", "(a]"] {
+            assert!(!balanced(run), "{run:?}");
+        }
     }
 }

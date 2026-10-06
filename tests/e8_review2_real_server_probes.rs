@@ -354,6 +354,121 @@ fn review2_rust_analyzer_marks_the_parameter_where_its_byte_reading_is_also_whol
     );
 }
 
+// ---- 1b. Fix round 2: the marks the stronger predicate keeps --------------
+
+/// Each `(call, parameter)` of `source`: the caret after `call`, `C-c s`
+/// until a marked signature popup arrives, then the popup's mark, the
+/// frame a GPU session is sent and the grid's painted mark compared with
+/// `parameter`. The calls that disagree, each with all three.
+fn wrong_marks(state: &mut EditorState, source: &str, calls: &[(&str, &str)]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for &(call, want) in calls {
+        goto(state, after(source, call));
+        let p = match try_ask(state, 's', 120, |p| {
+            p.kind == PopupKind::Signature && p.active_range.is_some()
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                wrong.push(format!("{call:?}: {e}"));
+                continue;
+            }
+        };
+        let label = p.lines[0].clone();
+        let r = p.active_range.expect("marked");
+        let marked = label[r.start as usize..r.end as usize].to_owned();
+        let gpu = wire_frame(state)
+            .and_then(|f| f.active_range)
+            .map(|r| label[r.start as usize..r.end as usize].to_owned());
+        let grid = grid_marked(&paint(state));
+        eprintln!("e8fr2: {call:?} label {label:?} marked {marked:?} (gpu {gpu:?}, grid {grid:?})");
+        if marked != want || gpu.as_deref() != Some(want) || grid != want {
+            wrong.push(format!(
+                "{call:?}: want {want:?} in {label:?}; the popup marks {marked:?}, a GPU \
+                 session is sent {gpu:?}, the grid paints {grid:?}"
+            ));
+        }
+        key(state, 'g', KeyModifiers::CONTROL);
+        tick(state);
+    }
+    wrong
+}
+
+/// E8 fix round 2, the balance rule on rust-analyzer. `move_to`'s one
+/// parameter is a Japanese name with a tuple type; its UTF-16 offsets
+/// (11..26) read as bytes are `現在地: (i32`, opened by the `(` and
+/// closed by the tuple's own `,`. Only the bracket left open says it is
+/// no parameter: without that rule both readings pass, they differ, and
+/// nothing is marked.
+#[test]
+fn fix2_rust_analyzer_marks_a_parameter_whose_byte_reading_leaves_a_bracket_open() {
+    if !rust_analyzer_provisioned() {
+        return;
+    }
+    let source = "fn move_to(現在地: (i32, i32)) -> i32 { 現在地.0 }\n\
+fn main() {\n\
+    let _ = move_to((1, 2));\n\
+}\n";
+    let (mut state, _dir) = open("balance", source);
+    let wrong = wrong_marks(
+        &mut state,
+        source,
+        &[("let _ = move_to(", "現在地: (i32, i32)")],
+    );
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+fn clangd_provisioned() -> bool {
+    if on_path("clangd") {
+        return true;
+    }
+    support::skip_or_fail("clangd", "PMACS_REQUIRE_LSP");
+    false
+}
+
+/// E8 fix round 2, a server that counts its label offsets in the bytes
+/// it negotiated: clangd, on C++ with the same non-ASCII shapes as
+/// review 2's rust-analyzer row. Its offsets read as bytes are each
+/// parameter, delimited and balanced, and read as UTF-16 they are not
+/// (`f`'s second is `a) ->`), so the byte reading is kept and the rule
+/// that two differing readings mark nothing never fires. Passes at
+/// `57a980e` too: it holds the stronger predicate to the server whose
+/// reading it must not refuse.
+#[test]
+fn fix2_clangd_counts_label_offsets_in_bytes_and_each_parameter_is_marked() {
+    if !clangd_provisioned() {
+        return;
+    }
+    let source = "int f(int 名前, int a) { return 名前 + a; }\n\
+int g(int 名前, const char *größe, int a) { return 名前 + a + größe[0]; }\n\
+template <typename U> int 长度计算(int a, int b) { return a + b; }\n\
+int main() {\n\
+  int r = f(1, 2);\n\
+  r += f(3, 4);\n\
+  r += g(1, \"x\", 3);\n\
+  r += 长度计算<char>(1, 2);\n\
+  return r;\n\
+}\n";
+    let dir = tempfile::Builder::new()
+        .prefix("e8fr2-clangd-")
+        .tempdir()
+        .expect("tempdir");
+    std::fs::write(dir.path().join("compile_flags.txt"), "-std=c++20\n").expect("flags");
+    let main_cpp = dir.path().join("main.cpp");
+    std::fs::write(&main_cpp, source).expect("source");
+    let mut state = visit(&main_cpp);
+    let wrong = wrong_marks(
+        &mut state,
+        source,
+        &[
+            ("f(1, ", "int a"),
+            ("f(3", "int 名前"),
+            ("g(1, \"x\", ", "int a"),
+            ("长度计算<char>(1, ", "int b"),
+        ],
+    );
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 // ---- 2. The kept hover -----------------------------------------------------
 
 const TWO_FUNCTIONS: &str = "/// Alpha adds one to its argument.\n\

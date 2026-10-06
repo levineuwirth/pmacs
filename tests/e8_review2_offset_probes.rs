@@ -135,3 +135,49 @@ fn review2_codepoint_offsets_mark_a_parameter_whole_or_not_at_all() {
         );
     }
 }
+
+fn bytes(s: &str) -> usize {
+    s.len()
+}
+
+/// E8 fix round 2. The same labels from a server that counts its
+/// offsets in the bytes it negotiated (clangd does): the byte reading is
+/// the parameters, delimited and balanced, and the UTF-16 reading of the
+/// same numbers is not, so each is marked whole. The stronger predicate
+/// and the rule that two differing readings mark nothing refuse none of
+/// them; over review 2's generated labels, counted in bytes, they refuse
+/// none either (the fix round's pass has the sweep).
+#[test]
+fn fix2_byte_offsets_from_a_utf8_server_mark_each_parameter_whole() {
+    let mut wrong = Vec::new();
+    for (label, params) in [
+        ("fn f(名前: u8, a: u8) -> u8", &["名前: u8", "a: u8"][..]),
+        (
+            "fn g(名前: u8, größe: &str, a: u8) -> usize",
+            &["名前: u8", "größe: &str", "a: u8"][..],
+        ),
+        (
+            "fn 长度计算<'a, U>(a: i32, b: i32) -> i32",
+            &["a: i32", "b: i32"][..],
+        ),
+        (
+            "fn move_to(現在地: (i32, i32))",
+            &["現在地: (i32, i32)"][..],
+        ),
+        (
+            "(a: str, b: str = \"😀\") -> None",
+            &["a: str", "b: str = \"😀\""][..],
+        ),
+    ] {
+        let help =
+            SignatureHelp::from_lsp_value_in(&answer(label, params, bytes), PositionEncoding::Utf8);
+        let got = marks(label, &help);
+        let want: Vec<Option<String>> = params.iter().map(|p| Some((*p).to_owned())).collect();
+        if got != want {
+            wrong.push(format!(
+                "{label:?}: marked {got:?}, the parameters are {want:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
