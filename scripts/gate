@@ -1008,11 +1008,17 @@ export XDG_RUNTIME_DIR="$GATE_RUNTIME_DIR"
 # gate puts a shim named `sccache` first on PATH that runs the real one
 # with TMPDIR pointed at a durable directory beside the gate's targets:
 # a server any of this run's compiles starts keeps a directory that
-# outlives the run. The compiles themselves keep the run's TMPDIR; only
-# sccache's own process sees the other. A wrapper a config names by
-# absolute path never looks at PATH, so RUSTC_WRAPPER naming sccache is
-# pointed at the shim too; an absolute path in a config file is not
-# reached, which is stated rather than papered over.
+# outlives the run. The compiles see that directory too, not the run's:
+# sccache runs a compile in its client's environment, and the client is
+# the shim's own process (E8 review 2 measured it with a rustc that logs
+# its TMPDIR, and fix round 2 again, twelve calls of twelve), so a
+# compile's temporary files land beside the server's and are not this
+# run's to reap. A hand run outside the gate gets none of this unless
+# it puts a shim of its own first on PATH (the runbook's recipe). A
+# wrapper a config names by absolute path never looks at PATH, so
+# RUSTC_WRAPPER naming sccache is pointed at the shim too; an absolute
+# path in a config file is not reached, which is stated rather than
+# papered over.
 GATE_SCCACHE_TMPDIR="$(gate_root)/sccache-tmp"
 if GATE_REAL_SCCACHE=$(command -v sccache 2>/dev/null) && [ -n "$GATE_REAL_SCCACHE" ]; then
     mkdir -p "$GATE_SCCACHE_TMPDIR" "$GATE_TMPDIR/bin"
