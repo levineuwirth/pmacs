@@ -480,6 +480,69 @@ fn switch_buffer_reaches_a_file_by_its_bare_name_and_d18_still_holds() {
     assert_eq!(active_name(&s), scratch, "nothing switched");
 }
 
+/// E8b.2: RET names the buffer it reached on the status band, in the
+/// band's `<command>: …` idiom, and says when the selection is the
+/// buffer already shown, which changes nothing on screen: #318's
+/// measured case ended on `a.rs` with an empty band. A subsequence
+/// whose selection is the shown buffer says so as a full name does.
+/// The next key clears it, as it clears every message, and a name
+/// matching nothing is refused as before.
+#[test]
+fn switch_buffer_says_which_buffer_ret_reached() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td.path().join("bin-tests");
+    std::fs::create_dir_all(&dir).expect("bin-tests dir");
+    let mut s = fresh();
+    let scratch = eval::<String>(
+        &s,
+        "return pmacs.describe.buffer(pmacs.buffer.list()[1]).name",
+    );
+    let mut names = Vec::new();
+    for file in ["a.rs", "b.rs"] {
+        let path = dir.join(file);
+        std::fs::write(&path, b"x\n").expect("write");
+        exec(
+            &s,
+            &format!(
+                "pmacs.buffer.find_or_open({:?})",
+                path.display().to_string()
+            ),
+        );
+        names.push(active_name(&s));
+    }
+    let (a, b) = (names[0].clone(), names[1].clone());
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[2])");
+    assert_eq!(active_name(&s), a);
+    assert_eq!(status(&s), "", "fixture: the band starts empty");
+
+    switch_by_typing(&mut s, "b.rs");
+    assert_eq!(active_name(&s), b);
+    assert_eq!(status(&s), format!("switch-buffer: showing {b}"));
+
+    switch_by_typing(&mut s, &b);
+    assert_eq!(active_name(&s), b, "nothing switched");
+    assert_eq!(status(&s), format!("switch-buffer: already showing {b}"));
+
+    switch_by_typing(&mut s, "b.r");
+    assert_eq!(active_name(&s), b, "nothing switched");
+    assert_eq!(
+        status(&s),
+        format!("switch-buffer: already showing {b}"),
+        "a subsequence selecting the shown buffer says so"
+    );
+
+    press(&mut s, KeyCode::Right);
+    assert_eq!(status(&s), "", "the next key clears the band");
+
+    switch_by_typing(&mut s, "scr");
+    assert_eq!(active_name(&s), scratch);
+    assert_eq!(status(&s), format!("switch-buffer: showing {scratch}"));
+
+    switch_by_typing(&mut s, "zzz");
+    assert_eq!(status(&s), "no buffer: zzz", "the refusal is as it was");
+    assert_eq!(active_name(&s), scratch, "nothing switched");
+}
+
 /// Probe: `write-file` roots its field where `find-file` does, prefilled
 /// with the directory, and writes the typed name under it.
 #[test]

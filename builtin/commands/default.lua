@@ -683,7 +683,16 @@ cmd { name = "editor.switch-buffer",
             if name == nil or name == "" then return end
             for _, id in ipairs(pmacs.buffer.list()) do
               if pmacs.describe.buffer(id).name == name then
-                pmacs.window.switch_buffer(id)
+                -- E8b.2: say which buffer RET reached. The selection
+                -- can differ from what was typed, which D18 intends,
+                -- and a selection that is the buffer already shown
+                -- changes nothing on screen, so that is said too.
+                if tostring(id) == tostring(pmacs.window.buffer()) then
+                  pmacs.editor.set_status("switch-buffer: already showing " .. name)
+                else
+                  pmacs.window.switch_buffer(id)
+                  pmacs.editor.set_status("switch-buffer: showing " .. name)
+                end
                 return
               end
             end
