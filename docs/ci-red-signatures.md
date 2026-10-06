@@ -3621,6 +3621,95 @@ So, at E8's fix round 4: R7 moves to thirty; #311's list of runs reads at twenty
 stands.
 
 
+### `main` after E8: run 37514576127 at `24593f1`, red on #316's third sample, its first in CI
+
+Read 2026-10-06 at E8b's opening (its row E8b.0, before any code) from the jobs endpoint by
+`conclusion` and from all six test legs' logs; not rerun. `24593f1` is E8's squash merge
+(PR #315 at `05dfa6a`, merged 18:51:55Z with `--match-head-commit`), and the run is a
+`push` that checked out `24593f1` itself (the `Test (crdt)` log's fetch line). It is
+`main`'s base control for E8b: the last code-bearing commit on `main`.
+
+#### `CI` 37514576127 at `24593f1`, attempt 1 of 1: `failure`
+
+Created 18:51:58Z, completed 19:25:20Z.
+
+Tally (main-after-e8-ci): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 112444085059 | success |
+| Lint (luajit) | 112444085313 | success |
+| Commit attribution (D9) | 112444085323 | success |
+| Lint (lua54) | 112444085410 | success |
+| Format | 112444085418 | success |
+| M1 Acceptance Gates | 112444170929 | success |
+| Test (crdt) | 112444170937 | failure |
+| M5 Perf Gates | 112444170949 | success |
+| Test (ubuntu-latest / lua54) | 112444171009 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 112444171054 | success |
+| Test (macos-latest / luajit) | 112444171067 | success |
+| M6 Perf Gates | 112444171100 | success |
+| Perf budgets (debug) | 112444171101 | success |
+| Test (ubuntu-latest / luajit) | 112444171107 | success |
+| M10 Perf Gates (crdt) | 112444171163 | success |
+| M4 Perf Gates | 112444171184 | success |
+| Test (macos-latest / lua54) | 112444171187 | success |
+| GPU Render (headless) | 112444171249 | success |
+| Docs consistency | 112444174141 | skipped |
+
+Tally (main-after-e8-ci-success): 17 rows of the table above with `result` = `success`.
+
+- Every test leg pairs its `running` lines with its result lines: 190 on each macOS leg and
+  189 on each Ubuntu leg, all `ok`; 187 on `Test (crdt)`, 186 `ok` and one `FAILED`.
+  `WouldBlock` appears on no leg. `Test (crdt)` read 188 at `05dfa6a`: the extra line was
+  its `cargo test --doc` step's `Doc-tests pmacs`, and here that step (step 11) is `skipped`
+  after the sweep step failed, read from the job's steps; the 181 `Running` targets of the
+  two runs are the same list.
+- The legs' skip records are `05dfa6a`'s: 28 on each macOS leg, 21 on `Test (crdt)`, 4 on
+  each Ubuntu leg.
+
+#### #316, third sample, its first in CI and its first on `main`
+
+`-p pmacs --test e7i_review3_probes
+e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`, in
+`Test (crdt)` (Linux, default features, `--test-threads=1`), at
+`tests/e7i_review3_probes.rs:853` (not a fragment), `test result: FAILED. 10 passed; 1
+failed; 0 ignored`. The assertion is #316's, `nothing held the switch's follow-up parse,
+which started a worker at once and installed`, but on the loop's **third** kill:
+
+`kill 3: … deaths=3 crashes=0 busy=true held=false pending=0 stopped=false tree=true
+unit=pid_25243 death=killed, " +* … (rust) … parse:killed !3  L1:C1 Top"`
+
+**Two of the issue's fragments as written do not match it**, and the record says so rather
+than counting past them. They name the loop's first iteration: `kill 1:`, and a mode line
+opening `" +  `, the buffer unmodified before the first edit. Here it is `kill 3:` and
+`" +* `, the buffer modified by the two edits before it. The assertion is one template over
+`kill {kill}` and the same wait precedes every iteration, so this is counted as #316's
+third, with the fragments read as the template (`kill N:`, `" +` then `parse:killed`); the
+issue is commented with that reading, and splitting it out is the owner's call.
+
+**It also differs in a way the issue's candidate mechanism does not cover.** Both local
+samples' found reports read `busy=false` (`20261005T081704Z-3789356`'s `07-sweep-luajit`,
+`unit=pid_3900391`; `20261006T111111Z-85507`'s `06-sweep`, `unit=pid_128600`): the
+follow-up parse had installed and the mark outlived it, which is the candidate, the mark
+cleared by the runtime's settle a tick after the report shows the install. This one reads
+`busy=true` with a fresh unit: a parse was in flight at the read, after `quiesce` had seen
+`busy=false` and `pending=0` and ticked five times, so a parse was dispatched during those
+five ticks. The same iteration then installed the edit's parse in 18 ms. Both shapes are
+the row's wait returning before the state its assertion reads; which object dispatched the
+late parse is not measured. The row passed on the other five legs.
+
+`24593f1` carries E8's `paint_frame` call and `process.after-tick` subscriber, which the
+issue named as not shown innocent; on `main` they no longer discriminate a branch.
+
+#### `Grammar fuzz` 37514576116 at `24593f1`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112444084091 and `Grammar fuzz (asan-strict)`
+112444084436.
+
+So, at `main` after E8: #316 moves to three (its first on Linux CI, read under the
+template); every other count above stands, and no other row was sampled red.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
