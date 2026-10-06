@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 18 items in the list below.
+Tally (311-runs): 19 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2805,6 +2805,7 @@ Tally (311-runs): 18 items in the list below.
   machine's restart in `07-sweep-luajit`; `06-sweep` read whole, the partial luajit
   sweep red on the row too);
 - `20261006T111111Z-85507` at `d2de579` (the same round's gate, both sweeps).
+- `20261006T150249Z-1162130` at `e23510a` (PR #321's tip gate, its one sweep, `05-sweep`).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -3327,6 +3328,122 @@ Tally (pr315-fix3-ci-d2de579-attempt2): 19 = 16 + 2 + 1.
 Not rerun again, on the owner's instruction. So, at E8's fix round 3: #283
 moves to fourteen and #319 is at one; #313 stays at two; R7, #291, #311 and
 #316 are not sampled, no gate having run. Every other count above stands.
+
+### The required-checks PR: PR #321's runs and #322's first, its gate, #283 reproduced on demand, and #320's first
+
+Recorded 2026-10-06 with PR #321
+(`ci/required-checks-mean-what-they-say`, five commits on `97956ff`), which is not a
+phase: it changes the rows of #283, #313 and #319 and makes each test leg print its
+arming and the rows that returned without running. Its runs were read
+from the jobs endpoint by conclusion and through all six test legs' logs; neither was
+rerun.
+
+#### `CI` 37486414088 at `e23510a`, attempt 1 of 1: #322's first
+
+`pull_request`, the merge `a6b2df8` (`e23510a` into `97956ff`, read from all six test
+logs' checkout line), created 15:18:46Z and completed 15:52:33Z: `failure`.
+
+Tally (pr321-ci-e23510a): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 112347460053 | success |
+| Format | 112347459741 | success |
+| Changed paths | 112347459987 | success |
+| Lint (lua54) | 112347460028 | success |
+| Lint (luajit) | 112347460070 | success |
+| GPU Render (headless) | 112347630475 | success |
+| M10 Perf Gates (crdt) | 112347630562 | success |
+| Test (crdt) | 112347630574 | success |
+| M1 Acceptance Gates | 112347630634 | success |
+| M4 Perf Gates | 112347630655 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 112347630662 | success |
+| Test (ubuntu-latest / lua54) | 112347630704 | success |
+| M5 Perf Gates | 112347630719 | success |
+| Test (macos-latest / luajit) | 112347630743 | failure |
+| Test (macos-latest / lua54) | 112347630802 | success |
+| M6 Perf Gates | 112347630815 | success |
+| Perf budgets (debug) | 112347630824 | success |
+| Test (ubuntu-latest / luajit) | 112347631300 | success |
+| Docs consistency | 112347632844 | skipped |
+
+Tally (pr321-ci-e23510a-failures): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)`, its only failure against 179 `test result: ok`:
+  `e7i_review3_probes::e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart`,
+  `the deadline's kill did not become ready within 60s` with the last report holding
+  `deaths=3`, `busy=false`, `pending=0`, `tree=true` and `death=killed`, and `test
+  result: FAILED. 10 passed; 1 failed; 0 ignored`. The panic site
+  `tests/e7i_review3_probes.rs:918:9` and the unit's pid are not fragments. No row
+  here names it, so it is filed as **#322**, first occurrence, and not rerun. The
+  same row passed on the other five legs. The branch changes nothing under `src/`,
+  `builtin/` or that suite; that is read, not a demonstration.
+- The rows the branch changes passed on every leg that builds them: #283's
+  (`gpu_route::…`, five legs, not the no-crdt one, which compiles it out), #313's
+  and #319's, and the two new rows, which is non-reproduction and nothing more for
+  #313 and #319.
+- Each leg's `running` lines pair with its result lines: 180 on `Test (crdt)`, 181 on
+  each Ubuntu leg, and on the macOS legs 180 and 182, each log's one unpaired
+  `running 1 test` being the adapter step's own `grep` text. `WouldBlock` and `got
+  ok` appear on no leg; `did not become ready` once, #322's own line.
+- **The legs' new steps, read in every log.** `Arming report (this leg)` printed
+  each variable as the leg set it: on the Ubuntu legs `LSP`, `SHELLS`, `LUA`,
+  `SETSID` and `BASH` armed with their tools present, and `PYRIGHT`, `HLS` and
+  `CGROUP` unset with their tools absent; on the macOS legs every variable unset,
+  `BASH` and `CARGO_BUILD` with their tools present; on `Test (crdt)` `GPU`,
+  `SETSID` and `BASH` armed. `Rows that returned without running` then listed 2
+  rows on each Ubuntu leg (basedpyright's and the HLS row), 14 on each macOS leg and
+  17 on `Test (crdt)`, each by suite, row, call site, tool and variable.
+
+#### `Grammar fuzz` 37486414312 at `e23510a`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112347460903 and `Grammar fuzz
+(asan-strict)` 112347460472, eleven seconds each: the job's path for a change that
+touches no grammar, which fuzzes nothing (`scripts/grammar-fuzz-needed`, `ci.yml`
+among its non-grammar paths).
+
+#### The tip's gate, `20261006T150249Z-1162130` at `e23510a`
+
+Five of six, the default plan: fmt, clippy, doc, build and diff-check ok, and no
+daemon survived. `05-sweep`: 189 result lines, 5,221 passed, 1 failed, 62 ignored.
+The one is #311's row with #311's fragments (the store holding `Could not find module
+‘Prelude’`, the trace reaching `processi`), so #311's list gains this gate. R7,
+#291 and #316 did not fire, which is non-reproduction and nothing more. The rows of
+#283, #313 and #319 passed in it, in their new forms.
+
+#### #283 reproduced on demand, twice, and not counted
+
+Two variants of `main`'s row, each from test-side Lua, failed with #283's three
+fragments and its message character for character, `pump timeout waiting for the
+accept and its import; text="fn main() {\n    println\n    \n}\n// tail\n"
+popup_rows=0 anchor=None cursor=Some(28)` at `tests/e7_review1_probes.rs:774:13`:
+with the popup's first open held 2.5 s (11.67 s), and with the fake server started
+2 s late, so that the letters met a server not yet initialized (11.71 s). The
+fragments cannot tell those two apart, and which one the macOS runners met is not
+known. These were made, not met, so they are not occurrences, and #283 stays at
+fourteen. The row as PR #321 changes it passed both variants (2.69 s and 2.22 s).
+
+#### #320, first sample, local, outside the gate
+
+`e7_review1_probes::e7_review1_a_late_answer_past_the_default_bound_never_touches_an_edited_buffer`,
+in a hand run in the gate's environment on the PR's branch before its first commit
+(the log closed 15:12:16+02:00, load average 15.65 on 16 threads from other
+builds on the machine): `answered in time: 11.062716943s` at the row's second save, whose
+bound is 3000 ms, and `test result: FAILED. 10 passed; 1 failed; 0 ignored`. The
+panic site `tests/e7_review1_probes.rs:330:5` moves with the file and is not a
+fragment. No row here names the selector, so it is filed as **#320**. A rerun of the
+suite failed the same row at its first save with another fragment (`the save waits
+the default bound and gives up before the answer: 5.08476519s`), but that run was in
+flight across the laptop's suspend (`Suspending...` 15:12:57, `PM: suspend exit`
+16:39:59, its log closed 16:39:59.7), so it is no evidence and is not counted; the
+other two reruns passed. The branch's diff in that suite is #283's row only, and the
+failing row's path is untouched; that is read, not a demonstration. The row passed
+in the tip's gate above.
+
+So, at PR #321: #283 stays at fourteen, not moved by the two reproductions; #320 is
+at one; #311's list of runs reads at nineteen; #313 stays at two and #319 at one, their rows passing on
+every leg; #322 is at one; R7,
+#291 and #316 are not sampled. Every other count above stands.
 
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
