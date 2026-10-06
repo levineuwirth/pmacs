@@ -619,6 +619,68 @@ fn review2_c_c_h_after_an_edit_does_not_open_documentation_the_buffer_no_longer_
     }
 }
 
+/// E8 fix round 2 (review 2's Low 1), both halves through the keys. The
+/// hover on `alpha` at line 13, the caret to the blank line in `beta`,
+/// `C-c H`: the kept text opens under a header naming where it was asked
+/// (`main.rs:13`), not only that it is not the caret's. Then, with
+/// `*lsp-help*` quit, the doc comment edited from "one" to "two", the
+/// caret back on that blank line, `C-c H` again: the kept text predates
+/// the edit and is gone, so nothing opens and the status says there is
+/// no hover, where at `57a980e` "Alpha adds one" came back.
+#[test]
+fn fix2_the_kept_hover_names_its_place_and_is_dropped_by_an_edit() {
+    if !rust_analyzer_provisioned() {
+        return;
+    }
+    let (mut state, _dir) = open("kept", TWO_FUNCTIONS);
+    goto(&mut state, after(TWO_FUNCTIONS, "let _ = alph"));
+    ask_until(&mut state, 'h', 120, |p| {
+        p.kind == PopupKind::Hover && p.lines.iter().any(|l| l.contains("Alpha adds one"))
+    });
+    let blank_in_beta = after(TWO_FUNCTIONS, "fn beta(y: u8) -> u8 {\n");
+    goto(&mut state, blank_in_beta);
+    let _ = paint(&state);
+    assert!(popup(&state).is_none(), "the motion closed the popup");
+    let text = press_c_c_h(&mut state)
+        .unwrap_or_else(|seen| panic!("before the edit C-c H opened nothing; statuses {seen:?}"));
+    let header = text.lines().next().unwrap_or_default().to_owned();
+    eprintln!("e8fr2: before the edit *lsp-help* header {header:?}");
+    assert!(text.contains("Alpha adds one"), "the kept text: {text:?}");
+    assert!(
+        header.contains("the last popup's (none at the caret), from main.rs:13"),
+        "the header names where the kept text was asked: {header:?}"
+    );
+    key(&mut state, 'q', KeyModifiers::NONE);
+    tick(&mut state);
+    assert!(lsp_help(&state).is_none(), "q quit *lsp-help*");
+    // `one` -> `two` in the doc comment, through the keys.
+    goto(&mut state, after(TWO_FUNCTIONS, "/// Alpha adds "));
+    for _ in 0.."one".len() {
+        key(&mut state, 'd', KeyModifiers::CONTROL);
+        tick(&mut state);
+    }
+    typed(&mut state, "two");
+    let now: String = eval(
+        &state,
+        "local b = pmacs.window.buffer() return b:slice(0, b:len())",
+    );
+    assert!(now.contains("Alpha adds two") && !now.contains("Alpha adds one"));
+    goto(&mut state, blank_in_beta);
+    let _ = paint(&state);
+    assert!(popup(&state).is_none(), "no popup is open");
+    match press_c_c_h(&mut state) {
+        Err(seen) => assert_eq!(
+            seen.last().map(String::as_str),
+            Some("LSP: no hover info"),
+            "after the edit C-c H says there is no hover: {seen:?}"
+        ),
+        Ok(text) => panic!(
+            "after the edit C-c H opened kept text the buffer no longer holds: {:?}",
+            text.lines().take(6).collect::<Vec<_>>()
+        ),
+    }
+}
+
 // ---- 3. #317: a project reached through a symlink --------------------------
 
 /// The server's `rootUri` as pmacs holds it, and the path of the buffer

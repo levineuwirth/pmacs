@@ -4083,7 +4083,10 @@ end
 -- popup's closing row names `C-c H`; once a motion has carried the caret
 -- off the symbol (a `C-v`, a wheel turn outside the popup), the popup is
 -- gone and the caret's new place may have no hover at all, so `C-c H`
--- there opens this one rather than saying "no hover info".
+-- there opens this one rather than saying "no hover info". Fix round 2
+-- (review 2's Low 1): it carries the place it was asked at, which the
+-- header names, and the buffer's revision then; once the buffer has been
+-- edited the text may describe what is no longer there, so it is dropped.
 local last_hover_popup = {}
 
 local function hover_popup(rec, quiet)
@@ -4114,7 +4117,15 @@ local function hover_popup(rec, quiet)
     if opened then
       local hover = pmacs.hover.current(rec.server, rec.uri)
       if hover and hover.contents and hover.contents ~= "" then
-        last_hover_popup[rec.uri] = { window = window, contents = hover.contents }
+        local ok_path, path = pcall(function() return rec.buffer:path() end)
+        local file = ok_path and type(path) == "string" and path:match("[^/]+$") or "?"
+        local ok_rev, revision = pcall(function() return rec.buffer:revision() end)
+        last_hover_popup[rec.uri] = {
+          window = window,
+          contents = hover.contents,
+          place = string.format("%s:%d", file, line + 1),
+          revision = ok_rev and revision or nil,
+        }
       end
     end
     if told then
@@ -4167,12 +4178,18 @@ function pmacs.lsp.hover_doc()
       -- buffer, if there was one (`last_hover_popup`), whose closing row
       -- sent the user to this command.
       local last = last_hover_popup[rec.uri]
+      local ok_rev, revision = pcall(function() return rec.buffer:revision() end)
+      if last and (not ok_rev or last.revision ~= revision) then
+        last_hover_popup[rec.uri] = nil
+        last = nil
+      end
       if not last or last.window ~= window then
         pmacs.editor.set_status("LSP: no hover info")
         return
       end
       contents = last.contents
-      header = "hover documentation, the last popup's (none at the caret)   q quit"
+      header = "hover documentation, the last popup's (none at the caret), from "
+        .. last.place .. "   q quit"
     end
     local rows = {}
     for l in (contents .. "\n"):gmatch("(.-)\n") do
