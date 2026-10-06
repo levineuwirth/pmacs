@@ -888,10 +888,11 @@ fn e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_b
 /// the worker is killed from outside, as the system's OOM killer would
 /// take it, three times in a row with no parse installed between: each is
 /// told as a kill (once), its moved spans dropped, and none counts toward
-/// the three-crash stop, which at `db697a2` the third reached. Then under
-/// a 300 ms deadline the editor kills the next worker itself
+/// the three-crash stop, which at `db697a2` the third reached. Then, the
+/// paragraph replaced by #301's nested openers, whose parse no deadline
+/// races, the editor kills the next worker itself under a 300 ms deadline
 /// (`Death::Time`, a `SIGKILL` it sent): told as the deadline it is. Once
-/// the paragraph is out a parse installs.
+/// the openers are out a parse installs.
 #[test]
 #[allow(clippy::too_many_lines)] // one user's path, kill by kill
 fn e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart() {
@@ -975,10 +976,30 @@ fn e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart() {
         );
     }
 
-    // The editor's own kill: the deadline's, 100 ms past 300 ms.
-    exec(&state, "pmacs.config.set('syntax.parse-deadline-ms', 300)");
+    // The editor's own kill: the deadline's, 100 ms past 300 ms, on #301's
+    // nested openers put in the paragraph's place. The paragraph raced it
+    // (#322): its expense is markdown's inline layer, and where that layer
+    // was still within the progress callback's reach at the deadline the
+    // worker cut it and answered with the root, so a tree installed and no
+    // kill came, on the macOS luajit runner and here at a 100 ms deadline or
+    // with the worker throttled to a quarter of its speed. The openers'
+    // parse is bounded below instead: it runs on, out of the callback's
+    // reach (`HARD_GRACE`'s "#301's condensation"), for about 23 s natively
+    // (`fuzz/regress/README.md`), so the editor's kill is the only way it
+    // ends, as the deadline stop above relies on.
+    let openers = Stop::Deadline.input();
+    exec(
+        &state,
+        &format!(
+            "pmacs.config.set('syntax.parse-deadline-ms', 300)\n\
+             local b = pmacs.window.buffer()\n\
+             b:delete(0, {inserted})\n\
+             b:insert(0, {openers:?})\n\
+             pmacs.editor.goto_byte(0)"
+        ),
+    );
     type_keys(&mut state, "x");
-    inserted += 1;
+    inserted = openers.len() + 1;
     settled(&mut state, 4, "the deadline's kill");
     let own = report(&state);
     let own_line = mode_line(&paint(&state));
@@ -998,7 +1019,7 @@ fn e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart() {
         "and is marked as one: {own_line:?}"
     );
 
-    // The paragraph out: a parse installs, and the mark goes.
+    // The openers out: a parse installs, and the mark goes.
     exec(
         &state,
         &format!(
@@ -1007,12 +1028,12 @@ fn e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart() {
              pmacs.parse._dispatch(b, 'markdown')"
         ),
     );
-    wait_installed(&mut state, "a parse installs once the paragraph is out");
+    wait_installed(&mut state, "a parse installs once the openers are out");
     quiesce(&mut state);
     let cells = paint(&state);
     let errors = errors_text(&state);
     say(&format!(
-        "the paragraph out: {}, mode line {:?}\n*errors*:\n{errors}",
+        "the openers out: {}, mode line {:?}\n*errors*:\n{errors}",
         report(&state),
         mode_line(&cells)
     ));

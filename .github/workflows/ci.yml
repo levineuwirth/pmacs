@@ -301,6 +301,18 @@ jobs:
           - os: ubuntu-latest
             lua: luajit
             crdt: ""
+    # The arming, for every step, so the arming report below reads the
+    # values the test step runs under and not a copy of them that can
+    # drift. Why each is set where it is: the note above the test step.
+    # `matrix.os`, not `runner.os`, because a job's `env` cannot read the
+    # `runner` context; the two agree on this matrix. Empty on macOS,
+    # which the tests read as unset (`tests/support/mod.rs`, `armed`).
+    env:
+      PMACS_REQUIRE_LSP: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+      PMACS_REQUIRE_SHELLS: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+      PMACS_REQUIRE_LUA: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+      PMACS_REQUIRE_SETSID: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+      PMACS_REQUIRE_BASH: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -414,7 +426,8 @@ jobs:
       #
       # PMACS_REQUIRE_* make a missing tool fatal rather than a silent
       # skip, exactly as PMACS_REQUIRE_GPU already does for the headless
-      # render job. Set only where the install step ran.
+      # render job. Set only where the install step ran, in the job's
+      # `env` since the leg's arming report was added.
       #
       # PMACS_REQUIRE_PYRIGHT is deliberately NOT set and basedpyright
       # is deliberately NOT installed. Both original reasons are now
@@ -458,13 +471,35 @@ jobs:
       # at all --- at the tip of this branch that was 51 of 122 targets
       # silently unrun under one flavor, on a red the owner had already
       # filed.
+      #
+      # WHAT THE LEG DID NOT RUN, in its own log. A row that finds its
+      # tool absent with its variable unset returns, and libtest reports
+      # it `ok` like a row that ran; the notice it prints is captured and
+      # shown only for a failure. So the leg prints its arming first
+      # (`scripts/gate --print-arming-env`: each variable as this job's
+      # `env` sets it, and for each unset one whose tool is absent the
+      # suites whose rows will read ok without running), and after the
+      # tests the skip record: every row that returned through
+      # `tests/support`'s skip helpers writes one line, itself, its call
+      # site and why, to the file `PMACS_SKIP_LOG` names. The report
+      # fails the leg on nothing it finds; whether a missing tool should
+      # is a separate decision. The test step's own text is unchanged,
+      # because its name is a fragment of record (#313).
+      - name: Arming report (this leg)
+        run: scripts/gate --print-arming-env
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} --no-fail-fast -- ${{ runner.os == 'macOS' && ' ' || '--test-threads=1' }}
         env:
-          PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
-          PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
-          PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
-          PMACS_REQUIRE_SETSID: ${{ runner.os == 'Linux' && '1' || '' }}
-          PMACS_REQUIRE_BASH: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_SKIP_LOG: ${{ runner.temp }}/skipped-rows.txt
+      - name: Rows that returned without running
+        if: always()
+        run: |
+          log="$RUNNER_TEMP/skipped-rows.txt"
+          if [ -s "$log" ]; then
+            echo "$(wc -l < "$log" | tr -d ' ') skips recorded; each row returned without running and read ok above:"
+            sort "$log"
+          else
+            echo "no row recorded a skip in $log"
+          fi
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
@@ -512,6 +547,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 35
+    # In the job's `env`, for the arming report's sake, as in `test`.
+    env:
+      PMACS_REQUIRE_GPU: "1"
+      PMACS_REQUIRE_SETSID: "1"
+      PMACS_REQUIRE_BASH: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -541,11 +581,25 @@ jobs:
       # this job stopped at the 49th of ~150 targets on the review's own
       # probe, U17's witness among the unrun. Any earlier red in this
       # job may have hidden more than it reported.
+      #
+      # The arming report and the skip record, as on the `test` legs:
+      # this job installs no language server, shell or Lua, so the rows
+      # gated on them return early here and read ok.
+      - name: Arming report (this leg)
+        run: scripts/gate --print-arming-env
       - run: cargo test --all-targets --no-fail-fast -- --test-threads=1
         env:
-          PMACS_REQUIRE_GPU: "1"
-          PMACS_REQUIRE_SETSID: "1"
-          PMACS_REQUIRE_BASH: "1"
+          PMACS_SKIP_LOG: ${{ runner.temp }}/skipped-rows.txt
+      - name: Rows that returned without running
+        if: always()
+        run: |
+          log="$RUNNER_TEMP/skipped-rows.txt"
+          if [ -s "$log" ]; then
+            echo "$(wc -l < "$log" | tr -d ' ') skips recorded; each row returned without running and read ok above:"
+            sort "$log"
+          else
+            echo "no row recorded a skip in $log"
+          fi
       - run: cargo test --doc
 
   acceptance:
