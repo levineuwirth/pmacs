@@ -51,7 +51,8 @@ fn on_path(name: &str) -> bool {
 }
 
 /// As `tests/e8_review1_real_server_probes.rs`: rust-analyzer on PATH,
-/// and Linux unless `PMACS_REQUIRE_LSP` is armed (#317).
+/// and Linux unless `PMACS_REQUIRE_LSP` is armed, while #317 (a
+/// symlinked document URI, which macOS's `$TMPDIR` is) stands.
 fn rust_analyzer_provisioned() -> bool {
     if !on_path("rust-analyzer") {
         support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
@@ -59,7 +60,7 @@ fn rust_analyzer_provisioned() -> bool {
     }
     let armed = std::env::var_os("PMACS_REQUIRE_LSP").is_some_and(|v| !v.is_empty());
     if !cfg!(target_os = "linux") && !armed {
-        eprintln!("rust-analyzer rows run on Linux, where CI provisions them (#317); skipping");
+        eprintln!("rust-analyzer rows skip off Linux while #317 (a symlinked document URI) stands");
         return false;
     }
     true
@@ -714,7 +715,14 @@ fn uris(state: &EditorState) -> String {
 /// fixtures under `$TMPDIR`, `/var/folders/…`, and `/var` is a symlink
 /// to `/private/var`. The control is the same project opened by its
 /// real path, which answers.
+///
+/// Held ignored at E8 fix round 2, as #317's reproduction: the review's
+/// one-line fix (the attachment's URI canonicalized) passes it, and makes
+/// `fix2_a_rename_through_a_symlinked_project_edits_the_users_buffer`
+/// edit a second buffer, so the fix is wider than its sketch and the
+/// owner rules on it.
 #[test]
+#[ignore = "#317: a symlinked document URI; canonicalizing it opens a second buffer for an edited file (E8 fix round 2), the owner's ruling"]
 fn review2_rust_analyzer_answers_a_file_opened_through_a_symlinked_directory() {
     if !rust_analyzer_provisioned() {
         return;
@@ -752,4 +760,89 @@ fn main() { let _ = alpha(1); }\n";
             "a project opened through a symlinked directory gets no hover: {e}; pmacs holds {held}"
         )
     });
+}
+
+/// E8 fix round 2: what #317's fix must also hold, and why the review's
+/// sketch was not landed. A cargo project opened through a symlinked
+/// directory, `alpha` renamed to `gamma` with `C-c r`. With the
+/// attachment's URI canonicalized (the sketch) the server answers, and
+/// the status reads "renamed — 2 edits across 1 file", but its edits name
+/// the file by the canonical path, `find_or_open` matches buffers by
+/// their lexical path, and the edits go into a second buffer for the same
+/// file, `real/src/main.rs`, while the user's `link/src/main.rs` still
+/// says `alpha`: two buffers, two texts, one file. Measured with the
+/// sketch applied, then restored; at the head the server answers nothing
+/// and nothing is renamed. Passes only once a canonical URI also finds
+/// the buffer that holds its file.
+#[test]
+#[ignore = "#317: a symlinked document URI; canonicalizing it opens a second buffer for an edited file (E8 fix round 2), the owner's ruling"]
+fn fix2_a_rename_through_a_symlinked_project_edits_the_users_buffer() {
+    if !rust_analyzer_provisioned() {
+        return;
+    }
+    let source = "fn alpha(x: u8) -> u8 { x + 1 }\nfn main() { let _ = alpha(1); }\n";
+    let dir = tempfile::Builder::new()
+        .prefix("e8fr2-rename-")
+        .tempdir()
+        .expect("tempdir");
+    let real = dir.path().join("real");
+    write_project(&real, source);
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let mut state = visit(&link.join("src/main.rs"));
+    goto(&mut state, after(source, "let _ = alph"));
+    try_ask(&mut state, 'h', 120, |p| p.kind == PopupKind::Hover)
+        .unwrap_or_else(|e| panic!("the server answers through the link (#317): {e}"));
+    key(&mut state, 'g', KeyModifiers::CONTROL);
+    tick(&mut state);
+    key(&mut state, 'c', KeyModifiers::CONTROL);
+    key(&mut state, 'r', KeyModifiers::NONE);
+    let until = Instant::now() + Duration::from_secs(30);
+    while !eval::<bool>(&state, "return pmacs.minibuffer.is_active()") {
+        assert!(
+            Instant::now() < until,
+            "C-c r opened no prompt; status {:?}",
+            state.core.borrow().status
+        );
+        tick(&mut state);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    key(&mut state, 'a', KeyModifiers::CONTROL);
+    key(&mut state, 'k', KeyModifiers::CONTROL);
+    typed(&mut state, "gamma");
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    let until = Instant::now() + Duration::from_secs(30);
+    let mut status = String::new();
+    while Instant::now() < until && !status.starts_with("LSP: rename") {
+        tick(&mut state);
+        status = state.core.borrow().status.clone();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let buffers: String = eval(
+        &state,
+        "local out = {} \
+         for _, b in ipairs(pmacs.buffer.list()) do \
+           local p = b:path() \
+           if p then out[#out + 1] = p .. ' :: ' .. b:slice(0, b:len()) end \
+         end \
+         return table.concat(out, '\\n')",
+    );
+    eprintln!("e8fr2: status {status:?}; buffers:\n{buffers}");
+    assert!(status.starts_with("LSP: renamed"), "renamed: {status:?}");
+    let real_main = real.join("src/main.rs");
+    assert!(
+        !buffers.contains(&format!("{} ::", real_main.display())),
+        "a second buffer holds the renamed file: {buffers}"
+    );
+    let mine: String = eval(
+        &state,
+        "local b = pmacs.window.buffer() return b:slice(0, b:len())",
+    );
+    assert!(
+        mine.contains("fn gamma") && !mine.contains("alpha"),
+        "the user's buffer holds the rename: {mine:?}"
+    );
 }

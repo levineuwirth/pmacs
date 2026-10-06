@@ -54,8 +54,14 @@ fn on_path(name: &str) -> bool {
 /// (`PMACS_REQUIRE_LSP`). On CI's macOS runners the toolchain's own
 /// `rust-analyzer` component is on PATH and initializes, but answers no
 /// hover or signature help for these fixtures in 120 s (#317, `CI`
-/// 37358723033 at E8's fix round 1), so the rows skip there unless the
-/// variable is armed, which runs them anywhere.
+/// 37358723033 at E8's fix round 1). That is pmacs's, not the runner's
+/// (E8 review 2's Medium 2): the fixtures are under `$TMPDIR`,
+/// `/var/folders/…`, `/var` is a symlink, and pmacs sends the server a
+/// canonical `rootUri` and a document URI that keeps the symlink, so the
+/// document is in no crate the server loaded. Canonicalizing that URI
+/// alone makes a rename's edits open a second buffer for the same file
+/// (E8 fix round 2), so the fix waits on the owner's ruling and the rows
+/// skip there unless the variable is armed, which runs them anywhere.
 fn rust_analyzer_provisioned() -> bool {
     if !on_path("rust-analyzer") {
         support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
@@ -63,7 +69,7 @@ fn rust_analyzer_provisioned() -> bool {
     }
     let armed = std::env::var_os("PMACS_REQUIRE_LSP").is_some_and(|v| !v.is_empty());
     if !cfg!(target_os = "linux") && !armed {
-        eprintln!("rust-analyzer rows run on Linux, where CI provisions them (#317); skipping");
+        eprintln!("rust-analyzer rows skip off Linux while #317 (a symlinked document URI) stands");
         return false;
     }
     true
