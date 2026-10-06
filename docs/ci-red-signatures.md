@@ -2159,11 +2159,11 @@ Tally (pr297-fuzz): 4 items in the list below.
 - 36653672430 at `0a85d18`, 01:08:20Z to 02:02:55Z: success; six grammars 600 s, no crash or reproduced hang.
 - 36761534142 at `17c3c8f`, 18:51:14Z to 19:57:29Z: success; eight grammars 600 s, no crash, reproduced hang or memory cut; two markdown_inline hangs not reproduced alone (E7h review 2 later reproduced the class on the laptop, #301).
 
-#### #283, thirteen occurrences
+#### #283, fourteen occurrences
 
 #283 is `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import` on a macOS leg with all three fragments (`pump timeout waiting for the accept and its import`, `popup_rows=0 anchor=None`, `9 passed; 1 failed`). Each occurrence, one run and job:
 
-Tally (283): 13 items in the list below.
+Tally (283): 14 items in the list below.
 
 - run 35437135435 at `361bb3b` (`main` after E7b), job 105881622751, `Test (macos-latest / lua54)`;
 - run 35455311600 at `1847805` (PR #284), job 105929452757, `Test (macos-latest / luajit)`;
@@ -2177,9 +2177,10 @@ Tally (283): 13 items in the list below.
 - run 37161567765 at `c540a68` (PR #309), job 111315929548, `Test (macos-latest / luajit)` (recorded at E7i's fix round 1, below);
 - run 37203840409 at `db697a2` (PR #309), job 111440850223, `Test (macos-latest / lua54)` (recorded at E7i's fix round 2, below);
 - run 37451551936 at `d2de579` (PR #315), job 112229134676, `Test (macos-latest / lua54)` (recorded at E8's fix round 2, below);
-- run 37451551936 at `d2de579` (PR #315), job 112229134735, `Test (macos-latest / luajit)`, the same run's other macOS leg: the first run with both red on it (recorded at E8's fix round 2, below).
+- run 37451551936 at `d2de579` (PR #315), job 112229134735, `Test (macos-latest / luajit)`, the same run's other macOS leg: the first run with both red on it (recorded at E8's fix round 2, below);
+- run 37451551936 at `d2de579` (PR #315), **attempt 2**, job 112253935087, `Test (macos-latest / luajit)`, the same merge as attempt 1 rerun on the owner's instruction: red on the row again on this leg, while the lua54 leg passed it (recorded at E8's fix round 3, below).
 
-#283 is at thirteen (eleven until E8's fix round 2, ten until E7i's fix round 2); the list above is the one the count is read from.
+#283 is at fourteen (thirteen until E8's fix round 3, eleven until E8's fix round 2, ten until E7i's fix round 2); the list above is the one the count is read from.
 
 #### #291, fourteen occurrences, all local
 
@@ -3249,7 +3250,9 @@ issue.
 
 #### PR #315's runs at `d2de579`
 
-Each attempt 1 of 1.
+Each attempt 1 of 1 when read here. `CI` 37451551936's two failed macOS legs
+were rerun at E8's fix round 3 on the owner's instruction; this entry is its
+attempt 1, and attempt 2 is recorded at that round, below.
 
 Tally (pr315-fix2-ci-d2de579): 19 = 16 + 2 + 1.
 
@@ -3278,6 +3281,52 @@ round's), #283 to thirteen and #316 to two; #311's list of runs reads at
 eighteen; #291 is not sampled, #311 holding its row, and #313 stays at two; #317
 is a product defect and not an intermittent (above). Every other count above
 stands.
+
+
+### E8's fix round 3: `CI` 37451551936 at `d2de579`, attempt 2, #283's fourteenth and #319's first
+
+Read 2026-10-06 at E8's fix round 3 from the jobs endpoint by `conclusion` and
+from the two rerun legs' logs. The round changed no code and ran no gate (its
+first item was written early, for the owner's ruling), so its only run is the
+owner's instructed rerun of the head run's two failed macOS legs. The rerun
+checked out the merge attempt 1 tested: all four macOS logs, both attempts on
+both legs, read `HEAD is now at b545c81 Merge d2de579… into 8b25ed8…`.
+
+Tally (pr315-fix3-ci-d2de579-attempt2): 19 = 16 + 2 + 1.
+
+- `CI` 37451551936 attempt 2, rerun at 11:50:43Z and completed at 12:24:28Z:
+  `failure`. Both macOS test legs ran again and both failed; the other
+  seventeen keep attempt 1's conclusions, sixteen success listed under new ids
+  with attempt 1's times and `Docs consistency` 112253936735 skipped.
+  - `Test (macos-latest / luajit)` 112253935087: **#283's fourteenth** (its
+    list above), all three fragments, its only failure against 187 `test
+    result: ok`, 188 `running` lines paired with 188 result lines. The same
+    leg's attempt 1, 112229134735, was #283's thirteenth: one commit red on
+    the row twice on this leg.
+  - `Test (macos-latest / lua54)` 112253934977: #283's row passed, which is
+    non-reproduction and nothing more (attempt 1's 112229134676 was its
+    twelfth). The leg failed instead on
+    `e7c_indicator_acceptance::e7c_fix_3_a_request_answered_under_the_threshold_never_appears`,
+    `and never reached the indicator: [(52, "⋯1 parse rust …")]` and
+    `test result: FAILED. 4 passed; 1 failed; 0 ignored`, its only failure
+    against 187 `test result: ok`, 188 `running` lines paired with 188 result
+    lines. No row here matches it: #305 is the same suite's typing row with its
+    own fragment, though its indicator also showed `⋯1 parse rust`. Filed as
+    **#319**, first occurrence, and not widened into #305. The row passed on
+    both legs in attempt 1 and on luajit in attempt 2. The branch's diff touches
+    the hover command the row invokes and not the parse path or the indicator;
+    that is read, not a demonstration.
+  - #313's row passed on both legs, non-reproduction and nothing more.
+    `WouldBlock` and `did not become ready` appear zero times in either log.
+    The two E8 real-server suites again report their rust-analyzer rows `ok`,
+    though off Linux each returns before starting a server while #317's skip
+    stands: review 1's suite 9 passed in 0.01 s, review 2's 6 passed and 2
+    ignored in 8.14 s (lua54) and 3.93 s (luajit), as in attempt 1.
+- `Grammar fuzz` 37451551922 was not rerun: attempt 1 of 1, green (above).
+
+Not rerun again, on the owner's instruction. So, at E8's fix round 3: #283
+moves to fourteen and #319 is at one; #313 stays at two; R7, #291, #311 and
+#316 are not sampled, no gate having run. Every other count above stands.
 
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
