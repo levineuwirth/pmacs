@@ -611,40 +611,67 @@ fn e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line() {
 
 /// A request answered under the threshold never appears: a hover the
 /// fake answers at once, the frames read for 600 ms, the request in
-/// the completed ring.
+/// the completed ring, answered under the threshold, and no frame's
+/// indicator naming it.
+///
+/// The subject is the hover, so a reading counts only when it names
+/// the hover, as the job counts are filtered by purpose. Any other job
+/// past the threshold is the indicator working: since E7i a buffer's
+/// parse waits on a worker process, and on a loaded runner one was on
+/// the indicator in this window (`⋯1 parse rust`, #319). The indicator
+/// names only the oldest job past the threshold, so a hover past it
+/// behind an older job would be counted and not named; the hover's own
+/// time in flight, read from the ring, is asserted under the threshold
+/// for that case.
 #[test]
 fn e7c_fix_3_a_request_answered_under_the_threshold_never_appears() {
     let mut f = open_with_fake("hover", "");
-    let before: usize = eval(
-        &f.s,
-        "local n = 0
+    let hovers = "local n, slowest = 0, 0
          for _, job in ipairs(pmacs.workers.snapshot().completed) do
-           if job.purpose:find('textDocument/hover', 1, true) then n = n + 1 end
+           if job.purpose:find('textDocument/hover', 1, true) then
+             n = n + 1
+             if job.duration_ms > slowest then slowest = job.duration_ms end
+           end
          end
-         return n",
-    );
+         return n, slowest";
+    let (before, _): (usize, u64) = eval(&f.s, hovers);
     exec(&f.s, "pmacs.editor.goto_byte(3)");
     let t0 = Instant::now();
     exec(&f.s, "pmacs.command.invoke('lsp.hover')");
     let mut seen = Vec::new();
+    let mut others = Vec::new();
     while t0.elapsed() < Duration::from_millis(600) {
         tick(&mut f.s);
         let fr = read_frame(&mut f, t0);
         if let Some(a) = activity_of(&fr) {
-            seen.push((fr.at_ms, a));
+            if a.contains("textDocument/hover") {
+                seen.push((fr.at_ms, a));
+            } else {
+                others.push((fr.at_ms, a));
+            }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let after: usize = eval(
+    let (after, slowest): (usize, u64) = eval(&f.s, hovers);
+    let threshold: u64 = eval(
         &f.s,
-        "local n = 0
-         for _, job in ipairs(pmacs.workers.snapshot().completed) do
-           if job.purpose:find('textDocument/hover', 1, true) then n = n + 1 end
-         end
-         return n",
+        "return pmacs.config.get('ui.activity-indicator-threshold-ms')",
     );
+    if !others.is_empty() {
+        eprintln!("INDICATOR other jobs past the threshold in the window: {others:?}");
+    }
     assert!(after > before, "the hover went out and was answered");
-    assert!(seen.is_empty(), "and never reached the indicator: {seen:?}");
+    assert!(
+        seen.is_empty(),
+        "and never reached the indicator: {seen:?}; the slowest hover was {slowest} ms in \
+         flight against the {threshold} ms threshold; other jobs on it: {others:?}"
+    );
+    assert!(
+        slowest < threshold,
+        "the hover was answered under the threshold: {slowest} ms in flight against \
+         {threshold} ms, so this run is not the row's case; other jobs on the indicator: \
+         {others:?}"
+    );
 }
 
 /// A slow request appears, as its method, past the threshold, moving
