@@ -53,6 +53,7 @@ fn on_path(name: &str) -> bool {
 /// As `tests/e8_review1_real_server_probes.rs`: rust-analyzer on PATH,
 /// and Linux unless `PMACS_REQUIRE_LSP` is armed, while #317 (a
 /// symlinked document URI, which macOS's `$TMPDIR` is) stands.
+#[track_caller]
 fn rust_analyzer_provisioned() -> bool {
     if !on_path("rust-analyzer") {
         support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
@@ -60,6 +61,9 @@ fn rust_analyzer_provisioned() -> bool {
     }
     let armed = std::env::var_os("PMACS_REQUIRE_LSP").is_some_and(|v| !v.is_empty());
     if !cfg!(target_os = "linux") && !armed {
+        support::record_skip(
+            "`rust-analyzer` off Linux while #317 stands and PMACS_REQUIRE_LSP unset",
+        );
         eprintln!("rust-analyzer rows skip off Linux while #317 (a symlinked document URI) stands");
         return false;
     }
