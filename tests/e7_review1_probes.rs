@@ -808,6 +808,11 @@ mod gpu_route {
         }
     }
 
+    /// Whether the daemon has written anything to `sink` yet.
+    fn sink_written(sink: &std::path::Path) -> bool {
+        std::fs::metadata(sink).is_ok_and(|m| m.len() > 0)
+    }
+
     /// The GPU's user types `printl` as six optimistic ops, the popup
     /// opens on the fake's answer (every item carrying an import at
     /// line 3), one more letter goes the same way with the popup still
@@ -816,15 +821,50 @@ mod gpu_route {
     /// replace and the import on its own line, carried across the
     /// letter and the replace, with the daemon's caret at the end of
     /// the completed word.
+    ///
+    /// Every wait is on the unit the next step needs, read from the
+    /// daemon (#283). This replica is never sent the popup, which is
+    /// emitted only to the frontend whose window owns the session, so
+    /// the daemon's own Lua writes two sinks the probe reads: one when
+    /// the server is initialized, before which a completion request is
+    /// refused and the letters open nothing, and one each time
+    /// `popup_show` leaves the popup visible. Until #283 the probe gave
+    /// the popup a fixed 1.5 s and then typed; on the macOS legs the
+    /// window closed first fourteen times, and RET inserted a newline.
+    /// After RET the probe waits for the daemon's caret to leave the
+    /// end of the typed word, which it reports only after the edits
+    /// that moved it (E6d.3), and then asserts the text and the caret,
+    /// so a wrong accept fails as itself and not as a timeout.
     #[test]
     fn e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import() {
         let fixture_dir = tempfile::TempDir::new().expect("fixture tempdir");
         let fixture = fixture_dir.path().join("a.rs");
+        let ready_sink = fixture_dir.path().join("server-initialized");
+        let popup_sink = fixture_dir.path().join("popup-shown");
         let body = "fn main() {\n    \n}\n// tail\n";
         std::fs::write(&fixture, body).expect("write a.rs");
         let fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp");
         let init_lua = format!(
-            "pmacs.lsp.config = {{}}\npmacs.lsp.config.rust = {{\n  command = {fake:?},\n  env = {{ PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT = '3:0:// imported\\\\n' }},\n}}\npmacs.buffer.find_or_open({fixture:?})\nfor _, b in ipairs(pmacs.buffer.list()) do\n  if b:name() == '*scratch*' then pcall(pmacs.buffer.kill, b) end\nend\n"
+            "pmacs.lsp.config = {{}}\npmacs.lsp.config.rust = {{\n  command = {fake:?},\n  env = {{ PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT = '3:0:// imported\\\\n' }},\n}}\npmacs.buffer.find_or_open({fixture:?})\nfor _, b in ipairs(pmacs.buffer.list()) do\n  if b:name() == '*scratch*' then pcall(pmacs.buffer.kill, b) end\nend\n\
+             local ready = false\n\
+             pmacs.hook.add('process.after-tick', function()\n\
+               if ready then return end\n\
+               for _, s in ipairs(pmacs.lsp.list()) do\n\
+                 if s.language_id == 'rust' and s.state and s.state.kind == 'initialized' then\n\
+                   ready = true\n\
+                   local f = assert(io.open({ready_sink:?}, 'w')); f:write('initialized\\n'); f:close()\n\
+                   return\n\
+                 end\n\
+               end\n\
+             end)\n\
+             local show = pmacs.completion.popup_show\n\
+             pmacs.completion.popup_show = function(spec)\n\
+               local shown = show(spec)\n\
+               if pmacs.completion.popup_visible() then\n\
+                 local f = assert(io.open({popup_sink:?}, 'a')); f:write(#spec.candidates, '\\n'); f:close()\n\
+               end\n\
+               return shown\n\
+             end\n"
         );
         let daemon = TestDaemon::spawn_with_env_and_init(
             &[
@@ -840,53 +880,55 @@ mod gpu_route {
             "positive control: the daemon holds the fixture"
         );
 
+        // A completion request before the server has initialized is
+        // refused, and the letters typed then open nothing.
+        pump_until(
+            &mut source,
+            Duration::from_secs(30),
+            "the rust server initialized at the daemon",
+            |_| sink_written(&ready_sink),
+        );
         let at = "fn main() {\n    ".len();
         for (i, ch) in "printl".chars().enumerate() {
             send_optimistic_insert(&mut source, at + i, &ch.to_string());
         }
-        // Let the fake answer and the daemon publish; a replica session
-        // may or may not be sent the popup message, so the wait is a
-        // window and the popup's state is reported, not required.
-        let settle = Instant::now() + Duration::from_millis(1500);
         pump_until(
             &mut source,
-            Duration::from_secs(3),
-            "the settle window",
-            |_| Instant::now() >= settle,
+            Duration::from_secs(30),
+            "the popup open at the daemon",
+            |_| sink_written(&popup_sink),
         );
-        let popup_seen = (source.popup_rows, source.popup_anchor);
         // One more letter with the popup open: the buffer has changed
-        // since the answer the popup shows.
+        // since the answer the popup shows. The daemon reports the
+        // caret after the letter once it has applied it.
         send_optimistic_insert(&mut source, at + 6, "n");
-        pump_until(
-            &mut source,
-            Duration::from_secs(5),
-            "the letter mirrored",
-            |r| r.state.materialize_string().contains("println"),
-        );
-        send_key(&mut source, Key::Enter);
-        let expected = "fn main() {\n    println!\n}\n// imported\n// tail\n";
-        let newline_instead = "fn main() {\n    println\n\n}\n// tail\n";
+        let after_letter = "fn main() {\n    println".len() as u64;
         pump_until(
             &mut source,
             Duration::from_secs(10),
-            "the accept and its import",
-            |r| {
-                let t = r.state.materialize_string();
-                t == expected || t == newline_instead
-            },
+            "the daemon's caret after the letter",
+            |r| r.cursor == Some(after_letter),
         );
+        send_key(&mut source, Key::Enter);
+        pump_until(
+            &mut source,
+            Duration::from_secs(10),
+            "the daemon's caret to move on RET",
+            |r| r.cursor.is_some_and(|c| c != after_letter),
+        );
+        let expected = "fn main() {\n    println!\n}\n// imported\n// tail\n";
         assert_eq!(
             source.state.materialize_string(),
             expected,
-            "RET on the GPU route after typing since the request; popup (rows, anchor) seen \
-             by this replica before the letter: {popup_seen:?}"
+            "RET on the GPU route after typing since the request, with the popup open at the \
+             daemon: the accept's replace and the import carried across the letter; popups \
+             shown, by row count: {:?}",
+            std::fs::read_to_string(&popup_sink).unwrap_or_default()
         );
-        pump_until(
-            &mut source,
-            Duration::from_secs(5),
-            "the caret after the word",
-            |r| r.cursor == Some("fn main() {\n    println!".len() as u64),
+        assert_eq!(
+            source.cursor,
+            Some("fn main() {\n    println!".len() as u64),
+            "the daemon's caret at the end of the completed word"
         );
     }
 }

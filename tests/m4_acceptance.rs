@@ -1330,6 +1330,52 @@ fn m4_5_basedpyright_initializes_and_negotiates_encoding() {
     let _ = mgr.borrow_mut().stop(sid);
 }
 
+/// A row that returns without running is recorded where a CI leg's log
+/// can say so. libtest reports the basedpyright row above `ok` when the
+/// server is absent, which on CI is every leg; run in this binary as a
+/// leg runs it, with the server off `PATH` and `PMACS_SKIP_LOG` set, it
+/// must still read `ok` and must have written one line naming itself,
+/// its call site, the tool and the variable (`support::record_skip`).
+/// `PATH` is an empty directory, so the child cannot find the server on
+/// any machine and spawns nothing.
+#[test]
+fn m4_5_a_row_skipped_for_its_tool_is_recorded_for_the_leg_log() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty = dir.path().join("empty-path");
+    std::fs::create_dir(&empty).expect("empty PATH directory");
+    let log = dir.path().join("skipped-rows.txt");
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "m4_5_basedpyright_initializes_and_negotiates_encoding",
+            "--test-threads=1",
+        ])
+        .env("PATH", &empty)
+        .env("PMACS_SKIP_LOG", &log)
+        .env_remove("PMACS_REQUIRE_PYRIGHT")
+        .output()
+        .expect("run the row in this binary");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success()
+            && stdout.contains("running 1 test")
+            && stdout.contains("test m4_5_basedpyright_initializes_and_negotiates_encoding ... ok"),
+        "the row read ok without its server, as on every leg; stdout:\n{stdout}"
+    );
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+    let lines: Vec<&str> = recorded.lines().collect();
+    assert_eq!(lines.len(), 1, "one line for the one row: {recorded:?}");
+    assert!(
+        lines[0].starts_with(
+            "m4_acceptance::m4_5_basedpyright_initializes_and_negotiates_encoding \
+             (tests/m4_acceptance.rs:"
+        ) && lines[0]
+            .ends_with("): `basedpyright-langserver` not on PATH and PMACS_REQUIRE_PYRIGHT unset"),
+        "the suite, the row, its call site and why: {:?}",
+        lines[0]
+    );
+}
+
 /// Shared body for the PATH-gated real-server smoke tests: spawn,
 /// reach `Initialized`, and assert the server negotiated a
 /// `positionEncoding` pmacs can actually encode (absent ⇒ pmacs

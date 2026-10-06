@@ -76,6 +76,47 @@ fn armed(var: &str) -> bool {
     std::env::var_os(var).is_some_and(|v| !v.is_empty())
 }
 
+/// Record that the calling row is returning without running, in the
+/// file `PMACS_SKIP_LOG` names, one line per skip: the suite and the
+/// row, the call site, and why.
+///
+/// libtest reports a row whose body returns as `ok` (`calc_result`),
+/// and shows a passing row's output only under `--nocapture` or
+/// `--show-output`, so the notice printed beside the return reaches no
+/// log. A CI leg sets the variable and prints the file after its tests,
+/// beside its arming report (`scripts/gate --print-arming-env`), so the
+/// leg's log says which rows did not run and why. Unset, as it is
+/// locally, this records nothing. A failed write is not the row's
+/// failure, so it is reported on the notice and not asserted.
+#[track_caller]
+pub fn record_skip(why: &str) {
+    let Some(path) = std::env::var_os("PMACS_SKIP_LOG").filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let caller = std::panic::Location::caller();
+    let row = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed thread>")
+        .to_owned();
+    let line = format!(
+        "{}::{row} ({}:{}): {why}\n",
+        env!("CARGO_CRATE_NAME"),
+        caller.file(),
+        caller.line()
+    );
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    if let Err(e) = written {
+        eprintln!(
+            "could not record this skip in {}: {e}",
+            std::path::Path::new(&path).display()
+        );
+    }
+}
+
 #[track_caller]
 pub fn skip_or_fail(tool: &str, require_var: &str) {
     assert!(
@@ -85,6 +126,7 @@ pub fn skip_or_fail(tool: &str, require_var: &str) {
          somewhere not on PATH. This is a hard failure precisely so \
          the test cannot report green without executing."
     );
+    record_skip(&format!("`{tool}` not on PATH and {require_var} unset"));
     eprintln!("{tool} not on PATH; skipping (set {require_var} to make this fatal)");
 }
 
@@ -101,6 +143,9 @@ pub fn skip_or_fail_overridable(tool: &str, require_var: &str, override_var: &st
          is unset or points at nothing. The CI step that installs it did not \
          run, or installed it somewhere not on PATH."
     );
+    record_skip(&format!(
+        "`{tool}` not on PATH, {override_var} unset or naming nothing, and {require_var} unset"
+    ));
     eprintln!(
         "skipping: {tool} not on PATH (set {override_var} to override, \
          or {require_var} to make this fatal)"

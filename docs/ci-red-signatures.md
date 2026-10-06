@@ -2159,11 +2159,11 @@ Tally (pr297-fuzz): 4 items in the list below.
 - 36653672430 at `0a85d18`, 01:08:20Z to 02:02:55Z: success; six grammars 600 s, no crash or reproduced hang.
 - 36761534142 at `17c3c8f`, 18:51:14Z to 19:57:29Z: success; eight grammars 600 s, no crash, reproduced hang or memory cut; two markdown_inline hangs not reproduced alone (E7h review 2 later reproduced the class on the laptop, #301).
 
-#### #283, eleven occurrences
+#### #283, fourteen occurrences
 
 #283 is `gpu_route::e7_review1_gpu_route_accept_after_a_letter_typed_since_the_request_carries_the_import` on a macOS leg with all three fragments (`pump timeout waiting for the accept and its import`, `popup_rows=0 anchor=None`, `9 passed; 1 failed`). Each occurrence, one run and job:
 
-Tally (283): 11 items in the list below.
+Tally (283): 14 items in the list below.
 
 - run 35437135435 at `361bb3b` (`main` after E7b), job 105881622751, `Test (macos-latest / lua54)`;
 - run 35455311600 at `1847805` (PR #284), job 105929452757, `Test (macos-latest / luajit)`;
@@ -2175,15 +2175,18 @@ Tally (283): 11 items in the list below.
 - run 36942304451 at `b9d00fe` (PR #297), job 110636448104, `Test (macos-latest / lua54)` (recorded at E7h's fix round 3, below);
 - run 37080922545 at `2d4c848` (PR #309), job 111081065656, `Test (macos-latest / lua54)` (recorded at C7i, below);
 - run 37161567765 at `c540a68` (PR #309), job 111315929548, `Test (macos-latest / luajit)` (recorded at E7i's fix round 1, below);
-- run 37203840409 at `db697a2` (PR #309), job 111440850223, `Test (macos-latest / lua54)` (recorded at E7i's fix round 2, below).
+- run 37203840409 at `db697a2` (PR #309), job 111440850223, `Test (macos-latest / lua54)` (recorded at E7i's fix round 2, below);
+- run 37451551936 at `d2de579` (PR #315), job 112229134676, `Test (macos-latest / lua54)` (recorded at E8's fix round 2, below);
+- run 37451551936 at `d2de579` (PR #315), job 112229134735, `Test (macos-latest / luajit)`, the same run's other macOS leg: the first run with both red on it (recorded at E8's fix round 2, below);
+- run 37451551936 at `d2de579` (PR #315), **attempt 2**, job 112253935087, `Test (macos-latest / luajit)`, the same merge as attempt 1 rerun on the owner's instruction: red on the row again on this leg, while the lua54 leg passed it (recorded at E8's fix round 3, below).
 
-#283 is at eleven (ten until E7i's fix round 2); the list above is the one the count is read from.
+#283 is at fourteen (thirteen until E8's fix round 3, eleven until E8's fix round 2, ten until E7i's fix round 2); the list above is the one the count is read from.
 
-#### #291, eleven occurrences, all local
+#### #291, fourteen occurrences, all local
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
 
-Tally (291): 11 items in the list below.
+Tally (291): 14 items in the list below.
 
 - 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
 - 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
@@ -2196,8 +2199,11 @@ Tally (291): 11 items in the list below.
 - 2026-10-03, `scripts/gate` on `e7i/parse-containment` at `45186c9`, `20261003T150924Z-395472`, the owner gaming beside it (load 6 to 78), 129.81 s (recorded at the E7i build, below);
 - 2026-10-04, `scripts/gate` on `e7i/parse-containment` at `12c3a6c`, `20261003T230816Z-2486117`, 125.43 s (recorded at E7i's fix round 1, below);
 - 2026-10-04, `scripts/gate` on `e7i/parse-containment` at `b1c36d7`, `20261004T170334Z-438134`, 126.00 s, with #311's condition holding on the laptop (recorded at E7i's fix round 3, below).
+- 2026-10-04, `scripts/gate --protocol` on `e8/hover-and-signature` at `4fc5599`, `20261004T202450Z-1217913`, step `06-sweep`, 126.55 s, the trace reaching `LSP:ready·setting` and never `processi`; the same gate's `07-sweep-luajit` failed the row with #311's fragments instead (recorded at E8's checkpoint, below).
+- 2026-10-05, `scripts/gate --protocol` on `e8/hover-and-signature` at `1ace8b3` (the tip), `20261004T234355Z-3389009`, step `06-sweep`, 126.71 s; that gate's `07-sweep-luajit` failed the row with #311's fragments (recorded at E8's checkpoint, below).
+- 2026-10-05, `scripts/gate --protocol` at `1ace8b3`, E8 review 1's gate `20261005T081704Z-3789356`, step `07-sweep-luajit`, 126.03 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments (recorded at E8's fix round 1, below).
 
-#291 is at eleven; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+#291 is at fourteen; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
 #### #298, first sample, local
 
@@ -2770,19 +2776,47 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 3 items in the list below.
+Tally (311-runs): 20 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
 - `20261004T145947Z-40985` at `db697a2` (E7i review round 3's gate, the second
-  occurrence recorded, below).
+  occurrence recorded, below);
+- `20261004T202450Z-1217913` at `4fc5599` (E8.1's gate; `07-sweep-luajit` only,
+  its `06-sweep` failing the row with #291's fragments instead);
+- `20261004T210335Z-1636352` at `ae160fa` (E8.2's gate, both sweeps);
+- `20261004T212802Z-1897687` at `f4b7d5c` (E8.3's first gate, stopped by its
+  author after `06-sweep`, the one sweep read);
+- `20261004T215311Z-2163018` at `a2e18c5` (E8.3's gate, both sweeps);
+- `20261004T222129Z-2395408` at `8ce4b0c` (E8.4's gate, both sweeps);
+- `20261004T225031Z-2642055` at `a8104f4` (E8.5's gate, both sweeps);
+- `20261004T231827Z-3005940` at `35e74fa` (E8's first tip gate, both sweeps);
+- `20261004T234355Z-3389009` at `1ace8b3` (E8's tip gate; `07-sweep-luajit` only,
+  its `06-sweep` failing the row with #291's fragments instead);
+- `20261005T081704Z-3789356` at `1ace8b3` (E8 review 1's gate; `06-sweep` only,
+  its `07-sweep-luajit` failing the row with #291's fragments instead);
+- `20261005T182116Z-597588` at `44dfb24` (E8 fix round 1's gate, both sweeps);
+- `20261005T193708Z-986096` at `7505eea` (the same round's gate at its second head,
+  both sweeps);
+- `20261005T213945Z-1605050` at `57a980e` (the same round's gate at its third head,
+  both sweeps);
+- `20261005T224931Z-2046695` at `57a980e` (E8 review 2's gate, both sweeps);
+- `20261006T104137Z-2974993` at `d2de579` (E8 fix round 2's first gate, ended by the
+  machine's restart in `07-sweep-luajit`; `06-sweep` read whole, the partial luajit
+  sweep red on the row too);
+- `20261006T111111Z-85507` at `d2de579` (the same round's gate, both sweeps).
+- `20261006T150249Z-1162130` at `e23510a` (PR #321's tip gate, its one sweep, `05-sweep`).
+- `20261006T164749Z-1441387` at `ab06caa` (PR #321's second head's gate, `05-sweep`).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
-list counts is gate runs read, three of them, and no occurrence count or rate is
-claimed for it --- unlike every intermittent row in this file, where a count is the
-whole point. Fix round 2's section below recorded its first two runs together as
-the sample that filed it.
+list counts is gate runs read, and no occurrence count or rate is claimed for it
+--- unlike every intermittent row in this file, where a count is the whole point.
+Fix round 2's section below recorded its first two runs together as the sample
+that filed it. E8's gates failed the row in every sweep they ran, with #311's
+fragments in all but two: E8.1's `06-sweep` and the tip's carried #291's instead
+(store empty, the trace never reaching `processi`), with the condition holding, as
+E7i's fix round 3 also saw. Which signature the row fails with is not this row's to claim.
 
 So, at E7i's fix round 2: #283 moves to eleven and R7 to twenty-three; #311
 is recorded and deterministic, its runs listed in its own block (three read by
@@ -2973,6 +3007,535 @@ Attempt 1's one red is **#313's first sample**, filed: `r6_every_spawned_fallbac
 **Attempt 2 is non-reproduction and nothing more**, and a rerun re-executes the same commit, so it is recorded beside attempt 1 rather than in place of it. #313 stays open on one sample.
 
 `main`'s tip after the merge is `60bfee7`, two registry commits above it, whose own `CI` 37223720891 is green at 15 = 6 + 9 skipped and `Grammar fuzz` 37223720906 green --- the registry-push shape described under `a3ea968` above.
+
+### E8's checkpoint: `0736378`'s runs, the phase's local samples, and PR #315's runs
+
+Read 2026-10-05 at C8 from the jobs endpoint by `conclusion` and from the gate
+logs. E8 is wire-bearing (v26) and ran `scripts/gate --protocol` at every row's
+commit.
+
+`0736378`, `main`'s tip and this branch's base, ran `CI` 37229601069 green, 15 = 6
++ 9 skipped (a registry push), and `Grammar fuzz` 37229601229 green on both legs.
+The base control is `9780407`'s, recorded in the section above: attempt 1 red on
+#313's first sample, attempt 2 green, which is non-reproduction and nothing more.
+
+Local samples, each in its own block above: **#291's twelfth and thirteenth**
+(E8.1's gate and the tip's, `06-sweep`), **R7's twenty-fourth and twenty-fifth** (E8.1's and E8.5's gates,
+`07-sweep-luajit`), and #311 in every E8 gate (its list). One red that was no
+intermittent: E8.1's `07-sweep-luajit` failed both rows of
+`e7b_gpu_chord_acceptance` at the attach (status 4, a daemon without `crdt`
+advertising no semantic render), deterministically, because that suite alone of
+the ten that drive the GPU probe carried no `cfg(feature = "crdt")`; no `--protocol`
+gate had run since E7b added it. Fixed on the branch (`427489d`). Two gate runs are
+no evidence: `20261004T201733Z-1108366` swept a mutated build its author had
+restored with `cp -p`, keeping the file's old mtime, and was stopped; and
+`20261004T212802Z-1897687` was stopped after `06-sweep` showed a count pin of the
+branch's own (`theme_faces_acceptance`, fixed on the branch).
+
+PR #315's runs at its head `1ace8b3`, each attempt 1 of 1:
+
+Tally (pr315-ci): 19 = 17 + 1 + 1.
+
+- `CI` 37244883640: `cancelled`, seventeen success, `Docs consistency` skipped, and
+  `Test (macos-latest / lua54)` (111560721445) cut by its own 45-minute timeout.
+  That is **#313's second sample**, the first's shape: `tests/lean4_server_acceptance.rs`
+  began at 00:00:27Z and its other rows passed by 00:00:33.9Z, then
+  `r6_every_spawned_fallback_server_is_bounded has been running for over 60 seconds`
+  at 00:01:32Z and nothing until `The operation was canceled.` at 00:30:40Z; 5,004
+  log lines, 103 `test result: ok`, no `FAILED`. Commented on #313, not rerun. #313
+  is at two.
+- `Grammar fuzz` 37244883728: green on both legs.
+
+### E8's review round 1 and fix round 1: #291's fourteenth, #316's first, R7 at twenty-seven, and PR #315's runs at three heads
+
+Read 2026-10-05 at E8's fix round 1 from the gate logs and from the jobs
+endpoint by `conclusion`. Review round 1 ran no CI of its own: its probes are on
+`e8/review-1` at `d15d4b5` with no pull request, and the fix round committed
+them to the branch as they were left.
+
+#### `scripts/gate --protocol` `20261005T081704Z-3789356` at `1ace8b3` (review 1's gate)
+
+Six of eight. `06-sweep`: 192 targets, 5,266 passed, 1 failed, 62 ignored, the
+one #311's (its list above). `07-sweep-luajit`: 192 targets, 4,861 passed, 2
+failed, 48 ignored, the two **#291's fourteenth** (its list above: `store []`,
+the trace reaching `LSP:ready·setting` and never `processi`) and **#316's first
+sample**, below. No daemon survived. **R7 passed its row in both sweeps**
+(`managed_retry_survives_transients_and_uses_the_successful_stream ... ok`, and
+no `transient sequence must attach` in either log), so this gate adds no R7
+occurrence and R7 stays at twenty-five. The logs are copied to
+`~/build/e8-review1/gate-logs-20261005T081704Z-3789356/`.
+
+#### #316, first sample, local
+
+`-p pmacs --test e7i_review3_probes
+e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`,
+in the `07-sweep-luajit` stage of the gate above, with the fragments `kill 1:
+nothing held the switch's follow-up parse, which started a worker at once and
+installed`, a report line holding `tree=true`, `unit=pid_`, `death=killed` and a
+mode line still reading `parse:killed`, and `test result: FAILED. 10 passed; 1
+failed; 0 ignored`. The panic site `tests/e7i_review3_probes.rs:853` moves with
+the file and is not a fragment. The same row passed in the same run's
+`06-sweep`. No row named this selector, so the review filed it as **#316**.
+
+Its candidate mechanism, from the issue and read from the code rather than
+measured: the row waits on the worker slot's report, which shows the follow-up
+parse installed, while the mode-line mark is cleared by the runtime's Lua
+settle a tick later. E8 adds a call at the head of `paint_frame` and a
+`process.after-tick` subscriber, so the branch is not argued innocent. #316 is
+at one: the row passed in both sweeps of E8's fix round 1's gate (below),
+which is non-reproduction and nothing more.
+
+#### `scripts/gate --protocol` at `44dfb24`, `7505eea` and `57a980e` (fix round 1's gates)
+
+`20261005T182116Z-597588` at the round's first head `44dfb24`, six of eight,
+the tree untouched for its run. `06-sweep`: 194 targets (review 1's two suites added), 5,292 passed, 1 failed,
+62 ignored. `07-sweep-luajit`: 194 targets, 4,873 passed, 1 failed, 48 ignored.
+Both reds are **#311** (its list above: the store holding `Could not find module
+‘Prelude’`, the trace reaching `processi`), so #291 is not sampled here. R7's,
+#316's, #312's and #313's rows passed in both sweeps: non-reproduction and
+nothing more. No daemon survived.
+
+The round's second head, `7505eea`, changed three test files after the first
+head's CI (below); its gate, `20261005T193708Z-986096`, is six of eight too. `06-sweep`: 194 targets, 5,291
+passed, 2 failed, 62 ignored, the two #311 and **R7's twenty-sixth** (its list
+above). `07-sweep-luajit`: 194 targets, 4,873 passed, 1 failed, 48 ignored, the
+one #311. #316's row passed in both sweeps. No daemon survived.
+
+The third head, `57a980e`, changed one test file after `7505eea`'s CI (below):
+`20261005T213945Z-1605050`, six of eight. `06-sweep`: 194 targets, 5,292 passed,
+1 failed, 62 ignored, the one #311. `07-sweep-luajit`: 194 targets, 4,872 passed,
+2 failed, 48 ignored, the two #311 and **R7's twenty-seventh** (its list above).
+#316's row passed in both sweeps. No daemon survived. The three gates' logs are
+copied to `~/build/e8-fix1/gate-logs/`.
+
+#### PR #315's runs at `44dfb24`, `7505eea` and `57a980e`
+
+At the round's first head `44dfb24`, each attempt 1 of 1:
+
+Tally (pr315-fix1-ci-44dfb24): 19 = 13 + 5 + 1.
+
+- `CI` 37358723033: `failure`, thirteen success, five failed and
+  `Docs consistency` skipped. The five are test legs, and every red is a row
+  this round had just committed, none a registry row:
+  - `review1_switching_the_windows_buffer_closes_the_popup`
+    (`tests/e8_review1_probes.rs`, "the window switched buffers") on `Test (crdt)`
+    111927843329, both macOS legs (111927843820, 111927843263) and
+    `ubuntu luajit` 111927843611: review 1's row read the switch's snapshot from a
+    fixed 2 s window, which those runners did not meet;
+  - every rust-analyzer row of `tests/e8_review1_real_server_probes.rs` on both
+    macOS legs, the server initializing (`positionEncoding "utf-8"`) and answering
+    no hover or signature help in 120 s: filed as **#317**;
+  - `fr1_c_c_h_opens_the_last_popup_after_a_motion_closed_it` on `ubuntu luajit`
+    and `luajit, no crdt` (111927843487), which waited out one `C-c H` that opened
+    neither `*lsp-help*` nor said "no hover info" within 60 s.
+
+  All three are the round's own. `7505eea` fixed two (the `C-c H` row presses
+  again; the rust-analyzer rows run on Linux, #317) and made the switch and kill
+  rows wait for the snapshot, which did not fix the switch row (below); `57a980e`
+  did. `ubuntu lua54` 111927843352 passed all
+  186 targets. Each leg's `running` lines pair with its result lines. #313's row
+  passed on both macOS legs, which is non-reproduction and nothing more.
+- `Grammar fuzz` 37358723025: green on both legs (111927636475, 111927636793), the
+  skip path for a branch that changes no grammar.
+
+At the head `7505eea`, which changed three test files after those runs, `CI`
+37364522422 and `Grammar fuzz` 37364522424 ran nothing of the code in their first
+two attempts. Every job that was not skipped was `cancelled` with the annotation
+"The job was not acquired by Runner of type hosted even after multiple attempts",
+during GitHub's incident of that evening ("delays in assigning GitHub-hosted
+runners"); the skipped jobs are those that wait on `Changed paths`.
+
+Tally (pr315-fix1-ci-7505eea-attempt1): 15 = 0 + 5 + 10.
+
+Tally (pr315-fix1-ci-7505eea-attempt2): 15 = 1 + 4 + 10.
+
+Each reads success, cancelled and skipped: attempt 1 cancelled `Changed paths`,
+`Commit attribution (D9)`, `Format` and both lints; attempt 2 ran `Format` green
+and cancelled the other four. `Grammar fuzz` cancelled both its jobs in both
+attempts. The reruns were taken because no job had run at all: there was no red
+to rerun away.
+
+The third attempt ran in part, the incident still open:
+
+Tally (pr315-fix1-ci-7505eea-attempt3): 19 = 8 + 7 + 3 + 1.
+
+Success, cancelled (unacquired, as before), failure and skipped (`Docs
+consistency`). `ubuntu lua54` 111970313598 passed all 186 targets. The three
+failed legs carry two rows of the round's own, fixed on the branch at `57a980e`:
+
+- review 1's buffer-switch row again, on both macOS legs (111970313460,
+  111970313437) and `ubuntu luajit` 111970313520, now waiting 20 s for the
+  snapshot: the wait was never the cause. `C-x b b.rs RET` kept the window on
+  `a.rs` --- buffers are named by path, and `b.rs` matched `a.rs`'s path as a
+  subsequence --- filed as **#318** and measured in-process; the row now switches
+  with `C-x <right>`;
+- `fr1_a_v25_session_is_told_the_signature_its_typing_asks_for` on `macos lua54`,
+  whose v26 control typed `(` before the fake server had initialized; it now asks
+  a hover first.
+
+`Grammar fuzz` attempt 3: `Grammar fuzz` 111968420608 green, `Grammar fuzz
+(asan-strict)` 111968420806 cancelled unacquired. Not rerun: the fix went out as
+a new head.
+
+At the third head `57a980e`, each attempt 1 of 1, both green:
+
+Tally (pr315-fix1-ci-57a980e): 19 = 18 + 1.
+
+- `CI` 37377329510: `success`, eighteen jobs and `Docs consistency` skipped. The
+  six test legs: `Test (crdt)` 111989867116 185 `test result: ok`, both macOS legs
+  (lua54 111989867379, luajit 111989867641) 187 each, `ubuntu lua54`
+  111989867318, `ubuntu luajit` 111989867420 and `luajit, no crdt` 111989867414
+  186 each; zero `FAILED`, every leg's `running` lines paired with its result
+  lines. #313's row passed on both macOS legs, which is non-reproduction and
+  nothing more.
+- `Grammar fuzz` 37377329537: green on both legs (111989781295, 111989780931).
+
+So, at E8's fix round 1: #291 moves to fourteen and R7 to twenty-seven; #316 is
+at one and #311's list of runs read at fifteen; #317 and #318 are filed from the
+round's CI and are not intermittents (#317 written here as a platform's
+provisioning, which E8's review round 2 falsified: it is pmacs's, a canonical
+root beside a document URI that keeps a symlink, and macOS's `TMPDIR` is one;
+#318 a switcher's ranking); #313's row passed in every run here, and #313 stays
+at two. Every other count above stands.
+
+
+### E8's review round 2 and fix round 2: R7 at twenty-nine, #316's second, #283's twelfth and thirteenth, and PR #315's runs at `d2de579`
+
+Read 2026-10-06 at E8's fix round 2 from the gate logs and from the jobs
+endpoint by `conclusion`. Review round 2 ran no CI of its own: its probes are on
+`e8/review-2` at `617f9ff` with no pull request (no run for that commit), and the
+fix round fast-forwarded the branch onto them as they were left.
+
+#### `scripts/gate --protocol` `20261005T224931Z-2046695` at `57a980e` (review 2's gate)
+
+Six of eight. `06-sweep`: 194 targets, 194 `running` and 194 result lines,
+5,292 passed, 1 failed, 62 ignored, the one #311's (its list above: the store
+holding `Could not find module ‘Prelude’`). `07-sweep-luajit`: 194 targets,
+4,872 passed, 2 failed, 48 ignored: #311 and **R7's twenty-eighth** (its list
+above). #291 is not sampled, #311 holding the row. #316's, #312's and #313's rows
+passed. No daemon survived. The logs are copied to
+`~/build/e8-review2/gate-logs/`.
+
+#### `scripts/gate --protocol` at `d2de579` (fix round 2's gates)
+
+`20261006T104137Z-2974993` is no verdict: the laptop restarted at 13:03 local
+during its `07-sweep-luajit`, at 69 of 197 targets, and the stage's `cargo test`
+ended on `Hangup`. Its five stages before were ok, and its
+`06-sweep` completed: 197 targets (review 2's three suites added), 197 `running`
+and 197 result lines, 5,311 passed, 1 failed, 64 ignored (the two rows the round
+holds ignored for #317), the one #311. R7's row passed in it. The partial
+luajit sweep's one red is #311 again. No process carrying the run's `TMPDIR`
+survived it.
+
+`20261006T111111Z-85507`, the round's gate at the same head, the tree untouched
+for its run: six of eight, fmt, clippy, clippy-luajit, doc, build and diff-check
+ok, and no daemon survived, identified by environ. `06-sweep`: 197 targets, 197
+`running` and 197 result lines, 5,310 passed, 2 failed, 64 ignored: #311 and
+**#316's second sample** (below). `07-sweep-luajit`: 197 targets, 4,885 passed, 2
+failed, 50 ignored: #311 and **R7's twenty-ninth** (its list above). #312's and
+#313's rows passed in both sweeps, #316's in the luajit one and R7's in the
+first. The logs of both gates are copied to `~/build/e8-fix2/gate-logs/`.
+
+#### #316, second sample, local
+
+The same selector as its first, `-p pmacs --test e7i_review3_probes
+e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`,
+in the `06-sweep` stage of `20261006T111111Z-85507`, with all its fragments: `kill
+1: nothing held the switch's follow-up parse, which started a worker at once and
+installed`, a report line holding `tree=true`, `unit=pid_`, `death=killed` and a
+mode line still reading `parse:killed`, and `test result: FAILED. 10 passed; 1
+failed; 0 ignored`. The first sample was in a `07-sweep-luajit`; this one is in
+the default sweep, so neither flavor is the discriminator. `tests/e7i_review3_probes.rs`
+has no diff on the branch, and the round touched neither `paint_frame` nor the
+`process.after-tick` subscriber the first sample's entry names. Commented on the
+issue.
+
+#### PR #315's runs at `d2de579`
+
+Each attempt 1 of 1 when read here. `CI` 37451551936's two failed macOS legs
+were rerun at E8's fix round 3 on the owner's instruction; this entry is its
+attempt 1, and attempt 2 is recorded at that round, below.
+
+Tally (pr315-fix2-ci-d2de579): 19 = 16 + 2 + 1.
+
+- `CI` 37451551936: `failure`, sixteen success, two failed and `Docs
+  consistency` skipped. The two are both macOS test legs, `Test (macos-latest /
+  lua54)` 112229134676 and `Test (macos-latest / luajit)` 112229134735, each on
+  **#283** with all three of its fragments and nothing else: 187 `test result:
+  ok` and the one `FAILED`, 188 `running` lines paired with 188 result lines.
+  They are #283's twelfth and thirteenth (its list above), the first run with
+  both macOS legs red on it. The branch's diff from `57a980e`, whose run passed
+  the row on both legs, is the signature-label parse, the kept hover's place and
+  revision, tests and a comment in `scripts/gate`; that is read, not a
+  demonstration of innocence. Commented on the issue, not rerun. The four Linux
+  test legs are green: `Test (crdt)` 112229134544 188 `test result: ok`, `ubuntu
+  luajit` 112229134630, `ubuntu lua54` 112229134702 and `luajit, no crdt`
+  112229134608 189 each, zero `FAILED`. #313's row passed on both macOS legs,
+  which is non-reproduction and nothing more. On the macOS legs the
+  rust-analyzer rows still skip (#317 stands; review 2's real-server suite 6
+  passed and 2 ignored in 4.72 s there, 22 to 35 s on the Linux legs).
+- `Grammar fuzz` 37451551922: `success` on both legs (`Grammar fuzz`
+  112229063549, `Grammar fuzz (asan-strict)` 112229063267), the skip path for a
+  branch that changes no grammar.
+
+So, at E8's fix round 2: R7 moves to twenty-nine (the review's gate and the
+round's), #283 to thirteen and #316 to two; #311's list of runs reads at
+eighteen; #291 is not sampled, #311 holding its row, and #313 stays at two; #317
+is a product defect and not an intermittent (above). Every other count above
+stands.
+
+
+### E8's fix round 3: `CI` 37451551936 at `d2de579`, attempt 2, #283's fourteenth and #319's first
+
+Read 2026-10-06 at E8's fix round 3 from the jobs endpoint by `conclusion` and
+from the two rerun legs' logs. The round changed no code and ran no gate (its
+first item was written early, for the owner's ruling), so its only run is the
+owner's instructed rerun of the head run's two failed macOS legs. The rerun
+checked out the merge attempt 1 tested: all four macOS logs, both attempts on
+both legs, read `HEAD is now at b545c81 Merge d2de579… into 8b25ed8…`.
+
+Tally (pr315-fix3-ci-d2de579-attempt2): 19 = 16 + 2 + 1.
+
+- `CI` 37451551936 attempt 2, rerun at 11:50:43Z and completed at 12:24:28Z:
+  `failure`. Both macOS test legs ran again and both failed; the other
+  seventeen keep attempt 1's conclusions, sixteen success listed under new ids
+  with attempt 1's times and `Docs consistency` 112253936735 skipped.
+  - `Test (macos-latest / luajit)` 112253935087: **#283's fourteenth** (its
+    list above), all three fragments, its only failure against 187 `test
+    result: ok`, 188 `running` lines paired with 188 result lines. The same
+    leg's attempt 1, 112229134735, was #283's thirteenth: one commit red on
+    the row twice on this leg.
+  - `Test (macos-latest / lua54)` 112253934977: #283's row passed, which is
+    non-reproduction and nothing more (attempt 1's 112229134676 was its
+    twelfth). The leg failed instead on
+    `e7c_indicator_acceptance::e7c_fix_3_a_request_answered_under_the_threshold_never_appears`,
+    `and never reached the indicator: [(52, "⋯1 parse rust …")]` and
+    `test result: FAILED. 4 passed; 1 failed; 0 ignored`, its only failure
+    against 187 `test result: ok`, 188 `running` lines paired with 188 result
+    lines. No row here matches it: #305 is the same suite's typing row with its
+    own fragment, though its indicator also showed `⋯1 parse rust`. Filed as
+    **#319**, first occurrence, and not widened into #305. The row passed on
+    both legs in attempt 1 and on luajit in attempt 2. The branch's diff touches
+    the hover command the row invokes and not the parse path or the indicator;
+    that is read, not a demonstration.
+  - #313's row passed on both legs, non-reproduction and nothing more.
+    `WouldBlock` and `did not become ready` appear zero times in either log.
+    The two E8 real-server suites again report their rust-analyzer rows `ok`,
+    though off Linux each returns before starting a server while #317's skip
+    stands: review 1's suite 9 passed in 0.01 s, review 2's 6 passed and 2
+    ignored in 8.14 s (lua54) and 3.93 s (luajit), as in attempt 1.
+- `Grammar fuzz` 37451551922 was not rerun: attempt 1 of 1, green (above).
+
+Not rerun again, on the owner's instruction. So, at E8's fix round 3: #283
+moves to fourteen and #319 is at one; #313 stays at two; R7, #291, #311 and
+#316 are not sampled, no gate having run. Every other count above stands.
+
+### The required-checks PR: PR #321's runs and #322's first, its gate, #283 reproduced on demand, and #320's first
+
+Recorded 2026-10-06 with PR #321
+(`ci/required-checks-mean-what-they-say`, five commits on `97956ff`), which is not a
+phase: it changes the rows of #283, #313 and #319 and makes each test leg print its
+arming and the rows that returned without running. Its runs were read
+from the jobs endpoint by conclusion and through all six test legs' logs; neither was
+rerun.
+
+#### `CI` 37486414088 at `e23510a`, attempt 1 of 1: #322's first
+
+`pull_request`, the merge `a6b2df8` (`e23510a` into `97956ff`, read from all six test
+logs' checkout line), created 15:18:46Z and completed 15:52:33Z: `failure`.
+
+Tally (pr321-ci-e23510a): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 112347460053 | success |
+| Format | 112347459741 | success |
+| Changed paths | 112347459987 | success |
+| Lint (lua54) | 112347460028 | success |
+| Lint (luajit) | 112347460070 | success |
+| GPU Render (headless) | 112347630475 | success |
+| M10 Perf Gates (crdt) | 112347630562 | success |
+| Test (crdt) | 112347630574 | success |
+| M1 Acceptance Gates | 112347630634 | success |
+| M4 Perf Gates | 112347630655 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 112347630662 | success |
+| Test (ubuntu-latest / lua54) | 112347630704 | success |
+| M5 Perf Gates | 112347630719 | success |
+| Test (macos-latest / luajit) | 112347630743 | failure |
+| Test (macos-latest / lua54) | 112347630802 | success |
+| M6 Perf Gates | 112347630815 | success |
+| Perf budgets (debug) | 112347630824 | success |
+| Test (ubuntu-latest / luajit) | 112347631300 | success |
+| Docs consistency | 112347632844 | skipped |
+
+Tally (pr321-ci-e23510a-failures): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)`, its only failure against 179 `test result: ok`:
+  `e7i_review3_probes::e7i_review3_the_editor_s_own_sigkill_and_an_outside_one_are_told_apart`,
+  `the deadline's kill did not become ready within 60s` with the last report holding
+  `deaths=3`, `busy=false`, `pending=0`, `tree=true` and `death=killed`, and `test
+  result: FAILED. 10 passed; 1 failed; 0 ignored`. The panic site
+  `tests/e7i_review3_probes.rs:918:9` and the unit's pid are not fragments. No row
+  here names it, so it is filed as **#322**, first occurrence, and not rerun. The
+  same row passed on the other five legs. The branch changes nothing under `src/`,
+  `builtin/` or that suite; that is read, not a demonstration.
+- The rows the branch changes passed on every leg that builds them: #283's
+  (`gpu_route::…`, five legs, not the no-crdt one, which compiles it out), #313's
+  and #319's, and the two new rows, which is non-reproduction and nothing more for
+  #313 and #319.
+- Each leg's `running` lines pair with its result lines: 180 on `Test (crdt)`, 181 on
+  each Ubuntu leg, and on the macOS legs 180 and 182, each log's one unpaired
+  `running 1 test` being the adapter step's own `grep` text. `WouldBlock` and `got
+  ok` appear on no leg; `did not become ready` once, #322's own line.
+- **The legs' new steps, read in every log.** `Arming report (this leg)` printed
+  each variable as the leg set it: on the Ubuntu legs `LSP`, `SHELLS`, `LUA`,
+  `SETSID` and `BASH` armed with their tools present, and `PYRIGHT`, `HLS` and
+  `CGROUP` unset with their tools absent; on the macOS legs every variable unset,
+  `BASH` and `CARGO_BUILD` with their tools present; on `Test (crdt)` `GPU`,
+  `SETSID` and `BASH` armed. `Rows that returned without running` then listed 2
+  rows on each Ubuntu leg (basedpyright's and the HLS row), 14 on each macOS leg and
+  17 on `Test (crdt)`, each by suite, row, call site, tool and variable.
+
+#### `Grammar fuzz` 37486414312 at `e23510a`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112347460903 and `Grammar fuzz
+(asan-strict)` 112347460472, eleven seconds each: the job's path for a change that
+touches no grammar, which fuzzes nothing (`scripts/grammar-fuzz-needed`, `ci.yml`
+among its non-grammar paths).
+
+#### The tip's gate, `20261006T150249Z-1162130` at `e23510a`
+
+Five of six, the default plan: fmt, clippy, doc, build and diff-check ok, and no
+daemon survived. `05-sweep`: 189 result lines, 5,221 passed, 1 failed, 62 ignored.
+The one is #311's row with #311's fragments (the store holding `Could not find module
+‘Prelude’`, the trace reaching `processi`), so #311's list gains this gate. R7,
+#291 and #316 did not fire, which is non-reproduction and nothing more. The rows of
+#283, #313 and #319 passed in it, in their new forms.
+
+#### #283 reproduced on demand, twice, and not counted
+
+Two variants of `main`'s row, each from test-side Lua, failed with #283's three
+fragments and its message character for character, `pump timeout waiting for the
+accept and its import; text="fn main() {\n    println\n    \n}\n// tail\n"
+popup_rows=0 anchor=None cursor=Some(28)` at `tests/e7_review1_probes.rs:774:13`:
+with the popup's first open held 2.5 s (11.67 s), and with the fake server started
+2 s late, so that the letters met a server not yet initialized (11.71 s). The
+fragments cannot tell those two apart, and which one the macOS runners met is not
+known. These were made, not met, so they are not occurrences, and #283 stays at
+fourteen. The row as PR #321 changes it passed both variants (2.69 s and 2.22 s).
+
+#### #320, first sample, local, outside the gate
+
+`e7_review1_probes::e7_review1_a_late_answer_past_the_default_bound_never_touches_an_edited_buffer`,
+in a hand run in the gate's environment on the PR's branch before its first commit
+(the log closed 15:12:16+02:00, load average 15.65 on 16 threads from other
+builds on the machine): `answered in time: 11.062716943s` at the row's second save, whose
+bound is 3000 ms, and `test result: FAILED. 10 passed; 1 failed; 0 ignored`. The
+panic site `tests/e7_review1_probes.rs:330:5` moves with the file and is not a
+fragment. No row here names the selector, so it is filed as **#320**. A rerun of the
+suite failed the same row at its first save with another fragment (`the save waits
+the default bound and gives up before the answer: 5.08476519s`), but that run was in
+flight across the laptop's suspend (`Suspending...` 15:12:57, `PM: suspend exit`
+16:39:59, its log closed 16:39:59.7), so it is no evidence and is not counted; the
+other two reruns passed. The branch's diff in that suite is #283's row only, and the
+failing row's path is untouched; that is read, not a demonstration. The row passed
+in the tip's gate above.
+
+So, at PR #321: #283 stays at fourteen, not moved by the two reproductions; #320 is
+at one; #311's list of runs reads at nineteen; #313 stays at two and #319 at one, their rows passing on
+every leg; #322 is at one; R7,
+#291 and #316 are not sampled. Every other count above stands.
+
+### The required-checks PR's second head: `ab06caa`'s runs, #306's second and #323's first, #322 folded in, and #283, #313 and #319 closed
+
+Recorded 2026-10-06 with PR #321 at `ab06caa` (six commits on `97956ff`): the fifth row of
+the class, #322's, given an input no deadline races. Its runs were read from the jobs endpoint
+by conclusion and through all six test legs' logs; neither was rerun.
+
+#### `CI` 37498475119 at `ab06caa`, attempt 1 of 1: #306's second and #323's first
+
+`pull_request`, the merge `a97734b` (`ab06caa` into `9b2dc8b`, read from all six test logs'
+checkout line), created 16:47:30Z and completed 17:20:59Z: `failure`.
+
+Tally (pr321-ci-ab06caa): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 112389030032 | success |
+| Format | 112389030503 | success |
+| Lint (luajit) | 112389030633 | success |
+| Lint (lua54) | 112389030667 | success |
+| Commit attribution (D9) | 112389030779 | success |
+| M1 Acceptance Gates | 112389146620 | success |
+| M5 Perf Gates | 112389146639 | success |
+| GPU Render (headless) | 112389146736 | success |
+| M4 Perf Gates | 112389146780 | success |
+| Perf budgets (debug) | 112389146842 | success |
+| Test (crdt) | 112389146849 | success |
+| Test (ubuntu-latest / luajit) | 112389146897 | success |
+| M10 Perf Gates (crdt) | 112389146900 | success |
+| Test (ubuntu-latest / lua54) | 112389146951 | success |
+| M6 Perf Gates | 112389146966 | success |
+| Test (macos-latest / lua54) | 112389147010 | success |
+| Test (macos-latest / luajit) | 112389147024 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 112389147113 | success |
+| Docs consistency | 112389148171 | skipped |
+
+Tally (pr321-ci-ab06caa-failures): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)`, two failures against 178 `test result: ok`:
+  - `compile_mode_acceptance::acc05_kill_reaps_backgrounded_descendant`, with #306's three
+    fragments (`kill must produce a signaled exit marker; buffer:`, the shell's
+    `Terminated: 15          sleep 30` and no `[compile killed by …]` marker, and `test
+    result: FAILED. 74 passed; 1 failed; 0 ignored`): **#306's second occurrence**, the first
+    on this leg (its first, `CI` 36927231233, was on lua54). The buffer ends `[compile exited
+    with code 0]`. Commented on #306, not rerun.
+  - `e7i_review1_probes::e7i_review1_parse_now_on_a_buffer_mid_parse`, `the report did not
+    reach the expected state in 120s; last:` with nothing written, no `_parse_now mid-parse in
+    none:` line in the log, and `test result: FAILED. 21 passed; 1 failed; 0 ignored`. No
+    row here names it, so it is filed as **#323**, first occurrence, not rerun. On the legs
+    where it finished, its `none` mode blocked the main thread 30,571 to 100,920 ms across this
+    run and PR #321's first, against the row's 120 s wait, the macOS luajit leg's 100,920 at
+    `e23510a` the nearest.
+
+  The branch changes nothing under `src/` or `builtin/`, nor either suite but #283's row; that
+  is read, not a demonstration.
+- The rows of #283, #313, #319 and #322 and the PR's two new rows passed on every leg that
+  builds them (#283's on five, the no-crdt leg compiling it out). Each leg's `running` lines
+  pair with its result lines, the macOS legs' one unpaired line apiece being the adapter
+  step's `grep` text. `WouldBlock`, `did not become ready` and `got ok` appear on no leg.
+  The legs' new steps printed as at `e23510a`: 2 skips on each Ubuntu leg, 14 on
+  each macOS leg and 17 on `Test (crdt)`.
+
+#### `Grammar fuzz` 37498475125 at `ab06caa`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112389024126 and `Grammar fuzz (asan-strict)`
+112389023611, the path for a change that touches no grammar.
+
+#### The tip's gate, `20261006T164749Z-1441387` at `ab06caa`
+
+Five of six, the default plan: `05-sweep` read 189 result lines, 5,221 passed, 1 failed, 62
+ignored, the one #311's row with #311's fragments, so #311's list gains it. R7, #291 and #316
+did not fire, which is non-reproduction and nothing more. #322's row passed in it.
+
+#### #322 folded in, reproduced on demand
+
+`ab06caa` runs the row's fourth parse on #301's nested openers instead of #296's paragraph.
+On the laptop `main`'s row failed with #322's fragments exactly (`the deadline's kill did not
+become ready within 60s`, the last report `deaths=3 … busy=false … pending=0 … tree=true …
+death=killed`) at a 100 ms deadline, and at its own 300 ms with the worker throttled to a
+quarter of its speed; the row at `ab06caa` passed under both. These were made, not met, and
+#322 stays at one.
+
+#### #283, #313 and #319 closed
+
+Closed at 16:48:30Z, 16:48:33Z and 16:48:36Z, each with a comment naming the mechanism PR #321
+removes and the witness that fails without it. Their counts stand as recorded above: #283 at
+fourteen, #313 at two, #319 at one.
+
+So, at PR #321's second head: #306 moves to two; #323 is at one; #311's list of runs reads at
+twenty; #322 stays at one; R7, #291 and #316 are not sampled. Every other count above stands.
+
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
@@ -4612,13 +5175,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least twenty-three, 2026-08-07 to 2026-10-04, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the eleven since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least twenty-nine, 2026-08-07 to 2026-10-06, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the seventeen since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 23 = 12 + 11.
+Tally (R7): 29 = 12 + 17.
 
-Tally (R7-held): 11 items in the list below.
+Tally (R7-held): 17 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -4631,6 +5194,12 @@ Tally (R7-held): 11 items in the list below.
 - twenty-first: gate log `20261002T114815Z-408166`, step `05-sweep` on E7h's branch at `64d396b` (fix round 4's tip, whose change from the green gate before it is comments in the fuzz harness and one test), the load average 3.4 at its start and about 18 over five minutes at its end (other sessions' work), `attach.rs:1971`, `test result: FAILED. 373 passed; 1 failed`, all three fragments (recorded in E7h's fourth fix round, below); the next run on the same tree (`20261002T115902Z-518091`) six of six, non-reproduction and nothing more
 - twenty-second: gate log `20261004T104358Z-3360185`, step `05-sweep`, E7i review 2's gate on `e7i/parse-containment` at `cd6cd52` (PR #309), niced with `CARGO_BUILD_JOBS=6` beside the reviewer's own probes, `attach.rs:1971`, `test result: FAILED. 373 passed; 1 failed`, all three fragments; `pmacs-gpu/src/attach.rs` has no diff on the branch (recorded at E7i's fix round 1 and review 2, below); the next run on the same tree (`20261004T112802Z-3536917`) six of six, non-reproduction and nothing more
 - twenty-third: gate log `20261004T123921Z-3949386`, step `05-sweep`, E7i fix round 2's first gate on `e7i/parse-containment` at `79d2895` (PR #309), niced with `CARGO_BUILD_JOBS=6`, `attach.rs:1971`, `test result: FAILED. 373 passed; 1 failed`, all three fragments; `pmacs-gpu/src/attach.rs` has no diff on the branch (recorded at E7i's fix round 2, below); the next run on the same tree (`20261004T125601Z-4051540` at `db697a2`, a test-only change) passed it, non-reproduction and nothing more
+- twenty-fourth: gate log `20261004T202450Z-1217913`, step `07-sweep-luajit`, E8.1's gate on `e8/hover-and-signature` at `4fc5599`, `attach.rs:1971`, `test result: FAILED. 373 passed; 1 failed`, all three fragments; `pmacs-gpu/src/attach.rs` has no diff on the branch (recorded at E8's checkpoint, below)
+- twenty-fifth: gate log `20261004T225031Z-2642055`, step `07-sweep-luajit`, E8.5's gate on `e8/hover-and-signature` at `a8104f4`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed` (375 since E8.3 added a GPU unit row), all three fragments; `attach.rs` has no diff on the branch
+- twenty-sixth: gate log `20261005T193708Z-986096`, step `06-sweep`, E8 fix round 1's second gate on `e8/hover-and-signature` at `7505eea`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch (recorded at E8's fix round 1, below)
+- twenty-seventh: gate log `20261005T213945Z-1605050`, step `07-sweep-luajit`, E8 fix round 1's third gate on `e8/hover-and-signature` at `57a980e`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch (recorded at E8's fix round 1, below)
+- twenty-eighth: gate log `20261005T224931Z-2046695`, step `07-sweep-luajit`, E8 review 2's gate on `e8/hover-and-signature` at `57a980e`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch (recorded at E8's fix round 2, below)
+- twenty-ninth: gate log `20261006T111111Z-85507`, step `07-sweep-luajit`, E8 fix round 2's gate on `e8/hover-and-signature` at `d2de579`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same run's `06-sweep` (recorded at E8's fix round 2, below)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,

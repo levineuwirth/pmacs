@@ -6,6 +6,7 @@
 #   scripts/gate [--protocol] [--perf] --print-plan-named
 #   scripts/gate --docs [--print-plan|--print-plan-named]
 #   scripts/gate --print-arming
+#   scripts/gate --print-arming-env
 #   scripts/gate --print-target-dir
 #   scripts/gate --init
 #   scripts/gate --prune [--force]
@@ -130,6 +131,7 @@ usage: scripts/gate [--protocol] [--perf] [--print-plan]
        scripts/gate [--protocol] [--perf] --print-plan-named
        scripts/gate --docs [--print-plan|--print-plan-named]
        scripts/gate --print-arming
+       scripts/gate --print-arming-env
        scripts/gate --print-target-dir
        scripts/gate --init
        scripts/gate --prune [--force]
@@ -154,6 +156,12 @@ usage: scripts/gate [--protocol] [--perf] [--print-plan]
                       PMACS_REQUIRE_* variables a run here would arm,
                       and for each it would not, the missing tool and
                       the suites that will skip.
+  --print-arming-env  print the arming of the environment as it stands
+                      and exit, arming nothing: which PMACS_REQUIRE_*
+                      variables it sets, and for each it does not whose
+                      tool is absent, the suites whose rows will return
+                      early and read ok. What a CI leg prints, since a
+                      leg arms by its workflow and not by this script.
   --print-plan        print the exact gate commands and exit. Names are
                       stripped, so every line is runnable as printed.
   --print-plan-named  print the plan as `name<TAB>command` lines and exit
@@ -374,7 +382,7 @@ emit_self_test_plan() {
 arming_table() {
     cat <<'EOF'
 PMACS_REQUIRE_GPU always
-PMACS_REQUIRE_PYRIGHT never
+PMACS_REQUIRE_PYRIGHT never basedpyright-langserver
 PMACS_REQUIRE_BASH /bin/bash
 PMACS_REQUIRE_SETSID setsid
 PMACS_REQUIRE_CARGO_BUILD cargo
@@ -418,7 +426,7 @@ arm_tools() {
         case $tools in
             always)
                 echo "gate: armed      $var (always; a missing adapter fails the sweep)" ;;
-            never)
+            never*)
                 echo "gate: unarmed    $var: never armed, the sweep skips basedpyright by name; $(gated_suites "$var")" ;;
             *)
                 missing=''
@@ -432,6 +440,51 @@ arm_tools() {
                     echo "gate: unarmed    $var: not installed:$missing; skipping in $(gated_suites "$var")"
                 fi ;;
         esac
+    done
+}
+
+# The arming of the environment as it stands, for a CI leg, which arms
+# by its workflow's `env` and never runs this script's arm_tools: each
+# variable is read as the tests read it (set and non-empty is armed,
+# tests/support/mod.rs's `armed`), and nothing is exported. A row whose
+# variable is unset and whose tool is absent returns early, and libtest
+# reports it `ok` like any row that ran; so for each such variable the
+# line says that, with the suites. `--print-arming` cannot stand in for
+# this on a leg: it reports what THIS script would arm, by presence,
+# which is not what the leg's tests run under (it would call
+# PMACS_REQUIRE_CARGO_BUILD armed on a leg that never sets it, and say
+# basedpyright is skipped by name, which only the gate's own sweep
+# does). Which rows did return early is the leg's skip record, the file
+# `PMACS_SKIP_LOG` names, printed beside this.
+report_env_arming() {
+    echo "gate: arming read from this environment; nothing is armed or exported here"
+    arming_table | while IFS=' ' read -r var tools; do
+        eval "val=\${$var:-}"
+        suites=$(gated_suites "$var")
+        case $tools in
+            always)
+                if [ -n "$val" ]; then
+                    echo "gate: armed      $var (set; a row that finds no adapter or no built pmacs-gpu fails)"
+                else
+                    echo "gate: unarmed    $var: unset; a row that finds no adapter or no built pmacs-gpu returns and reads ok, in $suites"
+                fi
+                continue ;;
+            never*) tools=${tools#never} ;;
+        esac
+        tools=" ${tools# }"
+        missing=''
+        for t in $tools; do
+            tool_present "$t" || missing="$missing $t"
+        done
+        if [ -n "$val" ] && [ -z "$missing" ]; then
+            echo "gate: armed      $var (set;$tools present)"
+        elif [ -n "$val" ]; then
+            echo "gate: armed      $var (set) but not installed:$missing; a row needing one fails, in $suites"
+        elif [ -z "$missing" ]; then
+            echo "gate: unarmed    $var: unset, and$tools present, so its rows run, in $suites"
+        else
+            echo "gate: unarmed    $var: unset and not installed:$missing; a row needing one returns and reads ok, in $suites"
+        fi
     done
 }
 
@@ -564,6 +617,7 @@ while [ $# -gt 0 ]; do
         --perf)              PERF=1; shift ;;
         --docs)              DOCS=1; shift ;;
         --print-arming)      MODE=arming; shift ;;
+        --print-arming-env)  MODE=armingenv; shift ;;
         --print-plan)        MODE=plan; shift ;;
         --print-plan-named)  MODE=plannamed; shift ;;
         --print-target-dir)  MODE=printdir; shift ;;
@@ -654,6 +708,10 @@ case $MODE in
         ARMED_FILE=$(mktemp "${TMPDIR:-/tmp}/pmacs-armed.XXXXXX")
         arm_tools
         rm -f "$ARMED_FILE"
+        exit 0 ;;
+    armingenv)
+        cd "$(canon "$(worktree_root)")"
+        report_env_arming
         exit 0 ;;
 esac
 

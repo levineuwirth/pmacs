@@ -1961,13 +1961,129 @@ fn r6_the_shipped_lean_command_rebuilds_a_dead_attachment() {
     );
 }
 
+/// The last step a [`bounded`] body entered, and when.
+struct Steps(std::sync::Arc<std::sync::Mutex<(&'static str, std::time::Instant)>>);
+
+impl Steps {
+    fn enter(&self, step: &'static str) {
+        *self.0.lock().unwrap() = (step, std::time::Instant::now());
+    }
+}
+
+/// Run a row's body under a bound on the whole row, for a row that has
+/// hung rather than failed (#313).
+///
+/// Every wait in this suite checks its deadline between ticks, so a
+/// call that never returns --- a tick, an eval, a drop --- is past any
+/// deadline the row can check. `cargo test --all-targets` runs one
+/// binary at a time, so on CI that one call then held the macOS lua54
+/// job until the job's own 45-minute timeout, twice, and every binary
+/// after it went unrun. Here the body runs on a thread of its own and
+/// the test's thread waits for it: past `limit` the row fails, naming
+/// the last step the body entered and the processes beneath this
+/// binary, and the binary goes on to its other rows. The stuck thread
+/// cannot be unblocked, so it is left, not joined; the binary's exit
+/// ends it. A body that panics fails the row with its own message.
+fn bounded(limit: Duration, body: impl FnOnce(&Steps) + Send + 'static) {
+    let steps = Steps(std::sync::Arc::new(std::sync::Mutex::new((
+        "starting",
+        std::time::Instant::now(),
+    ))));
+    let last = std::sync::Arc::clone(&steps.0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = std::thread::current()
+        .name()
+        .unwrap_or("bounded row")
+        .to_owned();
+    let handle = std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            body(&steps);
+            let _ = tx.send(());
+        })
+        .expect("spawn the row's body");
+    match rx.recv_timeout(limit) {
+        Ok(()) => handle.join().expect("the body returned"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            if let Err(payload) = handle.join() {
+                std::panic::resume_unwind(payload);
+            }
+            unreachable!("the body ended without returning or panicking");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let (step, since) = *last.lock().unwrap();
+            panic!(
+                "the row did not finish within {limit:?}: its last step, {step:?}, \
+                 was entered {:?} ago and has not returned; processes beneath this \
+                 test binary:\n{}",
+                since.elapsed(),
+                processes_beneath(std::process::id())
+            );
+        }
+    }
+}
+
+/// `ps` rows for every process descended from `root`, `ps` itself
+/// left out, for a row's report when it has stopped.
+fn processes_beneath(root: u32) -> String {
+    let child = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,stat=,etime=,command="])
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let Ok(child) = child else {
+        return "(ps did not start)".to_owned();
+    };
+    let ps = child.id();
+    let Ok(out) = child.wait_with_output() else {
+        return "(ps did not finish)".to_owned();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<(u32, u32, &str)> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            Some((pid, ppid, line.trim()))
+        })
+        .collect();
+    let mut parents = vec![root];
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < parents.len() {
+        for &(pid, ppid, line) in &rows {
+            if ppid == parents[i] && pid != ps {
+                parents.push(pid);
+                found.push(line);
+            }
+        }
+        i += 1;
+    }
+    if found.is_empty() {
+        "(none)".to_owned()
+    } else {
+        found.join("\n")
+    }
+}
+
+/// The bound on [`r6_every_spawned_fallback_server_is_bounded`]. Its
+/// waits are one readiness wait (`ready::DEADLINE`, 10 s) and a 900 ms
+/// drain, so a run that is slow but moving fails at those; past two
+/// minutes a call has not returned.
+const R6_BOUND: Duration = Duration::from_mins(2);
+
 #[test]
 fn r6_every_spawned_fallback_server_is_bounded() {
+    bounded(R6_BOUND, r6_every_spawned_fallback_server_is_bounded_body);
+}
+
+fn r6_every_spawned_fallback_server_is_bounded_body(steps: &Steps) {
     // A scalar fallback watch covers only one Q#LN15 root. The second
     // server can also be created directly by lsp.lua's after-load path,
     // bypassing `repair_active_if_stale` entirely.
     use std::os::unix::fs::PermissionsExt as _;
 
+    steps.enter("writing the fixture");
     let fx = Fixture::new();
     fx.toolchain("one", "v4.9.0\n");
     fx.toolchain("two", "v4.9.0\n");
@@ -1979,7 +2095,9 @@ fn r6_every_spawned_fallback_server_is_bounded() {
     std::fs::write(&dying_fallback, "#!/bin/sh\nexit 4\n").unwrap();
     std::fs::set_permissions(&dying_fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+    steps.enter("creating the editor");
     let mut state = editor(&fx);
+    steps.enter("configuring the absent primary and the dying fallback");
     exec(
         &state,
         &format!(
@@ -1993,7 +2111,9 @@ fn r6_every_spawned_fallback_server_is_bounded() {
         ),
     );
 
+    steps.enter("opening one/A.lean");
     open(&state, &first);
+    steps.enter("opening two/B.lean");
     open(&state, &second);
     // A bound on `attempt` says nothing until something has been
     // spawned: with no lean4 server listed the assertion below reads 0
@@ -2008,6 +2128,7 @@ fn r6_every_spawned_fallback_server_is_bounded() {
         end
         return worst
         ";
+    steps.enter("waiting for a fallback server per root");
     wait_eval::<i64>(
         &mut state,
         "a fallback server spawned for each root",
@@ -2022,14 +2143,19 @@ fn r6_every_spawned_fallback_server_is_bounded() {
     );
     // RETAINED DRAIN (900 ms). The bound is a negative claim, so an
     // unwatched root's respawn needs a window past the 500 ms backoff.
+    steps.enter("draining 900 ms past the restart backoff");
     tick_for(&mut state, 900);
 
+    steps.enter("reading the worst attempt");
     let worst_attempt: i64 = eval(&state, worst_attempt_src);
     assert!(
         worst_attempt <= 1,
         "every fallback server must be bounded; an unwatched root \
          reached attempt {worst_attempt}"
     );
+    steps.enter("dropping the editor");
+    drop(state);
+    steps.enter("removing the fixture");
 }
 
 #[test]

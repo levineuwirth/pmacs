@@ -1948,46 +1948,7 @@ fn the_arming_report_names_the_unarmed_variable_and_its_suites() {
         .prefix("g-")
         .tempdir_in(short_root_base())
         .expect("tempdir");
-    let bin = root.path().join("bin");
-    std::fs::create_dir_all(&bin).expect("bin");
-    for tool in [
-        "git",
-        "sh",
-        "awk",
-        "sed",
-        "grep",
-        "tr",
-        "cat",
-        "cut",
-        "basename",
-        "dirname",
-        "mktemp",
-        "date",
-        "sha256sum",
-        "wc",
-        "cmp",
-        "rm",
-        "mkdir",
-        "tee",
-    ] {
-        let found = Command::new("sh")
-            .arg("-c")
-            .arg(format!("command -v {tool}"))
-            .output()
-            .expect("command -v");
-        let path = String::from_utf8_lossy(&found.stdout).trim().to_owned();
-        if !path.is_empty() {
-            std::os::unix::fs::symlink(&path, bin.join(tool)).expect("symlink tool");
-        }
-    }
-    // `setsid` is the tool under assertion below, so the test provides
-    // it rather than borrowing the host's (macOS has none): an executable
-    // stub is present in the sense the gate checks, `command -v`, and
-    // `--print-arming` runs nothing that would call it.
-    let stub = bin.join("setsid");
-    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("setsid stub");
-    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .expect("stub mode");
+    let bin = shell_tools_and_a_setsid_stub(root.path());
     let out = Command::new(gate())
         .arg("--print-arming")
         .current_dir(repo_root())
@@ -2020,6 +1981,135 @@ fn the_arming_report_names_the_unarmed_variable_and_its_suites() {
     assert!(
         report.contains("gate: unarmed    PMACS_REQUIRE_PYRIGHT"),
         "basedpyright is never armed and the report says so; report:\n{report}"
+    );
+}
+
+/// A `bin` directory under `root` holding links to the tools the gate's
+/// shell needs and nothing else, so the LSP servers, basedpyright and
+/// cargo are absent whatever the machine has installed; and a `setsid`
+/// stub.
+fn shell_tools_and_a_setsid_stub(root: &Path) -> PathBuf {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    for tool in [
+        "git",
+        "sh",
+        "awk",
+        "sed",
+        "grep",
+        "tr",
+        "cat",
+        "cut",
+        "basename",
+        "dirname",
+        "mktemp",
+        "date",
+        "sha256sum",
+        "wc",
+        "cmp",
+        "rm",
+        "mkdir",
+        "tee",
+    ] {
+        let found = Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {tool}"))
+            .output()
+            .expect("command -v");
+        let path = String::from_utf8_lossy(&found.stdout).trim().to_owned();
+        if !path.is_empty() {
+            std::os::unix::fs::symlink(&path, bin.join(tool)).expect("symlink tool");
+        }
+    }
+    // `setsid` is the tool under assertion in both rows, so the test
+    // provides it rather than borrowing the host's (macOS has none): an
+    // executable stub is present in the sense the gate checks, `command
+    // -v`, and neither report runs anything that would call it.
+    let stub = bin.join("setsid");
+    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("setsid stub");
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("stub mode");
+    bin
+}
+
+/// `--print-arming-env` reports the variables as the environment sets
+/// them, which is how a CI leg arms (its workflow's `env`), not as the
+/// gate would arm them by presence: set with its tool present is armed,
+/// set without it is named as failing, and unset without its tool is
+/// named as returning early and reading `ok`, with its suites. An empty
+/// value is unset, as `support::armed` reads it and as the workflow's
+/// `cond && '1' || ''` spelling leaves it on the macOS legs.
+///
+/// Driven with a cleared environment and a `PATH` of the shell's needs
+/// and a `setsid` stub, so no LSP server, basedpyright or cargo is
+/// found whatever the machine has.
+#[test]
+fn the_environment_arming_report_reads_the_variables_a_leg_sets() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let bin = shell_tools_and_a_setsid_stub(root.path());
+    let mut cmd = Command::new(gate());
+    cmd.arg("--print-arming-env")
+        .current_dir(repo_root())
+        .env_clear()
+        .env("PATH", &bin)
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .env("PMACS_REQUIRE_SETSID", "1")
+        .env("PMACS_REQUIRE_LSP", "1")
+        .env("PMACS_REQUIRE_SHELLS", "");
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }
+    let out = cmd.output().expect("run gate --print-arming-env");
+    let report = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "report:\n{report}");
+    let line = |var: &str| -> String {
+        report
+            .lines()
+            .find(|l| l.contains(&format!("{var}:")) || l.contains(&format!("{var} (")))
+            .unwrap_or_else(|| panic!("the report must mention {var}; report:\n{report}"))
+            .to_owned()
+    };
+    assert_eq!(
+        line("PMACS_REQUIRE_SETSID"),
+        "gate: armed      PMACS_REQUIRE_SETSID (set; setsid present)",
+        "set, with its tool present, is armed"
+    );
+    let lsp = line("PMACS_REQUIRE_LSP");
+    assert!(
+        lsp.starts_with("gate: armed      PMACS_REQUIRE_LSP (set) but not installed:")
+            && lsp.contains("rust-analyzer")
+            && lsp.contains("fails"),
+        "set, with its tool absent, is named as failing; line was:\n{lsp}"
+    );
+    let pyright = line("PMACS_REQUIRE_PYRIGHT");
+    assert!(
+        pyright.starts_with(
+            "gate: unarmed    PMACS_REQUIRE_PYRIGHT: unset and not installed: basedpyright-langserver;"
+        ) && pyright.contains("returns and reads ok")
+            && pyright.contains("tests/m4_acceptance.rs"),
+        "unset, with its tool absent: the rows return early and read ok, and the suites are \
+         named, not 'skipped by name', which only the gate's sweep does; line was:\n{pyright}"
+    );
+    let shells = line("PMACS_REQUIRE_SHELLS");
+    assert!(
+        shells.starts_with("gate: unarmed    PMACS_REQUIRE_SHELLS: unset"),
+        "an empty value is unset; line was:\n{shells}"
+    );
+    let gpu = line("PMACS_REQUIRE_GPU");
+    assert!(
+        gpu.starts_with("gate: unarmed    PMACS_REQUIRE_GPU: unset;")
+            && gpu.contains("returns and reads ok"),
+        "the GPU is not armed by this mode either; line was:\n{gpu}"
+    );
+    let cargo = line("PMACS_REQUIRE_CARGO_BUILD");
+    assert!(
+        cargo.starts_with(
+            "gate: unarmed    PMACS_REQUIRE_CARGO_BUILD: unset and not installed: cargo"
+        ),
+        "unset is reported as unset, never as what the gate would arm; line was:\n{cargo}"
     );
 }
 
