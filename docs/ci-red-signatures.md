@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 19 items in the list below.
+Tally (311-runs): 20 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2806,6 +2806,7 @@ Tally (311-runs): 19 items in the list below.
   sweep red on the row too);
 - `20261006T111111Z-85507` at `d2de579` (the same round's gate, both sweeps).
 - `20261006T150249Z-1162130` at `e23510a` (PR #321's tip gate, its one sweep, `05-sweep`).
+- `20261006T164749Z-1441387` at `ab06caa` (PR #321's second head's gate, `05-sweep`).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -3444,6 +3445,96 @@ So, at PR #321: #283 stays at fourteen, not moved by the two reproductions; #320
 at one; #311's list of runs reads at nineteen; #313 stays at two and #319 at one, their rows passing on
 every leg; #322 is at one; R7,
 #291 and #316 are not sampled. Every other count above stands.
+
+### The required-checks PR's second head: `ab06caa`'s runs, #306's second and #323's first, #322 folded in, and #283, #313 and #319 closed
+
+Recorded 2026-10-06 with PR #321 at `ab06caa` (six commits on `97956ff`): the fifth row of
+the class, #322's, given an input no deadline races. Its runs were read from the jobs endpoint
+by conclusion and through all six test legs' logs; neither was rerun.
+
+#### `CI` 37498475119 at `ab06caa`, attempt 1 of 1: #306's second and #323's first
+
+`pull_request`, the merge `a97734b` (`ab06caa` into `9b2dc8b`, read from all six test logs'
+checkout line), created 16:47:30Z and completed 17:20:59Z: `failure`.
+
+Tally (pr321-ci-ab06caa): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 112389030032 | success |
+| Format | 112389030503 | success |
+| Lint (luajit) | 112389030633 | success |
+| Lint (lua54) | 112389030667 | success |
+| Commit attribution (D9) | 112389030779 | success |
+| M1 Acceptance Gates | 112389146620 | success |
+| M5 Perf Gates | 112389146639 | success |
+| GPU Render (headless) | 112389146736 | success |
+| M4 Perf Gates | 112389146780 | success |
+| Perf budgets (debug) | 112389146842 | success |
+| Test (crdt) | 112389146849 | success |
+| Test (ubuntu-latest / luajit) | 112389146897 | success |
+| M10 Perf Gates (crdt) | 112389146900 | success |
+| Test (ubuntu-latest / lua54) | 112389146951 | success |
+| M6 Perf Gates | 112389146966 | success |
+| Test (macos-latest / lua54) | 112389147010 | success |
+| Test (macos-latest / luajit) | 112389147024 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 112389147113 | success |
+| Docs consistency | 112389148171 | skipped |
+
+Tally (pr321-ci-ab06caa-failures): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)`, two failures against 178 `test result: ok`:
+  - `compile_mode_acceptance::acc05_kill_reaps_backgrounded_descendant`, with #306's three
+    fragments (`kill must produce a signaled exit marker; buffer:`, the shell's
+    `Terminated: 15          sleep 30` and no `[compile killed by …]` marker, and `test
+    result: FAILED. 74 passed; 1 failed; 0 ignored`): **#306's second occurrence**, the first
+    on this leg (its first, `CI` 36927231233, was on lua54). The buffer ends `[compile exited
+    with code 0]`. Commented on #306, not rerun.
+  - `e7i_review1_probes::e7i_review1_parse_now_on_a_buffer_mid_parse`, `the report did not
+    reach the expected state in 120s; last:` with nothing written, no `_parse_now mid-parse in
+    none:` line in the log, and `test result: FAILED. 21 passed; 1 failed; 0 ignored`. No
+    row here names it, so it is filed as **#323**, first occurrence, not rerun. On the legs
+    where it finished, its `none` mode blocked the main thread 30,571 to 100,920 ms across this
+    run and PR #321's first, against the row's 120 s wait, the macOS luajit leg's 100,920 at
+    `e23510a` the nearest.
+
+  The branch changes nothing under `src/` or `builtin/`, nor either suite but #283's row; that
+  is read, not a demonstration.
+- The rows of #283, #313, #319 and #322 and the PR's two new rows passed on every leg that
+  builds them (#283's on five, the no-crdt leg compiling it out). Each leg's `running` lines
+  pair with its result lines, the macOS legs' one unpaired line apiece being the adapter
+  step's `grep` text. `WouldBlock`, `did not become ready` and `got ok` appear on no leg.
+  The legs' new steps printed as at `e23510a`: 2 skips on each Ubuntu leg, 14 on
+  each macOS leg and 17 on `Test (crdt)`.
+
+#### `Grammar fuzz` 37498475125 at `ab06caa`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112389024126 and `Grammar fuzz (asan-strict)`
+112389023611, the path for a change that touches no grammar.
+
+#### The tip's gate, `20261006T164749Z-1441387` at `ab06caa`
+
+Five of six, the default plan: `05-sweep` read 189 result lines, 5,221 passed, 1 failed, 62
+ignored, the one #311's row with #311's fragments, so #311's list gains it. R7, #291 and #316
+did not fire, which is non-reproduction and nothing more. #322's row passed in it.
+
+#### #322 folded in, reproduced on demand
+
+`ab06caa` runs the row's fourth parse on #301's nested openers instead of #296's paragraph.
+On the laptop `main`'s row failed with #322's fragments exactly (`the deadline's kill did not
+become ready within 60s`, the last report `deaths=3 … busy=false … pending=0 … tree=true …
+death=killed`) at a 100 ms deadline, and at its own 300 ms with the worker throttled to a
+quarter of its speed; the row at `ab06caa` passed under both. These were made, not met, and
+#322 stays at one.
+
+#### #283, #313 and #319 closed
+
+Closed at 16:48:30Z, 16:48:33Z and 16:48:36Z, each with a comment naming the mechanism PR #321
+removes and the witness that fails without it. Their counts stand as recorded above: #283 at
+fourteen, #313 at two, #319 at one.
+
+So, at PR #321's second head: #306 moves to two; #323 is at one; #311's list of runs reads at
+twenty; #322 stays at one; R7, #291 and #316 are not sampled. Every other count above stands.
 
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
