@@ -21,6 +21,11 @@
 //! where the session declares the buffer its window shows. The harness's
 //! declaration is #324's, filed with the scope its fix needs; the third
 //! row is E8b.1's bare name through the daemon.
+//!
+//! The last row is E8b fix round 1's: the same daemon driven by the GPU
+//! frontend itself (`pmacs-gpu --headless-probe`, every key through
+//! `App::apply_keyboard`), reaching a dired buffer by its own name in
+//! one session with the bare name and D18's four.
 #![cfg(feature = "crdt")]
 
 mod common;
@@ -421,4 +426,236 @@ fn e8b_1_a_bare_name_reaches_its_file_in_a_daemon_window() {
     let after = s.switch_by_typing("b.rs", &b);
     assert_eq!(after.name.as_deref(), Some(b.as_str()), "{after:?}");
     assert_eq!(after.bands, vec![format!("switch-buffer: showing {b}")]);
+}
+
+/// The own-name session through a daemon (E8b fix round 1), laid out as
+/// `tests/e8b_own_name_acceptance.rs` lays it out: `bin-tests` holding
+/// `a.rs`, `b.rs` and `notes.txt`, `proj` holding `dired.lua`,
+/// `src/lsp.rs` and `editor.rs` (shown), both in `nightowls`, which
+/// spells `nts` loosely; `*scratch*` kept, no language server. The init
+/// binds `C-c z` to `probe.where`, which writes `WHERE <the window's
+/// buffer>` to the band: an oracle for the window that does not read
+/// E8b.2's message. Returns the daemon and the paths as handed to it.
+fn own_name_daemon() -> (TestDaemon, tempfile::TempDir, HashMap<&'static str, String>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("nightowls");
+    std::fs::create_dir_all(root.join("bin-tests")).expect("bin-tests");
+    std::fs::create_dir_all(root.join("proj/src")).expect("proj/src");
+    let mut paths = HashMap::new();
+    let mut visits = String::new();
+    for (key, rel) in [
+        ("a", "bin-tests/a.rs"),
+        ("b", "bin-tests/b.rs"),
+        ("notes", "bin-tests/notes.txt"),
+        ("lua", "proj/dired.lua"),
+        ("lsp_rs", "proj/src/lsp.rs"),
+        ("editor", "proj/editor.rs"),
+    ] {
+        let path = root.join(rel);
+        std::fs::write(&path, b"x\n").expect("write");
+        let shown = path.display().to_string();
+        let _ = writeln!(visits, "pmacs.buffer.find_or_open({shown:?})");
+        paths.insert(key, shown);
+    }
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         {visits}\
+         pmacs.command.define {{\n\
+           name = 'probe.where',\n\
+           description = 'Say which buffer the window shows.',\n\
+           fn = function()\n\
+             pmacs.editor.set_status('WHERE ' .. pmacs.describe.buffer(pmacs.window.buffer()).name)\n\
+           end,\n\
+         }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c z', command = 'probe.where' }}\n"
+    );
+    let daemon = TestDaemon::spawn_with_env_and_init(
+        &[
+            ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
+            ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
+        ],
+        &init,
+    );
+    (daemon, dir, paths)
+}
+
+/// Run `pmacs-gpu --headless-probe` under the popup action with `steps`:
+/// every `key:` step through `App::apply_keyboard`, the production key
+/// path, and every `report:<label>` writing the band as
+/// `<label>.status`. `None` when skipped (no `pmacs-gpu` binary or no
+/// wgpu adapter), which panics under `PMACS_REQUIRE_GPU` so the gate's
+/// GPU leg never passes vacuously.
+fn run_gpu_probe(daemon: &TestDaemon, steps: &[String]) -> Option<HashMap<String, String>> {
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("test binary directory")
+        .join("pmacs-gpu");
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+            binary.display()
+        );
+        eprintln!("skipping the GPU probe: {} is not built", binary.display());
+        return None;
+    }
+    let report = daemon
+        .socket_path()
+        .parent()
+        .expect("socket parent")
+        .join("own-name.report");
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", steps.join(" "))
+        .env("PMACS_GPU_PROBE_ACTION", "popup")
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "60000")
+        .output()
+        .expect("run the headless GPU probe");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "headless GPU probe failed (status {:?}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping the GPU probe: no wgpu adapter available");
+        return None;
+    }
+    let text = std::fs::read_to_string(&report).expect("read the probe report");
+    Some(
+        text.lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+    )
+}
+
+/// Report the band as `label` once it begins with `prefix`. A key step
+/// waits 250 ms, and a switch's message came later than that out of the
+/// dired buffer, and later than 600 ms beside the suite's other rows.
+fn report_steps(steps: &mut Vec<String>, prefix: &str, label: &str) {
+    steps.push(format!("band:{prefix}"));
+    steps.push(format!("report:{label}"));
+}
+
+/// `C-c z` reported as `<label>-where`: the window's buffer, by the
+/// init's oracle.
+fn where_steps(steps: &mut Vec<String>, label: &str) {
+    steps.extend(["key:C-c".to_owned(), "key:z".to_owned()]);
+    report_steps(steps, "WHERE", &format!("{label}-where"));
+}
+
+/// `C-x b`, `text`, RET reported as `label` once the band begins with
+/// `said`, then [`where_steps`].
+fn switch_steps(steps: &mut Vec<String>, text: &str, said: &str, label: &str) {
+    steps.extend(["key:C-x".to_owned(), "key:b".to_owned()]);
+    steps.extend(text.chars().map(|c| format!("key:{c}")));
+    steps.push("key:ret".to_owned());
+    report_steps(steps, said, label);
+    where_steps(steps, label);
+}
+
+/// The band a report wrote under `label`, as the probe quotes it.
+fn band(facts: &HashMap<String, String>, label: &str) -> String {
+    facts
+        .get(&format!("{label}.status"))
+        .unwrap_or_else(|| panic!("the report has no {label}.status: {facts:?}"))
+        .clone()
+}
+
+/// E8b fix round 1's GPU row: review 1's Medium 1 on the GPU frontend,
+/// in one session with the bare name and D18's four, every key through
+/// `App::apply_keyboard`. `C-x b dired RET` and `C-x b dir RET` reach the
+/// dired buffer, `b.rs` reaches `b.rs` beside `a.rs`, `nts` reaches
+/// `notes.txt` with the dired buffer's name holding `nts` too, `scr`
+/// `*scratch*`, `lsp` `*lsp*` beside `src/lsp.rs`, and `zzz` is refused
+/// with the window unchanged. Each switch is read twice: the band E8b.2
+/// writes, and `C-c z`'s oracle for the window.
+#[test]
+fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four() {
+    let (daemon, _dir, paths) = own_name_daemon();
+    // The probe is ready once one snapshot has landed, and the GPU
+    // declares a viewport on each bootstrap snapshot as it applies it,
+    // which moves its window; where it settles varies from run to run,
+    // so the row lets the bootstrap finish and then puts `editor.rs` in
+    // the window by its name.
+    let mut steps = vec!["quiet:2000".to_owned()];
+    switch_steps(&mut steps, "editor.rs", "switch-buffer:", "start");
+    steps.extend(["key:C-x", "key:d", "key:ret", "quiet:1500"].map(str::to_owned));
+    where_steps(&mut steps, "dired-open");
+    for (text, label) in [
+        ("editor.rs", "editor"),
+        ("dired", "dired"),
+        ("editor.rs", "editor-2"),
+        ("dir", "dir"),
+        ("a.rs", "a"),
+        ("b.rs", "bare"),
+        ("nts", "nts"),
+        ("scr", "scr"),
+    ] {
+        switch_steps(&mut steps, text, "switch-buffer:", label);
+    }
+    steps.extend(["key:C-c", "key:l", "quiet:500"].map(str::to_owned));
+    where_steps(&mut steps, "lsp-open");
+    switch_steps(&mut steps, "scr", "switch-buffer:", "scr-2");
+    switch_steps(&mut steps, "lsp", "switch-buffer:", "lsp");
+    switch_steps(&mut steps, "zzz", "no", "zzz");
+    let Some(facts) = run_gpu_probe(&daemon, &steps) else {
+        return;
+    };
+    assert_eq!(fact_or(&facts, "ready"), "true", "{facts:?}");
+    assert_eq!(fact_or(&facts, "disconnect"), "", "{facts:?}");
+    let where_ = |name: &str| format!("{:?}", format!("WHERE {name}"));
+    let showing = |name: &str| format!("{:?}", format!("switch-buffer: showing {name}"));
+    assert_eq!(band(&facts, "start-where"), where_(&paths["editor"]));
+    assert!(
+        band(&facts, "start").ends_with(&format!("showing {}\"", paths["editor"])),
+        "{facts:?}"
+    );
+    let opened = band(&facts, "dired-open-where");
+    let dired = opened
+        .trim_matches('"')
+        .strip_prefix("WHERE ")
+        .filter(|n| n.starts_with("*dired:") && n.ends_with("/proj*"))
+        .unwrap_or_else(|| panic!("fixture: C-x d RET opened a dired buffer; {opened}"))
+        .to_owned();
+    let expect = [
+        ("editor", paths["editor"].clone()),
+        ("dired", dired.clone()),
+        ("editor-2", paths["editor"].clone()),
+        ("dir", dired.clone()),
+        ("a", paths["a"].clone()),
+        ("bare", paths["b"].clone()),
+        ("nts", paths["notes"].clone()),
+        ("scr", "*scratch*".to_owned()),
+        ("scr-2", "*scratch*".to_owned()),
+        ("lsp", "*lsp*".to_owned()),
+    ];
+    for (label, name) in &expect {
+        assert_eq!(
+            (band(&facts, label), band(&facts, &format!("{label}-where"))),
+            (showing(name), where_(name)),
+            "{label}: the switch reached {name}; {facts:?}"
+        );
+    }
+    assert_eq!(band(&facts, "lsp-open-where"), where_("*lsp*"));
+    assert_eq!(band(&facts, "zzz"), format!("{:?}", "no buffer: zzz"));
+    assert_eq!(
+        band(&facts, "zzz-where"),
+        where_("*lsp*"),
+        "zzz switched nothing"
+    );
+    assert!(
+        !facts.keys().any(|k| k.starts_with("step.")),
+        "every step settled: {facts:?}"
+    );
+}
+
+/// A report's top-level fact, `""` when absent.
+fn fact_or<'a>(facts: &'a HashMap<String, String>, key: &str) -> &'a str {
+    facts.get(key).map_or("", String::as_str)
 }

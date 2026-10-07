@@ -448,14 +448,17 @@ impl Minibuffer {
             return Ok(());
         };
         let needle = self_contents(&self.buffer);
-        let pool = collect_pool(&s.source, &needle, commands, registry)?;
         let candidates = if s.ranked {
             // The source already filtered and ordered against the
             // needle it was handed; only the cap applies.
-            pool.into_iter().take(CANDIDATE_LIMIT).collect()
+            collect_pool(&s.source, &needle, commands, registry)?
+                .into_iter()
+                .take(CANDIDATE_LIMIT)
+                .collect()
         } else if matches!(s.source, CompletionSource::Buffers) {
-            rank_buffer_names(&needle, &pool)
+            rank_buffer_names(&needle, &buffer_pool(registry))
         } else {
+            let pool = collect_pool(&s.source, &needle, commands, registry)?;
             filter_and_sort(filter_needle(&s.source, &needle), &pool)
         };
         s.candidates = candidates;
@@ -806,10 +809,9 @@ fn collect_pool(
     match source {
         CompletionSource::None => Ok(Vec::new()),
         CompletionSource::Commands => Ok(commands.names().to_vec()),
-        CompletionSource::Buffers => Ok(registry
-            .ids()
-            .iter()
-            .filter_map(|id| registry.get(*id).ok().map(|b| b.name().to_owned()))
+        CompletionSource::Buffers => Ok(buffer_pool(registry)
+            .into_iter()
+            .map(|(name, _)| name)
             .collect()),
         CompletionSource::Files { root } => {
             let (dir_part, _) = split_dir_base(needle);
@@ -827,6 +829,20 @@ fn collect_pool(
             Ok(table.sequence_values::<String>().flatten().collect())
         }
     }
+}
+
+/// The `buffers` source's pool: each buffer's name, and whether the
+/// buffer holds a file path, which is what makes a `/` in its name a
+/// directory (see [`name_tier`]).
+fn buffer_pool(registry: &BufferRegistry) -> Vec<(String, bool)> {
+    registry
+        .ids()
+        .iter()
+        .filter_map(|id| {
+            let b = registry.get(*id).ok()?;
+            Some((b.name().to_owned(), b.file_path().is_some()))
+        })
+        .collect()
 }
 
 fn list_directory(root: &Path) -> Vec<String> {
@@ -920,27 +936,48 @@ pub fn rank_candidates(needle: &str, pool: &[String], limit: Option<usize>) -> V
         .collect()
 }
 
-/// [`filter_and_sort`] for the `buffers` source (`C-x b`), whose file
-/// buffers are named by their absolute paths. A path is many components,
-/// so a short name is a subsequence of paths it does not name: `b.rs`
-/// matches `…/build/…/a.rs` through the `b` of `build` and the `.rs`,
-/// and [`fuzzy_score`], which takes each character's first occurrence,
-/// scores the two paths alike wherever their shared directories hold the
-/// `b`. The lexical tie-break then put `a.rs` first and `C-x b b.rs RET`
-/// stayed on it (#318). An abbreviation meets the same: under this
-/// laptop's gate, `nts` is spelled by `jeans`, `gate` and `targets`, so
-/// it matched every file buffer beside `notes.txt` alike and `C-x b nts
-/// RET` reached `a.rs`. So a name is placed by [`name_tier`] before its
-/// score is read: the typed text naming whole trailing components of a
-/// buffer's name, or fitting inside its last one, is preferred to a
-/// match assembled across directories. The score and the lexical order
-/// still decide within a tier, on the whole name as before (scoring the
-/// last component alone would put `src/lsp.rs` above `*lsp*` for
-/// `lsp`), and the display names are untouched.
-fn rank_buffer_names(needle: &str, pool: &[String]) -> Vec<String> {
+/// [`filter_and_sort`] for the `buffers` source (`C-x b`, `C-x k`), whose
+/// file buffers are named by their absolute paths. A path is many
+/// components, so a short name is a subsequence of paths it does not
+/// name: `b.rs` matches `…/build/…/a.rs` through the `b` of `build` and
+/// the `.rs`, and [`fuzzy_score`], which takes each character's first
+/// occurrence, scores the two paths alike wherever their shared
+/// directories hold the `b`. The lexical tie-break then put `a.rs` first
+/// and `C-x b b.rs RET` stayed on it (#318); under this laptop's gate
+/// `jeans`, `gate` and `targets` spell `nts` the same way.
+///
+/// So a name is placed by [`name_tier`] before its score is read: a match
+/// within a buffer's own name outranks one spelled through the
+/// directories it sits in. A buffer's own name is the basename of one
+/// that holds a file path, and the whole name of any other, which sits in
+/// no directory however many `/` it holds: a dired buffer is
+/// `*dired:<path>*`, and while its `/` were read as directories `C-x b
+/// dired RET` reached `dired.lua` (E8b review 1).
+///
+/// Within a place the match is scored where the place says it lies:
+/// inside the own name in place 3, and on the whole name otherwise. Read
+/// on the whole name, `notes.txt` and a dired buffer whose directories
+/// both spell `nts` tie through those directories, and the lexical order
+/// took the dired buffer. The own name is read where it stands, after
+/// its `/`, so a basename's first letter is never taken for the name's.
+/// Ties are lexical, which puts a `*` name before a `/` one: `*lsp*`
+/// before `src/lsp.rs` for `lsp`, and the dired buffer before
+/// `dired.lua` for `dired`, whose own names hold the letters as tightly.
+/// The display names are untouched.
+fn rank_buffer_names(needle: &str, pool: &[(String, bool)]) -> Vec<String> {
     let mut scored: Vec<(u8, i32, &str)> = pool
         .iter()
-        .filter_map(|s| fuzzy_score(needle, s).map(|sc| (name_tier(needle, s), sc, s.as_str())))
+        .filter_map(|(name, path)| {
+            let whole = fuzzy_score(needle, name)?;
+            let place = name_tier(needle, name, *path);
+            let score = if place == 3 {
+                let own = own_name_start(name, *path);
+                fuzzy_score(needle, &name[own.saturating_sub(1)..]).unwrap_or(whole)
+            } else {
+                whole
+            };
+            Some((place, score, name.as_str()))
+        })
         .collect();
     scored.sort_by(|a, b| {
         a.0.cmp(&b.0)
@@ -954,27 +991,25 @@ fn rank_buffer_names(needle: &str, pool: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// How `name` meets `needle` before any score: `0` when it is the name
-/// as written; `1` when the name ends with it at a path component (a
-/// basename typed whole, or `lsp/mod.rs` against `…/src/lsp/mod.rs`, so
-/// directories still tell two `mod.rs` apart); `2` the same with case
-/// folded as [`fuzzy_score`] folds it; `3` when it is a subsequence of
-/// the name's last component (`nts` of `notes.txt`; the whole of a name
-/// with no `/`, such as `*scratch*`); `4` when the match needs the
-/// directories. An empty needle places every name alike.
-fn name_tier(needle: &str, name: &str) -> u8 {
-    fn ends_at_component(name: &str, needle: &str) -> bool {
-        name.strip_suffix(needle)
-            .is_some_and(|rest| rest.is_empty() || rest.ends_with('/') || needle.starts_with('/'))
-    }
+/// How `name` meets `needle` before any score, `path` saying whether its
+/// buffer holds a file path: `0` when it is the name as written; `1`
+/// when the name ends with it at a path component (a basename typed
+/// whole, or `lsp/mod.rs` against `…/src/lsp/mod.rs`, so directories
+/// still tell two `mod.rs` apart); `2` the same with case folded as
+/// [`fuzzy_score`] folds it; `3` when it is a subsequence of the name's
+/// own name (`nts` of `notes.txt`, `dired` of `*dired:/p/proj*`); `4`
+/// when the match needs the directories. A name whose buffer holds no
+/// file is one component, so a match in it is never placed 1 or 4. An
+/// empty needle places every name alike.
+fn name_tier(needle: &str, name: &str, path: bool) -> u8 {
     fn fold(s: &str) -> String {
         s.chars().flat_map(char::to_lowercase).collect()
     }
-    let last = name
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(name);
+    let ends_at_component = |name: &str, needle: &str| {
+        name.strip_suffix(needle).is_some_and(|rest| {
+            rest.is_empty() || (path && (rest.ends_with('/') || needle.starts_with('/')))
+        })
+    };
     if needle.is_empty() {
         4
     } else if name == needle {
@@ -983,10 +1018,21 @@ fn name_tier(needle: &str, name: &str) -> u8 {
         1
     } else if ends_at_component(&fold(name), &fold(needle)) {
         2
-    } else if fuzzy_score(needle, last).is_some() {
+    } else if fuzzy_score(needle, &name[own_name_start(name, path)..]).is_some() {
         3
     } else {
         4
+    }
+}
+
+/// Where a buffer's own name begins in `name`: after the last `/` of one
+/// whose buffer holds a file path (`path`), and at the start of any
+/// other.
+fn own_name_start(name: &str, path: bool) -> usize {
+    if path {
+        name.trim_end_matches('/').rfind('/').map_or(0, |i| i + 1)
+    } else {
+        0
     }
 }
 
@@ -1313,6 +1359,11 @@ mod tests {
         assert!(out.iter().all(|s| s.contains("buffer")));
     }
 
+    /// File buffers named by `paths`, as the `buffers` source pools them.
+    fn files(paths: &[&String]) -> Vec<(String, bool)> {
+        paths.iter().map(|p| ((*p).clone(), true)).collect()
+    }
+
     /// E8b.1, #318's premise measured on the scorer itself: where the
     /// directories two file buffers share hold a `b`, `b.rs` is a
     /// subsequence of both paths and [`fuzzy_score`] gives them one
@@ -1328,11 +1379,11 @@ mod tests {
             fuzzy_score("b.rs", &b),
             "premise: the scorer cannot tell the two paths apart"
         );
-        let pool = vec![a.clone(), b.clone()];
         assert_eq!(
-            rank_candidates("b.rs", &pool, None),
+            rank_candidates("b.rs", &[a.clone(), b.clone()], None),
             vec![a.clone(), b.clone()]
         );
+        let pool = files(&[&a, &b]);
         assert_eq!(rank_buffer_names("b.rs", &pool), vec![b.clone(), a.clone()]);
         assert_eq!(rank_buffer_names("a.rs", &pool), vec![a.clone()]);
         assert_eq!(rank_buffer_names("B.RS", &pool), vec![b.clone(), a.clone()]);
@@ -1350,17 +1401,17 @@ mod tests {
         let lsp = "/p/src/lsp/mod.rs".to_owned();
         let lua = "/p/src/lua_bindings/mod.rs".to_owned();
         let other = "/p/src/main.rs".to_owned();
-        let pool = vec![other.clone(), lua.clone(), lsp.clone()];
+        let pool = files(&[&other, &lua, &lsp]);
         assert_eq!(rank_buffer_names("lsp/mod.rs", &pool)[0], lsp);
         assert_eq!(rank_buffer_names("lua_bindings/mod.rs", &pool)[0], lua);
         assert_eq!(rank_buffer_names("/mod.rs", &pool).len(), 2);
         let both = rank_buffer_names("mod.rs", &pool);
         assert_eq!(both.len(), 2, "{both:?}");
         assert_eq!(rank_buffer_names(&lua, &pool)[0], lua);
-        assert_eq!(name_tier("mod.rs", &lsp), 1);
-        assert_eq!(name_tier("od.rs", &lsp), 3);
-        assert_eq!(name_tier("src/m", &lsp), 4);
-        assert_eq!(name_tier("", &lsp), 4);
+        assert_eq!(name_tier("mod.rs", &lsp, true), 1);
+        assert_eq!(name_tier("od.rs", &lsp, true), 3);
+        assert_eq!(name_tier("src/m", &lsp, true), 4);
+        assert_eq!(name_tier("", &lsp, true), 4);
     }
 
     /// E8b.1 keeps D18's subsequences: `nts` reaches `notes.txt`, `scr`
@@ -1373,14 +1424,16 @@ mod tests {
     #[test]
     fn the_buffers_ranker_keeps_d18_s_subsequences() {
         let root = "/home/jeans/build/pmacs-gate-targets/tmp/hand/.tmpXq9/build";
-        let pool: Vec<String> = ["a.rs", "b.rs", "notes.txt", "src/lsp.rs"]
+        let paths: Vec<String> = ["a.rs", "b.rs", "notes.txt", "src/lsp.rs"]
             .iter()
             .map(|f| format!("{root}/{f}"))
-            .chain(["*scratch*".to_owned(), "*lsp*".to_owned()])
             .collect();
+        let mut pool = files(&paths.iter().collect::<Vec<_>>());
+        pool.extend([("*scratch*".to_owned(), false), ("*lsp*".to_owned(), false)]);
         let notes = format!("{root}/notes.txt");
+        let names: Vec<String> = pool.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(
-            rank_candidates("nts", &pool, None)[0],
+            rank_candidates("nts", &names, None)[0],
             format!("{root}/a.rs"),
             "premise: the directories spell `nts` for every file"
         );
@@ -1392,6 +1445,68 @@ mod tests {
             rank_buffer_names("lsp.rs", &pool)[0],
             format!("{root}/src/lsp.rs")
         );
+    }
+
+    /// E8b review 1's Medium 1: a buffer that holds no file is placed by
+    /// its whole name, its `/` read as nothing. A dired buffer's name,
+    /// `*dired:<path>*`, holds `dired` and every abbreviation of it, so
+    /// it is place 3 beside `dired.lua`, ties it, and comes first by the
+    /// lexical order; read as a path (the flag alone changed), its own
+    /// name would be `proj*` and its match would need the directories.
+    #[test]
+    fn a_buffer_holding_no_file_is_its_whole_name() {
+        let dired = "*dired:/home/u/build/proj*".to_owned();
+        let lua = "/home/u/build/proj/dired.lua".to_owned();
+        let editor = "/home/u/build/proj/editor.rs".to_owned();
+        let mut pool = files(&[&lua, &editor]);
+        pool.push((dired.clone(), false));
+        assert_eq!(
+            rank_buffer_names("dired", &pool),
+            vec![dired.clone(), lua.clone()]
+        );
+        assert_eq!(
+            rank_buffer_names("dir", &pool),
+            vec![dired.clone(), lua.clone(), editor]
+        );
+        assert_eq!(name_tier("dired", &dired, false), 3);
+        assert_eq!(name_tier("dired", &dired, true), 4);
+        assert_eq!(name_tier("dired", &lua, true), 3);
+        assert_eq!(name_tier("/proj*", &dired, false), 3, "one component");
+        assert_eq!(name_tier("/proj*", &dired, true), 1);
+        assert_eq!(name_tier(&dired, &dired, false), 0);
+    }
+
+    /// Within place 3 the match is scored inside each own name, read where
+    /// it stands. `notes.txt` and a dired buffer of a directory beside it
+    /// both hold `nts`, and on their whole names they tie through the
+    /// directories that spell it (`jeans`, `gate`, `targets`), which the
+    /// lexical order gave the dired buffer. `src/lsp.rs`'s own name holds
+    /// `lsp` as tightly as `*lsp*` does, its `l` taken as following a `/`
+    /// rather than starting a name, and the lexical order gives `*lsp*`.
+    /// The other side of the rule: a dired buffer whose own name holds
+    /// `nts` more tightly than `notes.txt` (`bin-tests`, with `-t`'s
+    /// boundary) takes it.
+    #[test]
+    fn place_three_scores_the_match_inside_the_own_name() {
+        let root = "/home/jeans/build/pmacs-gate-targets/tmp/hand/.tmpXq9";
+        let notes = format!("{root}/proj/notes.txt");
+        let lsp_rs = format!("{root}/proj/src/lsp.rs");
+        let dired = format!("*dired:{root}/proj*");
+        let mut pool = files(&[&notes, &lsp_rs]);
+        pool.extend([(dired.clone(), false), ("*lsp*".to_owned(), false)]);
+        assert_eq!(
+            fuzzy_score("nts", &dired),
+            fuzzy_score("nts", &notes),
+            "premise: on their whole names the two tie"
+        );
+        assert_eq!(rank_buffer_names("nts", &pool)[0], notes);
+        assert_eq!(
+            rank_buffer_names("lsp", &pool)[..2],
+            ["*lsp*", lsp_rs.as_str()]
+        );
+        let tests = "*dired:/tmp/.tmpXq9/bin-tests*".to_owned();
+        pool.push((tests.clone(), false));
+        assert_eq!(rank_buffer_names("nts", &pool)[0], tests);
     }
 
     #[test]
