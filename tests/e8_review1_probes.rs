@@ -34,16 +34,24 @@ use common::daemon::{TestDaemon, build_default_caps};
 const SOURCE: &str = "fn main() { let value = 1; }\n";
 
 /// One attached semantic session: its writer, a channel of everything
-/// the daemon wrote it, and its frontend id.
+/// the daemon wrote it, its frontend id, and the name of the buffer its
+/// window showed when it attached.
 struct Session {
     stream: UnixStream,
     rx: mpsc::Receiver<InstanceMessage>,
     fid: FrontendId,
+    window: String,
 }
 
 impl Session {
-    /// Attach offering exactly `offer`, declare a viewport so the
-    /// projection producer is live, and start the reader thread.
+    /// Attach offering exactly `offer`, start the reader thread, and
+    /// declare a viewport on the window's own buffer, the one the first
+    /// `CursorByte` names, so the projection producer is live; the
+    /// `StatusFacts` that answers it names that buffer. This harness
+    /// declared the bootstrap's first snapshot until E8b's fix round 1,
+    /// and a `Viewport` aligns the window to the buffer it names, so every
+    /// row here ran in a window moved to `b.rs`, the first visited, where
+    /// `daemon_with` leaves `a.rs` shown (#324).
     fn attach(daemon: &TestDaemon, offer: u32) -> Self {
         let mut stream = daemon.connect();
         stream
@@ -82,9 +90,14 @@ impl Session {
                 }
             }
         });
-        let mut session = Self { stream, rx, fid };
-        let document = session.wait("the first BufferSnapshot", |msg| match msg {
-            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+        let mut session = Self {
+            stream,
+            rx,
+            fid,
+            window: String::new(),
+        };
+        let document = session.wait("the first CursorByte", |msg| match msg {
+            InstanceMessage::CursorByte { buffer_id, .. } => Some(*buffer_id),
             _ => None,
         });
         write_message(
@@ -97,6 +110,12 @@ impl Session {
             },
         )
         .expect("declare a viewport");
+        session.window = session.wait("the window's buffer named", |msg| match msg {
+            InstanceMessage::StatusFacts {
+                buffer_id, name, ..
+            } if *buffer_id == document => Some(name.clone()),
+            _ => None,
+        });
         session
     }
 
@@ -249,7 +268,8 @@ fn init_for(files: &[&Path], mode: &str, env: &[(&str, &str)], extra: &str) -> S
 }
 
 /// A daemon visiting `b.rs` then `a.rs` (shown), both holding `source`,
-/// in a cargo project, semantic and multi-frontend.
+/// in a cargo project, semantic and multi-frontend. An attached
+/// [`Session`]'s window shows `a.rs`.
 fn daemon_with(
     source: &str,
     mode: &str,
@@ -433,12 +453,19 @@ fn presents(msgs: &[InstanceMessage]) -> usize {
 fn review1_switching_the_windows_buffer_closes_the_popup() {
     let (daemon, _dir) = daemon_with(SOURCE, "hover", &[], "");
     let mut s = Session::attach(&daemon, PROTOCOL_VERSION);
+    assert!(
+        s.window.ends_with("/a.rs"),
+        "the window starts where the fixture leaves it, on a.rs (#324): {}",
+        s.window
+    );
     let opened = s.ask_until_present('h');
-    // E8 fix round 1: `C-x <right>` (`editor.next-buffer`) puts another
-    // buffer in the window. The review's `C-x b b.rs RET` did not on CI's
-    // runners: `C-x b` takes the top candidate and buffers are named by
-    // path, so `b.rs` also matches `a.rs`'s path as a subsequence and the
-    // window kept `a.rs` on four of six test legs.
+    // E8 fix round 1 switched with `C-x <right>` (`editor.next-buffer`),
+    // reading the review's red on CI's runners as `C-x b b.rs RET` keeping
+    // the window on `a.rs`. That reading was backwards (#318, #324): this
+    // harness had put the window on `b.rs`, so where `b.rs` matched only
+    // itself the selection was the buffer already shown, nothing switched,
+    // and the row failed. `C-x <right>` puts another buffer in the window
+    // either way, and the window now starts on `a.rs`.
     s.ctrl('x');
     let mut seen = s.drain(Duration::from_millis(300));
     s.key(Key::Right, Modifiers::NONE);
@@ -481,11 +508,17 @@ fn review1_switching_the_windows_buffer_closes_the_popup() {
 /// PASSES at `1ace8b3`; the handoff reasons this close and witnesses
 /// none. Killing the buffer under an open popup (`C-x k RET`) ends it:
 /// the window's next buffer arrives as a snapshot and no `Present`
-/// follows.
+/// follows. The buffer killed is `a.rs`, the window's own since #324's
+/// fix (E8b fix round 1).
 #[test]
 fn review1_killing_the_buffer_closes_the_popup() {
     let (daemon, _dir) = daemon_with(SOURCE, "hover", &[], "");
     let mut s = Session::attach(&daemon, PROTOCOL_VERSION);
+    assert!(
+        s.window.ends_with("/a.rs"),
+        "the window starts where the fixture leaves it, on a.rs (#324): {}",
+        s.window
+    );
     s.ask_until_present('h');
     s.ctrl('x');
     s.typed("k");
