@@ -389,6 +389,53 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     assert_eq!(active_name(&s), scratch, "nothing switched");
 }
 
+/// The folded half of "ends with it at a path component" (place 2), which
+/// no other row through the keys noticed when it was removed (E8b fix
+/// round 1's survey of the rule): a basename typed whole in another case
+/// outranks a neighbor whose own name ends with it. `Q.RS` beside `aq.rs`
+/// and `q.rs`: both own names hold it, the scorer folds case and ties
+/// them, and the lexical order would take `aq.rs`. The tie needs the
+/// letter to be absent from the directories (else the scorer starts
+/// there and the shorter basename wins by its gap), so the row picks one
+/// its own temporary root does not hold, as review 1's `q.rs` probe does
+/// (`tests/e8b_review1_probes.rs`).
+#[test]
+fn a_basename_typed_in_another_case_beats_a_name_ending_with_it() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td.path().join("zz");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let root = dir.display().to_string().to_lowercase();
+    let letter = ['q', 'x', 'z', 'w', 'y', 'k', 'f', 'v']
+        .into_iter()
+        .find(|c| !root.contains(*c))
+        .expect("fixture: some letter is absent from the temporary root");
+    let typed = format!("{}.RS", letter.to_ascii_uppercase());
+    let mut s = fresh();
+    let mut names = Vec::new();
+    for file in [
+        format!("a{letter}.rs"),
+        format!("{letter}.rs"),
+        "c.txt".to_owned(),
+    ] {
+        std::fs::write(dir.join(&file), b"x\n").expect("write");
+        names.push(visit(&s, &dir.join(&file)));
+    }
+    let [neighbor, own, c] = names.try_into().expect("three visits");
+    assert_eq!(
+        fuzzy_score(&typed, &neighbor),
+        fuzzy_score(&typed, &own),
+        "premise: the scorer cannot tell them apart"
+    );
+    show(&s, &c);
+    switch_by_typing(&mut s, &typed);
+    assert_eq!(
+        active_name(&s),
+        own,
+        "C-x b {typed} RET reaches {letter}.rs, not a{letter}.rs"
+    );
+    assert_eq!(status(&s), format!("switch-buffer: showing {own}"));
+}
+
 /// Whether the buffer named `name` reads as modified, which decides
 /// whether a kill asks first.
 fn modified(s: &EditorState, name: &str) -> bool {
