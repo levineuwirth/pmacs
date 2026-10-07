@@ -283,6 +283,44 @@ fn review1_c_x_k_dired_kills_the_dired_buffer_not_a_file() {
     );
 }
 
+/// PASSES at `0001946`; FAILS against `b374cd8`'s parent. The other
+/// side of the row above: in the handoff's crowded fixture (`a.rs` and
+/// `b.rs` under `bin-tests`, whose `b` both paths share), `C-x k b.rs
+/// RET` kills `b.rs`. Before `b374cd8` the same keys killed `a.rs`, an
+/// unmodified buffer, with no question and nothing on the band: E8b.1
+/// fixed a silent wrong kill that no pass records, and no row of the
+/// phase witnesses `C-x k` at all.
+#[test]
+fn review1_c_x_k_b_rs_kills_b_rs_in_a_crowded_directory() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td.path().join("bin-tests");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let mut s = fresh();
+    let mut names = Vec::new();
+    for file in ["a.rs", "b.rs", "c.txt"] {
+        std::fs::write(dir.join(file), b"x\n").expect("write");
+        names.push(visit(&s, &dir.join(file)));
+    }
+    let (a, b, c) = (names[0].clone(), names[1].clone(), names[2].clone());
+    show(&s, &c);
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('k'));
+    clear_field(&mut s);
+    type_str(&mut s, "b.rs");
+    let offered = candidates(&s);
+    assert!(
+        offered.contains(&a) && offered.contains(&b),
+        "fixture premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+    );
+    press(&mut s, KeyCode::Enter);
+    let left = buffer_names(&s);
+    assert!(
+        left.contains(&a) && !left.contains(&b),
+        "C-x k b.rs RET kills b.rs and keeps a.rs; left {left:?}, band {:?}",
+        status(&s)
+    );
+}
+
 /// PASSES at `0001946`, and is the only row through the keys that does
 /// so because of places 1 and 2. Every acceptance row's bare name
 /// (`b.rs` beside `a.rs`) is also won by place 3 alone, since `a.rs`'s
