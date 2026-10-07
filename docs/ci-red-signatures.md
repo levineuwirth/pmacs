@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 26 items in the list below.
+Tally (311-runs): 27 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2816,6 +2816,8 @@ Tally (311-runs): 26 items in the list below.
 - `20261007T101629Z-2858399` at `0001946` (E8b review 1's gate, `05-sweep`; recorded at
   E8b's fix round 1, below).
 - `20261007T154827Z-3509142` at `70d69d0` (E8b fix round 1's tip gate, `05-sweep`).
+- `20261007T183201Z-3888421` at `226f5f0` (the cache-budget PR's tip gate, `05-sweep`;
+  recorded with that PR, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -3876,6 +3878,160 @@ review 1's are at `~/build/e8b-review1/`.
 
 So, at E8b's fix round 1: #311's list of runs reads at twenty-six; #323 moves to two; #327 and
 #328 are at one; every other count above stands.
+
+### The cache-budget PR: #328's second and its cold-cache rerun, #330 and #331 filed, PR #329's runs, #282's fourth, #307's second, and #311's list at twenty-seven
+
+Recorded 2026-10-07 by the cache-budget pull request, #329 at `226f5f0` on `602c7ed`: one
+signed commit, a workflow change the owner's brief granted to it alone (`rust-cache` saves
+from `main` only). The runs were read from the jobs endpoint by conclusion and through the
+logs named below.
+
+#### `main` at `602c7ed`, E8b fix round 1's registry push
+
+`CI` 37655163947, `push`, attempt 1 of 1, `success`, 15 = 6 success + 9 skipped (`Docs
+consistency` 112908387495 among the six); `Grammar fuzz` 37655163928 `success`.
+
+#### `CI` 37648231070 at `70d69d0`, attempt 2: #328's second
+
+The owner's rerun of attempt 1's two unsuccessful jobs, 17:12:20Z to 17:36:52Z, on attempt
+1's merge (`HEAD is now at d253906` in both rerun logs): `failure`.
+
+Tally (pr325-ci-70d69d0-attempt2): 19 = 17 + 1 + 1.
+
+- `Test (ubuntu-latest / luajit)` 112915370760, `failure`: **#328's second occurrence**,
+  its fragments in three binaries (`e6d_review1_cursor_probes`, `m8_1c_acceptance`,
+  `e7b_review_tab_acceptance`) where attempt 1 had one, its 860-line log holding no
+  `running` line. Each failure asks for an LLVM bug report, so the linker `collect2` names
+  `ld` is LLVM's. Both attempts restored `v0-rust-test-Linux-x64-5dc78561-10e4f63a`, full
+  match, 678,605,842 bytes, and ran on `ubuntu-24.04` image `20260927.320.1`, whose
+  toolchain step updated rustc 1.98.1 to 1.99.0; attempt 1's three other Ubuntu-hosted legs
+  ran on `20261004.327.1`. That entry is `main`'s, saved once at 2026-10-04T18:41:49Z by
+  run 37223480185's `luajit, no crdt` leg; 36 distinct Ubuntu legs in the 12 runs since
+  restored it, 31 passing, this leg nine times (`0001946`'s among them). Commented on #328.
+- `Test (macos-latest / lua54)` 112915370769, `success`: 194 `running` lines paired with
+  194 `test result: ok`, no `FAILED`. #327's row passed, its suite's sixteen in 1.80 s, and
+  #323's passed after its sixty-second notice, its suite's twenty-two in 114.89 s; both are
+  non-reproduction and nothing more.
+- The other seventeen keep attempt 1's conclusions under new ids: sixteen success and `Docs
+  consistency` 112915374354 skipped.
+
+#### `CI` 37648231070 at `70d69d0`, attempts 3 to 5: the brief's cold-cache rerun, and #330
+
+The cache-budget brief's discriminator: the entry #328's leg restored deleted by id
+(8488722453, `204` at 18:24:21Z), leaving only PR #309's copy, which PR #325's runs cannot
+read, and the leg rerun on the same merge.
+
+- Attempt 3, job 112947328819, image `20260927.320.1`, `No cache found.`: `cancelled` at the
+  job's 45 minutes in its tool-install step, never reaching `cargo build`. Its `sudo apt-get
+  update` saw every `azure.archive.ubuntu.com` index `Ign`, fell back to
+  `archive.ubuntu.com`, and printed nothing after `Get:5 https://archive.ubuntu.com/ubuntu
+  noble-security InRelease [126 kB]` (18:25:42Z) until the cancel (19:10:02Z). Filed as
+  **#330**, first occurrence.
+- Attempt 4, job 112968169387, image `20260927.320.1`, `No cache found.`: the same stall,
+  its `Get:5` line at 19:13:15Z; the run cancelled by the session at 19:22:06Z, nine minutes
+  into a step whose longest earlier run was 145 s. **#330's third occurrence** (its second
+  is PR #329's, below).
+- Attempt 5, job 112972995696: Attempt 5, job 112972995696, image `20260927.320.1` with the same rustc update,
+  `No cache found.`: `failure`. The leg's own build linked everything: `cargo build
+  --workspace --all-targets` passed in 4 m 34 s, and step 9 ran the same 191 test binaries as
+  attempt 1's Ubuntu lua54 leg (the two lists of `Running` lines identical), 190 `test result:
+  ok`. The one failure is
+  `e7i_review1_probes::e7i_review1_the_aliasing_guard_reaches_the_worker_s_build`, whose own
+  `cargo build` into a target under `/tmp` died with **#328's linker fragment beside `No space
+  left on device`**: `collect2: fatal error: ld terminated with signal 7 [Bus error], core
+  dumped` twice (the `nix` and `libc` build scripts) and gcc's `error writing to /tmp/cc….s:
+  No space left on device`. It does not carry #328's `could not compile `pmacs` (test …)`, so
+  it is filed as **#331**, first occurrence, not rerun; on #328 it is commented as the first
+  log in which the linker's SIGBUS on these runners stands beside ENOSPC. That a cold leg
+  linked where two warm ones did not is evidence about the carrier and not a diagnosis.
+
+Tally (pr325-ci-70d69d0-attempt3): 19 = 17 + 1 + 1.
+
+Tally (pr325-ci-70d69d0-attempt4): 19 = 17 + 1 + 1.
+
+Tally (pr325-ci-70d69d0-attempt5): 19 = 17 + 1 + 1.
+
+Each attempt's other eighteen jobs keep their earlier conclusions under new ids: seventeen
+success and `Docs consistency` skipped (112947329548, 112968170595, 112972997003).
+
+#### `CI` 37667841100 at `226f5f0`, attempt 1 of 1: #282's fourth, #307's second, #330's second
+
+`pull_request`, the merge `fbdfb73` (`226f5f0` into `602c7ed`, read from the test logs'
+checkout line), created 18:34:14Z and completed 19:20:11Z: `failure`.
+
+Tally (pr329-ci-226f5f0): 19 = 15 + 2 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 112951553833 | success |
+| Changed paths | 112951554196 | success |
+| Lint (lua54) | 112951554325 | success |
+| Lint (luajit) | 112951554588 | success |
+| Format | 112951554601 | success |
+| M4 Perf Gates | 112951656453 | success |
+| M1 Acceptance Gates | 112951656522 | success |
+| M5 Perf Gates | 112951656699 | success |
+| Test (ubuntu-latest / luajit) | 112951656708 | cancelled |
+| Test (macos-latest / luajit) | 112951656709 | failure |
+| Test (crdt) | 112951656711 | success |
+| M10 Perf Gates (crdt) | 112951656729 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 112951656742 | failure |
+| Test (ubuntu-latest / lua54) | 112951656769 | success |
+| GPU Render (headless) | 112951656792 | success |
+| M6 Perf Gates | 112951656793 | success |
+| Test (macos-latest / lua54) | 112951656842 | success |
+| Perf budgets (debug) | 112951656854 | success |
+| Docs consistency | 112951658686 | skipped |
+
+Tally (pr329-ci-226f5f0-success): 15 rows of the table above with `result` = `success`.
+
+- `Test (macos-latest / luajit)`, `failure`:
+  `e7b_review_wire_acceptance::a_save_sends_did_save_and_rust_analyzer_flychecks_on_it` with
+  all three of #307's fragments (`the check showed as a suffix on ready, or as the tracker's
+  busy title under a reload`; the wire after the save `["11 = LSP:ready"]` with the busy
+  field `["11 b -"]`; `test result: FAILED. 4 passed; 1 failed; 2 ignored`): **#307's second
+  occurrence**, its only failure against 187 `test result: ok`. Commented, not rerun.
+- `Test (ubuntu-latest / luajit, no crdt)`, `failure`:
+  `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`
+  with all three of #282's fragments, the result line's count moved with the suite as at its
+  second and third (`*lsp* names the request and the code: []`; the `-32602` line in
+  `*errors*` and `WIRE label "ready", last_error None`; `test result: FAILED. 4 passed; 1
+  failed; 2 ignored`), the row's trace holding 103 `$/progress` frames, 87 of them
+  `cachePriming`: **#282's fourth occurrence**, its only failure against 186 `test result:
+  ok`. Commented, not rerun.
+- `Test (ubuntu-latest / luajit)`, `cancelled` at 45 minutes in its tool-install step, on
+  image `20261004.327.1`: #330's fragments, its `Get:5` line at 18:35:03Z. **#330's second
+  occurrence**. The run's three other Ubuntu-hosted legs reached the Azure mirror (`Hit:2
+  http://azure.archive.ubuntu.com/ubuntu noble InRelease`) and finished their own `apt-get`
+  steps in 50 s to 1 m 48 s (`Test (crdt)`'s is its lavapipe install).
+- Ubuntu lua54 and the no-crdt leg logged `No cache found.` (`main`'s shared Linux entry
+  deleted above) and built and linked every binary cold on image `20260927.320.1`; neither
+  saved, and the listing at 19:11:59Z held the same 15 entries as at 18:29:39Z. The macOS
+  legs and `Test (crdt)` restored `main`'s entries in full. The rows of #282 and #307 passed
+  on every other leg that reached them.
+- Neither red is the branch's: it changes only `save-if` in two workflows, and nothing
+  reaches LSP or these suites.
+
+#### `Grammar fuzz` 37667841057 at `226f5f0`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112951554177 and `Grammar fuzz (asan-strict)`
+112951554699, each fuzzing (`reason=.github/workflows/grammar-fuzz.yml changed`) after
+restoring `main`'s fuzz entry in full.
+
+#### The pull request's gate
+
+`scripts/gate`, the default plan, `20261007T183201Z-3888421` at `226f5f0`: five of six, its
+`05-sweep` 197 paired result lines, 5,313 / 1 / 64, the counts of E8 fix round 4's default
+sweep on the same code. The one failure is #311's row with #311's fragments (`Could not
+find module ‘Prelude’`, the trace reaching `processi`), so #311's list gains it. No daemon
+survived. #316's row passed, which is non-reproduction and nothing more. The default plan
+has no luajit sweep, so R7's row did not run. The logs are copied to
+`~/build/cache-budget/gate/`.
+
+So, at the cache-budget PR: #311's list of runs reads at twenty-seven; #328 moves to two;
+#282 moves to four and #307 to two; #330 is at three and #331 at one; #323 and #327 stand at
+two and one, their rows passing in attempt 2; #316's row passed in the gate and R7's did not
+run; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
