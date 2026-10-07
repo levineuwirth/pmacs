@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 24 items in the list below.
+Tally (311-runs): 26 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2813,6 +2813,9 @@ Tally (311-runs): 24 items in the list below.
   checkpoint, below).
 - `20261006T222430Z-2574647` at `3764454` (E8b.2's gate, `05-sweep`).
 - `20261006T224358Z-2710606` at `0001946` (E8b's tip gate, `05-sweep`).
+- `20261007T101629Z-2858399` at `0001946` (E8b review 1's gate, `05-sweep`; recorded at
+  E8b's fix round 1, below).
+- `20261007T154827Z-3509142` at `70d69d0` (E8b fix round 1's tip gate, `05-sweep`).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -3783,6 +3786,96 @@ default plan has no luajit sweep, so R7's row did not run. The logs are copied t
 `~/build/e8b/`.
 
 So, at E8b's checkpoint: #311's list of runs reads at twenty-four; no other count moves.
+
+### E8b's fix round 1: PR #325's runs at `70d69d0`, #323's second, #327's and #328's first, and #311's list at twenty-six
+
+Recorded 2026-10-07 at E8b's fix round 1, with PR #325 at `70d69d0`: six signed commits on
+`0001946`, after review round 1. The runs were read from the jobs endpoint by conclusion and
+through all six test legs' logs; none was rerun.
+
+#### `CI` 37648231070 at `70d69d0`, attempt 1 of 1: #328, #323's second and #327
+
+`pull_request`, the merge `d253906` (`70d69d0` into `042e777`, read from the test logs'
+checkout line), created 15:57:47Z and completed 16:43:41Z: `failure`.
+
+Tally (pr325-ci-70d69d0): 19 = 16 + 1 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 112884485108 | success |
+| Format | 112884485156 | success |
+| Lint (lua54) | 112884485210 | success |
+| Lint (luajit) | 112884485257 | success |
+| Commit attribution (D9) | 112884485313 | success |
+| GPU Render (headless) | 112884564211 | success |
+| M1 Acceptance Gates | 112884564265 | success |
+| Perf budgets (debug) | 112884564278 | success |
+| M10 Perf Gates (crdt) | 112884564341 | success |
+| Test (ubuntu-latest / luajit) | 112884564372 | failure |
+| M6 Perf Gates | 112884564415 | success |
+| M4 Perf Gates | 112884564431 | success |
+| Test (crdt) | 112884564503 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 112884564524 | success |
+| Test (ubuntu-latest / lua54) | 112884564530 | success |
+| Test (macos-latest / lua54) | 112884564569 | cancelled |
+| M5 Perf Gates | 112884564571 | success |
+| Test (macos-latest / luajit) | 112884564598 | success |
+| Docs consistency | 112884565446 | skipped |
+
+Tally (pr325-ci-70d69d0-success): 16 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit)`, `failure`, ran no test: its step 9 (`cargo test --all-targets
+  …`) died compiling, `collect2: fatal error: ld terminated with signal 7 [Bus error], core
+  dumped` and `could not compile `pmacs` (test "e7c_indicator_acceptance")`, its 825-line log
+  holding no `running` line, after step 6's `cargo build --workspace --all-targets` had
+  finished. Neither the log nor the job's annotations say the disk was short, which E7i's three
+  Ubuntu reds at PR #309's first head both said. The same suites built and linked on the run's
+  other three Ubuntu-hosted legs, which passed: Ubuntu lua54 and the no-crdt leg through the
+  same two steps, `Test (crdt)` through `cargo build --workspace` and its `cargo test
+  --all-targets`. No row here names
+  it, so it is filed as **#328**, first occurrence, not attributed to the branch, not rerun.
+- `Test (macos-latest / lua54)`, `cancelled`: `The job has exceeded the maximum execution time
+  of 45m0s`, its step 9 cancelled after 38 minutes with 122 result lines.
+  - `e7i_review1_probes::e7i_review1_parse_now_on_a_buffer_mid_parse`, with #323's three
+    fragments (`the report did not reach the expected state in 120s; last:` with nothing after
+    it, no `_parse_now mid-parse in none:` line in the log, and `test result: FAILED. 21
+    passed; 1 failed; 0 ignored`): **#323's second occurrence**, its first on this leg.
+    Commented on #323, not rerun.
+  - `lsp_spawn_guidance_acceptance::j1b2_g_refreshes_the_lsp_panel_after_recovery` was still
+    running when the job was cut. It printed its sixty-second notice at 16:22:58Z after the
+    suite's fifteen other rows passed, and nothing more until the cancel at 16:43:33Z. The
+    suite takes 1.5 to 6.4 s on every leg where it finished, this run's and `0001946`'s. This
+    leg's step 9 took 15 to 18 minutes in all at `0001946`, `05dfa6a`, `ab06caa` and `24593f1`.
+    No row here names it, so it is filed as **#327**, first occurrence, not rerun.
+
+  The branch changes nothing under `src/lsp*`, `src/parse_isolation.rs`,
+  `builtin/runtime/syntax.lua` or either suite; that is read, not a demonstration.
+- The other four test legs pair their `running` lines with `test result: ok` and have no
+  `FAILED`: 194 on macOS luajit, 193 on each of Ubuntu lua54 and the no-crdt leg, 192 on
+  `Test (crdt)`, each three more than at `0001946`, this round's three new suites. This round's
+  rows passed on every one of those legs that builds them. Its two GPU rows ran on `Test (crdt)`
+  and macOS luajit (their suite 69.9 and 45.4 s) and returned early on Ubuntu lua54 (5.6 s),
+  where E8's GPU suite does the same (0.76 s).
+
+#### `Grammar fuzz` 37648231088 at `70d69d0`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112884476903 and `Grammar fuzz (asan-strict)`
+112884477696, the path for a change that touches no grammar.
+
+#### The round's gate, and review 1's
+
+`scripts/gate`, the default plan, `20261007T154827Z-3509142` at `70d69d0`: five of six, its
+`05-sweep` 201 paired result lines, 5,348 / 1 / 64. Review 1's, `20261007T101629Z-2858399` at
+`0001946`: five of six, 198 paired, 5,326 / 1 / 64, read from the review's copy of its logs. The
+one failure in each is #311's row with #311's fragments (`Could not find module ‘Prelude’`, the
+trace reaching `processi`), so #311's list gains both. No daemon survived either. #316's row
+passed in both, which is non-reproduction and nothing more. The default plan has no luajit
+sweep, so R7's row did not run. The gate target holding both runs' logs was later deleted from
+outside the session; this round's logs were copied to `~/build/e8b-fix1/gate/` before it, and
+review 1's are at `~/build/e8b-review1/`.
+
+So, at E8b's fix round 1: #311's list of runs reads at twenty-six; #323 moves to two; #327 and
+#328 are at one; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
