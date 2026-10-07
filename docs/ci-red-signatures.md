@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 21 items in the list below.
+Tally (311-runs): 24 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2809,6 +2809,10 @@ Tally (311-runs): 21 items in the list below.
 - `20261006T164749Z-1441387` at `ab06caa` (PR #321's second head's gate, `05-sweep`).
 - `20261006T175402Z-1776889` at `05dfa6a` (E8 fix round 4's gate, both sweeps; recorded at
   that round, below).
+- `20261006T220742Z-2454838` at `b374cd8` (E8b.1's gate, `05-sweep`; recorded at E8b's
+  checkpoint, below).
+- `20261006T222430Z-2574647` at `3764454` (E8b.2's gate, `05-sweep`).
+- `20261006T224358Z-2710606` at `0001946` (E8b's tip gate, `05-sweep`).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -3709,6 +3713,76 @@ Attempt 1 of 1, `success`: `Grammar fuzz` 112444084091 and `Grammar fuzz (asan-s
 
 So, at `main` after E8: #316 moves to three (its first on Linux CI, read under the
 template); every other count above stands, and no other row was sampled red.
+
+### E8b's checkpoint: PR #325's runs at `0001946` green on every leg, three gates, and #311's list at twenty-four
+
+Recorded 2026-10-07 at C8b, with PR #325 at `0001946`: three signed commits on `main` at
+`422b2c4`, which carries this phase's opening record (`main` after E8, above). The runs were
+read from the jobs endpoint by conclusion and through all six test legs' logs; none was rerun.
+
+#### `CI` 37591971331 at `0001946`, attempt 1 of 1: green
+
+`pull_request`, the merge `b618e89` (`0001946` into `422b2c4`, read from the `Test (crdt)`
+log's checkout line), created 08:10:07Z and completed 08:47:11Z: `success`.
+
+Tally (pr325-ci-0001946): 19 = 18 + 1.
+
+| job | id | result |
+|---|---|---|
+| Format | 112695372384 | success |
+| Lint (luajit) | 112695372673 | success |
+| Commit attribution (D9) | 112695372851 | success |
+| Lint (lua54) | 112695372852 | success |
+| Changed paths | 112695372874 | success |
+| M5 Perf Gates | 112695444281 | success |
+| GPU Render (headless) | 112695444345 | success |
+| M4 Perf Gates | 112695444351 | success |
+| M1 Acceptance Gates | 112695444390 | success |
+| Test (ubuntu-latest / lua54) | 112695444415 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 112695444464 | success |
+| Perf budgets (debug) | 112695444466 | success |
+| M10 Perf Gates (crdt) | 112695444474 | success |
+| M6 Perf Gates | 112695444496 | success |
+| Test (macos-latest / luajit) | 112695444507 | success |
+| Test (macos-latest / lua54) | 112695444511 | success |
+| Test (crdt) | 112695444549 | success |
+| Test (ubuntu-latest / luajit) | 112695444575 | success |
+| Docs consistency | 112695446216 | skipped |
+
+Tally (pr325-ci-0001946-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs its `running` lines with its `test result: ok` lines and has no
+  `FAILED`: 191 on each macOS leg, 190 on each Ubuntu leg and 189 on `Test (crdt)`, one more
+  than `05dfa6a`'s on each, the new suite. `WouldBlock` appears on no leg.
+- E8b's rows passed on every leg that builds them: the three in
+  `tests/minibuffer_accept_acceptance.rs` and the minibuffer unit rows on all six, the three
+  daemon rows on the five crdt legs. #316's row passed on all six, which is non-reproduction
+  and nothing more.
+- The legs' skip records are `05dfa6a`'s: 28 on each macOS leg, 21 on `Test (crdt)`, 4 on
+  each Ubuntu leg.
+
+#### `Grammar fuzz` 37591971313 at `0001946`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 112695373032 and `Grammar fuzz (asan-strict)`
+112695373183, the path for a change that touches no grammar.
+
+#### `main` at `422b2c4`, E8b.0's registry push
+
+`CI` 37536504580, `push`, attempt 1 of 1, `success`, 15 = 6 success + 9 skipped (`Docs
+consistency` 112518819432 among the six); `Grammar fuzz` 37536504649 `success`.
+
+#### The phase's gates
+
+`scripts/gate`, the default plan, at each row: `20261006T220742Z-2454838` at `b374cd8`,
+`20261006T222430Z-2574647` at `3764454` and `20261006T224358Z-2710606` at `0001946`, each
+five of six. Their `05-sweep` read 197, 197 and 198 paired result lines, 5,317 / 1 / 64,
+5,318 / 1 / 64 and 5,326 / 1 / 64. The one failure in each is #311's row with #311's
+fragments (`Could not find module ‘Prelude’` in the store, the trace reaching `processi`),
+so #311's list gains the three runs. No daemon survived. #316's row passed in all three. The
+default plan has no luajit sweep, so R7's row did not run. The logs are copied to
+`~/build/e8b/`.
+
+So, at E8b's checkpoint: #311's list of runs reads at twenty-four; no other count moves.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
