@@ -400,10 +400,20 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           npm install -g vscode-langservers-extracted@4.10.0 \
                          yaml-language-server@1.15.0
+      # The disk before and after the build and after the tests, so the
+      # next linker SIGBUS (#328) or `No space left on device` (#331)
+      # arrives with its figure; `scripts/ci-disk` says why. Linux only:
+      # both have been seen only there, and the script reads GNU's `df`.
+      - name: Disk before the workspace build (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/ci-disk "before the workspace build" target
       # `--workspace`, not the root package: the crdt legs run the suites
       # that spawn `pmacs-gpu` as a process, and a root-only build leaves
       # that binary absent. No `cargo test` invocation produces it.
       - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
+      - name: Disk after the workspace build (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/ci-disk "after the workspace build" target
       # THE macOS ADAPTER QUESTION, asked here because nothing else in
       # this file asks it. `cargo test -p pmacs-gpu` runs on exactly one
       # job of nineteen (`GPU Render (headless)`, ubuntu + lavapipe), so
@@ -543,6 +553,9 @@ jobs:
           else
             echo "no row recorded a skip in $log"
           fi
+      - name: Disk after the tests (Linux)
+        if: always() && runner.os == 'Linux'
+        run: scripts/ci-disk "after the tests" target
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
@@ -612,10 +625,16 @@ jobs:
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: vulkaninfo --summary || true
+      # The disk around the build and after the tests, as on the `test`
+      # legs (#328, #331).
+      - name: Disk before the workspace build
+        run: scripts/ci-disk "before the workspace build" target
       # Default features, which are `luajit,crdt`. --workspace, not the
       # root package: a37 and the gpu_* suites locate the `pmacs-gpu`
       # binary beside `pmacs`, and a root-only build leaves it absent.
       - run: cargo build --workspace
+      - name: Disk after the workspace build
+        run: scripts/ci-disk "after the workspace build" target
       # Serial for the same reason the `test` job is: these suites spawn
       # real daemons and real PTYs, and this job adds MORE of them.
       #
@@ -645,6 +664,9 @@ jobs:
           else
             echo "no row recorded a skip in $log"
           fi
+      - name: Disk after the tests
+        if: always()
+        run: scripts/ci-disk "after the tests" target
       - run: cargo test --doc
 
   acceptance:

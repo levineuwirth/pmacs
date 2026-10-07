@@ -2692,3 +2692,131 @@ fn skipped_directories_are_reported_with_a_reason() {
         "the live one must be named with its reason too; output was:\n{out}"
     );
 }
+
+// CI's own helper scripts (the cache-budget pull request's addendum): the
+// disk the Ubuntu test legs print around their build (#328, #331). It runs
+// only on CI, so these rows hold its shape and its wiring here, where a
+// change to it is made.
+
+/// The job named `job` in `ci.yml`, from its header to the next job's.
+fn ci_job(workflow: &str, job: &str) -> String {
+    let header = format!("\n  {job}:\n");
+    let start = workflow
+        .find(&header)
+        .unwrap_or_else(|| panic!("ci.yml has a `{job}` job"));
+    let body = &workflow[start + header.len()..];
+    let end = body
+        .match_indices("\n  ")
+        .find(|(i, _)| {
+            let line = &body[i + 3..];
+            line.starts_with(|c: char| c.is_ascii_lowercase())
+                && line.split('\n').next().is_some_and(|l| l.ends_with(':'))
+        })
+        .map_or(body.len(), |(i, _)| i);
+    body[..end].to_owned()
+}
+
+/// `scripts/ci-disk` prints each filesystem once and each named
+/// directory's size, in the form a red leg's log is read for, and exits 0
+/// on anything it cannot read: a report that failed a leg would hide the
+/// failure it is there to explain.
+#[test]
+fn ci_disk_prints_each_filesystem_and_directory_and_never_fails_a_leg() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sized = dir.path().join("sized");
+    std::fs::create_dir(&sized).expect("mkdir");
+    std::fs::write(sized.join("blob"), vec![7u8; 3 << 20]).expect("write");
+    let out = Command::new(repo_root().join("scripts/ci-disk"))
+        .arg("a row's label")
+        .arg(&sized)
+        .arg(dir.path().join("absent"))
+        .output()
+        .expect("run scripts/ci-disk");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "exit {:?}:\n{stdout}", out.status);
+    let root = stdout
+        .lines()
+        .find(|l| l.starts_with("disk: a row's label: / on "))
+        .unwrap_or_else(|| panic!("a line for `/`:\n{stdout}"));
+    let figures = root.rsplit(": ").next().unwrap_or_default();
+    let numbers: Vec<&str> = figures
+        .split([' ', ',', '(', ')', '%'])
+        .filter(|w| w.chars().all(|c| c.is_ascii_digit()) && !w.is_empty())
+        .collect();
+    assert!(
+        figures.contains(" MB, ")
+            && figures.contains(" used, ")
+            && figures.contains(" available (")
+            && numbers.len() == 4,
+        "`N MB, N used, N available (P%)`: {root}"
+    );
+    let mounts: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.split(": ").nth(2))
+        .filter_map(|l| l.split(" on ").next())
+        .collect();
+    let mut unique = mounts.clone();
+    unique.dedup();
+    assert_eq!(mounts, unique, "each filesystem once:\n{stdout}");
+    let size = stdout
+        .lines()
+        .find(|l| {
+            l.starts_with(&format!(
+                "disk: a row's label: size of {}: ",
+                sized.display()
+            ))
+        })
+        .unwrap_or_else(|| panic!("a size line for the directory:\n{stdout}"));
+    let mb: u64 = size
+        .trim_end_matches(" MB")
+        .rsplit(": ")
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("a size in MB: {size}"));
+    assert!(mb >= 3, "the 3 MB written is counted: {size}");
+    assert!(
+        !stdout.contains("absent"),
+        "a missing directory is skipped:\n{stdout}"
+    );
+
+    let bare = Command::new(repo_root().join("scripts/ci-disk"))
+        .output()
+        .expect("run scripts/ci-disk bare");
+    assert!(
+        bare.status.success() && bare.stdout.is_empty(),
+        "no label: usage on stderr, and still exit 0"
+    );
+}
+
+/// The Ubuntu test legs print the disk before and after the workspace
+/// build and, whatever the tests did, after them: the `test` job's Linux
+/// legs and `Test (crdt)`, the jobs #328 and #331 were seen on and beside.
+#[test]
+fn the_ubuntu_test_legs_print_the_disk_around_the_build_and_after_the_tests() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    for (job, build) in [
+        ("test", "- run: cargo build --workspace --all-targets "),
+        ("crdt-test", "- run: cargo build --workspace\n"),
+    ] {
+        let body = ci_job(&workflow, job);
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("`{job}` holds `{needle}`"))
+        };
+        let before = at("scripts/ci-disk \"before the workspace build\" target");
+        let built = at(build);
+        let after = at("scripts/ci-disk \"after the workspace build\" target");
+        let tests = at("- run: cargo test --all-targets ");
+        let last = at("scripts/ci-disk \"after the tests\" target");
+        assert!(
+            before < built && built < after && after < tests && tests < last,
+            "`{job}`: the disk before the build, after it, and after the tests"
+        );
+        let step = &body[body[..last].rfind("\n      - ").expect("a step")..last];
+        assert!(
+            step.contains("if: always()"),
+            "`{job}`: the last report runs whatever the tests did:{step}"
+        );
+    }
+}
