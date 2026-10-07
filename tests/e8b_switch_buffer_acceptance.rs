@@ -58,12 +58,14 @@ enum Declare {
 
 /// One attached semantic session: its writer, a channel of everything
 /// the daemon wrote it, its frontend id, the buffer its viewport is
-/// declared on, and the names `StatusFacts` has told it.
+/// declared on and whether the window is known to show it, and the
+/// names `StatusFacts` has told it.
 struct Session {
     stream: UnixStream,
     rx: mpsc::Receiver<InstanceMessage>,
     fid: FrontendId,
     viewport: BufferId,
+    aligned: bool,
     names: HashMap<BufferId, String>,
 }
 
@@ -113,6 +115,7 @@ impl Session {
             rx,
             fid,
             viewport: BufferId::from_raw(0),
+            aligned: false,
             names: HashMap::new(),
         };
         let first = match declare {
@@ -125,12 +128,16 @@ impl Session {
                 _ => None,
             }),
         };
-        session.declare(first);
+        // A `CursorByte` names the window's buffer, so a declaration on
+        // it is aligned at once; the first snapshot's buffer is not, until
+        // the window is seen on it.
+        session.declare(first, matches!(declare, Declare::Window));
         session
     }
 
-    /// Declare a viewport on `buffer`, which also aligns the window to it.
-    fn declare(&mut self, buffer: BufferId) {
+    /// Declare a viewport on `buffer`, which also aligns the window to it;
+    /// `aligned` when the window is already known to show it.
+    fn declare(&mut self, buffer: BufferId, aligned: bool) {
         write_message(
             &mut self.stream,
             &FrontendEvent::Viewport {
@@ -142,6 +149,7 @@ impl Session {
         )
         .expect("declare a viewport");
         self.viewport = buffer;
+        self.aligned = aligned;
     }
 
     fn key(&mut self, key: Key, mods: Modifiers) {
@@ -188,28 +196,44 @@ impl Session {
     /// `CursorByte` naming a buffer other than the declared one is
     /// answered with a viewport on it (as `pmacs-gpu` declares one after
     /// the snapshot a switch brings), and every `StatusFacts` teaches a
-    /// buffer's name. Returns the window's buffer, by name once known,
-    /// and every status band said, in order.
+    /// buffer's name. Until the window is seen on a declared buffer it was
+    /// not known to show, a `CursorByte` naming another is cursor traffic
+    /// the daemon sent before it read the declaration: it is counted as
+    /// stale, not followed. Following it put the window back on the
+    /// init's buffer in 9 of 48 runs of the first-snapshot row at
+    /// `0001946`, eight at a time; ignoring it, 48 of 48 passed, and of 48
+    /// that counted them 8 met one (E8b fix round 1). Returns the window's
+    /// buffer, by name once known, every status band said, in order, and
+    /// the stale count.
     fn watch(&mut self, window: Duration, done: Option<&dyn Fn(&Shown) -> bool>) -> Shown {
         let mut deadline = Instant::now() + done.map_or(window, |_| Duration::from_secs(20));
         let mut settled = false;
         let mut shown = None;
         let mut bands: Vec<String> = Vec::new();
-        let seen =
-            |names: &HashMap<BufferId, String>, shown: Option<BufferId>, bands: &[String]| Shown {
-                name: shown.map(|id| {
-                    names
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| format!("{id:?}, name not yet told"))
-                }),
-                bands: bands.to_vec(),
-            };
+        let mut stale = 0;
+        let seen = |names: &HashMap<BufferId, String>,
+                    shown: Option<BufferId>,
+                    bands: &[String],
+                    stale: usize| Shown {
+            name: shown.map(|id| {
+                names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{id:?}, name not yet told"))
+            }),
+            bands: bands.to_vec(),
+            stale,
+        };
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             match self.rx.recv_timeout(left) {
                 Ok(InstanceMessage::CursorByte { buffer_id, .. }) => {
-                    if buffer_id != self.viewport {
-                        self.declare(buffer_id);
+                    if buffer_id == self.viewport {
+                        self.aligned = true;
+                    } else if self.aligned {
+                        self.declare(buffer_id, true);
+                    } else {
+                        stale += 1;
+                        continue;
                     }
                     shown = Some(buffer_id);
                 }
@@ -229,12 +253,12 @@ impl Session {
                 Ok(_) => {}
                 Err(_) => break,
             }
-            if !settled && done.is_some_and(|d| d(&seen(&self.names, shown, &bands))) {
+            if !settled && done.is_some_and(|d| d(&seen(&self.names, shown, &bands, stale))) {
                 settled = true;
                 deadline = Instant::now() + Duration::from_millis(500);
             }
         }
-        seen(&self.names, shown, &bands)
+        seen(&self.names, shown, &bands, stale)
     }
 
     /// `C-c h` until the hover popup is up.
@@ -283,11 +307,13 @@ impl Session {
     }
 }
 
-/// What a session saw: the window's buffer by name, and the status band.
+/// What a session saw: the window's buffer by name, the status band, and
+/// how many `CursorByte`s it took as stale.
 #[derive(Debug)]
 struct Shown {
     name: Option<String>,
     bands: Vec<String>,
+    stale: usize,
 }
 
 /// An `init.lua` attaching the fake server to `.rs` files, visiting
@@ -354,7 +380,9 @@ fn e8b_3_review1_s_session_already_showed_the_file_whose_path_it_typed() {
     assert_eq!(
         before.name.as_deref(),
         Some(b.as_str()),
-        "the mechanism: declaring the first snapshot put b.rs in the window, not a.rs ({a})"
+        "the mechanism: declaring the first snapshot put b.rs in the window, not a.rs ({a}); \
+         {} cursor(s) sent before the declaration was read set aside",
+        before.stale
     );
     s.hover_until_present();
     let after = s.switch_by_typing(&b, &b);
