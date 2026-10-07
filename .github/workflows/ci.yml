@@ -82,6 +82,41 @@ concurrency:
 # hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
 # never set, in the test job below. 35 still beats the 360-minute
 # default by an order of magnitude.
+#
+# CACHES ARE WRITTEN BY `main` ALONE. Every `Swatinem/rust-cache` step
+# carries `save-if: ${{ github.ref == 'refs/heads/main' }}`, so a pull
+# request restores `main`'s entries and never saves its own. The budget
+# is GitHub's default 10 GB a repository, evicted by last access,
+# oldest first, and an entry a pull request saves is scoped to its merge
+# ref, which only that pull request's own runs can read: once it merges
+# the entry is dead until it expires, seven days unread. On 2026-10-07
+# the budget held 23 entries, 10,337,227,747 bytes, near its limit;
+# seven were copies of `main`'s keys under PR #309, merged three days
+# before (3,599,973,399 bytes). A pull request saves only where its key
+# misses `main`'s --- a changed `Cargo.lock` or `Cargo.toml`, a new
+# stable rustc, an entry gone from `main` --- and then once per job key,
+# up to the eleven a code run uses (4,948,022,205 bytes at `main`'s
+# sizes that day) and the fuzz job's two. One that matches `main`, as
+# most do, saved nothing before this either ("Cache up-to-date.").
+#
+# The price: a pull request that misses `main`'s key rebuilds what
+# `main`'s entry lacks on every push, not only its first, until `main`
+# saves the new key. After a toolchain bump that is every pull request
+# and every Swatinem key; dispatching this workflow on `main` (the
+# trigger above) saves them without waiting for a merge.
+#
+# THE TEST JOB'S KEY IS INDIFFERENT TO THE LUA FLAVOR AND TO `crdt`, AND
+# THAT IS KEPT. Swatinem keys on the job id, the toolchain, the
+# compiler's environment and the manifests, never the matrix, so the
+# three Ubuntu legs share one entry, the two macOS legs another and the
+# two `Lint` legs a third. The leg that finishes first saves it and the
+# others log "Unable to reserve cache": in `main`'s run 37223480185
+# (2026-10-04) that was `luajit, no crdt`, so every Linux leg restores a
+# build without `crdt` and compiles its own flavor and features on top.
+# Do not key it per flavor or feature set (`key: ${{ matrix.lua }}`):
+# two test entries become five, about two more gigabytes in a budget
+# already near its limit, and a full budget evicting the entries it
+# depends on is the failure this note exists to prevent, not a fix.
 jobs:
   # Docs-only changes skip the jobs that compile and run tests, except
   # `docs-consistency` below, which exists for exactly that path. Only
@@ -191,6 +226,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `crdt` is a default feature, so the configuration a user builds is
       # `<flavor>,crdt`; that is what is linted here, for both flavors.
       # `--workspace` reaches pmacs-gpu and pmacs-protocol, which the
@@ -234,6 +271,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Default features, which is what `scripts/gate --docs` runs and
       # what `scripts/anchor` reports; the suite reads Cargo.toml and
       # the scripts rather than any cfg, so the Lua flavor is not a
@@ -250,6 +289,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The headless render harness (audit F-014) needs a Vulkan adapter;
       # the runner has no GPU, so install the mesa software rasterizer
       # (lavapipe). This job also runs pmacs-gpu's other tests, which the
@@ -317,6 +358,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Arm the external-tool-gated tests (see `TEST_IMPROVEMENT.md`
       # §1.2). Before this step nothing installed these tools, so every
       # test guarded on them returned early and reported GREEN without
@@ -556,6 +599,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Several dark suites drive a real GPU frontend. Without an adapter
       # they do not fail — a37 and its siblings `eprintln!` a skip and
       # return `ok`, measured at 9/9 in 0.17s versus ~4s for a real run.
@@ -612,6 +657,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: perf, memory, and 30s fuzz gates
         run: cargo test --release --test acceptance -- --ignored --nocapture --test-threads=1
 
@@ -625,6 +672,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: tree-sitter parse + highlight latency budgets
         run: cargo test --release --test m4_acceptance -- --ignored --nocapture --test-threads=1
 
@@ -646,6 +695,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: keystroke-to-render p99 over loopback LocalSocket
         run: cargo test --release --test m5_perf_acceptance -- --ignored --nocapture
 
@@ -671,6 +722,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: ingest rate, RSS ceiling, cancel p99, navigation p99, search p99
         env:
           # Full cancel profile remains the test default. Hosted CI has
@@ -727,6 +780,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: CRDT buffer throughput baselines (soak; asserts nothing)
         run: cargo test --release --test m10_2_perf -- --ignored --nocapture
       - name: cross-frontend propagation p99 over a real socket
@@ -750,5 +805,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace
       - run: scripts/perf-budgets
