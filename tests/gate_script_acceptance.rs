@@ -2878,6 +2878,10 @@ fn ci_apt_update(stub: &Path) -> (std::process::Output, Vec<String>, std::time::
 /// fails once is retried, and one that succeeds runs once. Every attempt
 /// carries apt's own timeout on a stalled transfer.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "scripts/ci-apt-update runs on the Ubuntu legs, which have apt and coreutils' timeout"
+)]
 fn ci_apt_update_bounds_a_stalled_update_and_retries_it() {
     let stall = apt_stub("stall");
     let (out, calls, took) = ci_apt_update(stall.path());

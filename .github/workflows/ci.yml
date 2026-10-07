@@ -405,7 +405,7 @@ jobs:
       # The disk before and after the build and after the tests, so the
       # next linker SIGBUS (#328) or `No space left on device` (#331)
       # arrives with its figure; `scripts/ci-disk` says why. Linux only:
-      # both have been seen only there, and the script reads GNU's `df`.
+      # both have been seen only there.
       - name: Disk before the workspace build (Linux)
         if: runner.os == 'Linux'
         run: scripts/ci-disk "before the workspace build" target
