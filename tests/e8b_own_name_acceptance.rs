@@ -1,7 +1,7 @@
 // tests/e8b_own_name_acceptance.rs --- E8b fix round 1: a buffer reached
-// by its own name.
+// by its own name, through `C-x b` and `C-x k`.
 
-//! E8b review 1's Medium 1, through the keys a user presses
+//! E8b review 1's Medium 1 and Medium 2, through the keys a user presses
 //! (`EditorState::dispatch_key`, the TUI's path). The `buffers` source
 //! ranks a match within a buffer's own name above one spelled through
 //! the directories it sits in, and a buffer's own name is the basename
@@ -10,6 +10,10 @@
 //! name is all of it: `C-x b dired RET` reaches it again, where the
 //! first form of the rule read its `/` as directories and reached
 //! `dired.lua`.
+//!
+//! `C-x k` reads its target from the same source, so the same rule
+//! decides what it kills, and a kill now says which buffer went, in the
+//! `kill-buffer: …` idiom `builtin/commands/default.lua` already uses.
 //!
 //! One session layout serves every row: `bin-tests` holds `a.rs`, `b.rs`
 //! and `notes.txt`, so `b.rs` is a subsequence of `a.rs`'s path through
@@ -82,6 +86,13 @@ fn active(s: &EditorState) -> bool {
     eval(s, "return pmacs.minibuffer.is_active()")
 }
 
+fn prompt(s: &EditorState) -> String {
+    eval(
+        s,
+        "return pmacs.minibuffer.is_active() and pmacs.minibuffer.prompt() or ''",
+    )
+}
+
 fn contents(s: &EditorState) -> String {
     eval(s, "return pmacs.minibuffer.contents()")
 }
@@ -94,6 +105,17 @@ fn active_name(s: &EditorState) -> String {
     eval(
         s,
         "return pmacs.describe.buffer(pmacs.window.buffer()).name",
+    )
+}
+
+fn buffer_names(s: &EditorState) -> Vec<String> {
+    eval(
+        s,
+        "local t = {}\n\
+         for _, id in ipairs(pmacs.buffer.list()) do\n\
+           t[#t + 1] = pmacs.describe.buffer(id).name\n\
+         end\n\
+         return t",
     )
 }
 
@@ -164,6 +186,19 @@ fn switch_by_typing(s: &mut EditorState, text: &str) {
     type_str(s, text);
     press(s, KeyCode::Enter);
     assert!(!active(s), "RET closed the prompt");
+}
+
+/// `C-x k`, the prefill cleared, `text`, RET. Returns the candidates the
+/// prompt offered for `text`, for a failure to show.
+fn kill_by_typing(s: &mut EditorState, text: &str) -> Vec<String> {
+    ctrl(s, 'x');
+    press(s, KeyCode::Char('k'));
+    assert!(active(s), "C-x k opens the prompt");
+    clear_field(s);
+    type_str(s, text);
+    let offered = candidates(s);
+    press(s, KeyCode::Enter);
+    offered
 }
 
 /// The session every row starts from (the module's comment has the
@@ -352,6 +387,254 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     press(&mut s, KeyCode::Enter);
     assert_eq!(status(&s), "no buffer: zzz", "zzz is refused as typed");
     assert_eq!(active_name(&s), scratch, "nothing switched");
+}
+
+/// Whether the buffer named `name` reads as modified, which decides
+/// whether a kill asks first.
+fn modified(s: &EditorState, name: &str) -> bool {
+    eval(
+        s,
+        &format!(
+            "for _, id in ipairs(pmacs.buffer.list()) do\n\
+               local d = pmacs.describe.buffer(id)\n\
+               if d.name == {name:?} then return d.modified end\n\
+             end\n\
+             error('no buffer ' .. {name:?})"
+        ),
+    )
+}
+
+/// Review 1's Medium 2, the first of its two wrong kills, in the review's
+/// own crowded fixture: `a.rs`, `b.rs` and `c.txt` under `bin-tests`,
+/// `c.txt` shown. `C-x k b.rs RET` kills `b.rs`. Before `b374cd8` the same
+/// keys killed `a.rs`, whose path also holds `b.rs` through the `b` of
+/// `bin` and which the lexical order put first, with no question (it is
+/// unmodified) and nothing said. Now the band names what went, and a
+/// full path kills its own buffer.
+#[test]
+fn c_x_k_b_rs_kills_b_rs_and_says_so() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td.path().join("bin-tests");
+    std::fs::create_dir_all(&dir).expect("bin-tests");
+    let mut s = fresh();
+    let mut names = Vec::new();
+    for file in ["a.rs", "b.rs", "c.txt"] {
+        std::fs::write(dir.join(file), b"x\n").expect("write");
+        names.push(visit(&s, &dir.join(file)));
+    }
+    let [a, b, c] = names.try_into().expect("three visits");
+    show(&s, &c);
+    assert!(
+        !modified(&s, &a) && !modified(&s, &b),
+        "premise: both files are unmodified, so neither kill asks"
+    );
+    let offered = kill_by_typing(&mut s, "b.rs");
+    assert!(
+        offered.contains(&a) && offered.contains(&b),
+        "premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+    );
+    assert!(!active(&s), "an unmodified buffer goes without a question");
+    let left = buffer_names(&s);
+    assert!(
+        left.contains(&a) && !left.contains(&b),
+        "C-x k b.rs RET kills b.rs and keeps a.rs; left {left:?}, band {:?}",
+        status(&s)
+    );
+    assert_eq!(status(&s), format!("kill-buffer: killed {b}"));
+
+    kill_by_typing(&mut s, &a);
+    let left = buffer_names(&s);
+    assert!(
+        !left.contains(&a),
+        "a.rs's full path kills it; left {left:?}"
+    );
+    assert_eq!(status(&s), format!("kill-buffer: killed {a}"));
+}
+
+/// Review 1's Medium 2, the second: `C-x k dired RET` acts on the dired
+/// buffer, not `dired.lua`. At `0001946` it killed `dired.lua`, an
+/// unmodified file buffer, silently, and kept the dired buffer. The
+/// dired buffer's generated text reads as modified (review 1's aside,
+/// the owner's to rule on, asserted here as a premise), so the kill asks
+/// first and names it: `n` keeps both buffers and says so, and `y` kills
+/// the dired buffer and names it on the band. `dir` selects it as
+/// `dired` does.
+#[test]
+fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let Session {
+        mut s, lua, dired, ..
+    } = session(td.path());
+    assert!(
+        modified(&s, &dired) && !modified(&s, &lua),
+        "premise: the dired buffer reads as modified and dired.lua does not"
+    );
+    for typed in ["dir", "dired"] {
+        let offered = kill_by_typing(&mut s, typed);
+        assert!(
+            offered.contains(&dired) && offered.contains(&lua),
+            "premise: `{typed}` is held by the dired buffer and by dired.lua; got {offered:?}"
+        );
+        let asked = prompt(&s);
+        assert!(
+            asked.contains(&dired) && asked.contains("kill anyway"),
+            "C-x k {typed} RET asks about the dired buffer; asked {asked:?}, left {:?}, \
+             band {:?}",
+            buffer_names(&s),
+            status(&s)
+        );
+        if typed == "dir" {
+            press(&mut s, KeyCode::Char('n'));
+            assert_eq!(status(&s), "kill-buffer cancelled");
+            let left = buffer_names(&s);
+            assert!(
+                left.contains(&dired) && left.contains(&lua),
+                "n keeps both; left {left:?}"
+            );
+        }
+    }
+    press(&mut s, KeyCode::Char('y'));
+    let left = buffer_names(&s);
+    assert!(
+        !left.contains(&dired) && left.contains(&lua),
+        "y kills the dired buffer and keeps dired.lua; left {left:?}"
+    );
+    assert_eq!(status(&s), format!("kill-buffer: killed {dired}"));
+}
+
+/// D18's four through `C-x k`, which shares `C-x b`'s source and its
+/// `candidate` policy: `nts` kills `notes.txt` and `scr` `*scratch*`,
+/// both unmodified and so without a question; `lsp` selects `*lsp*`
+/// beside `src/lsp.rs`, whose generated text reads as modified, so the
+/// kill asks about `*lsp*` and `y` kills it; each is named on the band.
+/// `zzz` matches nothing, is looked up as typed and refused, and nothing
+/// goes.
+#[test]
+fn c_x_k_keeps_d18_s_four() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let Session {
+        mut s,
+        notes,
+        lsp_rs,
+        editor,
+        scratch,
+        ..
+    } = session(td.path());
+    assert!(
+        !modified(&s, &notes) && !modified(&s, &scratch),
+        "premise: notes.txt and *scratch* are unmodified"
+    );
+    let offered = kill_by_typing(&mut s, "nts");
+    assert!(
+        offered.contains(&notes) && offered.len() > 1,
+        "premise: `nts` matches notes.txt among others; got {offered:?}"
+    );
+    assert!(!active(&s), "notes.txt goes without a question");
+    assert!(!buffer_names(&s).contains(&notes), "nts kills notes.txt");
+    assert_eq!(status(&s), format!("kill-buffer: killed {notes}"));
+
+    kill_by_typing(&mut s, "scr");
+    assert!(!active(&s), "*scratch* goes without a question");
+    assert!(
+        !buffer_names(&s).contains(&scratch),
+        "scr kills *scratch*; band {:?}",
+        status(&s)
+    );
+    assert_eq!(status(&s), format!("kill-buffer: killed {scratch}"));
+
+    show(&s, &editor);
+    ctrl(&mut s, 'c');
+    press(&mut s, KeyCode::Char('l'));
+    assert_eq!(active_name(&s), "*lsp*", "C-c l opens *lsp*");
+    assert!(modified(&s, "*lsp*"), "premise: *lsp* reads as modified");
+    let offered = kill_by_typing(&mut s, "lsp");
+    assert!(
+        offered.contains(&lsp_rs),
+        "premise: src/lsp.rs holds `lsp` in its own name; got {offered:?}"
+    );
+    let asked = prompt(&s);
+    assert!(
+        asked.contains("*lsp*") && asked.contains("kill anyway"),
+        "C-x k lsp RET asks about *lsp*; asked {asked:?}"
+    );
+    press(&mut s, KeyCode::Char('y'));
+    let left = buffer_names(&s);
+    assert!(
+        !left.contains(&"*lsp*".to_owned()) && left.contains(&lsp_rs),
+        "lsp kills *lsp* and keeps src/lsp.rs; left {left:?}"
+    );
+    assert_eq!(status(&s), "kill-buffer: killed *lsp*");
+
+    let before = buffer_names(&s);
+    let offered = kill_by_typing(&mut s, "zzz");
+    assert!(offered.is_empty(), "premise: nothing matches `zzz`");
+    assert!(!active(&s), "a refusal asks nothing");
+    assert_eq!(status(&s), "kill-buffer: no buffer named zzz");
+    assert_eq!(buffer_names(&s), before, "nothing went");
+}
+
+/// RET on `C-x k`'s prefill kills the buffer in the window and names it;
+/// a modified file buffer is asked about first, and `y` kills it and
+/// names it too.
+#[test]
+fn c_x_k_names_what_it_killed_from_the_prefill_and_after_the_question() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let Session {
+        mut s,
+        a,
+        b,
+        editor,
+        ..
+    } = session(td.path());
+    show(&s, &editor);
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('k'));
+    assert_eq!(contents(&s), editor, "C-x k prefills the shown buffer");
+    press(&mut s, KeyCode::Enter);
+    assert!(!active(&s), "an unmodified buffer goes without a question");
+    assert!(!buffer_names(&s).contains(&editor), "RET kills editor.rs");
+    assert_eq!(status(&s), format!("kill-buffer: killed {editor}"));
+
+    show(&s, &a);
+    type_str(&mut s, "edit");
+    assert!(modified(&s, &a), "premise: typing modified a.rs");
+    kill_by_typing(&mut s, &a);
+    let asked = prompt(&s);
+    assert!(
+        asked.contains(&a) && asked.contains("kill anyway"),
+        "a modified buffer is asked about; asked {asked:?}"
+    );
+    press(&mut s, KeyCode::Char('y'));
+    let left = buffer_names(&s);
+    assert!(
+        !left.contains(&a) && left.contains(&b),
+        "y kills a.rs; left {left:?}"
+    );
+    assert_eq!(status(&s), format!("kill-buffer: killed {a}"));
+}
+
+/// `buffer.kill-this` shares `C-x k`'s helper, so it names what it
+/// killed too: `M-x buffer.kill-this RET` on `b.rs`, unmodified, kills
+/// it without a question and says so.
+#[test]
+fn kill_this_names_what_it_killed() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let Session { mut s, a, b, .. } = session(td.path());
+    show(&s, &b);
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::ALT),
+    );
+    assert!(active(&s), "M-x opens the prompt");
+    type_str(&mut s, "buffer.kill-this");
+    press(&mut s, KeyCode::Enter);
+    assert!(!active(&s), "an unmodified buffer goes without a question");
+    let left = buffer_names(&s);
+    assert!(
+        !left.contains(&b) && left.contains(&a),
+        "kill-this kills the shown b.rs; left {left:?}"
+    );
+    assert_eq!(status(&s), format!("kill-buffer: killed {b}"));
 }
 
 #[path = "common/iso.rs"]

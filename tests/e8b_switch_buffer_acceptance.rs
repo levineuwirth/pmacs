@@ -659,3 +659,79 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
 fn fact_or<'a>(facts: &'a HashMap<String, String>, key: &str) -> &'a str {
     facts.get(key).map_or("", String::as_str)
 }
+
+/// `C-x k` from a window on `*scratch*`, its prefill deleted (`C-a` and
+/// nine `C-d`), `text`, RET.
+fn kill_steps(steps: &mut Vec<String>, text: &str) {
+    steps.extend(["key:C-x", "key:k", "key:C-a"].map(str::to_owned));
+    steps.extend(std::iter::repeat_n("key:C-d".to_owned(), "*scratch*".len()));
+    steps.extend(text.chars().map(|c| format!("key:{c}")));
+    steps.push("key:ret".to_owned());
+}
+
+/// E8b fix round 1's GPU row for review 1's Medium 2: `C-x k` by name
+/// through `App::apply_keyboard`. `C-x k dired RET` asks about the dired
+/// buffer (its generated text reads as modified), `y` kills it, and the
+/// band names it; `dired.lua` is still there to switch to. `C-x k b.rs
+/// RET` kills `b.rs` beside `a.rs`, unmodified, without a question, and
+/// names it; `a.rs` is still there.
+#[test]
+fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
+    let (daemon, _dir, paths) = own_name_daemon();
+    let mut steps = vec!["quiet:2000".to_owned()];
+    switch_steps(&mut steps, "editor.rs", "switch-buffer:", "editor");
+    steps.extend(["key:C-x", "key:d", "key:ret", "quiet:1500"].map(str::to_owned));
+    where_steps(&mut steps, "dired-open");
+    switch_steps(&mut steps, "scr", "switch-buffer:", "scr");
+    kill_steps(&mut steps, "dired");
+    steps.push("key:y".to_owned());
+    report_steps(&mut steps, "kill-buffer:", "kill-dired");
+    where_steps(&mut steps, "kill-dired");
+    switch_steps(&mut steps, "dired.lua", "switch-buffer:", "lua");
+    switch_steps(&mut steps, "scr", "switch-buffer:", "scr-2");
+    kill_steps(&mut steps, "b.rs");
+    report_steps(&mut steps, "kill-buffer:", "kill-b");
+    where_steps(&mut steps, "kill-b");
+    switch_steps(&mut steps, "a.rs", "switch-buffer:", "a");
+    let Some(facts) = run_gpu_probe(&daemon, &steps) else {
+        return;
+    };
+    assert_eq!(fact_or(&facts, "ready"), "true", "{facts:?}");
+    assert_eq!(fact_or(&facts, "disconnect"), "", "{facts:?}");
+    let quoted = |text: String| format!("{text:?}");
+    let opened = band(&facts, "dired-open-where");
+    let dired = opened
+        .trim_matches('"')
+        .strip_prefix("WHERE ")
+        .filter(|n| n.starts_with("*dired:") && n.ends_with("/proj*"))
+        .unwrap_or_else(|| panic!("fixture: C-x d RET opened a dired buffer; {opened}"))
+        .to_owned();
+    assert_eq!(
+        band(&facts, "kill-dired"),
+        quoted(format!("kill-buffer: killed {dired}")),
+        "C-x k dired RET y kills the dired buffer; {facts:?}"
+    );
+    assert_eq!(
+        band(&facts, "kill-dired-where"),
+        quoted("WHERE *scratch*".to_owned())
+    );
+    assert_eq!(
+        band(&facts, "lua"),
+        quoted(format!("switch-buffer: showing {}", paths["lua"])),
+        "dired.lua was kept; {facts:?}"
+    );
+    assert_eq!(
+        band(&facts, "kill-b"),
+        quoted(format!("kill-buffer: killed {}", paths["b"])),
+        "C-x k b.rs RET kills b.rs; {facts:?}"
+    );
+    assert_eq!(
+        band(&facts, "a"),
+        quoted(format!("switch-buffer: showing {}", paths["a"])),
+        "a.rs was kept; {facts:?}"
+    );
+    assert!(
+        !facts.keys().any(|k| k.starts_with("step.")),
+        "every step settled: {facts:?}"
+    );
+}

@@ -383,7 +383,13 @@ local function kill_buffer_with_prompt(id)
     local ok, err = pcall(pmacs.buffer.kill, id)
     if not ok then
       ed.set_status("kill-buffer: " .. (tostring(err):match("^[^\n]*") or ""))
+      return
     end
+    -- E8b fix round 1: say which buffer went. `C-x k` reads its target
+    -- from the buffers ranking, whose selection can differ from what
+    -- was typed (D18), and an unmodified buffer goes without a
+    -- question, so the band is where a kill of the wrong one shows.
+    ed.set_status("kill-buffer: killed " .. d.name)
   end
   if not d.modified then
     kill()
@@ -914,7 +920,10 @@ cmd { name = "revert-buffer",
 
 -- `C-x k`. The buffer to kill is chosen by name, prefilled with the one
 -- in the window --- RET is then the common case --- and the unsaved
--- check is `buffer.kill-this`'s, through the same helper.
+-- check is `buffer.kill-this`'s, through the same helper. The typed
+-- name is ranked as `C-x b` ranks it (the `buffers` source, whose RET
+-- takes the selection), so a subsequence of a buffer's own name selects
+-- that buffer, and the helper names what it killed.
 cmd { name = "buffer.kill",
       description = "Kill a buffer chosen by name.",
       fn = function()
