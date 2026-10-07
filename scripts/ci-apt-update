@@ -1,0 +1,33 @@
+#!/bin/sh
+# scripts/ci-apt-update --- `sudo apt-get update`, bounded and retried
+# (#330; the cache-budget pull request's addendum).
+#
+#   scripts/ci-apt-update
+#
+# Up to three attempts. Each is killed at CI_APT_UPDATE_SECONDS (default
+# 120; ten more to answer SIGTERM before SIGKILL), and gives apt its own
+# 30 s timeout on a connection or a transfer that stops moving. Exits 0 on
+# the first attempt that succeeds; after the third, exits 1 naming #330.
+#
+# Why: on #330's three legs every Azure mirror index came back `Ign`, apt
+# fell back to archive.ubuntu.com, and after its `Get:5 … noble-security
+# InRelease` line printed nothing until the job's 45-minute ceiling; two
+# such legs in one round were ninety minutes of runner time spent on a
+# mirror. A healthy update here takes seconds: the whole install step
+# around it averaged 53 s over 42 legs, 145 s at the most. The retry and
+# its bound are pinned by tests/gate_script_acceptance.rs, against a stub
+# apt-get, since a real one cannot be made to stall on demand.
+set -u
+
+limit=${CI_APT_UPDATE_SECONDS:-120}
+attempt=1
+while [ "$attempt" -le 3 ]; do
+    if sudo timeout -k 10 "$limit" apt-get \
+        -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update; then
+        exit 0
+    fi
+    echo "ci-apt-update: attempt $attempt of 3 failed or ran past ${limit} s (#330)" >&2
+    attempt=$((attempt + 1))
+done
+echo "ci-apt-update: apt-get update did not complete in 3 attempts (#330)" >&2
+exit 1

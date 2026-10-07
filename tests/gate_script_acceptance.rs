@@ -2694,9 +2694,9 @@ fn skipped_directories_are_reported_with_a_reason() {
 }
 
 // CI's own helper scripts (the cache-budget pull request's addendum): the
-// disk the Ubuntu test legs print around their build (#328, #331). It runs
-// only on CI, so these rows hold its shape and its wiring here, where a
-// change to it is made.
+// disk the Ubuntu test legs print around their build (#328, #331) and the
+// bounded `apt-get update` (#330). Both run only on CI, so these rows hold
+// their shape and their wiring here, where a change to them is made.
 
 /// The job named `job` in `ci.yml`, from its header to the next job's.
 fn ci_job(workflow: &str, job: &str) -> String {
@@ -2818,5 +2818,121 @@ fn the_ubuntu_test_legs_print_the_disk_around_the_build_and_after_the_tests() {
             step.contains("if: always()"),
             "`{job}`: the last report runs whatever the tests did:{step}"
         );
+    }
+}
+
+/// A stub `sudo` that runs its arguments, and an `apt-get` that records
+/// its arguments and then does what `behavior` says: `stall` (sleeps, as
+/// #330's legs did), `ok`, or `fail-once` (fails, then succeeds).
+fn apt_stub(behavior: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("mkdir");
+    let calls = dir.path().join("calls");
+    let apt = match behavior {
+        "stall" => "exec sleep 60".to_owned(),
+        "ok" => "exit 0".to_owned(),
+        _ => format!(
+            "[ \"$(wc -l < '{}')\" -ge 2 ] && exit 0; exit 100",
+            calls.display()
+        ),
+    };
+    for (name, body) in [
+        ("sudo", "exec \"$@\"".to_owned()),
+        (
+            "apt-get",
+            format!("echo \"$*\" >> '{}'\n{apt}", calls.display()),
+        ),
+    ] {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod stub");
+    }
+    dir
+}
+
+fn ci_apt_update(stub: &Path) -> (std::process::Output, Vec<String>, std::time::Duration) {
+    let path = format!(
+        "{}:{}",
+        stub.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let started = std::time::Instant::now();
+    let out = Command::new(repo_root().join("scripts/ci-apt-update"))
+        .env("PATH", path)
+        .env("CI_APT_UPDATE_SECONDS", "1")
+        .output()
+        .expect("run scripts/ci-apt-update");
+    let calls = std::fs::read_to_string(stub.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (out, calls, started.elapsed())
+}
+
+/// `scripts/ci-apt-update` kills an `apt-get update` that stalls at its
+/// bound, tries three times, and then fails naming #330, where an
+/// unbounded one held two legs to their 45-minute ceiling; one that
+/// fails once is retried, and one that succeeds runs once. Every attempt
+/// carries apt's own timeout on a stalled transfer.
+#[test]
+fn ci_apt_update_bounds_a_stalled_update_and_retries_it() {
+    let stall = apt_stub("stall");
+    let (out, calls, took) = ci_apt_update(stall.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && calls.len() == 3 && stderr.contains("(#330)"),
+        "three bounded attempts, then a failure naming #330: {calls:?}\n{stderr}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "each attempt cut at its 1 s bound, not the stub's 60 s: {took:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|c| c == "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update"),
+        "{calls:?}"
+    );
+
+    let once = apt_stub("fail-once");
+    let (out, calls, _) = ci_apt_update(once.path());
+    assert!(
+        out.status.success() && calls.len() == 2,
+        "a failed attempt is retried: {calls:?}"
+    );
+
+    let ok = apt_stub("ok");
+    let (out, calls, _) = ci_apt_update(ok.path());
+    assert!(out.status.success() && calls.len() == 1, "{calls:?}");
+}
+
+/// Every `apt-get update` in the workflows goes through the bounded
+/// script (#330): `ci.yml`'s three, before the install each feeds.
+#[test]
+fn no_workflow_runs_an_unbounded_apt_get_update() {
+    for name in ["ci.yml", "grammar-fuzz.yml", "release.yml"] {
+        let workflow = std::fs::read_to_string(repo_root().join(".github/workflows").join(name))
+            .expect("read workflow");
+        assert!(
+            !workflow
+                .lines()
+                .any(|l| !l.trim_start().starts_with('#') && l.contains("apt-get update")),
+            "{name} runs `apt-get update` itself; call scripts/ci-apt-update"
+        );
+    }
+    let ci =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    for job in ["gpu-render", "test", "crdt-test"] {
+        let body = ci_job(&ci, job);
+        let update = body
+            .find("scripts/ci-apt-update")
+            .unwrap_or_else(|| panic!("`{job}` updates through the script"));
+        let install = body
+            .find("sudo apt-get install")
+            .unwrap_or_else(|| panic!("`{job}` installs"));
+        assert!(update < install, "`{job}`: the update before the install");
     }
 }

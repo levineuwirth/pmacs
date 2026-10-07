@@ -297,7 +297,8 @@ jobs:
       # workspace test job (root package only) never executes.
       - name: Install lavapipe (Vulkan software rasterizer)
         run: |
-          sudo apt-get update
+          # bounded and retried: a mirror held two legs 45 minutes (#330)
+          scripts/ci-apt-update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: |
@@ -378,7 +379,8 @@ jobs:
       - name: Install external tools that gate acceptance tests (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
+          # bounded and retried: a mirror held two legs 45 minutes (#330)
+          scripts/ci-apt-update
           sudo apt-get install -y clangd zsh fish lua5.4
           # `locate_lua` looks for `lua` or `luajit` by name; the
           # distro package installs `lua5.4` only.
@@ -621,7 +623,8 @@ jobs:
       # fatal instead of silent.
       - name: Install lavapipe (Vulkan software rasterizer)
         run: |
-          sudo apt-get update
+          # bounded and retried: a mirror held two legs 45 minutes (#330)
+          scripts/ci-apt-update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: vulkaninfo --summary || true
