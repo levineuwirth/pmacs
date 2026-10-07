@@ -1236,17 +1236,101 @@ fn e7i_review1_the_aliasing_guard_reaches_the_worker_s_build() {
         .env_remove("HOST_CFLAGS")
         .env_remove("TARGET_CFLAGS")
         .env_remove("CFLAGS")
+        // The refusal needs cargo to reach `pmacs-syntax`'s build script,
+        // and cargo reaches it only after every other build script in the
+        // worker's graph and the grammars' C: 49 crates, the guard last
+        // even at `-j 1` (measured at the cache-budget PR's addendum). So
+        // this check costs that stage and no more. The verdict reads only
+        // the strict-aliasing flags, never `-g`, so no debug information:
+        // 346 MB of target became 198 MB on the laptop. On CI it lands
+        // beside a leg's whole build, and once ran that disk out (#331).
+        .env("CARGO_PROFILE_DEV_DEBUG", "0")
+        .env("CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG", "0")
+        .env("CARGO_INCREMENTAL", "0")
         .output()
         .expect("cargo check from outside the checkout");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success()
-            && stderr.contains("failed to run custom build command for `pmacs-syntax")
-            && stderr.contains(
-                "refusing to build: the C compiler would not receive -fno-strict-aliasing"
-            ),
+    if let Err(why) =
+        aliasing_guard_check_verdict(out.status.success(), &stderr, || disk_holding(dir.path()))
+    {
+        panic!("{why}");
+    }
+}
+
+/// The aliasing-guard row's reading of its nested check. A check that ran
+/// out of disk before `pmacs-syntax`'s build script ran witnessed nothing
+/// about the guard, so it fails as that, with the disk's figure (#331),
+/// and not as a guard that did not refuse.
+fn aliasing_guard_check_verdict(
+    succeeded: bool,
+    stderr: &str,
+    disk: impl FnOnce() -> String,
+) -> Result<(), String> {
+    let refused = !succeeded
+        && stderr.contains("failed to run custom build command for `pmacs-syntax")
+        && stderr
+            .contains("refusing to build: the C compiler would not receive -fno-strict-aliasing");
+    if refused {
+        return Ok(());
+    }
+    if stderr.contains("No space left on device") {
+        return Err(format!(
+            "the check of the worker ran out of disk before pmacs-syntax's build script \
+             could refuse it (#331), so this row witnessed nothing about the guard; the \
+             disk holding its target:\n{}\n{stderr}",
+            disk()
+        ));
+    }
+    Err(format!(
         "the worker's build started outside the checkout is refused by pmacs-syntax's \
          build script, naming the flag:\n{stderr}"
+    ))
+}
+
+/// `df` of the filesystem holding `path`, in POSIX form so it reads the
+/// same on Linux and macOS, or why it could not be read.
+fn disk_holding(path: &std::path::Path) -> String {
+    match Command::new("df").arg("-Pk").arg(path).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(e) => format!("df could not run: {e}"),
+    }
+}
+
+/// #331's own output (`CI` 37648231070, attempt 5): the check died on the
+/// disk before the guard ran, and the row now says so, with the figure,
+/// rather than reading it as a guard that did not refuse; a refusal still
+/// passes, and anything else still fails as the guard's absence.
+#[test]
+fn e7i_review1_the_aliasing_guard_row_names_a_disk_that_ran_out() {
+    let ran_out = "   Compiling libc v0.2.186\n\
+        error: linking with `cc` failed: exit status: 1\n  \
+        = note: collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped\n\
+        error: could not compile `libc` (build script) due to 1 previous error\n\
+        warning: tree-sitter-python@0.25.0: src/parser.c:129739:1: fatal error: error \
+        writing to /tmp/ccnh7jfG.s: No space left on device\n";
+    let why = aliasing_guard_check_verdict(false, ran_out, || "a df figure".to_owned())
+        .expect_err("a check that ran out of disk is not a refusal");
+    assert!(
+        why.contains("ran out of disk before pmacs-syntax's build script")
+            && why.contains("(#331)")
+            && why.contains("a df figure"),
+        "{why}"
+    );
+
+    let refusal = "error: failed to run custom build command for `pmacs-syntax v1.1.0 (…)`\n  \
+        pmacs: refusing to build: the C compiler would not receive -fno-strict-aliasing; …\n";
+    assert_eq!(
+        aliasing_guard_check_verdict(false, refusal, || unreachable!("no df for a refusal")),
+        Ok(())
+    );
+
+    let built = aliasing_guard_check_verdict(true, "    Finished `dev` profile\n", || {
+        unreachable!("no df when the disk did not run out")
+    })
+    .expect_err("a check that succeeds is the guard's absence");
+    assert!(
+        built.contains("is refused by pmacs-syntax's build script, naming the flag"),
+        "{built}"
     );
 }
 
