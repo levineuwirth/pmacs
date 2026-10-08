@@ -126,6 +126,9 @@ jobs:
           # One cache a leg: the arms build into their own directories.
           key: ${{ matrix.arm }}
           workspaces: ". -> target/grammar-fuzz/${{ matrix.arm == 'ubsan' && 'target' || format('target-{0}', matrix.arm) }}"
+          # Only `main` saves, as in ci.yml (its note above `jobs:`): a
+          # pull request's entry is readable by that pull request alone.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Name the runner image and the compiler
         if: steps.decide.outputs.run == 'true'
         run: |

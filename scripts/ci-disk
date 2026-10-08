@@ -1,0 +1,48 @@
+#!/bin/sh
+# scripts/ci-disk --- a CI leg's disk at a named point (the cache-budget
+# pull request's addendum, for #328 and #331).
+#
+#   scripts/ci-disk LABEL [DIR...]
+#
+# Prints one line per filesystem holding `/`, `/tmp`, `/mnt` or a DIR,
+# each filesystem once, then one line per DIR with its size, all in MB:
+#
+#   disk: LABEL: / on /dev/root: 74220 MB, 61000 used, 13204 available (83%)
+#   disk: LABEL: size of target: 21034 MB
+#
+# Exits 0 whatever it finds or fails to read: it reports, and a report
+# that failed a leg would hide the failure it is there to explain.
+#
+# Why a script: #328's linker SIGBUS and #331's `No space left on device`
+# arrived with no figure, so whether the disk was full could only be
+# argued. The Ubuntu test legs call this before and after the workspace
+# build and after the tests (`if: always()`), so the next one arrives with
+# the number; the line format is pinned by tests/gate_script_acceptance.rs.
+set -u
+
+[ $# -ge 1 ] || { echo "usage: scripts/ci-disk LABEL [DIR...]" >&2; exit 0; }
+label=$1
+shift
+
+paths=/
+for p in /tmp /mnt "$@"; do
+    [ -e "$p" ] && paths="$paths $p"
+done
+
+# POSIX `df -Pk` and `du -sk`, so it reads the same on the Linux legs that
+# call it and on the macOS legs that run its row (GNU's `-B1M` is read as
+# a block count there). One line per mount point, so `/tmp` on the root
+# filesystem is not printed twice.
+# shellcheck disable=SC2086 # $paths is a list of words, none with spaces
+df -Pk $paths 2>/dev/null | awk -v label="$label" '
+    NR > 1 && !seen[$6]++ {
+        printf "disk: %s: %s on %s: %d MB, %d used, %d available (%s)\n",
+            label, $6, $1, $2 / 1024, $3 / 1024, $4 / 1024, $5
+    }' || true
+
+for d in "$@"; do
+    [ -d "$d" ] || continue
+    size=$(du -sk "$d" 2>/dev/null | awk '{ printf "%d", ($1 + 1023) / 1024 }')
+    echo "disk: $label: size of $d: ${size:-unknown} MB"
+done
+exit 0
