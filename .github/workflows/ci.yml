@@ -412,7 +412,16 @@ jobs:
       # `--workspace`, not the root package: the crdt legs run the suites
       # that spawn `pmacs-gpu` as a process, and a root-only build leaves
       # that binary absent. No `cargo test` invocation produces it.
-      - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
+      #
+      # No `--all-targets`. The test step below is root-only, so the other
+      # crates' test targets built here were never run, and they were the
+      # disk: a crdt leg's target reached 84 GB of a 147,719 MB disk and
+      # the luajit one ended its tests with 1,918 MB free, where `Test
+      # (crdt)`, built this way, ends at 44 GB (the cache-budget PR's
+      # addendum, #328, #331). `Lint (luajit)` and `Lint (lua54)` still
+      # type-check `--workspace --all-targets`, and the no-crdt leg links
+      # the small crates' test targets just below.
+      - run: cargo build --workspace --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       - name: Disk after the workspace build (Linux)
         if: runner.os == 'Linux'
         run: scripts/ci-disk "after the workspace build" target

@@ -2796,7 +2796,10 @@ fn the_ubuntu_test_legs_print_the_disk_around_the_build_and_after_the_tests() {
     let workflow =
         std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
     for (job, build) in [
-        ("test", "- run: cargo build --workspace --all-targets "),
+        (
+            "test",
+            "- run: cargo build --workspace --no-default-features ",
+        ),
         ("crdt-test", "- run: cargo build --workspace\n"),
     ] {
         let body = ci_job(&workflow, job);
@@ -2819,6 +2822,29 @@ fn the_ubuntu_test_legs_print_the_disk_around_the_build_and_after_the_tests() {
             "`{job}`: the last report runs whatever the tests did:{step}"
         );
     }
+}
+
+/// The `test` legs build the workspace without `--all-targets`. Their test
+/// step is root-only, so the other crates' test targets built there were
+/// never run, and they were the disk: a crdt leg's target reached 84 GB of
+/// a 147,719 MB disk (#328, #331). `--workspace` stays, for the `pmacs-gpu`
+/// binary the crdt legs spawn and no `cargo test` produces.
+#[test]
+fn the_test_legs_build_the_workspace_without_all_targets() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let body = ci_job(&workflow, "test");
+    let builds: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("- run: cargo build --workspace"))
+        .collect();
+    assert_eq!(builds.len(), 1, "one workspace build: {builds:?}");
+    assert!(
+        !builds[0].contains("--all-targets"),
+        "the workspace build links no test targets the root-only test step never runs: {}",
+        builds[0]
+    );
 }
 
 /// A stub `sudo` that runs its arguments, and an `apt-get` that records
