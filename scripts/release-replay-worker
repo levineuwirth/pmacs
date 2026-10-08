@@ -1,0 +1,151 @@
+#!/bin/sh
+# scripts/release-replay-worker --- make the parse worker a release archive
+# carries parse, before the archive is published (release.yml).
+#
+#   scripts/release-replay-worker --archive PATH --harness PATH --out DIR
+#                                 [--grammar NAME]... [--sources upstream|checkout]
+#                                 [-- REPLAY-UNIT-FLAG...]
+#
+# Since E7i every buffer's parse runs in pmacs-parse-unit, and release.yml
+# stages, requires and version-checks it; `--version` proves the file is
+# there and runs, and makes it parse nothing. This unpacks the archive into
+# a fresh directory, so the worker under test is the one a user unpacks,
+# and drives it as the editor does with `pmacs_grammar_fuzz replay-unit`,
+# the harness built from this checkout, the way scripts/fuzz-grammars
+# drives each arm's worker (its step 5): seeds from this tree and, by
+# default, every grammar's own sources at the commits fuzz/corpora.tsv
+# pins (as that script's step 2 fetches them), then fuzz/regress/, the
+# inputs that took the editor down before E7i. Each input is parsed whole
+# and then edited, with reads of the tree sent while the edit's parse runs.
+#
+# A worker stopped by its own time or memory limit is contained, the
+# boundary's job, and passes. The run fails, and so does the release, when
+# the worker crashed on an input (replay-unit exits 1), could not be run or
+# did not speak the harness's protocol (2), when a grammar replayed had no
+# seeds, or when one answered none of its inputs: a replay that parsed
+# nothing would otherwise pass. Flags after `--` go to replay-unit (the
+# suite's row shortens its deadline); its defaults are the editor's, a
+# 5 s deadline and 1 GiB, enforced as the worker enforces them where it
+# runs (RLIMIT_AS on Linux, its own watch on macOS).
+#
+# --sources checkout seeds from this tree alone, without the network: the
+# suite's row. A grammar it replays must have files here.
+set -eu
+
+die() { echo "release-replay-worker: $*" >&2; exit 1; }
+
+archive=
+harness=
+out=
+grammars=
+sources=upstream
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --archive) archive=${2:?}; shift 2 ;;
+        --harness) harness=${2:?}; shift 2 ;;
+        --out) out=${2:?}; shift 2 ;;
+        --grammar) grammars="$grammars ${2:?}"; shift 2 ;;
+        --sources) sources=${2:?}; shift 2 ;;
+        --) shift; break ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+[ -n "$archive" ] && [ -n "$harness" ] && [ -n "$out" ] \
+    || die "--archive, --harness and --out are required"
+case "$sources" in
+    upstream|checkout) ;;
+    *) die "--sources takes upstream or checkout, not $sources" ;;
+esac
+root=$(git rev-parse --show-toplevel) || die "not inside a git worktree"
+[ -f "$archive" ] || die "$archive: no such archive"
+[ -f "$harness" ] && [ -x "$harness" ] || die "$harness: not an executable"
+archive=$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")
+harness=$(cd "$(dirname "$harness")" && pwd)/$(basename "$harness")
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+
+# --- the worker, as a user unpacks it -----------------------------------
+rm -rf "$out/unpacked" "$out/corpus" "$out/unit"
+mkdir "$out/unpacked"
+tar -xzf "$archive" -C "$out/unpacked"
+# The archive holds one directory, pmacs-<version>-<platform>/.
+unit=$(find "$out/unpacked" -mindepth 2 -maxdepth 2 -name pmacs-parse-unit)
+[ -n "$unit" ] || die "$archive carries no pmacs-parse-unit in its directory"
+[ "$(printf '%s\n' "$unit" | wc -l | tr -d ' ')" = 1 ] \
+    || die "$archive carries more than one pmacs-parse-unit: $unit"
+[ -f "$unit" ] && [ -x "$unit" ] || die "$unit is not an executable file"
+echo "release-replay-worker: the worker under test is $unit, unpacked from $archive"
+
+# --- seeds ---------------------------------------------------------------
+froms=
+corpora=
+if [ "$sources" = upstream ]; then
+    registry=${CARGO_HOME:-$HOME/.cargo}/registry/src
+    tab=$(printf '\t')
+    while IFS="$tab" read -r grammar crate version repo commit kind paths; do
+        case "$grammar" in ''|'#'*|grammar) continue ;; esac
+        if [ "$kind" = crate ]; then
+            dir=$(ls -d "$registry"/*/"$crate-$version" 2>/dev/null | head -n 1)
+            [ -n "$dir" ] || die "$crate $version is not in $registry (cargo fetch)"
+        else
+            # One checkout per row: rows sharing a repository want different paths.
+            dir="$out/upstream/$grammar-$commit"
+            if [ ! -d "$dir/.done" ]; then
+                rm -rf "$dir"
+                git init -q "$dir"
+                git -C "$dir" remote add origin "$repo"
+                # shellcheck disable=SC2046
+                git -C "$dir" sparse-checkout set --no-cone $(echo "$paths" | tr ',' ' ')
+                git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$commit"
+                git -C "$dir" checkout -q FETCH_HEAD
+                mkdir "$dir/.done"
+            fi
+            [ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] || die "$dir is not at $commit"
+        fi
+        for p in $(echo "$paths" | tr ',' ' '); do
+            [ -e "$dir/$p" ] || die "$grammar: $dir/$p is missing"
+            case "$kind" in
+                corpus) corpora="$corpora --corpus $grammar=$dir/$p" ;;
+                *) froms="$froms --from upstream-$grammar=$dir/$p" ;;
+            esac
+        done
+    done < "$root/fuzz/corpora.tsv"
+fi
+# `collect` exits 2 when some grammar has no seeds, which --sources checkout
+# expects; every grammar this run replays is held to having some below.
+set +e
+# shellcheck disable=SC2086
+"$harness" collect --out "$out/corpus" --from "pmacs=$root" $froms $corpora \
+    > "$out/collect.log" 2>&1
+collected=$?
+set -e
+[ "$collected" -le 2 ] || { cat "$out/collect.log" >&2; die "collecting seeds failed (exit $collected)"; }
+[ -n "$grammars" ] || grammars=$("$harness" list | cut -f1)
+gflags=
+for g in $grammars; do
+    [ -n "$(ls "$out/corpus/$g" 2>/dev/null)" ] || die "$g: no seeds (see $out/collect.log)"
+    gflags="$gflags --grammar $g"
+done
+
+# --- the replay ------------------------------------------------------------
+set +e
+# shellcheck disable=SC2086
+"$harness" replay-unit --unit "$unit" --corpus "$out/corpus" --out "$out/unit" \
+    --findings "$root/fuzz/regress" $gflags "$@" > /dev/null 2> "$out/replay.log"
+status=$?
+set -e
+cat "$out/replay.log"
+[ -f "$out/unit/unit-report.md" ] && cat "$out/unit/unit-report.md"
+case "$status" in
+    0) ;;
+    1) die "the archived worker crashed (above): it would take a buffer's highlighting down" ;;
+    *) die "the archived worker could not be replayed (replay-unit exit $status, above)" ;;
+esac
+for g in $grammars; do
+    answered=$(awk -F '|' -v g="$g" '{ n = $2; gsub(/ /, "", n) } n == g { a = $4; gsub(/ /, "", a); print a }' \
+        "$out/unit/unit-report.md")
+    [ -n "$answered" ] || die "$g: the replay's report has no row for it"
+    [ "$answered" -ge 1 ] || die "$g: the archived worker answered none of its inputs"
+done
+echo "release-replay-worker: the archived worker parsed every grammar it was given, and crashed on nothing"

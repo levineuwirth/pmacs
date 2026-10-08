@@ -286,6 +286,27 @@ jobs:
           done
           [ "$fail" -eq 0 ]
 
+      # Make the staged worker PARSE, as the editor drives it. Every check
+      # above proves the archive carries a pmacs-parse-unit that runs and
+      # reports this version; none makes it parse a byte, which is the whole
+      # of what the editor needs it for (E7i). The script unpacks the
+      # archive itself, so the worker under test is the one a user unpacks,
+      # and drives it with `pmacs_grammar_fuzz replay-unit`, the harness
+      # built here from the checkout, over this tree's files, every
+      # grammar's own sources at the commits fuzz/corpora.tsv pins, and
+      # fuzz/regress/, the inputs that took the editor down before E7i. A
+      # worker stopped by its own time or memory limit is contained and
+      # passes; a crash, a worker that does not answer, or a grammar that
+      # answered nothing fails the release here, before upload. The
+      # harness shares the release build's artifacts, so it is one link,
+      # and it is built after staging, so it never reaches the archive.
+      - name: Replay the staged parse worker
+        run: |
+          set -euo pipefail
+          cargo build --release --bin pmacs_grammar_fuzz
+          scripts/release-replay-worker --archive "${{ steps.stage.outputs.archive }}" \
+            --harness target/release/pmacs_grammar_fuzz --out release-replay
+
       - name: Checksum
         run: |
           set -euo pipefail

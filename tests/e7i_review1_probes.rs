@@ -1213,6 +1213,149 @@ fn e7i_review1_the_release_archive_requires_the_parse_worker() {
     );
 }
 
+/// The release replays the worker it ships (2.0.0). Every check
+/// `release.yml` made of the staged `pmacs-parse-unit` (present, executable,
+/// `--version`, the glibc floor) passes a worker that cannot parse a byte.
+/// Since 2.0.0 the build job runs `scripts/release-replay-worker` on the
+/// staged archive after those checks and before the checksum, so before
+/// upload. Driven here on archives staged as the release stages them, with
+/// the debug worker and harness this suite builds, markdown only and from
+/// this tree (no network), at a 1 s deadline: the real worker passes,
+/// #296's and #301's inputs contained; a stand-in that reports the version
+/// the release checks for and then ends fails, "did not answer"; and the
+/// real worker crashing as it parses a markdown layer (the debug build's
+/// `PMACS_PARSE_UNIT_TEST_CRASH`) fails.
+#[test]
+#[allow(clippy::too_many_lines)] // one release step, three archives
+fn the_release_replays_the_archived_worker_and_fails_one_that_cannot_parse() {
+    let workflow =
+        std::fs::read_to_string(repo().join(".github/workflows/release.yml")).expect("release.yml");
+    let at = |needle: &str| {
+        workflow
+            .find(needle)
+            .unwrap_or_else(|| panic!("release.yml carries {needle:?}"))
+    };
+    let replay =
+        at("scripts/release-replay-worker --archive \"${{ steps.stage.outputs.archive }}\"");
+    assert!(
+        at("\"staging/$name/pmacs-parse-unit\" --version") < replay
+            && at("- name: Assert the glibc floor") < replay
+            && replay < at("- name: Checksum")
+            && replay < at("uses: actions/upload-artifact"),
+        "the replay runs after the staged worker's checks and before the checksum and upload"
+    );
+    assert!(
+        at("cargo build --release --bin pmacs_grammar_fuzz") < replay,
+        "the harness is built from the checkout before the replay"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("target dir")
+        .join("pmacs-parse-unit");
+    let standin = dir.path().join("standin-worker");
+    let version = format!("pmacs-parse-unit {} protocol 0", env!("CARGO_PKG_VERSION"));
+    std::fs::write(
+        &standin,
+        format!(
+            "#!/bin/sh\ncase \"${{1:-}}\" in --version) echo '{version}'; exit 0 ;; esac\nexit 0\n"
+        ),
+    )
+    .expect("stand-in");
+    let stage = |label: &str, worker: &Path| -> PathBuf {
+        let name = format!("pmacs-{}-test", env!("CARGO_PKG_VERSION"));
+        let staging = dir.path().join(label).join(&name);
+        std::fs::create_dir_all(&staging).expect("staging");
+        std::fs::copy(worker, staging.join("pmacs-parse-unit")).expect("stage the worker");
+        let ok = Command::new("chmod")
+            .arg("+x")
+            .arg(staging.join("pmacs-parse-unit"))
+            .status()
+            .expect("chmod")
+            .success();
+        assert!(ok, "chmod");
+        let archive = dir.path().join(label).join(format!("{name}.tar.gz"));
+        let ok = Command::new("tar")
+            .arg("-C")
+            .arg(dir.path().join(label))
+            .arg("-czf")
+            .arg(&archive)
+            .arg(&name)
+            .status()
+            .expect("tar")
+            .success();
+        assert!(ok, "tar");
+        archive
+    };
+    let replay = |label: &str, worker: &Path, env: &[(&str, &str)]| {
+        let archive = stage(label, worker);
+        let out = Command::new(repo().join("scripts/release-replay-worker"))
+            .current_dir(repo())
+            .envs(env.iter().copied())
+            .arg("--archive")
+            .arg(&archive)
+            .arg("--harness")
+            .arg(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
+            .arg("--out")
+            .arg(dir.path().join(label).join("replay"))
+            .args(["--sources", "checkout", "--grammar", "markdown", "--"])
+            .args(["--max-inputs", "3", "--deadline-ms", "1000"])
+            .output()
+            .expect("run the release's replay");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        say(&format!("the release's replay, {label}: {:?}", out.status));
+        (out.status.success(), text)
+    };
+
+    let (ok, text) = replay("real", &real, &[]);
+    assert!(ok, "the real worker passes the release's replay:\n{text}");
+    assert!(
+        text.contains("parsed every grammar it was given, and crashed on nothing")
+            && text.contains("markdown contained:"),
+        "it parsed seeds and contained the regression inputs:\n{text}"
+    );
+
+    let got = Command::new("sh")
+        .arg(&standin)
+        .arg("--version")
+        .output()
+        .expect("the stand-in's version");
+    assert!(
+        String::from_utf8_lossy(&got.stdout)
+            .starts_with(&format!("pmacs-parse-unit {} ", env!("CARGO_PKG_VERSION"))),
+        "the stand-in passes the release's --version check, so only the replay can tell"
+    );
+    let (ok, text) = replay("standin", &standin, &[]);
+    assert!(
+        !ok,
+        "a worker that parses nothing fails the release:\n{text}"
+    );
+    assert!(
+        text.contains("did not answer")
+            && text.contains("could not be replayed (replay-unit exit 2"),
+        "it fails as a worker that did not answer:\n{text}"
+    );
+
+    let (ok, text) = replay(
+        "crash",
+        &real,
+        &[("PMACS_PARSE_UNIT_TEST_CRASH", "markdown: ")],
+    );
+    assert!(
+        !ok,
+        "a worker that crashes as it parses fails the release:\n{text}"
+    );
+    assert!(
+        text.contains("markdown CRASHED") && text.contains("the archived worker crashed"),
+        "it fails as a crash:\n{text}"
+    );
+}
+
 /// The strict-aliasing guard (E7h fix round 1) refuses a build of the
 /// grammar C that `-fno-strict-aliasing` does not reach. It runs in the root
 /// package's `build.rs`, so it guards a build of `pmacs`; since E7i the C
