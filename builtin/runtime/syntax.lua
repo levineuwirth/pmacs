@@ -99,20 +99,42 @@ pmacs.config.define {
 }
 
 -- E7i: the parse boundary (`src/parse_isolation.rs`), the process the
--- owner ruled, and the default. "process" runs each buffer's parse, and
--- every read of its tree, in a worker process of `pmacs-parse-unit`: the
--- memory limits below and the deadline above bound the whole parse, the
--- work the progress callback cannot reach included, and a parse that hits
--- one ends its worker, not the editor. "none" parses in the editor's own
--- process, as before E7i, where nothing stops #296 or #301.
+-- owner ruled. "process" runs each buffer's parse, and every read of its
+-- tree, in a worker process of `pmacs-parse-unit`: the memory limits below
+-- and the deadline above bound the whole parse, the work the progress
+-- callback cannot reach included, and a parse that hits one ends its
+-- worker, not the editor. Since 2.0.0 it is the only choice. The other,
+-- "none", parsed in the editor's own process as before E7i, where nothing
+-- stops #296 or #301, and a documented switch back to that is worse than
+-- none. The setting stays for a boundary a later phase may add beside the
+-- process (E7i measured a wasm one). The suite still holds the worker's
+-- answers to the editor's own parse, through `_parse_in_editor` below.
 pmacs.config.define {
   name = "syntax.isolation",
-  description = "Where syntax parses run: process (a worker process per buffer, the default) or none (in the editor). Under process a parse past its time limit, or its memory limit, is stopped without taking the editor down: on Linux before the memory exists, on macOS after it, by up to a few MB (docs/divergences.md). Under none it is not.",
+  description = "Where syntax parses run: process, a worker process per buffer, the only choice since 2.0.0 (none, which parsed in the editor where a runaway parse is not stopped, was removed). A parse past its time limit, or its memory limit, is stopped without taking the editor down: on Linux before the memory exists, on macOS after it, by up to a few MB (docs/divergences.md).",
   type = "enum",
-  choices = { "process", "none" },
+  choices = { "process" },
   default = "process",
   mutability = "live",
 }
+
+-- The editor's own parse, for the suite alone (2.0.0): a row that holds
+-- what the worker answers to what the editor computes in-process (folds,
+-- a whole-tree read) calls `pmacs.parse._parse_in_editor(true)` first. No
+-- setting reaches it, and nothing outside the tests calls it.
+local parse_in_editor = false
+function pmacs.parse._parse_in_editor(on)
+  parse_in_editor = on == true
+end
+
+-- The boundary a parse runs behind, as `_dispatch` and `_parse_now` name
+-- it to the editor: "none" is the editor's own process.
+local function isolation()
+  if parse_in_editor then
+    return "none"
+  end
+  return pmacs.config.get("syntax.isolation")
+end
 
 pmacs.config.define {
   name = "syntax.parse-memory-limit-mb",
@@ -177,7 +199,7 @@ function pmacs.parse._dispatch(buf, lang)
     return inflight
   end
   local job_id = raw_dispatch(buf, lang, pmacs.config.get("syntax.parse-deadline-ms"),
-    pmacs.config.get("syntax.isolation"),
+    isolation(),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
     pmacs.config.get("syntax.parse-memory-total-mb"),
     pmacs.config.get("syntax.parse-worker-recycle-mb"),
@@ -189,13 +211,13 @@ function pmacs.parse._dispatch(buf, lang)
 end
 
 -- `_parse_now` parses synchronously where a dispatch would: in the
--- editor, or in the buffer's parse unit under syntax.isolation (E7i). The
--- deadline is the caller's, absent leaving the parse unbounded in time as
--- it always was here.
+-- buffer's parse unit (E7i), or in the editor under `_parse_in_editor`.
+-- The deadline is the caller's, absent leaving the parse unbounded in time
+-- as it always was here.
 local raw_parse_now = pmacs.parse._parse_now
 function pmacs.parse._parse_now(buf, lang, deadline_ms)
   return raw_parse_now(buf, lang, deadline_ms,
-    pmacs.config.get("syntax.isolation"),
+    isolation(),
     pmacs.config.get("syntax.parse-memory-limit-mb"),
     pmacs.config.get("syntax.parse-memory-total-mb"),
     pmacs.config.get("syntax.parse-worker-recycle-mb"),
@@ -900,12 +922,13 @@ pmacs._async.tick = function(...)
       -- session, with the ways out. The release archive carries the worker
       -- beside pmacs (`release.yml` fails a release without it), so the
       -- remedy is one a user of an archive can follow: put the two back
-      -- together. What a terminal's echo line cuts is the tail; the
-      -- *errors* buffer keeps it all.
+      -- together, or name where the worker is. Since 2.0.0 these are the
+      -- only two: no setting parses in the editor. What a terminal's echo
+      -- line cuts is the tail; the *errors* buffer keeps it all.
       if not parse_unit_unavailable_warned then
         parse_unit_unavailable_warned = true
         pmacs.error(string.format(
-          "syntax: %s, so nothing is highlighted. pmacs-parse-unit ships beside pmacs in the release archive: keep the two in one directory, or name the worker in syntax.parse-unit-path (a source build makes it with cargo build --release -p pmacs-parse-unit). Or set syntax.isolation to none to parse in the editor, where a runaway parse is not stopped",
+          "syntax: %s, so nothing is highlighted. pmacs-parse-unit ships beside pmacs in the release archive: keep the two in one directory, or name the worker in syntax.parse-unit-path (a source build makes it with cargo build --release -p pmacs-parse-unit)",
           tostring(detail)), ERROR_LABEL)
       end
     elseif key and (status == "crashed" or status == "crash-stopped" or status == "held") then

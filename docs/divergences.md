@@ -162,9 +162,9 @@ whole. Under one cap a growing register squeezes the rules.
   `WindowFacts` on the wire and the GPU paints more than one document
    window, at which point the preview is visible on both and this entry
    becomes a statement that the two frontends agree.
-- **Parse containment by platform.** By default every buffer's parse
-  runs in a worker process (`syntax.isolation`, E7i), and what holds a
-  worker depends on what the platform grants. A platform difference, not a
+- **Parse containment by platform.** Every buffer's parse runs in a
+  worker process (`syntax.isolation`, E7i, its one choice since 2.0.0),
+  and what holds a worker depends on what the platform grants. A platform difference, not a
   frontend's, recorded here at the owner's direction because it changes
   what "contained" means. Time is the editor's everywhere:
   a parse past `syntax.parse-deadline-ms` is killed 100 ms after it. A

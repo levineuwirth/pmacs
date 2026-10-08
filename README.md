@@ -224,9 +224,8 @@ runaway or crashing parse is stopped without taking the editor down
 `syntax.parse-unit-path`. The release archive carries it beside `pmacs`,
 and a release without it fails before upload; a source build makes it
 with `cargo build --release -p pmacs-parse-unit` (below). Without the
-worker nothing is highlighted, and the editor says so once;
-`syntax.isolation` set to `"none"` parses in the editor instead, as
-releases before E7i did, without that protection.
+worker nothing is highlighted, and the editor says so once. Since 2.0.0
+no setting parses in the editor instead, as releases before E7i did.
 
 Verify a download:
 

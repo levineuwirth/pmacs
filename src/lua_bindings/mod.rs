@@ -8192,7 +8192,8 @@ impl UserData for ParseNodeLua {
 /// The parse deadline a dispatch carries (E7h.2): `syntax.lua` passes
 /// `syntax.parse-deadline-ms`; absent or 0 leaves the parse unbounded.
 /// `pmacs.parse._dispatch`'s arguments: the buffer, its language, then
-/// `syntax.parse-deadline-ms` and E7i's `syntax.isolation`,
+/// `syntax.parse-deadline-ms`, the boundary (`syntax.isolation`, or
+/// `"none"` under the suite's `pmacs.parse._parse_in_editor`),
 /// `syntax.parse-memory-limit-mb`, `syntax.parse-memory-total-mb`,
 /// `syntax.parse-worker-recycle-mb` and `syntax.parse-unit-path`.
 type DispatchArgs = (
@@ -8211,8 +8212,8 @@ type DispatchArgs = (
 /// (E7i).
 const ISOLATED_INTEREST_MARGIN: u32 = 4096;
 
-/// The boundary `syntax.isolation` names; absent or unknown is the worker
-/// process, the editor's default since E7i.
+/// The boundary a dispatch names; absent or unknown is the worker process,
+/// the editor's default since E7i and its one setting since 2.0.0.
 fn isolation_mode(isolation: Option<&str>) -> crate::parse_isolation::Isolation {
     isolation
         .and_then(crate::parse_isolation::Isolation::from_config)
@@ -8557,8 +8558,8 @@ pub fn install_parse(
                 ): DispatchArgs| {
                     let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
                     crate::parse_isolation::set_unit_path(unit_path.as_deref());
-                    // `syntax.isolation` (E7i): "none" parses here, as before;
-                    // "process" sends the parse to the buffer's unit.
+                    // "process" (E7i) sends the parse to the buffer's unit;
+                    // "none", the suite's in-editor route, parses here.
                     let mode = isolation_mode(isolation.as_deref());
                     if mode != crate::parse_isolation::Isolation::Native {
                         let job = isolated_job(
