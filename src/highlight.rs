@@ -39,7 +39,7 @@ use crate::display_width::byte_range_to_columns;
 use crate::lsp::SharedLspManager;
 use crate::overlay::merge_styles;
 use crate::syntax::{HighlightSpan, ParseTreeBundle, ParseViewHandle, compute_highlight_spans_for};
-use crate::view::{View, Viewport};
+use crate::view::{View, Viewport, WrapMode};
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -527,6 +527,126 @@ impl SyntaxHighlightView {
         };
     }
 
+    /// The row walk under word wrap (#335). A row is not a line there:
+    /// the walk carries a row cursor down the visible lines, as
+    /// [`crate::text_view::TextView::render`] does, lays each line out
+    /// once with the wrap rule its text is drawn by, and paints every
+    /// layer's spans on that line from the one layout. Before this the
+    /// walk took row `r` for the `r`-th visible line, so below the first
+    /// line that wrapped each row took the spans of a line further down.
+    fn render_wrapped(
+        &self,
+        source: &[u8],
+        theme: &Theme,
+        viewport: Viewport<'_>,
+        cells: &mut CellGrid<'_>,
+    ) {
+        let max_rows = viewport.cell_size.rows;
+        let max_cols = viewport.cell_size.cols;
+        if max_cols == 0 {
+            return;
+        }
+        let offsets = &self.cache.line_offsets;
+        let total_lines = offsets.len();
+        let folds = viewport.folds.filter(|m| !m.is_identity());
+        let start_line = {
+            let raw = line_at_offset(offsets, viewport.buffer_start as u32) as usize;
+            folds.map_or(raw, |m| m.visible_head_of(raw))
+        };
+        // A line's text, its trailing newline trimmed as the text view
+        // trims it, and where it starts.
+        let line_text = |line: usize| -> (u32, Option<&str>) {
+            let start = offsets[line];
+            let end = offsets
+                .get(line + 1)
+                .copied()
+                .unwrap_or(source.len() as u32);
+            let end = if end > start && source.get(end as usize - 1) == Some(&b'\n') {
+                end - 1
+            } else {
+                end
+            };
+            (
+                start,
+                std::str::from_utf8(&source[start as usize..end as usize]).ok(),
+            )
+        };
+        // The first line's rows above `buffer_start`, which the text view
+        // skips: the anchor may sit partway down a wrapped line.
+        let mut skip_rows = match line_text(start_line.min(total_lines - 1)) {
+            (start, Some(text)) => {
+                let within = (viewport.buffer_start as u32).saturating_sub(start);
+                crate::text_view::place_in_line(text, u64::from(within), max_cols).0
+            }
+            (_, None) => 0,
+        };
+        // Each character with cells: (byte index, byte end, row, columns).
+        let mut places: Vec<(usize, usize, u32, u32, u32)> = Vec::new();
+        let mut first_row: u32 = 0;
+        let mut line = start_line;
+        while first_row < max_rows && line < total_lines {
+            let this_line = line;
+            line = folds.map_or(this_line + 1, |m| m.next_visible(this_line));
+            let (line_start, text) = line_text(this_line);
+            places.clear();
+            let rows = match text {
+                Some(text) => crate::text_view::lay_out_wrapped_line(
+                    text,
+                    max_cols,
+                    folds.is_some_and(|m| m.is_head(this_line)),
+                    |idx, len, row, start_col, end_col| {
+                        places.push((idx, idx + len, row, start_col, end_col));
+                    },
+                ),
+                // The text view paints nothing of a line that is not UTF-8
+                // and gives it one row.
+                None => 1,
+            };
+            let line_len = text.map_or(0, str::len) as u32;
+            for layer in &self.cache.layers {
+                for span in layer
+                    .spans
+                    .iter()
+                    .filter(|s| s.start_byte < line_start + line_len && s.end_byte > line_start)
+                    .copied()
+                {
+                    let style = Self::style_for(theme, layer, span);
+                    if style == Style::default() {
+                        continue;
+                    }
+                    let lo = (span.start_byte.max(line_start) - line_start) as usize;
+                    let hi = (span.end_byte.min(line_start + line_len) - line_start) as usize;
+                    let from = places.partition_point(|p| p.1 <= lo);
+                    for &(idx, _, row, start_col, end_col) in &places[from..] {
+                        if idx >= hi {
+                            break;
+                        }
+                        let Some(row) = row
+                            .checked_sub(skip_rows)
+                            .map(|r| first_row + r)
+                            .filter(|&r| r < max_rows)
+                        else {
+                            continue;
+                        };
+                        let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
+                            continue;
+                        };
+                        for col in start..end {
+                            let cell = cells.at(CellCoord::new(
+                                viewport.cell_origin.row + row,
+                                viewport.cell_origin.col + col,
+                            ));
+                            cell.style = merge_styles(cell.style, style);
+                        }
+                    }
+                }
+            }
+            // `paint_line`'s advance: the rows it showed, at least one.
+            first_row += (rows - 1).saturating_sub(skip_rows) + 1;
+            skip_rows = 0;
+        }
+    }
+
     /// Look up the style for span `s` within `layer`, consulting the
     /// active theme.
     fn style_for(theme: &Theme, layer: &LayerSpans, s: HighlightSpan) -> Style {
@@ -553,6 +673,10 @@ impl View for SyntaxHighlightView {
         }
         let source: &[u8] = bundle.source.as_ref();
         let theme = self.theme.lock().expect("theme mutex poisoned").clone();
+        if viewport.wrap == WrapMode::Wrap {
+            self.render_wrapped(source, &theme, viewport, cells);
+            return;
+        }
 
         let start_line = line_at_offset(&self.cache.line_offsets, viewport.buffer_start as u32);
         let max_rows = viewport.cell_size.rows;
@@ -2379,5 +2503,149 @@ mod tests {
         );
         assert_eq!(rows[5][6], Style::default(), "throughout");
         assert_eq!(rows[6][0], literal, "its closing fence");
+    }
+
+    /// #335's oracle. Under wrap every character's cell takes the style
+    /// the unwrapped painter gives the same character, whose path this
+    /// change leaves alone. Each place comes from the text view's caret
+    /// walk (`pos_to_display`) at `wrap` and at `truncate`, never from the
+    /// painter's own layout, and the viewport may start partway down a
+    /// wrapped line. Returns how many characters on screen were styled.
+    fn wrapped_paint_matches_unwrapped(
+        language_name: &str,
+        file: &str,
+        src: &str,
+        cols: u32,
+        start: u64,
+    ) -> usize {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+        use crate::text_view::TextView;
+        use crate::view::LayoutCtx;
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let mut paint = |rows: u32, cols: u32, wrap: WrapMode, start: u64| -> Vec<Style> {
+            let mut backing = vec![Cell::default(); (rows * cols) as usize];
+            let mut grid = CellGrid {
+                cells: &mut backing,
+                stride: cols,
+                size: CellSize::new(rows, cols),
+            };
+            let viewport = Viewport {
+                buffer_start: start,
+                buffer_end: u64::MAX,
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(rows, cols),
+                gutter_w: 0,
+                folds: None,
+                wrap,
+                view_left: 0,
+            };
+            hv.render(&buf, viewport, &mut grid);
+            backing.iter().map(|c| c.style).collect()
+        };
+        let wide = src.lines().map(str::len).max().unwrap_or(0) as u32 + 2;
+        let lines = src.lines().count() as u32 + 1;
+        let flat = paint(lines, wide, WrapMode::Truncate, 0);
+        let rows = 64;
+        let wrapped = paint(rows, cols, WrapMode::Wrap, start);
+
+        let text = TextView::new(&buf);
+        let ctx = LayoutCtx {
+            cols,
+            wrap: WrapMode::Wrap,
+            view_left: 0,
+        };
+        let top = text.pos_to_display(&buf, start, ctx).expect("start");
+        let start_line = top.row as usize;
+        let mut rows_above = vec![0u32; text.line_count() + 1];
+        for line in start_line..text.line_count() {
+            rows_above[line + 1] = rows_above[line] + text.line_rows(&buf, line, ctx);
+        }
+        let first = text.line_offset(start_line).expect("start line");
+        let (mut styled, mut moved) = (0, false);
+        for (byte, ch) in src.char_indices() {
+            let byte = byte as u64;
+            if ch == '\n' || byte < first {
+                continue;
+            }
+            let at = text.pos_to_display(&buf, byte, ctx).expect("wrapped place");
+            let next = text
+                .pos_to_display(&buf, byte + ch.len_utf8() as u64, ctx)
+                .expect("the next place");
+            if (next.row, next.sub_row, next.col) == (at.row, at.sub_row, at.col) {
+                continue; // no cell: a space hanging past the edge, which
+                // the caret walk puts where the next character is drawn
+            }
+            let Some(row) = (rows_above[at.row as usize] + at.sub_row).checked_sub(top.sub_row)
+            else {
+                continue; // above the viewport's first row
+            };
+            if row >= rows || at.col >= cols {
+                continue; // below the viewport, or a space hanging past the edge
+            }
+            let flat_at = text
+                .pos_to_display(&buf, byte, LayoutCtx::truncated())
+                .expect("unwrapped place");
+            let want = flat[(flat_at.row * wide + flat_at.col) as usize];
+            assert_eq!(
+                wrapped[(row * cols + at.col) as usize],
+                want,
+                "byte {byte} ({ch:?}) of line {}, drawn on row {row} column {}",
+                at.row,
+                at.col
+            );
+            styled += usize::from(want != Style::default());
+            moved |= want != Style::default() && row > at.row - top.row;
+        }
+        assert!(
+            moved,
+            "some styled character is drawn below a wrapped line's extra rows"
+        );
+        styled
+    }
+
+    #[test]
+    fn under_wrap_a_lines_spans_paint_on_the_rows_it_is_drawn_on() {
+        // #335: the row walk took row `r` for the `r`-th line, so below
+        // the first line that wrapped every row took the spans of a line
+        // further down. A comment wraps over four rows of twenty columns;
+        // the code and the block comment below it paint on their own rows.
+        let rust = "// a comment long enough to wrap over several rows of a narrow window\n\
+                    fn first() { let s = \"a string\"; }\n\
+                    /* a block comment that\n   spans two lines */ fn second() {}\n";
+        assert!(wrapped_paint_matches_unwrapped("rust", "a.rs", rust, 20, 0) >= 40);
+        // From partway down the comment, its first rows scrolled away.
+        let partway = rust.find("several").unwrap() as u64;
+        assert!(wrapped_paint_matches_unwrapped("rust", "a.rs", rust, 20, partway) >= 40);
+
+        // Markdown, the prose #335 was met on: a heading above a wrapped
+        // paragraph, emphasis, strong and a code span on its wrapped rows,
+        // and a heading and a list item below it, through the injected
+        // inline layer.
+        let md = "# Above\n\
+                  Prose that wraps across rows: one two three four five *em* six seven \
+                  `code` eight nine **strong** ten.\n\
+                  ## Below\n\
+                  - item `tail`\n";
+        assert!(wrapped_paint_matches_unwrapped("markdown", "notes.md", md, 24, 0) >= 30);
+        let partway = md.find("four").unwrap() as u64;
+        assert!(wrapped_paint_matches_unwrapped("markdown", "notes.md", md, 24, partway) >= 20);
     }
 }

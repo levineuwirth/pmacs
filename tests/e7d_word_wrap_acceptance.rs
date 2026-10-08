@@ -366,6 +366,177 @@ fn a_click_on_a_wrapped_row_lands_where_it_points() {
     assert_eq!(f.caret, Some((5, 10)));
 }
 
+/// One frame's cells, glyph and style, row-major.
+fn styled_frame(s: &EditorState, rows: u32, cols: u32) -> Vec<Vec<(char, pmacs::cell::Style)>> {
+    let size = pmacs::cell::CellSize::new(rows, cols);
+    let mut rs = pmacs::instance_render::RenderState::new(size);
+    let msgs = rs.render_frame(s, FrontendId::LOCAL, &HashMap::new(), &[]);
+    let mut grid = vec![vec![(' ', pmacs::cell::Style::default()); cols as usize]; rows as usize];
+    for msg in &msgs {
+        if let pmacs_protocol::InstanceMessage::CellDelta { spans, .. } = msg {
+            for span in spans {
+                for (i, cell) in span.cells.iter().enumerate() {
+                    let (r, c) = (span.start.row as usize, span.start.col as usize + i);
+                    if r < rows as usize && c < cols as usize {
+                        let ch = match cell.glyph {
+                            pmacs::cell::Glyph::Char(ch) => ch,
+                            _ => ' ',
+                        };
+                        grid[r][c] = (ch, cell.style);
+                    }
+                }
+            }
+        }
+    }
+    grid
+}
+
+/// The styles of the cells that draw `needle`, on the one row showing it.
+fn styles_of(grid: &[Vec<(char, pmacs::cell::Style)>], needle: &str) -> Vec<pmacs::cell::Style> {
+    let mut found = grid.iter().filter_map(|row| {
+        let text: String = row.iter().map(|&(ch, _)| ch).collect();
+        let at = text.find(needle)?;
+        let col = text[..at].chars().count();
+        Some(
+            row[col..col + needle.chars().count()]
+                .iter()
+                .map(|&(_, s)| s)
+                .collect(),
+        )
+    });
+    let styles = found
+        .next()
+        .unwrap_or_else(|| panic!("{needle:?} is on screen"));
+    assert!(found.next().is_none(), "{needle:?} is on one row");
+    styles
+}
+
+/// Tick until a frame paints every cell of `needle` in a face, the
+/// parse having reached the grid; then a few frames more, so every layer
+/// the parse returned is in the frame read next.
+fn settle_painted(s: &mut EditorState, rows: u32, cols: u32, needle: &str) {
+    let tick = |s: &mut EditorState| {
+        s.tick_processes();
+        s.tick_lsp();
+        s.tick_async();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        tick(s);
+        let grid = styled_frame(s, rows, cols);
+        let on_screen = grid.iter().any(|row| {
+            let text: String = row.iter().map(|&(ch, _)| ch).collect();
+            text.contains(needle)
+        });
+        if on_screen
+            && styles_of(&grid, needle)
+                .iter()
+                .all(|&st| st != pmacs::cell::Style::default())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{needle:?} never painted"
+        );
+    }
+    for _ in 0..10 {
+        tick(s);
+    }
+}
+
+/// #335: under wrap, the default, a line's syntax colors paint on the
+/// rows its text is drawn on. The grid's span painter took row `r` for
+/// the `r`-th line, so below the first line that wrapped each row took
+/// the spans of a line further down, on the TUI and not on the GPU, which
+/// places spans by byte. Here a markdown paragraph wraps over five rows
+/// with emphasis, a code span and strong text on its wrapped rows; the
+/// heading above it, the heading and the list item below it, and the
+/// paragraph's own spans each paint their own glyphs, and its plain
+/// words stay plain. The parse is the real worker's.
+#[test]
+fn under_wrap_a_lines_syntax_colors_paint_on_the_rows_it_is_drawn_on() {
+    let mut s = session("syntax-colors");
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.config.get('ui.line-wrap')"),
+        "wrap",
+        "the default"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("notes.md");
+    std::fs::write(
+        &path,
+        "# Above\n\
+         Prose that wraps across rows: one two three four five *em* six seven \
+         `code` eight nine **strong** ten.\n\
+         ## Below\n\
+         - item `tail`\n",
+    )
+    .expect("write the note");
+    exec(
+        &s,
+        &format!(
+            "pmacs.buffer.find_or_open({:?})",
+            path.display().to_string()
+        ),
+    );
+    let (rows, cols) = (12, 24);
+    // The heading above the paragraph paints with or without #335's fix,
+    // so the wait is on it.
+    settle_painted(&mut s, rows, cols, "Above");
+    let grid = styled_frame(&s, rows, cols);
+    let text: Vec<String> = grid
+        .iter()
+        .map(|row| row.iter().map(|&(ch, _)| ch).collect())
+        .collect();
+    let below = text
+        .iter()
+        .position(|row| row.starts_with("## Below"))
+        .expect("the heading below");
+    assert!(below >= 5, "the paragraph wraps over its rows: {text:#?}");
+
+    let heading = styles_of(&grid, "Above")[0];
+    let marker = styles_of(&grid, "# A")[0];
+    assert_ne!(
+        heading,
+        pmacs::cell::Style::default(),
+        "a heading has a face"
+    );
+    for st in styles_of(&grid, "Below") {
+        assert_eq!(st, heading, "the heading below the paragraph: {text:#?}");
+    }
+    for st in styles_of(&grid, "##") {
+        assert_eq!(st, marker, "its marker");
+    }
+    let code = styles_of(&grid, "tail")[0];
+    assert_ne!(
+        code,
+        pmacs::cell::Style::default(),
+        "a code span has a face"
+    );
+    for st in styles_of(&grid, "code") {
+        assert_eq!(st, code, "the code span on the paragraph's wrapped rows");
+    }
+    assert!(
+        styles_of(&grid, "em*")[..2].iter().all(|st| st.italic),
+        "emphasis on a wrapped row"
+    );
+    assert!(
+        styles_of(&grid, "strong").iter().all(|st| st.bold),
+        "strong on a wrapped row"
+    );
+    for word in ["Prose", "three", "eight", "nine", "ten."] {
+        for st in styles_of(&grid, word) {
+            assert_eq!(
+                st,
+                pmacs::cell::Style::default(),
+                "{word:?} is plain prose: {text:#?}"
+            );
+        }
+    }
+}
+
 /// The grid's layout cost on a large markdown file, per painted frame:
 /// E7d.1's measurement, taken before and after the word-wrap walk
 /// (`--ignored`, a measurement and not a gate). The file is named by

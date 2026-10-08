@@ -565,6 +565,52 @@ pub(crate) fn place_in_line(s: &str, within: u64, max_cols: u32) -> (u32, u32) {
     }
 }
 
+/// Lay out one line's text `s` (no line break) under word wrap at
+/// `max_cols` as [`TextView::paint_line`] draws it, handing `visit` each
+/// character that has cells as `(byte index, byte length, visual row,
+/// first column, end column)`, and return the visual rows the painter
+/// gives the line: its count before any leading rows are skipped, the
+/// fold head's trailing ellipsis included.
+///
+/// Shared with the grid's syntax painter (#335), which places a span's
+/// cells on the rows its line's text is drawn on by walking each visible
+/// line once, as [`TextView::render`] does, rather than one row per line.
+pub(crate) fn lay_out_wrapped_line(
+    s: &str,
+    max_cols: u32,
+    is_fold_head: bool,
+    mut visit: impl FnMut(usize, usize, u32, u32, u32),
+) -> u32 {
+    if max_cols == 0 {
+        return 1;
+    }
+    let (mut row, mut col) = (0u32, 0u32);
+    walk_line(s, max_cols, true, |p| {
+        // A space hanging past the edge, or a zero-width mark, has no cell.
+        let end = p.end_col.min(max_cols);
+        if end > p.start_col {
+            visit(p.idx, p.ch.len_utf8(), p.start_row, p.start_col, end);
+        }
+        row = p.end_row;
+        col = p.end_col;
+        true
+    });
+    // `paint_line`'s count: the fold head's two markers may open a row,
+    // and a line ending at or past the edge owns the row below.
+    if is_fold_head {
+        for _ in 0..2 {
+            if col >= max_cols {
+                row += 1;
+                col = 0;
+            }
+            col += 1;
+        }
+    } else if col >= max_cols {
+        row += 1;
+    }
+    row + 1
+}
+
 /// Lay out one line and hand each character's place to `visit`, which
 /// returns `false` to stop the walk.
 ///
@@ -1397,6 +1443,82 @@ mod tests {
                 _ => ' ',
             })
             .collect()
+    }
+
+    proptest! {
+        // #335: the syntax painter's layout is the text view's. Every
+        // character `lay_out_wrapped_line` places is drawn there, a wide
+        // one with its continuation, and the next line starts on the row
+        // its count gives.
+        #[test]
+        fn lay_out_wrapped_line_places_what_the_text_view_draws(
+            line in "[ab \t/中-]{0,60}",
+            cols in 2u32..12,
+        ) {
+            let text = format!("{line}\nZ");
+            let rows = 128;
+            let g = render_grid(text.as_bytes(), rows, cols, WrapMode::Wrap);
+            let mut placed = Vec::new();
+            let used = lay_out_wrapped_line(&line, cols, false, |idx, _, row, start, end| {
+                placed.push((idx, row, start, end));
+            });
+            for (idx, row, start, end) in placed {
+                let ch = line[idx..].chars().next().expect("a character");
+                let shown = if ch == '\t' { ' ' } else { ch };
+                prop_assert_eq!(&g[(row * cols + start) as usize], &Glyph::Char(shown));
+                if ch != '\t' && end - start == 2 {
+                    prop_assert_eq!(&g[(row * cols + start + 1) as usize], &Glyph::Continuation);
+                }
+            }
+            prop_assert_eq!(&g[(used * cols) as usize], &Glyph::Char('Z'));
+        }
+    }
+
+    /// The count includes a fold head's ellipsis when it opens a row:
+    /// nine columns of text in ten leave room for the space and not for
+    /// the `…`, so the line takes two rows and the next visible line
+    /// starts on the third, as the text view draws it.
+    #[test]
+    fn lay_out_wrapped_line_counts_the_fold_heads_ellipsis_row() {
+        let text = b"aaaa bbbb\nhidden\nZ";
+        let (buf, mut view) = attached(text);
+        let folds = crate::fold_view::VisibleLineMap::build(
+            &[pmacs_protocol::ByteRange { start: 9, end: 16 }],
+            |off| view.line_at_offset(off),
+        );
+        assert!(folds.is_head(0) && folds.is_hidden(1), "line 1 is folded");
+        let (rows, cols) = (4, 10);
+        let mut storage = vec![Cell::default(); (rows * cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(rows, cols),
+                gutter_w: 0,
+                folds: Some(&folds),
+                wrap: WrapMode::Wrap,
+                view_left: 0,
+            },
+            &mut grid,
+        );
+        let glyphs: Vec<Glyph> = storage.iter().map(|c| c.glyph.clone()).collect();
+        assert_eq!(row_text(&glyphs, cols, 1).trim_end(), "…");
+        assert_eq!(row_text(&glyphs, cols, 2).trim_end(), "Z");
+        assert_eq!(
+            lay_out_wrapped_line("aaaa bbbb", cols, true, |_, _, _, _, _| {}),
+            2
+        );
+        assert_eq!(
+            lay_out_wrapped_line("aaaa bbbb", cols, false, |_, _, _, _, _| {}),
+            1
+        );
     }
 
     /// `reached_buffer_end` is a local predicate, recorded by the walk.
