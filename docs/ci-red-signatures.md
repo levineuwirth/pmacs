@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 28 items in the list below.
+Tally (311-runs): 29 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2819,6 +2819,7 @@ Tally (311-runs): 28 items in the list below.
 - `20261007T183201Z-3888421` at `226f5f0` (the cache-budget PR's tip gate, `05-sweep`;
   recorded with that PR, below).
 - `20261007T204535Z-472312` at `1dc7658` (the same PR's addendum gate, `05-sweep`).
+- `20261008T132308Z-224598` at `1218ba1` (the same PR's second addendum gate, `05-sweep`).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -4170,6 +4171,94 @@ The logs are copied to `~/build/cache-budget/gate/`.
 
 So, at the cache-budget PR's addendum: #311's list of runs reads at twenty-eight; #330's
 precondition recurred twice without a stall; every other count above stands.
+
+### The cache-budget PR's second addendum: the workspace build without `--all-targets`, PR #329's run at `1218ba1`, and #311's list at twenty-nine
+
+Recorded 2026-10-08 by the cache-budget pull request's second addendum, #329 at `1218ba1`
+(seven signed commits on `602c7ed`): the matrix test legs build `cargo build --workspace`
+without `--all-targets`, and the no-crdt leg alone links the test targets of
+`pmacs-protocol`, `pmacs-syntax` and `pmacs-parse-unit`. The run was read from the jobs
+endpoint by conclusion and through all six test legs' logs.
+
+#### `main` at `ae9761d`, the addendum's registry push
+
+`CI` 37775485751, `push`, attempt 1 of 1, `success`, 15 = 6 success + 9 skipped (`Docs
+consistency` 113305215737 among the six); `Grammar fuzz` 37775485681 `success`.
+
+#### `CI` 37783868963 at `1218ba1`, attempt 1 of 1: green, and the disk
+
+`pull_request`, the merge `cd80a50` (`1218ba1` into `ae9761d`, read from the test logs'
+checkout line), created 13:22:45Z and completed 13:54:29Z: `success`.
+
+Tally (pr329-ci-1218ba1): 19 = 18 + 1.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 113333509781 | success |
+| Format | 113333509951 | success |
+| Commit attribution (D9) | 113333509958 | success |
+| Lint (luajit) | 113333509997 | success |
+| Changed paths | 113333510099 | success |
+| Test (crdt) | 113333594763 | success |
+| Perf budgets (debug) | 113333594889 | success |
+| M1 Acceptance Gates | 113333594891 | success |
+| M4 Perf Gates | 113333594897 | success |
+| GPU Render (headless) | 113333594907 | success |
+| M6 Perf Gates | 113333594910 | success |
+| M10 Perf Gates (crdt) | 113333594967 | success |
+| Test (ubuntu-latest / luajit) | 113333594988 | success |
+| Test (ubuntu-latest / lua54) | 113333594994 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 113333595000 | success |
+| M5 Perf Gates | 113333595020 | success |
+| Test (macos-latest / luajit) | 113333595074 | success |
+| Test (macos-latest / lua54) | 113333595089 | success |
+| Docs consistency | 113333597453 | skipped |
+
+Tally (pr329-ci-1218ba1-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs its `running` lines with `test result: ok` and has no `FAILED`: 190
+  on each macOS leg, 189 on each Ubuntu `test` leg, 188 on `Test (crdt)`, the counts at
+  `d453609`. The three `test` legs logged `No cache found.`; `Test (crdt)` restored its own
+  key.
+- The disk on the Ubuntu legs, against the same legs at `1dc7658` (also cold), every one on
+  a 147,718 MB root filesystem:
+
+| leg | free after the tests, `1dc7658` | free after the tests, `1218ba1` | target after the tests, `1dc7658` | target after the tests, `1218ba1` |
+|---|---|---|---|---|
+| luajit | 1,918 MB | 42,095 MB | 84,067 MB | 43,869 MB |
+| lua54 | 2,872 MB | 42,621 MB | 83,112 MB | 43,346 MB |
+| luajit, no crdt | 31,795 MB | 57,040 MB | 54,176 MB | 28,927 MB |
+| `Test (crdt)` | 42,568 MB | 42,568 MB | 43,869 MB | 43,869 MB |
+
+  The luajit crdt leg now ends at `Test (crdt)`'s target size, 43,869 MB, to the megabyte.
+  Its workspace build left a 3,342 MB target where it had left 43,588 MB.
+- The no-crdt leg's new step (`cargo build -p pmacs-protocol -p pmacs-syntax -p
+  pmacs-parse-unit --all-targets`) took 11 s and 267 MB: the target went from 3,139 to
+  3,406 MB, the root filesystem's use from 64,778 to 65,045 MB.
+- Time, against `CI` 37769314441 at `d453609`: the workspace build step took 131, 91 and
+  129 s on the luajit, lua54 and no-crdt legs, where it had taken 282, 269 and 259 s; the
+  test step took 1,667, 1,661 and 1,476 s, against 1,648, 1,656 and 1,527 s; the jobs ended
+  130 to 182 s sooner.
+- No apt attempt was cut on any leg.
+- The figures are all from cold `test` legs. `main` holds no Linux test entry, so a warm
+  luajit crdt leg's margin under this build is not measured; it arrives with the second code
+  run after this pull request merges, the first saving the entry.
+
+#### `Grammar fuzz` 37783868837 at `1218ba1`
+
+Attempt 1 of 1, `success`: `Grammar fuzz` 113333509292 and `Grammar fuzz (asan-strict)`
+113333509514.
+
+#### The second addendum's gate
+
+`scripts/gate`, the default plan, `20261008T132308Z-224598` at `1218ba1`: five of six, its
+`05-sweep` 197 paired result lines, 5,320 / 1 / 64, the last gate's 5,318 and the two rows
+this round adds. The one failure is #311's row with #311's fragments, so #311's list gains
+it. No daemon survived. #316's row passed, which is non-reproduction and nothing more; R7's
+is not in the default plan. The logs are copied to `~/build/cache-budget/gate/`.
+
+So, at the cache-budget PR's second addendum: #311's list of runs reads at twenty-nine; #328,
+#330 and #331 stay open and are not sampled; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
