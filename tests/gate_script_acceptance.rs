@@ -2847,6 +2847,54 @@ fn the_test_legs_build_the_workspace_without_all_targets() {
     );
 }
 
+/// The link the workspace build gave up is kept on one leg: the no-crdt
+/// leg, the roomiest, builds the test targets of `pmacs-protocol`,
+/// `pmacs-syntax` and `pmacs-parse-unit`, and prints the disk after them.
+/// Its condition selects that leg alone: only the matrix's `include` has
+/// an empty `crdt`.
+#[test]
+fn the_no_crdt_leg_links_the_small_crates_test_targets() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let body = ci_job(&workflow, "test");
+    let step = |needle: &str| {
+        let at = body
+            .find(needle)
+            .unwrap_or_else(|| panic!("`test` holds `{needle}`"));
+        let start = body[..at].rfind("\n      - ").expect("a step");
+        let end = body[at..].find("\n      - ").map_or(body.len(), |e| at + e);
+        body[start..end].to_owned()
+    };
+    for needle in [
+        "run: cargo build -p pmacs-protocol -p pmacs-syntax -p pmacs-parse-unit --all-targets",
+        "run: scripts/ci-disk \"after the small crates' test targets\" target",
+    ] {
+        let text = step(needle);
+        assert!(
+            text.contains("if: matrix.crdt == ''"),
+            "the no-crdt leg alone runs `{needle}`:{text}"
+        );
+    }
+    assert_eq!(
+        body.matches("crdt: \"\"").count(),
+        1,
+        "one leg has an empty `crdt`, the no-crdt one"
+    );
+    let built = body
+        .find("- run: cargo build --workspace")
+        .expect("the build");
+    let small = body
+        .find("cargo build -p pmacs-protocol")
+        .expect("the small crates");
+    let tests = body
+        .find("- run: cargo test --all-targets ")
+        .expect("the tests");
+    assert!(
+        built < small && small < tests,
+        "after the workspace build, before the tests"
+    );
+}
+
 /// A stub `sudo` that runs its arguments, and an `apt-get` that records
 /// its arguments and then does what `behavior` says: `stall` (sleeps, as
 /// #330's legs did), `ok`, or `fail-once` (fails, then succeeds).

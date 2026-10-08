@@ -425,6 +425,19 @@ jobs:
       - name: Disk after the workspace build (Linux)
         if: runner.os == 'Linux'
         run: scripts/ci-disk "after the workspace build" target
+      # The link the build above gave up, kept on one leg: the test
+      # targets of three small crates (each lib's and the worker's bin's
+      # unit tests, and the worker's `worker` suite), on the roomiest leg,
+      # 31,795 MB free at the end of its tests at the cache-budget PR's
+      # addendum. `pmacs-gpu`'s are linked and run by `GPU Render
+      # (headless)`; `pmacs-protocol`'s lib tests also run in this job's
+      # last step on every leg.
+      - name: Link the protocol, syntax and worker crates' test targets (no crdt)
+        if: matrix.crdt == ''
+        run: cargo build -p pmacs-protocol -p pmacs-syntax -p pmacs-parse-unit --all-targets
+      - name: Disk after those crates' test targets (no crdt)
+        if: matrix.crdt == ''
+        run: scripts/ci-disk "after the small crates' test targets" target
       # THE macOS ADAPTER QUESTION, asked here because nothing else in
       # this file asks it. `cargo test -p pmacs-gpu` runs on exactly one
       # job of nineteen (`GPU Render (headless)`, ubuntu + lavapipe), so
