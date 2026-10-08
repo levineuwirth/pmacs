@@ -87,6 +87,16 @@ jobs:
             exit 1
           fi
 
+          # A release says what it is. Its notes are reviewed in the tree,
+          # docs/releases/<version>.md (a prerelease takes its base's), and
+          # lead the published notes; a tag with none is refused here,
+          # before anything is built.
+          if [ ! -s "docs/releases/$base.md" ]; then
+            echo "::error::docs/releases/$base.md is missing or empty." \
+                 "Write the release's notes in the tree before tagging $tag."
+            exit 1
+          fi
+
           # Anything with a suffix (-rc.1, -beta) is a prerelease. The
           # framing requires the RC to be marked so it cannot be mistaken
           # for the real thing on the releases page.
@@ -350,10 +360,16 @@ jobs:
           echo "--- SHA256SUMS ---"; cat SHA256SUMS
           sha256sum -c SHA256SUMS
 
+      # The release's own notes lead (docs/releases/<version>.md, which the
+      # preflight requires, its title line dropped since the release has
+      # one); the sections every release shares follow.
       - name: Release notes
         run: |
           set -euo pipefail
-          cat > notes.md <<'NOTES'
+          version="${{ needs.preflight.outputs.version }}"
+          awk 'NR == 1 && /^# / { next } { print }' "docs/releases/${version%%-*}.md" > notes.md
+          printf '\n' >> notes.md
+          cat >> notes.md <<'NOTES'
           ## Install
 
           Download the archive for your platform, unpack it, and put its

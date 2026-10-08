@@ -1356,6 +1356,32 @@ fn the_release_replays_the_archived_worker_and_fails_one_that_cannot_parse() {
     );
 }
 
+/// A release says what it is (2.0.0): its notes are reviewed in the tree as
+/// `docs/releases/<version>.md`, `release.yml`'s preflight refuses a tag
+/// whose version has none before anything is built, and the notes step
+/// leads the published notes with them. So the crate's own version has its
+/// notes here, and a version bump without them fails this row.
+#[test]
+fn the_release_s_notes_are_in_the_tree_and_lead_its_page() {
+    let version = env!("CARGO_PKG_VERSION");
+    let notes = std::fs::read_to_string(repo().join(format!("docs/releases/{version}.md")))
+        .unwrap_or_else(|e| panic!("docs/releases/{version}.md: {e}"));
+    assert!(
+        notes.starts_with(&format!("# pmacs {version}\n")),
+        "the notes name their release"
+    );
+    let workflow =
+        std::fs::read_to_string(repo().join(".github/workflows/release.yml")).expect("release.yml");
+    assert!(
+        workflow.contains("if [ ! -s \"docs/releases/$base.md\" ]; then"),
+        "the preflight refuses a tag without notes"
+    );
+    assert!(
+        workflow.contains("\"docs/releases/${version%%-*}.md\" > notes.md"),
+        "the notes step leads with them"
+    );
+}
+
 /// The strict-aliasing guard (E7h fix round 1) refuses a build of the
 /// grammar C that `-fno-strict-aliasing` does not reach. It runs in the root
 /// package's `build.rs`, so it guards a build of `pmacs`; since E7i the C
