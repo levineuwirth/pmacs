@@ -4260,6 +4260,319 @@ is not in the default plan. The logs are copied to `~/build/cache-budget/gate/`.
 So, at the cache-budget PR's second addendum: #311's list of runs reads at twenty-nine; #328,
 #330 and #331 stay open and are not sampled; every other count above stands.
 
+### E8b's close: PR #325's last runs, `main` at `a27cdc2` and `4fade33`, #332, #333 and #334 filed, and the disk on E8b's tree, cold and warm
+
+Recorded 2026-10-08 after PR #329 merged as `a27cdc2` (14:38:57Z) and PR #325 as `4fade33`
+(17:17:35Z, the squash of `ca8b2f6`, whose tree it is: `git diff ca8b2f6 4fade33` is empty).
+The runs were read from the jobs endpoint by conclusion and through every test leg's log;
+none was rerun. No gate ran: this records CI and changes no tree, so #311's list stands at
+twenty-nine.
+
+#### `main` at `8bacad0`, the second addendum's registry push
+
+`CI` 37791288514, `push`, attempt 1 of 1, `success`, 15 = 6 success + 9 skipped (`Docs
+consistency` 113359193392 among the six); `Grammar fuzz` 37791288523 `success`.
+
+#### `CI` 37648231070 at `70d69d0`, attempt 6: #333, a first sample
+
+The sections above end at attempt 5, and attempt 6 was recorded nowhere until now. It re-ran
+`Test (ubuntu-latest / luajit)` alone, job 112999008021, 2026-10-07 20:23:52Z to 20:59:39Z,
+on attempt 1's merge (`HEAD is now at d253906`): `failure`. By their start times the
+attempt's other eighteen jobs are copies carried from earlier attempts: seventeen success
+and `Docs consistency` 112999047715 skipped.
+
+Tally (pr325-ci-70d69d0-attempt6): 19 = 17 + 1 + 1.
+
+- Image `ubuntu-24.04` `20260927.320.1`, its toolchain step updating rustc 1.98.1 to 1.99.0,
+  and `No cache found.`. The leg's own build and link passed: step 9 ran 191 test binaries
+  for 191 result lines, 190 `test result: ok` and one `FAILED`.
+- The failure is `e7i_review1_probes::e7i_review1_the_aliasing_guard_reaches_the_worker_s_build`,
+  `test result: FAILED. 21 passed; 1 failed; 0 ignored` (`finished in 124.14s`). Its nested
+  `cargo build` died on `collect2: fatal error: ld terminated with signal 7 [Bus error], core
+  dumped`, twice, under `could not compile `nix` (build script)` and `could not compile
+  `tree-sitter-go` (build script)`, each beside the LLVM linker's bug-report request.
+  **`No space left on device`, `error writing to` and `error reading` appear zero times.**
+- So it is neither #331, whose ENOSPC fragment it lacks (and `tree-sitter-go` stands where
+  #331 had `libc`), nor #328, which died in the leg's own compile with no test run. Filed as
+  **#333**, first sample, between the two; #331 is commented. Nothing printed `df` then
+  (`scripts/ci-disk` reached the legs with `a27cdc2`), so like #328's two it has no disk
+  figure.
+- Read from the code, not measured: the aliasing-guard row on `main` names #331 and prints
+  `df` only when the nested check's stderr holds `No space left on device`
+  (`aliasing_guard_check_verdict`), so #333's shape would still fail it as the guard's
+  absence, with no figure.
+
+The run's conclusion is `failure` at attempt 6 of 6.
+
+#### `main` at `a27cdc2`, PR #329's squash: #282's fifth and #316's fourth
+
+`CI` 37794192379, `push`, attempt 1 of 1, created 14:39:00Z and completed 15:12:33Z:
+`failure`. The first code-bearing run on `main` after #329, and the base of #325's last run,
+which tested its merge into this commit.
+
+Tally (main-a27cdc2-ci): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 113369228634 | success |
+| Format | 113369229078 | success |
+| Lint (lua54) | 113369229097 | success |
+| Lint (luajit) | 113369229154 | success |
+| Changed paths | 113369229307 | success |
+| Test (crdt) | 113369313348 | failure |
+| M4 Perf Gates | 113369313375 | success |
+| M1 Acceptance Gates | 113369313383 | success |
+| Perf budgets (debug) | 113369313386 | success |
+| Test (ubuntu-latest / luajit) | 113369313462 | success |
+| GPU Render (headless) | 113369313464 | success |
+| M10 Perf Gates (crdt) | 113369313526 | success |
+| Test (ubuntu-latest / lua54) | 113369313528 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 113369313619 | success |
+| M6 Perf Gates | 113369313693 | success |
+| M5 Perf Gates | 113369313701 | success |
+| Test (macos-latest / lua54) | 113369313724 | success |
+| Test (macos-latest / luajit) | 113369313784 | success |
+| Docs consistency | 113369316807 | skipped |
+
+Tally (main-a27cdc2-ci-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` 113369313348, `failure`, on two rows. Each carries its issue's every required
+  fragment, read against the issue's text and not matched by selector alone:
+  - `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`,
+    at `tests/e7b_review_wire_acceptance.rs:1218` (not a fragment): `*lsp* names the request
+    and the code: []`; `WIRE *errors* gained ["[lsp] LSP: default-rust refused
+    textDocument/prepareRename as a client error, -32602 InvalidParams: No references found
+    at position"]` and `WIRE label "ready", last_error None`; and `test result: FAILED. 4
+    passed; 1 failed; 2 ignored` (`running 7 tests`), the count moved with the suite as at
+    the second to fourth. Between the row's stdout header and its panic the trace holds 121
+    `$/progress` frames, 101 of them `rustAnalyzer/cachePriming` reports, against `*lsp*`'s
+    64-entry ring. **#282's fifth occurrence**, its second on `main`.
+  - `e7i_review3_probes::e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`,
+    at `tests/e7i_review3_probes.rs:853` (not a fragment): `kill 1: nothing held the switch's
+    follow-up parse, which started a worker at once and installed`, its report `busy=false …
+    tree=true unit=pid_26141 death=killed, " +  /tmp/…/a.rs  (rust) … parse:killed !1  L1:C1
+    Top"`, and `test result: FAILED. 10 passed; 1 failed; 0 ignored` (`running 11 tests`,
+    `finished in 17.31s`). **#316's fourth sample**, its second on `main`. It matches the
+    fragments as written, where the third matched only as the template, and its `busy=false`
+    is the two local samples' shape, not the third's.
+  - Both issues are commented. The job pairs 187 `running` lines with 187 result lines, 185
+    `ok`; its `cargo test --doc` step was skipped after the sweep failed. Both rows ran `ok`
+    on the run's other five legs; on macOS the rename row returns without its server.
+- `Test (crdt)` restored its own key in full (`v0-rust-crdt-test-Linux-x64-5dc78561-10e4f63a`,
+  `full match: true`) and read **42,566 MB available after the tests, its target 43,869
+  MB**. The disk is not in these two reds.
+- The other five test legs pair every `running` line with `test result: ok` and carry no
+  `FAILED`: 189 on each Ubuntu `test` leg and 190 on each macOS leg, whose logs hold one more
+  `running 1 test`, in the adapter probe's script text. `WouldBlock` appears on no leg.
+- The three Ubuntu `test` legs logged `No cache found.` and built cold. The no-crdt leg
+  finished first and saved `v0-rust-test-Linux-x64-5dc78561-10e4f63a` (690,199,046 bytes
+  sent at 15:05:51Z); the luajit and lua54 legs logged `Unable to reserve cache with key
+  v0-rust-test-Linux-x64-5dc78561-10e4f63a, another job may be creating this cache`.
+- The disk on the Ubuntu legs, every one on a 147,718 MB root filesystem, available MB:
+
+| leg | before the build | after the build | target after the build | after the tests | target after the tests |
+|---|---|---|---|---|---|
+| luajit | 86,579 | 82,720 | 3,342 | 42,099 | 43,870 |
+| lua54 | 86,575 | 82,758 | 3,300 | 42,616 | 43,346 |
+| luajit, no crdt | 86,579 | 82,923 | 3,139 | 57,038 | 28,927 |
+| `Test (crdt)` | 84,419 | 82,768 | 3,760 | 42,566 | 43,869 |
+
+  The no-crdt leg's small crates' test targets left 82,656 MB available and a 3,406 MB
+  target. `Test (crdt)`'s target was 2,522 MB before its build, restored.
+
+`Grammar fuzz` 37794192417, attempt 1 of 1, `success`: `Grammar fuzz` 113369229545 and
+`Grammar fuzz (asan-strict)` 113369229199.
+
+#### `CI` 37794436707 at `ca8b2f6`, attempt 1 of 1: #332, a first sample, and the disk on E8b's tree
+
+`ca8b2f6` merges `main` at `a27cdc2` into the branch at `70d69d0` (its two parents), so that
+#325's run would test a `main` carrying #329. The run is a `pull_request` on the merge
+`8681d5f` (`ca8b2f6` into `a27cdc2`, read from the test logs' checkout line), created
+14:40:48Z and completed 15:14:42Z: `failure`. It is #325's first run after #329 and its last.
+
+Tally (pr325-ci-ca8b2f6): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 113370078000 | success |
+| Lint (luajit) | 113370078630 | success |
+| Format | 113370078782 | success |
+| Lint (lua54) | 113370078809 | success |
+| Changed paths | 113370078959 | success |
+| M4 Perf Gates | 113370216322 | success |
+| Test (ubuntu-latest / lua54) | 113370216401 | success |
+| Test (crdt) | 113370216424 | success |
+| GPU Render (headless) | 113370216435 | success |
+| M6 Perf Gates | 113370216489 | success |
+| Test (macos-latest / lua54) | 113370216491 | success |
+| Test (macos-latest / luajit) | 113370216504 | success |
+| M1 Acceptance Gates | 113370216520 | success |
+| Perf budgets (debug) | 113370216583 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 113370216636 | success |
+| Test (ubuntu-latest / luajit) | 113370216644 | failure |
+| M10 Perf Gates (crdt) | 113370216653 | success |
+| M5 Perf Gates | 113370216814 | success |
+| Docs consistency | 113370219103 | skipped |
+
+Tally (pr325-ci-ca8b2f6-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit)` 113370216644, `failure`, on one row:
+  `m10_11_acceptance`'s copy of `common::ready::tests::readiness_is_a_served_hello_not_a_connect`
+  at `tests/common/ready.rs:423:9`, `Err(Timeout { what: "a daemon serving on
+  /tmp/.tmpJDRwKe/late.sock", deadline: 10s, elapsed: 10.000113846s, polls: 473, last:
+  "connect: Connection refused (os error 111)" })`, `running 13 tests` at 15:10:09Z and
+  `test result: FAILED. 9 passed; 1 failed; 3 ignored` at 15:10:21Z. The job's only failure
+  against 190 `test result: ok`; its `cargo test --doc` and `pmacs-protocol` steps were
+  skipped after it. `WouldBlock`, `did not become ready` and `B must receive CrdtOp` appear
+  zero times. The same test ran `ok` in 57 other suites' copies in the job, among them
+  `gpu_invocation_acceptance`'s and `lsp_dispatch_seams_acceptance`'s (#271's) and
+  `vterm_stage2_acceptance`'s (#276's), and #271's two other targets ran `ok` too.
+- **Neither #271 nor #276, filed as #332.** The fragments are #271's first group and the
+  whole of #276's: `a daemon serving on <tmp>/late.sock` + `deadline: 10s` + `connect:
+  Connection refused`. #271 names this job, but requires its other two groups too (the
+  `WouldBlock` snapshot read, the missed broadcast at `m5_5_acceptance.rs:1169`) in four
+  exact targets, and `m10_11_acceptance` is not among them. #276 requires this group alone,
+  but its selector is the `vterm_stage2_acceptance` copy and its job `Test (crdt)`. A red
+  matches a row only on the selector, the job and every fragment, and a row widens only on a
+  demonstrated shared object, none of which is shown here. That is the reading that filed
+  #276 apart from #271 at E6d's fix round 1, applied in both directions. It is the lone
+  shape's second CI sample and its first on #271's leg; whether #271, #276 and #332 are one
+  mechanism is the owner's ruling. #271 and #276 are commented, and both stay at one.
+- The other five test legs pair every `running` line with `test result: ok` and carry no
+  `FAILED`: 193 on Ubuntu lua54 and the no-crdt leg, 192 on `Test (crdt)` and 194 on each
+  macOS leg (their logs carry the adapter probe's extra `running 1 test`), each four more
+  than #329's at `1218ba1`: the lists of `Running` lines differ from `a27cdc2`'s lua54 leg by
+  E8b's four new suites and nothing else. #282's and #316's rows ran `ok` on every leg, which
+  is non-reproduction and nothing more.
+- The disk, cold on the three `test` legs, which logged `No cache found.` at 14:41Z; `main`'s
+  shared test entry was saved by `a27cdc2`'s run at 15:05:51Z (above). Available MB:
+
+| leg | before the build | after the build | target after the build | after the tests | target after the tests |
+|---|---|---|---|---|---|
+| luajit | 86,579 | 82,717 | 3,345 | **41,225** | 44,741 |
+| lua54 | 86,579 | 82,760 | 3,302 | 41,768 | 44,198 |
+| luajit, no crdt | 86,579 | 82,921 | 3,141 | 56,643 | 29,323 |
+| `Test (crdt)` | 84,420 | 82,766 | 3,763 | 41,696 | 44,742 |
+
+  The luajit crdt leg, the one #328 and #331 name, ended E8b's tree with 41,225 MB available,
+  where it ended `main`'s tree with 1,918 MB before #329 (`1dc7658`) and 42,099 MB at
+  `a27cdc2` after it, both cold. Its linker succeeded and its tests ran: `signal 7` and `No
+  space left on device` appear zero times, so this run reached neither #328's fragments nor
+  #331's. **These figures do not retire #328.** Its own two failures have no disk figure,
+  because nothing printed one then; they were warm, and this leg was cold. The warm figure
+  on this tree is `4fade33`'s, below.
+
+`Grammar fuzz` 37794436694, attempt 1 of 1, `success`: `Grammar fuzz` 113370084313 and
+`Grammar fuzz (asan-strict)` 113370084260.
+
+#### `main` at `4fade33`, E8b's squash: #323's third and #334, a first sample, and the warm disk
+
+`CI` 37815431889, `push`, attempt 1 of 1, created 17:17:39Z and completed 17:49:46Z:
+`failure`. `4fade33` is `main`'s last code-bearing commit as recorded here.
+
+Tally (main-4fade33-ci): 19 = 16 + 1 + 2.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 113442731130 | success |
+| Lint (lua54) | 113442731421 | success |
+| Commit attribution (D9) | 113442731454 | success |
+| Changed paths | 113442731519 | success |
+| Format | 113442731670 | success |
+| M1 Acceptance Gates | 113442840324 | success |
+| M6 Perf Gates | 113442840341 | success |
+| GPU Render (headless) | 113442840369 | success |
+| Test (crdt) | 113442840380 | success |
+| M5 Perf Gates | 113442840429 | success |
+| Perf budgets (debug) | 113442840443 | success |
+| Test (macos-latest / lua54) | 113442840458 | failure |
+| M10 Perf Gates (crdt) | 113442840483 | success |
+| Test (ubuntu-latest / lua54) | 113442840550 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 113442840561 | success |
+| Test (macos-latest / luajit) | 113442840572 | success |
+| M4 Perf Gates | 113442840626 | success |
+| Test (ubuntu-latest / luajit) | 113442840680 | success |
+| Docs consistency | 113442842302 | skipped |
+
+Tally (main-4fade33-ci-failures): 2 rows of the table above with `result` = `failure`.
+
+- `Test (macos-latest / lua54)` 113442840458, `failure`:
+  `e7i_review1_probes::e7i_review1_parse_now_on_a_buffer_mid_parse`, **#323's third
+  occurrence**, its first on `main`. All three fragments are present: `the report did not
+  reach the expected state in 120s; last:` with nothing after `last:`; no `_parse_now
+  mid-parse in none:` line in the job; and `test result: FAILED. 22 passed; 1 failed; 0
+  ignored` (`running 23 tests`, `finished in 131.48s`), the count moved with the suite, which
+  gained a row with #329. It was the job's only failure, against 191 `test result: ok`.
+  Where the row finished on macOS, mode `none`'s `blocked=` read 102,291 and 99,917 ms at
+  `a27cdc2` (lua54, luajit), 99,461 and 103,504 at `ca8b2f6`, and 55,122 on this run's
+  luajit leg. Commented on #323.
+- `Test (ubuntu-latest / lua54)` 113442840550, `failure`:
+  `e7i_parse_containment_acceptance::e7i_a_fresh_worker_s_query_compile_is_not_under_the_deadline`,
+  `the report did not reach the expected state in 60s; last:` with nothing after `last:`,
+  and `test result: FAILED. 26 passed; 1 failed; 0 ignored` (`running 27 tests`). It was the
+  job's only failure, against 190 `test result: ok`. No row or issue names this selector, and
+  it is not #323, which names another row, bound and leg. Filed as **#334**, first sample. The
+  row ran 60.7 s here; on the other seventeen test legs of the three code runs above it
+  passed, and on the eleven Linux ones it returned 0.48 to 0.95 s after the row before it.
+- Each red leg's `cargo test --doc` and `pmacs-protocol` steps were skipped after it. The
+  other four test legs pair every `running` line with `test result: ok`: 193 on the Ubuntu
+  luajit and no-crdt legs, 192 on `Test (crdt)` and 194 on macOS luajit. #282's and #316's
+  rows passed on every leg, `Test (crdt)` among them, which is non-reproduction and nothing
+  more. The readiness self-test passed in every copy on every leg, `m10_11_acceptance`'s
+  (#332's) among them: 58 per crdt leg, 39 on the no-crdt leg. `WouldBlock` appears on no
+  leg.
+- **The warm figure #329 left unmeasured.** The three Ubuntu `test` legs restored
+  `v0-rust-test-Linux-x64-5dc78561-10e4f63a` in full, 690,199,046 bytes: the entry
+  `a27cdc2`'s no-crdt leg saved. `Test (crdt)` restored its own key. They ran on image
+  `20261004.327.1` with rustc 1.99.0 unchanged. Available MB:
+
+| leg | before the build | target before the build | after the build | target after the build | after the tests | target after the tests |
+|---|---|---|---|---|---|---|
+| luajit | 83,812 | 2,539 | 82,157 | 3,781 | **40,767** | 45,075 |
+| lua54 | 83,816 | 2,539 | 82,139 | 3,804 | 41,252 | 44,598 |
+| luajit, no crdt | 83,816 | 2,539 | 82,366 | 3,576 | 56,524 | 29,324 |
+| `Test (crdt)` | 84,368 | 2,522 | 82,714 | 3,763 | 41,644 | 44,742 |
+
+  The tree is `ca8b2f6`'s, so the luajit crdt leg's warm figure stands beside its cold one on
+  the same tree: 40,767 MB against 41,225, a target 334 MB larger. The no-crdt leg's small
+  crates' test targets left 82,232 MB and a 3,711 MB target. The luajit and no-crdt legs
+  logged `Cache up-to-date` at their post step.
+
+`Grammar fuzz` 37815431881, attempt 1 of 1, `success`: `Grammar fuzz` 113442729654 and
+`Grammar fuzz (asan-strict)` 113442729130.
+
+#### Squashes
+
+`a27cdc2` and `4fade33` are both signature `E`, GitHub's key, as every merge since `d97e137`.
+Both have empty trailers, no attribution and no line beginning with `#`. `a27cdc2`'s only diff
+from `1218ba1` is this file, the registry commits `main` gained; `4fade33`'s diff from
+`ca8b2f6` is empty. Both are faithful.
+
+#### `main` goes toward the release red on four filed rows
+
+Said plainly, because the tag's notes must say what the tagged commit's own CI says.
+`main`'s last two code-bearing runs are both `failure`, each on rows filed before or by this
+record and none of them rerun:
+
+- at `a27cdc2`, two red rows on `Test (crdt)`: #282's fifth and #316's fourth;
+- at `4fade33`, `main`'s tip, two red rows on the two `lua54` legs: #323's third (macOS) and
+  #334's first (Ubuntu). `Test (crdt)` passed there, which retires neither #282 nor #316.
+
+A tag on `4fade33`, or on a docs-only commit above it (whose own run skips every test leg
+under `ci.yml`'s changed-paths rule), has `CI` 37815431889 as the last run of its code.
+
+#### #328 reopened
+
+GitHub closed #328 at 14:38:58Z, a second after #329 merged, as `completed`: #329's body says
+"It may not fix #328", GitHub reads `fix #328` there as a closing keyword, and #329's closing
+references list #328 alone. No ruling closed it, and nothing above retires it, so it is
+reopened with that said. #330 and #331 stay open; neither is sampled here.
+
+So, at E8b's close: #282 moves to five, #316 to four and #323 to three; #332, #333 and #334
+open at one each; #271 and #276 stay at one; #328 is reopened, and #330 and #331 stay open,
+none of the three sampled here; #311's list stands at twenty-nine. Every other count above
+stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
