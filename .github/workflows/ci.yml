@@ -82,6 +82,41 @@ concurrency:
 # hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
 # never set, in the test job below. 35 still beats the 360-minute
 # default by an order of magnitude.
+#
+# CACHES ARE WRITTEN BY `main` ALONE. Every `Swatinem/rust-cache` step
+# carries `save-if: ${{ github.ref == 'refs/heads/main' }}`, so a pull
+# request restores `main`'s entries and never saves its own. The budget
+# is GitHub's default 10 GB a repository, evicted by last access,
+# oldest first, and an entry a pull request saves is scoped to its merge
+# ref, which only that pull request's own runs can read: once it merges
+# the entry is dead until it expires, seven days unread. On 2026-10-07
+# the budget held 23 entries, 10,337,227,747 bytes, near its limit;
+# seven were copies of `main`'s keys under PR #309, merged three days
+# before (3,599,973,399 bytes). A pull request saves only where its key
+# misses `main`'s --- a changed `Cargo.lock` or `Cargo.toml`, a new
+# stable rustc, an entry gone from `main` --- and then once per job key,
+# up to the eleven a code run uses (4,948,022,205 bytes at `main`'s
+# sizes that day) and the fuzz job's two. One that matches `main`, as
+# most do, saved nothing before this either ("Cache up-to-date.").
+#
+# The price: a pull request that misses `main`'s key rebuilds what
+# `main`'s entry lacks on every push, not only its first, until `main`
+# saves the new key. After a toolchain bump that is every pull request
+# and every Swatinem key; dispatching this workflow on `main` (the
+# trigger above) saves them without waiting for a merge.
+#
+# THE TEST JOB'S KEY IS INDIFFERENT TO THE LUA FLAVOR AND TO `crdt`, AND
+# THAT IS KEPT. Swatinem keys on the job id, the toolchain, the
+# compiler's environment and the manifests, never the matrix, so the
+# three Ubuntu legs share one entry, the two macOS legs another and the
+# two `Lint` legs a third. The leg that finishes first saves it and the
+# others log "Unable to reserve cache": in `main`'s run 37223480185
+# (2026-10-04) that was `luajit, no crdt`, so every Linux leg restores a
+# build without `crdt` and compiles its own flavor and features on top.
+# Do not key it per flavor or feature set (`key: ${{ matrix.lua }}`):
+# two test entries become five, about two more gigabytes in a budget
+# already near its limit, and a full budget evicting the entries it
+# depends on is the failure this note exists to prevent, not a fix.
 jobs:
   # Docs-only changes skip the jobs that compile and run tests, except
   # `docs-consistency` below, which exists for exactly that path. Only
@@ -191,6 +226,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `crdt` is a default feature, so the configuration a user builds is
       # `<flavor>,crdt`; that is what is linted here, for both flavors.
       # `--workspace` reaches pmacs-gpu and pmacs-protocol, which the
@@ -234,6 +271,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Default features, which is what `scripts/gate --docs` runs and
       # what `scripts/anchor` reports; the suite reads Cargo.toml and
       # the scripts rather than any cfg, so the Lua flavor is not a
@@ -250,13 +289,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The headless render harness (audit F-014) needs a Vulkan adapter;
       # the runner has no GPU, so install the mesa software rasterizer
       # (lavapipe). This job also runs pmacs-gpu's other tests, which the
       # workspace test job (root package only) never executes.
       - name: Install lavapipe (Vulkan software rasterizer)
         run: |
-          sudo apt-get update
+          # bounded and retried: a mirror held two legs 45 minutes (#330)
+          scripts/ci-apt-update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: |
@@ -317,6 +359,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Arm the external-tool-gated tests (see `TEST_IMPROVEMENT.md`
       # §1.2). Before this step nothing installed these tools, so every
       # test guarded on them returned early and reported GREEN without
@@ -335,7 +379,8 @@ jobs:
       - name: Install external tools that gate acceptance tests (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
+          # bounded and retried: a mirror held two legs 45 minutes (#330)
+          scripts/ci-apt-update
           sudo apt-get install -y clangd zsh fish lua5.4
           # `locate_lua` looks for `lua` or `luajit` by name; the
           # distro package installs `lua5.4` only.
@@ -357,10 +402,42 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           npm install -g vscode-langservers-extracted@4.10.0 \
                          yaml-language-server@1.15.0
+      # The disk before and after the build and after the tests, so the
+      # next linker SIGBUS (#328) or `No space left on device` (#331)
+      # arrives with its figure; `scripts/ci-disk` says why. Linux only:
+      # both have been seen only there.
+      - name: Disk before the workspace build (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/ci-disk "before the workspace build" target
       # `--workspace`, not the root package: the crdt legs run the suites
       # that spawn `pmacs-gpu` as a process, and a root-only build leaves
       # that binary absent. No `cargo test` invocation produces it.
-      - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
+      #
+      # No `--all-targets`. The test step below is root-only, so the other
+      # crates' test targets built here were never run, and they were the
+      # disk: a crdt leg's target reached 84 GB of a 147,719 MB disk and
+      # the luajit one ended its tests with 1,918 MB free, where `Test
+      # (crdt)`, built this way, ends at 44 GB (the cache-budget PR's
+      # addendum, #328, #331). `Lint (luajit)` and `Lint (lua54)` still
+      # type-check `--workspace --all-targets`, and the no-crdt leg links
+      # the small crates' test targets just below.
+      - run: cargo build --workspace --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
+      - name: Disk after the workspace build (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/ci-disk "after the workspace build" target
+      # The link the build above gave up, kept on one leg: the test
+      # targets of three small crates (each lib's and the worker's bin's
+      # unit tests, and the worker's `worker` suite), on the roomiest leg,
+      # 31,795 MB free at the end of its tests at the cache-budget PR's
+      # addendum. `pmacs-gpu`'s are linked and run by `GPU Render
+      # (headless)`; `pmacs-protocol`'s lib tests also run in this job's
+      # last step on every leg.
+      - name: Link the protocol, syntax and worker crates' test targets (no crdt)
+        if: matrix.crdt == ''
+        run: cargo build -p pmacs-protocol -p pmacs-syntax -p pmacs-parse-unit --all-targets
+      - name: Disk after those crates' test targets (no crdt)
+        if: matrix.crdt == ''
+        run: scripts/ci-disk "after the small crates' test targets" target
       # THE macOS ADAPTER QUESTION, asked here because nothing else in
       # this file asks it. `cargo test -p pmacs-gpu` runs on exactly one
       # job of nineteen (`GPU Render (headless)`, ubuntu + lavapipe), so
@@ -500,6 +577,9 @@ jobs:
           else
             echo "no row recorded a skip in $log"
           fi
+      - name: Disk after the tests (Linux)
+        if: always() && runner.os == 'Linux'
+        run: scripts/ci-disk "after the tests" target
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
@@ -556,6 +636,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Several dark suites drive a real GPU frontend. Without an adapter
       # they do not fail — a37 and its siblings `eprintln!` a skip and
       # return `ok`, measured at 9/9 in 0.17s versus ~4s for a real run.
@@ -563,14 +645,21 @@ jobs:
       # fatal instead of silent.
       - name: Install lavapipe (Vulkan software rasterizer)
         run: |
-          sudo apt-get update
+          # bounded and retried: a mirror held two legs 45 minutes (#330)
+          scripts/ci-apt-update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: vulkaninfo --summary || true
+      # The disk around the build and after the tests, as on the `test`
+      # legs (#328, #331).
+      - name: Disk before the workspace build
+        run: scripts/ci-disk "before the workspace build" target
       # Default features, which are `luajit,crdt`. --workspace, not the
       # root package: a37 and the gpu_* suites locate the `pmacs-gpu`
       # binary beside `pmacs`, and a root-only build leaves it absent.
       - run: cargo build --workspace
+      - name: Disk after the workspace build
+        run: scripts/ci-disk "after the workspace build" target
       # Serial for the same reason the `test` job is: these suites spawn
       # real daemons and real PTYs, and this job adds MORE of them.
       #
@@ -600,6 +689,9 @@ jobs:
           else
             echo "no row recorded a skip in $log"
           fi
+      - name: Disk after the tests
+        if: always()
+        run: scripts/ci-disk "after the tests" target
       - run: cargo test --doc
 
   acceptance:
@@ -612,6 +704,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: perf, memory, and 30s fuzz gates
         run: cargo test --release --test acceptance -- --ignored --nocapture --test-threads=1
 
@@ -625,6 +719,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: tree-sitter parse + highlight latency budgets
         run: cargo test --release --test m4_acceptance -- --ignored --nocapture --test-threads=1
 
@@ -646,6 +742,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: keystroke-to-render p99 over loopback LocalSocket
         run: cargo test --release --test m5_perf_acceptance -- --ignored --nocapture
 
@@ -671,6 +769,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: ingest rate, RSS ceiling, cancel p99, navigation p99, search p99
         env:
           # Full cancel profile remains the test default. Hosted CI has
@@ -727,6 +827,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: CRDT buffer throughput baselines (soak; asserts nothing)
         run: cargo test --release --test m10_2_perf -- --ignored --nocapture
       - name: cross-frontend propagation p99 over a real socket
@@ -750,5 +852,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace
       - run: scripts/perf-budgets

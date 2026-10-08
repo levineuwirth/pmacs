@@ -2692,3 +2692,325 @@ fn skipped_directories_are_reported_with_a_reason() {
         "the live one must be named with its reason too; output was:\n{out}"
     );
 }
+
+// CI's own helper scripts (the cache-budget pull request's addendum): the
+// disk the Ubuntu test legs print around their build (#328, #331) and the
+// bounded `apt-get update` (#330). Both run only on CI, so these rows hold
+// their shape and their wiring here, where a change to them is made.
+
+/// The job named `job` in `ci.yml`, from its header to the next job's.
+fn ci_job(workflow: &str, job: &str) -> String {
+    let header = format!("\n  {job}:\n");
+    let start = workflow
+        .find(&header)
+        .unwrap_or_else(|| panic!("ci.yml has a `{job}` job"));
+    let body = &workflow[start + header.len()..];
+    let end = body
+        .match_indices("\n  ")
+        .find(|(i, _)| {
+            let line = &body[i + 3..];
+            line.starts_with(|c: char| c.is_ascii_lowercase())
+                && line.split('\n').next().is_some_and(|l| l.ends_with(':'))
+        })
+        .map_or(body.len(), |(i, _)| i);
+    body[..end].to_owned()
+}
+
+/// `scripts/ci-disk` prints each filesystem once and each named
+/// directory's size, in the form a red leg's log is read for, and exits 0
+/// on anything it cannot read: a report that failed a leg would hide the
+/// failure it is there to explain.
+#[test]
+fn ci_disk_prints_each_filesystem_and_directory_and_never_fails_a_leg() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sized = dir.path().join("sized");
+    std::fs::create_dir(&sized).expect("mkdir");
+    std::fs::write(sized.join("blob"), vec![7u8; 3 << 20]).expect("write");
+    let out = Command::new(repo_root().join("scripts/ci-disk"))
+        .arg("a row's label")
+        .arg(&sized)
+        .arg(dir.path().join("absent"))
+        .output()
+        .expect("run scripts/ci-disk");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "exit {:?}:\n{stdout}", out.status);
+    let root = stdout
+        .lines()
+        .find(|l| l.starts_with("disk: a row's label: / on "))
+        .unwrap_or_else(|| panic!("a line for `/`:\n{stdout}"));
+    let figures = root.rsplit(": ").next().unwrap_or_default();
+    let numbers: Vec<&str> = figures
+        .split([' ', ',', '(', ')', '%'])
+        .filter(|w| w.chars().all(|c| c.is_ascii_digit()) && !w.is_empty())
+        .collect();
+    assert!(
+        figures.contains(" MB, ")
+            && figures.contains(" used, ")
+            && figures.contains(" available (")
+            && numbers.len() == 4,
+        "`N MB, N used, N available (P%)`: {root}"
+    );
+    let mounts: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.split(": ").nth(2))
+        .filter_map(|l| l.split(" on ").next())
+        .collect();
+    let mut unique = mounts.clone();
+    unique.dedup();
+    assert_eq!(mounts, unique, "each filesystem once:\n{stdout}");
+    let size = stdout
+        .lines()
+        .find(|l| {
+            l.starts_with(&format!(
+                "disk: a row's label: size of {}: ",
+                sized.display()
+            ))
+        })
+        .unwrap_or_else(|| panic!("a size line for the directory:\n{stdout}"));
+    let mb: u64 = size
+        .trim_end_matches(" MB")
+        .rsplit(": ")
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("a size in MB: {size}"));
+    assert!(mb >= 3, "the 3 MB written is counted: {size}");
+    assert!(
+        !stdout.contains("absent"),
+        "a missing directory is skipped:\n{stdout}"
+    );
+
+    let bare = Command::new(repo_root().join("scripts/ci-disk"))
+        .output()
+        .expect("run scripts/ci-disk bare");
+    assert!(
+        bare.status.success() && bare.stdout.is_empty(),
+        "no label: usage on stderr, and still exit 0"
+    );
+}
+
+/// The Ubuntu test legs print the disk before and after the workspace
+/// build and, whatever the tests did, after them: the `test` job's Linux
+/// legs and `Test (crdt)`, the jobs #328 and #331 were seen on and beside.
+#[test]
+fn the_ubuntu_test_legs_print_the_disk_around_the_build_and_after_the_tests() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    for (job, build) in [
+        (
+            "test",
+            "- run: cargo build --workspace --no-default-features ",
+        ),
+        ("crdt-test", "- run: cargo build --workspace\n"),
+    ] {
+        let body = ci_job(&workflow, job);
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("`{job}` holds `{needle}`"))
+        };
+        let before = at("scripts/ci-disk \"before the workspace build\" target");
+        let built = at(build);
+        let after = at("scripts/ci-disk \"after the workspace build\" target");
+        let tests = at("- run: cargo test --all-targets ");
+        let last = at("scripts/ci-disk \"after the tests\" target");
+        assert!(
+            before < built && built < after && after < tests && tests < last,
+            "`{job}`: the disk before the build, after it, and after the tests"
+        );
+        let step = &body[body[..last].rfind("\n      - ").expect("a step")..last];
+        assert!(
+            step.contains("if: always()"),
+            "`{job}`: the last report runs whatever the tests did:{step}"
+        );
+    }
+}
+
+/// The `test` legs build the workspace without `--all-targets`. Their test
+/// step is root-only, so the other crates' test targets built there were
+/// never run, and they were the disk: a crdt leg's target reached 84 GB of
+/// a 147,719 MB disk (#328, #331). `--workspace` stays, for the `pmacs-gpu`
+/// binary the crdt legs spawn and no `cargo test` produces.
+#[test]
+fn the_test_legs_build_the_workspace_without_all_targets() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let body = ci_job(&workflow, "test");
+    let builds: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("- run: cargo build --workspace"))
+        .collect();
+    assert_eq!(builds.len(), 1, "one workspace build: {builds:?}");
+    assert!(
+        !builds[0].contains("--all-targets"),
+        "the workspace build links no test targets the root-only test step never runs: {}",
+        builds[0]
+    );
+}
+
+/// The link the workspace build gave up is kept on one leg: the no-crdt
+/// leg, the roomiest, builds the test targets of `pmacs-protocol`,
+/// `pmacs-syntax` and `pmacs-parse-unit`, and prints the disk after them.
+/// Its condition selects that leg alone: only the matrix's `include` has
+/// an empty `crdt`.
+#[test]
+fn the_no_crdt_leg_links_the_small_crates_test_targets() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let body = ci_job(&workflow, "test");
+    let step = |needle: &str| {
+        let at = body
+            .find(needle)
+            .unwrap_or_else(|| panic!("`test` holds `{needle}`"));
+        let start = body[..at].rfind("\n      - ").expect("a step");
+        let end = body[at..].find("\n      - ").map_or(body.len(), |e| at + e);
+        body[start..end].to_owned()
+    };
+    for needle in [
+        "run: cargo build -p pmacs-protocol -p pmacs-syntax -p pmacs-parse-unit --all-targets",
+        "run: scripts/ci-disk \"after the small crates' test targets\" target",
+    ] {
+        let text = step(needle);
+        assert!(
+            text.contains("if: matrix.crdt == ''"),
+            "the no-crdt leg alone runs `{needle}`:{text}"
+        );
+    }
+    assert_eq!(
+        body.matches("crdt: \"\"").count(),
+        1,
+        "one leg has an empty `crdt`, the no-crdt one"
+    );
+    let built = body
+        .find("- run: cargo build --workspace")
+        .expect("the build");
+    let small = body
+        .find("cargo build -p pmacs-protocol")
+        .expect("the small crates");
+    let tests = body
+        .find("- run: cargo test --all-targets ")
+        .expect("the tests");
+    assert!(
+        built < small && small < tests,
+        "after the workspace build, before the tests"
+    );
+}
+
+/// A stub `sudo` that runs its arguments, and an `apt-get` that records
+/// its arguments and then does what `behavior` says: `stall` (sleeps, as
+/// #330's legs did), `ok`, or `fail-once` (fails, then succeeds).
+fn apt_stub(behavior: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("mkdir");
+    let calls = dir.path().join("calls");
+    let apt = match behavior {
+        "stall" => "exec sleep 60".to_owned(),
+        "ok" => "exit 0".to_owned(),
+        _ => format!(
+            "[ \"$(wc -l < '{}')\" -ge 2 ] && exit 0; exit 100",
+            calls.display()
+        ),
+    };
+    for (name, body) in [
+        ("sudo", "exec \"$@\"".to_owned()),
+        (
+            "apt-get",
+            format!("echo \"$*\" >> '{}'\n{apt}", calls.display()),
+        ),
+    ] {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod stub");
+    }
+    dir
+}
+
+fn ci_apt_update(stub: &Path) -> (std::process::Output, Vec<String>, std::time::Duration) {
+    let path = format!(
+        "{}:{}",
+        stub.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let started = std::time::Instant::now();
+    let out = Command::new(repo_root().join("scripts/ci-apt-update"))
+        .env("PATH", path)
+        .env("CI_APT_UPDATE_SECONDS", "1")
+        .output()
+        .expect("run scripts/ci-apt-update");
+    let calls = std::fs::read_to_string(stub.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (out, calls, started.elapsed())
+}
+
+/// `scripts/ci-apt-update` kills an `apt-get update` that stalls at its
+/// bound, tries three times, and then fails naming #330, where an
+/// unbounded one held two legs to their 45-minute ceiling; one that
+/// fails once is retried, and one that succeeds runs once. Every attempt
+/// carries apt's own timeout on a stalled transfer.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "scripts/ci-apt-update runs on the Ubuntu legs, which have apt and coreutils' timeout"
+)]
+fn ci_apt_update_bounds_a_stalled_update_and_retries_it() {
+    let stall = apt_stub("stall");
+    let (out, calls, took) = ci_apt_update(stall.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && calls.len() == 3 && stderr.contains("(#330)"),
+        "three bounded attempts, then a failure naming #330: {calls:?}\n{stderr}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "each attempt cut at its 1 s bound, not the stub's 60 s: {took:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|c| c == "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update"),
+        "{calls:?}"
+    );
+
+    let once = apt_stub("fail-once");
+    let (out, calls, _) = ci_apt_update(once.path());
+    assert!(
+        out.status.success() && calls.len() == 2,
+        "a failed attempt is retried: {calls:?}"
+    );
+
+    let ok = apt_stub("ok");
+    let (out, calls, _) = ci_apt_update(ok.path());
+    assert!(out.status.success() && calls.len() == 1, "{calls:?}");
+}
+
+/// Every `apt-get update` in the workflows goes through the bounded
+/// script (#330): `ci.yml`'s three, before the install each feeds.
+#[test]
+fn no_workflow_runs_an_unbounded_apt_get_update() {
+    for name in ["ci.yml", "grammar-fuzz.yml", "release.yml"] {
+        let workflow = std::fs::read_to_string(repo_root().join(".github/workflows").join(name))
+            .expect("read workflow");
+        assert!(
+            !workflow
+                .lines()
+                .any(|l| !l.trim_start().starts_with('#') && l.contains("apt-get update")),
+            "{name} runs `apt-get update` itself; call scripts/ci-apt-update"
+        );
+    }
+    let ci =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    for job in ["gpu-render", "test", "crdt-test"] {
+        let body = ci_job(&ci, job);
+        let update = body
+            .find("scripts/ci-apt-update")
+            .unwrap_or_else(|| panic!("`{job}` updates through the script"));
+        let install = body
+            .find("sudo apt-get install")
+            .unwrap_or_else(|| panic!("`{job}` installs"));
+        assert!(update < install, "`{job}`: the update before the install");
+    }
+}
