@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 29 items in the list below.
+Tally (311-runs): 30 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2820,6 +2820,8 @@ Tally (311-runs): 29 items in the list below.
   recorded with that PR, below).
 - `20261007T204535Z-472312` at `1dc7658` (the same PR's addendum gate, `05-sweep`).
 - `20261008T132308Z-224598` at `1218ba1` (the same PR's second addendum gate, `05-sweep`).
+- `20261008T195204Z-1042685` at `bca69d4` (the pre-release PR's gate, both sweeps; recorded with
+  that PR, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -4573,6 +4575,106 @@ open at one each; #271 and #276 stay at one; #328 is reopened, and #330 and #331
 none of the three sampled here; #311's list stands at twenty-nine. Every other count above
 stands.
 
+### The pre-release PR: PR #337's run at `bca69d4`, #316's fifth, its gate with #251's third and R7's thirty-first, and #311's list at thirty
+
+Recorded 2026-10-08 by the pre-release pull request, #337 at `bca69d4` (five signed commits on
+`391bf96`): the workspace to 2.0.0, `syntax.isolation`'s `none` removed, markdown's highlight
+overlays, the release's replay of its archived worker, and the release notes. The run was read
+from the jobs endpoint by conclusion and through all six test legs' logs; none was rerun.
+
+#### `main` at `391bf96`, E8b's closing registry push
+
+`CI` 37820758591, `push`, attempt 1 of 1, `success`, 15 = 6 success + 9 skipped (`Docs
+consistency` 113460959927 among the six); `Grammar fuzz` 37820758476 `success`.
+
+#### `CI` 37835832078 at `bca69d4`, attempt 1 of 1: #316's fifth
+
+`pull_request`, the merge `fc1dab2` (`bca69d4` into `391bf96`, read from the test logs' checkout
+line), created 19:57:30Z and completed 20:27:55Z: `failure`.
+
+Tally (pr337-ci-bca69d4): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Format | 113512480482 | success |
+| Lint (lua54) | 113512480884 | success |
+| Commit attribution (D9) | 113512480891 | success |
+| Changed paths | 113512480972 | success |
+| Lint (luajit) | 113512481006 | success |
+| M4 Perf Gates | 113512555207 | success |
+| M5 Perf Gates | 113512555213 | success |
+| Perf budgets (debug) | 113512555350 | success |
+| Test (crdt) | 113512555371 | success |
+| GPU Render (headless) | 113512555453 | success |
+| Test (macos-latest / lua54) | 113512555503 | failure |
+| M10 Perf Gates (crdt) | 113512555517 | success |
+| Test (macos-latest / luajit) | 113512555524 | success |
+| M1 Acceptance Gates | 113512555531 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 113512555545 | success |
+| M6 Perf Gates | 113512555551 | success |
+| Test (ubuntu-latest / lua54) | 113512555655 | success |
+| Test (ubuntu-latest / luajit) | 113512555744 | success |
+| Docs consistency | 113512557608 | skipped |
+
+Tally (pr337-ci-bca69d4-failures): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / lua54)` 113512555503, `failure`:
+  `e7i_review3_probes::e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`,
+  **#316's fifth occurrence**, its first on a macOS leg and its third in CI. All three
+  fragments are present: `kill 1: nothing held the switch's follow-up parse, which started a
+  worker at once and installed`; `death=killed, " +  ` followed in the same line by
+  `parse:killed`, with `tree=true` and `unit=pid_35917` in the report; and `test result:
+  FAILED. 10 passed; 1 failed; 0 ignored` (`finished in 26.08s`). It was the job's only
+  failure, against 191 `test result: ok`. The failing kill is the first, on `a.rs`. The
+  branch touches this suite only to retheme `MARK` from `text` to the markdown overlays' six
+  capture names, and `builtin/runtime/syntax.lua`'s dispatch only to read the boundary
+  through one local function that returns the same `process`; that is read, not a
+  demonstration. Commented on #316, not rerun.
+- The other five test legs pair every `running` line with `test result: ok`: 194 on macOS
+  luajit, 193 on each Ubuntu `test` leg, 192 on `Test (crdt)`. The branch's new rows passed on
+  every leg that builds them.
+- **#323's row** passed on all six legs. The branch removes `syntax.isolation`'s `none`, and
+  the row's in-editor arm with it, so it runs its `process` arm alone: `_parse_now mid-parse in
+  process:` blocked 2,992 to 3,069 ms. #334's and #282's rows passed on every leg, which is
+  non-reproduction and nothing more.
+
+#### `Grammar fuzz` 37835830812 at `bca69d4`
+
+Attempt 1 of 1, `success`, created 19:57:30Z and completed 20:55:59Z: `Grammar fuzz`
+113512479860 and `Grammar fuzz (asan-strict)` 113512480320. The job fuzzed, the branch adding
+two query overlays under `builtin/queries/`, but its log reads `fuzz-grammars: changed since
+391bf96…, run 600 s:` with no grammar named, so every grammar, markdown and markdown_inline
+among them, ran 15 s and at least 300 mutations: **#336**, filed on this branch, seen on its
+own run. The ten-minute markdown run is taken locally (the pull request's body).
+
+#### The pull request's gate
+
+`scripts/gate --protocol`, `20261008T195204Z-1042685` at `bca69d4`: six of eight. fmt, clippy,
+clippy-luajit, doc, build and diff-check ok. `06-sweep`: 201 paired result lines, 5,359
+passed, 3 failed, 64 ignored; `07-sweep-luajit`: 201 paired, 4,920 / 1 / 50. Each failure
+matched by its required fragments:
+
+- #311's row in both sweeps (`Could not find module ‘Prelude’`, the trace reaching
+  `processi`), so #311's list gains it;
+- R7's row in `06-sweep`, **R7's thirty-first** (the list below its table), passing in
+  `07-sweep-luajit`;
+- `--lib daemon::tests::a_panel_pointer_without_a_present_declaration_is_dropped` in
+  `06-sweep`, **#251's third occurrence**: `bundled package `repl` failed to load` and
+  `pmacs/bundled-load:1: bundled package failed to load: repl`, both verbatim, the panic site
+  moved to `src/editor.rs:1143` with the file; the lib binary passed in `07-sweep-luajit`.
+  Every gate's ambient data root is fresh, so the version bump renames the directory the
+  race is over and widens nothing. Commented on #251.
+
+Another project's gate ran on the laptop during the sweep (a one-minute load average of 48.98
+near its start). The gate's own summary and survivor post-step printed to a file the session
+could no longer read. Checked by hand after it: no `pmacs --daemon` carried the run's `TMPDIR`
+in its environment, and the run's `TMPDIR` was gone, which the gate removes at its end. #316's
+row passed in both sweeps, which is non-reproduction and nothing more.
+
+So, at the pre-release PR: #316 moves to five, #251 to three, R7 to thirty-one; #311's list of
+runs reads at thirty; #323 stands at three, its row's in-editor arm removed on the branch;
+every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
@@ -6211,13 +6313,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least thirty, 2026-08-07 to 2026-10-06, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the eighteen since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least thirty-one, 2026-08-07 to 2026-10-08, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the nineteen since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 30 = 12 + 18.
+Tally (R7): 31 = 12 + 19.
 
-Tally (R7-held): 18 items in the list below.
+Tally (R7-held): 19 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -6237,6 +6339,7 @@ Tally (R7-held): 18 items in the list below.
 - twenty-eighth: gate log `20261005T224931Z-2046695`, step `07-sweep-luajit`, E8 review 2's gate on `e8/hover-and-signature` at `57a980e`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch (recorded at E8's fix round 2, below)
 - twenty-ninth: gate log `20261006T111111Z-85507`, step `07-sweep-luajit`, E8 fix round 2's gate on `e8/hover-and-signature` at `d2de579`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same run's `06-sweep` (recorded at E8's fix round 2, below)
 - thirtieth: gate log `20261006T175402Z-1776889`, step `07-sweep-luajit`, E8 fix round 4's gate on `e8/hover-and-signature` at `05dfa6a` (the branch with `main` at `93752c6` merged in), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff from `main`, and the row passed in the same run's `06-sweep` (recorded at E8's fix round 4, below)
+- thirty-first: gate log `20261008T195204Z-1042685`, step `06-sweep`, the pre-release PR's gate on `release/pre-2.0.0` at `bca69d4` (#337), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same gate's `07-sweep-luajit` (recorded with the pre-release PR, above)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
