@@ -1362,6 +1362,52 @@ mod tests {
     }
 
     #[test]
+    fn the_markup_faces_reach_markdown_inline_alone() {
+        // The theme's two prose faces (`markup.strong`, bold with no hue;
+        // `markup.emphasis`, italic with no hue) are for markdown's inline
+        // overlay. A capture of another grammar that reached either, by
+        // its name or by dropping dotted segments, would be repainted by
+        // them: the #146 lesson, which kept the `@text.*` family out.
+        let theme = crate::highlight::Theme::default_dark();
+        let reg = SyntaxRegistry::new();
+        let reaches = |capture: &str| {
+            ["markup.strong", "markup.emphasis"]
+                .into_iter()
+                .find(|face| {
+                    capture == *face
+                        || capture
+                            .strip_prefix(face)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                })
+        };
+        let mut used = Vec::new();
+        for entry in BUILTIN_LANGUAGES {
+            let Some(query) = reg.highlights_query(entry.name) else {
+                continue;
+            };
+            for capture in query.capture_names() {
+                if let Some(face) = reaches(capture) {
+                    assert_eq!(
+                        entry.name, "markdown_inline",
+                        "`{}`'s @{capture} reaches the prose face `{face}`",
+                        entry.name
+                    );
+                    used.push((*capture).to_owned());
+                }
+            }
+        }
+        used.sort_unstable();
+        assert_eq!(used, ["markup.emphasis", "markup.strong"]);
+        assert_eq!(
+            theme.lookup("markup.strong"),
+            crate::cell::Style {
+                bold: true,
+                ..crate::cell::Style::default()
+            }
+        );
+    }
+
+    #[test]
     fn language_for_path_resolves_latex_extensions() {
         // `.tex`/`.latex`/`.sty`/`.cls` all resolve to the LaTeX grammar via
         // the same extension path as every bundled language — the single

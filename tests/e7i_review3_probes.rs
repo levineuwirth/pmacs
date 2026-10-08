@@ -45,7 +45,8 @@ const MARK_THEME: &str = "pmacs.theme.merge { \
     string = { fg = { 0x7b, 0x1f, 0xa2 } }, \
     constant = { fg = { 0x7b, 0x1f, 0xa2 } }, \
     operator = { fg = { 0x7b, 0x1f, 0xa2 } }, \
-    parameter = { fg = { 0x7b, 0x1f, 0xa2 } } }";
+    ['markup.strong'] = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    ['markup.emphasis'] = { fg = { 0x7b, 0x1f, 0xa2 } } }";
 
 const ROWS: u32 = 30;
 const COLS: u32 = 100;

@@ -135,6 +135,10 @@ impl Theme {
             italic: true,
             ..Style::default()
         };
+        let bold_only = Style {
+            bold: true,
+            ..Style::default()
+        };
 
         // (capture name, style). LSP semantic-token type names are the
         // unprefixed entries (`macro`, `namespace`, `parameter`, …);
@@ -212,6 +216,22 @@ impl Theme {
             // is the one thing a reader must never skim past. Plain `fg(1)`
             // would have collided with every numeric literal on colour alone.
             ("warning", fg_bold(9)),
+            // Markdown's strong and emphasis (#310's overlay,
+            // builtin/queries/markdown_inline/highlights.scm): bold with no
+            // hue and italic with no hue, prose's own marks. Nothing above
+            // is bold without a color, and `parameter`, the one italic
+            // without a color, is an LSP token type a user theme colors for
+            // code. So two faces of their own, and only these two: the
+            // crate's `@text.*` family stays out of the theme, because one
+            // capture name means different things across grammars ---
+            // tree-sitter-make 1.1.1's `@text.danger`, `@text.warning` and
+            // `@text.note` mark the arguments of `$(error)`, `$(warning)`
+            // and `$(info)`, not prose, and a `text` entry would repaint
+            // them. No other bundled query reaches either name (pinned in
+            // `syntax.rs`); the LaTeX overlay drops upstream's
+            // `@markup.italic` and `@markup.strong` with their predicates.
+            ("markup.strong", bold_only),
+            ("markup.emphasis", italic_only),
         ];
         let by_capture = entries
             .iter()
@@ -2458,7 +2478,15 @@ mod tests {
         );
         assert_eq!(at(2, "Body"), Style::default(), "body text has no face");
         assert_eq!(at(2, "em*"), italic(Style::default()), "emphasis is italic");
-        assert_eq!(at(2, "strong"), themed("keyword"), "strong is bold");
+        assert_eq!(
+            at(2, "strong"),
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+            "strong is bold, with no hue"
+        );
+        assert_eq!(themed("markup.emphasis"), italic(Style::default()));
         assert_eq!(at(2, "code`"), themed("string"), "a code span");
         assert_eq!(at(2, "text]"), themed("constant"), "a link's text");
         assert_eq!(at(2, "https"), themed("constant"), "a link's destination");

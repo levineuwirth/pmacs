@@ -523,8 +523,10 @@ fn under_wrap_a_lines_syntax_colors_paint_on_the_rows_it_is_drawn_on() {
         "emphasis on a wrapped row"
     );
     assert!(
-        styles_of(&grid, "strong").iter().all(|st| st.bold),
-        "strong on a wrapped row"
+        styles_of(&grid, "strong")
+            .iter()
+            .all(|st| st.bold && st.fg == pmacs::cell::Color::Default),
+        "strong on a wrapped row, bold with no hue"
     );
     for word in ["Prose", "three", "eight", "nine", "ten."] {
         for st in styles_of(&grid, word) {

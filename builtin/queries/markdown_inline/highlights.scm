@@ -10,10 +10,11 @@
 ; Every capture below is an exact entry of `Theme::default_dark`.
 ; Remapped, by role:
 ;   @text.literal          -> @string       (code spans, link titles)
-;   @text.emphasis         -> @parameter    (the theme's one italic face
-;                                            with no color)
-;   @text.strong           -> @keyword      (bold; the theme has no bold
-;                                            face without a color)
+;   @text.emphasis         -> @markup.emphasis  (italic, no color)
+;   @text.strong           -> @markup.strong    (bold, no color)
+;                             the two faces the theme keeps for prose's
+;                             marks, and the only `markup` names it has
+;                             (src/highlight.rs says why these two)
 ;   @text.uri              -> @constant     (link destinations, autolinks;
 ;                                            LaTeX's urls)
 ;   @text.reference        -> @constant     (link labels and text, image
@@ -38,9 +39,9 @@
   (code_span_delimiter)
 ] @punctuation
 
-(emphasis) @parameter
+(emphasis) @markup.emphasis
 
-(strong_emphasis) @keyword
+(strong_emphasis) @markup.strong
 
 [
   (link_destination)
