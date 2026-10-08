@@ -1910,8 +1910,11 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// popup to go; `quiet:<ms>` drains events that long; `wheel:<n>` turns
 /// the wheel `n` notches down (up when negative) over the popup;
 /// `click` presses and releases the left button over the popup;
-/// `report:<label>` writes the popup's facts under `label`. A step that
-/// times out is reported as `step.<i>=timeout` and the script goes on.
+/// `band:<prefix>` waits up to five seconds for the status band to begin
+/// with `prefix` (a switch's or a kill's message lands a frame or more
+/// after its key, later under load); `report:<label>` writes the popup's
+/// facts under `label`. A step that times out is reported as
+/// `step.<i>=timeout` and the script goes on.
 #[allow(
     clippy::too_many_lines,
     reason = "one linear attach-script-report session, step by step"
@@ -2005,6 +2008,17 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                 let ms = arg.parse::<u64>().unwrap_or(500);
                 let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
                 pump_probe_events(&mut app, &rx, until, |_| false).map(|_| true)
+            }
+            "band" => {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                pump_probe_events(&mut app, &rx, until, |app| {
+                    app.state.as_ref().is_some_and(|s| {
+                        s.status_facts
+                            .as_ref()
+                            .and_then(|f| f.message.as_deref())
+                            .is_some_and(|m| m.starts_with(arg))
+                    })
+                })
             }
             "wheel" | "click" => {
                 let centre = app.state.as_mut().and_then(|s| {

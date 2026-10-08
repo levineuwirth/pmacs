@@ -372,6 +372,177 @@ fn switch_buffer_ret_takes_the_selected_buffer_so_a_subsequence_switches() {
     assert_eq!(active_name(&s), "*scratch*", "nothing switched");
 }
 
+/// `C-x b`, `text`, RET, as a user types them.
+fn switch_by_typing(s: &mut EditorState, text: &str) {
+    ctrl(s, 'x');
+    press(s, KeyCode::Char('b'));
+    assert!(active(s), "C-x b opens the prompt");
+    type_str(s, text);
+    press(s, KeyCode::Enter);
+    assert!(!active(s), "RET closed the prompt");
+}
+
+/// E8b.1 (#318): a file buffer is named by its absolute path, so a bare
+/// name is also a subsequence of paths it does not name. Under a
+/// directory called `bin-tests`, `b.rs` matches `…/bin-tests/a.rs`
+/// through the `b` of `bin` and the `.rs`, the scorer gives both paths
+/// one score, and `C-x b b.rs RET` stayed on `a.rs`.
+///
+/// Beside it, in the same session, D18's four witnesses as
+/// `switch_buffer_ret_takes_the_selected_buffer_so_a_subsequence_switches`
+/// pins them: `nts` reaches `notes.txt`, `scr` `*scratch*`, `lsp`
+/// `*lsp*`, and `zzz` is refused as typed; and each file's full path
+/// still reaches it. `bin-tests` also spells `nts`, so the abbreviation
+/// matches all three files alike and reached `a.rs` until a match inside
+/// a name's last component outranked one through its directories. The
+/// directory is the fixture's so that both hold on every machine: the
+/// temporary root under this laptop's gate spells both, and CI's
+/// `/tmp/.tmpXXXXXX` neither.
+#[test]
+fn switch_buffer_reaches_a_file_by_its_bare_name_and_d18_still_holds() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td.path().join("bin-tests");
+    std::fs::create_dir_all(&dir).expect("bin-tests dir");
+    let mut s = fresh();
+    let scratch = eval::<String>(
+        &s,
+        "return pmacs.describe.buffer(pmacs.buffer.list()[1]).name",
+    );
+    let mut names = Vec::new();
+    for file in ["a.rs", "b.rs", "notes.txt"] {
+        let path = dir.join(file);
+        std::fs::write(&path, b"x\n").expect("write");
+        exec(
+            &s,
+            &format!(
+                "pmacs.buffer.find_or_open({:?})",
+                path.display().to_string()
+            ),
+        );
+        // The name as pmacs stores it (macOS's temp root is a symlink).
+        names.push(active_name(&s));
+    }
+    let (a, b, notes) = (names[0].clone(), names[1].clone(), names[2].clone());
+    assert!(b.ends_with("/bin-tests/b.rs"), "fixture: {b}");
+
+    // The bare name, from `a.rs`.
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[2])");
+    assert_eq!(active_name(&s), a);
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('b'));
+    type_str(&mut s, "b.rs");
+    let offered = candidates(&s);
+    assert!(
+        offered.contains(&a) && offered.contains(&b),
+        "fixture premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+    );
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(active_name(&s), b, "C-x b b.rs RET reaches b.rs");
+
+    // The full path reaches each file still.
+    switch_by_typing(&mut s, &a);
+    assert_eq!(active_name(&s), a, "a.rs's full path reaches it");
+    switch_by_typing(&mut s, &b);
+    assert_eq!(active_name(&s), b, "b.rs's full path reaches it");
+
+    // D18's four, in this session.
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('b'));
+    type_str(&mut s, "nts");
+    let offered = candidates(&s);
+    assert!(
+        [&a, &b, &notes].iter().all(|n| offered.contains(n)),
+        "fixture premise: the directory spells `nts` for every file; got {offered:?}"
+    );
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(active_name(&s), notes, "C-x b nts RET reaches notes.txt");
+    switch_by_typing(&mut s, "scr");
+    assert_eq!(active_name(&s), scratch, "C-x b scr RET reaches *scratch*");
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(40, 100));
+    ctrl(&mut s, 'c');
+    press(&mut s, KeyCode::Char('l'));
+    assert_eq!(active_name(&s), "*lsp*", "C-c l opens *lsp*");
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[1])");
+    assert_eq!(active_name(&s), scratch);
+    switch_by_typing(&mut s, "lsp");
+    assert_eq!(active_name(&s), "*lsp*", "C-x b lsp RET reaches *lsp*");
+    switch_by_typing(&mut s, "scr");
+    assert_eq!(active_name(&s), scratch);
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('b'));
+    type_str(&mut s, "zzz");
+    assert!(
+        candidates(&s).is_empty(),
+        "fixture premise: nothing matches `zzz`"
+    );
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(status(&s), "no buffer: zzz", "zzz is refused as typed");
+    assert_eq!(active_name(&s), scratch, "nothing switched");
+}
+
+/// E8b.2: RET names the buffer it reached on the status band, in the
+/// band's `<command>: …` idiom, and says when the selection is the
+/// buffer already shown, which changes nothing on screen: #318's
+/// measured case ended on `a.rs` with an empty band. A subsequence
+/// whose selection is the shown buffer says so as a full name does.
+/// The next key clears it, as it clears every message, and a name
+/// matching nothing is refused as before.
+#[test]
+fn switch_buffer_says_which_buffer_ret_reached() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td.path().join("bin-tests");
+    std::fs::create_dir_all(&dir).expect("bin-tests dir");
+    let mut s = fresh();
+    let scratch = eval::<String>(
+        &s,
+        "return pmacs.describe.buffer(pmacs.buffer.list()[1]).name",
+    );
+    let mut names = Vec::new();
+    for file in ["a.rs", "b.rs"] {
+        let path = dir.join(file);
+        std::fs::write(&path, b"x\n").expect("write");
+        exec(
+            &s,
+            &format!(
+                "pmacs.buffer.find_or_open({:?})",
+                path.display().to_string()
+            ),
+        );
+        names.push(active_name(&s));
+    }
+    let (a, b) = (names[0].clone(), names[1].clone());
+    exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[2])");
+    assert_eq!(active_name(&s), a);
+    assert_eq!(status(&s), "", "fixture: the band starts empty");
+
+    switch_by_typing(&mut s, "b.rs");
+    assert_eq!(active_name(&s), b);
+    assert_eq!(status(&s), format!("switch-buffer: showing {b}"));
+
+    switch_by_typing(&mut s, &b);
+    assert_eq!(active_name(&s), b, "nothing switched");
+    assert_eq!(status(&s), format!("switch-buffer: already showing {b}"));
+
+    switch_by_typing(&mut s, "b.r");
+    assert_eq!(active_name(&s), b, "nothing switched");
+    assert_eq!(
+        status(&s),
+        format!("switch-buffer: already showing {b}"),
+        "a subsequence selecting the shown buffer says so"
+    );
+
+    press(&mut s, KeyCode::Right);
+    assert_eq!(status(&s), "", "the next key clears the band");
+
+    switch_by_typing(&mut s, "scr");
+    assert_eq!(active_name(&s), scratch);
+    assert_eq!(status(&s), format!("switch-buffer: showing {scratch}"));
+
+    switch_by_typing(&mut s, "zzz");
+    assert_eq!(status(&s), "no buffer: zzz", "the refusal is as it was");
+    assert_eq!(active_name(&s), scratch, "nothing switched");
+}
+
 /// Probe: `write-file` roots its field where `find-file` does, prefilled
 /// with the directory, and writes the typed name under it.
 #[test]
