@@ -29,8 +29,9 @@ the same buffers concurrently with live cursor/selection presence.
 
 ## Status
 
-**v1.1.0 --- stable core, active development, and the first release
-with prebuilt binaries.** The v1.0 gate (the instance/frontend
+**v2.0.0 --- stable core, active development, and the release in which
+every buffer's parse runs in a worker process, so an installation is
+three binaries, not two.** The v1.0 gate (the instance/frontend
 partition, the Lua surface, and a REPL package audited to use zero
 direct Rust core access) shipped some time ago. Development since has
 grown the semantic frontend protocol release by release, brought the
