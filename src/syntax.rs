@@ -1323,6 +1323,45 @@ mod tests {
     }
 
     #[test]
+    fn markdown_highlights_are_the_overlays_and_speak_only_recognized_captures() {
+        // #310: both markdown grammars drive highlighting from the in-repo
+        // overlays, which compile against the bundled grammars (the
+        // node-name gate, as for LaTeX), and every capture they emit is an
+        // exact entry of the default theme. Exact, not reached by dropping
+        // dotted segments: the crate's `@text.*` resolved to nothing, and
+        // its `@none` would have fallen through to the face it sits in.
+        for (name, overlay) in [
+            ("markdown", MARKDOWN_HIGHLIGHTS),
+            ("markdown_inline", MARKDOWN_INLINE_HIGHLIGHTS),
+        ] {
+            let entry = BUILTIN_LANGUAGES
+                .iter()
+                .find(|l| l.name == name)
+                .unwrap_or_else(|| panic!("`{name}` entry"));
+            assert_eq!(
+                entry.highlights_query,
+                &[overlay],
+                "`{name}` carries the in-repo overlay alone"
+            );
+        }
+        let theme = crate::highlight::Theme::default_dark();
+        let reg = SyntaxRegistry::new();
+        for name in ["markdown", "markdown_inline"] {
+            let query = reg
+                .highlights_query(name)
+                .unwrap_or_else(|| panic!("{name} highlights compile against the grammar"));
+            let names = query.capture_names();
+            assert!(!names.is_empty(), "{name} captures something");
+            for capture in names {
+                assert!(
+                    theme.by_capture.contains_key(*capture),
+                    "{name}'s @{capture} is an exact entry of the default theme; got {names:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn language_for_path_resolves_latex_extensions() {
         // `.tex`/`.latex`/`.sty`/`.cls` all resolve to the LaTeX grammar via
         // the same extension path as every bundled language — the single

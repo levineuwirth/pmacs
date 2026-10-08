@@ -1008,14 +1008,14 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     // named language, and paragraph/heading text injects `markdown_inline`
     // (the entry below) — so inline emphasis/links are now highlighted, and
     // the former M9.7 "block-only, inline unhighlighted" floor is retired.
-    // Note the constant name: `HIGHLIGHT_QUERY_BLOCK` (singular) is
-    // the markdown crate's idiom; `tree-sitter-rust` and
-    // `tree-sitter-lua` use `HIGHLIGHTS_QUERY` (plural).
+    // Its highlights are the in-repo overlay `MARKDOWN_HIGHLIGHTS` below
+    // (#310): the crate's `HIGHLIGHT_QUERY_BLOCK` speaks `@text.*`, which the
+    // theme does not, so it painted plain; the injections are the crate's.
     LanguageEntry {
         name: "markdown",
         extensions: &["md", "markdown"],
         loader: || tree_sitter_md::LANGUAGE.into(),
-        highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+        highlights_query: &[MARKDOWN_HIGHLIGHTS],
         locals_query: &[],
         injections_query: &[tree_sitter_md::INJECTION_QUERY_BLOCK],
     },
@@ -1025,11 +1025,13 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     // opened directly by name. Ships an inline highlights query (emphasis,
     // links, code spans) and its own injections (e.g. inline HTML), so it
     // recurses like any other layer. Retires the M9.7 block-only floor.
+    // Like the block grammar's, its highlights are an in-repo overlay of
+    // the crate's, `MARKDOWN_INLINE_HIGHLIGHTS` (#310).
     LanguageEntry {
         name: "markdown_inline",
         extensions: &[],
         loader: || tree_sitter_md::INLINE_LANGUAGE.into(),
-        highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_INLINE],
+        highlights_query: &[MARKDOWN_INLINE_HIGHLIGHTS],
         locals_query: &[],
         injections_query: &[tree_sitter_md::INJECTION_QUERY_INLINE],
     },
@@ -1294,6 +1296,19 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
 /// `crate::audit`'s `audit-rules.scm`.
 #[doc(hidden)]
 pub const LATEX_HIGHLIGHTS: &str = include_str!("../../builtin/queries/latex/highlights.scm");
+
+/// Markdown block highlights overlay (#310): `tree_sitter_md`'s
+/// `HIGHLIGHT_QUERY_BLOCK` reconciled onto the recognized capture set, as
+/// [`LATEX_HIGHLIGHTS`] is. The crate's query speaks `@text.*`, which the
+/// default theme resolves to nothing, so a markdown buffer painted plain.
+#[doc(hidden)]
+pub const MARKDOWN_HIGHLIGHTS: &str = include_str!("../../builtin/queries/markdown/highlights.scm");
+
+/// Markdown inline highlights overlay (#310): `tree_sitter_md`'s
+/// `HIGHLIGHT_QUERY_INLINE` reconciled onto the recognized capture set.
+#[doc(hidden)]
+pub const MARKDOWN_INLINE_HIGHLIGHTS: &str =
+    include_str!("../../builtin/queries/markdown_inline/highlights.scm");
 
 #[doc(hidden)]
 pub fn query_uses_local_predicates(query: &tree_sitter::Query) -> bool {

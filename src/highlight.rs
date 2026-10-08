@@ -1886,6 +1886,58 @@ mod tests {
         grid.get(CellCoord::new(0, col)).style
     }
 
+    /// Every painted cell's style of `src` as `language_name` paints it on
+    /// a grid of one row per line and 80 columns, injection layers
+    /// included: `out[row][col]`.
+    fn painted_rows(language_name: &str, file: &str, src: &str) -> Vec<Vec<Style>> {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let (rows, cols) = (src.lines().count(), 80usize);
+        let mut backing: Vec<Cell> = vec![Cell::default(); rows * cols];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols as u32,
+            size: CellSize::new(rows as u32, cols as u32),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows as u32, cols as u32),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Truncate,
+            view_left: 0,
+        };
+        hv.render(&buf, viewport, &mut grid);
+        (0..rows)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| grid.get(CellCoord::new(r as u32, c as u32)).style)
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Does `language`'s compiled highlight query use `capture`?
     fn query_uses_capture(language: &str, capture: &str) -> bool {
         let reg = crate::syntax::SyntaxRegistry::new();
@@ -2234,5 +2286,98 @@ mod tests {
             !grid.get(CellCoord::new(1, 8)).style.bold,
             "`let` inside <script> paints plain"
         );
+    }
+
+    /// The default theme's style for `capture`, as the overlays name it.
+    fn themed(capture: &str) -> Style {
+        *Theme::default_dark()
+            .by_capture
+            .get(capture)
+            .unwrap_or_else(|| panic!("`{capture}` is a default theme entry"))
+    }
+
+    #[test]
+    fn markdown_grid_paints_headings_emphasis_code_links_and_markers() {
+        // #310: a markdown buffer painted almost entirely in the default
+        // foreground, its queries speaking `@text.*`. Through the overlays,
+        // on a painted grid, the block layer and the inline layer it injects
+        // into each paragraph and heading.
+        let src = "# Title with *em*\n\
+                   \n\
+                   Body *em* and **strong** and `code` and [text](https://x.org) and \\*.\n\
+                   \n\
+                   > quoted\n\
+                   \n\
+                   - item\n\
+                   \n\
+                   Setext\n\
+                   ======\n\
+                   \n\
+                   ---\n";
+        let rows = painted_rows("markdown", "notes.md", src);
+        let line = |r: usize| src.lines().nth(r).expect("line");
+        let at = |r: usize, needle: &str| {
+            let col = line(r)
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} on line {r}"));
+            rows[r][col]
+        };
+        let heading = themed("keyword.control");
+        let italic = |s: Style| Style { italic: true, ..s };
+
+        assert_eq!(at(0, "#"), themed("keyword"), "a heading's marker");
+        assert_eq!(at(0, "Title"), heading, "a heading's text");
+        assert_eq!(
+            at(0, "em*"),
+            italic(heading),
+            "emphasis inside a heading keeps the heading's face, italic"
+        );
+        assert_eq!(at(2, "Body"), Style::default(), "body text has no face");
+        assert_eq!(at(2, "em*"), italic(Style::default()), "emphasis is italic");
+        assert_eq!(at(2, "strong"), themed("keyword"), "strong is bold");
+        assert_eq!(at(2, "code`"), themed("string"), "a code span");
+        assert_eq!(at(2, "text]"), themed("constant"), "a link's text");
+        assert_eq!(at(2, "https"), themed("constant"), "a link's destination");
+        assert_eq!(at(2, "[text"), Style::default(), "a link's bracket");
+        assert_eq!(at(2, "\\*"), themed("string"), "a backslash escape");
+        assert_eq!(at(4, ">"), themed("operator"), "a block quote marker");
+        assert_eq!(at(6, "-"), themed("operator"), "a list marker");
+        assert_eq!(at(8, "Setext"), heading, "a setext heading's text");
+        assert_eq!(at(9, "="), themed("keyword"), "a setext underline");
+        assert_eq!(at(11, "-"), themed("operator"), "a thematic break");
+    }
+
+    #[test]
+    fn markdown_fence_content_takes_no_face_from_the_block_layer() {
+        // The crate's query puts `@text.literal` over a whole fenced block
+        // and `@none` over its content, which is its injected language's to
+        // paint, or nobody's. pmacs merges a narrower capture over a wider
+        // one and has no capture that clears, so the overlay treats `@none`
+        // as no face at all: the fence lines take the literal face, and no
+        // pattern of the block layer paints the content. A Rust fence's
+        // identifier is not green beneath its keyword's color, and a fence
+        // with no language is plain.
+        let src = "```rust\n\
+                   fn f() { let x = 1; }\n\
+                   ```\n\
+                   \n\
+                   ```\n\
+                   plain words\n\
+                   ```\n";
+        let rows = painted_rows("markdown", "notes.md", src);
+        let literal = themed("string");
+        assert_eq!(rows[0][0], literal, "the opening fence");
+        assert_eq!(rows[0][3], literal, "the fence's info string");
+        assert_eq!(rows[1][0], themed("keyword"), "Rust paints its own keyword");
+        assert_eq!(rows[1][13], Style::default(), "a Rust identifier: no face");
+        assert_eq!(rows[2][0], literal, "the closing fence");
+        assert_eq!(rows[4][0], literal, "a bare fence");
+        assert_eq!(
+            rows[5][0],
+            Style::default(),
+            "a bare fence's content: no face"
+        );
+        assert_eq!(rows[5][6], Style::default(), "throughout");
+        assert_eq!(rows[6][0], literal, "its closing fence");
     }
 }
