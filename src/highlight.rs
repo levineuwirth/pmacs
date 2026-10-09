@@ -958,6 +958,7 @@ impl View for LspStyleView {
         // the same cells by the same arithmetic.
         let line_offsets = crate::overlay::compute_line_offsets(buf);
         let start_line = crate::overlay::line_at_offset(&line_offsets, viewport.buffer_start);
+        let layout = crate::overlay::screen_layout(buf, &line_offsets, viewport);
         for t in &tokens {
             if t.end <= viewport.buffer_start || t.start >= viewport.buffer_end {
                 continue;
@@ -979,6 +980,7 @@ impl View for LspStyleView {
                 &line_offsets,
                 start_line,
                 viewport,
+                layout.as_ref(),
                 cells,
                 crate::overlay::BufferStyleSpan {
                     start: t.start,

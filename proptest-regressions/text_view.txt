@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b0706d8278d2870821d106caae097f8bb3ba1a258a9d0f97dc76b90b692af55e # shrinks to lines = ["a中/- -/中\ta//a-a--中中\t a中中--中- 中\t中-/  a/\ta/a\t -\t/中  \ta中/aa 中-\t\t\t \t-\ta  中--中- a\ta a\t中/a\t\t/ -/a -/-\t/a中 -/\t -\t\t\t\t  \t中中 /\t/中中 -/ 中 a\t中-中\t/a -a\t\t-a aa a//a\t\t/中/ a/-a \t中/ - \t\t--//\t/ 中/aa中--\ta\t-中\t -aa中中\t\t-  / /a /中///\t\t--\t\t/a-/中中 \t/-\t//a/- 中-a中\t//- \t- /  中-a///a\t \t中a\t -\t-\t-a/-/\ta/中中", " 中\t//\t\t  中/-a中a ////--a/中 -\ta\t-/  a/中-a中/中/ /中/中-\t\t/中中 中中a\t中/中a中/--\t//a/ a/-  中"], rows = 1, cols = 3, anchor = 462

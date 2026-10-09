@@ -539,6 +539,180 @@ fn under_wrap_a_lines_syntax_colors_paint_on_the_rows_it_is_drawn_on() {
     }
 }
 
+/// The text of each row of `grid`.
+fn row_texts(grid: &[Vec<(char, pmacs::cell::Style)>]) -> Vec<String> {
+    grid.iter()
+        .map(|row| row.iter().map(|&(ch, _)| ch).collect())
+        .collect()
+}
+
+/// The `(row, column)` of every cell of `grid` whose style `pick` takes.
+fn cells_where(
+    grid: &[Vec<(char, pmacs::cell::Style)>],
+    pick: impl Fn(char, pmacs::cell::Style) -> bool,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (r, row) in grid.iter().enumerate() {
+        for (c, &(ch, st)) in row.iter().enumerate() {
+            if pick(ch, st) {
+                out.push((r, c));
+            }
+        }
+    }
+    out
+}
+
+/// #338, the search half: under wrap a match's wash marks the cells its
+/// text is drawn on. The wash took the row a line would have if every
+/// line took one, so below a wrapped line it washed a row above the
+/// match, over other words. #338's own file: a heading, a paragraph of
+/// forty words wrapping over ten rows, a blank line and `needle` below.
+#[test]
+fn under_wrap_a_search_match_washes_the_cells_it_is_drawn_on() {
+    let mut s = session("search-wash");
+    let words: Vec<String> = (0..40).map(|i| format!("word{i:02}")).collect();
+    fill(
+        &s,
+        &format!(
+            "# Title\n{}\n\nneedle on the fourth line\n",
+            words.join(" ")
+        ),
+    );
+    ctrl(&mut s, 's');
+    type_str(&mut s, "needle");
+    let (rows, cols) = (16, 30);
+    let grid = styled_frame(&s, rows, cols);
+    // The text area; the mode line and the prompt are below it.
+    let content = &grid[..(rows - 2) as usize];
+    let text = row_texts(content);
+    let at = text
+        .iter()
+        .position(|row| row.starts_with("needle"))
+        .expect("the match is on screen");
+    assert!(at >= 10, "the paragraph wraps above it: {text:#?}");
+    assert_eq!(
+        cells_where(content, |_, st| st.bg != pmacs::cell::Color::Default),
+        (0..6).map(|c| (at, c)).collect::<Vec<_>>(),
+        "the wash is on `needle` and nowhere else: {text:#?}"
+    );
+}
+
+/// The face the fake server's tokens take: an RGB the bundled theme never
+/// emits, merged over its one token type.
+const MARK: pmacs::cell::Color = pmacs::cell::Color::Rgb(0x7b, 0x1f, 0xa2);
+
+/// A session on a Rust file whose first line wraps over four rows of 30
+/// columns, served by the fake language server: its two synthetic
+/// diagnostics (an error on line 0's bytes 4..8, a warning on line 2's
+/// 0..5) and, in `semantichold`, a token on every word in [`MARK`], both
+/// on screen. Returns the frame's text area and its text.
+fn served_frame(name: &str) -> (Vec<Vec<(char, pmacs::cell::Style)>>, Vec<String>) {
+    let mut s = session(name);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("a.rs");
+    std::fs::write(
+        &path,
+        "use wxyz::a; // one two three four five six seven eight nine ten eleven twelve thirteen\n\
+         // filler\n\
+         fn zeta() {}\n",
+    )
+    .expect("write a.rs");
+    exec(
+        &s,
+        &format!(
+            "pmacs.lsp.config.rust = {{ command = {:?}, env = {{ PMACS_FAKE_LSP_MODE = 'semantichold' }} }}\n\
+             pmacs.theme.merge {{ namespace = {{ fg = {{ 0x7b, 0x1f, 0xa2 }} }} }}\n\
+             pmacs.buffer.find_or_open({:?})",
+            env!("CARGO_BIN_EXE_pmacs_fake_lsp"),
+            path.display().to_string()
+        ),
+    );
+    let (rows, cols) = (14, 30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        s.tick_processes();
+        s.tick_lsp();
+        s.tick_async();
+        let grid = styled_frame(&s, rows, cols);
+        let content = grid[..(rows - 2) as usize].to_vec();
+        let text = row_texts(&content);
+        // Both landed: the warning's underline and the tokens on the
+        // last line's words, wherever each painter puts them.
+        let underlined = !cells_where(&content, |_, st| {
+            st.underline_color == pmacs::cell::Color::Indexed(3)
+        })
+        .is_empty();
+        let marked = !cells_where(&content, |_, st| st.fg == MARK).is_empty();
+        if underlined && marked && text.iter().any(|row| row.starts_with("fn zeta")) {
+            for _ in 0..10 {
+                s.tick_lsp();
+                s.tick_async();
+            }
+            let grid = styled_frame(&s, rows, cols);
+            let content = grid[..(rows - 2) as usize].to_vec();
+            let text = row_texts(&content);
+            return (content, text);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server's diagnostics and tokens never both painted: {text:#?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// #338, the diagnostics half: under wrap a diagnostic's underline marks
+/// the cells its range is drawn on, and its sign the first row of its
+/// line. Both took the row a line would have if every line took one, so
+/// the warning on the line below a wrapped one marked a row of the
+/// wrapped line's text. With no gutter the sign is the line's first
+/// cell's background.
+#[test]
+fn under_wrap_a_diagnostic_marks_the_cells_its_range_is_drawn_on() {
+    let (content, text) = served_frame("diagnostic-marks");
+    let line2 = text
+        .iter()
+        .position(|row| row.starts_with("fn zeta"))
+        .expect("line 2 on screen");
+    assert!(line2 >= 4, "line 0 wraps above it: {text:#?}");
+    let mut underlined: Vec<(usize, usize)> = (4..8).map(|c| (0, c)).collect();
+    underlined.extend((0..5).map(|c| (line2, c)));
+    assert_eq!(
+        cells_where(&content, |_, st| st.underline
+            != pmacs::cell::UnderlineStyle::None),
+        underlined,
+        "the error under `wxyz` and the warning under `fn ze`: {text:#?}"
+    );
+    assert_eq!(
+        cells_where(&content, |_, st| st.bg != pmacs::cell::Color::Default),
+        vec![(0, 0), (line2, 0)],
+        "the two signs, on their lines' first rows: {text:#?}"
+    );
+}
+
+/// #338, the semantic half: under wrap a language server's colors mark
+/// the cells of the words they name. The byte-span painter semantic
+/// tokens go through took the row a line would have if every line took
+/// one, so below a wrapped line the comment's and `fn zeta`'s tokens
+/// painted the wrapped line's text, and `fn zeta` was plain. The fake
+/// server gives every word a token, so a cell is in the marker face
+/// exactly when it draws a word's character.
+#[test]
+fn under_wrap_semantic_colors_mark_the_words_they_name() {
+    let (content, text) = served_frame("semantic-colors");
+    assert!(
+        text.iter()
+            .position(|row| row.starts_with("fn zeta"))
+            .is_some_and(|row| row >= 4),
+        "line 0 wraps above `fn zeta`: {text:#?}"
+    );
+    assert_eq!(
+        cells_where(&content, |_, st| st.fg == MARK),
+        cells_where(&content, |ch, _| ch.is_ascii_alphanumeric() || ch == '_'),
+        "the marker face is on the words' cells and nowhere else: {text:#?}"
+    );
+}
+
 /// The grid's layout cost on a large markdown file, per painted frame:
 /// E7d.1's measurement, taken before and after the word-wrap walk
 /// (`--ignored`, a measurement and not a gate). The file is named by

@@ -567,9 +567,11 @@ pub(crate) fn place_in_line(s: &str, within: u64, max_cols: u32) -> (u32, u32) {
 
 /// The text a [`ScreenLayout`] lays out: some bytes and their line index.
 ///
+/// The painters that mark the buffer (search, diagnostics, the byte-span
+/// painter under semantic tokens and package styles) hand it the buffer.
 /// The syntax painter hands it the parse's source, because its spans'
-/// bytes are that source's; once the parse has caught up with an edit it
-/// is the buffer's text.
+/// bytes are that source's; once the parse has caught up with an edit the
+/// two are the same text.
 pub(crate) trait ScreenText {
     /// Lines in the text, at least one.
     fn line_count(&self) -> usize;
@@ -587,7 +589,7 @@ pub(crate) trait ScreenText {
 }
 
 /// A [`ScreenText`] over bytes held whole and their line starts: the
-/// syntax painter's parse source.
+/// syntax painter's parse source, or a painter's copy of the buffer.
 pub(crate) struct SourceText<'a> {
     /// The text.
     pub source: &'a [u8],
@@ -633,10 +635,68 @@ impl ScreenText for SourceText<'_> {
     }
 }
 
+/// A [`ScreenText`] over a buffer's rope and its line starts, reading only
+/// the lines the screen shows.
+pub(crate) struct BufferText<'a> {
+    /// The buffer.
+    pub buf: &'a Buffer,
+    /// Each line's first byte, the first being `0`.
+    pub line_offsets: &'a [u64],
+}
+
+impl ScreenText for BufferText<'_> {
+    fn line_count(&self) -> usize {
+        self.line_offsets.len()
+    }
+
+    fn line_start(&self, line: usize) -> u64 {
+        self.line_offsets[line]
+    }
+
+    fn line_at(&self, offset: u64) -> usize {
+        match self.line_offsets.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+    }
+
+    fn line_bytes(&self, line: usize) -> std::borrow::Cow<'_, [u8]> {
+        let start = self.line_offsets[line];
+        let raw_end = self
+            .line_offsets
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.buf.len());
+        let end = if line + 1 < self.line_offsets.len() && raw_end > start {
+            raw_end - 1
+        } else {
+            raw_end
+        };
+        let mut out = vec![0u8; (end - start) as usize];
+        if !out.is_empty() {
+            self.buf.snapshot_rope().slice(start, end, &mut out);
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    fn known_utf8(&self) -> bool {
+        false
+    }
+}
+
 /// Where a word-wrapped viewport draws the characters it shows, laid out
 /// once by the walk [`TextView::render`] makes and bounded by the screen.
-/// The grid's syntax painter takes its spans' rows and columns from it
-/// (#335).
+///
+/// **The one row-and-column mapping on screen under wrap** (#338). The
+/// marks the grid places by buffer byte --- syntax colors, search
+/// matches, diagnostics' underlines and signs, and the byte-span painter
+/// semantic tokens and package styles go through --- each build one of
+/// these for the frame and read their rows and columns from it, so a mark
+/// lands on the cells its text is drawn on. Before it each counted one row
+/// per line (`Viewport::row_offset_of`; the syntax painter until #335, the
+/// rest until #338), and below a wrapped line marked a row above its text.
+/// `Truncate` keeps those painters' own arithmetic,
+/// under which a line is one row (the identity case [`WrapMode`] keeps).
 ///
 /// **Bounded by the rows on screen** (#337 review 1). A line is laid out
 /// only until a character starts below the last row, and decoded only as
@@ -645,6 +705,8 @@ impl ScreenText for SourceText<'_> {
 /// a visible line, on every frame, however far below the window it ran.
 #[derive(Debug, Default)]
 pub(crate) struct ScreenLayout {
+    /// The visible lines that reach the screen, top to bottom.
+    lines: Vec<ScreenLine>,
     /// Every character with cells on a displayed row, in byte order.
     places: Vec<ScreenPlace>,
     /// What the layout read to build itself.
@@ -660,6 +722,21 @@ pub struct LayoutWork {
     pub decoded: usize,
 }
 
+/// One visible line's part of a [`ScreenLayout`].
+#[derive(Clone, Copy, Debug)]
+struct ScreenLine {
+    /// The source line.
+    line: usize,
+    /// The screen row its first displayed row is on.
+    row: u32,
+    /// The bytes whose places are on displayed rows: from the anchor (the
+    /// first line may begin partway down) to the first character below the
+    /// screen, or to the line's end when it ends on screen.
+    shown: (u64, u64),
+    /// Where a caret after the line's last character sits, when on screen.
+    end: Option<(u32, u32)>,
+}
+
 /// One character's cells in a [`ScreenLayout`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ScreenPlace {
@@ -673,6 +750,13 @@ struct ScreenPlace {
 }
 
 impl ScreenLayout {
+    /// [`Self::lay_out`] when `viewport` wraps, or `None` under
+    /// `Truncate`, where a line is one row and the painters keep their own
+    /// arithmetic.
+    pub(crate) fn wrapped(viewport: &Viewport<'_>, text: &impl ScreenText) -> Option<Self> {
+        (viewport.wrap == WrapMode::Wrap).then(|| Self::lay_out(viewport, text))
+    }
+
     /// Lay out what `viewport` shows of `text` under word wrap: the
     /// visible lines from the anchor down, each as [`TextView::paint_line`]
     /// draws it --- the anchor's skipped rows, folds, the fold head's
@@ -753,17 +837,35 @@ impl ScreenLayout {
             let Some(s) = self.decode(&bytes, known, need) else {
                 // The text view paints nothing of a line that is not UTF-8
                 // and gives it one row.
+                self.lines.push(ScreenLine {
+                    line,
+                    row: place.first_row,
+                    shown: (start, start),
+                    end: None,
+                });
                 return 1;
             };
             let whole = s.len() == bytes.len();
             let places = &mut self.places;
             let (mut row, mut col, mut walked) = (0u32, 0u32, 0usize);
-            let mut stop: Option<u32> = None;
+            let mut stop: Option<(usize, u32)> = None;
+            let mut from: Option<usize> = None;
             walk_line(s, max_cols, true, |p| {
                 walked += 1;
                 if p.start_row >= limit {
-                    stop = Some(p.start_row);
+                    stop = Some((p.idx, p.start_row));
                     return false;
+                }
+                // A caret before a space hanging past the edge sits at
+                // column 0 of the next row (`place_in_line`), so the first
+                // shown byte may be one on the last skipped row.
+                let caret_row = if p.start_col >= max_cols {
+                    p.start_row + 1
+                } else {
+                    p.start_row
+                };
+                if caret_row >= place.skip_rows {
+                    from.get_or_insert(p.idx);
                 }
                 if p.start_row >= place.skip_rows {
                     // A space hanging past the edge, or a zero-width mark,
@@ -784,8 +886,14 @@ impl ScreenLayout {
                 true
             });
             self.work.walked += walked;
-            if let Some(stop_row) = stop {
+            if let Some((idx, stop_row)) = stop {
                 // The line runs off the screen; nothing below is laid out.
+                self.lines.push(ScreenLine {
+                    line,
+                    row: place.first_row,
+                    shown: (start + from.unwrap_or(idx) as u64, start + idx as u64),
+                    end: None,
+                });
                 return stop_row.saturating_sub(place.skip_rows).saturating_add(1);
             }
             if !whole {
@@ -793,6 +901,15 @@ impl ScreenLayout {
                 need = need.saturating_mul(4);
                 continue;
             }
+            // A caret after the last character: column 0 of the next row
+            // when the line ends at or past the edge (`place_in_line`).
+            let (end_row, end_col) = if col >= max_cols {
+                (row.saturating_add(1), 0)
+            } else {
+                (row, col)
+            };
+            let end = (end_row >= place.skip_rows && end_row < limit)
+                .then(|| (place.first_row + (end_row - place.skip_rows), end_col));
             // `paint_line`'s count: the fold head's two markers may open a
             // row, and a line ending at or past the edge owns the row below.
             if place.is_fold_head {
@@ -806,6 +923,13 @@ impl ScreenLayout {
             } else if col >= max_cols {
                 row += 1;
             }
+            let line_end = start + bytes.len() as u64;
+            self.lines.push(ScreenLine {
+                line,
+                row: place.first_row,
+                shown: (start + from.unwrap_or(bytes.len()) as u64, line_end),
+                end,
+            });
             return row.saturating_sub(place.skip_rows).saturating_add(1);
         }
     }
@@ -853,6 +977,37 @@ impl ScreenLayout {
     /// nothing, so a painter walking sorted marks stops at the end.
     pub(crate) fn shown(&self) -> Option<std::ops::Range<u64>> {
         Some(self.places.first()?.start..self.places.last()?.end)
+    }
+
+    /// The screen row `line`'s first displayed row is on, when the screen
+    /// shows it; the row a diagnostic's sign takes.
+    pub(crate) fn line_row(&self, line: usize) -> Option<u32> {
+        let i = self.lines.binary_search_by_key(&line, |l| l.line).ok()?;
+        Some(self.lines[i].row)
+    }
+
+    /// Whether `line` lies below every line the screen shows.
+    pub(crate) fn is_below(&self, line: usize) -> bool {
+        self.lines.last().is_none_or(|l| line > l.line)
+    }
+
+    /// The cell a caret at byte `offset` sits on, when the screen shows it:
+    /// where a zero-width mark is drawn. The character at `offset`'s, or,
+    /// past the last character with cells, the line's end.
+    pub(crate) fn cell_at(&self, offset: u64) -> Option<(u32, u32)> {
+        let i = self
+            .lines
+            .partition_point(|l| l.shown.0 <= offset)
+            .checked_sub(1)?;
+        let line = self.lines[i];
+        if offset > line.shown.1 || (offset == line.shown.1 && line.end.is_none()) {
+            return None;
+        }
+        let from = self.places.partition_point(|p| p.end <= offset);
+        match self.places.get(from) {
+            Some(p) if p.start < line.shown.1 => Some((p.row, p.start_col)),
+            _ => line.end,
+        }
     }
 
     /// What building this layout read.
@@ -1697,9 +1852,10 @@ mod tests {
     }
 
     /// The screen layout of `text` under `viewport`, laid out over the
-    /// bytes not known to be UTF-8 and known: the two must agree, since the
-    /// prefix the known path decodes is only a shortcut.
-    fn screen_layouts(text: &[u8], viewport: &Viewport<'_>) -> [ScreenLayout; 2] {
+    /// buffer's rope and over the bytes held whole, known to be UTF-8 or
+    /// not: the three must agree, since the prefix the known path decodes
+    /// is only a shortcut.
+    fn screen_layouts(text: &[u8], viewport: &Viewport<'_>) -> [ScreenLayout; 3] {
         let buf = buf_with(text);
         let offsets = crate::overlay::compute_line_offsets(&buf);
         let narrow: Vec<u32> = offsets.iter().map(|&o| o as u32).collect();
@@ -1713,7 +1869,17 @@ mod tests {
                 },
             )
         };
-        [held(false), held(true)]
+        [
+            ScreenLayout::lay_out(
+                viewport,
+                &BufferText {
+                    buf: &buf,
+                    line_offsets: &offsets,
+                },
+            ),
+            held(false),
+            held(true),
+        ]
     }
 
     fn wrapped_viewport(start: u64, rows: u32, cols: u32) -> Viewport<'static> {
@@ -1730,11 +1896,14 @@ mod tests {
     }
 
     proptest! {
-        // #335: the syntax painter's layout is the text view's. Every
-        // character the layout places is drawn on its cell, every glyph
-        // drawn is placed, and the prefix the known path decodes changes
-        // none of it. Long lines, so that the screen ends partway down one
-        // and the prefix is cut short of its end.
+        // #338: the one mapping the grid's marks read under wrap is the
+        // text view's. Every character the layout places is drawn on its
+        // cell, every glyph drawn is placed, a caret's cell is the one the
+        // caret's own reckoning gives (`pos_to_display`, then the rows of
+        // the lines above, as `window_cursor_cell` counts them), each
+        // line's first row is where it starts, and the prefix the known
+        // path decodes changes none of it. Long lines, so that the screen
+        // ends partway down one and the prefix is cut short of its end.
         #[test]
         fn the_screen_layout_places_what_the_text_view_draws(
             lines in prop::collection::vec("[ab \t/中-]{0,300}", 1..4),
@@ -1756,7 +1925,8 @@ mod tests {
                 size: CellSize::new(rows, cols),
             };
             view.render(&buf, viewport, &mut grid);
-            let [layout, known] = screen_layouts(text.as_bytes(), &viewport);
+            let [layout, held, known] = screen_layouts(text.as_bytes(), &viewport);
+            prop_assert_eq!(&layout.places, &held.places);
             prop_assert_eq!(&layout.places, &known.places);
 
             let mut covered = vec![false; (rows * cols) as usize];
@@ -1775,6 +1945,27 @@ mod tests {
                 );
             }
 
+            // Rows from the top of the screen: the lines above, less the
+            // anchor's skipped rows.
+            let ctx = LayoutCtx { cols, wrap: WrapMode::Wrap, view_left: 0 };
+            let first = view.line_at_offset(start as u64);
+            let skip = view.place_of_byte(&buf, first, start as u64 - view.line_offset(first).unwrap(), cols).0;
+            let line_top = |line: usize| -> u64 {
+                (first..line).map(|l| u64::from(view.line_rows(&buf, l, ctx))).sum()
+            };
+            for line in first..view.line_count() {
+                let top = line_top(line).saturating_sub(u64::from(skip));
+                let want = (top < u64::from(rows)).then_some(top as u32);
+                prop_assert_eq!(layout.line_row(line), want, "line {}'s first row", line);
+            }
+            for b in (0..=text.len()).filter(|&b| text.is_char_boundary(b)) {
+                let d = view.pos_to_display(&buf, b as u64, ctx).expect("a place");
+                let row = (line_top(d.row as usize) + u64::from(d.sub_row)).checked_sub(u64::from(skip));
+                let want = row
+                    .filter(|&r| r < u64::from(rows) && (d.row as usize) >= first)
+                    .map(|r| (r as u32, d.col));
+                prop_assert_eq!(layout.cell_at(b as u64), want, "the caret's cell at byte {}", b);
+            }
         }
     }
 
@@ -1807,8 +1998,10 @@ mod tests {
         assert_eq!(row_text(&glyphs, cols, 1).trim_end(), "…");
         assert_eq!(row_text(&glyphs, cols, 2).trim_end(), "Z");
         let [layout, ..] = screen_layouts(text, &viewport);
-        let z = layout.places.iter().find(|p| p.start == 17).expect("the Z");
-        assert_eq!((z.row, z.start_col), (2, 0), "below the ellipsis's row");
+        assert_eq!(layout.line_row(0), Some(0));
+        assert_eq!(layout.line_row(1), None, "the hidden line has no row");
+        assert_eq!(layout.line_row(2), Some(2), "below the ellipsis's row");
+        assert_eq!(layout.cell_at(17), Some((2, 0)), "the Z");
     }
 
     /// #337 review 1: the layout reads a screenful of a long line, not the
@@ -1819,9 +2012,9 @@ mod tests {
     fn the_screen_layout_reads_a_screenful_of_a_long_line() {
         let text = format!("{}\ntail", "a ".repeat(500_000));
         let (rows, cols) = (20, 40);
-        let [held, known] = screen_layouts(text.as_bytes(), &wrapped_viewport(0, rows, cols));
+        let [buffer, _, known] = screen_layouts(text.as_bytes(), &wrapped_viewport(0, rows, cols));
         let screenful = ((rows + 1) * cols) as usize;
-        for layout in [&held, &known] {
+        for layout in [&buffer, &known] {
             let work = layout.work();
             assert!(
                 work.walked <= screenful + 1,
@@ -1831,9 +2024,8 @@ mod tests {
             assert_eq!(layout.places.len(), 800, "every cell holds a character");
             assert_eq!(layout.places.last().map(|p| p.row), Some(rows - 1));
         }
-        // Not known to be UTF-8, the line is decoded to its end, since the
-        // text view draws nothing of a line that is not; known, only as
-        // far as the walk goes.
+        // The rope's text cannot be known UTF-8 without reading it; held
+        // and known, it is decoded only as far as the walk goes.
         let decoded = known.work().decoded;
         assert!(
             decoded <= 2 * screenful + 64,
@@ -1850,7 +2042,8 @@ mod tests {
     #[test]
     fn the_screen_layout_grows_a_prefix_that_ends_on_screen() {
         let text = format!("{}{}", " ".repeat(3000), "word ".repeat(20_000));
-        let [held, known] = screen_layouts(text.as_bytes(), &wrapped_viewport(0, 3, 8));
+        let [buffer, held, known] = screen_layouts(text.as_bytes(), &wrapped_viewport(0, 3, 8));
+        assert_eq!(known.places, buffer.places);
         assert_eq!(known.places, held.places);
         let rows: Vec<u32> = known.places.iter().map(|p| p.row).collect();
         assert_eq!(rows.first(), Some(&0), "the hanging spaces' visible cells");

@@ -356,6 +356,7 @@ pub fn find_first_regex_from(
 use crate::buffer::Buffer;
 use crate::cell::{CellCoord, CellGrid, Color, Style};
 use crate::overlay::merge_styles;
+use crate::text_view::ScreenText as _;
 use crate::view::{View, Viewport};
 
 /// Background style applied to a non-active search match (Q#SR4) —
@@ -429,13 +430,7 @@ impl View for SearchView {
             return;
         }
 
-        let source: Vec<u8> = {
-            let mut bytes = vec![0u8; buf.len() as usize];
-            if !bytes.is_empty() {
-                buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
-            }
-            bytes
-        };
+        let source = crate::diag::buffer_bytes(buf);
         let line_offsets = crate::diag::compute_line_offsets(&source);
         let start_line_buf =
             crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
@@ -470,6 +465,25 @@ impl View for SearchView {
             )
         };
 
+        // #338: under wrap a row is not a line, so the wash takes its
+        // cells from the screen's layout, the walk the text is drawn by.
+        let text = crate::text_view::SourceText {
+            source: &source,
+            line_offsets: &line_offsets,
+            known_utf8: false,
+        };
+        if let Some(layout) = crate::text_view::ScreenLayout::wrapped(&viewport, &text) {
+            wash_wrapped(
+                &layout,
+                viewport,
+                cells,
+                &matches,
+                active,
+                (match_overlay, active_overlay),
+            );
+            return;
+        }
+
         for m in &matches {
             let style = if Some(*m) == active {
                 active_overlay
@@ -498,30 +512,19 @@ impl View for SearchView {
                     break;
                 }
                 let line_start = line_offsets[line as usize];
-                let line_end = line_offsets
-                    .get(line as usize + 1)
-                    .copied()
-                    .unwrap_or(source.len() as u32);
-                let line_end_no_nl = if line_end > line_start
-                    && source.get(line_end as usize - 1).copied() == Some(b'\n')
-                {
-                    line_end - 1
-                } else {
-                    line_end
-                };
+                let line_bytes = text.line_bytes(line as usize);
                 // Clip the match to this line's content (newline excluded
                 // so a multi-line match doesn't wash a phantom trailing
                 // cell).
                 let paint_start = (m.start as u32).max(line_start);
-                let paint_end = (m.end as u32).min(line_end_no_nl);
+                let paint_end = (m.end as u32).min(line_start + line_bytes.len() as u32);
                 if paint_start >= paint_end {
                     continue;
                 }
-                let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
                 let within_start = (paint_start - line_start) as usize;
                 let within_end = (paint_end - line_start) as usize;
                 let (start_col, end_col) =
-                    byte_range_to_columns(line_bytes, within_start, within_end);
+                    byte_range_to_columns(&line_bytes, within_start, within_end);
                 // `visible_cols` returns `None` for an empty range too, so the
                 // old `end_col <= start_col` guard is subsumed rather than
                 // dropped.
@@ -536,6 +539,49 @@ impl View for SearchView {
                 }
             }
         }
+    }
+}
+
+/// Wash `matches` where the screen's layout draws them (#338), the
+/// active one in the second of `styles`. A match's newline has no cell
+/// there, so a multi-line match washes each line's own characters.
+fn wash_wrapped(
+    layout: &crate::text_view::ScreenLayout,
+    viewport: Viewport<'_>,
+    cells: &mut CellGrid<'_>,
+    matches: &[ByteRange],
+    active: Option<ByteRange>,
+    (match_style, active_style): (Style, Style),
+) {
+    let Some(shown) = layout.shown() else {
+        return;
+    };
+    for m in matches {
+        // Sorted ascending: once one starts past the screen's last
+        // character every later one does too.
+        if m.start >= shown.end {
+            break;
+        }
+        if m.end <= shown.start {
+            continue;
+        }
+        let style = if Some(*m) == active {
+            active_style
+        } else {
+            match_style
+        };
+        layout.runs(m.start, m.end, |row, start_col, end_col| {
+            let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
+                return;
+            };
+            for col in start..end {
+                let cell = cells.at(CellCoord::new(
+                    viewport.cell_origin.row + row,
+                    viewport.cell_origin.col + col,
+                ));
+                cell.style = merge_styles(cell.style, style);
+            }
+        });
     }
 }
 
