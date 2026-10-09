@@ -35,6 +35,7 @@ budgets() {
 --lib	async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms
 --lib	async_runtime::tests::dispatch_parse_stays_under_the_parse_budget
 --lib	semantic_render::tests::full_buffer_summary_flatten_scales_on_large_grammar_file
+--lib	highlight::tests::wrapped_paint_of_a_five_megabyte_line_stays_within_budget
 --lib	project_index::tests::search_one_million_symbols_under_one_second
 --lib	message_bus::tests::round_trip_latency_is_within_budget
 --test dired_acceptance	dired_renders_10k_entries_within_200ms

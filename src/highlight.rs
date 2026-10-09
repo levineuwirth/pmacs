@@ -370,6 +370,10 @@ struct HighlightCache {
     /// (what the grid has shown of this parse); empty in-process, where
     /// `layers` covers the whole file.
     covered: Vec<(u32, u32)>,
+    /// Whether `bundle.source` is UTF-8 throughout, decoded once per
+    /// parse so that the wrapped walk decodes a line only as far as the
+    /// screen reaches (#337 review 1).
+    source_utf8: bool,
 }
 
 impl HighlightCache {
@@ -379,6 +383,7 @@ impl HighlightCache {
             layers: Vec::new(),
             line_offsets: Vec::new(),
             covered: Vec::new(),
+            source_utf8: false,
         }
     }
 }
@@ -395,6 +400,8 @@ pub struct SyntaxHighlightView {
     /// E7i: where the grid declares what it shows, so the buffer's next
     /// isolated parse returns spans for it, as the semantic path does.
     interest: Option<(crate::syntax::SharedSyntaxRegistry, crate::buffer::BufferId)>,
+    /// What the last wrapped render's layout read.
+    last_work: crate::text_view::LayoutWork,
 }
 
 impl SyntaxHighlightView {
@@ -410,6 +417,7 @@ impl SyntaxHighlightView {
             theme,
             cache: HighlightCache::empty(),
             interest: None,
+            last_work: crate::text_view::LayoutWork::default(),
         }
     }
 
@@ -429,6 +437,13 @@ impl SyntaxHighlightView {
     #[must_use]
     pub fn cached_span_count(&self) -> usize {
         self.cache.layers.iter().map(|l| l.spans.len()).sum()
+    }
+
+    /// Test helper: what the last render under word wrap read to lay out
+    /// the screen, the bound #337's review 1 asked for.
+    #[must_use]
+    pub fn last_layout_work(&self) -> crate::text_view::LayoutWork {
+        self.last_work
     }
 
     /// Refresh `self.cache` if the parse view's current bundle
@@ -482,11 +497,13 @@ impl SyntaxHighlightView {
             });
         }
         let line_offsets = compute_line_offsets(source);
+        let source_utf8 = std::str::from_utf8(source).is_ok();
         self.cache = HighlightCache {
             bundle: Some(bundle),
             layers,
             line_offsets,
             covered: Vec::new(),
+            source_utf8,
         };
     }
 
@@ -505,10 +522,16 @@ impl SyntaxHighlightView {
         let Some(isolated) = bundle.isolated.clone() else {
             return;
         };
-        let line_offsets = if stale {
-            compute_line_offsets(&bundle.source)
+        let (line_offsets, source_utf8) = if stale {
+            (
+                compute_line_offsets(&bundle.source),
+                std::str::from_utf8(&bundle.source).is_ok(),
+            )
         } else {
-            std::mem::take(&mut self.cache.line_offsets)
+            (
+                std::mem::take(&mut self.cache.line_offsets),
+                self.cache.source_utf8,
+            )
         };
         let want = visible_bytes(&line_offsets, bundle.source.len(), viewport);
         if let Some((registry, buffer)) = self.interest.as_ref() {
@@ -544,112 +567,63 @@ impl SyntaxHighlightView {
             layers,
             line_offsets,
             covered: set.covered.clone(),
+            source_utf8,
         };
     }
 
-    /// The row walk under word wrap (#335). A row is not a line there:
-    /// the walk carries a row cursor down the visible lines, as
-    /// [`crate::text_view::TextView::render`] does, lays each line out
-    /// once with the wrap rule its text is drawn by, and paints every
-    /// layer's spans on that line from the one layout. Before this the
-    /// walk took row `r` for the `r`-th visible line, so below the first
-    /// line that wrapped each row took the spans of a line further down.
+    /// The paint under word wrap (#335). A row is not a line there, so
+    /// the spans take their rows and columns from the screen's layout
+    /// ([`crate::text_view::ScreenLayout`]), the walk the text view draws
+    /// by, laid out once for the frame and bounded by the rows on screen.
+    /// Before #335 row `r` took the `r`-th visible line, so below the first
+    /// line that wrapped each row took the spans of a line further down;
+    /// before #337's review 1 the layout ran every visible line to its end,
+    /// however far below the window, and kept a place for each character.
+    ///
+    /// The layout is the parse's source, which the spans' bytes index: it
+    /// is the buffer once the parse has caught up with an edit.
     fn render_wrapped(
-        &self,
+        &mut self,
         source: &[u8],
         theme: &Theme,
         viewport: Viewport<'_>,
         cells: &mut CellGrid<'_>,
     ) {
-        let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
-        if max_cols == 0 {
+        let layout = crate::text_view::ScreenLayout::lay_out(
+            &viewport,
+            &crate::text_view::SourceText {
+                source,
+                line_offsets: &self.cache.line_offsets,
+                known_utf8: self.cache.source_utf8,
+            },
+        );
+        self.last_work = layout.work();
+        let Some(shown) = layout.shown() else {
             return;
-        }
-        let offsets = &self.cache.line_offsets;
-        let total_lines = offsets.len();
-        let folds = viewport.folds.filter(|m| !m.is_identity());
-        let start_line = {
-            let raw = line_at_offset(offsets, viewport.buffer_start as u32) as usize;
-            folds.map_or(raw, |m| m.visible_head_of(raw))
         };
-        // A line's text, its trailing newline trimmed as the text view
-        // trims it, and where it starts.
-        let line_text = |line: usize| -> (u32, Option<&str>) {
-            let start = offsets[line];
-            let end = offsets
-                .get(line + 1)
+        // Shallow-to-deep, and within a layer in the spans' order, as the
+        // row walk merges them: each cell takes its styles in that order.
+        for layer in &self.cache.layers {
+            // Spans are sorted by their start, so those past the screen's
+            // last character are skipped whole rather than tested.
+            let reach = layer
+                .spans
+                .partition_point(|s| u64::from(s.start_byte) < shown.end);
+            for span in layer.spans[..reach]
+                .iter()
+                .filter(|s| u64::from(s.end_byte) > shown.start)
                 .copied()
-                .unwrap_or(source.len() as u32);
-            let end = if end > start && source.get(end as usize - 1) == Some(&b'\n') {
-                end - 1
-            } else {
-                end
-            };
-            (
-                start,
-                std::str::from_utf8(&source[start as usize..end as usize]).ok(),
-            )
-        };
-        // The first line's rows above `buffer_start`, which the text view
-        // skips: the anchor may sit partway down a wrapped line.
-        let mut skip_rows = match line_text(start_line.min(total_lines - 1)) {
-            (start, Some(text)) => {
-                let within = (viewport.buffer_start as u32).saturating_sub(start);
-                crate::text_view::place_in_line(text, u64::from(within), max_cols).0
-            }
-            (_, None) => 0,
-        };
-        // Each character with cells: (byte index, byte end, row, columns).
-        let mut places: Vec<(usize, usize, u32, u32, u32)> = Vec::new();
-        let mut first_row: u32 = 0;
-        let mut line = start_line;
-        while first_row < max_rows && line < total_lines {
-            let this_line = line;
-            line = folds.map_or(this_line + 1, |m| m.next_visible(this_line));
-            let (line_start, text) = line_text(this_line);
-            places.clear();
-            let rows = match text {
-                Some(text) => crate::text_view::lay_out_wrapped_line(
-                    text,
-                    max_cols,
-                    folds.is_some_and(|m| m.is_head(this_line)),
-                    |idx, len, row, start_col, end_col| {
-                        places.push((idx, idx + len, row, start_col, end_col));
-                    },
-                ),
-                // The text view paints nothing of a line that is not UTF-8
-                // and gives it one row.
-                None => 1,
-            };
-            let line_len = text.map_or(0, str::len) as u32;
-            for layer in &self.cache.layers {
-                for span in layer
-                    .spans
-                    .iter()
-                    .filter(|s| s.start_byte < line_start + line_len && s.end_byte > line_start)
-                    .copied()
-                {
-                    let style = Self::style_for(theme, layer, span);
-                    if style == Style::default() {
-                        continue;
-                    }
-                    let lo = (span.start_byte.max(line_start) - line_start) as usize;
-                    let hi = (span.end_byte.min(line_start + line_len) - line_start) as usize;
-                    let from = places.partition_point(|p| p.1 <= lo);
-                    for &(idx, _, row, start_col, end_col) in &places[from..] {
-                        if idx >= hi {
-                            break;
-                        }
-                        let Some(row) = row
-                            .checked_sub(skip_rows)
-                            .map(|r| first_row + r)
-                            .filter(|&r| r < max_rows)
-                        else {
-                            continue;
-                        };
+            {
+                let style = Self::style_for(theme, layer, span);
+                if style == Style::default() {
+                    continue;
+                }
+                layout.runs(
+                    u64::from(span.start_byte),
+                    u64::from(span.end_byte),
+                    |row, start_col, end_col| {
                         let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
-                            continue;
+                            return;
                         };
                         for col in start..end {
                             let cell = cells.at(CellCoord::new(
@@ -658,12 +632,9 @@ impl SyntaxHighlightView {
                             ));
                             cell.style = merge_styles(cell.style, style);
                         }
-                    }
-                }
+                    },
+                );
             }
-            // `paint_line`'s advance: the rows it showed, at least one.
-            first_row += (rows - 1).saturating_sub(skip_rows) + 1;
-            skip_rows = 0;
         }
     }
 
@@ -2675,5 +2646,121 @@ mod tests {
         assert!(wrapped_paint_matches_unwrapped("markdown", "notes.md", md, 24, 0) >= 30);
         let partway = md.find("four").unwrap() as u64;
         assert!(wrapped_paint_matches_unwrapped("markdown", "notes.md", md, 24, partway) >= 20);
+    }
+
+    /// `src` parsed in process as `language_name`, and a highlight view
+    /// over that parse.
+    fn parsed_highlight_view(
+        language_name: &str,
+        file: &str,
+        src: &str,
+    ) -> (crate::buffer::Buffer, SyntaxHighlightView) {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+        (buf, SyntaxHighlightView::new(handle, reg.theme()))
+    }
+
+    /// One wrapped paint of `hv` from the top of a `rows` x `cols` screen.
+    fn paint_wrapped(
+        hv: &mut SyntaxHighlightView,
+        buf: &crate::buffer::Buffer,
+        rows: u32,
+        cols: u32,
+    ) -> Vec<Style> {
+        use crate::cell::{Cell, CellSize};
+        let mut backing = vec![Cell::default(); (rows * cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows, cols),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Wrap,
+            view_left: 0,
+        };
+        hv.render(buf, viewport, &mut grid);
+        backing.iter().map(|c| c.style).collect()
+    }
+
+    /// #337's review 1: under wrap the painter laid out every character of
+    /// a visible line and kept a place for each, however far below the
+    /// window the line ran --- on a five-megabyte comment, 103 ms and
+    /// 154 MB a paint. On a one-megabyte comment it now reads a screenful:
+    /// the walk stops at the first character below the last row and decodes
+    /// only the prefix it walks, while every row still takes the comment's
+    /// face and the code below it is off screen.
+    #[test]
+    fn under_wrap_a_long_lines_paint_reads_a_screenful() {
+        let src = format!("// {}\nfn tail() {{}}\n", "a ".repeat(500_000));
+        let (buf, mut hv) = parsed_highlight_view("rust", "long.rs", &src);
+        let (rows, cols) = (64u32, 115u32);
+        let styles = paint_wrapped(&mut hv, &buf, rows, cols);
+        let comment = themed("comment");
+        for row in 0..rows {
+            assert_eq!(styles[(row * cols) as usize], comment, "row {row}");
+        }
+        let work = hv.last_layout_work();
+        let screenful = ((rows + 1) * cols) as usize;
+        assert!(
+            work.walked <= screenful + 1,
+            "walked {} characters of a {}-byte line for a {rows}x{cols} screen",
+            work.walked,
+            src.len()
+        );
+        assert!(
+            work.decoded <= 2 * screenful + 64,
+            "decoded {} bytes of a {}-byte line for a {rows}x{cols} screen",
+            work.decoded,
+            src.len()
+        );
+    }
+
+    /// The review's measurement, kept as a budget: a wrapped paint over a
+    /// five-megabyte comment, the cache warm, at the review's 64 x 115.
+    /// The review measured a 103 ms median in a release build before the
+    /// layout was bounded.
+    #[test]
+    #[ignore = "wall-clock budget (D12): run by scripts/perf-budgets and CI's perf jobs"]
+    fn wrapped_paint_of_a_five_megabyte_line_stays_within_budget() {
+        let src = format!("// {}\nfn tail() {{}}\n", "a ".repeat(2_500_000));
+        let (buf, mut hv) = parsed_highlight_view("rust", "long.rs", &src);
+        let (rows, cols) = (64u32, 115u32);
+        paint_wrapped(&mut hv, &buf, rows, cols);
+        let mut each: Vec<std::time::Duration> = (0..20)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                paint_wrapped(&mut hv, &buf, rows, cols);
+                t.elapsed()
+            })
+            .collect();
+        each.sort();
+        let median = each[each.len() / 2];
+        eprintln!("wrapped paint of a 5 MB line at {rows}x{cols}: median {median:?} over 20");
+        assert!(
+            median < std::time::Duration::from_millis(10),
+            "a wrapped paint of a 5 MB line took {median:?}, past its 10 ms budget"
+        );
     }
 }
