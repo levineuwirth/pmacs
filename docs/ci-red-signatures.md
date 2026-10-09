@@ -2776,7 +2776,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 30 items in the list below.
+Tally (311-runs): 31 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2822,6 +2822,8 @@ Tally (311-runs): 30 items in the list below.
 - `20261008T132308Z-224598` at `1218ba1` (the same PR's second addendum gate, `05-sweep`).
 - `20261008T195204Z-1042685` at `bca69d4` (the pre-release PR's gate, both sweeps; recorded with
   that PR, below).
+- `20261008T232032Z-2370178` at `334cc13` (the pre-release PR's fix round 1 gate, both sweeps;
+  recorded with that round, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -4673,6 +4675,105 @@ row passed in both sweeps, which is non-reproduction and nothing more.
 
 So, at the pre-release PR: #316 moves to five, #251 to three, R7 to thirty-one; #311's list of
 runs reads at thirty; #323 stands at three, its row's in-editor arm removed on the branch;
+every other count above stands.
+
+### The pre-release PR's fix round 1: PR #337's run at `334cc13`, #282's sixth, its gate with #316's sixth and #339's first, and #311's list at thirty-one
+
+Recorded 2026-10-09 by the pre-release pull request's fix round 1, #337 at `334cc13` (eight
+signed commits on `391bf96`, three of them this round's: the grid's syntax painter under wrap,
+markdown's strong and emphasis faces, and the notes). The run was read from the jobs endpoint by
+conclusion and through all six test legs' logs; none was rerun.
+
+#### `CI` 37861280461 at `334cc13`, attempt 1 of 1: #282's sixth
+
+`pull_request`, the merge `ac884c4` (`334cc13` into `69e3f55`, read from the test logs' checkout
+line), created 23:46:30Z and completed 00:18:37Z: `failure`.
+
+Tally (pr337-ci-334cc13): 19 = 17 + 1 + 1.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 113597336670 | success |
+| Format | 113597336802 | success |
+| Lint (lua54) | 113597336895 | success |
+| Changed paths | 113597336901 | success |
+| Lint (luajit) | 113597337025 | success |
+| GPU Render (headless) | 113597401919 | success |
+| Test (crdt) | 113597401984 | success |
+| M6 Perf Gates | 113597401985 | success |
+| M1 Acceptance Gates | 113597402009 | success |
+| Perf budgets (debug) | 113597402015 | success |
+| Test (macos-latest / lua54) | 113597402033 | success |
+| Test (ubuntu-latest / lua54) | 113597402043 | success |
+| M5 Perf Gates | 113597402069 | success |
+| M10 Perf Gates (crdt) | 113597402076 | success |
+| Test (ubuntu-latest / luajit) | 113597402086 | success |
+| M4 Perf Gates | 113597402104 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 113597402108 | failure |
+| Test (macos-latest / luajit) | 113597402143 | success |
+| Docs consistency | 113597403860 | skipped |
+
+Tally (pr337-ci-334cc13-success): 17 rows of the table above with `result` = `success`.
+
+Tally (pr337-ci-334cc13-failures): 1 row of the table above with `result` = `failure`.
+
+- `Test (ubuntu-latest / luajit, no crdt)` 113597402108, `failure`:
+  `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`,
+  **#282's sixth occurrence**, all three fragments read against the job's own log: `*lsp* names
+  the request and the code: []`; `WIRE *errors* gained ["[lsp] LSP: default-rust refused
+  textDocument/prepareRename as a client error, -32602 InvalidParams: No references found at
+  position"]` and `WIRE label "ready", last_error None`; and `test result: FAILED. 4 passed; 1
+  failed; 2 ignored` (`running 7 tests`, `finished in 57.86s`). Between the row's stdout header
+  and its panic the trace holds 94 `$/progress` frames, 78 of them `rustAnalyzer/cachePriming`
+  reports. It was the job's only failure, against 190 `test result: ok`. The round's commits
+  touch nothing on the LSP path; that is read, not a demonstration. Commented on #282, not
+  rerun.
+- The other five test legs pair every `running` line with `test result: ok`: 194 on each macOS
+  leg, 193 on each other Ubuntu `test` leg, 192 on `Test (crdt)`. The round's new rows (the
+  wrapped render_frame row, the painter's oracle, the two layout rows and the faces' pin) passed
+  on every leg.
+- **#323's row** passed on all six legs, its `process` arm alone blocking 2,992 to 3,163 ms.
+  #316's and #339's rows passed on every leg, which is non-reproduction and nothing more.
+
+#### `Grammar fuzz` 37861280552 at `334cc13`
+
+Attempt 1 of 1, `success`, created 23:46:30Z and completed 00:36:12Z: `Grammar fuzz`
+113597336867 and `Grammar fuzz (asan-strict)` 113597337181, both on GCC 13.3.0. Its log again
+reads `fuzz-grammars: changed since 391bf96…, run 600 s:` with no grammar named, so
+markdown_inline, whose overlay the round changed, ran 15 s after its seeds like every grammar:
+300 mutated inputs, 763 inputs, 8,366 parses, no finding, its worker replay 48 inputs, 47
+answered, 1 contained, 0 crashed, in each job: **#336**, seen again. The ten-minute
+markdown_inline run is taken locally (the pull request's body).
+
+#### The pull request's gate
+
+`scripts/gate --protocol`, `20261008T232032Z-2370178` at `334cc13`: six of eight. fmt, clippy,
+clippy-luajit, doc, build and diff-check ok; no `pmacs --daemon` survived (identified by
+environ). `06-sweep`: 201 paired result lines, 5,366 passed, 1 failed, 64 ignored;
+`07-sweep-luajit`: 201 paired, 4,923 / 3 / 50. Each failure matched by its required fragments:
+
+- #311's row in both sweeps (`Could not find module ‘Prelude’`, the trace reaching
+  `processi`), so #311's list gains it;
+- `e7i_review3_probes::e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`
+  in `07-sweep-luajit`, **#316's sixth occurrence** under the reading its third was counted by:
+  the assertion's template, `kill 2: nothing held the switch's follow-up parse, which started a
+  worker at once and installed`, and `death=killed, " +* ` followed in the same line by
+  `parse:killed`, with `busy=false`, `tree=true` and `unit=pid_2605001`; `test result: FAILED.
+  10 passed; 1 failed; 0 ignored` (`finished in 15.02s`). Its two literal fragments name the
+  first kill, so as written they do not match; commented on #316, a split being the owner's
+  call. The row passed in `06-sweep`;
+- `e7h_grammar_gate_acceptance::e7h_a_crash_only_a_sequence_brings_back_is_found_and_fails_the_run`
+  in `07-sweep-luajit`, **#339, filed, its first occurrence**: the report row holding
+  `"crashes=0"`, `"in_sequence=0"` and `"unconfirmed=1"`, `- **lua** hang `one parse over 1000
+  ms`, reproduced: no`, and `test result: FAILED. 22 passed; 1 failed; 2 ignored`. It passed
+  in `06-sweep` and in both sweeps of the previous gate.
+
+A niced single-grammar `scripts/fuzz-grammars` run (one fuzz worker) ran beside the gate. R7's
+and #251's rows passed in both sweeps, which is non-reproduction and nothing more.
+
+So, at the pre-release PR's fix round 1: #282 moves to six and #316 to six; #339 is filed at
+one; #311's list of runs reads at thirty-one; #323 stands at three, its row's in-editor arm
+removed on the branch (the pull request's body names it and #310 as closing at the merge);
 every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
