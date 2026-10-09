@@ -74,14 +74,17 @@ use crate::syntax::{
 /// Which boundary a parse runs behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Isolation {
-    /// In the editor's own process, as before E7i.
+    /// In the editor's own process, as before E7i. Since 2.0.0 no setting
+    /// selects it: only the suite's `pmacs.parse._parse_in_editor`, for
+    /// rows that hold a worker's answers to the editor's own.
     Native,
-    /// A worker process running the unit.
+    /// A worker process running the unit, `syntax.isolation`'s one choice.
     Process,
 }
 
 impl Isolation {
-    /// The mode `syntax.isolation` names: `"none"` or `"process"`.
+    /// The mode a dispatch names: `"process"`, or `"none"`, which only
+    /// `pmacs.parse._parse_in_editor` names since 2.0.0.
     #[must_use]
     pub fn from_config(value: &str) -> Option<Self> {
         match value {
@@ -1294,9 +1297,9 @@ pub fn isolation_report() -> Option<String> {
     Some(report)
 }
 
-/// Trace an in-process parse (`syntax.isolation` none) beside the units'
-/// own events, when `PMACS_E7I_TRACE` is set: `unit_us` is the parse's
-/// whole time on the worker thread, as a unit's is inside the unit.
+/// Trace an in-process parse (`pmacs.parse._parse_in_editor`) beside the
+/// units' own events, when `PMACS_E7I_TRACE` is set: `unit_us` is the
+/// parse's whole time on the worker thread, as a unit's is inside the unit.
 pub fn trace_native_parse(bytes: usize, layers: usize, root: Duration, total: Duration) {
     let host = host();
     if host.trace.is_none() {

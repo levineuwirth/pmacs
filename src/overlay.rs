@@ -326,8 +326,17 @@ impl View for BufferStyleOverlay {
             return;
         }
         let start_line = line_at_offset(&line_offsets, viewport.buffer_start);
+        let layout = screen_layout(buf, &line_offsets, viewport);
         for span in spans {
-            render_buffer_style_span(buf, &line_offsets, start_line, viewport, cells, span);
+            render_buffer_style_span(
+                buf,
+                &line_offsets,
+                start_line,
+                viewport,
+                layout.as_ref(),
+                cells,
+                span,
+            );
         }
     }
 }
@@ -367,18 +376,52 @@ fn line_end(buf: &Buffer, line_offsets: &[u64], line: usize) -> u64 {
     }
 }
 
+/// The screen's layout under word wrap, for [`render_buffer_style_span`]:
+/// built once per render and shared by every span it paints, or `None`
+/// under `Truncate`, where a line is one row.
+pub(crate) fn screen_layout(
+    buf: &Buffer,
+    line_offsets: &[u64],
+    viewport: Viewport<'_>,
+) -> Option<crate::text_view::ScreenLayout> {
+    crate::text_view::ScreenLayout::wrapped(
+        &viewport,
+        &crate::text_view::BufferText { buf, line_offsets },
+    )
+}
+
 /// Paint one buffer-byte span into the cells `viewport` shows, merging
 /// its style over what is there. Shared with `LspStyleView` (E6b.2),
 /// whose tokens arrive in the same byte coordinates.
+///
+/// Under word wrap (`layout`, from [`screen_layout`]) the cells are the
+/// layout's, the walk the text is drawn by (#338); a row per line would
+/// mark a row above the text below a wrapped line.
 pub(crate) fn render_buffer_style_span(
     buf: &Buffer,
     line_offsets: &[u64],
     start_line: usize,
     viewport: Viewport<'_>,
+    layout: Option<&crate::text_view::ScreenLayout>,
     cells: &mut CellGrid<'_>,
     span: BufferStyleSpan,
 ) {
     if span.start >= span.end {
+        return;
+    }
+    if let Some(layout) = layout {
+        layout.runs(span.start, span.end, |row, start_col, end_col| {
+            let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
+                return;
+            };
+            for col in start..end {
+                let cell = cells.at(CellCoord::new(
+                    viewport.cell_origin.row + row,
+                    viewport.cell_origin.col + col,
+                ));
+                cell.style = merge_styles(cell.style, span.style);
+            }
+        });
         return;
     }
     let first_line = line_at_offset(line_offsets, span.start);

@@ -29,8 +29,9 @@ the same buffers concurrently with live cursor/selection presence.
 
 ## Status
 
-**v1.1.0 --- stable core, active development, and the first release
-with prebuilt binaries.** The v1.0 gate (the instance/frontend
+**v2.0.0 --- stable core, active development, and the release in which
+every buffer's parse runs in a worker process, so an installation is
+three binaries, not two.** The v1.0 gate (the instance/frontend
 partition, the Lua surface, and a REPL package audited to use zero
 direct Rust core access) shipped some time ago. Development since has
 grown the semantic frontend protocol release by release, brought the
@@ -223,9 +224,8 @@ runaway or crashing parse is stopped without taking the editor down
 `syntax.parse-unit-path`. The release archive carries it beside `pmacs`,
 and a release without it fails before upload; a source build makes it
 with `cargo build --release -p pmacs-parse-unit` (below). Without the
-worker nothing is highlighted, and the editor says so once;
-`syntax.isolation` set to `"none"` parses in the editor instead, as
-releases before E7i did, without that protection.
+worker nothing is highlighted, and the editor says so once. Since 2.0.0
+no setting parses in the editor instead, as releases before E7i did.
 
 Verify a download:
 

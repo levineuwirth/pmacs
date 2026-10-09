@@ -1,6 +1,6 @@
 [package]
 name = "pmacs-syntax"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.95"
 description = "pmacs's tree-sitter parse logic, shared by the editor and its parse units"

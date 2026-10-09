@@ -1323,6 +1323,91 @@ mod tests {
     }
 
     #[test]
+    fn markdown_highlights_are_the_overlays_and_speak_only_recognized_captures() {
+        // #310: both markdown grammars drive highlighting from the in-repo
+        // overlays, which compile against the bundled grammars (the
+        // node-name gate, as for LaTeX), and every capture they emit is an
+        // exact entry of the default theme. Exact, not reached by dropping
+        // dotted segments: the crate's `@text.*` resolved to nothing, and
+        // its `@none` would have fallen through to the face it sits in.
+        for (name, overlay) in [
+            ("markdown", MARKDOWN_HIGHLIGHTS),
+            ("markdown_inline", MARKDOWN_INLINE_HIGHLIGHTS),
+        ] {
+            let entry = BUILTIN_LANGUAGES
+                .iter()
+                .find(|l| l.name == name)
+                .unwrap_or_else(|| panic!("`{name}` entry"));
+            assert_eq!(
+                entry.highlights_query,
+                &[overlay],
+                "`{name}` carries the in-repo overlay alone"
+            );
+        }
+        let theme = crate::highlight::Theme::default_dark();
+        let reg = SyntaxRegistry::new();
+        for name in ["markdown", "markdown_inline"] {
+            let query = reg
+                .highlights_query(name)
+                .unwrap_or_else(|| panic!("{name} highlights compile against the grammar"));
+            let names = query.capture_names();
+            assert!(!names.is_empty(), "{name} captures something");
+            for capture in names {
+                assert!(
+                    theme.by_capture.contains_key(*capture),
+                    "{name}'s @{capture} is an exact entry of the default theme; got {names:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_markup_faces_reach_markdown_inline_alone() {
+        // The theme's two prose faces (`markup.strong`, bold with no hue;
+        // `markup.emphasis`, italic with no hue) are for markdown's inline
+        // overlay. A capture of another grammar that reached either, by
+        // its name or by dropping dotted segments, would be repainted by
+        // them: the #146 lesson, which kept the `@text.*` family out.
+        let theme = crate::highlight::Theme::default_dark();
+        let reg = SyntaxRegistry::new();
+        let reaches = |capture: &str| {
+            ["markup.strong", "markup.emphasis"]
+                .into_iter()
+                .find(|face| {
+                    capture == *face
+                        || capture
+                            .strip_prefix(face)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                })
+        };
+        let mut used = Vec::new();
+        for entry in BUILTIN_LANGUAGES {
+            let Some(query) = reg.highlights_query(entry.name) else {
+                continue;
+            };
+            for capture in query.capture_names() {
+                if let Some(face) = reaches(capture) {
+                    assert_eq!(
+                        entry.name, "markdown_inline",
+                        "`{}`'s @{capture} reaches the prose face `{face}`",
+                        entry.name
+                    );
+                    used.push((*capture).to_owned());
+                }
+            }
+        }
+        used.sort_unstable();
+        assert_eq!(used, ["markup.emphasis", "markup.strong"]);
+        assert_eq!(
+            theme.lookup("markup.strong"),
+            crate::cell::Style {
+                bold: true,
+                ..crate::cell::Style::default()
+            }
+        );
+    }
+
+    #[test]
     fn language_for_path_resolves_latex_extensions() {
         // `.tex`/`.latex`/`.sty`/`.cls` all resolve to the LaTeX grammar via
         // the same extension path as every bundled language — the single

@@ -1,6 +1,6 @@
 [package]
 name = "pmacs-protocol"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Wire types for the pmacs daemon ↔ frontend protocol (the SemanticFrame family, capabilities, attach handshake)"

@@ -31,10 +31,22 @@ use pmacs::editor::EditorState;
 use pmacs::protocol::{ByteRange, FrontendId, InstanceMessage};
 use pmacs::semantic_render::SemanticRenderState;
 
-/// The color the rows theme markdown's `@text.*` captures with (#310:
-/// the default theme styles none of them), so the parse's spans are told
-/// from every other style on screen.
+/// The color the rows theme markdown's captures with, so the parse's spans
+/// are told from every other style on screen.
 const MARK: Color = Color::Rgb(0x7b, 0x1f, 0xa2);
+
+/// `MARK` on every capture markdown's overlays emit that has a color or
+/// an attribute (`builtin/queries/markdown*/highlights.scm`). Until #310's
+/// overlays these rows themed `text`, the prefix of the crate's `@text.*`
+/// captures, which the default theme styled not at all.
+const MARK_THEME: &str = "pmacs.theme.merge { \
+    ['keyword.control'] = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    keyword = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    string = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    constant = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    operator = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    ['markup.strong'] = { fg = { 0x7b, 0x1f, 0xa2 } }, \
+    ['markup.emphasis'] = { fg = { 0x7b, 0x1f, 0xa2 } } }";
 
 const ROWS: u32 = 30;
 const COLS: u32 = 100;
@@ -273,7 +285,7 @@ fn editor_on_notes(dir: &Path, unit: &Path, settings: &str) -> (EditorState, Pat
              pmacs.config.set('syntax.isolation', 'process')\n\
              pmacs.config.set('syntax.parse-unit-path', {:?})\n\
              pmacs.config.set('ui.line-wrap', 'truncate')\n\
-             pmacs.theme.merge {{ text = {{ fg = {{ 0x7b, 0x1f, 0xa2 }} }} }}\n\
+             {MARK_THEME}\n\
              {settings}\n\
              pmacs.buffer.find_or_open({:?})",
             unit.display().to_string(),
@@ -620,7 +632,7 @@ fn e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans() {
              pmacs.config.set('syntax.isolation', 'process')\n\
              pmacs.config.set('syntax.parse-unit-path', {:?})\n\
              pmacs.config.set('ui.line-wrap', 'truncate')\n\
-             pmacs.theme.merge {{ text = {{ fg = {{ 0x7b, 0x1f, 0xa2 }} }} }}\n\
+             {MARK_THEME}\n\
              pmacs.buffer.find_or_open({:?})",
             real_unit().display().to_string(),
             path.display().to_string()

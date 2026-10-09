@@ -31,6 +31,16 @@ fn say(line: &str) {
     let _ = writeln!(std::io::stderr(), "e7i review 1: {line}");
 }
 
+/// The two places a parse can run, each with the init line that puts it
+/// there: the editor's own process, which since 2.0.0 only the suite's
+/// `pmacs.parse._parse_in_editor` reaches, and the buffer's worker,
+/// `syntax.isolation`'s one choice. A row holding the worker's answers to
+/// the editor's own runs both, the editor first.
+const BOUNDARIES: [(&str, &str); 2] = [
+    ("the editor", "pmacs.parse._parse_in_editor(true)"),
+    ("process", "pmacs.config.set('syntax.isolation', 'process')"),
+];
+
 /// Wait until `report` satisfies `done`, returning its last text.
 fn wait_report(
     report: &Path,
@@ -406,9 +416,11 @@ fn e7i_review1_a_worker_does_not_outlive_its_editor() {
 
 /// Folds through the worker are the folds the editor computed in-process:
 /// over a deeply nested file and over a 600 KB real one, at many positions,
-/// `pmacs.fold.close` then `pmacs.fold.folds` give the same ranges under
-/// `none` and `process`, and `close_all` the same top-level set. The time a
-/// whole sweep of fold commands takes in each mode goes to stderr.
+/// `pmacs.fold.close` then `pmacs.fold.folds` give the same ranges in the
+/// editor and under `process`, and `close_all` the same top-level set. The
+/// time a whole sweep of fold commands takes in each mode goes to stderr.
+/// Since 2.0.0 no setting parses in the editor; the oracle is reached by
+/// the suite's own route, `pmacs.parse._parse_in_editor`.
 #[test]
 fn e7i_review1_folds_through_the_unit_are_the_folds_in_the_editor() {
     let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -432,10 +444,10 @@ fn e7i_review1_folds_through_the_unit_are_the_folds_in_the_editor() {
             .collect::<Vec<_>>()
             .join(",");
         let mut seen = Vec::new();
-        for mode in ["none", "process"] {
+        for (mode, route) in BOUNDARIES {
             let init = format!(
                 "pmacs.lsp.config = {{}}\n\
-                 pmacs.config.set('syntax.isolation', '{mode}')\n\
+                 {route}\n\
                  local b = pmacs.buffer.find_or_open({path:?})\n\
                  local function folds()\n\
                    local out = {{}}\n\
@@ -496,46 +508,54 @@ fn e7i_review1_folds_through_the_unit_are_the_folds_in_the_editor() {
 /// synchronous call waits for the in-flight parse (the per-buffer order
 /// lock) before its own, under its own 1 s deadline. How long it blocked the
 /// main thread, what it returned, and what is installed after the async
-/// parse settles go to stderr, for each mode.
+/// parse settles go to stderr.
+///
+/// Until 2.0.0 it measured the same in the editor (`syntax.isolation`
+/// `none`), and that arm was #323: #301's parse in the editor's process is
+/// one no deadline reaches, so the arm blocked the main thread 30.6 to
+/// 100.9 s where it finished and, three times on CI, outlasted the row's
+/// 120 s wait. Its subject was that hang, which the worker exists to stop;
+/// with the setting gone no user reaches it, and the suite's in-editor
+/// route (`pmacs.parse._parse_in_editor`) would keep the hang in CI for a
+/// figure E7i review 1 already recorded. So the arm retires with the
+/// setting, and the row measures the worker alone.
 #[test]
 fn e7i_review1_parse_now_on_a_buffer_mid_parse() {
     let openers =
         std::fs::read_to_string(repo().join("fuzz/regress/markdown/301-nested-openers-98.input"))
             .expect("#301's input");
-    for mode in ["none", "process"] {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
-        let file = dir.join("mid.md");
-        std::fs::write(&file, "# A heading\n\nSome *emphasis*.\n").expect("mid.md");
-        let init = format!(
-            "pmacs.lsp.config = {{}}\n\
-             pmacs.config.set('syntax.isolation', '{mode}')\n\
-             pmacs.config.set('syntax.parse-deadline-ms', 2000)\n\
-             local b = pmacs.buffer.find_or_open({file:?})\n\
-             pmacs.async(function()\n\
-               local t0 = pmacs.editor.monotonic_ms()\n\
-               while not pmacs.parse.tree(b) and pmacs.editor.monotonic_ms() - t0 < 30000 do\n\
-                 pmacs.workers.sleep(50):await()\n\
-               end\n\
-               pmacs.workers.sleep(300):await()\n\
-               b:insert(b:len(), {openers:?})\n\
-               pmacs.parse._dispatch(b, 'markdown')\n\
-               pmacs.workers.sleep(200):await()\n\
-               local s0 = pmacs.editor.monotonic_ms()\n\
-               local ok, got = pcall(pmacs.parse._parse_now, b, 'markdown', 1000)\n\
-               local blocked = pmacs.editor.monotonic_ms() - s0\n\
-               pmacs.workers.sleep(4000):await()\n\
-               local t = pmacs.parse.tree(b)\n\
-               local f = assert(io.open('{{report}}', 'w'))\n\
-               f:write(string.format('blocked=%d ok=%s got=%s installed=%s buffer=%d\\n', blocked,\n\
-                 tostring(ok), ok and 'tree' or tostring(got):sub(1, 80), t and t:source_len() or '-', b:len()))\n\
-               f:close()\n\
-             end)\n",
-            file = file.display().to_string(),
-        );
-        let (daemon, text) = run_init(&init, Duration::from_mins(2), |t| t.ends_with('\n'));
-        say(&format!("_parse_now mid-parse in {mode}: {}", text.trim()));
-        drop(daemon);
-    }
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let file = dir.join("mid.md");
+    std::fs::write(&file, "# A heading\n\nSome *emphasis*.\n").expect("mid.md");
+    let init = format!(
+        "pmacs.lsp.config = {{}}\n\
+         pmacs.config.set('syntax.isolation', 'process')\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 2000)\n\
+         local b = pmacs.buffer.find_or_open({file:?})\n\
+         pmacs.async(function()\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while not pmacs.parse.tree(b) and pmacs.editor.monotonic_ms() - t0 < 30000 do\n\
+             pmacs.workers.sleep(50):await()\n\
+           end\n\
+           pmacs.workers.sleep(300):await()\n\
+           b:insert(b:len(), {openers:?})\n\
+           pmacs.parse._dispatch(b, 'markdown')\n\
+           pmacs.workers.sleep(200):await()\n\
+           local s0 = pmacs.editor.monotonic_ms()\n\
+           local ok, got = pcall(pmacs.parse._parse_now, b, 'markdown', 1000)\n\
+           local blocked = pmacs.editor.monotonic_ms() - s0\n\
+           pmacs.workers.sleep(4000):await()\n\
+           local t = pmacs.parse.tree(b)\n\
+           local f = assert(io.open('{{report}}', 'w'))\n\
+           f:write(string.format('blocked=%d ok=%s got=%s installed=%s buffer=%d\\n', blocked,\n\
+             tostring(ok), ok and 'tree' or tostring(got):sub(1, 80), t and t:source_len() or '-', b:len()))\n\
+           f:close()\n\
+         end)\n",
+        file = file.display().to_string(),
+    );
+    let (daemon, text) = run_init(&init, Duration::from_mins(2), |t| t.ends_with('\n'));
+    say(&format!("_parse_now mid-parse in process: {}", text.trim()));
+    drop(daemon);
 }
 
 /// The TUI grid across its worker's death: a real `paint_frame` over a
@@ -714,7 +734,9 @@ fn e7i_review1_reads_beside_an_allocating_parse() {
 /// in it) and the read answers nothing. `tree:sexp()` of a large file's root
 /// is such a read. This row times it in-process and through the unit for a
 /// file of `PMACS_REVIEW_SEXP_KB` kilobytes of Rust (default 600) and prints
-/// both, with whether the unit survived.
+/// both, with whether the unit survived: the editor's own time is the
+/// baseline the bound is read against, reached since 2.0.0 by the suite's
+/// route, `pmacs.parse._parse_in_editor`.
 #[test]
 fn e7i_review1_a_long_read_through_the_unit() {
     let kb: usize = std::env::var("PMACS_REVIEW_SEXP_KB")
@@ -733,10 +755,10 @@ fn e7i_review1_a_long_read_through_the_unit() {
         n += 1;
     }
     std::fs::write(&file, &text).expect("long.rs");
-    for mode in ["none", "process"] {
+    for (mode, route) in BOUNDARIES {
         let init = format!(
             "pmacs.lsp.config = {{}}\n\
-             pmacs.config.set('syntax.isolation', '{mode}')\n\
+             {route}\n\
              local b = pmacs.buffer.find_or_open({file:?})\n\
              pmacs.async(function()\n\
                local t0 = pmacs.editor.monotonic_ms()\n\
@@ -1191,6 +1213,175 @@ fn e7i_review1_the_release_archive_requires_the_parse_worker() {
     );
 }
 
+/// The release replays the worker it ships (2.0.0). Every check
+/// `release.yml` made of the staged `pmacs-parse-unit` (present, executable,
+/// `--version`, the glibc floor) passes a worker that cannot parse a byte.
+/// Since 2.0.0 the build job runs `scripts/release-replay-worker` on the
+/// staged archive after those checks and before the checksum, so before
+/// upload. Driven here on archives staged as the release stages them, with
+/// the debug worker and harness this suite builds, markdown only and from
+/// this tree (no network), at a 1 s deadline: the real worker passes,
+/// #296's and #301's inputs contained; a stand-in that reports the version
+/// the release checks for and then ends fails, "did not answer"; and the
+/// real worker crashing as it parses a markdown layer (the debug build's
+/// `PMACS_PARSE_UNIT_TEST_CRASH`) fails.
+#[test]
+#[allow(clippy::too_many_lines)] // one release step, three archives
+fn the_release_replays_the_archived_worker_and_fails_one_that_cannot_parse() {
+    let workflow =
+        std::fs::read_to_string(repo().join(".github/workflows/release.yml")).expect("release.yml");
+    let at = |needle: &str| {
+        workflow
+            .find(needle)
+            .unwrap_or_else(|| panic!("release.yml carries {needle:?}"))
+    };
+    let replay =
+        at("scripts/release-replay-worker --archive \"${{ steps.stage.outputs.archive }}\"");
+    assert!(
+        at("\"staging/$name/pmacs-parse-unit\" --version") < replay
+            && at("- name: Assert the glibc floor") < replay
+            && replay < at("- name: Checksum")
+            && replay < at("uses: actions/upload-artifact"),
+        "the replay runs after the staged worker's checks and before the checksum and upload"
+    );
+    assert!(
+        at("cargo build --release --bin pmacs_grammar_fuzz") < replay,
+        "the harness is built from the checkout before the replay"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("target dir")
+        .join("pmacs-parse-unit");
+    let standin = dir.path().join("standin-worker");
+    let version = format!("pmacs-parse-unit {} protocol 0", env!("CARGO_PKG_VERSION"));
+    std::fs::write(
+        &standin,
+        format!(
+            "#!/bin/sh\ncase \"${{1:-}}\" in --version) echo '{version}'; exit 0 ;; esac\nexit 0\n"
+        ),
+    )
+    .expect("stand-in");
+    let stage = |label: &str, worker: &Path| -> PathBuf {
+        let name = format!("pmacs-{}-test", env!("CARGO_PKG_VERSION"));
+        let staging = dir.path().join(label).join(&name);
+        std::fs::create_dir_all(&staging).expect("staging");
+        std::fs::copy(worker, staging.join("pmacs-parse-unit")).expect("stage the worker");
+        let ok = Command::new("chmod")
+            .arg("+x")
+            .arg(staging.join("pmacs-parse-unit"))
+            .status()
+            .expect("chmod")
+            .success();
+        assert!(ok, "chmod");
+        let archive = dir.path().join(label).join(format!("{name}.tar.gz"));
+        let ok = Command::new("tar")
+            .arg("-C")
+            .arg(dir.path().join(label))
+            .arg("-czf")
+            .arg(&archive)
+            .arg(&name)
+            .status()
+            .expect("tar")
+            .success();
+        assert!(ok, "tar");
+        archive
+    };
+    let replay = |label: &str, worker: &Path, env: &[(&str, &str)]| {
+        let archive = stage(label, worker);
+        let out = Command::new(repo().join("scripts/release-replay-worker"))
+            .current_dir(repo())
+            .envs(env.iter().copied())
+            .arg("--archive")
+            .arg(&archive)
+            .arg("--harness")
+            .arg(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"))
+            .arg("--out")
+            .arg(dir.path().join(label).join("replay"))
+            .args(["--sources", "checkout", "--grammar", "markdown", "--"])
+            .args(["--max-inputs", "3", "--deadline-ms", "1000"])
+            .output()
+            .expect("run the release's replay");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        say(&format!("the release's replay, {label}: {:?}", out.status));
+        (out.status.success(), text)
+    };
+
+    let (ok, text) = replay("real", &real, &[]);
+    assert!(ok, "the real worker passes the release's replay:\n{text}");
+    assert!(
+        text.contains("parsed every grammar it was given, and crashed on nothing")
+            && text.contains("markdown contained:"),
+        "it parsed seeds and contained the regression inputs:\n{text}"
+    );
+
+    let got = Command::new("sh")
+        .arg(&standin)
+        .arg("--version")
+        .output()
+        .expect("the stand-in's version");
+    assert!(
+        String::from_utf8_lossy(&got.stdout)
+            .starts_with(&format!("pmacs-parse-unit {} ", env!("CARGO_PKG_VERSION"))),
+        "the stand-in passes the release's --version check, so only the replay can tell"
+    );
+    let (ok, text) = replay("standin", &standin, &[]);
+    assert!(
+        !ok,
+        "a worker that parses nothing fails the release:\n{text}"
+    );
+    assert!(
+        text.contains("did not answer")
+            && text.contains("could not be replayed (replay-unit exit 2"),
+        "it fails as a worker that did not answer:\n{text}"
+    );
+
+    let (ok, text) = replay(
+        "crash",
+        &real,
+        &[("PMACS_PARSE_UNIT_TEST_CRASH", "markdown: ")],
+    );
+    assert!(
+        !ok,
+        "a worker that crashes as it parses fails the release:\n{text}"
+    );
+    assert!(
+        text.contains("markdown CRASHED") && text.contains("the archived worker crashed"),
+        "it fails as a crash:\n{text}"
+    );
+}
+
+/// A release says what it is (2.0.0): its notes are reviewed in the tree as
+/// `docs/releases/<version>.md`, `release.yml`'s preflight refuses a tag
+/// whose version has none before anything is built, and the notes step
+/// leads the published notes with them. So the crate's own version has its
+/// notes here, and a version bump without them fails this row.
+#[test]
+fn the_release_s_notes_are_in_the_tree_and_lead_its_page() {
+    let version = env!("CARGO_PKG_VERSION");
+    let notes = std::fs::read_to_string(repo().join(format!("docs/releases/{version}.md")))
+        .unwrap_or_else(|e| panic!("docs/releases/{version}.md: {e}"));
+    assert!(
+        notes.starts_with(&format!("# pmacs {version}\n")),
+        "the notes name their release"
+    );
+    let workflow =
+        std::fs::read_to_string(repo().join(".github/workflows/release.yml")).expect("release.yml");
+    assert!(
+        workflow.contains("if [ ! -s \"docs/releases/$base.md\" ]; then"),
+        "the preflight refuses a tag without notes"
+    );
+    assert!(
+        workflow.contains("\"docs/releases/${version%%-*}.md\" > notes.md"),
+        "the notes step leads with them"
+    );
+}
+
 /// The strict-aliasing guard (E7h fix round 1) refuses a build of the
 /// grammar C that `-fno-strict-aliasing` does not reach. It runs in the root
 /// package's `build.rs`, so it guards a build of `pmacs`; since E7i the C
@@ -1417,6 +1608,58 @@ fn e7i_review1_the_parse_limit_settings_say_where_they_are_reactive() {
             "{name} says where its bound is reactive: {description}"
         );
     }
+}
+
+/// 2.0.0 removed `syntax.isolation`'s `none`, the switch back to parsing in
+/// the editor where no deadline or memory limit reaches the parse. A user's
+/// `none` is refused at the setting, naming the one choice left, and the
+/// setting's own description says what became of it, as the settings help
+/// renders it. The suite's route to the editor's parse,
+/// `pmacs.parse._parse_in_editor`, is no setting.
+#[test]
+fn syntax_isolation_refuses_none_and_names_its_one_choice() {
+    let state = pmacs::editor::EditorState::new_with_roots(&common::iso::roots());
+    let (ok, err, choices, value, description, settings): (
+        bool,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = state
+        .lua_host
+        .lua()
+        .load(
+            "local ok, err = pcall(pmacs.config.set, 'syntax.isolation', 'none')\n\
+             local d = pmacs.config.describe('syntax.isolation')\n\
+             local names = {}\n\
+             for _, s in ipairs(pmacs.config.list()) do\n\
+               if s.name:find('isolation') or s.name:find('in.editor') then\n\
+                 names[#names + 1] = s.name\n\
+               end\n\
+             end\n\
+             return ok, tostring(err), table.concat(d.choices, ','),\n\
+               pmacs.config.get('syntax.isolation'), d.description, table.concat(names, ',')",
+        )
+        .eval()
+        .expect("the setting is described");
+    assert!(!ok, "syntax.isolation = none is refused");
+    assert!(
+        err.contains(r#"config "syntax.isolation" value "none" is not one of: ["process"]"#),
+        "the refusal names the one choice: {err}"
+    );
+    assert_eq!(choices, "process", "process is the one choice");
+    assert_eq!(value, "process", "and the setting still reads it");
+    assert!(
+        description.contains("the only choice since 2.0.0")
+            && description.contains("none, which parsed in the editor")
+            && description.contains("was removed"),
+        "the setting says what became of none: {description}"
+    );
+    assert_eq!(
+        settings, "syntax.isolation",
+        "no other setting reaches the boundary, the suite's in-editor route among them"
+    );
 }
 
 /// `fuzz/regress/markdown/301-hang-596.input` hangs only under the edit

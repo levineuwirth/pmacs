@@ -1,6 +1,6 @@
 [package]
 name = "pmacs-gpu"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.95"
 description = "GPU/GUI frontend for pmacs — attach, editing, syntax/diagnostics/minimap, mouse + context menu, clipboard, search, minibuffer. See docs/pmacs-gpu-design.md."
@@ -73,7 +73,7 @@ sys-locale = "0.3"
 # Session 1's wire-types crate. Pulled in now so the dep graph is
 # settled from session 2 forward; protocol consumption itself lands
 # in session 3.
-pmacs-protocol = { version = "1.0.0", path = "../pmacs-protocol" }
+pmacs-protocol = { version = "1.1.0", path = "../pmacs-protocol" }
 pollster = "0.4.0"
 wgpu = "29.0.3"
 winit = "0.30.13"

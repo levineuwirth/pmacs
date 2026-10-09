@@ -22,9 +22,10 @@ Always true:
   `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`.
 - A tree-sitter grammar is C beside the `forbid(unsafe_code)` Rust.
   Since E7i it runs in a worker process per buffer, `pmacs-parse-unit`,
-  and not in the editor (`src/parse_isolation.rs`), by default:
-  `syntax.isolation`'s `none` still parses in the editor, where nothing
-  below holds, until a release ships the worker. So one bad parse no
+  and not in the editor (`src/parse_isolation.rs`); since 2.0.0 no
+  setting parses in the editor, where nothing below holds, and only the
+  suite reaches that parse (`pmacs.parse._parse_in_editor`, for rows
+  that hold the worker's answers to it). So one bad parse no
   longer takes every buffer the daemon holds: a
   crash ends its worker, a parse past `syntax.parse-deadline-ms` is
   killed 100 ms after it, a worker ends when its editor does (its stdin

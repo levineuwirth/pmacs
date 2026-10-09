@@ -25,7 +25,7 @@ unicode-width = "0.2"
 [package]
 name = "pmacs"
 default-run = "pmacs"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Parallel Emacs --- a Rust-cored, Lua-scripted editor in the Emacs tradition"
@@ -119,7 +119,7 @@ rmp-serde = "1"
 # `pmacs` crate re-exports through `crate::protocol`, `crate::cell`,
 # `crate::buffer`, and `crate::rope` so existing internal imports keep
 # working unchanged.
-pmacs-protocol = { version = "1.0.0", path = "pmacs-protocol" }
+pmacs-protocol = { version = "1.1.0", path = "pmacs-protocol" }
 # Wire format for the M5 frontend ↔ instance protocol (T M5.5b).
 # Length-prefix framing wraps postcard-encoded payloads. Chosen for
 # compactness on the cell-stream traffic (60 Hz cell deltas dominate

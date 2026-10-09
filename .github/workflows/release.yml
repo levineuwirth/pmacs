@@ -87,6 +87,16 @@ jobs:
             exit 1
           fi
 
+          # A release says what it is. Its notes are reviewed in the tree,
+          # docs/releases/<version>.md (a prerelease takes its base's), and
+          # lead the published notes; a tag with none is refused here,
+          # before anything is built.
+          if [ ! -s "docs/releases/$base.md" ]; then
+            echo "::error::docs/releases/$base.md is missing or empty." \
+                 "Write the release's notes in the tree before tagging $tag."
+            exit 1
+          fi
+
           # Anything with a suffix (-rc.1, -beta) is a prerelease. The
           # framing requires the RC to be marked so it cannot be mistaken
           # for the real thing on the releases page.
@@ -286,6 +296,27 @@ jobs:
           done
           [ "$fail" -eq 0 ]
 
+      # Make the staged worker PARSE, as the editor drives it. Every check
+      # above proves the archive carries a pmacs-parse-unit that runs and
+      # reports this version; none makes it parse a byte, which is the whole
+      # of what the editor needs it for (E7i). The script unpacks the
+      # archive itself, so the worker under test is the one a user unpacks,
+      # and drives it with `pmacs_grammar_fuzz replay-unit`, the harness
+      # built here from the checkout, over this tree's files, every
+      # grammar's own sources at the commits fuzz/corpora.tsv pins, and
+      # fuzz/regress/, the inputs that took the editor down before E7i. A
+      # worker stopped by its own time or memory limit is contained and
+      # passes; a crash, a worker that does not answer, or a grammar that
+      # answered nothing fails the release here, before upload. The
+      # harness shares the release build's artifacts, so it is one link,
+      # and it is built after staging, so it never reaches the archive.
+      - name: Replay the staged parse worker
+        run: |
+          set -euo pipefail
+          cargo build --release --bin pmacs_grammar_fuzz
+          scripts/release-replay-worker --archive "${{ steps.stage.outputs.archive }}" \
+            --harness target/release/pmacs_grammar_fuzz --out release-replay
+
       - name: Checksum
         run: |
           set -euo pipefail
@@ -329,10 +360,16 @@ jobs:
           echo "--- SHA256SUMS ---"; cat SHA256SUMS
           sha256sum -c SHA256SUMS
 
+      # The release's own notes lead (docs/releases/<version>.md, which the
+      # preflight requires, its title line dropped since the release has
+      # one); the sections every release shares follow.
       - name: Release notes
         run: |
           set -euo pipefail
-          cat > notes.md <<'NOTES'
+          version="${{ needs.preflight.outputs.version }}"
+          awk 'NR == 1 && /^# / { next } { print }' "docs/releases/${version%%-*}.md" > notes.md
+          printf '\n' >> notes.md
+          cat >> notes.md <<'NOTES'
           ## Install
 
           Download the archive for your platform, unpack it, and put its

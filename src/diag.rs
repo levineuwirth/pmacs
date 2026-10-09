@@ -37,6 +37,7 @@ use crate::buffer::Buffer;
 use crate::cell::{CellCoord, CellGrid, Color, Glyph, Style, UnderlineStyle};
 use crate::display_width::byte_range_to_columns;
 use crate::overlay::merge_styles;
+use crate::text_view::ScreenText as _;
 use crate::view::{View, Viewport};
 
 // ---------------------------------------------------------------------------
@@ -671,18 +672,11 @@ impl View for DiagnosticView {
         // translate (line, column) → display column with tab/UTF-8
         // accounting. The rope keeps this cheap (refcount bump on
         // the root). M5 may switch to streaming row reads.
-        let source: Vec<u8> = {
-            let mut bytes = vec![0u8; buf.len() as usize];
-            if !bytes.is_empty() {
-                buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
-            }
-            bytes
-        };
+        let source = buffer_bytes(buf);
         let line_offsets = compute_line_offsets(&source);
         let total_lines = line_offsets.len() as u32;
         let start_line_buf = line_at_offset(&line_offsets, viewport.buffer_start as u32);
 
-        let max_rows = viewport.cell_size.rows;
         let cell_origin = viewport.cell_origin;
 
         // Column-0 line markers (gutter signs, T M4.6): most severe
@@ -697,6 +691,16 @@ impl View for DiagnosticView {
             .theme
             .as_ref()
             .map(|t| t.lock().expect("theme mutex poisoned").clone());
+
+        // #338: under wrap a row is not a line, so the signs and the
+        // underlines take their rows and columns from the screen's layout,
+        // the walk the text is drawn by.
+        let text = crate::text_view::SourceText {
+            source: &source,
+            line_offsets: &line_offsets,
+            known_utf8: false,
+        };
+        let layout = crate::text_view::ScreenLayout::wrapped(&viewport, &text);
 
         for diag in &diags {
             let style = style_for(diag.severity, severity_color(theme.as_ref(), diag.severity));
@@ -715,13 +719,12 @@ impl View for DiagnosticView {
                 if line >= total_lines {
                     break;
                 }
-                let row_offset = viewport.row_offset_of(start_line_buf as usize, line as usize);
-                let Some(sign_row) = sign_row_for(viewport, start_line_buf, line) else {
-                    continue;
-                };
-                if sign_row >= max_rows {
-                    break;
-                }
+                let (row_offset, sign_row) =
+                    match mark_rows(viewport, layout.as_ref(), start_line_buf, line) {
+                        MarkRows::At { own, sign } => (own, sign),
+                        MarkRows::Skip => continue,
+                        MarkRows::Below => break,
+                    };
                 // Record the line marker before any byte-range work:
                 // zero-width ranges (`byte_end <= byte_start` below)
                 // skip the underline but still mark the line.
@@ -733,18 +736,7 @@ impl View for DiagnosticView {
                     continue;
                 };
                 let line_start = line_offsets[line as usize];
-                let line_end = line_offsets
-                    .get(line as usize + 1)
-                    .copied()
-                    .unwrap_or(source.len() as u32);
-                let line_end_no_nl = if line_end > line_start
-                    && source.get(line_end as usize - 1).copied() == Some(b'\n')
-                {
-                    line_end - 1
-                } else {
-                    line_end
-                };
-                let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
+                let line_bytes = text.line_bytes(line as usize);
                 let line_byte_len = line_bytes.len() as u32;
 
                 // Resolve (start_col, end_col) within this line.
@@ -758,8 +750,18 @@ impl View for DiagnosticView {
                 } else {
                     line_byte_len
                 };
+                if let Some(layout) = &layout {
+                    underline_wrapped(
+                        layout,
+                        viewport,
+                        cells,
+                        style,
+                        u64::from(line_start + byte_start)..u64::from(line_start + byte_end),
+                    );
+                    continue;
+                }
                 let (start_col, end_col) =
-                    underline_cols_for_line(line_bytes, byte_start, byte_end);
+                    underline_cols_for_line(&line_bytes, byte_start, byte_end);
                 // `visible_cols` returns `None` for an empty range too, so the
                 // old `end_col <= start_col` guard is subsumed rather than
                 // dropped.
@@ -787,6 +789,79 @@ impl View for DiagnosticView {
             &line_markers,
             theme.as_ref(),
         );
+    }
+}
+
+/// Where one source line's marks go, for [`DiagnosticView::render`].
+enum MarkRows {
+    /// Its own row (`None` when it is collapsed away, which keeps its
+    /// sign and drops its underline) and its sign's.
+    At { own: Option<u32>, sign: u32 },
+    /// Not on screen; a later line may be.
+    Skip,
+    /// Below the screen, as is every later line.
+    Below,
+}
+
+/// The rows `line`'s marks take: under wrap (`layout`) the line's first
+/// displayed row, or its fold's visible head's when it is collapsed away
+/// (#338); otherwise [`sign_row_for`]'s and the viewport's line-per-row
+/// reckoning.
+fn mark_rows(
+    viewport: Viewport<'_>,
+    layout: Option<&crate::text_view::ScreenLayout>,
+    start_line: u32,
+    line: u32,
+) -> MarkRows {
+    if let Some(layout) = layout {
+        let own = layout.line_row(line as usize);
+        let sign = own.or_else(|| layout.line_row(viewport.folds?.visible_head_of(line as usize)));
+        return match sign {
+            Some(sign) => MarkRows::At { own, sign },
+            None if layout.is_below(line as usize) => MarkRows::Below,
+            None => MarkRows::Skip,
+        };
+    }
+    let Some(sign) = sign_row_for(viewport, start_line, line) else {
+        return MarkRows::Skip;
+    };
+    if sign >= viewport.cell_size.rows {
+        return MarkRows::Below;
+    }
+    MarkRows::At {
+        own: viewport.row_offset_of(start_line as usize, line as usize),
+        sign,
+    }
+}
+
+/// Underline `bytes` of one line where the screen's layout draws them
+/// (#338); a zero-width range marks the one cell a caret at its start
+/// sits on, as [`underline_cols_for_line`] does unwrapped.
+fn underline_wrapped(
+    layout: &crate::text_view::ScreenLayout,
+    viewport: Viewport<'_>,
+    cells: &mut CellGrid<'_>,
+    style: Style,
+    bytes: std::ops::Range<u64>,
+) {
+    let mut underline = |row: u32, start_col: u32, end_col: u32| {
+        let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
+            return;
+        };
+        for col in start..end {
+            let cell = cells.at(CellCoord::new(
+                viewport.cell_origin.row + row,
+                viewport.cell_origin.col + col,
+            ));
+            cell.style = merge_styles(cell.style, style);
+        }
+    };
+    if bytes.is_empty() {
+        if let Some((row, col)) = layout.cell_at(bytes.start) {
+            underline(row, col, col + 1);
+        }
+    } else {
+        layout.runs(bytes.start, bytes.end, underline);
     }
 }
 
@@ -847,6 +922,16 @@ fn paint_line_markers(
 // ---------------------------------------------------------------------------
 // Line lookup helpers shared with the completion overlay.
 // ---------------------------------------------------------------------------
+
+/// The whole of `buf`'s text, copied out of its rope: what the
+/// diagnostic and search painters map positions over.
+pub(crate) fn buffer_bytes(buf: &Buffer) -> Vec<u8> {
+    let mut bytes = vec![0u8; buf.len() as usize];
+    if !bytes.is_empty() {
+        buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+    }
+    bytes
+}
 
 pub(crate) fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
     let mut out = Vec::with_capacity(source.len() / 32 + 1);
@@ -1742,6 +1827,103 @@ mod tests {
         assert_eq!(
             grid.get(CellCoord::new(0, 6)).style.underline,
             UnderlineStyle::None
+        );
+    }
+
+    /// #338, the branches of the wrapped path the acceptance rows do not
+    /// reach. `aaaa bbbb cc` wraps at ten columns, `cc` on its second row,
+    /// and heads a fold hiding `hidden`; `zz` follows on the third row,
+    /// after the head's ellipsis. A zero-width error one past `cc` marks
+    /// the cell after it, on the wrapped row; a warning on the hidden line
+    /// signs its head's first row and underlines nothing; a range from
+    /// `cc` into `zz` underlines `cc` and `z` where they are drawn and
+    /// signs both lines' first rows.
+    #[test]
+    fn under_wrap_marks_land_on_the_rows_their_bytes_are_drawn_on() {
+        use crate::cell::{Cell, CellSize, UnderlineStyle};
+
+        let at = |line, col| (line, col);
+        let diag = |(sl, sc): (u32, u32), (el, ec): (u32, u32), severity| Diagnostic {
+            start_line: sl,
+            start_col: sc,
+            end_line: el,
+            end_col: ec,
+            severity,
+            message: "m".to_owned(),
+            source: None,
+            code: None,
+            span: None,
+        };
+        let store = make_shared_store();
+        store.lock().expect("diag store").set(
+            "file:///a",
+            vec![
+                diag(at(0, 12), at(0, 12), DiagnosticSeverity::Error),
+                diag(at(1, 0), at(1, 6), DiagnosticSeverity::Warning),
+                diag(at(0, 10), at(2, 1), DiagnosticSeverity::Information),
+            ],
+        );
+        let text = b"aaaa bbbb cc\nhidden\nzz\n";
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.rs");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: text,
+        })
+        .expect("seed buffer");
+        let lines = compute_line_offsets(text);
+        let folds = crate::fold_view::VisibleLineMap::build(
+            &[pmacs_protocol::ByteRange { start: 12, end: 19 }],
+            |off| line_at_offset(&lines, off as u32) as usize,
+        );
+        assert!(folds.is_head(0) && folds.is_hidden(1), "line 1 is folded");
+
+        let (rows, cols) = (4u32, 10u32);
+        let mut backing = vec![Cell::default(); (rows * cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        let mut view = DiagnosticView::new("file:///a", store, None);
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(rows, cols),
+                gutter_w: 0,
+                folds: Some(&folds),
+                wrap: WrapMode::Wrap,
+                view_left: 0,
+            },
+            &mut grid,
+        );
+        let cells_where = |pick: &dyn Fn(Style) -> bool| -> Vec<(u32, u32)> {
+            (0..rows)
+                .flat_map(|r| (0..cols).map(move |c| (r, c)))
+                .filter(|&(r, c)| pick(backing[(r * cols + c) as usize].style))
+                .collect()
+        };
+        assert_eq!(
+            cells_where(&|st| st.underline == UnderlineStyle::Curly),
+            vec![(1, 2)],
+            "the zero-width error, past `cc` on the wrapped row"
+        );
+        assert_eq!(
+            cells_where(&|st| st.underline == UnderlineStyle::Single),
+            vec![(1, 0), (1, 1), (2, 0)],
+            "the range from `cc` into `zz`, nothing on the hidden line"
+        );
+        assert_eq!(
+            cells_where(&|st| st.bg != Color::Default),
+            vec![(0, 0), (2, 0)],
+            "a sign on each line's first row, the hidden line's on its head's"
+        );
+        assert_eq!(
+            backing[0].style.bg,
+            DiagnosticSeverity::Error.underline_color(),
+            "the head's row takes the most severe of its own and the hidden line's"
         );
     }
 

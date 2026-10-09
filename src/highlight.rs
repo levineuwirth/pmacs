@@ -39,7 +39,7 @@ use crate::display_width::byte_range_to_columns;
 use crate::lsp::SharedLspManager;
 use crate::overlay::merge_styles;
 use crate::syntax::{HighlightSpan, ParseTreeBundle, ParseViewHandle, compute_highlight_spans_for};
-use crate::view::{View, Viewport};
+use crate::view::{View, Viewport, WrapMode};
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -135,6 +135,10 @@ impl Theme {
             italic: true,
             ..Style::default()
         };
+        let bold_only = Style {
+            bold: true,
+            ..Style::default()
+        };
 
         // (capture name, style). LSP semantic-token type names are the
         // unprefixed entries (`macro`, `namespace`, `parameter`, …);
@@ -212,6 +216,22 @@ impl Theme {
             // is the one thing a reader must never skim past. Plain `fg(1)`
             // would have collided with every numeric literal on colour alone.
             ("warning", fg_bold(9)),
+            // Markdown's strong and emphasis (#310's overlay,
+            // builtin/queries/markdown_inline/highlights.scm): bold with no
+            // hue and italic with no hue, prose's own marks. Nothing above
+            // is bold without a color, and `parameter`, the one italic
+            // without a color, is an LSP token type a user theme colors for
+            // code. So two faces of their own, and only these two: the
+            // crate's `@text.*` family stays out of the theme, because one
+            // capture name means different things across grammars ---
+            // tree-sitter-make 1.1.1's `@text.danger`, `@text.warning` and
+            // `@text.note` mark the arguments of `$(error)`, `$(warning)`
+            // and `$(info)`, not prose, and a `text` entry would repaint
+            // them. No other bundled query reaches either name (pinned in
+            // `syntax.rs`); the LaTeX overlay drops upstream's
+            // `@markup.italic` and `@markup.strong` with their predicates.
+            ("markup.strong", bold_only),
+            ("markup.emphasis", italic_only),
         ];
         let by_capture = entries
             .iter()
@@ -350,6 +370,10 @@ struct HighlightCache {
     /// (what the grid has shown of this parse); empty in-process, where
     /// `layers` covers the whole file.
     covered: Vec<(u32, u32)>,
+    /// Whether `bundle.source` is UTF-8 throughout, decoded once per
+    /// parse so that the wrapped walk decodes a line only as far as the
+    /// screen reaches (#337 review 1).
+    source_utf8: bool,
 }
 
 impl HighlightCache {
@@ -359,6 +383,7 @@ impl HighlightCache {
             layers: Vec::new(),
             line_offsets: Vec::new(),
             covered: Vec::new(),
+            source_utf8: false,
         }
     }
 }
@@ -375,6 +400,8 @@ pub struct SyntaxHighlightView {
     /// E7i: where the grid declares what it shows, so the buffer's next
     /// isolated parse returns spans for it, as the semantic path does.
     interest: Option<(crate::syntax::SharedSyntaxRegistry, crate::buffer::BufferId)>,
+    /// What the last wrapped render's layout read.
+    last_work: crate::text_view::LayoutWork,
 }
 
 impl SyntaxHighlightView {
@@ -390,6 +417,7 @@ impl SyntaxHighlightView {
             theme,
             cache: HighlightCache::empty(),
             interest: None,
+            last_work: crate::text_view::LayoutWork::default(),
         }
     }
 
@@ -409,6 +437,13 @@ impl SyntaxHighlightView {
     #[must_use]
     pub fn cached_span_count(&self) -> usize {
         self.cache.layers.iter().map(|l| l.spans.len()).sum()
+    }
+
+    /// Test helper: what the last render under word wrap read to lay out
+    /// the screen, the bound #337's review 1 asked for.
+    #[must_use]
+    pub fn last_layout_work(&self) -> crate::text_view::LayoutWork {
+        self.last_work
     }
 
     /// Refresh `self.cache` if the parse view's current bundle
@@ -462,11 +497,13 @@ impl SyntaxHighlightView {
             });
         }
         let line_offsets = compute_line_offsets(source);
+        let source_utf8 = std::str::from_utf8(source).is_ok();
         self.cache = HighlightCache {
             bundle: Some(bundle),
             layers,
             line_offsets,
             covered: Vec::new(),
+            source_utf8,
         };
     }
 
@@ -485,10 +522,16 @@ impl SyntaxHighlightView {
         let Some(isolated) = bundle.isolated.clone() else {
             return;
         };
-        let line_offsets = if stale {
-            compute_line_offsets(&bundle.source)
+        let (line_offsets, source_utf8) = if stale {
+            (
+                compute_line_offsets(&bundle.source),
+                std::str::from_utf8(&bundle.source).is_ok(),
+            )
         } else {
-            std::mem::take(&mut self.cache.line_offsets)
+            (
+                std::mem::take(&mut self.cache.line_offsets),
+                self.cache.source_utf8,
+            )
         };
         let want = visible_bytes(&line_offsets, bundle.source.len(), viewport);
         if let Some((registry, buffer)) = self.interest.as_ref() {
@@ -524,7 +567,75 @@ impl SyntaxHighlightView {
             layers,
             line_offsets,
             covered: set.covered.clone(),
+            source_utf8,
         };
+    }
+
+    /// The paint under word wrap (#335). A row is not a line there, so
+    /// the spans take their rows and columns from the screen's layout
+    /// ([`crate::text_view::ScreenLayout`]), the walk the text view draws
+    /// by, laid out once for the frame and bounded by the rows on screen.
+    /// Before #335 row `r` took the `r`-th visible line, so below the first
+    /// line that wrapped each row took the spans of a line further down;
+    /// before #337's review 1 the layout ran every visible line to its end,
+    /// however far below the window, and kept a place for each character.
+    ///
+    /// The layout is the parse's source, which the spans' bytes index: it
+    /// is the buffer once the parse has caught up with an edit.
+    fn render_wrapped(
+        &mut self,
+        source: &[u8],
+        theme: &Theme,
+        viewport: Viewport<'_>,
+        cells: &mut CellGrid<'_>,
+    ) {
+        let layout = crate::text_view::ScreenLayout::lay_out(
+            &viewport,
+            &crate::text_view::SourceText {
+                source,
+                line_offsets: &self.cache.line_offsets,
+                known_utf8: self.cache.source_utf8,
+            },
+        );
+        self.last_work = layout.work();
+        let Some(shown) = layout.shown() else {
+            return;
+        };
+        // Shallow-to-deep, and within a layer in the spans' order, as the
+        // row walk merges them: each cell takes its styles in that order.
+        for layer in &self.cache.layers {
+            // Spans are sorted by their start, so those past the screen's
+            // last character are skipped whole rather than tested.
+            let reach = layer
+                .spans
+                .partition_point(|s| u64::from(s.start_byte) < shown.end);
+            for span in layer.spans[..reach]
+                .iter()
+                .filter(|s| u64::from(s.end_byte) > shown.start)
+                .copied()
+            {
+                let style = Self::style_for(theme, layer, span);
+                if style == Style::default() {
+                    continue;
+                }
+                layout.runs(
+                    u64::from(span.start_byte),
+                    u64::from(span.end_byte),
+                    |row, start_col, end_col| {
+                        let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
+                            return;
+                        };
+                        for col in start..end {
+                            let cell = cells.at(CellCoord::new(
+                                viewport.cell_origin.row + row,
+                                viewport.cell_origin.col + col,
+                            ));
+                            cell.style = merge_styles(cell.style, style);
+                        }
+                    },
+                );
+            }
+        }
     }
 
     /// Look up the style for span `s` within `layer`, consulting the
@@ -553,6 +664,10 @@ impl View for SyntaxHighlightView {
         }
         let source: &[u8] = bundle.source.as_ref();
         let theme = self.theme.lock().expect("theme mutex poisoned").clone();
+        if viewport.wrap == WrapMode::Wrap {
+            self.render_wrapped(source, &theme, viewport, cells);
+            return;
+        }
 
         let start_line = line_at_offset(&self.cache.line_offsets, viewport.buffer_start as u32);
         let max_rows = viewport.cell_size.rows;
@@ -843,6 +958,7 @@ impl View for LspStyleView {
         // the same cells by the same arithmetic.
         let line_offsets = crate::overlay::compute_line_offsets(buf);
         let start_line = crate::overlay::line_at_offset(&line_offsets, viewport.buffer_start);
+        let layout = crate::overlay::screen_layout(buf, &line_offsets, viewport);
         for t in &tokens {
             if t.end <= viewport.buffer_start || t.start >= viewport.buffer_end {
                 continue;
@@ -864,6 +980,7 @@ impl View for LspStyleView {
                 &line_offsets,
                 start_line,
                 viewport,
+                layout.as_ref(),
                 cells,
                 crate::overlay::BufferStyleSpan {
                     start: t.start,
@@ -1886,6 +2003,58 @@ mod tests {
         grid.get(CellCoord::new(0, col)).style
     }
 
+    /// Every painted cell's style of `src` as `language_name` paints it on
+    /// a grid of one row per line and 80 columns, injection layers
+    /// included: `out[row][col]`.
+    fn painted_rows(language_name: &str, file: &str, src: &str) -> Vec<Vec<Style>> {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let (rows, cols) = (src.lines().count(), 80usize);
+        let mut backing: Vec<Cell> = vec![Cell::default(); rows * cols];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols as u32,
+            size: CellSize::new(rows as u32, cols as u32),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows as u32, cols as u32),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Truncate,
+            view_left: 0,
+        };
+        hv.render(&buf, viewport, &mut grid);
+        (0..rows)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| grid.get(CellCoord::new(r as u32, c as u32)).style)
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Does `language`'s compiled highlight query use `capture`?
     fn query_uses_capture(language: &str, capture: &str) -> bool {
         let reg = crate::syntax::SyntaxRegistry::new();
@@ -2233,6 +2402,367 @@ mod tests {
         assert!(
             !grid.get(CellCoord::new(1, 8)).style.bold,
             "`let` inside <script> paints plain"
+        );
+    }
+
+    /// The default theme's style for `capture`, as the overlays name it.
+    fn themed(capture: &str) -> Style {
+        *Theme::default_dark()
+            .by_capture
+            .get(capture)
+            .unwrap_or_else(|| panic!("`{capture}` is a default theme entry"))
+    }
+
+    #[test]
+    fn markdown_grid_paints_headings_emphasis_code_links_and_markers() {
+        // #310: a markdown buffer painted almost entirely in the default
+        // foreground, its queries speaking `@text.*`. Through the overlays,
+        // on a painted grid, the block layer and the inline layer it injects
+        // into each paragraph and heading.
+        let src = "# Title with *em*\n\
+                   \n\
+                   Body *em* and **strong** and `code` and [text](https://x.org) and \\*.\n\
+                   \n\
+                   > quoted\n\
+                   \n\
+                   - item\n\
+                   \n\
+                   Setext\n\
+                   ======\n\
+                   \n\
+                   ---\n";
+        let rows = painted_rows("markdown", "notes.md", src);
+        let line = |r: usize| src.lines().nth(r).expect("line");
+        let at = |r: usize, needle: &str| {
+            let col = line(r)
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} on line {r}"));
+            rows[r][col]
+        };
+        let heading = themed("keyword.control");
+        let italic = |s: Style| Style { italic: true, ..s };
+
+        assert_eq!(at(0, "#"), themed("keyword"), "a heading's marker");
+        assert_eq!(at(0, "Title"), heading, "a heading's text");
+        assert_eq!(
+            at(0, "em*"),
+            italic(heading),
+            "emphasis inside a heading keeps the heading's face, italic"
+        );
+        assert_eq!(at(2, "Body"), Style::default(), "body text has no face");
+        assert_eq!(at(2, "em*"), italic(Style::default()), "emphasis is italic");
+        assert_eq!(
+            at(2, "strong"),
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+            "strong is bold, with no hue"
+        );
+        assert_eq!(themed("markup.emphasis"), italic(Style::default()));
+        assert_eq!(at(2, "code`"), themed("string"), "a code span");
+        assert_eq!(at(2, "text]"), themed("constant"), "a link's text");
+        assert_eq!(at(2, "https"), themed("constant"), "a link's destination");
+        assert_eq!(at(2, "[text"), Style::default(), "a link's bracket");
+        assert_eq!(at(2, "\\*"), themed("string"), "a backslash escape");
+        assert_eq!(at(4, ">"), themed("operator"), "a block quote marker");
+        assert_eq!(at(6, "-"), themed("operator"), "a list marker");
+        assert_eq!(at(8, "Setext"), heading, "a setext heading's text");
+        assert_eq!(at(9, "="), themed("keyword"), "a setext underline");
+        assert_eq!(at(11, "-"), themed("operator"), "a thematic break");
+    }
+
+    #[test]
+    fn markdown_fence_content_takes_no_face_from_the_block_layer() {
+        // The crate's query puts `@text.literal` over a whole fenced block
+        // and `@none` over its content, which is its injected language's to
+        // paint, or nobody's. pmacs merges a narrower capture over a wider
+        // one and has no capture that clears, so the overlay treats `@none`
+        // as no face at all: the fence lines take the literal face, and no
+        // pattern of the block layer paints the content. A Rust fence's
+        // identifier is not green beneath its keyword's color, and a fence
+        // with no language is plain.
+        let src = "```rust\n\
+                   fn f() { let x = 1; }\n\
+                   ```\n\
+                   \n\
+                   ```\n\
+                   plain words\n\
+                   ```\n";
+        let rows = painted_rows("markdown", "notes.md", src);
+        let literal = themed("string");
+        assert_eq!(rows[0][0], literal, "the opening fence");
+        assert_eq!(rows[0][3], literal, "the fence's info string");
+        assert_eq!(rows[1][0], themed("keyword"), "Rust paints its own keyword");
+        assert_eq!(rows[1][13], Style::default(), "a Rust identifier: no face");
+        assert_eq!(rows[2][0], literal, "the closing fence");
+        assert_eq!(rows[4][0], literal, "a bare fence");
+        assert_eq!(
+            rows[5][0],
+            Style::default(),
+            "a bare fence's content: no face"
+        );
+        assert_eq!(rows[5][6], Style::default(), "throughout");
+        assert_eq!(rows[6][0], literal, "its closing fence");
+    }
+
+    /// #335's oracle. Under wrap every character's cell takes the style
+    /// the unwrapped painter gives the same character, whose path this
+    /// change leaves alone. Each place comes from the text view's caret
+    /// walk (`pos_to_display`) at `wrap` and at `truncate`, never from the
+    /// painter's own layout, and the viewport may start partway down a
+    /// wrapped line. Returns how many characters on screen were styled.
+    fn wrapped_paint_matches_unwrapped(
+        language_name: &str,
+        file: &str,
+        src: &str,
+        cols: u32,
+        start: u64,
+    ) -> usize {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+        use crate::text_view::TextView;
+        use crate::view::LayoutCtx;
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let mut paint = |rows: u32, cols: u32, wrap: WrapMode, start: u64| -> Vec<Style> {
+            let mut backing = vec![Cell::default(); (rows * cols) as usize];
+            let mut grid = CellGrid {
+                cells: &mut backing,
+                stride: cols,
+                size: CellSize::new(rows, cols),
+            };
+            let viewport = Viewport {
+                buffer_start: start,
+                buffer_end: u64::MAX,
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(rows, cols),
+                gutter_w: 0,
+                folds: None,
+                wrap,
+                view_left: 0,
+            };
+            hv.render(&buf, viewport, &mut grid);
+            backing.iter().map(|c| c.style).collect()
+        };
+        let wide = src.lines().map(str::len).max().unwrap_or(0) as u32 + 2;
+        let lines = src.lines().count() as u32 + 1;
+        let flat = paint(lines, wide, WrapMode::Truncate, 0);
+        let rows = 64;
+        let wrapped = paint(rows, cols, WrapMode::Wrap, start);
+
+        let text = TextView::new(&buf);
+        let ctx = LayoutCtx {
+            cols,
+            wrap: WrapMode::Wrap,
+            view_left: 0,
+        };
+        let top = text.pos_to_display(&buf, start, ctx).expect("start");
+        let start_line = top.row as usize;
+        let mut rows_above = vec![0u32; text.line_count() + 1];
+        for line in start_line..text.line_count() {
+            rows_above[line + 1] = rows_above[line] + text.line_rows(&buf, line, ctx);
+        }
+        let first = text.line_offset(start_line).expect("start line");
+        let (mut styled, mut moved) = (0, false);
+        for (byte, ch) in src.char_indices() {
+            let byte = byte as u64;
+            if ch == '\n' || byte < first {
+                continue;
+            }
+            let at = text.pos_to_display(&buf, byte, ctx).expect("wrapped place");
+            let next = text
+                .pos_to_display(&buf, byte + ch.len_utf8() as u64, ctx)
+                .expect("the next place");
+            if (next.row, next.sub_row, next.col) == (at.row, at.sub_row, at.col) {
+                continue; // no cell: a space hanging past the edge, which
+                // the caret walk puts where the next character is drawn
+            }
+            let Some(row) = (rows_above[at.row as usize] + at.sub_row).checked_sub(top.sub_row)
+            else {
+                continue; // above the viewport's first row
+            };
+            if row >= rows || at.col >= cols {
+                continue; // below the viewport, or a space hanging past the edge
+            }
+            let flat_at = text
+                .pos_to_display(&buf, byte, LayoutCtx::truncated())
+                .expect("unwrapped place");
+            let want = flat[(flat_at.row * wide + flat_at.col) as usize];
+            assert_eq!(
+                wrapped[(row * cols + at.col) as usize],
+                want,
+                "byte {byte} ({ch:?}) of line {}, drawn on row {row} column {}",
+                at.row,
+                at.col
+            );
+            styled += usize::from(want != Style::default());
+            moved |= want != Style::default() && row > at.row - top.row;
+        }
+        assert!(
+            moved,
+            "some styled character is drawn below a wrapped line's extra rows"
+        );
+        styled
+    }
+
+    #[test]
+    fn under_wrap_a_lines_spans_paint_on_the_rows_it_is_drawn_on() {
+        // #335: the row walk took row `r` for the `r`-th line, so below
+        // the first line that wrapped every row took the spans of a line
+        // further down. A comment wraps over four rows of twenty columns;
+        // the code and the block comment below it paint on their own rows.
+        let rust = "// a comment long enough to wrap over several rows of a narrow window\n\
+                    fn first() { let s = \"a string\"; }\n\
+                    /* a block comment that\n   spans two lines */ fn second() {}\n";
+        assert!(wrapped_paint_matches_unwrapped("rust", "a.rs", rust, 20, 0) >= 40);
+        // From partway down the comment, its first rows scrolled away.
+        let partway = rust.find("several").unwrap() as u64;
+        assert!(wrapped_paint_matches_unwrapped("rust", "a.rs", rust, 20, partway) >= 40);
+
+        // Markdown, the prose #335 was met on: a heading above a wrapped
+        // paragraph, emphasis, strong and a code span on its wrapped rows,
+        // and a heading and a list item below it, through the injected
+        // inline layer.
+        let md = "# Above\n\
+                  Prose that wraps across rows: one two three four five *em* six seven \
+                  `code` eight nine **strong** ten.\n\
+                  ## Below\n\
+                  - item `tail`\n";
+        assert!(wrapped_paint_matches_unwrapped("markdown", "notes.md", md, 24, 0) >= 30);
+        let partway = md.find("four").unwrap() as u64;
+        assert!(wrapped_paint_matches_unwrapped("markdown", "notes.md", md, 24, partway) >= 20);
+    }
+
+    /// `src` parsed in process as `language_name`, and a highlight view
+    /// over that parse.
+    fn parsed_highlight_view(
+        language_name: &str,
+        file: &str,
+        src: &str,
+    ) -> (crate::buffer::Buffer, SyntaxHighlightView) {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+        (buf, SyntaxHighlightView::new(handle, reg.theme()))
+    }
+
+    /// One wrapped paint of `hv` from the top of a `rows` x `cols` screen.
+    fn paint_wrapped(
+        hv: &mut SyntaxHighlightView,
+        buf: &crate::buffer::Buffer,
+        rows: u32,
+        cols: u32,
+    ) -> Vec<Style> {
+        use crate::cell::{Cell, CellSize};
+        let mut backing = vec![Cell::default(); (rows * cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows, cols),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Wrap,
+            view_left: 0,
+        };
+        hv.render(buf, viewport, &mut grid);
+        backing.iter().map(|c| c.style).collect()
+    }
+
+    /// #337's review 1: under wrap the painter laid out every character of
+    /// a visible line and kept a place for each, however far below the
+    /// window the line ran --- on a five-megabyte comment, 103 ms and
+    /// 154 MB a paint. On a one-megabyte comment it now reads a screenful:
+    /// the walk stops at the first character below the last row and decodes
+    /// only the prefix it walks, while every row still takes the comment's
+    /// face and the code below it is off screen.
+    #[test]
+    fn under_wrap_a_long_lines_paint_reads_a_screenful() {
+        let src = format!("// {}\nfn tail() {{}}\n", "a ".repeat(500_000));
+        let (buf, mut hv) = parsed_highlight_view("rust", "long.rs", &src);
+        let (rows, cols) = (64u32, 115u32);
+        let styles = paint_wrapped(&mut hv, &buf, rows, cols);
+        let comment = themed("comment");
+        for row in 0..rows {
+            assert_eq!(styles[(row * cols) as usize], comment, "row {row}");
+        }
+        let work = hv.last_layout_work();
+        let screenful = ((rows + 1) * cols) as usize;
+        assert!(
+            work.walked <= screenful + 1,
+            "walked {} characters of a {}-byte line for a {rows}x{cols} screen",
+            work.walked,
+            src.len()
+        );
+        assert!(
+            work.decoded <= 2 * screenful + 64,
+            "decoded {} bytes of a {}-byte line for a {rows}x{cols} screen",
+            work.decoded,
+            src.len()
+        );
+    }
+
+    /// The review's measurement, kept as a budget: a wrapped paint over a
+    /// five-megabyte comment, the cache warm, at the review's 64 x 115.
+    /// The review measured a 103 ms median in a release build before the
+    /// layout was bounded.
+    #[test]
+    #[ignore = "wall-clock budget (D12): run by scripts/perf-budgets and CI's perf jobs"]
+    fn wrapped_paint_of_a_five_megabyte_line_stays_within_budget() {
+        let src = format!("// {}\nfn tail() {{}}\n", "a ".repeat(2_500_000));
+        let (buf, mut hv) = parsed_highlight_view("rust", "long.rs", &src);
+        let (rows, cols) = (64u32, 115u32);
+        paint_wrapped(&mut hv, &buf, rows, cols);
+        let mut each: Vec<std::time::Duration> = (0..20)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                paint_wrapped(&mut hv, &buf, rows, cols);
+                t.elapsed()
+            })
+            .collect();
+        each.sort();
+        let median = each[each.len() / 2];
+        eprintln!("wrapped paint of a 5 MB line at {rows}x{cols}: median {median:?} over 20");
+        assert!(
+            median < std::time::Duration::from_millis(10),
+            "a wrapped paint of a 5 MB line took {median:?}, past its 10 ms budget"
         );
     }
 }

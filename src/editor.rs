@@ -6716,6 +6716,30 @@ fn paint_local_selection(
         return;
     }
 
+    // #341: under wrap a row is not a line, so the wash takes its cells
+    // from the screen's layout, the walk the text is drawn by, as the
+    // other marks do (#335, #338). The walk below gives each visible line
+    // one row and, below a wrapped line, washed a row of other text.
+    let text = crate::text_view::BufferText {
+        buf,
+        line_offsets: window.text_view.line_offsets(),
+    };
+    if let Some(layout) = crate::text_view::ScreenLayout::wrapped(&viewport, &text) {
+        layout.runs(sel_start, sel_end, |row, start_col, end_col| {
+            let Some((start, end)) = viewport.visible_cols(start_col, end_col) else {
+                return;
+            };
+            for col in start..end {
+                let cell = grid.at(CellCoord::new(
+                    viewport.cell_origin.row + row,
+                    viewport.cell_origin.col + col,
+                ));
+                cell.style = crate::overlay::merge_styles(cell.style, overlay);
+            }
+        });
+        return;
+    }
+
     // Row `r` shows the `r`-th VISIBLE line at or after `view_top`.
     let mut next_line = folds.map_or(window.view_top, |map| map.visible_head_of(window.view_top));
     for row_offset in 0..inner_rows {
