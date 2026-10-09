@@ -597,6 +597,93 @@ fn under_wrap_a_search_match_washes_the_cells_it_is_drawn_on() {
     );
 }
 
+/// #338's file, which #341 was seen on: a heading, forty words wrapping
+/// over ten rows of 30 columns, a blank line and `needle` below.
+fn wrapped_paragraph() -> String {
+    let words: Vec<String> = (0..40).map(|i| format!("word{i:02}")).collect();
+    format!(
+        "# Title\n{}\n\nneedle on the fourth line\n",
+        words.join(" ")
+    )
+}
+
+fn set_mark(s: &mut EditorState) {
+    key(s, KeyCode::Char(' '), KeyModifiers::CONTROL);
+}
+
+/// #341: under wrap the selection is washed on the cells its text is
+/// drawn on. It took a row per visible line, so below a wrapped line the
+/// reverse video lay on a row of other text and the selected text was
+/// drawn plain. This selection begins below the wrapped line: `M->`,
+/// `C-p`, `C-SPC`, `C-e`, the issue's keys.
+#[test]
+fn under_wrap_a_selection_below_a_wrapped_line_washes_the_cells_it_is_drawn_on() {
+    let mut s = session("selection-below");
+    fill(&s, &wrapped_paragraph());
+    key(&mut s, KeyCode::Char('>'), KeyModifiers::ALT);
+    ctrl(&mut s, 'p');
+    set_mark(&mut s);
+    ctrl(&mut s, 'e');
+    let (rows, cols) = (16, 30);
+    let grid = styled_frame(&s, rows, cols);
+    let content = &grid[..(rows - 2) as usize];
+    let text = row_texts(content);
+    let at = text
+        .iter()
+        .position(|row| row.starts_with("needle"))
+        .expect("the selected line is on screen");
+    assert!(at >= 10, "the paragraph wraps above it: {text:#?}");
+    assert_eq!(
+        cells_where(content, |_, st| st.reverse),
+        (0.."needle on the fourth line".len())
+            .map(|c| (at, c))
+            .collect::<Vec<_>>(),
+        "the reverse video is on `needle on the fourth line` and nowhere else: {text:#?}"
+    );
+}
+
+/// #341, the selection beginning above the wrapped line: from `Title` on
+/// the heading into the paragraph's seventh row. Each row it covers is
+/// washed where its characters are drawn: the heading's word, six rows of
+/// four words with the space after them, and the seventh up to the caret,
+/// inside `word24`. The walk this replaces washed the paragraph's first
+/// row alone, over the seventh row's columns.
+#[test]
+fn under_wrap_a_selection_above_a_wrapped_line_washes_every_row_it_is_drawn_on() {
+    let mut s = session("selection-above");
+    let source = wrapped_paragraph();
+    fill(&s, &source);
+    for _ in 0.."# ".len() {
+        ctrl(&mut s, 'f');
+    }
+    set_mark(&mut s);
+    let through = "Title\n".len() + "word00 ".len() * 24 + "wor".len();
+    for _ in 0..through {
+        ctrl(&mut s, 'f');
+    }
+    let (rows, cols) = (16, 30);
+    let grid = styled_frame(&s, rows, cols);
+    let content = &grid[..(rows - 2) as usize];
+    let text = row_texts(content);
+    assert_eq!(text[0].trim_end(), "# Title");
+    assert_eq!(text[1].trim_end(), "word00 word01 word02 word03");
+    assert_eq!(text[7].trim_end(), "word24 word25 word26 word27");
+    let mut expected: Vec<(usize, usize)> = (2..7).map(|c| (0, c)).collect();
+    for row in 1..=6 {
+        expected.extend((0.."word00 word01 word02 word03 ".len()).map(|c| (row, c)));
+    }
+    expected.extend((0..3).map(|c| (7, c)));
+    let washed = cells_where(content, |_, st| st.reverse);
+    assert_eq!(
+        washed, expected,
+        "the reverse video is on the selected characters' cells: {text:#?}"
+    );
+    // Read back in order, the washed cells are the selected text but for
+    // the newline, which has no cell.
+    let read: String = washed.iter().map(|&(r, c)| content[r][c].0).collect();
+    assert_eq!(read, source[2..2 + through].replace('\n', ""));
+}
+
 /// The face the fake server's tokens take: an RGB the bundled theme never
 /// emits, merged over its one token type.
 const MARK: pmacs::cell::Color = pmacs::cell::Color::Rgb(0x7b, 0x1f, 0xa2);

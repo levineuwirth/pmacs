@@ -92,6 +92,14 @@ impl TextView {
         self.line_offsets.get(line).copied()
     }
 
+    /// Every line's first byte, the first being `0`: the table a
+    /// [`BufferText`] reads, so a painter lays the screen out over the
+    /// lines this view draws without walking the buffer for its own.
+    #[must_use]
+    pub(crate) fn line_offsets(&self) -> &[u64] {
+        &self.line_offsets
+    }
+
     /// Index of the line containing byte `offset`.
     ///
     /// For an offset equal to a line's first byte, returns that line. For an
@@ -689,12 +697,14 @@ impl ScreenText for BufferText<'_> {
 ///
 /// **The one row-and-column mapping on screen under wrap** (#338). The
 /// marks the grid places by buffer byte --- syntax colors, search
-/// matches, diagnostics' underlines and signs, and the byte-span painter
-/// semantic tokens and package styles go through --- each build one of
-/// these for the frame and read their rows and columns from it, so a mark
-/// lands on the cells its text is drawn on. Before it each counted one row
-/// per line (`Viewport::row_offset_of`; the syntax painter until #335, the
-/// rest until #338), and below a wrapped line marked a row above its text.
+/// matches, diagnostics' underlines and signs, the byte-span painter
+/// semantic tokens and package styles go through, and the selection ---
+/// each build one of these for the frame and read their rows and columns
+/// from it, so a mark lands on the cells its text is drawn on. Before it
+/// each counted one row per line (`Viewport::row_offset_of`, or the
+/// selection's own walk of a row per visible line; the syntax painter
+/// until #335, the selection until #341, the rest until #338), and below
+/// a wrapped line marked a row above its text.
 /// `Truncate` keeps those painters' own arithmetic,
 /// under which a line is one row (the identity case [`WrapMode`] keeps).
 ///
