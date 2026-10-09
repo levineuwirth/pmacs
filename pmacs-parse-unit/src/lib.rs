@@ -75,6 +75,12 @@ pub const PROTOCOL: u32 = 3;
 /// The exit status of a worker its memory watch stopped.
 pub const MEMORY_WATCH_EXIT: i32 = 86;
 
+/// What a worker told to hold its memory by `RLIMIT_AS` writes to its
+/// stderr before it serves where the platform refuses that limit (macOS,
+/// `EINVAL`): its memory watch holds it instead. A harness reads from it
+/// which of the two a worker has (#347).
+pub const RLIMIT_REFUSED: &str = "the memory watch holds this unit instead";
+
 /// The environment a worker runs in, which the editor and anything else
 /// that drives one set alike. glibc gives each thread that allocates an
 /// arena reserving 64 MiB of address space, which `RLIMIT_AS` counts, so a

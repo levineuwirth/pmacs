@@ -871,6 +871,12 @@ fn e7i_an_ordinary_file_parses_inside_a_64_mib_worker() {
 /// `pmacs_grammar_fuzz replay-unit --unit <worker> …` with the run's
 /// corpus, extras and limits; its exit status and report.
 fn replay(unit: &Path, extras: &[&str]) -> (Option<i32>, String) {
+    replay_with(unit, extras, &[])
+}
+
+/// [`replay`] with more of `replay-unit`'s flags, or `race-unit`'s run on
+/// the same corpus when `flags` begins with it.
+fn replay_with(unit: &Path, extras: &[&str], flags: &[&str]) -> (Option<i32>, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let corpus = dir.path().join("corpus");
     for (grammar, file) in [("rust", "src/fold.rs"), ("markdown", "docs/invariants.md")] {
@@ -878,8 +884,12 @@ fn replay(unit: &Path, extras: &[&str]) -> (Option<i32>, String) {
         std::fs::copy(repo().join(file), corpus.join(grammar).join("seed")).expect("seed");
     }
     let out = dir.path().join("out");
+    let (subcommand, flags, report) = match flags {
+        ["race-unit", rest @ ..] => ("race-unit", rest, "race-report.md"),
+        _ => ("replay-unit", flags, "unit-report.md"),
+    };
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs_grammar_fuzz"));
-    command.args(["replay-unit", "--unit"]).arg(unit);
+    command.args([subcommand, "--unit"]).arg(unit);
     command.arg("--corpus").arg(&corpus).arg("--out").arg(&out);
     // The arms' own deadline. At 1 s a loaded machine let the deadline cut
     // #296's inline layer before the debug worker grew to 64 MiB, so the
@@ -887,14 +897,85 @@ fn replay(unit: &Path, extras: &[&str]) -> (Option<i32>, String) {
     // two runs of this suite beside its own parallel rows; at fa176de the
     // same cut read "answered" and failed the counts instead).
     command.args(["--memory-mb", "64", "--deadline-ms", "5000"]);
+    command.args(flags);
     for extra in extras {
         command
             .arg("--extra")
             .arg(format!("markdown={}", repo().join(extra).display()));
     }
     let output = command.output().expect("run the replay");
-    let report = std::fs::read_to_string(out.join("unit-report.md")).unwrap_or_default();
+    let report = std::fs::read_to_string(out.join(report)).unwrap_or_default();
     (output.status.code(), report)
+}
+
+/// What a replay's or a race's report header says held its workers'
+/// memory: `memory N MiB by <this>, deadline …`.
+fn header_holds(report: &str) -> &str {
+    report
+        .split_once(" MiB by ")
+        .and_then(|(_, rest)| rest.split_once(", deadline "))
+        .map_or("", |(by, _)| by)
+}
+
+/// What each memory finding of a report says stopped its worker.
+fn memory_findings(report: &str) -> Vec<&str> {
+    report
+        .lines()
+        .filter(|l| l.contains(" contained: `"))
+        .filter_map(|l| l.split_once("`, memory: ").map(|(_, by)| by))
+        .collect()
+}
+
+/// #347: the header names `holds` as what held the memory, and so does
+/// every memory finding below it, of which there is at least one.
+fn assert_header_and_findings_name(report: &str, holds: &str) {
+    assert_eq!(
+        header_holds(report),
+        holds,
+        "the header names what held the memory:\n{report}"
+    );
+    let findings = memory_findings(report);
+    assert!(
+        !findings.is_empty(),
+        "a memory finding for the header to agree with:\n{report}"
+    );
+    assert!(
+        findings.iter().all(|by| *by == holds),
+        "every memory finding names what the header does:\n{report}"
+    );
+}
+
+/// What holds a worker's memory where its limit is asked for by
+/// `RLIMIT_AS`, the editor's default: the limit on Linux, and the worker's
+/// watch on macOS, which refuses it (`docs/divergences.md`).
+fn platform_holds() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "the worker's watch"
+    } else {
+        "RLIMIT_AS"
+    }
+}
+
+/// A stand-in worker: it writes `stderr` to its stderr, answers the
+/// protocol's Hello as this build's worker does, and runs `then` once the
+/// next request's first byte arrives.
+fn stand_in_unit(dir: &Path, name: &str, stderr: &str, then: &str) -> PathBuf {
+    let fake = dir.join(name);
+    // Hello's request frame is 10 bytes; the answer is (1, Hello { this
+    // build's protocol }), each a one-byte varint.
+    let protocol = u8::try_from(pmacs_parse_unit::PROTOCOL).expect("a one-byte protocol");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{stderr}' >&2\nhead -c 10 >/dev/null\n\
+             printf '\\003\\000\\000\\000\\001\\000\\{protocol:03o}\\000\\000\\000\\000'\n\
+             head -c 1 >/dev/null\n{then}\n"
+        ),
+    )
+    .expect("fake unit");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    fake
 }
 
 /// E7i.2: the fuzz harness drives the editor's own worker binary through
@@ -918,14 +999,92 @@ fn e7i_the_fuzz_replay_drives_the_worker_and_finds_296_and_301_contained() {
     assert!(report.contains("| markdown | 3 | 1 | 2 | 0 |"), "{report}");
     assert!(report.contains("| rust | 1 | 1 | 0 | 0 |"), "{report}");
     assert!(
-        report.contains("296-underscores-16k.input`, memory: RLIMIT_AS")
-            || report.contains("296-underscores-16k.input`, memory: the worker's watch"),
-        "#296 contained by its memory limit: {report}"
+        report.contains(&format!(
+            "296-underscores-16k.input`, memory: {}",
+            platform_holds()
+        )),
+        "#296 contained by its memory limit, as this platform holds it: {report}"
     );
+    assert_header_and_findings_name(&report, platform_holds());
     assert!(
         report.contains("301-nested-openers-98.input`, time: "),
         "#301 contained by its time limit: {report}"
     );
+}
+
+/// #347: a replay's header names what held its workers' memory where they
+/// ran, which its memory findings name too. `v2.0.0-rc.1`'s macOS log
+/// said `by RLIMIT_AS` above a finding stopped by the worker's watch,
+/// because the header printed the flag the harness passed. Here: the real
+/// worker told `--enforcement watch` (the header said "its watch"), and a
+/// stand-in that says what a worker on macOS says when `RLIMIT_AS` is
+/// refused, then stops at the first parse as the watch does, on any
+/// platform.
+#[test]
+fn e7i_the_replay_header_names_what_held_the_worker_s_memory() {
+    let worker = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("target dir")
+        .join("pmacs-parse-unit");
+    let (code, report) = replay_with(
+        &worker,
+        &["fuzz/regress/markdown/296-underscores-16k.input"],
+        &["--enforcement", "watch"],
+    );
+    assert_eq!(code, Some(0), "no crash: {report}");
+    assert_header_and_findings_name(&report, "the worker's watch");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let refused = stand_in_unit(
+        dir.path(),
+        "refused-unit",
+        &format!(
+            "pmacs-parse-unit: setrlimit(RLIMIT_AS, 67108864): EINVAL: Invalid argument; {}",
+            pmacs_parse_unit::RLIMIT_REFUSED
+        ),
+        &format!("exit {}", pmacs_parse_unit::MEMORY_WATCH_EXIT),
+    );
+    let (code, report) = replay(&refused, &[]);
+    assert_eq!(code, Some(0), "a watch's stop is contained: {report}");
+    assert!(
+        report.contains("| markdown | 1 | 0 | 1 | 0 |")
+            && report.contains("| rust | 1 | 0 | 1 | 0 |"),
+        "each seed reached the stand-in and was stopped: {report}"
+    );
+    assert_header_and_findings_name(&report, "the worker's watch");
+}
+
+/// #347: `race-unit`'s header, which said "by its watch" whatever its
+/// workers had, names the watch it asks every worker for (a
+/// `ThreadSanitizer` worker's shadow reservation is address space
+/// `RLIMIT_AS` would refuse) as #296's memory finding does.
+#[test]
+fn e7i_the_race_header_names_what_held_the_worker_s_memory() {
+    let worker = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("target dir")
+        .join("pmacs-parse-unit");
+    let (code, report) = replay_with(
+        &worker,
+        &["fuzz/regress/markdown/296-underscores-16k.input"],
+        // The race's own deadline (a parse in this debug worker returns
+        // well inside it), one schedule, and inputs not grown.
+        &[
+            "race-unit",
+            "--deadline-ms",
+            "30000",
+            "--iters",
+            "1",
+            "--grow-kb",
+            "1",
+        ],
+    );
+    assert_eq!(code, Some(0), "no report: {report}");
+    assert!(
+        report.contains("296-underscores-16k.input`, memory: "),
+        "#296 stopped by its memory limit: {report}"
+    );
+    assert_header_and_findings_name(&report, "the worker's watch");
 }
 
 /// And a worker that crashes fails the replay: a stand-in that answers
@@ -933,21 +1092,7 @@ fn e7i_the_fuzz_replay_drives_the_worker_and_finds_296_and_301_contained() {
 #[test]
 fn e7i_the_fuzz_replay_fails_a_worker_that_crashes() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let fake = dir.path().join("crashing-unit");
-    // Hello's request frame is 10 bytes; the answer is (1, Hello { this
-    // build's protocol }), each a one-byte varint.
-    let protocol = u8::try_from(pmacs_parse_unit::PROTOCOL).expect("a one-byte protocol");
-    std::fs::write(
-        &fake,
-        format!(
-            "#!/bin/sh\nhead -c 10 >/dev/null\n\
-             printf '\\003\\000\\000\\000\\001\\000\\{protocol:03o}\\000\\000\\000\\000'\n\
-             head -c 1 >/dev/null\nkill -SEGV $$\n"
-        ),
-    )
-    .expect("fake unit");
-    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .expect("chmod");
+    let fake = stand_in_unit(dir.path(), "crashing-unit", "", "kill -SEGV $$");
     let (code, report) = replay(&fake, &[]);
     assert_eq!(code, Some(1), "a crash fails the replay: {report}");
     assert!(
