@@ -114,7 +114,8 @@ fn limit_memory(mb: u64) -> bool {
         }
         Err(error) => {
             eprintln!(
-                "pmacs-parse-unit: setrlimit(RLIMIT_AS, {limit}): {error}; the memory watch holds this unit instead"
+                "pmacs-parse-unit: setrlimit(RLIMIT_AS, {limit}): {error}; {}",
+                pmacs_parse_unit::RLIMIT_REFUSED
             );
             false
         }

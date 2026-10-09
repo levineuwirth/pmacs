@@ -50,6 +50,12 @@
 //! sequence beside it, `<name>.edits` (E7i fix round 1: `301-hang-596`
 //! returns at once however it is fed whole): the replay parses it whole,
 //! then applies each recorded parse's edits as the editor sends them.
+//! Its report's header names the memory limit by what held it in the
+//! workers it ran, where they ran, as a memory finding names what stopped
+//! one (#347): `RLIMIT_AS`, or the worker's watch, asked for with
+//! `--enforcement watch` or standing in where the platform refuses
+//! `RLIMIT_AS`, which the worker says before it serves. `race-unit`'s
+//! header names it the same way.
 //!
 //! `race-unit` (E7i fix round 1) drives a worker built under
 //! `ThreadSanitizer`, the `tsan` arm, through the schedules that let its two
@@ -3561,6 +3567,49 @@ enum UnitOutcome {
     Crashed(String),
 }
 
+/// How a worker holds its memory limit where it runs. A report's header
+/// names it and so does each memory finding, by [`Enforcement::name`], so
+/// the two cannot disagree as they did on `v2.0.0-rc.1`'s macOS leg (#347).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Enforcement {
+    /// `RLIMIT_AS`, set by the worker on itself before it serves: the
+    /// allocation past it fails (Linux).
+    Rlimit,
+    /// The worker's own watch of its peak: asked for, or standing in where
+    /// the platform refused `RLIMIT_AS` (macOS).
+    Watch,
+}
+
+impl Enforcement {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rlimit => "RLIMIT_AS",
+            Self::Watch => "the worker's watch",
+        }
+    }
+}
+
+/// A report's limits: the memory limit by what held it in the workers the
+/// run started, as each said at its start, and the deadline.
+fn limits_line<'a>(
+    cfg: &ReplayConfig,
+    held: impl IntoIterator<Item = &'a BTreeSet<Enforcement>>,
+) -> String {
+    let held: BTreeSet<Enforcement> = held.into_iter().flatten().copied().collect();
+    let by = if held.is_empty() {
+        "no worker, none having started".to_owned()
+    } else {
+        held.iter()
+            .map(|e| e.name())
+            .collect::<Vec<_>>()
+            .join(" and ")
+    };
+    format!(
+        "memory {} MiB by {by}, deadline {} ms",
+        cfg.memory_mb, cfg.deadline_ms
+    )
+}
+
 type UnitFrame = std::io::Result<Option<((u64, pmacs_parse_unit::Response), Vec<u8>)>>;
 
 /// Named inputs: a path, and the bytes it holds.
@@ -3577,6 +3626,8 @@ struct UnitClient {
     killed_for_time: bool,
     /// The ids answered, in the order their answers arrived.
     arrived: Vec<u64>,
+    /// How it holds its memory limit, known once it has answered Hello.
+    enforcement: Enforcement,
 }
 
 impl UnitClient {
@@ -3617,6 +3668,7 @@ impl UnitClient {
             next: 1,
             killed_for_time: false,
             arrived: Vec::new(),
+            enforcement: Enforcement::Rlimit,
         };
         let id = client
             .send(&pmacs_parse_unit::Request::Hello, &[])
@@ -3626,6 +3678,13 @@ impl UnitClient {
                 Some(pmacs_parse_unit::Response::Hello { protocol })
                     if protocol == pmacs_parse_unit::PROTOCOL =>
                 {
+                    // It says so before it serves where the platform
+                    // refused RLIMIT_AS, so by its Hello the line is there.
+                    let refused = tail(&client.stderr, STDERR_KEPT as u64)
+                        .contains(pmacs_parse_unit::RLIMIT_REFUSED);
+                    if watch || refused {
+                        client.enforcement = Enforcement::Watch;
+                    }
                     Ok(client)
                 }
                 other => Err(format!(
@@ -3710,7 +3769,7 @@ impl UnitClient {
         let status = self.child.wait().ok();
         let log = tail(&self.stderr, STDERR_KEPT as u64);
         if status.and_then(|s| s.code()) == Some(pmacs_parse_unit::MEMORY_WATCH_EXIT) {
-            return UnitOutcome::Contained("memory: the worker's watch".into());
+            return UnitOutcome::Contained(format!("memory: {}", Enforcement::Watch.name()));
         }
         let sanitizer = log.contains("Sanitizer") || log.contains(": runtime error: ");
         let allocation = [
@@ -3721,7 +3780,7 @@ impl UnitClient {
         .iter()
         .any(|m| log.contains(m));
         if allocation && !sanitizer && status.and_then(|s| s.signal()) == Some(6) {
-            return UnitOutcome::Contained("memory: RLIMIT_AS".into());
+            return UnitOutcome::Contained(format!("memory: {}", Enforcement::Rlimit.name()));
         }
         let how = match status {
             Some(s) => s.signal().map_or_else(
@@ -4019,6 +4078,8 @@ struct UnitReplay {
     contained: Vec<(String, String)>,
     crashed: Vec<(String, String)>,
     error: Option<String>,
+    /// How its workers held their memory.
+    held: BTreeSet<Enforcement>,
 }
 
 struct ReplayConfig {
@@ -4150,12 +4211,10 @@ fn replay_queue(
 /// The replay's report, in markdown.
 fn unit_report(cfg: &ReplayConfig, replays: &[UnitReplay]) -> String {
     let mut md = format!(
-        "# Parse worker replay\n\n`{}`, memory {} MiB by {}, deadline {} ms.\n\n\
+        "# Parse worker replay\n\n`{}`, {}.\n\n\
          | grammar | inputs | answered | contained | crashed |\n|---|---|---|---|---|\n",
         cfg.unit.display(),
-        cfg.memory_mb,
-        if cfg.watch { "its watch" } else { "RLIMIT_AS" },
-        cfg.deadline_ms
+        limits_line(cfg, replays.iter().map(|r| &r.held))
     );
     for r in replays {
         let _ = writeln!(
@@ -4210,6 +4269,7 @@ fn replay_grammar(
         contained: Vec::new(),
         crashed: Vec::new(),
         error: None,
+        held: BTreeSet::new(),
     };
     let mut unit: Option<UnitClient> = None;
     let mut spawned = 0;
@@ -4218,7 +4278,10 @@ fn replay_grammar(
             spawned += 1;
             let stderr = cfg.out.join(format!("{grammar}-unit-{spawned}.stderr"));
             match UnitClient::spawn(&cfg.unit, stderr, cfg.memory_mb, cfg.watch) {
-                Ok(u) => unit = Some(u),
+                Ok(u) => {
+                    replay.held.insert(u.enforcement);
+                    unit = Some(u);
+                }
                 Err(e) => {
                     replay.error = Some(e);
                     return replay;
@@ -4485,6 +4548,8 @@ struct RaceRun {
     contained: Vec<(String, String)>,
     reported: Vec<(String, String)>,
     error: Option<String>,
+    /// How its workers held their memory.
+    held: BTreeSet<Enforcement>,
 }
 
 fn race_unit(args: &[String]) -> Result<ExitCode, String> {
@@ -4549,13 +4614,12 @@ fn race_unit(args: &[String]) -> Result<ExitCode, String> {
     let mut runs = std::mem::take(&mut *runs.lock().map_err(|_| "poisoned")?);
     runs.sort_by_key(|r| r.grammar);
     let mut md = format!(
-        "# Parse worker race schedules\n\n`{}`, memory {} MiB by its watch, deadline {} ms, \
+        "# Parse worker race schedules\n\n`{}`, {}, \
          {iters} schedules an input, each input grown to {grow_kb} KB.\n\n\
          | grammar | inputs | schedules | reads past an eviction | contained | reported |\n\
          |---|---|---|---|---|---|\n",
         cfg.unit.display(),
-        cfg.memory_mb,
-        cfg.deadline_ms
+        limits_line(&cfg, runs.iter().map(|r| &r.held))
     );
     for r in &runs {
         let _ = writeln!(
@@ -4606,6 +4670,7 @@ fn race_grammar(
         contained: Vec::new(),
         reported: Vec::new(),
         error: None,
+        held: BTreeSet::new(),
     };
     let mut unit: Option<UnitClient> = None;
     let mut spawned = 0;
@@ -4614,7 +4679,10 @@ fn race_grammar(
             spawned += 1;
             let stderr = cfg.out.join(format!("{grammar}-race-{spawned}.stderr"));
             match UnitClient::spawn(&cfg.unit, stderr, cfg.memory_mb, cfg.watch) {
-                Ok(u) => unit = Some(u),
+                Ok(u) => {
+                    run.held.insert(u.enforcement);
+                    unit = Some(u);
+                }
                 Err(e) => {
                     run.error = Some(e);
                     return run;

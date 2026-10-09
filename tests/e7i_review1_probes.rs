@@ -1319,6 +1319,28 @@ fn the_release_replays_the_archived_worker_and_fails_one_that_cannot_parse() {
             && text.contains("markdown contained:"),
         "it parsed seeds and contained the regression inputs:\n{text}"
     );
+    // #347: its header names what held the worker's memory where it ran,
+    // as a memory finding does. `v2.0.0-rc.1`'s macOS leg said `by
+    // RLIMIT_AS`, which macOS refuses (`docs/divergences.md`), two lines
+    // above a finding the worker's watch had stopped.
+    let holds = if cfg!(target_os = "macos") {
+        "the worker's watch"
+    } else {
+        "RLIMIT_AS"
+    };
+    assert!(
+        text.contains(&format!(" MiB by {holds}, deadline ")),
+        "the release's header names {holds}:\n{text}"
+    );
+    for by in text
+        .lines()
+        .filter_map(|l| l.split_once("`, memory: ").map(|(_, by)| by))
+    {
+        assert_eq!(
+            by, holds,
+            "a memory finding names what the header does:\n{text}"
+        );
+    }
 
     let got = Command::new("sh")
         .arg(&standin)
