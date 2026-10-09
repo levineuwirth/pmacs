@@ -2778,7 +2778,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 34 items in the list below.
+Tally (311-runs): 35 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2832,6 +2832,8 @@ Tally (311-runs): 34 items in the list below.
   `07-sweep-luajit`; recorded with that round, below).
 - `20261009T135200Z-4043146` at `29b5b81` (the same round's tip gate, `06-sweep`; recorded
   with that round, below).
+- `20261009T161057Z-421242` at `f45fa10` (the pre-release PR's fix round 3 gate, both sweeps;
+  recorded with that round, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -4996,6 +4998,97 @@ were counted by, the seventh's result line differing only by #340's failure besi
 to four; #340 is at one (filed by review 1), and #342, #343 and #344 at one each; #311's list of
 runs reads at thirty-four; every other count above stands.
 
+### The pre-release PR's fix round 3: its gate, PR #337 green at `f45fa10`, R7's thirty-second and #311's list at thirty-five
+
+Recorded 2026-10-09 by the pre-release pull request's fix round 3, #337 at `f45fa10` (fifteen
+signed commits on `391bf96`, one of them this round's: the selection under wrap on the screen's
+layout, #341). The runs were read from the jobs endpoint by conclusion and through every test
+leg's log; none was rerun.
+
+#### The round's gate: `20261009T161057Z-421242` at `f45fa10`
+
+`scripts/gate --protocol` at the tip: six of eight. fmt, clippy, clippy-luajit, doc, build and
+diff-check ok; no `pmacs --daemon` survived (identified by environ). `06-sweep`: 201 paired
+result lines, 5,375 passed, 1 failed, 65 ignored; `07-sweep-luajit`: 201 paired, 4,933 / 2 /
+51. Each failure by its fragments:
+
+- the HLS row in both sweeps with #311's fragments (`Could not find module ‘Prelude’`, the trace
+  reaching `LSP:ready·processi`, `test result: FAILED. 4 passed; 1 failed; 0 ignored`), so
+  #311's list gains the gate;
+- in `07-sweep-luajit`, `pmacs-gpu`'s
+  `attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`, `transient
+  sequence must attach: Attach(Handshake(Io(Os { code: 32, kind: BrokenPipe, message: "Broken
+  pipe" })))` at `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed; 0 ignored`: all
+  three of R7's fragments, **R7's thirty-second**, its list above extended. `attach.rs` has no
+  diff on the branch, and the row passed in the same gate's `06-sweep`.
+
+No other row failed in either sweep: #316's, #340's, #342's, #304's two and the round's two rows
+passed in both, which for the filed rows is non-reproduction and nothing more. The HLS row's
+failures carry #311's fragments, not #291's.
+
+#### `CI` 37960188510 at `f45fa10`, attempt 1 of 1: green on every job
+
+`pull_request`, the merge `e39c28a` (`f45fa10` into `2cb4c49`, read from the test logs' checkout
+line and the commit's parents), created 16:35:15Z and completed 17:07:12Z: `success`.
+
+Tally (pr337-ci-f45fa10): 19 = 18 + 1.
+
+Tally (pr337-ci-f45fa10-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 113920759637 | success |
+| Changed paths | 113920759880 | success |
+| Format | 113920759905 | success |
+| Lint (lua54) | 113920759946 | success |
+| Commit attribution (D9) | 113920760099 | success |
+| M1 Acceptance Gates | 113920836092 | success |
+| M4 Perf Gates | 113920836140 | success |
+| Test (crdt) | 113920836194 | success |
+| GPU Render (headless) | 113920836197 | success |
+| Test (macos-latest / lua54) | 113920836357 | success |
+| Test (ubuntu-latest / luajit) | 113920836379 | success |
+| M6 Perf Gates | 113920836427 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 113920836437 | success |
+| Test (macos-latest / luajit) | 113920836449 | success |
+| M5 Perf Gates | 113920836537 | success |
+| M10 Perf Gates (crdt) | 113920836557 | success |
+| Test (ubuntu-latest / lua54) | 113920836641 | success |
+| Perf budgets (debug) | 113920836679 | success |
+| Docs consistency | 113920838393 | skipped |
+
+Tally (pr337-ci-f45fa10-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: 192 on `Test (crdt)`, 193 on
+  each Ubuntu `test` leg, 194 on each macOS leg, none failed. The round's two rows passed on
+  every leg.
+- On `Test (macos-latest / lua54)`, where `29b5b81`'s run was cancelled, #343's row
+  (`e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line`) and #344's
+  (`two_markerless_documents_in_different_directories_do_not_share_a_server`) passed. No row
+  failed on any leg, so every filed row that ran there passed, which is non-reproduction and
+  nothing more.
+
+#### `Grammar fuzz` 37960188503 at `f45fa10`
+
+Attempt 1 of 1, `success`, created 16:35:15Z and completed 17:34:14Z: `Grammar fuzz` 113920758667
+and `Grammar fuzz (asan-strict)` 113920759115, GCC 13 on `ubuntu24 20261004.327.1`. The round
+touches no grammar, query or vendored file, so every grammar ran 15 s after its seeds (seed 1).
+Both jobs reported the standing findings of the runs at `29b5b81` and `c915c51`, none a crash:
+json's allocation (`one input grew RSS by over 1024 MB`, minimal 135,120 and 133,383 bytes),
+CUDA's slow input (245,920 bytes) and cmake's three (growth exponents 1.43 to 2.00), each
+contained in the arm's worker replay, json's by the worker's memory watch and the rest at the
+deadline. Lua's slow finding, which `29b5b81`'s `asan-strict` arm reported, did not come back;
+`ubsan`'s replay stopped its slowest lua input at the deadline. **One finding is new to this
+pull request's runs:** a markdown_inline allocation, `one
+input grew RSS by over 1024 MB`, reproduced alone and minimized to 79,572 bytes (`ubsan`) and
+79,652 (`asan-strict`), edits 0, a paragraph of `*_f` repeated after leading spaces; each arm's
+replay contained it by the worker's memory watch. The runs at `29b5b81` and `c915c51` reported
+no markdown_inline finding. Its shape is #296's delimiter run; that it is #296's defect is not
+shown, and it is commented there. `--fail-on crashes` passes all of them, as it is meant to.
+
+So, at the pre-release PR's fix round 3: R7 moves to thirty-two; #311's list of runs reads at
+thirty-five; #343 and #344 did not recur; every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
@@ -6634,13 +6727,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least thirty-one, 2026-08-07 to 2026-10-08, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the nineteen since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least thirty-two, 2026-08-07 to 2026-10-09, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the twenty since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 31 = 12 + 19.
+Tally (R7): 32 = 12 + 20.
 
-Tally (R7-held): 19 items in the list below.
+Tally (R7-held): 20 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -6661,6 +6754,7 @@ Tally (R7-held): 19 items in the list below.
 - twenty-ninth: gate log `20261006T111111Z-85507`, step `07-sweep-luajit`, E8 fix round 2's gate on `e8/hover-and-signature` at `d2de579`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same run's `06-sweep` (recorded at E8's fix round 2, below)
 - thirtieth: gate log `20261006T175402Z-1776889`, step `07-sweep-luajit`, E8 fix round 4's gate on `e8/hover-and-signature` at `05dfa6a` (the branch with `main` at `93752c6` merged in), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff from `main`, and the row passed in the same run's `06-sweep` (recorded at E8's fix round 4, below)
 - thirty-first: gate log `20261008T195204Z-1042685`, step `06-sweep`, the pre-release PR's gate on `release/pre-2.0.0` at `bca69d4` (#337), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same gate's `07-sweep-luajit` (recorded with the pre-release PR, above)
+- thirty-second: gate log `20261009T161057Z-421242`, step `07-sweep-luajit`, the pre-release PR's fix round 3 gate on `release/pre-2.0.0` at `f45fa10` (#337), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same gate's `06-sweep` (recorded with that round, above)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
