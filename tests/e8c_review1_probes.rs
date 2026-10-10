@@ -446,6 +446,29 @@ fn fake_with_heir(dir: &Path) -> String {
     )
 }
 
+/// Every file under `root`, with its length and modification time.
+/// Quit must leave a row's state root unchanged: a state write at quit
+/// is an `fsync`, whose wait on a busy disk has no bound (#360), and a
+/// row's bound must not hold one.
+fn state_files(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+    let mut found = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                dirs.push(entry.path());
+            } else {
+                found.push((entry.path(), meta.len(), meta.modified().expect("mtime")));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// Kills every pid the fakes recorded, however the row ends.
 struct Pids(std::path::PathBuf);
 
@@ -478,12 +501,15 @@ fn r1_two_servers_with_heirs_quit_within_one_bound() {
     std::fs::write(&c_file, "int main(void) { return 0; }\n").unwrap();
     let config = dir.path().join("config").join("pmacs");
     std::fs::create_dir_all(&config).unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
     let status = dir.path().join("status");
     let server = fake_with_heir(dir.path());
     std::fs::write(
         config.join("init.lua"),
         format!(
             "pmacs.lsp.config = {{}}\n\
+             pmacs.saveplace.enable(false)\n\
              pmacs.lsp.config.rust = {server}\n\
              pmacs.lsp.config.c = {server}\n\
              pmacs.buffer.find_or_open({c:?})\n\
@@ -505,8 +531,16 @@ fn r1_two_servers_with_heirs_quit_within_one_bound() {
     .unwrap();
     let file = dir.path().join("a.rs").display().to_string();
     let config_root = dir.path().join("config");
-    let mut pty =
-        common::pty::spawn_pmacs_in_pty(&[&file], &[("XDG_CONFIG_HOME", &config_root)], 40, 120);
+    let mut pty = common::pty::spawn_pmacs_in_pty(
+        &[&file],
+        &[
+            ("XDG_CONFIG_HOME", &config_root),
+            ("XDG_STATE_HOME", &state),
+            ("PMACS_STATE_HOME", &state),
+        ],
+        40,
+        120,
+    );
 
     let deadline = Instant::now() + Duration::from_mins(1);
     while std::fs::read_to_string(&status).unwrap_or_default() != "initialized,initialized" {
@@ -524,6 +558,7 @@ fn r1_two_servers_with_heirs_quit_within_one_bound() {
         "precondition: two heirs and two servers recorded; pids {pids:?}"
     );
 
+    let state_before = state_files(&state);
     pty.write_input(b"\x18\x03").expect("type C-x C-c");
     let started = Instant::now();
     let status = pty
@@ -531,6 +566,11 @@ fn r1_two_servers_with_heirs_quit_within_one_bound() {
         .expect("the editor exits within 30 s");
     let took = started.elapsed();
     assert!(status.success(), "quit is a clean exit, got {status:?}");
+    assert_eq!(
+        state_files(&state),
+        state_before,
+        "quit wrote state, so the bound held its fsync (#360), not only the teardown"
+    );
     assert!(
         took < Duration::from_secs(6),
         "two servers with heirs: quit took {took:?}, where E8c's suite states the \

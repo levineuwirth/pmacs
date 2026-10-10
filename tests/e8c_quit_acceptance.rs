@@ -29,6 +29,17 @@
 //! with `try_wait`, so a quit that never returns cannot hold up the
 //! deadline that judges it.
 //!
+//! **The bound is the language-server path's, and nothing else's.** Quit
+//! also runs the `editor.before-quit` hooks, and saveplace's writes the
+//! `places` state file through an `fsync` that a busy disk has held for
+//! seconds (E8c review 1 measured 2 to over 20 s under a gate sweep,
+//! #360). That wait is not this suite's subject and has no bound, so a
+//! row whose deadline included it would be measuring the disk. Every
+//! PTY row gives its editor a state root of its own, turns saveplace
+//! off, and checks that quit wrote nothing there ([`World::state_files`]),
+//! so the window [`QUIT_BOUND`] judges holds only the teardown's fixed
+//! waits. A busy disk can still make a user's quit slow; #360 is open.
+//!
 //! The in-process rows dispatch the keys a user presses and read
 //! `EditorState`'s own quit flag; `C-x C-c` invoked by name would pass
 //! with the binding gone.
@@ -45,10 +56,14 @@ mod common;
 
 use common::pty::{PmacsPty, spawn_pmacs_in_pty};
 
-/// The editor's own teardown is bounded at about four seconds: two of
-/// `SIGTERM` grace, then `SIGKILL` and two of reaping
-/// (`ProcessSupervisor::shutdown`). The rest is a slow runner's margin;
-/// #299 was a quit that never ended.
+/// The window a PTY row gives `C-x C-c` to end the editor. It holds only
+/// waits the teardown fixes in advance (`ProcessSupervisor::shutdown`):
+/// two seconds of `SIGTERM` grace, then `SIGKILL` and two of reaping,
+/// and, for each dead server whose output another process holds, two
+/// of draining it and two of joining its readers, one server after
+/// another. No quit-time state write is in it (the module doc, #360).
+/// The rest is a slow runner's margin; #299 was a quit that never
+/// ended.
 const QUIT_BOUND: Duration = Duration::from_secs(15);
 
 /// From spawn to the state each PTY row quits from.
@@ -76,11 +91,15 @@ impl World {
         std::fs::write(dir.path().join("a.rs"), text).expect("write a.rs");
         let config = dir.path().join("config").join("pmacs");
         std::fs::create_dir_all(&config).expect("config dir");
+        std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
         let status = dir.path().join("status");
         let init = format!(
             r#"
 pmacs.lsp.config = {{}}
 pmacs.lsp.config.rust = {server}
+-- Quit's state write is not the subject: saveplace's `fsync` waits on
+-- the disk, without a bound (#360).
+pmacs.saveplace.enable(false)
 -- Each frame, what quit depends on, written when it changes: the text
 -- of `*errors*`, the question the minibuffer asks, the servers' states.
 local last
@@ -122,7 +141,40 @@ end)
     fn spawn(&self) -> PmacsPty {
         let file = self.path("a.rs").display().to_string();
         let config = self.path("config");
-        spawn_pmacs_in_pty(&[&file], &[("XDG_CONFIG_HOME", &config)], 40, 120)
+        let state = self.path("state");
+        spawn_pmacs_in_pty(
+            &[&file],
+            &[
+                ("XDG_CONFIG_HOME", &config),
+                ("XDG_STATE_HOME", &state),
+                ("PMACS_STATE_HOME", &state),
+            ],
+            40,
+            120,
+        )
+    }
+
+    /// Every file under the editor's state root, with its length and
+    /// modification time. Quit must leave this unchanged: a state write
+    /// at quit is an `fsync`, and a row's bound must not hold one.
+    fn state_files(&self) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+        let mut found = Vec::new();
+        let mut dirs = vec![self.path("state")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    dirs.push(entry.path());
+                } else {
+                    let modified = meta.modified().expect("mtime");
+                    found.push((entry.path(), meta.len(), modified));
+                }
+            }
+        }
+        found.sort();
+        found
     }
 
     /// The hook's last record, or empty before its first frame.
@@ -276,6 +328,7 @@ fn quit_and_require_exit(world: &World, pty: &mut PmacsPty, children: &[u32]) {
         !children.is_empty(),
         "precondition: the editor has children to end"
     );
+    let state = world.state_files();
     pty.write_input(b"\x18\x03").expect("type C-x C-c");
     let started = Instant::now();
     let Some(status) = pty.wait_for_exit(QUIT_BOUND) else {
@@ -291,6 +344,11 @@ fn quit_and_require_exit(world: &World, pty: &mut PmacsPty, children: &[u32]) {
         status.success(),
         "quit is a clean exit, got {status:?} after {:?}",
         started.elapsed()
+    );
+    assert_eq!(
+        world.state_files(),
+        state,
+        "quit wrote state, so the bound held its fsync (#360), not only the teardown"
     );
     let deadline = Instant::now() + REAP_BOUND;
     loop {
