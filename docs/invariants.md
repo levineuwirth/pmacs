@@ -16,8 +16,9 @@ because the two halves grow by opposite laws.
 buffer the editor generates (`*help*`, listviews, dired, compilation
 output, and the like). It lifts `read_only`, replaces the whole buffer
 with a single `Replace` that skips intercepts, discards history,
-re-asserts `read_only`, and returns the `Edit`. The pairing, not the
-setter, is the primitive, for three reasons:
+re-asserts `read_only`, marks the buffer clean, and returns the `Edit`.
+Quit asks about `is_modified`, so Lua writers call `buf:mark_clean()`.
+The pairing, not the setter, is the primitive, for three reasons:
 
 - An intercept is not read-only. `Buffer::undo` reaches the rope through
   `ensure_writable` and never consults the intercept chain, so an
@@ -194,10 +195,9 @@ unclaimed crash data; adopting clears the old owner's skip cache.
 - A pass that sets a mode flag clears it on every exit, including the
   `?` early returns; `terminal_active` suppresses `CursorByte` and the
   presence sweep, and was once left set by an early return.
-- Knowledge about a buffer belongs in shared stores (the
-  `DiagnosticStore` severity totals), never in per-session baselines;
-  a field that doubles as an emission baseline and a freeze count is a
-  reset-contract trap.
+- Knowledge about a buffer belongs in shared stores (the `DiagnosticStore`
+  severity totals), never in per-session baselines; a field that doubles
+  as an emission baseline and a freeze count is a reset-contract trap.
 - The no-argument arm of `pmacs.window.buffer()` resolves through the
   ambient view and its fallback is what makes the function total. The
   acting frontend can name a frontend with no registered view, and no

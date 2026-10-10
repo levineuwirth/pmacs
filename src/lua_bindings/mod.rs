@@ -1395,6 +1395,19 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
             effective_edit_triple(&edit)
         },
     );
+
+    // E8c (#299): the owner of a generated buffer that writes it with
+    // the mutators above --- `*help*`, `*compilation*`,
+    // `*search-results*` --- says the text is its own, as
+    // `set_generated_contents` does for its writers. `is_modified` is
+    // what the quit and kill prompts ask about, and the editor's output
+    // is no one's unsaved work.
+    methods.add_method("mark_clean", |lua, this, ()| {
+        with_registry_mut(lua, |r| {
+            resolve_mut(r, this.0)?.mark_clean();
+            Ok(())
+        })
+    });
 }
 
 fn parse_bypass_intercept(opts: Option<&Table>) -> mlua::Result<bool> {
