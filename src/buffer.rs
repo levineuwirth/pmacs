@@ -762,6 +762,15 @@ impl Buffer {
     /// retention lives in the arbiter's per-source stacks, so both
     /// are cleared.
     ///
+    /// A write that lands also leaves the buffer **clean**: what the
+    /// owner wrote is no one's unsaved work, and [`Self::is_modified`] is
+    /// what the quit and kill prompts ask about. Left modified, every
+    /// generated buffer --- `*buffer-list*`, a dired listing, a terminal
+    /// snapshot --- held `C-x C-c` at a question about a buffer the user
+    /// never wrote (E8c, #299). The Rust renderers of `*help*`,
+    /// `*workers*` and `*pmacs-instance*` already marked their buffers
+    /// clean.
+    ///
     /// # The returned edit must be fanned out
     ///
     /// One whole-buffer [`EditOp::Replace`] is applied, and its [`Edit`]
@@ -785,6 +794,9 @@ impl Buffer {
         // half-applied edit reachable through an undo the owner cannot see.
         self.clear_history();
         self.read_only = true;
+        if result.is_ok() {
+            self.is_modified = false;
+        }
         result
     }
 

@@ -1045,6 +1045,7 @@ local function search_panel_resync()
   end
   local buf = p.buf
   buf:insert(buf:len(), GREP_DESYNC_MARKER, { bypass_intercept = true })
+  buf:mark_clean()
   p.next_row = grep_count_newlines(buf:slice(0, buf:len()))
   p.expected_rev = buf:revision()
 end
@@ -1067,6 +1068,9 @@ local function search_panel_append(text)
   local row = p.next_row
   local buf = p.buf
   buf:insert(buf:len(), text, { bypass_intercept = true })
+  -- E8c: results are the editor's output, never the user's unsaved
+  -- work; left modified, they held `C-x C-c` at a question.
+  buf:mark_clean()
   p.expected_rev = buf:revision()
   p.next_row = row + grep_count_newlines(text)
   return row
@@ -1230,6 +1234,7 @@ function pmacs.project.search(query, opts)
   if buf:len() > 0 then buf:delete(0, buf:len(), { bypass_intercept = true }) end
   local header = "Searching for: " .. query .. "\n\n"
   buf:insert(0, header, { bypass_intercept = true })
+  buf:mark_clean()
   p.next_row = grep_count_newlines(header)
   p.expected_rev = buf:revision()
   pmacs.window.switch_buffer(buf)
@@ -1510,6 +1515,10 @@ local function show_help_text(text)
   local len = buf:len()
   if len > 0 then buf:delete(0, len) end
   if #text > 0 then buf:insert(0, text) end
+  -- E8c: the editor's text, not the user's; left modified, `*help*`
+  -- held `C-x C-c` at "Modified buffers exist (*help*)" and `q` at an
+  -- "unsaved changes" question.
+  buf:mark_clean()
   if fresh or help_buffer_id ~= buf then
     pcall(function()
       pmacs.keymap.unbind { scope = "buffer", buffer = buf, sequence = "q" }
