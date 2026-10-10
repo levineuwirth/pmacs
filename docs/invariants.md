@@ -123,12 +123,13 @@ The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
 `didsavenotext`, `sighelp`, `prepare`, `preprefuse`, `rename`,
 `inlaybounds`, `inlayrefresh`, `semantictokensrefresh`, `applyeditplan`,
 `resourceops`, `posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`.
-Failure shapes: `crash`, `error`, `contentmodified`, `clientfault`,
-`garbage`, `silent`. Watchers: `filewatch` (`RelativePattern` `**/*.txt`),
-`filewatchabs` (absolute glob), `filewatchflat` (no `**/`), `filewatchbare`
-(bare relative), `filewatchrereg` (one id twice), `filewatchjoin`,
-`filewatchretire`. Use these, never a real server; the binary documents
-each shape, and a stale copy here covers the shape next to the defect.
+Failure shapes: `crash`, `abortonopen`, `error`, `contentmodified`,
+`clientfault`, `garbage`, `silent`, `stopanswering`. Watchers: `filewatch`
+(`RelativePattern` `**/*.txt`), `filewatchabs` (absolute glob),
+`filewatchflat` (no `**/`), `filewatchbare` (bare relative),
+`filewatchrereg` (one id twice), `filewatchjoin`, `filewatchretire`. Use
+these, never a real server; the binary documents each shape, and a stale
+copy here covers the shape next to the defect.
 
 ## Persistence
 
@@ -151,9 +152,8 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   incompatible act reserved for a change that cannot be additive.
 - A new wire message is an appended variant, bumping `PROTOCOL_VERSION`
   and extending `SUPPORTED_PROTOCOL_VERSIONS`, guarded by a byte pin on
-  the previous final variant: an appended variant's own round-trip
-  cannot detect a discriminant shift, only a literal fixture of the
-  neighbor can.
+  the previous final variant: an appended variant's own round-trip cannot
+  detect a discriminant shift, only a literal fixture of the neighbor can.
 - A widened field is a break. postcard encodes positionally, so every
   older peer mis-decodes rather than ignores. A superseded variant is
   frozen, kept unchanged and still sent to the versions that know only
