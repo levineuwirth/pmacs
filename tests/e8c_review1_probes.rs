@@ -366,10 +366,12 @@ impl Drop for Heir {
 /// while its child holds its output. The tick that reaps it waits out
 /// the final drain, then `READER_JOIN_BOUND`, on the main thread, and
 /// leaves the reader blocked on the child's pipe. The stall is bounded
-/// now (it was not before E8c), so the first assertion holds. The
-/// second asks whether anything says so: the editor froze for about
-/// four seconds and left a thread and two descriptors behind for as
-/// long as the child lives, and the user can read why in `*errors*`.
+/// now (it was not before E8c), so the first assertion holds. The rest
+/// ask whether anything says so: the editor froze for about four
+/// seconds and left a thread and two descriptors behind for as long as
+/// the child lives. The fix round says so where a failure is said, the
+/// status line and `*errors*` with the mode line's mark, naming the
+/// process and what was left.
 #[test]
 fn r1_a_reader_left_behind_is_told() {
     let dir = tempfile::tempdir().unwrap();
@@ -412,6 +414,19 @@ fn r1_a_reader_left_behind_is_told() {
         "the editor stalled {longest:?} and left a reader behind; nothing says so. \
          *errors* holds {errors:?}"
     );
+    assert!(
+        errors.contains(
+            "[process] r1-heir-holder exited, but another process still holds its output"
+        ) && errors.contains("reader thread"),
+        "*errors* says what happened and what was left; it holds {errors:?}"
+    );
+    let status = s.core.borrow().status.clone();
+    assert!(
+        status.starts_with("process: r1-heir-holder exited"),
+        "and so does the status line; it reads {status:?}"
+    );
+    let unread: usize = eval(&s, "return pmacs.error_log.unread()");
+    assert_eq!(unread, 1, "the mode line's mark counts it");
 }
 
 // ---------------------------------------------------------------------------

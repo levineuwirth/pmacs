@@ -411,6 +411,10 @@ fn e8c_quit_against_an_answering_server_exits_and_ends_it() {
 /// held, from inside the supervisor's shutdown tick. The child itself
 /// outlives the editor, a descendant it did not start, which is #356's
 /// question; the world's drop ends it.
+///
+/// The wait for that reader is said on the terminal once the editor has
+/// left it, naming the server (E8c fix round 1): at `a35b76b` the pane
+/// stayed blank through it and nothing said why.
 #[test]
 fn e8c_quit_exits_when_a_server_s_child_holds_its_output() {
     let world = World::new("fn main() {}\n", fake_with_heir);
@@ -441,6 +445,25 @@ fn e8c_quit_exits_when_a_server_s_child_holds_its_output() {
         pid_alive(heir),
         "the heir still held the pipe when the editor exited, so the exit did not wait on it"
     );
+    let told = "pmacs: quitting: lsp:default-rust exited, but another process still holds its \
+                output; waited ";
+    let deadline = Instant::now() + REAP_BOUND;
+    while !String::from_utf8_lossy(&pty.output()).contains(told) {
+        assert!(
+            Instant::now() < deadline,
+            "the wait at quit is said on the terminal, naming the server; the terminal's \
+             last bytes are {:?}",
+            String::from_utf8_lossy(&pty.output())
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 // ---------------------------------------------------------------------------

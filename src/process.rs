@@ -412,6 +412,42 @@ pub enum ProcessEventKind {
     },
 }
 
+/// A reap that stopped waiting on a dead process's output and left
+/// reader threads behind (E8c fix round 1).
+///
+/// The process exited, but another process --- most often one it
+/// started --- still holds the write end of its output, so a reader
+/// blocked in `read` on it cannot be ended from here. The reap waited,
+/// on the thread that ticks the supervisor, then left those readers to
+/// end when the holder lets go. That wait froze the editor and the
+/// threads outlive the reap, so neither may pass in silence: the
+/// supervisor queues one of these per such reap, and the editor says
+/// so ([`ProcessSupervisor::take_output_held`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputHeldNotice {
+    /// The process's [`ProcessSpec::label`].
+    pub label: String,
+    /// Reader threads left blocked on the held output.
+    pub readers_left: usize,
+    /// How long the reap waited for them, its final drain included.
+    pub waited: Duration,
+}
+
+impl OutputHeldNotice {
+    /// What happened, in the words the editor reports it with.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "{} exited, but another process still holds its output; waited {:.1} s, \
+             then left {} reader thread{} blocked on it",
+            self.label,
+            self.waited.as_secs_f64(),
+            self.readers_left,
+            if self.readers_left == 1 { "" } else { "s" },
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming pipeline constants (T M6.2)
 // ---------------------------------------------------------------------------
@@ -526,6 +562,9 @@ pub struct ProcessSupervisor {
     /// fixture teardown can assert its plan was consumed even when unit
     /// tests run in parallel.
     reap_kill_faults: Arc<Mutex<ReapKillFaults>>,
+    /// Reaps that left a dead process's readers behind, oldest first,
+    /// until [`Self::take_output_held`] hands them on.
+    output_held: Vec<OutputHeldNotice>,
 }
 
 /// One armed group in the reap ledger.
@@ -777,6 +816,18 @@ impl StdinWriter {
 
 impl Drop for RuntimeHandles {
     fn drop(&mut self) {
+        // A reap has already released the readers and said what it left
+        // (`poll_one`); this is for handles dropped any other way.
+        let _ = self.release_readers(Instant::now() + READER_JOIN_BOUND);
+    }
+}
+
+impl RuntimeHandles {
+    /// End this generation's reader threads: wake them, close the
+    /// child's stdin, and join each that finishes by `deadline`. Returns
+    /// how many were left unjoined, still blocked on output another
+    /// process holds. Idempotent: a second call finds no readers.
+    fn release_readers(&mut self, deadline: Instant) -> usize {
         // Wake any reader thread blocked in a bounded `send` ---
         // dropping the master closes the kernel pipe and unblocks
         // `read`, but does nothing for a reader stuck on a full
@@ -810,20 +861,24 @@ impl Drop for RuntimeHandles {
         // whose child kept its output never ended the editor, its main
         // thread parked in this join from `ProcessSupervisor::shutdown`'s
         // tick, and a tick that reaps such a server mid-session would
-        // freeze the same way. A reader not finished by
-        // [`READER_JOIN_BOUND`] is left unjoined. Its channel's receiver
-        // goes with these handles, so it returns at its pipe's end or
-        // with the next bytes it reads, and the editor's exit ends it
-        // otherwise.
-        let deadline = Instant::now() + READER_JOIN_BOUND;
+        // freeze the same way. A reader not finished by `deadline` is
+        // left unjoined, and counted: the caller says so, because the
+        // wait froze its thread and the reader outlives it. Its
+        // channel's receiver goes with these handles, so it returns at
+        // its pipe's end or with the next bytes it reads, and the
+        // editor's exit ends it otherwise.
+        let mut left = 0;
         for h in std::mem::take(&mut self.readers) {
             while !h.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(1));
             }
             if h.is_finished() {
                 let _ = h.join();
+            } else {
+                left += 1;
             }
         }
+        left
     }
 }
 
@@ -1303,6 +1358,7 @@ impl ProcessSupervisor {
             forced_kill_errno: None,
             forced_pty_lookup: None,
             reap_kill_faults: Arc::new(Mutex::new(ReapKillFaults::default())),
+            output_held: Vec::new(),
         }
     }
 
@@ -1795,6 +1851,14 @@ impl ProcessSupervisor {
         };
         let now = Instant::now();
         let final_output = final_drain_runtime(runtime, group_ctx.as_ref());
+        let readers_left = runtime.release_readers(Instant::now() + READER_JOIN_BOUND);
+        if readers_left > 0 {
+            self.output_held.push(OutputHeldNotice {
+                label: proc.spec.label.clone(),
+                readers_left,
+                waited: now.elapsed(),
+            });
+        }
         let (termination, event) = match status {
             Ok(Some(TermStatus::Exited(code))) => (
                 Termination::Exited {
@@ -1898,6 +1962,13 @@ impl ProcessSupervisor {
     /// that haven't produced events yet.
     pub fn take_events(&mut self, id: ProcessId) -> Vec<ProcessEvent> {
         self.pending.remove(&id).unwrap_or_default()
+    }
+
+    /// Drain the reaps since the last call that left a dead process's
+    /// readers behind, oldest first. The editor reports each (see
+    /// [`OutputHeldNotice`]).
+    pub fn take_output_held(&mut self) -> Vec<OutputHeldNotice> {
+        std::mem::take(&mut self.output_held)
     }
 
     /// Drain every queued event across every process. Returns events

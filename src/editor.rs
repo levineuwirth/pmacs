@@ -339,10 +339,18 @@ impl Drop for EditorState {
     /// stuck mid-handoff stays alive (bounded by its job), which is
     /// still a ~15x improvement over leaking every pool whole.
     fn drop(&mut self) {
-        {
+        let held = {
             let mut supervisor = self.process_supervisor.borrow_mut();
             self.terminal_manager.borrow_mut().shutdown(&mut supervisor);
             supervisor.shutdown();
+            supervisor.take_output_held()
+        };
+        // No buffer is shown any more: the TUI has left the alternate
+        // screen before its editor drops (`run`), so stderr is the
+        // terminal the user quit from, and a wait at quit that left a
+        // reader behind is said there (E8c fix round 1).
+        for notice in held {
+            eprintln!("pmacs: quitting: {}", notice.message());
         }
         self.async_runtime.shutdown_workers();
     }
@@ -1229,17 +1237,28 @@ impl EditorState {
 
     /// One pass of the process supervisor and terminal-owned event drain.
     ///
-    /// Ordering is supervisor tick → terminal drain/prune →
+    /// Ordering is supervisor tick → terminal drain/prune → the reaps
+    /// that left a dead process's readers behind, reported →
     /// `process.after-tick`. `TerminalManager` calls `take_events` only for its
     /// own `ProcessId`s; existing Lua/LSP/MCP ownership remains unchanged.
     pub fn tick_processes(&mut self) {
-        {
+        let held = {
             let mut supervisor = self.process_supervisor.borrow_mut();
             supervisor.tick();
             let mut manager = self.terminal_manager.borrow_mut();
             manager.tick(&mut supervisor);
             let mut core = self.core.borrow_mut();
             manager.prune(&mut core, &mut supervisor);
+            supervisor.take_output_held()
+        };
+        // The reap froze this thread while it waited and left threads
+        // behind, so it is said on both channels a failure has: the
+        // status line, and `*errors*` with the mode line's mark, which
+        // keep it after the next message (E8c fix round 1).
+        for notice in held {
+            let message = notice.message();
+            self.lua_host.report_error("process", &message);
+            self.core.borrow_mut().status = format!("process: {message}");
         }
         self.lua_host
             .run_hook("process.after-tick", mlua::MultiValue::new());
