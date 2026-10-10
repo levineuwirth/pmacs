@@ -5489,7 +5489,8 @@ mod tests {
 
     /// A plain (non-group) process whose shell starts an heir holding its
     /// stdout and stderr and records the heir's pid in `pid_file`, then
-    /// runs `rest`.
+    /// runs `rest`. Linux-only, as the rows that use it are.
+    #[cfg(target_os = "linux")]
     fn heir_holder_spec(label: &str, pid_file: &std::path::Path, rest: &str) -> ProcessSpec {
         let mut spec = ProcessSpec::new(label, "/bin/sh", "test process");
         spec.args = vec![
@@ -5500,8 +5501,10 @@ mod tests {
     }
 
     /// Ends every heir the row recorded, however it ends.
+    #[cfg(target_os = "linux")]
     struct Heirs(Vec<std::path::PathBuf>);
 
+    #[cfg(target_os = "linux")]
     impl Drop for Heirs {
         fn drop(&mut self) {
             for path in &self.0 {
