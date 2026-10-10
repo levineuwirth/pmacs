@@ -9,6 +9,13 @@
 //! atomic on the same filesystem, so a crash mid-write leaves either the
 //! old file or the new file --- never a truncated half-file.
 //!
+//! # Durability
+//!
+//! [`save_atomic`] also syncs, so the new file is on the disk when it
+//! returns. [`save_atomic_with_mode`] lets a caller say otherwise
+//! ([`Durability`]), for state that is cheap to lose and written where a
+//! wait on the disk would show.
+//!
 //! # External-modification detection
 //!
 //! [`load_file`] returns a [`FileMeta`] capturing modification time and
@@ -103,6 +110,30 @@ pub enum SaveError {
     Io(#[from] io::Error),
 }
 
+/// What [`save_atomic_with_mode`] waits for before it returns.
+///
+/// Either way the replace is atomic against a crash of the editor: the
+/// rename installs the whole new file or leaves the old one, and what
+/// was written sits in the kernel's cache, which a process crash does
+/// not lose. The two differ only on a crash of the machine (power, a
+/// kernel panic) before the kernel writes that cache back on its own
+/// schedule; Linux expires dirty data after thirty seconds by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Durability {
+    /// Sync the temp file before the rename and the directory after it
+    /// (F-006), so the new contents survive a machine crash once the
+    /// call returns. A user's file, and autosave's recovery copy of
+    /// one. Each sync waits on the disk without a bound: seconds under
+    /// load (#360).
+    Synced,
+    /// Sync nothing, so the call waits for no sync. After a machine
+    /// crash inside the window above, the file holds its old contents,
+    /// or, on a filesystem that does not write a file's data before a
+    /// rename that replaces another with it, it may be empty. For state
+    /// that is cheap to lose (#360).
+    Unsynced,
+}
+
 /// Cleanup guard: removes the named temp file on drop unless defused.
 ///
 /// Lives at module scope so [`save_atomic`] can use it without confusing
@@ -134,12 +165,12 @@ impl Drop for TempCleanup {
 /// # Errors
 /// See [`SaveError`].
 pub fn save_atomic(path: &Path, content: &[u8]) -> Result<FileMeta, SaveError> {
-    save_atomic_with_mode(path, content, None)
+    save_atomic_with_mode(path, content, None, Durability::Synced)
 }
 
 /// [`save_atomic`], but forcing the target's Unix mode to `mode` instead
 /// of inheriting the existing file's mode (or the umask default for a new
-/// file).
+/// file), and syncing only as `durability` says.
 ///
 /// The mode is applied to the **temp file before the rename**, so the
 /// target never exists — not even momentarily — at a laxer mode. A
@@ -155,6 +186,7 @@ pub fn save_atomic_with_mode(
     path: &Path,
     content: &[u8],
     mode: Option<u32>,
+    durability: Durability,
 ) -> Result<FileMeta, SaveError> {
     // `Path::parent` returns:
     //  * `None` for `/` or `""` --- no place to put a sibling temp file;
@@ -225,7 +257,9 @@ pub fn save_atomic_with_mode(
         fs::set_permissions(&tmp_path, perms).map_err(SaveError::Io)?;
     }
     tmp.write_all(content).map_err(SaveError::Io)?;
-    tmp.sync_all().map_err(SaveError::Io)?;
+    if durability == Durability::Synced {
+        tmp.sync_all().map_err(SaveError::Io)?;
+    }
     drop(tmp); // close before rename (Windows can't rename an open file)
 
     fs::rename(&tmp_path, path).map_err(SaveError::Io)?;
@@ -237,7 +271,9 @@ pub fn save_atomic_with_mode(
     // (F-006). Best-effort: the rename already succeeded, and some
     // filesystems reject directory fsync. Directory fsync is a Unix concept.
     #[cfg(unix)]
-    sync_parent_dir(path);
+    if durability == Durability::Synced {
+        sync_parent_dir(path);
+    }
 
     let meta = current_meta(path)?;
     Ok(meta)
@@ -397,6 +433,28 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], "ok.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsynced_save_still_replaces_whole_and_keeps_the_mode() {
+        // #360 — `Durability::Unsynced` drops the syncs and nothing else:
+        // the content replaced whole, the forced mode on the target, no
+        // temp left beside it.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("places");
+        save_atomic_with_mode(&path, b"old", Some(0o600), Durability::Unsynced).unwrap();
+        save_atomic_with_mode(&path, b"new", Some(0o600), Durability::Unsynced).unwrap();
+        let (bytes, _) = load_file(&path).unwrap();
+        assert_eq!(bytes, b"new");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["places"]);
     }
 
     #[test]
