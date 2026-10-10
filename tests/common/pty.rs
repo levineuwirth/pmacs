@@ -98,6 +98,21 @@ impl Drop for PmacsPty {
 /// drains the master so pmacs's writes never block on a full
 /// terminal buffer.
 pub fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols: u16) -> PmacsPty {
+    spawn_pmacs_in_pty_under(&[], args, envs, rows, cols)
+}
+
+/// [`spawn_pmacs_in_pty`], with pmacs run by `wrapper`: its first word
+/// is the program the PTY runs, the rest that program's arguments,
+/// which pmacs's path and `args` follow. An empty `wrapper` runs pmacs
+/// itself. The PTY's child, the process [`PmacsPty::wait_for_exit`] and
+/// [`PmacsPty::process_id`] name, is the wrapper.
+pub fn spawn_pmacs_in_pty_under(
+    wrapper: &[&str],
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    rows: u16,
+    cols: u16,
+) -> PmacsPty {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -108,7 +123,18 @@ pub fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols
         })
         .expect("openpty");
 
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_pmacs"));
+    let pmacs = env!("CARGO_BIN_EXE_pmacs");
+    let mut cmd = match wrapper.split_first() {
+        Some((program, rest)) => {
+            let mut cmd = CommandBuilder::new(program);
+            for arg in rest {
+                cmd.arg(arg);
+            }
+            cmd.arg(pmacs);
+            cmd
+        }
+        None => CommandBuilder::new(pmacs),
+    };
     for arg in args {
         cmd.arg(arg);
     }

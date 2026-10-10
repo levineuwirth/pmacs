@@ -391,6 +391,7 @@ PMACS_REQUIRE_SHELLS bash zsh fish sleep false
 PMACS_REQUIRE_LUA lua
 PMACS_REQUIRE_HLS haskell-language-server-wrapper cabal ghc
 PMACS_REQUIRE_CGROUP cgroup-delegation
+PMACS_REQUIRE_STRACE strace
 EOF
 }
 
