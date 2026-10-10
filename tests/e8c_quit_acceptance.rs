@@ -5,9 +5,14 @@
 //! buffers.
 //!
 //! **What #299 was, measured.** The TUI opened a Rust file nested
-//! 20,000 deep and rust-analyzer aborted on it (`SIGABRT`, half a
-//! second after the `didOpen`). The client reported the crash to
-//! `*errors*` and restarted the server. The report was an ordinary edit,
+//! 20,000 deep, and rust-analyzer aborted (`SIGABRT`) about half a
+//! second after the `didOpen`. Not on the file: driven directly it
+//! survives the `didOpen` alone and shuts down cleanly, and it overflows
+//! a worker's stack in the handler of whichever request pmacs sends next
+//! (`inlayHint`, `semanticTokens/range` or `semanticTokens/full`; E8c
+//! review 1, 4 of 4 and 7 of 7). The client reported the crash to
+//! `*errors*` and restarted the server, which survives only because it
+//! is sent nothing (#355). The report was an ordinary edit,
 //! so `*errors*` was modified, and `editor.quit` asked "Modified buffers
 //! exist (*errors*); quit anyway? (y or n)". Nothing answered it, so the
 //! editor never exited. No `shutdown` was sent at all: quit does not
@@ -16,8 +21,11 @@
 //! buffer the editor writes for itself was "modified".
 //!
 //! **The controlled server.** `pmacs_fake_lsp` in `abortonopen` aborts
-//! on the first `didOpen` it is sent, as rust-analyzer did, and serves
-//! normally once restarted; `stopanswering` is an initialized server that
+//! on the first `didOpen` it is sent and serves normally once restarted.
+//! It models the crash and its report, which is what held #299's quit,
+//! not the trigger, which is rust-analyzer's request handlers; that is
+//! enough here, since quit asked about the report whatever caused the
+//! crash. `stopanswering` is an initialized server that
 //! stops reading and writing on a command in the document. That one also
 //! ignores `SIGTERM`, through the shell `trap` it runs under, so its end
 //! needs the supervisor's `SIGKILL`. Every fake ignores `SIGHUP`, so

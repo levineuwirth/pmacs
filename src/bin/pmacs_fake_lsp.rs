@@ -41,11 +41,15 @@
 //!   `initialize`, then exits with code 7 immediately, so the
 //!   client can verify crash + restart handling.
 //! * If launched with `PMACS_FAKE_LSP_MODE=abortonopen` (E8c): the
-//!   first generation to receive a `didOpen` aborts (`SIGABRT`), which
-//!   is what rust-analyzer does on a Rust file nested 20,000 deep
-//!   (#299). `PMACS_FAKE_LSP_ABORT_ONCE` names the file that marks the
-//!   abort as done, so the generation the client restarts serves
-//!   normally.
+//!   first generation to receive a `didOpen` aborts (`SIGABRT`). That
+//!   models the crash #299's quit met and its report, not its trigger:
+//!   rust-analyzer survives the `didOpen` of a Rust file nested 20,000
+//!   deep and overflows a worker's stack in the handlers of the requests
+//!   that follow it (`inlayHint`, `semanticTokens/range`,
+//!   `semanticTokens/full`; E8c review 1). `PMACS_FAKE_LSP_ABORT_ONCE`
+//!   names the file that marks the abort as done, so the generation the
+//!   client restarts serves normally; rust-analyzer's restarted
+//!   generation survives only because it is sent nothing (#355).
 //! * If launched with `PMACS_FAKE_LSP_MODE=stopanswering` (E8c): an
 //!   ordinary server until a `didOpen` or `didChange` carries the text
 //!   `PMACS-STOP-ANSWERING`, the command. From then on it reads and
