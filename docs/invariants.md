@@ -17,32 +17,32 @@ buffer the editor generates (`*help*`, listviews, dired, compilation
 output, and the like). It lifts `read_only`, replaces the whole buffer
 with a single `Replace` that skips intercepts, discards history,
 re-asserts `read_only`, marks the buffer clean, and returns the `Edit`.
-Quit asks about `is_modified`, so Lua writers call `buf:mark_clean()`.
-The pairing, not the setter, is the primitive, for three reasons:
+Quit asks about `is_modified`, so `buf:mark_clean()` follows a Lua write
+only if it replaced the whole buffer, never an append to one the user
+can type into, which would drop their text from quit's question.
+`*errors*` is the live case: its append does not mark clean but keeps
+the state it found, and that keeps it safe. The pairing, not the setter,
+is the primitive, for three reasons:
 
-- An intercept is not read-only. `Buffer::undo` reaches the rope through
-  `ensure_writable` and never consults the intercept chain, so an
-  intercept-only "read-only" buffer is emptied by `M-x buffer.undo`.
-  Rebinding the undo chords buffer-locally does not close this; only
-  rope-level `read_only` does.
+- An intercept is not read-only: `Buffer::undo` reaches the rope through
+  `ensure_writable`, never the intercept chain, so `M-x buffer.undo`
+  empties an intercept-only "read-only" buffer, whatever the undo chords
+  are bound to; only rope-level `read_only` closes this.
 - A bare `set_read_only` would refuse the owner's own refresh, the
   operation such buffers exist for; there is deliberately no Lua one.
-- A rope write is half of an edit. The returned `Edit` must be fanned out
-  through `notify_buffer_edit_to_windows`, which also queues the
-  daemon-origin CRDT op. Skipping it leaves a displaying window with a
-  `TextView` line index for the previous contents, and replica mirrors
-  that never import the write.
+- A rope write is half of an edit: the returned `Edit` must be fanned
+  out through `notify_buffer_edit_to_windows`, which also queues the
+  daemon-origin CRDT op, or a displaying window keeps a `TextView` line
+  index for the previous contents and replica mirrors never import it.
 
-History clearing must clear whichever history the buffer has. In CRDT
-mode the undo history is the cross-peer arbiter's per-source stacks
-on the `Buffer`; the v0.1 rope stacks and those stacks are cleared
-together, and a remote import's pending record with them.
+History clearing clears whichever history the buffer has: the v0.1 rope
+stacks and, in CRDT mode, the cross-peer arbiter's per-source stacks on
+the `Buffer`, with a remote import's pending record.
 
-The protection is layered and both layers are needed: rope-level
-`read_only` refuses the op at the daemon, while `set_round_trip_input`
-stops a semantic frontend applying the op optimistically to its own
-mirror. A daemon-side refusal arrives after the frontend has painted,
-so on its own it buys divergence, not prevention.
+Both layers are needed: rope-level `read_only` refuses the op at the
+daemon, and `set_round_trip_input` stops a semantic frontend applying it
+optimistically to its mirror. A daemon-side refusal alone comes after
+the frontend has painted: divergence, not prevention.
 
 ## Command boundaries
 

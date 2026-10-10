@@ -9,8 +9,11 @@
 -- entries and their rendering) and the `help` command; the Rust seam
 -- `EditorState::finalize_local_launch` owns WHEN and WHERE — it alone
 -- decides that this is a local, no-target launch whose `*scratch*` is
--- still untouched, and it clears the modified flag afterwards (there is
--- no Lua API for that, deliberately).
+-- still untouched, and it clears the modified flag afterwards. It does
+-- that in Rust, beside its check that `*scratch*` was empty: the
+-- greeting is then the whole buffer, so marking it clean hides nothing
+-- the user typed. Lua has `buf:mark_clean()` since E8c, under the same
+-- rule (`docs/invariants.md`, Generated buffers).
 
 pmacs.welcome = pmacs.welcome or {}
 
