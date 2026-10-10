@@ -454,6 +454,13 @@ const READER_SEND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// before the runtime handles are dropped.
 const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long dropping a generation's handles waits, in all, for its
+/// reader threads to finish before it leaves the rest unjoined (E8c).
+/// A reader that has its pipe's end finishes at once; one that does
+/// not by now is blocked in a `read` that a process this editor did not
+/// start can hold open for good. See [`RuntimeHandles`]'s `Drop`.
+const READER_JOIN_BOUND: Duration = Duration::from_secs(2);
+
 /// TERM→KILL escalation window for `group = true` process groups
 /// (Q#CM3). Armed into the reap ledger when the group receives
 /// SIGTERM — on explicit kill/supersede and on the leader's terminal
@@ -796,8 +803,26 @@ impl Drop for RuntimeHandles {
         // have ended the join. `take()` is idempotent, matching
         // `close_stdin`.
         let _ = self.stdin.take();
+        // The join is bounded here, on the dropping thread, outside the
+        // `read` it waits on (E8c, #299). Joined without a bound, a
+        // reader blocked on a pipe that an escaped descendant holds never
+        // returned, and nor did the drop: `C-x C-c` against a server
+        // whose child kept its output never ended the editor, its main
+        // thread parked in this join from `ProcessSupervisor::shutdown`'s
+        // tick, and a tick that reaps such a server mid-session would
+        // freeze the same way. A reader not finished by
+        // [`READER_JOIN_BOUND`] is left unjoined. Its channel's receiver
+        // goes with these handles, so it returns at its pipe's end or
+        // with the next bytes it reads, and the editor's exit ends it
+        // otherwise.
+        let deadline = Instant::now() + READER_JOIN_BOUND;
         for h in std::mem::take(&mut self.readers) {
-            let _ = h.join();
+            while !h.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
         }
     }
 }

@@ -187,19 +187,19 @@ impl Drop for World {
 }
 
 /// The fake as rust's server in `mode`, its generations recorded in
-/// `dir`, under a shell that has it ignore `signals` (`trap ''`
-/// survives `exec`).
+/// `dir`, exec'd by a shell after `prelude`, which ignores signals for
+/// it (`trap ''` survives `exec`) and may start a child.
 ///
-/// `SIGHUP` is always among them. Here the editor leads the PTY's
-/// session, so its exit hangs up every process in its group; started
-/// from a shell it leads no session and nothing is hung up. Left
-/// default, the kernel would end a server the editor left behind and
-/// no row could see the leak (a supervisor with its `SIGKILL` removed
-/// passed the stopped-server row that way).
-fn fake_server(dir: &Path, mode: &str, signals: &str) -> String {
+/// `SIGHUP` is always ignored. Here the editor leads the PTY's session,
+/// so its exit hangs up every process in its group; started from a
+/// shell it leads no session and nothing is hung up. Left default, the
+/// kernel would end a server the editor left behind and no row could
+/// see the leak (a supervisor with its `SIGKILL` removed passed the
+/// stopped-server row that way).
+fn fake_server(dir: &Path, mode: &str, prelude: &str) -> String {
     format!(
         "{{ command = '/bin/sh', \
-           args = {{ '-c', 'trap \"\" {signals}; exec \"$0\"', {fake:?} }}, \
+           args = {{ '-c', '{prelude}; exec \"$0\"', {fake:?} }}, \
            env = {{ PMACS_FAKE_LSP_MODE = {mode:?}, \
                     PMACS_FAKE_LSP_PID_SINK = {pids:?}, \
                     PMACS_FAKE_LSP_ABORT_ONCE = {once:?}, \
@@ -213,12 +213,25 @@ fn fake_server(dir: &Path, mode: &str, signals: &str) -> String {
 
 /// The fake, ended by `SIGTERM` as a server is by default.
 fn fake(dir: &Path, mode: &str) -> String {
-    fake_server(dir, mode, "HUP")
+    fake_server(dir, mode, "trap \"\" HUP")
 }
 
 /// The fake deaf to `SIGTERM` as well, so only `SIGKILL` ends it.
 fn fake_deaf_to_term(dir: &Path, mode: &str) -> String {
-    fake_server(dir, mode, "HUP TERM")
+    fake_server(dir, mode, "trap \"\" HUP TERM")
+}
+
+/// The fake with an heir: before the shell becomes the server it starts
+/// a `sleep` that inherits the server's stdout and stderr and records
+/// its pid first in the pid sink. A shim that leaves its real work to a
+/// process the editor did not start has this shape.
+fn fake_with_heir(dir: &Path) -> String {
+    let pids = dir.join("pids").display().to_string();
+    fake_server(
+        dir,
+        "",
+        &format!("trap \"\" HUP; sleep 600 & echo $! >> \"{pids}\""),
+    )
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -388,6 +401,46 @@ fn e8c_quit_against_an_answering_server_exits_and_ends_it() {
         "precondition: one server, the editor's child; children {children:?}, server {servers:?}"
     );
     quit_and_require_exit(&world, &mut pty, &children);
+}
+
+/// **A server whose child holds its output.** The server ends at quit's
+/// `SIGTERM`; the child it started keeps the write end of its stdout
+/// and stderr. `C-x C-c` ends the editor within the bound anyway, and
+/// the server with it. Before E8c the editor never exited: dropping the
+/// dead server's handles joined a reader blocked on a pipe the child
+/// held, from inside the supervisor's shutdown tick. The child itself
+/// outlives the editor, a descendant it did not start, which is #356's
+/// question; the world's drop ends it.
+#[test]
+fn e8c_quit_exits_when_a_server_s_child_holds_its_output() {
+    let world = World::new("fn main() {}\n", fake_with_heir);
+    let mut pty = world.spawn();
+    let pid = pty.process_id().expect("the editor's pid");
+
+    world.wait(&mut pty, "the server ready", |w| {
+        w.field("servers") == "initialized"
+    });
+    let pids = world.server_pids();
+    let [heir, server] = pids[..] else {
+        panic!("precondition: the heir's pid, then the server's; got {pids:?}");
+    };
+    assert!(
+        pid_alive(heir) && pid_alive(server),
+        "precondition: the server and its heir are running; pids {pids:?}"
+    );
+    let children: Vec<u32> = descendants(pid)
+        .into_iter()
+        .filter(|&p| p != heir)
+        .collect();
+    assert!(
+        children.contains(&server),
+        "precondition: the server is the editor's child; children {children:?}, server {server}"
+    );
+    quit_and_require_exit(&world, &mut pty, &children);
+    assert!(
+        pid_alive(heir),
+        "the heir still held the pipe when the editor exited, so the exit did not wait on it"
+    );
 }
 
 // ---------------------------------------------------------------------------
