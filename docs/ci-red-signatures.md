@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 37 items in the list below.
+Tally (311-runs): 40 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2839,6 +2839,11 @@ Tally (311-runs): 37 items in the list below.
   it, below).
 - `20261010T084217Z-2263254` at `ae7e8c2` (the bounded-rows pull request's gate, `06-sweep`, its
   `07-sweep-luajit` failing the row with #291's fragments instead; recorded with it, below).
+- `20261010T094513Z-2620566` at `4ac5289` (E8c's base control, `05-sweep`; recorded with E8c,
+  below).
+- `20261010T102908Z-2908057` at `d79b5e5` (E8c's first tip gate, a commit rewritten before any push,
+  `05-sweep`; recorded with E8c, below).
+- `20261010T105213Z-3113170` at `a35b76b` (E8c's tip gate, `05-sweep`; recorded with E8c, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -5416,6 +5421,158 @@ owner's to rule. A bound on every row is #351, filed and not taken.
 
 So, at the bounded-rows pull request: #316 moves to eleven and #291 to seventeen; #352 is filed at
 one; #311's list of runs reads at thirty-seven; every other count above stands.
+
+### E8c, quit must exit: its gates, PR #357 red at `a35b76b`, `main` green at `4ac5289`, #316 at fourteen, #358 filed and #311's list at forty
+
+Recorded 2026-10-10 by E8c, #357 at `a35b76b`. That is four signed commits on `4ac5289`: the fake
+server's `abortonopen` and `stopanswering`; generated writes leaving their buffers clean, so quit
+no longer asks about the editor's own text (#299's stop); the reviewer's bound as PTY rows; and a
+bounded join of a dead child's readers. The runs were read from the jobs endpoint by conclusion
+and through every test leg's log; none was rerun.
+
+#### `main` at `4ac5289`, this branch's base
+
+`4ac5289` is #353's squash and `main`'s last code-bearing commit, so it is this branch's base
+control. Its runs were not recorded here before.
+
+`CI` 38041890976 at `4ac5289`, attempt 1 of 1, `push`, created 09:34:52Z and completed 10:05:33Z:
+`success`.
+
+Tally (main-ci-4ac5289): 19 = 18 + 1.
+
+Tally (main-ci-4ac5289-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 114183618583 | success |
+| Lint (luajit) | 114183618713 | success |
+| Lint (lua54) | 114183618773 | success |
+| Commit attribution (D9) | 114183618793 | success |
+| Changed paths | 114183618815 | success |
+| M4 Perf Gates | 114183642931 | success |
+| Test (crdt) | 114183642978 | success |
+| M1 Acceptance Gates | 114183642984 | success |
+| GPU Render (headless) | 114183642985 | success |
+| M10 Perf Gates (crdt) | 114183643001 | success |
+| M5 Perf Gates | 114183643004 | success |
+| Perf budgets (debug) | 114183643026 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114183643046 | success |
+| Test (macos-latest / lua54) | 114183643057 | success |
+| Test (macos-latest / luajit) | 114183643058 | success |
+| Test (ubuntu-latest / luajit) | 114183643063 | success |
+| Test (ubuntu-latest / lua54) | 114183643080 | success |
+| M6 Perf Gates | 114183643116 | success |
+| Docs consistency | 114183643815 | skipped |
+
+Tally (main-ci-4ac5289-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: 192 on `Test (crdt)`, 193 on
+  each Ubuntu `test` leg, 194 on each macOS leg; none failed.
+- #353's four bounded rows passed on both macOS legs, and none printed a sixty-second notice.
+  #316's row passed on all six legs.
+
+`Grammar fuzz` 38041890794 at `4ac5289`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+#### E8c's gates
+
+Three `scripts/gate` runs of the default plan. `pmacs-protocol` has no diff, so `--protocol` was
+not run; CI's luajit lint was run by hand at both tips and was clean. No `pmacs --daemon` survived
+any of them (identified by environ).
+
+- `20261010T094513Z-2620566` on `main`'s tree at `4ac5289`, the base control, run beside hand
+  reproductions of #299 (load 13 to 130). Five of six; `05-sweep` has 201 paired result lines,
+  5,376 passed, 2 failed, 65 ignored:
+  - the HLS row with #311's fragments (`Could not find module ‘Prelude’`, the trace reaching
+    `LSP:ready·processi`, `4 passed; 1 failed`, 126.60 s), so #311's list gains it;
+  - `e7i_review3_probes::e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`
+    on kill 2: `kill 2: nothing held the switch's follow-up parse, which started a worker at once
+    and installed`, the report `deaths=2 … busy=false … tree=true unit=pid_2741033 death=killed, "
+    +* …/a.rs  (rusparse:killed !2`, and `10 passed; 1 failed; 0 ignored` (14.81 s). Its literal
+    fragments name kill 1 and `" +  `, so as written they do not match. It is **#316's twelfth
+    under the template reading**, the reading its third and sixth were counted by, and commented
+    there.
+- `20261010T102908Z-2908057` at `d79b5e5`, a first tip rewritten before any push. Five of six;
+  `05-sweep` has 202 paired, 5,390 passed, 4 failed, 65 ignored:
+  - #311's row, the same fragments (126.35 s), so #311's list gains it;
+  - three rows of the branch's own making, `e8b_own_name_acceptance`'s
+    `c_x_k_dired_kills_the_dired_buffer_and_says_so` and `c_x_k_keeps_d18_s_four` (`premise: the
+    dired buffer reads as modified …`, `premise: *lsp* reads as modified`) and
+    `e8b_switch_buffer_acceptance`'s
+    `e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so`. They asserted the old flag
+    the branch removes, and were changed in the branch's fix commit (`d168e57`). They are not
+    signatures.
+- `20261010T105213Z-3113170` at `a35b76b`, the head. Five of six; `05-sweep` has 202 paired, 5,393
+  passed, 2 failed, 65 ignored:
+  - #311's row, the same fragments (131.79 s), so #311's list gains it;
+  - the outside-kill row on kill 1, `kill 1: nothing held the switch's follow-up parse, which
+    started a worker at once and installed`, the report `deaths=1 crashes=0 busy=true held=false
+    pending=0 stopped=false tree=true unit=pid_3212527 death=killed, " +  …/a.rs  (rusparse:killed
+    !1  L1:C1 Top"`, and `test result: FAILED. 10 passed; 1 failed; 0 ignored` (15.96 s): all
+    three fragments, **#316's thirteenth**, commented.
+
+R7's row passed in all three sweeps, which is non-reproduction and nothing more.
+
+#### `CI` 38047504467 at `a35b76b`, attempt 1 of 1: red on two legs, #316's fourteenth and #358's first
+
+`pull_request`, the merge `5d73a0d` (`a35b76b` into `4ac5289`, read from the test logs' checkout
+line), created 11:11:01Z and completed 11:40:28Z: `failure`.
+
+Tally (pr357-ci-a35b76b): 19 = 16 + 2 + 1.
+
+Tally (pr357-ci-a35b76b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 114199885889 | success |
+| Lint (luajit) | 114199886104 | success |
+| Changed paths | 114199886106 | success |
+| Commit attribution (D9) | 114199886113 | success |
+| Lint (lua54) | 114199886119 | success |
+| Test (crdt) | 114199917396 | success |
+| M5 Perf Gates | 114199917420 | success |
+| M1 Acceptance Gates | 114199917423 | success |
+| GPU Render (headless) | 114199917473 | success |
+| M4 Perf Gates | 114199917475 | success |
+| Perf budgets (debug) | 114199917478 | success |
+| M10 Perf Gates (crdt) | 114199917491 | success |
+| Test (macos-latest / luajit) | 114199917506 | failure |
+| Test (macos-latest / lua54) | 114199917510 | success |
+| Test (ubuntu-latest / luajit) | 114199917511 | failure |
+| Test (ubuntu-latest / lua54) | 114199917527 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114199917530 | success |
+| M6 Perf Gates | 114199917734 | success |
+| Docs consistency | 114199918347 | skipped |
+
+Tally (pr357-ci-a35b76b-success): 16 rows of the table above with `result` = `success`.
+
+Tally (pr357-ci-a35b76b-failure): 2 rows of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)` (114199917506):
+  `process::tests::repeated_terminate_does_not_extend_ledger_deadline`, `earliest deadline must
+  win: SIGKILL by ~500ms, not 800ms; took 779.031875ms`, and `test result: FAILED. 2282 passed; 1
+  failed; 13 ignored` (124.19 s), the escalation itself asserted and passing. It is **#358, filed,
+  its first occurrence**: no row or issue named the selector. The branch changes
+  `RuntimeHandles`'s drop on this row's path. The row alone took 0.52 s in all of 20 local runs at
+  `a35b76b` and 20 with `src/process.rs` at its parent, so it is not shown innocent on macOS and
+  the issue says so.
+- `Test (ubuntu-latest / luajit)` (114199917511): the outside-kill row on kill 1, the report
+  `deaths=1 crashes=0 busy=false … tree=true unit=pid_30127 death=killed, " +
+  /tmp/.tmpPTaisq/a.rs  (rust) … parse:killed !1`, and `test result: FAILED. 10 passed; 1 failed;
+  0 ignored` (17.30 s): all three fragments, **#316's fourteenth**, its first in CI since
+  `8b144da`'s, commented.
+- Each red leg paired every `running` line with a result line, 192 `ok` and one `FAILED` on macOS
+  luajit, 191 and one on Ubuntu luajit. Their doc-test and `pmacs-protocol` steps are `skipped`
+  after the sweep step failed, read from the jobs' steps, which accounts for the two fewer result
+  lines than their siblings. The other test legs pair each `running` with a `test result: ok`: 193
+  on `Test (crdt)`, 194 on each other Ubuntu `test` leg, 195 on `Test (macos-latest / lua54)`.
+  E8c's suite ran its 17 tests on all six legs and passed.
+
+`Grammar fuzz` 38047504451 at `a35b76b`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+So, at E8c: #316 moves to fourteen; #311's list of runs reads at forty; #358 is filed at one; #355
+and #356 are filed, neither a red; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
