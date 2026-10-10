@@ -491,10 +491,11 @@ const READER_SEND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long dropping a generation's handles waits, in all, for its
-/// reader threads to finish before it leaves the rest unjoined (E8c).
+/// blocking readers to finish before it leaves the rest unjoined (E8c).
 /// A reader that has its pipe's end finishes at once; one that does
 /// not by now is blocked in a `read` that a process this editor did not
-/// start can hold open for good. See [`RuntimeHandles`]'s `Drop`.
+/// start can hold open for good. Polling readers are joined without a
+/// bound ([`Reader`]). See [`RuntimeHandles`]'s `Drop`.
 const READER_JOIN_BOUND: Duration = Duration::from_secs(2);
 
 /// TERM→KILL escalation window for `group = true` process groups
@@ -684,16 +685,46 @@ struct ManagedProcess {
     next_restart_at: Option<Instant>,
 }
 
+/// One thread of a generation's output pipeline, by how it can be
+/// ended (E8c fix round 1).
+///
+/// The kinds are told apart so that a bound on joining them is spent
+/// only where it is needed. Before E8c every reader was joined without
+/// one, and a reader blocked on a pipe another process held never let
+/// the join return; E8c bounded the join of all of them, which made
+/// the end of a polling reader, certain by construction, hold only if
+/// it came within the bound.
+enum Reader {
+    /// Waits only in polls bounded by [`READER_SEND_POLL_INTERVAL`] and
+    /// checks the generation's cancel flag between them: a group reader
+    /// ([`spawn_group_reader`]) or the ANSI parser stage
+    /// ([`spawn_ansi_parser`]). Once `cancel` is set it ends within one
+    /// interval, whoever holds the pipe, so it is joined without a bound.
+    Polling(JoinHandle<()>),
+    /// Blocks in `read` ([`spawn_reader`]) and ends at its pipe's end,
+    /// which any process holding a write end can postpone for good: the
+    /// one kind whose join is bounded.
+    Blocking(JoinHandle<()>),
+}
+
+impl Reader {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Polling(h) | Self::Blocking(h) => h.is_finished(),
+        }
+    }
+}
+
 /// Handles tied to one running generation. Dropped (and joined)
 /// when the generation ends.
 struct RuntimeHandles {
     child: ChildHandle,
     stdin: Option<StdinWriter>,
     pid: u32,
-    /// Reader-thread join handles, drained by `Drop` of
-    /// [`RuntimeHandles`] so a generation's worker threads don't
-    /// outlive the supervisor.
-    readers: Vec<JoinHandle<()>>,
+    /// Reader-thread join handles, by kind, drained by
+    /// [`Self::release_readers`] so a generation's worker threads
+    /// don't outlive the supervisor.
+    readers: Vec<Reader>,
     /// Bounded output channel drained by the supervisor. Raw processes
     /// expose bytes directly; ANSI-enabled PTY processes expose parser
     /// batches from the worker stage.
@@ -824,9 +855,10 @@ impl Drop for RuntimeHandles {
 
 impl RuntimeHandles {
     /// End this generation's reader threads: wake them, close the
-    /// child's stdin, and join each that finishes by `deadline`. Returns
-    /// how many were left unjoined, still blocked on output another
-    /// process holds. Idempotent: a second call finds no readers.
+    /// child's stdin, join every polling reader, and join each blocking
+    /// one that finishes by `deadline`. Returns how many were left
+    /// unjoined, still blocked on output another process holds.
+    /// Idempotent: a second call finds no readers.
     fn release_readers(&mut self, deadline: Instant) -> usize {
         // Wake any reader thread blocked in a bounded `send` ---
         // dropping the master closes the kernel pipe and unblocks
@@ -867,15 +899,27 @@ impl RuntimeHandles {
         // channel's receiver goes with these handles, so it returns at
         // its pipe's end or with the next bytes it reads, and the
         // editor's exit ends it otherwise.
+        //
+        // Only a blocking reader can be held so. A polling reader ends
+        // within one poll of `cancel`, set above, so it is joined without
+        // a bound, as every reader was before E8c: its end is certain by
+        // construction, not by beating the deadline (E8c fix round 1).
         let mut left = 0;
-        for h in std::mem::take(&mut self.readers) {
-            while !h.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            if h.is_finished() {
-                let _ = h.join();
-            } else {
-                left += 1;
+        for reader in std::mem::take(&mut self.readers) {
+            match reader {
+                Reader::Polling(h) => {
+                    let _ = h.join();
+                }
+                Reader::Blocking(h) => {
+                    while !h.is_finished() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if h.is_finished() {
+                        let _ = h.join();
+                    } else {
+                        left += 1;
+                    }
+                }
             }
         }
         left
@@ -2196,33 +2240,38 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
     let mut readers = Vec::new();
     if let Some(out) = stdout {
         readers.push(if spec.group {
-            spawn_group_reader(
+            Reader::Polling(spawn_group_reader(
                 byte_tx.clone(),
                 Arc::clone(&cancel),
                 out,
                 ReaderKind::Stdout,
                 Arc::clone(&active_readers),
-            )
+            ))
         } else {
-            spawn_reader(
+            Reader::Blocking(spawn_reader(
                 byte_tx.clone(),
                 Arc::clone(&cancel),
                 out,
                 ReaderKind::Stdout,
-            )
+            ))
         });
     }
     if let Some(err) = stderr {
         readers.push(if spec.group {
-            spawn_group_reader(
+            Reader::Polling(spawn_group_reader(
                 byte_tx,
                 Arc::clone(&cancel),
                 err,
                 ReaderKind::Stderr,
                 Arc::clone(&active_readers),
-            )
+            ))
         } else {
-            spawn_reader(byte_tx, Arc::clone(&cancel), err, ReaderKind::Stderr)
+            Reader::Blocking(spawn_reader(
+                byte_tx,
+                Arc::clone(&cancel),
+                err,
+                ReaderKind::Stderr,
+            ))
         });
     }
     Ok(RuntimeHandles {
@@ -2296,20 +2345,20 @@ fn build_pty_runtime(
         .map_err(|e| format!("pty reader: {e}"))?;
     let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(BYTE_CHUNK_CHANNEL_CAP);
     let cancel = Arc::new(AtomicBool::new(false));
-    let mut readers = vec![spawn_reader(
+    let mut readers = vec![Reader::Blocking(spawn_reader(
         byte_tx,
         Arc::clone(&cancel),
         reader,
         ReaderKind::Stdout,
-    )];
+    ))];
     let output_rx = if spec.ansi_events {
         let (ansi_tx, ansi_rx) = channel::bounded::<AnsiBatch>(ANSI_EVENT_CHANNEL_CAP);
-        readers.push(spawn_ansi_parser(
+        readers.push(Reader::Polling(spawn_ansi_parser(
             byte_rx,
             ansi_tx,
             Arc::clone(&cancel),
             spec.ansi_profile,
-        ));
+        )));
         RuntimeOutputRx::Ansi(ansi_rx)
     } else {
         RuntimeOutputRx::Bytes(byte_rx)
@@ -2692,7 +2741,7 @@ fn final_drain_runtime(
         if drained_any {
             last_data = Instant::now();
         }
-        if rt.readers.iter().all(std::thread::JoinHandle::is_finished) && !drained_any {
+        if rt.readers.iter().all(Reader::is_finished) && !drained_any {
             return out;
         }
         if let Some(ctx) = group {
@@ -5278,6 +5327,77 @@ mod tests {
         for pid in escapees {
             let _ = nix::sys::signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL));
         }
+    }
+
+    /// **A polling reader's end is certain by construction, not by a
+    /// deadline** (E8c fix round 1, review 1's Low 2).
+    /// `release_readers` joins every polling reader --- a group's
+    /// readers, the ANSI parser stage --- however short its deadline,
+    /// and counts only a blocking reader as left. Both generations here
+    /// still run, so no pipe has reached its end: a polling reader ends
+    /// because `cancel` was set, and a blocking one does not end at all.
+    /// At E8c's `a35b76b` the bound covered every reader, so a deadline
+    /// already passed left them all.
+    #[test]
+    fn release_joins_every_polling_reader_whatever_the_deadline() {
+        let mut sup = ProcessSupervisor::new();
+        // A group: two polling readers on a leader that keeps its output.
+        let group = sup
+            .spawn(sh_group_spec("polling", "exec sleep 30"))
+            .expect("spawn group");
+        let probe = sup.active_reader_probe(group).expect("live runtime probe");
+        let started = Instant::now();
+        while probe.load(Ordering::Relaxed) < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "precondition: both group readers start"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let rt = sup
+            .processes
+            .get_mut(&group)
+            .and_then(|p| p.runtime.as_mut())
+            .expect("live group runtime");
+        assert_eq!(
+            rt.release_readers(Instant::now()),
+            0,
+            "a group's readers poll `cancel`, so none is left"
+        );
+        assert_eq!(
+            probe.load(Ordering::Relaxed),
+            0,
+            "and each has ended and dropped its FD"
+        );
+
+        // A PTY with the parser stage: a blocking reader on the master
+        // and a polling parser. The shell holds the slave, so the reader
+        // stays in `read`.
+        let mut spec = ProcessSpec::new("pty-parser", "/bin/sh", "test process");
+        spec.args = vec!["-c".into(), "exec sleep 30".into()];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        spec.ansi_events = true;
+        let pty = sup.spawn(spec).expect("spawn ansi pty");
+        let rt = sup
+            .processes
+            .get_mut(&pty)
+            .and_then(|p| p.runtime.as_mut())
+            .expect("live pty runtime");
+        assert_eq!(
+            rt.readers.len(),
+            2,
+            "precondition: the master's reader and the parser"
+        );
+        assert_eq!(
+            rt.release_readers(Instant::now()),
+            1,
+            "only the blocking reader on the master is left; the parser is joined"
+        );
+        // `sup` drops here, and its shutdown ends both children.
     }
 
     #[test]
