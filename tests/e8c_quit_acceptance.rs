@@ -1,7 +1,8 @@
 // tests/e8c_quit_acceptance.rs --- E8c, quit must exit (#299).
 
-//! `C-x C-c` against a language server that crashed, and against the
-//! editor's own buffers.
+//! `C-x C-c` against a language server that crashed, one that stopped
+//! answering, and one that answers; and against the editor's own
+//! buffers.
 //!
 //! **What #299 was, measured.** The TUI opened a Rust file nested
 //! 20,000 deep and rust-analyzer aborted on it (`SIGABRT`, half a
@@ -16,10 +17,15 @@
 //!
 //! **The controlled server.** `pmacs_fake_lsp` in `abortonopen` aborts
 //! on the first `didOpen` it is sent, as rust-analyzer did, and serves
-//! normally once restarted.
+//! normally once restarted; `stopanswering` is an initialized server that
+//! stops reading and writing on a command in the document. That one also
+//! ignores `SIGTERM`, through the shell `trap` it runs under, so its end
+//! needs the supervisor's `SIGKILL`. Every fake ignores `SIGHUP`, so
+//! what ends it is the editor and not the PTY's hang-up
+//! ([`fake_server`]).
 //!
-//! **The bound sits outside the body.** The PTY row runs the shipped
-//! binary as a child process and polls its exit from the test's thread
+//! **The bound sits outside the body.** The PTY rows run the shipped
+//! binary as a child process and poll its exit from the test's thread
 //! with `try_wait`, so a quit that never returns cannot hold up the
 //! deadline that judges it.
 //!
@@ -161,24 +167,58 @@ end)
     }
 }
 
-/// The fake as rust's server in `mode`, run as `command` with `args`
-/// before it, its generations recorded in `dir`.
-fn fake_server(dir: &Path, mode: &str, command: &str, args: &str) -> String {
+/// A row that fails leaves no server behind. Every fake ignores
+/// `SIGHUP` and the stopped one parks for good, so one the editor did
+/// not end would otherwise outlive the run. Runs after the PTY's own
+/// drop, which kills the editor.
+impl Drop for World {
+    fn drop(&mut self) {
+        for pid in self.server_pids() {
+            if pid_alive(pid)
+                && let Ok(raw) = i32::try_from(pid)
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(raw),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+}
+
+/// The fake as rust's server in `mode`, its generations recorded in
+/// `dir`, under a shell that has it ignore `signals` (`trap ''`
+/// survives `exec`).
+///
+/// `SIGHUP` is always among them. Here the editor leads the PTY's
+/// session, so its exit hangs up every process in its group; started
+/// from a shell it leads no session and nothing is hung up. Left
+/// default, the kernel would end a server the editor left behind and
+/// no row could see the leak (a supervisor with its `SIGKILL` removed
+/// passed the stopped-server row that way).
+fn fake_server(dir: &Path, mode: &str, signals: &str) -> String {
     format!(
-        "{{ command = {command:?}, args = {{ {args} }}, env = {{ \
-           PMACS_FAKE_LSP_MODE = {mode:?}, \
-           PMACS_FAKE_LSP_PID_SINK = {pids:?}, \
-           PMACS_FAKE_LSP_ABORT_ONCE = {once:?}, \
-           PMACS_FAKE_LSP_STOP_SINK = {stop:?} }} }}",
+        "{{ command = '/bin/sh', \
+           args = {{ '-c', 'trap \"\" {signals}; exec \"$0\"', {fake:?} }}, \
+           env = {{ PMACS_FAKE_LSP_MODE = {mode:?}, \
+                    PMACS_FAKE_LSP_PID_SINK = {pids:?}, \
+                    PMACS_FAKE_LSP_ABORT_ONCE = {once:?}, \
+                    PMACS_FAKE_LSP_STOP_SINK = {stop:?} }} }}",
+        fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp"),
         pids = dir.join("pids").display().to_string(),
         once = dir.join("aborted").display().to_string(),
         stop = dir.join("stopped").display().to_string(),
     )
 }
 
-/// The fake, run directly.
+/// The fake, ended by `SIGTERM` as a server is by default.
 fn fake(dir: &Path, mode: &str) -> String {
-    fake_server(dir, mode, env!("CARGO_BIN_EXE_pmacs_fake_lsp"), "")
+    fake_server(dir, mode, "HUP")
+}
+
+/// The fake deaf to `SIGTERM` as well, so only `SIGKILL` ends it.
+fn fake_deaf_to_term(dir: &Path, mode: &str) -> String {
+    fake_server(dir, mode, "HUP TERM")
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -292,6 +332,61 @@ fn e8c_quit_exits_after_a_server_crash_was_reported() {
     );
 
     let children = descendants(pid);
+    quit_and_require_exit(&world, &mut pty, &children);
+}
+
+/// **The reviewer's model.** An initialized server that has stopped
+/// answering, with requests in flight and `SIGTERM` ignored: `C-x C-c`
+/// ends the editor within the bound and the server with it. Quit sends
+/// the server nothing and waits on no answer; what ends it is the
+/// supervisor's `SIGKILL` after its grace.
+#[test]
+fn e8c_quit_exits_when_an_initialized_server_stops_answering() {
+    let world = World::new("fn main() {}\n// PMACS-STOP-ANSWERING\n", |dir| {
+        fake_deaf_to_term(dir, "stopanswering")
+    });
+    let mut pty = world.spawn();
+    let pid = pty.process_id().expect("the editor's pid");
+
+    world.wait(&mut pty, "the server initialized, then stopped", |w| {
+        w.path("stopped").exists() && w.field("servers") == "initialized"
+    });
+    let servers = world.server_pids();
+    assert!(
+        servers.len() == 1 && pid_alive(servers[0]),
+        "precondition: one server, alive and silent; pids {servers:?}"
+    );
+
+    let children = descendants(pid);
+    assert!(
+        children.contains(&servers[0]),
+        "precondition: the server is the editor's child; children {children:?}, server {servers:?}"
+    );
+    quit_and_require_exit(&world, &mut pty, &children);
+}
+
+/// **Normal shutdown keeps working.** A server that answers: `C-x C-c`
+/// ends the editor and the server.
+#[test]
+fn e8c_quit_against_an_answering_server_exits_and_ends_it() {
+    let world = World::new("fn main() {}\n", |dir| fake(dir, ""));
+    let mut pty = world.spawn();
+    let pid = pty.process_id().expect("the editor's pid");
+
+    world.wait(&mut pty, "the server ready", |w| {
+        w.field("servers") == "initialized"
+    });
+    assert!(
+        world.field("errors").is_empty(),
+        "precondition: nothing reported; *errors* holds {:?}",
+        world.field("errors")
+    );
+    let children = descendants(pid);
+    let servers = world.server_pids();
+    assert!(
+        servers.len() == 1 && children.contains(&servers[0]),
+        "precondition: one server, the editor's child; children {children:?}, server {servers:?}"
+    );
     quit_and_require_exit(&world, &mut pty, &children);
 }
 
