@@ -1904,13 +1904,19 @@ impl ProcessSupervisor {
         if matches!(status, Ok(None)) {
             return;
         }
-        // Terminal from here on. Its stdin closes now, before the drain:
-        // the process is gone, and a descendant still reading that stdin
-        // --- a stdio server a shim left behind --- ends at the EOF and
-        // lets go of the output the drain waits on. Until E8c's fix
-        // round 1 stdin closed only as the handles dropped, after the
-        // drain had waited its whole bound on that descendant.
-        let _ = runtime.stdin.take();
+        // Terminal from here on. A pipe child's stdin closes now, before
+        // the drain: the process is gone, and a descendant still reading
+        // that stdin --- a stdio server a shim left behind --- ends at the
+        // EOF and lets go of the output the drain waits on. Until E8c's
+        // fix round 1 stdin closed only as the handles dropped, after the
+        // drain had waited its whole bound on that descendant. A PTY's
+        // stays open until then: dropping portable-pty's master writer
+        // types a newline and the EOF character into the terminal, and
+        // the line discipline would echo them into the output drained
+        // here whenever a survivor still holds the slave.
+        if matches!(runtime.child, ChildHandle::Pipes(_)) {
+            let _ = runtime.stdin.take();
+        }
         // Group leader-exit reap (Q#CM3):
         // TERM the remaining group and arm the reap ledger BEFORE
         // the final drain — a leader that exits leaving `sleep 60 &`
@@ -5624,6 +5630,52 @@ mod tests {
         assert_eq!(
             sup.reap_wait_log[0], sup.reap_wait_log[1],
             "the teardown's two reaps, in different ticks, waited against one deadline"
+        );
+    }
+
+    /// **A reaped PTY child's output holds only what it wrote.** The
+    /// shell exits while a `sleep` it started still holds the terminal,
+    /// so the reap drains, waits, and leaves the master's reader. Dropping
+    /// portable-pty's master writer types a newline and the EOF character
+    /// into the terminal, which its line discipline echoes back to the
+    /// master. Closed before the drain, as `579c4e9` first closed every
+    /// dead child's stdin, that echo was drained as the child's output;
+    /// a PTY's writer is now dropped after the drain, as before.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reaped_pty_child_s_output_holds_only_what_it_wrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("heir");
+        let _heirs = Heirs(vec![pid_file.clone()]);
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("pty-heir", "/bin/sh", "test process");
+        spec.args = vec![
+            "-c".into(),
+            format!(
+                "trap '' HUP; sleep 20 & echo $! > {}; printf done; exit 0",
+                pid_file.display()
+            ),
+        ];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn pty");
+        let events = drain_until(&mut sup, id, Duration::from_secs(10), has_exited);
+        assert!(
+            has_exited(&events),
+            "precondition: the shell exits; {events:?}"
+        );
+        assert_eq!(
+            sup.take_output_held().len(),
+            1,
+            "precondition: the heir held the terminal, so the reap left its reader"
+        );
+        assert_eq!(
+            collect_stdout(&events),
+            "done",
+            "the drain holds what the child wrote, and no echo of the editor's own close"
         );
     }
 
