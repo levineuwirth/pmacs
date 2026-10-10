@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 44 items in the list below.
+Tally (311-runs): 45 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2852,6 +2852,8 @@ Tally (311-runs): 44 items in the list below.
   with E8c's fix round 1, below).
 - `20261010T141313Z-4170219` at `d5327b6` (E8c fix round 1's tip gate, `05-sweep`; recorded with
   that round, below).
+- `20261010T175142Z-30875` at `752811c` (the same round's gate at the head, `05-sweep`; recorded
+  with that round, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -5582,7 +5584,7 @@ Tally (pr357-ci-a35b76b-failure): 2 rows of the table above with `result` = `fai
 So, at E8c: #316 moves to fourteen; #311's list of runs reads at forty; #358 is filed at one; #355
 and #356 are filed, neither a red; every other count above stands.
 
-### E8c's fix round 1: review 1's gates and the round's, PR #357 red on #361's first at `752811c`, two heads red on macOS by the round's own helpers, R7's thirty-fourth, #312's second, #359's first and #311's list at forty-four
+### E8c's fix round 1: review 1's gates and the round's, PR #357 red on #361's first at `752811c`, two heads red on macOS by the round's own helpers, R7's thirty-fourth, #312's second, #359's first and #311's list at forty-five
 
 Recorded 2026-10-10 by E8c's fix round 1, #357 at `752811c`, fourteen signed commits on `4ac5289`, ten of them this round's on `a35b76b`. They commit review 1's probes and drivers, make a reap that leaves a dead process's readers behind say so, keep quit's state write out of the quit-bound rows, join polling readers without a bound, and give a tick's and a teardown's reaps one shared wait. They also keep a dead PTY's writer open through its drain, gate two test helpers to Linux, and correct the records. The runs were read from the jobs endpoint by conclusion and through the red jobs' logs; none was rerun.
 
@@ -5602,7 +5604,13 @@ Three `scripts/gate` runs of the default plan by the review, at the head, record
 #### The round's gates
 
 - `20261010T141313Z-4170219` at `d5327b6`: five of six; `05-sweep` has 203 paired result lines (the review's probe suite added), 5,407 passed, 1 failed, 65 ignored. The one is #311's row, the same fragments (128.38 s), so #311's list gains it. The rows of #312, #316, #358, #359 and R7 passed, which is non-reproduction and nothing more. No `pmacs --daemon` survived (identified by environ).
-- `20261010T143409Z-141932` at `124b955`: fmt, clippy, doc and build ok; the sweep was terminated while compiling, before any test ran, when the session's harness stopped background work for the laptop's memory. It is no sample of anything, and #311's list does not count it. It was not rerun.
+- `20261010T143409Z-141932` at `124b955`: fmt, clippy, doc and build ok; the sweep was terminated while compiling, before any test ran, when the session's harness stopped background work for the laptop's memory. It is no sample of anything, and #311's list does not count it. It was not rerun; the
+  owner asked for a gate at the head instead.
+- `20261010T175142Z-30875` at `752811c`, the head, run at the owner's word once the memory was free:
+  five of six; `05-sweep` has 203 paired result lines, 5,408 passed, 1 failed, 65 ignored. The one is
+  #311's row, the same fragments (126.63 s), so #311's list gains it. #361's row passed locally, as did
+  the rows of #312, #316, #358, #359 and R7, which is non-reproduction and nothing more. No `pmacs
+  --daemon` survived (identified by environ).
 
 #### `CI` 38059810024 at `d5327b6`, attempt 1 of 1: two macOS legs red on the round's own helpers, then cancelled
 
@@ -5726,7 +5734,7 @@ Tally (pr357-ci-752811c-failure): 1 row of the table above with `result` = `fail
 
 `Grammar fuzz` 38059810023 at `d5327b6`, 38060125825 at `124b955` and 38060487701 at `752811c`, each attempt 1 of 1, `success` on both arms, fuzzing nothing (`run=false`, `no changed path can change the grammar set`).
 
-So, at E8c's fix round 1: R7 moves to thirty-four; #312 to two; #359 is at one, filed by the review; #311's list of runs reads at forty-four; #316 stays at fourteen and #358 at one, their rows passing in every sweep of the round's and the review's gates; #361 is filed at one; #360 is filed by the review and is no red; every other count above stands.
+So, at E8c's fix round 1: R7 moves to thirty-four; #312 to two; #359 is at one, filed by the review; #311's list of runs reads at forty-five; #316 stays at fourteen and #358 at one, their rows passing in every sweep of the round's and the review's gates; #361 is filed at one; #360 is filed by the review and is no red; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
