@@ -59,9 +59,10 @@ use common::pty::{PmacsPty, spawn_pmacs_in_pty};
 /// The window a PTY row gives `C-x C-c` to end the editor. It holds only
 /// waits the teardown fixes in advance (`ProcessSupervisor::shutdown`):
 /// two seconds of `SIGTERM` grace, then `SIGKILL` and two of reaping,
-/// and, for each dead server whose output another process holds, two
-/// of draining it and two of joining its readers, one server after
-/// another. No quit-time state write is in it (the module doc, #360).
+/// and one wait of two on output another process holds, shared by every
+/// dead server of the teardown however many hold it. At `a35b76b` that
+/// wait was four seconds per such server, one after another (E8c review
+/// 1's Low 1). No quit-time state write is in it (the module doc, #360).
 /// The rest is a slow runner's margin; #299 was a quit that never
 /// ended.
 const QUIT_BOUND: Duration = Duration::from_secs(15);

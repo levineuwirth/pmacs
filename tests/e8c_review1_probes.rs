@@ -363,15 +363,16 @@ impl Drop for Heir {
 }
 
 /// **The bound reached, and what the user is told.** A process exits
-/// while its child holds its output. The tick that reaps it waits out
-/// the final drain, then `READER_JOIN_BOUND`, on the main thread, and
-/// leaves the reader blocked on the child's pipe. The stall is bounded
-/// now (it was not before E8c), so the first assertion holds. The rest
-/// ask whether anything says so: the editor froze for about four
-/// seconds and left a thread and two descriptors behind for as long as
-/// the child lives. The fix round says so where a failure is said, the
-/// status line and `*errors*` with the mode line's mark, naming the
-/// process and what was left.
+/// while its child holds its output. The tick that reaps it waits on the
+/// main thread, then leaves the reader blocked on the child's pipe. The
+/// stall is bounded now (it was not before E8c), so the first assertion
+/// holds: at `a35b76b` it was the final drain's two seconds and then
+/// `READER_JOIN_BOUND`'s two, and since the fix round it is the drain's
+/// alone. The rest ask whether anything says so: the editor froze and
+/// left a thread and two descriptors behind for as long as the child
+/// lives. The fix round says so where a failure is said, the status
+/// line and `*errors*` with the mode line's mark, naming the process
+/// and what was left.
 #[test]
 fn r1_a_reader_left_behind_is_told() {
     let dir = tempfile::tempdir().unwrap();
@@ -404,9 +405,8 @@ fn r1_a_reader_left_behind_is_told() {
         "precondition: the heir was started"
     );
     assert!(
-        longest >= Duration::from_secs(3) && longest < Duration::from_secs(10),
-        "the reaping tick waits out the drain and the join bound, about four \
-         seconds; it took {longest:?}"
+        longest >= Duration::from_secs(1) && longest < Duration::from_secs(10),
+        "the reaping tick waits out the drain, about two seconds; it took {longest:?}"
     );
     let errors = named_text(&s, "*errors*");
     assert!(
@@ -485,13 +485,17 @@ impl Drop for Pids {
     }
 }
 
-/// **The bound is per server.** E8c's suite says the editor's teardown
-/// is "bounded at about four seconds", and with one heir it is: the
-/// reaping tick waits the final drain, 2 s, then `READER_JOIN_BOUND`,
-/// 2 s. With two servers each holding an heir, the same tick reaps them
-/// one after the other, so quit takes about eight, with nothing on the
-/// screen after the editor leaves it. The row holds the suite's own
-/// figure, about four seconds and a margin, against two servers.
+/// **One wait for the teardown, not one per server.** E8c's suite said
+/// the editor's teardown was "bounded at about four seconds", and with
+/// one heir it was: the reaping tick waited the final drain, 2 s, then
+/// `READER_JOIN_BOUND`, 2 s. With two servers each holding an heir it
+/// reaped them one after the other, so quit took about eight (8.07 and
+/// 8.08 s at `a35b76b`), with nothing on the screen after the editor
+/// left it. Since E8c's fix round 1 a reap waits once, the drain's, and
+/// every reap of a teardown waits against one deadline; the structural
+/// witness is `reaps_share_one_wait_on_held_output_in_a_teardown` in
+/// `src/process.rs`. This row holds the user's view of it: two such
+/// servers quit within one server's figure and a margin.
 #[test]
 fn r1_two_servers_with_heirs_quit_within_one_bound() {
     let dir = tempfile::tempdir().unwrap();
@@ -573,7 +577,7 @@ fn r1_two_servers_with_heirs_quit_within_one_bound() {
     );
     assert!(
         took < Duration::from_secs(6),
-        "two servers with heirs: quit took {took:?}, where E8c's suite states the \
-         teardown is bounded at about four seconds"
+        "two servers with heirs: quit took {took:?}, where the teardown waits on held \
+         output once, about two seconds, however many servers hold it"
     );
 }
