@@ -40,6 +40,25 @@
 //! * If launched with `PMACS_FAKE_LSP_MODE=crash`: replies to
 //!   `initialize`, then exits with code 7 immediately, so the
 //!   client can verify crash + restart handling.
+//! * If launched with `PMACS_FAKE_LSP_MODE=abortonopen` (E8c): the
+//!   first generation to receive a `didOpen` aborts (`SIGABRT`). That
+//!   models the crash #299's quit met and its report, not its trigger:
+//!   rust-analyzer survives the `didOpen` of a Rust file nested 20,000
+//!   deep and overflows a worker's stack in the handlers of the requests
+//!   that follow it (`inlayHint`, `semanticTokens/range`,
+//!   `semanticTokens/full`; E8c review 1). `PMACS_FAKE_LSP_ABORT_ONCE`
+//!   names the file that marks the abort as done, so the generation the
+//!   client restarts serves normally; rust-analyzer's restarted
+//!   generation survives only because it is sent nothing (#355).
+//! * If launched with `PMACS_FAKE_LSP_MODE=stopanswering` (E8c): an
+//!   ordinary server until a `didOpen` or `didChange` carries the text
+//!   `PMACS-STOP-ANSWERING`, the command. From then on it reads and
+//!   writes nothing and stays alive, after writing `stopped` to the
+//!   file `PMACS_FAKE_LSP_STOP_SINK` names: an initialized server that
+//!   has stopped answering, `shutdown` included.
+//! * If `PMACS_FAKE_LSP_PID_SINK` names a file (any mode): each
+//!   generation appends its process id as one line when it starts, so
+//!   a test can check that none outlives the editor (E8c).
 //! * If launched with `PMACS_FAKE_LSP_MODE=rooturi`: writes the
 //!   `rootUri` received in `initialize` to the file named by
 //!   `PMACS_FAKE_LSP_ROOT_SINK`, so a test can assert the
@@ -164,6 +183,14 @@ use std::io::{self, Read, Write};
 )]
 fn main() {
     let mode = std::env::var("PMACS_FAKE_LSP_MODE").unwrap_or_default();
+    if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_PID_SINK")
+        && let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&sink)
+    {
+        let _ = writeln!(f, "{}", std::process::id());
+    }
     if mode == "garbage" {
         write_garbage();
         return;
@@ -209,6 +236,24 @@ fn main() {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        // E8c: the server that stops serving, in its two shapes (see the
+        // module docs), ahead of every arm that would answer.
+        if mode == "abortonopen"
+            && method == "textDocument/didOpen"
+            && let Ok(once) = std::env::var("PMACS_FAKE_LSP_ABORT_ONCE")
+            && !std::path::Path::new(&once).exists()
+        {
+            let _ = std::fs::write(&once, std::process::id().to_string());
+            std::process::abort();
+        }
+        if mode == "stopanswering" && carries_stop_command(&method, &params) {
+            if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_STOP_SINK") {
+                let _ = std::fs::write(&sink, "stopped");
+            }
+            loop {
+                std::thread::park();
+            }
+        }
         // T M4.5 `wsconfig`: the client's reply to the
         // `workspace/configuration` request we sent at `initialized`
         // arrives here as a response (id 9001, has `result`, no
@@ -1886,6 +1931,24 @@ fn main() {
             // useful exchange.
             std::process::exit(7);
         }
+    }
+}
+
+/// Whether a `didOpen` or `didChange` carries `stopanswering`'s command,
+/// the text `PMACS-STOP-ANSWERING`.
+fn carries_stop_command(method: &str, params: &serde_json::Value) -> bool {
+    const COMMAND: &str = "PMACS-STOP-ANSWERING";
+    let has = |v: Option<&serde_json::Value>| {
+        v.and_then(serde_json::Value::as_str)
+            .is_some_and(|text| text.contains(COMMAND))
+    };
+    match method {
+        "textDocument/didOpen" => has(params.get("textDocument").and_then(|d| d.get("text"))),
+        "textDocument/didChange" => params
+            .get("contentChanges")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|changes| changes.iter().any(|c| has(c.get("text")))),
+        _ => false,
     }
 }
 

@@ -670,11 +670,13 @@ fn kill_steps(steps: &mut Vec<String>, text: &str) {
 }
 
 /// E8b fix round 1's GPU row for review 1's Medium 2: `C-x k` by name
-/// through `App::apply_keyboard`. `C-x k dired RET` asks about the dired
-/// buffer (its generated text reads as modified), `y` kills it, and the
-/// band names it; `dired.lua` is still there to switch to. `C-x k b.rs
-/// RET` kills `b.rs` beside `a.rs`, unmodified, without a question, and
-/// names it; `a.rs` is still there.
+/// through `App::apply_keyboard`. `C-x k dired RET` kills the dired
+/// buffer and the band names it; `dired.lua` is still there to switch
+/// to. Until E8c the listing's generated text read as modified and this
+/// row answered `y` to "kill anyway?"; E8c leaves the editor's own text
+/// clean (#299), so it goes without a question. `C-x k b.rs RET` kills
+/// `b.rs` beside `a.rs`, unmodified, without a question, and names it;
+/// `a.rs` is still there.
 #[test]
 fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
     let (daemon, _dir, paths) = own_name_daemon();
@@ -684,7 +686,6 @@ fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
     where_steps(&mut steps, "dired-open");
     switch_steps(&mut steps, "scr", "switch-buffer:", "scr");
     kill_steps(&mut steps, "dired");
-    steps.push("key:y".to_owned());
     report_steps(&mut steps, "kill-buffer:", "kill-dired");
     where_steps(&mut steps, "kill-dired");
     switch_steps(&mut steps, "dired.lua", "switch-buffer:", "lua");
@@ -709,7 +710,7 @@ fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
     assert_eq!(
         band(&facts, "kill-dired"),
         quoted(format!("kill-buffer: killed {dired}")),
-        "C-x k dired RET y kills the dired buffer; {facts:?}"
+        "C-x k dired RET kills the dired buffer; {facts:?}"
     );
     assert_eq!(
         band(&facts, "kill-dired-where"),

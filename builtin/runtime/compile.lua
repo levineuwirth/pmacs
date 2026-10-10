@@ -322,6 +322,7 @@ local function resync(slot)
   slot.line_start = slot.out_pos
   slot.parse_line_start = slot.out_pos
   slot.next_row = count_newlines(buf:slice(0, slot.parse_line_start))
+  buf:mark_clean()
   slot.expected_rev = buf:revision()
 end
 
@@ -721,6 +722,7 @@ local function finish_run(slot, ev)
   end
   slot.out_pos = buf:len()
   emit_text_raw(slot, format_exit_marker(slot.label, ev))
+  buf:mark_clean()
   slot.expected_rev = buf:revision()
   if ev.kind == "exited" and (ev.code or 0) == 0 then
     pmacs.editor.set_status(slot.label .. ": finished")
@@ -735,6 +737,10 @@ local function feed_bytes(slot, bytes)
   if not check_rev(slot) then return end
   apply_events(slot, slot.parser:feed(bytes))
   parse_new_lines(slot)
+  -- E8c: the run's output is the editor's, never the user's unsaved
+  -- work; left modified, `*compilation*` held `C-x C-c` at a question.
+  -- Every write batch here ends this way.
+  slot.buf:mark_clean()
   slot.expected_rev = slot.buf:revision()
 end
 
@@ -863,6 +869,7 @@ local function start_run(slot, cmdline, opts)
   slot.line_start = slot.out_pos
   slot.parse_line_start = slot.out_pos
   slot.next_row = count_newlines(header)
+  buf:mark_clean()
   slot.expected_rev = buf:revision()
   slot.cwd = cwd
   if slot.parse and slot.skipped_rules > 0 then
@@ -921,6 +928,7 @@ local function start_run(slot, cmdline, opts)
   end
   if not ok then
     emit_text_raw(slot, string.format("[%s spawn failed: %s]\n", slot.label, tostring(proc)))
+    buf:mark_clean()
     slot.expected_rev = buf:revision()
     pmacs.editor.set_status(slot.label .. ": spawn failed")
     return nil

@@ -194,6 +194,12 @@ fn append_to_errors_buffer(lua: &Lua, record: &LuaErrorRecord) {
         let Ok(buf) = reg.get_mut(id) else {
             return;
         };
+        // The editor's own line is no one's unsaved work: the buffer
+        // stays as clean as the append found it. Left modified, the first
+        // reported error --- a language server's crash, say --- held every
+        // later `C-x C-c` at "Modified buffers exist (*errors*)" (E8c,
+        // #299). Text the user typed here is theirs, and stays modified.
+        let was_modified = buf.is_modified();
         let pos = buf.len();
         let Ok(edit) = buf.apply_edit(EditOp::Insert {
             pos,
@@ -201,6 +207,9 @@ fn append_to_errors_buffer(lua: &Lua, record: &LuaErrorRecord) {
         }) else {
             return;
         };
+        if !was_modified {
+            buf.mark_clean();
+        }
         (id, edit)
     };
     // Window TextViews are not attached views on the buffer; they sit

@@ -412,6 +412,42 @@ pub enum ProcessEventKind {
     },
 }
 
+/// A reap that stopped waiting on a dead process's output and left
+/// reader threads behind (E8c fix round 1).
+///
+/// The process exited, but another process --- most often one it
+/// started --- still holds the write end of its output, so a reader
+/// blocked in `read` on it cannot be ended from here. The reap waited,
+/// on the thread that ticks the supervisor, then left those readers to
+/// end when the holder lets go. That wait froze the editor and the
+/// threads outlive the reap, so neither may pass in silence: the
+/// supervisor queues one of these per such reap, and the editor says
+/// so ([`ProcessSupervisor::take_output_held`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputHeldNotice {
+    /// The process's [`ProcessSpec::label`].
+    pub label: String,
+    /// Reader threads left blocked on the held output.
+    pub readers_left: usize,
+    /// How long the reap waited for them, its final drain included.
+    pub waited: Duration,
+}
+
+impl OutputHeldNotice {
+    /// What happened, in the words the editor reports it with.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "{} exited, but another process still holds its output; waited {:.1} s, \
+             then left {} reader thread{} blocked on it",
+            self.label,
+            self.waited.as_secs_f64(),
+            self.readers_left,
+            if self.readers_left == 1 { "" } else { "s" },
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming pipeline constants (T M6.2)
 // ---------------------------------------------------------------------------
@@ -452,7 +488,27 @@ const READER_SEND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// parser worker may still have already-read bytes in flight. This is
 /// not process termination grace; it is only the final output flush
 /// before the runtime handles are dropped.
+///
+/// Since E8c's fix round 1 it is also the one wait on output another
+/// process holds, shared by every plain reap in a tick, and by every
+/// reap of a teardown ([`ProcessSupervisor::shutdown`]): see
+/// `ProcessSupervisor::reap_wait_until`.
 const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The least a reap waits for a dead process's blocking readers once the
+/// shared wait is spent (E8c fix round 1): long enough for a reader that
+/// has its pipe's end but has not yet run to finish, so that a process
+/// reaped late in a teardown is not reported as held for want of a
+/// scheduler slice. Spent only on a reader that has not finished.
+const REAP_WAIT_FLOOR: Duration = Duration::from_millis(100);
+
+/// How long dropping a generation's handles waits, in all, for its
+/// blocking readers to finish before it leaves the rest unjoined (E8c).
+/// A reader that has its pipe's end finishes at once; one that does
+/// not by now is blocked in a `read` that a process this editor did not
+/// start can hold open for good. Polling readers are joined without a
+/// bound ([`Reader`]). See [`RuntimeHandles`]'s `Drop`.
+const READER_JOIN_BOUND: Duration = Duration::from_secs(2);
 
 /// TERM→KILL escalation window for `group = true` process groups
 /// (Q#CM3). Armed into the reap ledger when the group receives
@@ -519,6 +575,29 @@ pub struct ProcessSupervisor {
     /// fixture teardown can assert its plan was consumed even when unit
     /// tests run in parallel.
     reap_kill_faults: Arc<Mutex<ReapKillFaults>>,
+    /// Reaps that left a dead process's readers behind, oldest first,
+    /// until [`Self::take_output_held`] hands them on.
+    output_held: Vec<OutputHeldNotice>,
+    /// The one deadline every plain reap waits on a dead process's
+    /// output against, set by the first reap that needs it and cleared at
+    /// each tick's start --- except during [`Self::shutdown`], whose reaps
+    /// all share the first one's (E8c fix round 1).
+    ///
+    /// A dead process's readers run on threads of their own from the
+    /// moment it exits, so a reap's wait gains nothing that another
+    /// reap's wait did not: what a reader could still read, it read
+    /// while the earlier reap waited. Waiting one reap after another
+    /// only multiplied the freeze, two seconds of drain and two of join
+    /// per server whose output another process held (8.08 s for two at
+    /// quit, E8c review 1's Low 1); one deadline makes the editor's
+    /// stall a tick's, and quit's a teardown's, however many such
+    /// servers die. Group drains keep their own bound, their group's
+    /// ledger deadline, and their readers poll ([`Reader::Polling`]).
+    reap_wait_until: Option<Instant>,
+    /// Every shared deadline a plain reap waited against, in reap order:
+    /// the witness that reaps share one (`reaps_share_one_wait_*`).
+    #[cfg(test)]
+    reap_wait_log: Vec<Instant>,
 }
 
 /// One armed group in the reap ledger.
@@ -638,16 +717,46 @@ struct ManagedProcess {
     next_restart_at: Option<Instant>,
 }
 
+/// One thread of a generation's output pipeline, by how it can be
+/// ended (E8c fix round 1).
+///
+/// The kinds are told apart so that a bound on joining them is spent
+/// only where it is needed. Before E8c every reader was joined without
+/// one, and a reader blocked on a pipe another process held never let
+/// the join return; E8c bounded the join of all of them, which made
+/// the end of a polling reader, certain by construction, hold only if
+/// it came within the bound.
+enum Reader {
+    /// Waits only in polls bounded by [`READER_SEND_POLL_INTERVAL`] and
+    /// checks the generation's cancel flag between them: a group reader
+    /// ([`spawn_group_reader`]) or the ANSI parser stage
+    /// ([`spawn_ansi_parser`]). Once `cancel` is set it ends within one
+    /// interval, whoever holds the pipe, so it is joined without a bound.
+    Polling(JoinHandle<()>),
+    /// Blocks in `read` ([`spawn_reader`]) and ends at its pipe's end,
+    /// which any process holding a write end can postpone for good: the
+    /// one kind whose join is bounded.
+    Blocking(JoinHandle<()>),
+}
+
+impl Reader {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Polling(h) | Self::Blocking(h) => h.is_finished(),
+        }
+    }
+}
+
 /// Handles tied to one running generation. Dropped (and joined)
 /// when the generation ends.
 struct RuntimeHandles {
     child: ChildHandle,
     stdin: Option<StdinWriter>,
     pid: u32,
-    /// Reader-thread join handles, drained by `Drop` of
-    /// [`RuntimeHandles`] so a generation's worker threads don't
-    /// outlive the supervisor.
-    readers: Vec<JoinHandle<()>>,
+    /// Reader-thread join handles, by kind, drained by
+    /// [`Self::release_readers`] so a generation's worker threads
+    /// don't outlive the supervisor.
+    readers: Vec<Reader>,
     /// Bounded output channel drained by the supervisor. Raw processes
     /// expose bytes directly; ANSI-enabled PTY processes expose parser
     /// batches from the worker stage.
@@ -770,6 +879,19 @@ impl StdinWriter {
 
 impl Drop for RuntimeHandles {
     fn drop(&mut self) {
+        // A reap has already released the readers and said what it left
+        // (`poll_one`); this is for handles dropped any other way.
+        let _ = self.release_readers(Instant::now() + READER_JOIN_BOUND);
+    }
+}
+
+impl RuntimeHandles {
+    /// End this generation's reader threads: wake them, close the
+    /// child's stdin, join every polling reader, and join each blocking
+    /// one that finishes by `deadline`. Returns how many were left
+    /// unjoined, still blocked on output another process holds.
+    /// Idempotent: a second call finds no readers.
+    fn release_readers(&mut self, deadline: Instant) -> usize {
         // Wake any reader thread blocked in a bounded `send` ---
         // dropping the master closes the kernel pipe and unblocks
         // `read`, but does nothing for a reader stuck on a full
@@ -796,9 +918,43 @@ impl Drop for RuntimeHandles {
         // have ended the join. `take()` is idempotent, matching
         // `close_stdin`.
         let _ = self.stdin.take();
-        for h in std::mem::take(&mut self.readers) {
-            let _ = h.join();
+        // The join is bounded here, on the dropping thread, outside the
+        // `read` it waits on (E8c, #299). Joined without a bound, a
+        // reader blocked on a pipe that an escaped descendant holds never
+        // returned, and nor did the drop: `C-x C-c` against a server
+        // whose child kept its output never ended the editor, its main
+        // thread parked in this join from `ProcessSupervisor::shutdown`'s
+        // tick, and a tick that reaps such a server mid-session would
+        // freeze the same way. A reader not finished by `deadline` is
+        // left unjoined, and counted: the caller says so, because the
+        // wait froze its thread and the reader outlives it. Its
+        // channel's receiver goes with these handles, so it returns at
+        // its pipe's end or with the next bytes it reads, and the
+        // editor's exit ends it otherwise.
+        //
+        // Only a blocking reader can be held so. A polling reader ends
+        // within one poll of `cancel`, set above, so it is joined without
+        // a bound, as every reader was before E8c: its end is certain by
+        // construction, not by beating the deadline (E8c fix round 1).
+        let mut left = 0;
+        for reader in std::mem::take(&mut self.readers) {
+            match reader {
+                Reader::Polling(h) => {
+                    let _ = h.join();
+                }
+                Reader::Blocking(h) => {
+                    while !h.is_finished() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if h.is_finished() {
+                        let _ = h.join();
+                    } else {
+                        left += 1;
+                    }
+                }
+            }
         }
+        left
     }
 }
 
@@ -1278,6 +1434,10 @@ impl ProcessSupervisor {
             forced_kill_errno: None,
             forced_pty_lookup: None,
             reap_kill_faults: Arc::new(Mutex::new(ReapKillFaults::default())),
+            output_held: Vec::new(),
+            reap_wait_until: None,
+            #[cfg(test)]
+            reap_wait_log: Vec::new(),
         }
     }
 
@@ -1622,6 +1782,11 @@ impl ProcessSupervisor {
     /// running child for exit, and apply restart policy. Call once
     /// per editor frame.
     pub fn tick(&mut self) {
+        // Each tick's reaps share one wait on held output; a teardown's
+        // share one across its ticks (see `reap_wait_until`).
+        if !self.shut_down {
+            self.reap_wait_until = None;
+        }
         // Drain pending lifecycle events from the supervisor-wide
         // unbounded channel (Started/Exited/Signaled/Crashed/Restarting
         // — small, infrequent, not subject to byte-stream backpressure).
@@ -1739,7 +1904,20 @@ impl ProcessSupervisor {
         if matches!(status, Ok(None)) {
             return;
         }
-        // Terminal from here on. Group leader-exit reap (Q#CM3):
+        // Terminal from here on. A pipe child's stdin closes now, before
+        // the drain: the process is gone, and a descendant still reading
+        // that stdin --- a stdio server a shim left behind --- ends at the
+        // EOF and lets go of the output the drain waits on. Until E8c's
+        // fix round 1 stdin closed only as the handles dropped, after the
+        // drain had waited its whole bound on that descendant. A PTY's
+        // stays open until then: dropping portable-pty's master writer
+        // types a newline and the EOF character into the terminal, and
+        // the line discipline would echo them into the output drained
+        // here whenever a survivor still holds the slave.
+        if matches!(runtime.child, ChildHandle::Pipes(_)) {
+            let _ = runtime.stdin.take();
+        }
+        // Group leader-exit reap (Q#CM3):
         // TERM the remaining group and arm the reap ledger BEFORE
         // the final drain — a leader that exits leaving `sleep 60 &`
         // holding the merged pipe would otherwise burn the full
@@ -1769,7 +1947,31 @@ impl ProcessSupervisor {
             None
         };
         let now = Instant::now();
-        let final_output = final_drain_runtime(runtime, group_ctx.as_ref());
+        // One wait, the drain's, then the readers are released against
+        // the same deadline: a blocking reader that did not finish while
+        // the drain waited is held by another process, and waiting again
+        // would only double the freeze. A plain reap's deadline is the
+        // tick's or the teardown's shared one (`reap_wait_until`), never
+        // less than `REAP_WAIT_FLOOR` away.
+        let deadline = if group_ctx.is_some() {
+            now + EXIT_OUTPUT_DRAIN_TIMEOUT
+        } else {
+            let shared = *self
+                .reap_wait_until
+                .get_or_insert(now + EXIT_OUTPUT_DRAIN_TIMEOUT);
+            #[cfg(test)]
+            self.reap_wait_log.push(shared);
+            shared.max(now + REAP_WAIT_FLOOR)
+        };
+        let final_output = final_drain_runtime(runtime, group_ctx.as_ref(), deadline);
+        let readers_left = runtime.release_readers(deadline);
+        if readers_left > 0 {
+            self.output_held.push(OutputHeldNotice {
+                label: proc.spec.label.clone(),
+                readers_left,
+                waited: now.elapsed(),
+            });
+        }
         let (termination, event) = match status {
             Ok(Some(TermStatus::Exited(code))) => (
                 Termination::Exited {
@@ -1875,6 +2077,13 @@ impl ProcessSupervisor {
         self.pending.remove(&id).unwrap_or_default()
     }
 
+    /// Drain the reaps since the last call that left a dead process's
+    /// readers behind, oldest first. The editor reports each (see
+    /// [`OutputHeldNotice`]).
+    pub fn take_output_held(&mut self) -> Vec<OutputHeldNotice> {
+        std::mem::take(&mut self.output_held)
+    }
+
     /// Drain every queued event across every process. Returns events
     /// in the order they were enqueued. Useful for `*processes*`
     /// log-style buffers and tests.
@@ -1929,6 +2138,9 @@ impl ProcessSupervisor {
             return;
         }
         self.shut_down = true;
+        // From here every reap of the teardown waits against one
+        // deadline, the first's (see `reap_wait_until`).
+        self.reap_wait_until = None;
         // SIGTERM phase.
         let ids: Vec<ProcessId> = self.processes.keys().copied().collect();
         for id in &ids {
@@ -2100,33 +2312,38 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
     let mut readers = Vec::new();
     if let Some(out) = stdout {
         readers.push(if spec.group {
-            spawn_group_reader(
+            Reader::Polling(spawn_group_reader(
                 byte_tx.clone(),
                 Arc::clone(&cancel),
                 out,
                 ReaderKind::Stdout,
                 Arc::clone(&active_readers),
-            )
+            ))
         } else {
-            spawn_reader(
+            Reader::Blocking(spawn_reader(
                 byte_tx.clone(),
                 Arc::clone(&cancel),
                 out,
                 ReaderKind::Stdout,
-            )
+            ))
         });
     }
     if let Some(err) = stderr {
         readers.push(if spec.group {
-            spawn_group_reader(
+            Reader::Polling(spawn_group_reader(
                 byte_tx,
                 Arc::clone(&cancel),
                 err,
                 ReaderKind::Stderr,
                 Arc::clone(&active_readers),
-            )
+            ))
         } else {
-            spawn_reader(byte_tx, Arc::clone(&cancel), err, ReaderKind::Stderr)
+            Reader::Blocking(spawn_reader(
+                byte_tx,
+                Arc::clone(&cancel),
+                err,
+                ReaderKind::Stderr,
+            ))
         });
     }
     Ok(RuntimeHandles {
@@ -2200,20 +2417,20 @@ fn build_pty_runtime(
         .map_err(|e| format!("pty reader: {e}"))?;
     let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(BYTE_CHUNK_CHANNEL_CAP);
     let cancel = Arc::new(AtomicBool::new(false));
-    let mut readers = vec![spawn_reader(
+    let mut readers = vec![Reader::Blocking(spawn_reader(
         byte_tx,
         Arc::clone(&cancel),
         reader,
         ReaderKind::Stdout,
-    )];
+    ))];
     let output_rx = if spec.ansi_events {
         let (ansi_tx, ansi_rx) = channel::bounded::<AnsiBatch>(ANSI_EVENT_CHANNEL_CAP);
-        readers.push(spawn_ansi_parser(
+        readers.push(Reader::Polling(spawn_ansi_parser(
             byte_rx,
             ansi_tx,
             Arc::clone(&cancel),
             spec.ansi_profile,
-        ));
+        )));
         RuntimeOutputRx::Ansi(ansi_rx)
     } else {
         RuntimeOutputRx::Bytes(byte_rx)
@@ -2566,11 +2783,14 @@ fn in_drain_probe(ctx: &GroupDrainCtx) -> nix::Result<()> {
     nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), None)
 }
 
+/// Collect a dead generation's remaining output, until its readers have
+/// all finished and nothing is left, or until `deadline` (a group drain
+/// also stops at its group's own bound, below).
 fn final_drain_runtime(
     rt: &RuntimeHandles,
     group: Option<&GroupDrainCtx>,
+    deadline: Instant,
 ) -> Vec<ProcessEventKind> {
-    let deadline = Instant::now() + EXIT_OUTPUT_DRAIN_TIMEOUT;
     let mut out = Vec::new();
     // Group drains get tighter bounds than the plain byte-flush
     // timeout (Q#CM3, round-4 finding 2 / round-5 revision):
@@ -2596,7 +2816,7 @@ fn final_drain_runtime(
         if drained_any {
             last_data = Instant::now();
         }
-        if rt.readers.iter().all(std::thread::JoinHandle::is_finished) && !drained_any {
+        if rt.readers.iter().all(Reader::is_finished) && !drained_any {
             return out;
         }
         if let Some(ctx) = group {
@@ -4421,17 +4641,29 @@ mod tests {
             );
 
             // The deadlock, if present, is here:
-            // shutdown -> tick -> poll_one -> RuntimeHandles::drop -> join.
+            // shutdown -> tick -> poll_one -> drain and release -> join.
+            sup.shutdown();
+            let held = sup.take_output_held();
             drop(sup);
-            let _ = done_tx.send(());
+            let _ = done_tx.send(held);
         });
 
-        done_rx.recv_timeout(Duration::from_secs(10)).expect(
+        let held = done_rx.recv_timeout(Duration::from_secs(10)).expect(
             "supervisor drop should complete within 10s --- if hung, \
              `RuntimeHandles::drop` is joining its readers before dropping \
              the `stdin` field, so the child never receives EOF, never \
              exits, and never closes the output pipe the readers are \
              blocked on",
+        );
+        // E8c fix round 1: the reap closes the dead child's stdin before
+        // it waits, so `cat` reads EOF and lets go of the output while the
+        // drain still waits, and nothing is reported held. Closed only at
+        // release, after the drain's whole wait, the readers were still
+        // blocked when the release looked, and were reported left.
+        assert!(
+            held.is_empty(),
+            "an escaped stdio child ends at the stdin EOF the reap delivers \
+             before it waits, so its output is not held; reported {held:?}"
         );
         handle.join().expect("test thread should exit cleanly");
     }
@@ -5182,6 +5414,272 @@ mod tests {
         for pid in escapees {
             let _ = nix::sys::signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL));
         }
+    }
+
+    /// **A polling reader's end is certain by construction, not by a
+    /// deadline** (E8c fix round 1, review 1's Low 2).
+    /// `release_readers` joins every polling reader --- a group's
+    /// readers, the ANSI parser stage --- however short its deadline,
+    /// and counts only a blocking reader as left. Both generations here
+    /// still run, so no pipe has reached its end: a polling reader ends
+    /// because `cancel` was set, and a blocking one does not end at all.
+    /// At E8c's `a35b76b` the bound covered every reader, so a deadline
+    /// already passed left them all.
+    #[test]
+    fn release_joins_every_polling_reader_whatever_the_deadline() {
+        let mut sup = ProcessSupervisor::new();
+        // A group: two polling readers on a leader that keeps its output.
+        let group = sup
+            .spawn(sh_group_spec("polling", "exec sleep 30"))
+            .expect("spawn group");
+        let probe = sup.active_reader_probe(group).expect("live runtime probe");
+        let started = Instant::now();
+        while probe.load(Ordering::Relaxed) < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "precondition: both group readers start"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let rt = sup
+            .processes
+            .get_mut(&group)
+            .and_then(|p| p.runtime.as_mut())
+            .expect("live group runtime");
+        assert_eq!(
+            rt.release_readers(Instant::now()),
+            0,
+            "a group's readers poll `cancel`, so none is left"
+        );
+        assert_eq!(
+            probe.load(Ordering::Relaxed),
+            0,
+            "and each has ended and dropped its FD"
+        );
+
+        // A PTY with the parser stage: a blocking reader on the master
+        // and a polling parser. The shell holds the slave, so the reader
+        // stays in `read`.
+        let mut spec = ProcessSpec::new("pty-parser", "/bin/sh", "test process");
+        spec.args = vec!["-c".into(), "exec sleep 30".into()];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        spec.ansi_events = true;
+        let pty = sup.spawn(spec).expect("spawn ansi pty");
+        let rt = sup
+            .processes
+            .get_mut(&pty)
+            .and_then(|p| p.runtime.as_mut())
+            .expect("live pty runtime");
+        assert_eq!(
+            rt.readers.len(),
+            2,
+            "precondition: the master's reader and the parser"
+        );
+        assert_eq!(
+            rt.release_readers(Instant::now()),
+            1,
+            "only the blocking reader on the master is left; the parser is joined"
+        );
+        // `sup` drops here, and its shutdown ends both children.
+    }
+
+    /// A plain (non-group) process whose shell starts an heir holding its
+    /// stdout and stderr and records the heir's pid in `pid_file`, then
+    /// runs `rest`. Linux-only, as the rows that use it are.
+    #[cfg(target_os = "linux")]
+    fn heir_holder_spec(label: &str, pid_file: &std::path::Path, rest: &str) -> ProcessSpec {
+        let mut spec = ProcessSpec::new(label, "/bin/sh", "test process");
+        spec.args = vec![
+            "-c".into(),
+            format!("sleep 20 & echo $! > {}; {rest}", pid_file.display()),
+        ];
+        spec
+    }
+
+    /// Ends every heir the row recorded, however it ends.
+    #[cfg(target_os = "linux")]
+    struct Heirs(Vec<std::path::PathBuf>);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Heirs {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                if let Ok(text) = std::fs::read_to_string(path)
+                    && let Ok(pid) = text.trim().parse::<i32>()
+                {
+                    let _ = nix::sys::signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL));
+                }
+            }
+        }
+    }
+
+    /// **Reaps in one tick share one wait on held output** (E8c fix
+    /// round 1, review 1's Low 1). Two processes exit while heirs hold
+    /// their output, and one tick reaps both. Each is reported as held,
+    /// and both waited against the same deadline: the second reap's
+    /// readers ran through the first's wait, so a second wait could only
+    /// add to the freeze. Before, each reap drained two seconds and
+    /// joined two more, one after the other.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reaps_share_one_wait_on_held_output_in_a_tick() {
+        fn zombie(pid: u32) -> bool {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+                s.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    == Some("Z")
+            })
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = [dir.path().join("a"), dir.path().join("b")];
+        let _heirs = Heirs(files.to_vec());
+        let mut sup = ProcessSupervisor::new();
+        let ids = [
+            sup.spawn(heir_holder_spec("held-a", &files[0], "exit 0"))
+                .expect("spawn a"),
+            sup.spawn(heir_holder_spec("held-b", &files[1], "exit 0"))
+                .expect("spawn b"),
+        ];
+        let pids: Vec<u32> = ids
+            .iter()
+            .map(|id| sup.processes[id].runtime.as_ref().expect("runtime").pid)
+            .collect();
+        // Untick'd, an exited child stays a zombie: wait until both are,
+        // so that the one tick below finds both exited.
+        let started = Instant::now();
+        while !pids.iter().all(|&pid| zombie(pid)) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "precondition: both shells exit"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        sup.tick();
+        for id in ids {
+            assert!(
+                matches!(sup.state(id), Some(ProcessState::Terminated(_))),
+                "precondition: one tick reaps both; {id} is {:?}",
+                sup.state(id)
+            );
+        }
+        let held = sup.take_output_held();
+        assert_eq!(
+            held.len(),
+            2,
+            "precondition: both reaps found their output held; {held:?}"
+        );
+        assert_eq!(sup.reap_wait_log.len(), 2, "two plain reaps");
+        assert_eq!(
+            sup.reap_wait_log[0], sup.reap_wait_log[1],
+            "the two reaps waited against one deadline, not one each"
+        );
+    }
+
+    /// **A teardown's reaps share one wait, across its ticks.** At quit
+    /// one server dies at `SIGTERM` and is reaped first, its heir holding
+    /// its output; another ignores `SIGTERM` and is reaped after the
+    /// grace, by its `SIGKILL`, in a later tick. Both waited against the
+    /// deadline the first set, so quit's stall on held output is one
+    /// wait however many servers hold it (8.08 s for two at E8c's
+    /// `a35b76b`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reaps_share_one_wait_on_held_output_in_a_teardown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = [dir.path().join("a"), dir.path().join("b")];
+        let _heirs = Heirs(files.to_vec());
+        let mut sup = ProcessSupervisor::new();
+        sup.set_grace_period(Duration::from_millis(300));
+        sup.spawn(heir_holder_spec("held-a", &files[0], "exec sleep 30"))
+            .expect("spawn a");
+        let b = sup
+            .spawn(heir_holder_spec(
+                "held-b",
+                &files[1],
+                "trap '' TERM; exec sleep 30",
+            ))
+            .expect("spawn b");
+        let started = Instant::now();
+        while !files
+            .iter()
+            .all(|f| std::fs::read_to_string(f).is_ok_and(|t| !t.trim().is_empty()))
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "precondition: both heirs start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        sup.shutdown();
+        assert!(
+            matches!(
+                sup.state(b),
+                Some(ProcessState::Terminated(Termination::Signaled { signal, .. })) if signal == "SIGKILL"
+            ),
+            "precondition: b outlived the grace and was killed; it is {:?}",
+            sup.state(b)
+        );
+        let held = sup.take_output_held();
+        assert_eq!(
+            held.len(),
+            2,
+            "precondition: both reaps found their output held; {held:?}"
+        );
+        assert_eq!(sup.reap_wait_log.len(), 2, "two plain reaps");
+        assert_eq!(
+            sup.reap_wait_log[0], sup.reap_wait_log[1],
+            "the teardown's two reaps, in different ticks, waited against one deadline"
+        );
+    }
+
+    /// **A reaped PTY child's output holds only what it wrote.** The
+    /// shell exits while a `sleep` it started still holds the terminal,
+    /// so the reap drains, waits, and leaves the master's reader. Dropping
+    /// portable-pty's master writer types a newline and the EOF character
+    /// into the terminal, which its line discipline echoes back to the
+    /// master. Closed before the drain, as `579c4e9` first closed every
+    /// dead child's stdin, that echo was drained as the child's output;
+    /// a PTY's writer is now dropped after the drain, as before.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reaped_pty_child_s_output_holds_only_what_it_wrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("heir");
+        let _heirs = Heirs(vec![pid_file.clone()]);
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("pty-heir", "/bin/sh", "test process");
+        spec.args = vec![
+            "-c".into(),
+            format!(
+                "trap '' HUP; sleep 20 & echo $! > {}; printf done; exit 0",
+                pid_file.display()
+            ),
+        ];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn pty");
+        let events = drain_until(&mut sup, id, Duration::from_secs(10), has_exited);
+        assert!(
+            has_exited(&events),
+            "precondition: the shell exits; {events:?}"
+        );
+        assert_eq!(
+            sup.take_output_held().len(),
+            1,
+            "precondition: the heir held the terminal, so the reap left its reader"
+        );
+        assert_eq!(
+            collect_stdout(&events),
+            "done",
+            "the drain holds what the child wrote, and no echo of the editor's own close"
+        );
     }
 
     #[test]

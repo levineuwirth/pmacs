@@ -213,6 +213,20 @@ struct Session {
     lsp_rs: String,
     dired: String,
     scratch: String,
+    proj: std::path::PathBuf,
+}
+
+/// `C-x d`, the prefill replaced by `dir`, RET: dired as a user opens
+/// it. Returns the buffer the window then shows.
+fn open_dired(s: &mut EditorState, dir: &Path) -> String {
+    ctrl(s, 'x');
+    press(s, KeyCode::Char('d'));
+    assert!(active(s), "C-x d opens the prompt");
+    clear_field(s);
+    type_str(s, &dir.display().to_string());
+    press(s, KeyCode::Enter);
+    pump(s);
+    active_name(s)
 }
 
 fn session(td: &Path) -> Session {
@@ -238,16 +252,7 @@ fn session(td: &Path) -> Session {
         std::fs::write(&path, b"x\n").expect("write");
         names.push(visit(&s, &path));
     }
-    // `C-x d`, the prefill replaced by the directory, RET: dired as a
-    // user opens it.
-    ctrl(&mut s, 'x');
-    press(&mut s, KeyCode::Char('d'));
-    assert!(active(&s), "C-x d opens the prompt");
-    clear_field(&mut s);
-    type_str(&mut s, &proj.display().to_string());
-    press(&mut s, KeyCode::Enter);
-    pump(&mut s);
-    let dired = active_name(&s);
+    let dired = open_dired(&mut s, &proj);
     assert!(
         dired.starts_with("*dired:") && dired.ends_with("/proj*"),
         "fixture: C-x d opened a dired buffer; showing {dired}"
@@ -264,6 +269,7 @@ fn session(td: &Path) -> Session {
         lsp_rs,
         dired,
         scratch,
+        proj,
     }
 }
 
@@ -300,6 +306,7 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
         lsp_rs,
         dired,
         scratch,
+        ..
     } = session(td.path());
     assert!(
         fuzzy_score("nts", &dired).is_some_and(|d| d < fuzzy_score("nts", "/notes.txt").unwrap()),
@@ -500,62 +507,62 @@ fn c_x_k_b_rs_kills_b_rs_and_says_so() {
 
 /// Review 1's Medium 2, the second: `C-x k dired RET` acts on the dired
 /// buffer, not `dired.lua`. At `0001946` it killed `dired.lua`, an
-/// unmodified file buffer, silently, and kept the dired buffer. The
-/// dired buffer's generated text reads as modified (review 1's aside,
-/// the owner's to rule on, asserted here as a premise), so the kill asks
-/// first and names it: `n` keeps both buffers and says so, and `y` kills
-/// the dired buffer and names it on the band. `dir` selects it as
-/// `dired` does.
+/// unmodified file buffer, silently, and kept the dired buffer. Until
+/// E8c the dired buffer's generated text read as modified (review 1's
+/// aside), so this row answered "kill anyway?" first; E8c leaves a
+/// buffer the editor writes clean (#299), and the kill now goes without
+/// a question, as for any unmodified buffer, and names it on the band.
+/// `dir` selects it as `dired` does, the listing opened again between.
 #[test]
 fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
     let td = tempfile::tempdir().expect("tempdir");
     let Session {
-        mut s, lua, dired, ..
+        mut s,
+        lua,
+        dired,
+        editor,
+        proj,
+        ..
     } = session(td.path());
     assert!(
-        modified(&s, &dired) && !modified(&s, &lua),
-        "premise: the dired buffer reads as modified and dired.lua does not"
+        !modified(&s, &dired) && !modified(&s, &lua),
+        "premise: neither the dired buffer nor dired.lua reads as modified"
     );
     for typed in ["dir", "dired"] {
+        if typed == "dired" {
+            assert_eq!(
+                open_dired(&mut s, &proj),
+                dired,
+                "fixture: C-x d lists proj again"
+            );
+            show(&s, &editor);
+        }
         let offered = kill_by_typing(&mut s, typed);
         assert!(
             offered.contains(&dired) && offered.contains(&lua),
             "premise: `{typed}` is held by the dired buffer and by dired.lua; got {offered:?}"
         );
-        let asked = prompt(&s);
         assert!(
-            asked.contains(&dired) && asked.contains("kill anyway"),
-            "C-x k {typed} RET asks about the dired buffer; asked {asked:?}, left {:?}, \
-             band {:?}",
-            buffer_names(&s),
-            status(&s)
+            !active(&s),
+            "C-x k {typed} RET asks nothing of a listing; asked {:?}",
+            prompt(&s)
         );
-        if typed == "dir" {
-            press(&mut s, KeyCode::Char('n'));
-            assert_eq!(status(&s), "kill-buffer cancelled");
-            let left = buffer_names(&s);
-            assert!(
-                left.contains(&dired) && left.contains(&lua),
-                "n keeps both; left {left:?}"
-            );
-        }
+        let left = buffer_names(&s);
+        assert!(
+            !left.contains(&dired) && left.contains(&lua),
+            "C-x k {typed} RET kills the dired buffer and keeps dired.lua; left {left:?}"
+        );
+        assert_eq!(status(&s), format!("kill-buffer: killed {dired}"));
     }
-    press(&mut s, KeyCode::Char('y'));
-    let left = buffer_names(&s);
-    assert!(
-        !left.contains(&dired) && left.contains(&lua),
-        "y kills the dired buffer and keeps dired.lua; left {left:?}"
-    );
-    assert_eq!(status(&s), format!("kill-buffer: killed {dired}"));
 }
 
 /// D18's four through `C-x k`, which shares `C-x b`'s source and its
 /// `candidate` policy: `nts` kills `notes.txt` and `scr` `*scratch*`,
 /// both unmodified and so without a question; `lsp` selects `*lsp*`
-/// beside `src/lsp.rs`, whose generated text reads as modified, so the
-/// kill asks about `*lsp*` and `y` kills it; each is named on the band.
-/// `zzz` matches nothing, is looked up as typed and refused, and nothing
-/// goes.
+/// beside `src/lsp.rs` and kills it, without a question since E8c left
+/// the editor's own text clean (before it, `*lsp*` read as modified and
+/// this row answered `y`); each is named on the band. `zzz` matches
+/// nothing, is looked up as typed and refused, and nothing goes.
 #[test]
 fn c_x_k_keeps_d18_s_four() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -593,18 +600,20 @@ fn c_x_k_keeps_d18_s_four() {
     ctrl(&mut s, 'c');
     press(&mut s, KeyCode::Char('l'));
     assert_eq!(active_name(&s), "*lsp*", "C-c l opens *lsp*");
-    assert!(modified(&s, "*lsp*"), "premise: *lsp* reads as modified");
+    assert!(
+        !modified(&s, "*lsp*"),
+        "premise: *lsp* is the editor's text and reads as unmodified"
+    );
     let offered = kill_by_typing(&mut s, "lsp");
     assert!(
         offered.contains(&lsp_rs),
         "premise: src/lsp.rs holds `lsp` in its own name; got {offered:?}"
     );
-    let asked = prompt(&s);
     assert!(
-        asked.contains("*lsp*") && asked.contains("kill anyway"),
-        "C-x k lsp RET asks about *lsp*; asked {asked:?}"
+        !active(&s),
+        "*lsp* goes without a question; asked {:?}",
+        prompt(&s)
     );
-    press(&mut s, KeyCode::Char('y'));
     let left = buffer_names(&s);
     assert!(
         !left.contains(&"*lsp*".to_owned()) && left.contains(&lsp_rs),
