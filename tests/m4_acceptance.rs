@@ -11015,12 +11015,33 @@ fn rd11a_present_plus_ignore_with_a_modified_buffer_is_refused() {
 #[cfg(unix)]
 #[test]
 fn rd11b_a_dangling_symlink_counts_as_present() {
+    bounded(RD11B_BOUND, rd11b_a_dangling_symlink_counts_as_present_body);
+}
+
+/// The bound on [`rd11b_a_dangling_symlink_counts_as_present`], for
+/// #349, where it ran at least 19 minutes without returning on macOS
+/// luajit and its leg hit the 45-minute limit. Containment, not repair:
+/// why it blocked is not known. Its waits are the fake's initialize and
+/// the apply-edit's response (10 s each), and its teardown's a 2 s grace
+/// after SIGTERM and a 2 s reap (`ProcessSupervisor::shutdown`), 24 s in
+/// all, so a run that is slow but moving fails at one of those. It runs
+/// in the heaviest of the three suites: 182 rows that took 88.19 to
+/// 107.38 s on CI's macOS legs at `cd730c9` and `8b144da`, beside real
+/// rust-analyzer rows that run past a minute. Past two minutes, five
+/// times what its waits can spend, a call has not returned.
+#[cfg(unix)]
+const RD11B_BOUND: Duration = Duration::from_mins(2);
+
+#[cfg(unix)]
+fn rd11b_a_dangling_symlink_counts_as_present_body(steps: &Steps) {
+    steps.enter("writing real.rs and its link");
     let dir = tempfile::tempdir().expect("tempdir");
     let real = dir.path().join("real.rs");
     let link = dir.path().join("link.rs");
     std::fs::write(&real, b"content\n").expect("write");
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
 
+    steps.enter("creating the editor for the symlink fixture");
     let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
@@ -11028,20 +11049,25 @@ fn rd11b_a_dangling_symlink_counts_as_present() {
               "options": { "ignoreIfNotExists": true } }
         ]
     });
+    steps.enter("pointing rust at the applyeditplan fake");
     let sink = rd_plan_server(&mut state, dir.path(), &plan);
     // Opened through the LINK path, so the buffer binds to the link —
     // `normalize_buffer_path` is lexical and resolves no symlinks.
+    steps.enter("opening the buffer through the link");
     rd_open(&mut state, "B", &link);
+    steps.enter("dirtying the buffer");
     state
         .lua_host
         .lua()
         .load("B:insert(0, 'unsaved')")
         .exec()
         .expect("dirty the buffer");
+    steps.enter("waiting for the fake to initialize");
     rd_wait_initialized(&mut state);
 
     // Break the link. `canonicalize` now says absent; the primitive's
     // `symlink_metadata` still says present.
+    steps.enter("breaking the link");
     std::fs::remove_file(&real).expect("unlink the destination");
     assert!(
         std::fs::symlink_metadata(&link).is_ok(),
@@ -11052,8 +11078,11 @@ fn rd11b_a_dangling_symlink_counts_as_present() {
         "fixture: the link must be dangling, or this test proves nothing"
     );
 
+    steps.enter("triggering the apply-edit");
     rd_trigger_apply_edit(&mut state);
+    steps.enter("waiting for the apply-edit's response");
     let response = rd_wait_response(&mut state, &sink, 10);
+    steps.enter("reading the refusal");
     assert!(
         !rd_applied(&response),
         "a dangling symlink is present, so the modified buffer refuses: {response:?}"
@@ -11066,6 +11095,10 @@ fn rd11b_a_dangling_symlink_counts_as_present() {
         std::fs::symlink_metadata(&link).is_ok(),
         "THE BITE: the link survives the refusal"
     );
+    steps.enter("dropping the editor and the fake server");
+    drop(state);
+    steps.enter("removing the symlink fixture");
+    drop(dir);
 }
 
 /// Criterion 11c — absent without `ignoreIfNotExists` refuses in the
@@ -11884,10 +11917,14 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
 // integration test is compiled without `cfg(test)`, so a raw
 // `EditorState::new()` would read the developer's real `init.lua` and
 // write into their real data root.
+#[path = "common/bounded.rs"]
+mod bounded;
 #[path = "common/iso.rs"]
 mod iso;
 #[path = "common/ready.rs"]
 mod ready;
+
+use bounded::{Steps, bounded};
 
 /// E4.3 --- `*workspace-symbols*` end-to-end against the fake server's
 /// flat `SymbolInformation` response (`WsThing`, a function in container

@@ -17,6 +17,7 @@
 //! here vacuous.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use pmacs::editor::EditorState;
 use pmacs::protocol::FrontendId;
@@ -24,6 +25,8 @@ use pmacs::statusline::{
     StatuslineEvaluationOutcome, StatuslineEvaluationTarget, evaluate_statusline,
 };
 use tempfile::TempDir;
+
+use bounded::{Steps, bounded};
 
 fn exec(state: &EditorState, source: &str) {
     state.lua_host.lua().load(source.to_owned()).exec().unwrap();
@@ -489,28 +492,59 @@ fn j1b2_lsp_status_renders_failures_and_servers() {
     );
 }
 
+/// The bound on [`j1b2_g_refreshes_the_lsp_panel_after_recovery`], for
+/// #327, where it ran past twenty minutes on macOS lua54 and its leg hit
+/// the 45-minute limit. Containment, not repair: why it blocked is not
+/// known. The body has no readiness wait of its own, and its teardown's
+/// are a 2 s grace after SIGTERM and a 2 s reap
+/// (`ProcessSupervisor::shutdown`). Its whole suite of sixteen rows took
+/// 1.61 to 6.32 s on CI's macOS legs at `cd730c9` and `8b144da`, so past
+/// a minute, ten times the slowest of those, a call has not returned.
+const J1B2_G_BOUND: Duration = Duration::from_mins(1);
+
 /// **N** (11) — `g` refreshes. The **reattach is load-bearing**: making
 /// the command resolvable changes no state on its own, since `failures`
 /// is cleared by a successful spawn.
 #[test]
 fn j1b2_g_refreshes_the_lsp_panel_after_recovery() {
+    bounded(
+        J1B2_G_BOUND,
+        j1b2_g_refreshes_the_lsp_panel_after_recovery_body,
+    );
+}
+
+fn j1b2_g_refreshes_the_lsp_panel_after_recovery_body(steps: &Steps) {
+    steps.enter("making the cargo project");
     let td = cargo_project();
+    steps.enter("creating the editor over the cargo project");
     let state = editor_for(td.path());
+    steps.enter("pointing rust at an absent command");
     let cmd = absent_command(td.path(), "rust-analyzer");
     configure_rust(&state, &cmd);
+    steps.enter("opening a.rs");
     open(&state, &write_rs(td.path(), "a.rs"));
+    steps.enter("rendering *lsp* with the failure");
     exec(&state, "pmacs.command.invoke('lsp.status')");
     assert!(named_text(&state, "*lsp*").contains(&cmd));
 
     // Resolve AND reattach, then refresh in place.
+    steps.enter("pointing rust at /bin/sh");
     configure_rust(&state, "/bin/sh");
+    steps.enter("opening b.rs, which starts /bin/sh");
     open(&state, &write_rs(td.path(), "b.rs"));
+    steps.enter("invoking lsp.status");
     exec(&state, "pmacs.command.invoke('lsp.status')");
+    steps.enter("invoking listview.refresh");
     exec(&state, "pmacs.command.invoke('listview.refresh')");
+    steps.enter("reading the refreshed *lsp*");
     assert!(
         !named_text(&state, "*lsp*").contains(&cmd),
         "g must re-render, not leave the panel stale"
     );
+    steps.enter("dropping the editor and its /bin/sh server");
+    drop(state);
+    steps.enter("removing the cargo project");
+    drop(td);
 }
 
 /// **N** (12) — a foreign `*lsp*` buffer is never adopted. This is
@@ -579,5 +613,7 @@ fn j1b2_preservation_a_spawnable_server_still_attaches() {
 // integration test is compiled without `cfg(test)`, so a raw
 // `EditorState::new()` would read the developer's real `init.lua` and
 // write into their real data root.
+#[path = "common/bounded.rs"]
+mod bounded;
 #[path = "common/iso.rs"]
 mod iso;
