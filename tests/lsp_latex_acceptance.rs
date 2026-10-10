@@ -33,8 +33,11 @@
 //! would behave differently here and in CI.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use pmacs::editor::EditorState;
+
+use bounded::{Steps, bounded};
 
 fn exec(state: &EditorState, source: &str) {
     state.lua_host.lua().load(source.to_owned()).exec().unwrap();
@@ -605,22 +608,52 @@ fn two_chapters_share_one_server_under_a_root_search_boundary() {
     );
 }
 
+/// The bound on
+/// [`two_markerless_documents_in_different_directories_do_not_share_a_server`],
+/// for #344, where it ran at least 28 minutes without returning on
+/// macOS lua54 and its leg hit the 45-minute limit. Containment, not
+/// repair: why it blocked is not known. Its waits are two readiness
+/// waits of `ready::DEADLINE` (10 s each), and its teardown's a 2 s
+/// grace after SIGTERM and a 2 s reap (`ProcessSupervisor::shutdown`),
+/// 24 s in all, so a run that is slow but moving fails at one of those.
+/// Its whole suite of twenty-one rows took 2.93 to 9.51 s on CI's macOS
+/// legs at `cd730c9` and `8b144da`. Past ninety seconds, nearly four
+/// times what its waits can spend, a call has not returned.
+const MARKERLESS_BOUND: Duration = Duration::from_secs(90);
+
 #[test]
 fn two_markerless_documents_in_different_directories_do_not_share_a_server() {
+    bounded(
+        MARKERLESS_BOUND,
+        two_markerless_documents_in_different_directories_do_not_share_a_server_body,
+    );
+}
+
+fn two_markerless_documents_in_different_directories_do_not_share_a_server_body(steps: &Steps) {
     // The complement of the pin above: the fallback is the file's own
     // directory, so unrelated loose documents keep separate scopes
     // rather than collapsing into one rootless server.
+    steps.enter("making the two documents' fixture");
     let fx = Fixture::new();
+    steps.enter("creating the editor with the shipped latex config");
     let mut state = editor();
+    steps.enter("binding the search boundary");
     fx.bind(&state);
+    steps.enter("pointing latex at the fake server");
     point_command_at(&state, &fake_lsp_path());
+    steps.enter("writing a/one.tex and b/two.tex");
     let one = fx.write("a/one.tex", DOC);
     let two = fx.write("b/two.tex", DOC);
+    steps.enter("opening a/one.tex");
     open(&state, &one);
+    steps.enter("waiting for one listed server");
     wait_rows(&mut state, 1);
+    steps.enter("opening b/two.tex");
     open(&state, &two);
+    steps.enter("waiting for two listed servers");
     wait_rows(&mut state, 2);
 
+    steps.enter("reading the two servers' rows");
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "one server per document directory: {rows:?}");
     let roots: Vec<&str> = rows.iter().map(|r| r.split('|').nth(1).unwrap()).collect();
@@ -632,6 +665,10 @@ fn two_markerless_documents_in_different_directories_do_not_share_a_server() {
         roots.contains(&file_uri(&fx.dir("b")).as_str()),
         "{roots:?}"
     );
+    steps.enter("dropping the editor and its two fake servers");
+    drop(state);
+    steps.enter("removing the two documents' fixture");
+    drop(fx);
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +801,8 @@ fn latex_root_for_a_document_at_the_filesystem_root_is_the_root() {
     );
 }
 
+#[path = "common/bounded.rs"]
+mod bounded;
 #[path = "common/iso.rs"]
 mod iso;
 #[path = "common/ready.rs"]
