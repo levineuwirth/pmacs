@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 40 items in the list below.
+Tally (311-runs): 44 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2844,6 +2844,14 @@ Tally (311-runs): 40 items in the list below.
 - `20261010T102908Z-2908057` at `d79b5e5` (E8c's first tip gate, a commit rewritten before any push,
   `05-sweep`; recorded with E8c, below).
 - `20261010T105213Z-3113170` at `a35b76b` (E8c's tip gate, `05-sweep`; recorded with E8c, below).
+- `20261010T122342Z-3576747` at `a35b76b` (E8c review 1's first gate, `05-sweep`; recorded with
+  E8c's fix round 1, below).
+- `20261010T125112Z-3703490` at `a35b76b` (the same review's second gate, `05-sweep`; recorded
+  with E8c's fix round 1, below).
+- `20261010T130620Z-3845623` at `a35b76b` (the same review's third gate, `05-sweep`; recorded
+  with E8c's fix round 1, below).
+- `20261010T141313Z-4170219` at `d5327b6` (E8c fix round 1's tip gate, `05-sweep`; recorded with
+  that round, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -5574,6 +5582,152 @@ Tally (pr357-ci-a35b76b-failure): 2 rows of the table above with `result` = `fai
 So, at E8c: #316 moves to fourteen; #311's list of runs reads at forty; #358 is filed at one; #355
 and #356 are filed, neither a red; every other count above stands.
 
+### E8c's fix round 1: review 1's gates and the round's, PR #357 red on #361's first at `752811c`, two heads red on macOS by the round's own helpers, R7's thirty-fourth, #312's second, #359's first and #311's list at forty-four
+
+Recorded 2026-10-10 by E8c's fix round 1, #357 at `752811c`, fourteen signed commits on `4ac5289`, ten of them this round's on `a35b76b`. They commit review 1's probes and drivers, make a reap that leaves a dead process's readers behind say so, keep quit's state write out of the quit-bound rows, join polling readers without a bound, and give a tick's and a teardown's reaps one shared wait. They also keep a dead PTY's writer open through its drain, gate two test helpers to Linux, and correct the records. The runs were read from the jobs endpoint by conclusion and through the red jobs' logs; none was rerun.
+
+#### E8c review 1's gates, at `a35b76b`
+
+Three `scripts/gate` runs of the default plan by the review, at the head, recorded here because the review commits nothing. Each sweep's figures were recomputed from its `05-sweep.log`. The review reports no surviving daemon for its first gate; that step leaves no log.
+
+- `20261010T122342Z-3576747`: five of six; `05-sweep` has 202 paired result lines, 5,393 passed, 2 failed, 65 ignored:
+  - #311's row with #311's fragments (`Could not find module ‘Prelude’`, the trace reaching `LSP:ready·processi`, `4 passed; 1 failed`, 127.53 s), so #311's list gains it;
+  - `-p pmacs --test e6b_review1_edit_log c6b_gpu_edit_shapes_correct_when_the_held_answer_lands`, `edit probe failed:`, the paste case's last frame at 293 ms without the held semantic answer, and `test result: FAILED. 2 passed; 1 failed; 0 ignored` (11.24 s): **#359's first occurrence**, filed by the review with those fragments.
+- `20261010T125112Z-3703490`: five of six; 202 paired, 5,394 passed, 1 failed, 65 ignored: #311's row, the same fragments (126.75 s), so #311's list gains it. #359's row passed, which is non-reproduction and nothing more.
+- `20261010T130620Z-3845623`: five of six; 202 paired, 5,392 passed, 3 failed, 65 ignored:
+  - #311's row, the same fragments (128.06 s), so #311's list gains it;
+  - `-p pmacs --lib process::tests::pty_mode_child_sees_a_tty`, `tty(1) should report a pty path in PTY mode; got ""` and `test result: FAILED. 2285 passed; 1 failed; 13 ignored` (11.73 s): **#312's second sample**, commented by the review. At `a35b76b`, `src/process.rs` differs from `4ac5289` only in `RuntimeHandles`'s drop, not in the drain #312's reading names; that is a reading, and the row stays separate from #289;
+  - **R7's thirty-fourth** (`attach.rs:1971`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`, `374 passed; 1 failed`), its list extended. `pmacs-gpu` has no diff on the branch.
+
+#### The round's gates
+
+- `20261010T141313Z-4170219` at `d5327b6`: five of six; `05-sweep` has 203 paired result lines (the review's probe suite added), 5,407 passed, 1 failed, 65 ignored. The one is #311's row, the same fragments (128.38 s), so #311's list gains it. The rows of #312, #316, #358, #359 and R7 passed, which is non-reproduction and nothing more. No `pmacs --daemon` survived (identified by environ).
+- `20261010T143409Z-141932` at `124b955`: fmt, clippy, doc and build ok; the sweep was terminated while compiling, before any test ran, when the session's harness stopped background work for the laptop's memory. It is no sample of anything, and #311's list does not count it. It was not rerun.
+
+#### `CI` 38059810024 at `d5327b6`, attempt 1 of 1: two macOS legs red on the round's own helpers, then cancelled
+
+`pull_request`, created 14:29:34Z, cancelled at 14:34:35Z by the push of `124b955`: `cancelled`.
+
+Tally (pr357-ci-d5327b6): 19 = 12 + 2 + 4 + 1.
+
+Tally (pr357-ci-d5327b6-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 114235590367 | success |
+| Changed paths | 114235590491 | success |
+| Lint (lua54) | 114235590508 | success |
+| Lint (luajit) | 114235590533 | success |
+| Commit attribution (D9) | 114235590558 | success |
+| GPU Render (headless) | 114235625071 | success |
+| M1 Acceptance Gates | 114235625132 | success |
+| Perf budgets (debug) | 114235625146 | success |
+| M4 Perf Gates | 114235625153 | success |
+| Test (crdt) | 114235625155 | cancelled |
+| Test (macos-latest / lua54) | 114235625163 | failure |
+| M10 Perf Gates (crdt) | 114235625171 | success |
+| M6 Perf Gates | 114235625182 | success |
+| M5 Perf Gates | 114235625192 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114235625205 | cancelled |
+| Test (ubuntu-latest / lua54) | 114235625209 | cancelled |
+| Test (ubuntu-latest / luajit) | 114235625226 | cancelled |
+| Test (macos-latest / luajit) | 114235625293 | failure |
+| Docs consistency | 114235625817 | skipped |
+
+Tally (pr357-ci-d5327b6-success): 12 rows of the table above with `result` = `success`.
+
+Tally (pr357-ci-d5327b6-failure): 2 rows of the table above with `result` = `failure`.
+
+Both macOS legs failed building the lib tests: `error: function \`heir_holder_spec\` is never used`, `error: struct \`Heirs\` is never constructed`, `could not compile \`pmacs\` (lib test) due to 2 previous errors`. Those are test helpers the round added for Linux-only rows, dead on macOS under CI's denied warnings, and fixed at `752811c`. They are the branch's own and not a signature.
+
+#### `CI` 38060125815 at `124b955`, attempt 1 of 1: the same two legs, then cancelled
+
+`pull_request`, created 14:34:10Z, cancelled at 14:40:03Z by the push of `752811c`: `cancelled`.
+
+Tally (pr357-ci-124b955): 19 = 11 + 2 + 5 + 1.
+
+Tally (pr357-ci-124b955-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 114236590958 | success |
+| Commit attribution (D9) | 114236591057 | success |
+| Format | 114236591060 | success |
+| Changed paths | 114236591076 | success |
+| Lint (luajit) | 114236591110 | success |
+| M1 Acceptance Gates | 114236632166 | success |
+| M4 Perf Gates | 114236632173 | success |
+| GPU Render (headless) | 114236632201 | success |
+| Test (crdt) | 114236632210 | cancelled |
+| Test (macos-latest / lua54) | 114236632234 | failure |
+| Perf budgets (debug) | 114236632235 | success |
+| M10 Perf Gates (crdt) | 114236632256 | cancelled |
+| M5 Perf Gates | 114236632260 | success |
+| Test (ubuntu-latest / luajit) | 114236632264 | cancelled |
+| M6 Perf Gates | 114236632265 | success |
+| Test (ubuntu-latest / lua54) | 114236632272 | cancelled |
+| Test (ubuntu-latest / luajit, no crdt) | 114236632276 | cancelled |
+| Test (macos-latest / luajit) | 114236632308 | failure |
+| Docs consistency | 114236632860 | skipped |
+
+Tally (pr357-ci-124b955-success): 11 rows of the table above with `result` = `success`.
+
+Tally (pr357-ci-124b955-failure): 2 rows of the table above with `result` = `failure`.
+
+Both macOS legs failed on the same two errors; the branch's own, fixed at `752811c`.
+
+#### `CI` 38060487700 at `752811c`, attempt 1 of 1: red on one macOS leg, #361's first
+
+`pull_request`, the merge `ac6e089` (`752811c` into `1b73532`, read from the macOS lua54 leg's fetch line), created 14:39:35Z and completed 15:09:23Z: `failure`.
+
+Tally (pr357-ci-752811c): 19 = 17 + 1 + 1.
+
+Tally (pr357-ci-752811c-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 114237664410 | success |
+| Format | 114237664594 | success |
+| Changed paths | 114237664649 | success |
+| Lint (lua54) | 114237664732 | success |
+| Lint (luajit) | 114237664860 | success |
+| GPU Render (headless) | 114237705335 | success |
+| M1 Acceptance Gates | 114237705337 | success |
+| M10 Perf Gates (crdt) | 114237705377 | success |
+| M5 Perf Gates | 114237705392 | success |
+| M4 Perf Gates | 114237705406 | success |
+| Test (crdt) | 114237705449 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114237705451 | success |
+| Test (ubuntu-latest / lua54) | 114237705465 | success |
+| M6 Perf Gates | 114237705469 | success |
+| Test (macos-latest / lua54) | 114237705474 | failure |
+| Test (ubuntu-latest / luajit) | 114237705481 | success |
+| Test (macos-latest / luajit) | 114237705507 | success |
+| Perf budgets (debug) | 114237705540 | success |
+| Docs consistency | 114237706237 | skipped |
+
+Tally (pr357-ci-752811c-success): 17 rows of the table above with `result` = `success`.
+
+Tally (pr357-ci-752811c-failure): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / lua54)` (114237705474):
+  `e8b_switch_buffer_acceptance::e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four`,
+  `assertion \`left == right\` failed` at the row's `zzz` band, `left` reading `"switch-buffer: showing
+  *dired:/var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T/.tmpZrZlE6/nightowls/proj*"` and `right`
+  `"no buffer: zzz"`, and `test result: FAILED. 9 passed; 1 failed; 0 ignored` (48.80 s). No row or issue
+  named the selector: **#361, filed, its first occurrence**. Its candidate mechanism, from the report and not
+  a run: the dired buffer ranks on its whole name, path included, under E8b's rule, and that temporary path
+  spells `zzz` case-folded (`snz9`, `.tmpZrZlE6`). The branch's diff touches neither the ranking nor this row.
+- Every test leg pairs each `running` line with a result line: 194 on `Test (crdt)`, 195 on each other
+  Ubuntu `test` leg, 196 on `Test (macos-latest / luajit)`, and 193 `ok` with one `FAILED` on the red leg,
+  whose doc-test and `pmacs-protocol` steps are skipped after its sweep failed. E8c's suite ran its 17 tests
+  and the review's probe suite its 10 on all six legs and passed; this round's process rows passed where
+  they run, four on each Linux leg and one, the platform-neutral one, on each macOS leg.
+
+`Grammar fuzz` 38059810023 at `d5327b6`, 38060125825 at `124b955` and 38060487701 at `752811c`, each attempt 1 of 1, `success` on both arms, fuzzing nothing (`run=false`, `no changed path can change the grammar set`).
+
+So, at E8c's fix round 1: R7 moves to thirty-four; #312 to two; #359 is at one, filed by the review; #311's list of runs reads at forty-four; #316 stays at fourteen and #358 at one, their rows passing in every sweep of the round's and the review's gates; #361 is filed at one; #360 is filed by the review and is no red; every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
@@ -7212,13 +7366,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least thirty-three, 2026-08-07 to 2026-10-09, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the twenty-one since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least thirty-four, 2026-08-07 to 2026-10-10, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the twenty-two since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 33 = 12 + 21.
+Tally (R7): 34 = 12 + 22.
 
-Tally (R7-held): 21 items in the list below.
+Tally (R7-held): 22 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -7241,6 +7395,7 @@ Tally (R7-held): 21 items in the list below.
 - thirty-first: gate log `20261008T195204Z-1042685`, step `06-sweep`, the pre-release PR's gate on `release/pre-2.0.0` at `bca69d4` (#337), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same gate's `07-sweep-luajit` (recorded with the pre-release PR, above)
 - thirty-second: gate log `20261009T161057Z-421242`, step `07-sweep-luajit`, the pre-release PR's fix round 3 gate on `release/pre-2.0.0` at `f45fa10` (#337), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `attach.rs` has no diff on the branch, and the row passed in the same gate's `06-sweep` (recorded with that round, above)
 - thirty-third: gate log `20261009T205956Z-1456466`, step `05-sweep` of the six-stage gate, #347's pull request's gate on `ci/replay-mechanism` at `2c890aa` (#348), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch (recorded with that pull request, above)
+- thirty-fourth: gate log `20261010T130620Z-3845623`, step `05-sweep` of the six-stage gate, E8c review 1's third gate on `e8c/quit-must-exit` at `a35b76b` (#357), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch, and the row passed in the review's two other gates and the fix round's (recorded with E8c's fix round 1, above)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
