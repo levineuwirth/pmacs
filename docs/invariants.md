@@ -134,6 +134,11 @@ unclaimed crash data; adopting clears the old owner's skip cache.
 what it holds is cheap to lose. Unsaved text is not: a recovery copy
 (`state::write_private`, `Staged::finish`) is `Durability::Synced`, its
 temporary file synced before the rename and the directory after it.
+The periodic sweep and quit's sync nothing on the main thread, and no
+copy lands over a newer one or a retired key: one installer at a time
+takes staged copies in order (`autosave::begin_install`), a sweep due
+meanwhile is deferred, `retire` removes a key once its copy in flight
+lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
 
 ## Protocol
 
