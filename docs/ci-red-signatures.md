@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 46 items in the list below.
+Tally (311-runs): 47 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2855,6 +2855,8 @@ Tally (311-runs): 46 items in the list below.
 - `20261010T175142Z-30875` at `752811c` (the same round's gate at the head, `05-sweep`; recorded
   with that round, below).
 - `20261010T192148Z-332172` at `c33b55c` (#360's pull request's gate, `05-sweep`; recorded with
+  it, below).
+- `20261011T171633Z-1297485` at `5f53b91` (#365's pull request's gate, `05-sweep`; recorded with
   it, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
@@ -5872,6 +5874,141 @@ Tally (pr362-ci-c33b55c-failure): 2 rows of the table above with `result` = `fai
 So, at #360's pull request: R7 moves to thirty-five; #311's list of runs reads at forty-six; #363
 and #364 are filed at one each; #304's sibling is commented and #304 stands; every other count
 above stands.
+
+### #365's pull request: `main` red at `a1f0c27` on #282's seventh, PR #366 green at `5f53b91`, #367 filed, #311's list at forty-seven
+
+Recorded 2026-10-11 by #365's pull request, #366 at `5f53b91`, two signed commits on `a1f0c27`:
+quit's recovery copies written before its question and synced after it on a thread, and the
+question naming a copy autosave could not write. The runs were read from the jobs endpoint by
+conclusion and through every test leg's log; none was rerun.
+
+#### `main` at `a1f0c27`, this branch's base: #282's seventh
+
+`a1f0c27` is #360's squash of #362 at `c33b55c`, merged 13:16:54Z, signature `E`, trailers
+empty; its only diff from `c33b55c` is this file. It is `main`'s last code-bearing commit, so it
+is this branch's base control. Its runs were not recorded here before.
+
+`CI` 38142552045 at `a1f0c27`, attempt 1 of 1, `push`, created 13:16:57Z and completed 13:47:46Z:
+`failure`.
+
+Tally (main-ci-a1f0c27): 19 = 17 + 1 + 1.
+
+Tally (main-ci-a1f0c27-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 114479205050 | success |
+| Lint (lua54) | 114479205192 | success |
+| Commit attribution (D9) | 114479205200 | success |
+| Format | 114479205295 | success |
+| Lint (luajit) | 114479205304 | success |
+| Test (crdt) | 114479244468 | success |
+| GPU Render (headless) | 114479244481 | success |
+| Perf budgets (debug) | 114479244488 | success |
+| Test (ubuntu-latest / lua54) | 114479244495 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 114479244505 | success |
+| Test (macos-latest / lua54) | 114479244524 | success |
+| M10 Perf Gates (crdt) | 114479244533 | success |
+| M5 Perf Gates | 114479244539 | success |
+| Test (macos-latest / luajit) | 114479244541 | success |
+| M4 Perf Gates | 114479244552 | success |
+| Test (ubuntu-latest / luajit) | 114479244589 | success |
+| M6 Perf Gates | 114479244606 | success |
+| M1 Acceptance Gates | 114479244962 | success |
+| Docs consistency | 114479245822 | skipped |
+
+Tally (main-ci-a1f0c27-success): 17 rows of the table above with `result` = `success`.
+
+Tally (main-ci-a1f0c27-failure): 1 row of the table above with `result` = `failure`.
+
+- `Test (ubuntu-latest / lua54)` 114479244495, `failure`:
+  `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`,
+  **#282's seventh occurrence, its third on `main`**, all three fragments read against the job's
+  own log: `*lsp* names the request and the code: []` at `tests/e7b_review_wire_acceptance.rs:1218`;
+  `WIRE *errors* gained ["[lsp] LSP: default-rust refused textDocument/prepareRename as a client
+  error, -32602 InvalidParams: No references found at position"]` and `WIRE label "ready",
+  last_error None, *lsp* errors []`; and `test result: FAILED. 4 passed; 1 failed; 2 ignored`
+  (`running 7 tests`, `finished in 48.13s`). Between the row's stdout header and its panic the
+  trace holds 91 `$/progress` frames, 75 of them `rustAnalyzer/cachePriming` reports. It was the
+  job's only failure: 194 `running` lines against 193 `test result: ok` and the one `FAILED`.
+  Commented on #282 at 15:48:55Z, before this round; not rerun.
+- The other five test legs pair every `running` line with `test result: ok`: 195 on `Test
+  (crdt)`, 196 on each other Ubuntu leg, 197 on each macOS leg. Both macOS legs passed, #363's and
+  #364's rows (`e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered`,
+  `e7_review1_a_late_answer_past_the_default_bound_never_touches_an_edited_buffer`) `ok` on each,
+  so neither sampled.
+
+`Grammar fuzz` 38142551945 at `a1f0c27`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+#### The pull request's gate: `20261011T171633Z-1297485` at `5f53b91`
+
+`scripts/gate`, the default plan: `pmacs-protocol` has no diff. Five of six; fmt, clippy, doc,
+build and diff-check ok; no `pmacs --daemon` survived (identified by environ). Every
+`PMACS_REQUIRE_*` armed but `PMACS_REQUIRE_PYRIGHT`, `PMACS_REQUIRE_STRACE` among them. Other
+sessions' builds ran beside the sweep: `uptime` read 5.30 at its start and 3.84, 10.24, 14.48
+(one, five, fifteen minutes) midway.
+
+- `05-sweep`: 205 paired result lines, 5,430 passed, 2 failed, 65 ignored:
+  - the HLS row with #311's fragments (`Could not find module ‘Prelude’`, the trace reaching
+    `LSP:ready·processi`, `test result: FAILED. 4 passed; 1 failed; 0 ignored`, 127.29 s), so
+    #311's list gains the gate;
+  - `e7i_parse_containment_acceptance::e7i_the_memory_watch_stops_296_and_says_by_how_much`,
+    `#296's worker was stopped by its memory watch:` at
+    `tests/e7i_parse_containment_acceptance.rs:691`, the death told as `grew past 64 MiB (by
+    watch)` with no `bytes over`, and `test result: FAILED. 28 passed; 1 failed; 0 ignored`
+    (7.60 s). No row or issue named the selector: **#367, filed, its first occurrence**. Its
+    candidate mechanism, from reading: `death()` takes the overshoot from the unit's stderr sink
+    without draining it, the sink E7i review 3's Low 1 named for the crashed layer's name. The
+    branch has no diff there.
+  - The branch's suites passed armed: `autosave_quit_acceptance` 10, `autosave_acceptance` 32,
+    `quit_state_write_acceptance` 7 and E8c's `e8c_quit_acceptance` 17. R7's row, #304's
+    sibling, #312's, #316's, #358's and #359's rows passed.
+
+#### `CI` 38159090400 at `5f53b91`, attempt 1 of 1: green
+
+`pull_request`, created 17:18:28Z and completed 17:49:09Z: `success`.
+
+Tally (pr366-ci-5f53b91): 19 = 18 + 1.
+
+Tally (pr366-ci-5f53b91-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 114528048171 | success |
+| Lint (luajit) | 114528048307 | success |
+| Commit attribution (D9) | 114528048310 | success |
+| Changed paths | 114528048325 | success |
+| Lint (lua54) | 114528048545 | success |
+| M4 Perf Gates | 114528092984 | success |
+| Test (crdt) | 114528093005 | success |
+| M1 Acceptance Gates | 114528093007 | success |
+| M10 Perf Gates (crdt) | 114528093019 | success |
+| GPU Render (headless) | 114528093021 | success |
+| M6 Perf Gates | 114528093091 | success |
+| Test (macos-latest / lua54) | 114528093092 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114528093119 | success |
+| Test (ubuntu-latest / lua54) | 114528093126 | success |
+| Test (ubuntu-latest / luajit) | 114528093137 | success |
+| M5 Perf Gates | 114528093146 | success |
+| Test (macos-latest / luajit) | 114528093192 | success |
+| Perf budgets (debug) | 114528093218 | success |
+| Docs consistency | 114528094105 | skipped |
+
+Tally (pr366-ci-5f53b91-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: 196 on `Test (crdt)`, 197
+  on each Ubuntu `test` leg, 198 on each macOS leg; none failed. The branch's suite passed 10 of 10
+  on all six legs, its PTY rows running on every one; its four strace rows ran on the four Linux
+  legs, where `strace` is present, and recorded their skip on both macOS legs, which hold five
+  `PMACS_REQUIRE_STRACE unset` skips each with #362's one.
+
+`Grammar fuzz` 38159090174 at `5f53b91`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+So, at #365's pull request: #282 moves to seven, its third on `main`; #311's list of runs reads
+at forty-seven; #367 is filed at one; R7 stays at thirty-five, #363 and #364 at one each, their
+rows passing; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
