@@ -120,7 +120,7 @@ end
 
 -- Run `fn` (a staging pass), surfacing any failure. Success clears
 -- nothing (#368): the copies are written but not yet synced or at their
--- keys, and a sync can fail where the write did not (ENOSPC on btrfs).
+-- keys, and a sync can fail where the write did not.
 local function reporting(fn)
   local ok, err = pcall(fn)
   if not ok then report(err) end
