@@ -123,6 +123,14 @@ local function reporting(fn)
   end
 end
 
+-- failure() --- the last failed sweep's message, or nil since one
+-- succeeded. Quit's question names it (#365): the question takes the
+-- status row, so a failure reported only there was never on the screen
+-- while the user could still cancel.
+function pmacs.autosave.failure()
+  return last_error
+end
+
 -- Ticks until the copies quit staged are installed (#365), or nil.
 local settle_in = nil
 
@@ -204,7 +212,7 @@ end)
 -- A final sweep on quit: async ticks stop after this, so a quit with
 -- unsaved changes must capture them here. A failure here means the quit
 -- is about to discard work that was never written anywhere, so it is
--- reported rather than swallowed. Returns
+-- reported rather than swallowed, and quit's question names it. Returns
 -- nil -- before-quit is short-circuit and this must never veto.
 --
 -- Each copy is written beside its key and staged, not synced (#365):

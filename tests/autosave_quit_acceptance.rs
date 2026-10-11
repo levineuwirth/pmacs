@@ -21,8 +21,9 @@
 //! question reached the terminal before any sync of a recovery copy
 //! (ordered in one `strace` log); the copy holds the typed text and was
 //! synced before the editor exited (R1); a cancelled or vetoed quit
-//! leaves the copy synced while the editor runs, as it did before (R2).
-//! The exit wait, [`HANG_GUARD`], is there for a quit that never returns
+//! leaves the copy synced while the editor runs, as it did before (R2);
+//! a copy quit could not write is named in its question (R3). The exit
+//! wait, [`HANG_GUARD`], is there for a quit that never returns
 //! and is not a budget.
 //!
 //! **Reading the screen.** The rows read what the editor showed from two
@@ -522,4 +523,53 @@ fn a_vetoed_quit_leaves_the_copy_synced_while_the_editor_runs() {
          syncs {temp:?}, directory syncs {dir:?}, question at {question}:\n{log}"
     );
     world.require_copy("abc");
+}
+
+/// **A copy quit could not write is named in its question** (R3). The
+/// state root's `autosave` is a plain file, so no copy can be made. The
+/// question says so: autosave's report went to the status row, which the
+/// question takes in the same frame, so before this the screen showed
+/// only the mode line's error count while the user could still cancel.
+/// The terminal is sent the word the question gains. `n` keeps the
+/// editor; `C-x C-c y` ends it.
+///
+/// Fails at `a1f0c27`: the question reads only `Modified buffers exist
+/// (…notes.txt); quit anyway? (y or n)`.
+#[test]
+fn a_recovery_copy_quit_could_not_write_is_named_in_its_question() {
+    let world = World::new("");
+    std::fs::create_dir_all(world.path("state").join("pmacs")).expect("state pmacs dir");
+    std::fs::write(
+        world.path("state").join("pmacs").join("autosave"),
+        "not a directory\n",
+    )
+    .expect("plant a file where autosave's directory goes");
+    let mut pty = world.spawn(&[]);
+    world.wait(&mut pty, "the editor's first frame", &["modified=false"]);
+    pty.write_input(b"abc").expect("type abc");
+    world.wait(&mut pty, "the edit", &["modified=true"]);
+
+    world.quit_and_see_the_question(&mut pty);
+    let named = format!(
+        "{}; autosave FAILED, see *errors*; quit anyway? (y or n) ",
+        world.question()
+    );
+    assert_eq!(
+        world.prompt(),
+        named,
+        "the question names the copy autosave could not write"
+    );
+    let shown = String::from_utf8_lossy(&pty.output()).into_owned();
+    assert!(
+        shown.contains("FAILED,"),
+        "the terminal is sent the failure with the question:\n{shown}"
+    );
+    pty.write_input(b"n").expect("answer n");
+    world.wait(
+        &mut pty,
+        "the quit cancelled",
+        &["modified=true", "prompt="],
+    );
+    pty.write_input(b"\x18\x03y").expect("type C-x C-c y");
+    exits(&mut pty);
 }

@@ -423,8 +423,15 @@ cmd { name = "editor.quit",   description = "Exit the editor.",
           summary = table.concat({ dirty[1], dirty[2], dirty[3] }, ", ")
             .. string.format(" and %d more", #dirty - 3)
         end
+        -- #365: a recovery copy the hook could not write is named here.
+        -- Its report went to the status row, which the question takes in
+        -- the same frame, so until now only the mode line's error count
+        -- was on the screen while the user could still cancel.
+        local failed = pmacs.autosave and pmacs.autosave.failure
+          and pmacs.autosave.failure()
         pmacs.minibuffer.y_or_n {
-          prompt = string.format("Modified buffers exist (%s); quit anyway?", summary),
+          prompt = string.format("Modified buffers exist (%s)%s; quit anyway?", summary,
+            failed and "; autosave FAILED, see *errors*" or ""),
           on_yes = function() ed.quit() end,
           on_no = function() ed.set_status("quit cancelled") end,
         }
