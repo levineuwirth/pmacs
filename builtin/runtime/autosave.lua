@@ -67,16 +67,11 @@ function pmacs.autosave.interval_ms(ms)
   return floored
 end
 
--- sweep() --- force a pass now. Returns (written, blocked, conflicted).
---   blocked    --- an unclaimed crash recovery sits at the buffer's key.
---                  Overwriting it would destroy exactly what autosave
---                  protects; recovering or discarding it resumes autosave.
---   conflicted --- another buffer already owns that file's recovery slot.
---                  Recovery files are keyed by path, so when two buffers
---                  visit one file only the first can be protected.
-function pmacs.autosave.sweep()
+-- One pass through `raw` (`_sweep`, or quit's `_stage`), with sweep()'s
+-- status reports.
+local function pass(raw)
   if not enabled then return 0, 0, 0 end
-  local written, blocked, conflicted = pmacs.autosave._sweep()
+  local written, blocked, conflicted = raw()
   if blocked and blocked > 0 then
     pmacs.editor.set_status(
       "autosave paused for " .. blocked .. " file(s) with unclaimed recovery"
@@ -89,6 +84,17 @@ function pmacs.autosave.sweep()
   return written, blocked, conflicted
 end
 
+-- sweep() --- force a pass now. Returns (written, blocked, conflicted).
+--   blocked    --- an unclaimed crash recovery sits at the buffer's key.
+--                  Overwriting it would destroy exactly what autosave
+--                  protects; recovering or discarding it resumes autosave.
+--   conflicted --- another buffer already owns that file's recovery slot.
+--                  Recovery files are keyed by path, so when two buffers
+--                  visit one file only the first can be protected.
+function pmacs.autosave.sweep()
+  return pass(pmacs.autosave._sweep)
+end
+
 local function basename(path)
   return path:match("[^/]+$") or path
 end
@@ -97,12 +103,13 @@ end
 -- read-only state dir) logs once but keeps warning in the status line.
 local last_error = nil
 
--- Run a sweep, surfacing any failure. `write_private` can fail --- a full
--- disk, a permission change, a clobbered state dir --- and this is a
+-- Run `fn` (a sweep, quit's staging, or the install of what it staged),
+-- surfacing any failure. A recovery write can fail --- a full disk, a
+-- permission change, a clobbered state dir --- and this is a
 -- data-protection feature: silently swallowing the error would leave the
 -- user believing their work is safe when nothing is being written.
-local function sweep_reporting()
-  local ok, err = pcall(pmacs.autosave.sweep)
+local function reporting(fn)
+  local ok, err = pcall(fn)
   if ok then
     last_error = nil
     return
@@ -115,6 +122,9 @@ local function sweep_reporting()
     pmacs.error(msg)
   end
 end
+
+-- Ticks until the copies quit staged are installed (#365), or nil.
+local settle_in = nil
 
 -- One aggregate message however many files are recoverable. N synchronous
 -- `after-load` fires (a desktop restore) collapse into a single report.
@@ -137,6 +147,20 @@ end
 -- compare per frame, and parks no worker thread (a long `workers.sleep`
 -- would hold one of only `available_parallelism - 1` pool threads).
 pmacs.hook.add("process.after-tick", function()
+  -- Quit's staged copies (#365). The first tick after quit's sweep runs
+  -- in the quit's own frame, before its question is painted; the second
+  -- runs after it and hands them to a thread, so their sync never holds
+  -- the question or its answer. Once that thread is done, collect it,
+  -- reporting a failure as a sweep's.
+  if settle_in then
+    settle_in = settle_in - 1
+    if settle_in <= 0 then
+      settle_in = nil
+      pmacs.autosave._install()
+    end
+  elseif pmacs.autosave._installed() then
+    reporting(pmacs.autosave._settle)
+  end
   if needs_report then
     needs_report = false
     pcall(report_pending)
@@ -149,7 +173,7 @@ pmacs.hook.add("process.after-tick", function()
   end
   if now - last_sweep_ms >= pmacs.config.get("autosave.interval-ms") then
     last_sweep_ms = now
-    sweep_reporting()
+    reporting(pmacs.autosave.sweep)
   end
 end)
 
@@ -177,13 +201,21 @@ pmacs.hook.add("buffer.after-save", function()
   if buf then pcall(pmacs.autosave._discard_buffer, buf) end
 end)
 
--- A final synchronous sweep on quit: async ticks stop after this, so a
--- quit with unsaved changes must capture them here. A failure here means
--- the quit is about to discard work that was never written anywhere, so
--- it is reported rather than swallowed. Returns nil -- before-quit is
--- short-circuit and this must never veto.
+-- A final sweep on quit: async ticks stop after this, so a quit with
+-- unsaved changes must capture them here. A failure here means the quit
+-- is about to discard work that was never written anywhere, so it is
+-- reported rather than swallowed. Returns
+-- nil -- before-quit is short-circuit and this must never veto.
+--
+-- Each copy is written beside its key and staged, not synced (#365):
+-- the sync waited on a busy disk for seconds before the question could
+-- appear, the screen unchanged. A copy is the only copy of the unsaved
+-- text it holds, so the sync still happens, by the same calls a sweep
+-- makes, on a thread from the second tick on, once the question is on
+-- the screen; an exit waits for it, saying so on the terminal.
 pmacs.hook.add("editor.before-quit", function()
-  sweep_reporting()
+  reporting(function() pass(pmacs.autosave._stage) end)
+  if #pmacs.autosave._staged() > 0 then settle_in = 2 end
 end)
 
 pmacs.command.define {

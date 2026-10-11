@@ -2955,6 +2955,45 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, ()| crate::autosave::sweep(lua).map_err(mlua::Error::external))?,
     )?;
 
+    // _stage() -> (written, blocked, conflicted): quit's sweep (#365). Each
+    // copy is written beside its key and staged, unsynced; `_install`
+    // hands them to a thread that syncs and installs them.
+    m.set(
+        "_stage",
+        lua.create_function(|lua, ()| {
+            crate::autosave::stage_for_quit(lua).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    // _install(): start the thread installing the staged copies.
+    m.set(
+        "_install",
+        lua.create_function(|lua, ()| {
+            crate::autosave::begin_install(lua);
+            Ok(())
+        })?,
+    )?;
+
+    // _installed() -> bool: that thread is done and not yet collected.
+    m.set(
+        "_installed",
+        lua.create_function(|lua, ()| Ok(crate::autosave::install_finished(lua)))?,
+    )?;
+
+    // _settle() -> installed: collect the thread, install what is still
+    // staged, and raise the first failure.
+    m.set(
+        "_settle",
+        lua.create_function(|lua, ()| crate::autosave::settle(lua).map_err(mlua::Error::external))?,
+    )?;
+
+    // _staged() -> { path, ... }: the buffers whose quit copies are not
+    // yet collected at their keys.
+    m.set(
+        "_staged",
+        lua.create_function(|lua, ()| Ok(crate::autosave::installing_paths(lua)))?,
+    )?;
+
     // _adopt(buf): claim a buffer's recovery file for this session, so
     // later sweeps may overwrite it and a kill can retire it.
     // `recover-file` calls this once the contents are installed.
@@ -2983,6 +3022,8 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
             let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
                 return Ok("none");
             };
+            // A quit copy still installing would make this read stale.
+            crate::autosave::settle_quietly(lua);
             Ok(crate::autosave::status(&base, std::path::Path::new(&path)).as_str())
         })?,
     )?;
@@ -2993,6 +3034,7 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
             let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
                 return Ok(None);
             };
+            crate::autosave::settle_quietly(lua);
             match crate::autosave::recover_bytes(&base, std::path::Path::new(&path)) {
                 Some(bytes) => Ok(Some(lua.create_string(&bytes)?)),
                 None => Ok(None),

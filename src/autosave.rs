@@ -159,6 +159,63 @@ struct CacheInner {
     ///   buffer claims the slot and any other buffer on that path is
     ///   reported as conflicted, not silently mis-protected.
     owner: HashMap<String, BufferId>,
+    /// A quit's recovery copies, written beside their keys and not yet
+    /// synced or in place (#365), oldest first, until [`begin_install`]
+    /// hands them to an installer.
+    staged: Vec<StagedCopy>,
+    /// The thread installing copies quit staged, until [`settle`]
+    /// collects it. Every operation on the autosave directory settles
+    /// first, so a copy is never installed after its key was retired or
+    /// rewritten.
+    installer: Option<Installer>,
+    /// Install failures met where nothing could report them; the next
+    /// [`settle`] returns them.
+    unreported: Vec<String>,
+}
+
+/// One recovery copy [`stage_for_quit`] wrote and nothing has installed.
+struct StagedCopy {
+    id: BufferId,
+    path_hash: String,
+    /// The buffer's path, for what quit tells the user it is waiting on.
+    path: String,
+    staged: crate::file_io::Staged,
+}
+
+/// A thread installing staged copies, and their buffers' paths.
+struct Installer {
+    paths: Vec<String>,
+    handle: std::thread::JoinHandle<Vec<Failed>>,
+}
+
+/// A staged copy that could not be installed.
+struct Failed {
+    id: BufferId,
+    path_hash: String,
+    message: String,
+}
+
+/// Install `copies` in order, each by the calls [`sweep`]'s writes make:
+/// the temporary file synced, renamed over its key, the directory synced
+/// (F-006). Returns those that failed.
+fn install(copies: Vec<StagedCopy>) -> Vec<Failed> {
+    copies
+        .into_iter()
+        .filter_map(|copy| {
+            let StagedCopy {
+                id,
+                path_hash,
+                path,
+                staged,
+            } = copy;
+            let error = staged.finish(crate::file_io::Durability::Synced).err()?;
+            Some(Failed {
+                id,
+                path_hash,
+                message: format!("{path}: {error}"),
+            })
+        })
+        .collect()
 }
 
 /// Encode a header + contents into the one-file envelope.
@@ -259,6 +316,48 @@ struct Pending {
 /// # Errors
 /// A state-write failure. Individual buffers never abort the pass.
 pub fn sweep(lua: &Lua) -> Result<(usize, usize, usize), String> {
+    settled_then(lua, Install::Now)
+}
+
+/// [`sweep`] for quit (#365): each copy is written to a temporary file
+/// beside its key and staged, neither synced nor in place, so quit can
+/// ask its question without waiting on the disk while a failure to
+/// write a copy is still known before the question. The copies are
+/// installed by the calls [`sweep`]'s writes make: on a thread
+/// [`begin_install`] starts once the question is on the screen, or by
+/// [`settle`] as the editor drops.
+///
+/// # Errors
+/// As [`sweep`]: a failure to write a copy. Copies staged before it
+/// stay staged.
+pub fn stage_for_quit(lua: &Lua) -> Result<(usize, usize, usize), String> {
+    settled_then(lua, Install::Staged)
+}
+
+/// A pass after [`settle`]: a quit's copies go in first, since one
+/// installed after this pass would replace a newer copy of the same
+/// buffer. A copy that failed to install does not stop the pass, which
+/// writes it again; its failure is still returned.
+fn settled_then(lua: &Lua, install: Install) -> Result<(usize, usize, usize), String> {
+    let settled = settle(lua);
+    let swept = sweep_with(lua, install);
+    match (settled, swept) {
+        (Ok(_), swept) => swept,
+        (Err(installing), Ok(_)) => Err(installing),
+        (Err(installing), Err(writing)) => Err(format!("{writing}; {installing}")),
+    }
+}
+
+/// How a pass's copies reach their keys.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Install {
+    /// Synced and in place before the pass returns.
+    Now,
+    /// Written and staged for [`settle`].
+    Staged,
+}
+
+fn sweep_with(lua: &Lua, install: Install) -> Result<(usize, usize, usize), String> {
     let Some(base) = base_dir(lua) else {
         return Ok((0, 0, 0));
     };
@@ -311,14 +410,176 @@ pub fn sweep(lua: &Lua) -> Result<(usize, usize, usize), String> {
                 origin: p.origin,
             };
             let bytes = encode(&header, &p.contents)?;
-            crate::state::write_private(&base, &format!("autosave/{}", p.path_hash), &bytes)
-                .map_err(|e| e.to_string())?;
+            let key = format!("autosave/{}", p.path_hash);
+            match install {
+                Install::Now => {
+                    crate::state::write_private(&base, &key, &bytes).map_err(|e| e.to_string())?;
+                }
+                Install::Staged => {
+                    let staged = crate::state::stage_private(&base, &key, &bytes)
+                        .map_err(|e| e.to_string())?;
+                    cache.staged.push(StagedCopy {
+                        id: p.id,
+                        path_hash: p.path_hash.clone(),
+                        path: header.path.clone(),
+                        staged,
+                    });
+                }
+            }
             cache.owner.insert(p.path_hash.clone(), p.id);
             cache.written.insert(p.id, (p.path_hash, p.revision));
             written += 1;
         }
     }
     Ok((written, blocked, conflicted))
+}
+
+/// Hand the copies [`stage_for_quit`] staged to a thread that installs
+/// them in order (#365), so the editor's main thread does not wait on
+/// their syncs: quit's question stays answerable, and a quit answered
+/// while they sync leaves at once and waits for them, saying so, as the
+/// editor drops. With an installer already running, or none possible,
+/// they stay staged for the next [`settle`].
+pub fn begin_install(lua: &Lua) {
+    let Some(cache) = lua.app_data_ref::<AutosaveCache>() else {
+        return;
+    };
+    let mut cache = cache.0.borrow_mut();
+    if cache.staged.is_empty() || cache.installer.is_some() {
+        return;
+    }
+    let copies = std::mem::take(&mut cache.staged);
+    let paths = copies.iter().map(|c| c.path.clone()).collect();
+    // The copies cross by a channel after the spawn, so a failed spawn
+    // leaves them here.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<StagedCopy>>();
+    let spawned = std::thread::Builder::new()
+        .name("pmacs-autosave-install".into())
+        .spawn(move || rx.recv().map(install).unwrap_or_default());
+    match spawned {
+        Ok(handle) => match tx.send(copies) {
+            Ok(()) => cache.installer = Some(Installer { paths, handle }),
+            Err(std::sync::mpsc::SendError(copies)) => cache.staged = copies,
+        },
+        Err(_) => cache.staged = copies,
+    }
+}
+
+/// True when an installer has finished and [`settle`] has not collected
+/// it.
+#[must_use]
+pub fn install_finished(lua: &Lua) -> bool {
+    lua.app_data_ref::<AutosaveCache>().is_some_and(|cache| {
+        cache
+            .0
+            .borrow()
+            .installer
+            .as_ref()
+            .is_some_and(|i| i.handle.is_finished())
+    })
+}
+
+/// Bring every copy quit staged to its key: wait for the installer, if
+/// one is running, then install what is still staged on this thread.
+/// Returns how many were installed.
+///
+/// A copy that fails is not in place, so its buffer's skip-cache entry
+/// is dropped and the next sweep writes it again.
+///
+/// # Errors
+/// The first failure, naming the buffer's path, this call's or one an
+/// earlier operation met and could not report.
+pub fn settle(lua: &Lua) -> Result<usize, String> {
+    let Some(cache) = lua.app_data_ref::<AutosaveCache>() else {
+        return Ok(0);
+    };
+    let (installer, staged) = {
+        let mut inner = cache.0.borrow_mut();
+        (inner.installer.take(), std::mem::take(&mut inner.staged))
+    };
+    let mut installed = 0usize;
+    let mut failed = Vec::new();
+    let mut panicked = false;
+    if let Some(installer) = installer {
+        let count = installer.paths.len();
+        if let Ok(f) = installer.handle.join() {
+            installed += count - f.len();
+            failed.extend(f);
+        } else {
+            panicked = true;
+        }
+    }
+    let count = staged.len();
+    let f = install(staged);
+    installed += count - f.len();
+    failed.extend(f);
+
+    let mut inner = cache.0.borrow_mut();
+    if panicked {
+        // Which copies went in is not known: forget every copy, so the
+        // next sweep writes each modified buffer again.
+        inner.written.clear();
+        inner
+            .unreported
+            .push("the thread installing quit's recovery copies panicked".into());
+    }
+    for f in failed {
+        if inner
+            .written
+            .get(&f.id)
+            .is_some_and(|(hash, _)| *hash == f.path_hash)
+        {
+            inner.written.remove(&f.id);
+        }
+        inner.unreported.push(f.message);
+    }
+    let unreported = std::mem::take(&mut inner.unreported);
+    match unreported.as_slice() {
+        [] => Ok(installed),
+        [one] => Err(one.clone()),
+        [first, rest @ ..] => Err(format!("{first} (and {} more)", rest.len())),
+    }
+}
+
+/// [`settle`] where nothing can report a failure: it waits for the next
+/// [`settle`]. For an operation that reads or retires a key, which a
+/// copy installed after it would contradict.
+pub fn settle_quietly(lua: &Lua) {
+    if let Err(message) = settle(lua)
+        && let Some(cache) = lua.app_data_ref::<AutosaveCache>()
+    {
+        cache.0.borrow_mut().unreported.push(message);
+    }
+}
+
+/// The paths of the buffers whose quit copies are not yet collected at
+/// their keys, oldest first: staged, or with an installer, finished or
+/// not.
+#[must_use]
+pub fn installing_paths(lua: &Lua) -> Vec<String> {
+    paths(lua, true)
+}
+
+/// [`installing_paths`] less an installer that has finished: what a
+/// [`settle`] would still wait on.
+#[must_use]
+pub fn waiting_paths(lua: &Lua) -> Vec<String> {
+    paths(lua, false)
+}
+
+fn paths(lua: &Lua, finished_too: bool) -> Vec<String> {
+    let Some(cache) = lua.app_data_ref::<AutosaveCache>() else {
+        return Vec::new();
+    };
+    let inner = cache.0.borrow();
+    let mut out: Vec<String> = Vec::new();
+    if let Some(installer) = &inner.installer
+        && (finished_too || !installer.handle.is_finished())
+    {
+        out.extend(installer.paths.iter().cloned());
+    }
+    out.extend(inner.staged.iter().map(|c| c.path.clone()));
+    out
 }
 
 /// What one pass of the registry decided, before any IO.
@@ -438,6 +699,9 @@ fn gather(lua: &Lua, core: &SharedCore, base: &Path) -> Result<Gathered, String>
 /// removal callback that fires *after* the buffer is gone, when there is
 /// no path left to read (finding).
 pub fn adopt(lua: &Lua, id: BufferId) {
+    // A quit copy of this path still to be installed would land over
+    // what the buffer now holds.
+    settle_quietly(lua);
     let Some(core) = lua.app_data_ref::<SharedCore>() else {
         return;
     };
@@ -485,6 +749,8 @@ pub fn discard_path(lua: &Lua, path: &Path) -> bool {
     let Some(base) = base_dir(lua) else {
         return false;
     };
+    // A quit copy still to be installed would come back after this.
+    settle_quietly(lua);
     let hash = sha256_hex(&path.display().to_string());
     if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
         let mut cache = cache.0.borrow_mut();
@@ -512,6 +778,8 @@ pub fn discard_buffer(lua: &Lua, id: BufferId) {
     let Some(base) = base_dir(lua) else {
         return;
     };
+    // A quit copy still to be installed would come back after this.
+    settle_quietly(lua);
     let mut keys: Vec<String> = Vec::new();
     // The key the last sweep (or an adopt) recorded for this buffer. This
     // is the only source that still works once the buffer is gone — a

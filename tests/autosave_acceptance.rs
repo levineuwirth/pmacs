@@ -848,10 +848,14 @@ fn interval_is_a_validated_getter_setter_and_enable_gates_the_sweep() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// #365: quit's sweep stages its copy rather than syncing it, so quit
+/// can ask without waiting on the disk; from the second tick after it,
+/// the first after the question is painted, a thread installs it, and a
+/// settle collects that thread.
 #[test]
-fn before_quit_sweeps_synchronously_without_vetoing() {
+fn before_quit_stages_a_copy_that_is_installed_after_the_question_without_vetoing() {
     let dir = fresh_state_dir();
-    let s = editor(&dir);
+    let mut s = editor(&dir);
     let f = write_file(&dir, "a.txt", "body\n");
     open_and_dirty(&s, &f, "unsaved ");
     // Not swept yet.
@@ -860,10 +864,119 @@ fn before_quit_sweeps_synchronously_without_vetoing() {
     // before-quit is short-circuit: a `true` result means "not vetoed".
     let not_vetoed: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
     assert!(not_vetoed, "autosave must never veto quit");
+    let staged: i64 = eval(&s, "return #pmacs.autosave._staged()");
+    assert_eq!(staged, 1, "quit's sweep stages the copy");
+    // Read the key itself: `_status` settles before it reads.
+    assert_eq!(
+        pmacs::autosave::status(&dir, std::path::Path::new(&f)),
+        pmacs::autosave::RecoveryStatus::None,
+        "a staged copy is not yet at its key"
+    );
+    s.tick_processes();
+    s.tick_processes();
+    let installed: i64 = eval(&s, "return pmacs.autosave._settle()");
+    assert_eq!(
+        installed, 1,
+        "the second tick's installer put the copy in place"
+    );
     assert_eq!(
         status(&s, &f),
         "fresh",
         "quitting with unsaved changes leaves a recovery copy"
+    );
+    assert_eq!(recovered(&s, &f), b"unsaved body\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #365: a quit answered before the tick that installs its copy leaves
+/// it staged, and the editor's drop installs it. Fails with that install
+/// removed: the key holds nothing.
+#[test]
+fn a_quit_copy_left_staged_is_installed_as_the_editor_drops() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "unsaved ");
+    let _: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
+    let path = std::path::Path::new(&f);
+    // Read the key itself: `_status` settles before it reads.
+    assert_eq!(
+        pmacs::autosave::status(&dir, path),
+        pmacs::autosave::RecoveryStatus::None,
+        "precondition: the copy is staged"
+    );
+    drop(s);
+    assert_eq!(
+        pmacs::autosave::status(&dir, path),
+        pmacs::autosave::RecoveryStatus::Fresh,
+        "the editor's drop installs a staged copy"
+    );
+    assert_eq!(
+        pmacs::autosave::recover_bytes(&dir, path).as_deref(),
+        Some(&b"unsaved body\n"[..])
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #365: a save between quit's staging and the install retires the copy
+/// for good. Without the staged copy dropped with its key, the install
+/// would put a copy of text since saved at a key no buffer owns, which
+/// the next sweep reads as unclaimed crash data and refuses to write
+/// over.
+#[test]
+fn a_save_after_quit_staged_a_copy_is_not_undone_by_its_install() {
+    let dir = fresh_state_dir();
+    let mut s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "unsaved ");
+    let _: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    assert!(
+        std::fs::read_to_string(&f).unwrap().starts_with("unsaved "),
+        "precondition: the save wrote the file"
+    );
+    s.tick_processes();
+    s.tick_processes();
+    let _: i64 = eval(&s, "return pmacs.autosave._settle()");
+    assert_eq!(
+        status(&s, &f),
+        "none",
+        "the saved buffer has no recovery copy"
+    );
+    let litter: Vec<_> = std::fs::read_dir(dir.join("autosave"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(litter.is_empty(), "nothing left in autosave/: {litter:?}");
+    exec(&s, "pmacs.window.buffer():insert(0, 'more ')");
+    let (written, blocked) = sweep2(&s);
+    assert_eq!(
+        (written, blocked),
+        (1, 0),
+        "the next edit is protected, not blocked"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #365: a sweep after quit staged a copy installs that copy first, so
+/// the older text can never land over the newer. Fails without the
+/// install at the start of the sweep: the drop puts the staged, older
+/// copy over the sweep's.
+#[test]
+fn a_sweep_after_quit_staged_a_copy_keeps_the_newer_text() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "old ");
+    let _: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
+    exec(&s, "pmacs.window.buffer():insert(0, 'new ')");
+    assert_eq!(sweep(&s), 1);
+    drop(s);
+    assert_eq!(
+        pmacs::autosave::recover_bytes(&dir, std::path::Path::new(&f)).as_deref(),
+        Some(&b"new old body\n"[..]),
+        "the copy holds the newest text"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
