@@ -220,6 +220,29 @@ pub fn write_private(base: &Path, name: &str, content: &[u8]) -> Result<(), Stat
     write_inner(base, name, content, Some(0o600), Durability::Synced)
 }
 
+/// The first half of [`write_private`]: the content written to a
+/// temporary file beside the key's path, `0600` under a `0700`
+/// directory, neither synced nor in place.
+/// [`Staged::finish`](crate::file_io::Staged::finish) with
+/// [`Durability::Synced`] is the second half, and the two in a row make
+/// the calls [`write_private`] makes, in its order.
+///
+/// Autosave's quit sweep stages its recovery copies before quit asks its
+/// question and finishes them once the question is on the screen
+/// (#365): a copy is still the only copy of the unsaved text it holds,
+/// so its sync stays; only where the wait falls moves.
+///
+/// # Errors
+/// Invalid key, or a failure to create or write the temporary file.
+pub fn stage_private(
+    base: &Path,
+    name: &str,
+    content: &[u8],
+) -> Result<crate::file_io::Staged, StateError> {
+    let path = prepare(base, name, Some(0o600))?;
+    crate::file_io::stage_with_mode(&path, content, Some(0o600)).map_err(StateError::Save)
+}
+
 /// True when a state file exists (no read, no parse).
 ///
 /// # Errors
@@ -236,6 +259,15 @@ fn write_inner(
     mode: Option<u32>,
     durability: Durability,
 ) -> Result<(), StateError> {
+    let path = prepare(base, name, mode)?;
+    crate::file_io::save_atomic_with_mode(&path, content, mode, durability)
+        .map_err(StateError::Save)?;
+    Ok(())
+}
+
+/// Resolve `name` under `base` and create its parent, at `0700` when a
+/// file `mode` is asked for.
+fn prepare(base: &Path, name: &str, mode: Option<u32>) -> Result<PathBuf, StateError> {
     let path = resolve(base, name).map_err(StateError::Name)?;
     if let Some(parent) = path.parent() {
         create_dir_all_with_mode(parent, mode.map(|_| 0o700)).map_err(StateError::Io)?;
@@ -252,9 +284,7 @@ fn write_inner(
             enforce_dir_mode(parent, 0o700).map_err(StateError::Io)?;
         }
     }
-    crate::file_io::save_atomic_with_mode(&path, content, mode, durability)
-        .map_err(StateError::Save)?;
-    Ok(())
+    Ok(path)
 }
 
 /// `create_dir_all`, birthing any directory this call creates at `mode`

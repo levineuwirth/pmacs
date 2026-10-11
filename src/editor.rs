@@ -339,6 +339,12 @@ impl Drop for EditorState {
     /// stuck mid-handoff stays alive (bounded by its job), which is
     /// still a ~15x improvement over leaking every pool whole.
     fn drop(&mut self) {
+        // A quit answered before its recovery copies are installed
+        // (#365) leaves them staged or on their installer's thread: they
+        // are the only copy of the text the quit discards, so the exit
+        // waits for them here, and since the TUI has left the alternate
+        // screen, the wait is said on the terminal the user quit from.
+        settle_recovery_copies_at_exit(self.lua_host.lua());
         let held = {
             let mut supervisor = self.process_supervisor.borrow_mut();
             self.terminal_manager.borrow_mut().shutdown(&mut supervisor);
@@ -353,6 +359,33 @@ impl Drop for EditorState {
             eprintln!("pmacs: quitting: {}", notice.message());
         }
         self.async_runtime.shutdown_workers();
+    }
+}
+
+/// Bring the recovery copies quit staged to their keys before the exit:
+/// wait for the thread installing them, or install them here, saying
+/// first on stderr what the exit waits for when it must wait, and after,
+/// any copy that failed (#365).
+fn settle_recovery_copies_at_exit(lua: &mlua::Lua) {
+    // One write a line, so nothing else on the terminal lands inside it.
+    fn say(line: &str) {
+        use std::io::Write as _;
+        let _ = std::io::stderr().write_all(format!("pmacs: quitting: {line}\n").as_bytes());
+    }
+    let waiting = crate::autosave::waiting_paths(lua);
+    match waiting.as_slice() {
+        [] => {}
+        [one] => say(&format!("writing the recovery copy of {one} to disk")),
+        many => say(&format!(
+            "writing {} recovery copies ({}) to disk",
+            many.len(),
+            many.join(", ")
+        )),
+    }
+    if let Err(error) = crate::autosave::settle(lua) {
+        say(&format!(
+            "autosave FAILED: {error}; its unsaved text was not written"
+        ));
     }
 }
 

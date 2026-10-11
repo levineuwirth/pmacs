@@ -134,23 +134,6 @@ pub enum Durability {
     Unsynced,
 }
 
-/// Cleanup guard: removes the named temp file on drop unless defused.
-///
-/// Lives at module scope so [`save_atomic`] can use it without confusing
-/// item-after-statements lints.
-struct TempCleanup {
-    /// Path to clean up. Set to `None` to defuse (rename succeeded).
-    tmp: Option<PathBuf>,
-}
-
-impl Drop for TempCleanup {
-    fn drop(&mut self) {
-        if let Some(p) = self.tmp.take() {
-            let _ = fs::remove_file(&p);
-        }
-    }
-}
-
 /// Atomically write `content` to `path`.
 ///
 /// Creates a sibling temporary file in `path`'s parent directory, writes
@@ -188,6 +171,26 @@ pub fn save_atomic_with_mode(
     mode: Option<u32>,
     durability: Durability,
 ) -> Result<FileMeta, SaveError> {
+    stage_with_mode(path, content, mode)?.finish(durability)
+}
+
+/// The first half of [`save_atomic_with_mode`]: `content` written to a
+/// fresh sibling temporary file at the target's mode, and nothing synced
+/// or renamed. [`Staged::finish`] is the second half, so the two in a
+/// row make the same calls in the same order as the whole.
+///
+/// What the split is for (#365): autosave writes a quit's recovery
+/// copies before quit asks its question, where a failure to write one
+/// can be named in the question, and syncs and installs them once the
+/// question is on the screen.
+///
+/// # Errors
+/// See [`SaveError`]; nothing is left behind on an error.
+pub fn stage_with_mode(
+    path: &Path,
+    content: &[u8],
+    mode: Option<u32>,
+) -> Result<Staged, SaveError> {
     // `Path::parent` returns:
     //  * `None` for `/` or `""` --- no place to put a sibling temp file;
     //  * `Some("")` for a bare filename like `notes.txt` --- means cwd, fine;
@@ -217,7 +220,7 @@ pub fn save_atomic_with_mode(
     // Open a fresh temp, retrying on the rare name collision (a stale temp
     // left by a crashed prior run whose pid+nanos recurs) instead of
     // failing the save (F-006). `TEMP_SEQ` makes same-process names unique.
-    let (mut tmp, tmp_path) = {
+    let (file, tmp_path) = {
         let mut opened = None;
         for _ in 0..MAX_TEMP_ATTEMPTS {
             let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -244,9 +247,13 @@ pub fn save_atomic_with_mode(
         })?
     };
 
-    let mut guard = TempCleanup {
-        tmp: Some(tmp_path.clone()),
+    // From here an error drops `staged`, which removes the temp.
+    let mut staged = Staged {
+        file: Some(file),
+        tmp: Some(tmp_path),
+        target: path.to_path_buf(),
     };
+    let tmp_path = staged.tmp.as_deref().expect("just set");
 
     // Carry the target's mode onto the temp so the saved file preserves it
     // (F-006). Done *before* the write so a sensitive (e.g. 0600) file's
@@ -254,29 +261,79 @@ pub fn save_atomic_with_mode(
     // already-open write handle keeps write access regardless of the new
     // mode (Unix checks permissions at open, not per write).
     if let Some(perms) = existing_perms {
-        fs::set_permissions(&tmp_path, perms).map_err(SaveError::Io)?;
+        fs::set_permissions(tmp_path, perms).map_err(SaveError::Io)?;
     }
-    tmp.write_all(content).map_err(SaveError::Io)?;
-    if durability == Durability::Synced {
-        tmp.sync_all().map_err(SaveError::Io)?;
+    staged
+        .file
+        .as_mut()
+        .expect("just set")
+        .write_all(content)
+        .map_err(SaveError::Io)?;
+    Ok(staged)
+}
+
+/// Content written beside its target by [`stage_with_mode`] and not yet
+/// in its place. [`Staged::finish`] installs it; dropping it unfinished
+/// removes the temporary file and leaves the target as it was.
+#[derive(Debug)]
+pub struct Staged {
+    /// The temporary file's write handle, open until [`Staged::finish`]
+    /// has synced through it, as the whole save always did.
+    file: Option<File>,
+    /// The temporary file; `None` once renamed over the target.
+    tmp: Option<PathBuf>,
+    target: PathBuf,
+}
+
+impl Staged {
+    /// The path the content is installed at.
+    #[must_use]
+    pub fn target(&self) -> &Path {
+        &self.target
     }
-    drop(tmp); // close before rename (Windows can't rename an open file)
 
-    fs::rename(&tmp_path, path).map_err(SaveError::Io)?;
-    // Rename succeeded: temp no longer exists at tmp_path; defuse cleanup.
-    guard.tmp = None;
+    /// Sync as `durability` says and rename over the target: the temp
+    /// file before the rename and the directory after it for
+    /// [`Durability::Synced`] (F-006), nothing for
+    /// [`Durability::Unsynced`].
+    ///
+    /// # Errors
+    /// See [`SaveError`]. On an error before the rename the temporary
+    /// file is removed and the target is untouched.
+    pub fn finish(mut self, durability: Durability) -> Result<FileMeta, SaveError> {
+        let file = self.file.take().expect("a staged file is finished once");
+        if durability == Durability::Synced {
+            file.sync_all().map_err(SaveError::Io)?;
+        }
+        drop(file); // close before rename (Windows can't rename an open file)
 
-    // fsync the parent directory so the rename (a directory operation) is
-    // durable across a crash, not just the file bytes `sync_all` covered
-    // (F-006). Best-effort: the rename already succeeded, and some
-    // filesystems reject directory fsync. Directory fsync is a Unix concept.
-    #[cfg(unix)]
-    if durability == Durability::Synced {
-        sync_parent_dir(path);
+        let tmp = self.tmp.as_deref().expect("a staged file is finished once");
+        fs::rename(tmp, &self.target).map_err(SaveError::Io)?;
+        // Rename succeeded: temp no longer exists at tmp; nothing to remove.
+        self.tmp = None;
+
+        // fsync the parent directory so the rename (a directory operation) is
+        // durable across a crash, not just the file bytes `sync_all` covered
+        // (F-006). Best-effort: the rename already succeeded, and some
+        // filesystems reject directory fsync. Directory fsync is a Unix concept.
+        #[cfg(unix)]
+        if durability == Durability::Synced {
+            sync_parent_dir(&self.target);
+        }
+
+        let meta = current_meta(&self.target)?;
+        Ok(meta)
     }
+}
 
-    let meta = current_meta(path)?;
-    Ok(meta)
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // Close before removing, as the whole save did.
+        drop(self.file.take());
+        if let Some(p) = self.tmp.take() {
+            let _ = fs::remove_file(&p);
+        }
+    }
 }
 
 fn temp_sibling(target: &Path, seq: u64) -> PathBuf {
@@ -455,6 +512,52 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(entries, ["places"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_write_leaves_the_target_until_finished() {
+        // #365 — staging writes the temp at the forced mode and touches
+        // the target not at all; finishing installs it whole.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("copy");
+        fs::write(&path, b"old").unwrap();
+        let staged = stage_with_mode(&path, b"new", Some(0o600)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        let temps: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p != &path)
+            .collect();
+        assert_eq!(temps.len(), 1, "one temp beside the target: {temps:?}");
+        let mode = fs::metadata(&temps[0]).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the temp is at the forced mode before it is installed"
+        );
+        assert_eq!(staged.target(), path);
+        staged.finish(Durability::Synced).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["copy"]);
+    }
+
+    #[test]
+    fn a_staged_write_dropped_unfinished_leaves_the_target_and_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("copy");
+        fs::write(&path, b"old").unwrap();
+        drop(stage_with_mode(&path, b"new", None).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["copy"]);
     }
 
     #[test]
