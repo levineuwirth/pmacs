@@ -836,9 +836,9 @@ fn a_periodic_install_in_flight_at_exit_is_waited_for_and_said() {
 }
 
 /// **A sync that failed on the installing thread is named in the next
-/// quit question.** Every `fsync` fails with `EIO`, as on a disk full at
-/// sync time: the sweep writes its copy and its install fails, met on
-/// the thread and reported at the tick that takes it. `C-x C-c` asks,
+/// quit question.** Every `fsync` fails with `EIO`, a sync failing where
+/// its write did not: the sweep writes its copy and its install fails,
+/// met on the thread and reported at the tick that takes it. `C-x C-c` asks,
 /// and the question says autosave FAILED, though quit's own write of
 /// the copy succeeded.
 ///
