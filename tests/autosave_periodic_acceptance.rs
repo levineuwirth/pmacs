@@ -9,15 +9,16 @@
 //! wrote each modified buffer's copy through `state::write_private`: the
 //! temporary file synced, renamed over its key, the directory synced, on
 //! the main thread. Under a writer of 2 GB files with `fdatasync` on this
-//! laptop's btrfs a sweep held the editor 2.4 to 8.4 s with keys typed
-//! and unechoed, every interval in which something was typed. The sweep
-//! also began by joining the thread #365 installs quit's copies on, so a
-//! sweep falling due while a cancelled quit's copy synced held the
-//! editor as long. A sweep now writes each copy's temporary file and
-//! hands the copies to one thread that installs them by the same calls;
-//! a sweep falling due while copies install is deferred to the tick that
-//! takes them, and nothing on the main thread waits for that thread but
-//! the editor's drop and the reads `recover-file` makes.
+//! laptop's btrfs a sweep after typing held the editor up to 8.4 s, keys
+//! typed and unechoed meanwhile, at every interval in which something
+//! was typed. The sweep also began by joining the thread #365 installs
+//! quit's copies on, so a sweep falling due while a cancelled quit's copy
+//! synced held the editor as long. A sweep now writes each copy's
+//! temporary file and hands the copies to one thread that installs them
+//! by the same calls; a sweep falling due while copies install is
+//! deferred to the tick that takes them, and nothing on the main thread
+//! waits for that thread but the editor's drop, a forced
+//! `pmacs.autosave.sweep()` and what `recover-file` reads and claims.
 //!
 //! **What the rows assert.** What the editor did and in what order,
 //! never how long it took. A disk slower than anything a row waits on is
@@ -26,15 +27,17 @@
 //! one `strace -f` log orders the editor's threads. Typing goes on while
 //! a copy syncs; a cancelled quit's copy installing does not hold the
 //! editor when a sweep falls due; on a disk slower than the interval one
-//! batch installs at a time and no second is staged behind it; an
-//! install in flight at exit is waited for and said; a sync that failed
-//! on the thread is named in the next quit question; a save while its
-//! copy installs leaves no copy behind. [`HANG_GUARD`] is there for an
-//! exit that never comes and is not a budget.
+//! batch installs at a time and no second is staged behind it; quit asks
+//! at once while a periodic copy installs; an install in flight at exit
+//! is waited for and said; a sync that failed on the thread is named in
+//! the next quit question; a kill while its copy installs leaves no copy
+//! behind. [`HANG_GUARD`] is there for an exit that never comes and is
+//! not a budget.
 //!
 //! **Reading the editor.** An `init.lua` hook records, each frame it
 //! changes, the buffer's first line, how many copies are not yet at
-//! their keys, the last failure and the minibuffer's prompt. It writes
+//! their keys, the last failure, the minibuffer's prompt and what a
+//! row's own hooks did. It writes
 //! the record with one `write`, which the `strace` log shows on the
 //! editor's main thread with its text, so a row orders the editor's
 //! response to a key against a thread's sync.
@@ -110,6 +113,7 @@ pmacs.hook.add("process.after-tick", function()
     .. "\nmost=" .. tostring(most)
     .. "\nfailed=" .. tostring(pmacs.autosave.failure() ~= nil)
     .. "\narmed=" .. tostring(_G.row_armed == true)
+    .. "\ndue=" .. tostring(_G.row_due == true)
     .. "\nprompt=" .. prompt .. "\n"
   if text ~= last then
     last = text
@@ -608,13 +612,15 @@ fn quit_asks_at_once_while_a_periodic_copy_installs() {
 /// sweep falls due** (#365's narrow case, a finding at `1448046`). Text
 /// typed, `C-x C-c`, `n`: quit's copy goes to its thread, which `strace`
 /// holds in its first sync. The row's `init.lua` shortens the interval
-/// once the question is gone, so the sweep falls due at once. A key
-/// typed after that is recorded by the main thread before the copy's
-/// sync returns.
+/// to the floor once the question is gone, and records the sweep due
+/// once that much time has passed since autosave's clock started, its
+/// own first tick. With the sweep due and the copy still installing on
+/// the record, a key typed is recorded by the main thread before the
+/// copy's sync returns.
 ///
-/// Fails at `1448046`: the sweep begins by settling, which joins the
-/// installing thread on the main thread, and the key is recorded only
-/// after the sync returns.
+/// Fails at `1448046`: the sweep that falls due begins by settling,
+/// which joins the installing thread on the main thread, so the editor
+/// records the sweep due only once the copy is taken.
 #[test]
 fn a_cancelled_quits_copy_installing_does_not_hold_a_sweep_falling_due() {
     if !strace_or_skip() {
@@ -623,11 +629,15 @@ fn a_cancelled_quits_copy_installing_does_not_hold_a_sweep_falling_due() {
     let world = World::new(
         600_000,
         "pmacs.hook.add('editor.before-quit', function() _G.row_quit = true end)\n\
+         local first\n\
          pmacs.hook.add('process.after-tick', function()\n\
+           local now = pmacs.editor.monotonic_ms()\n\
+           first = first or now\n\
            if _G.row_quit and not _G.row_armed and not pmacs.minibuffer.is_active() then\n\
              _G.row_armed = true\n\
              pmacs.autosave.interval_ms(1000)\n\
            end\n\
+           if _G.row_armed and now - first >= 1000 then _G.row_due = true end\n\
          end)",
     );
     let mut pty = world.spawn_traced(Disk::Slow(Duration::from_secs(20)));
@@ -639,8 +649,8 @@ fn a_cancelled_quits_copy_installing_does_not_hold_a_sweep_falling_due() {
     pty.write_input(b"n").expect("answer n");
     world.wait(
         &mut pty,
-        "the quit cancelled, its copy installing and the interval shortened",
-        &["prompt=", "pending=1", "armed=true"],
+        "the quit cancelled, its copy installing and a sweep due",
+        &["prompt=", "pending=1", "armed=true", "due=true"],
     );
     pty.write_input(b"b").expect("type b");
     world.wait(&mut pty, "the key after the cancel", &["line=abone"]);
@@ -653,13 +663,12 @@ fn a_cancelled_quits_copy_installing_does_not_hold_a_sweep_falling_due() {
         .first()
         .unwrap_or_else(|| panic!("the quit's copy is synced\n{}", trace.log));
     let returned = trace.returned(entry);
-    let armed = *trace
-        .records(main, &["armed=true", "pending=1"])
+    let due = *trace
+        .records(main, &["due=true", "pending=1"])
         .first()
         .unwrap_or_else(|| {
             panic!(
-                "the sweep fell due while the copy installed, recorded (armed, one copy not \
-                 at its key)\n{}",
+                "positive control: a sweep due while the copy installed, recorded\n{}",
                 trace.log
             )
         });
@@ -673,10 +682,10 @@ fn a_cancelled_quits_copy_installing_does_not_hold_a_sweep_falling_due() {
             )
         });
     assert!(
-        entry < typed && armed < typed && typed < returned,
+        entry < typed && due < typed && typed < returned,
         "the sweep that fell due while the cancelled quit's copy synced held the editor: \
-         sync entered at log line {entry}, interval shortened at {armed}, key recorded at \
-         {typed}, sync returned at {returned}\n{}",
+         sync entered at log line {entry}, sweep due at {due}, key recorded at {typed}, \
+         sync returned at {returned}\n{}",
         trace.log
     );
 }
@@ -689,9 +698,9 @@ fn a_cancelled_quits_copy_installing_does_not_hold_a_sweep_falling_due() {
 /// while another copy's is unfinished. Then `C-x C-c y`: the copy holds
 /// the text as typed.
 ///
-/// A guard on the mechanism, which `1448046` also passes (its syncs are
-/// serial on the main thread). Fails with the sweep staging while a
-/// batch installs: two copies not at their keys.
+/// Fails at `1448046` at its positive control, no copy ever installing
+/// on a thread; fails with the sweep staging while a batch installs:
+/// two copies not at their keys.
 #[test]
 fn a_disk_slower_than_the_interval_installs_one_batch_and_stages_none_behind_it() {
     if !strace_or_skip() {
@@ -711,10 +720,15 @@ fn a_disk_slower_than_the_interval_installs_one_batch_and_stages_none_behind_it(
         "every key in the buffer",
         &[&format!("line={typed}one")],
     );
-    let most = world.field("most");
-    assert_eq!(
-        most, "1",
-        "at most one copy is ever not at its key on a disk slower than the interval"
+    let most: usize = world.field("most").parse().expect("the record's count");
+    assert!(
+        most >= 1,
+        "positive control: a copy was recorded installing on its thread"
+    );
+    assert!(
+        most <= 1,
+        "at most one copy is ever not at its key on a disk slower than the interval, \
+         {most} were"
     );
 
     world.quit_and_see_the_question(&mut pty);
@@ -864,22 +878,26 @@ fn a_sync_that_failed_on_the_thread_is_named_in_the_next_question() {
     exits(&mut pty);
 }
 
-/// **A save while its copy installs leaves no copy behind.** A periodic
-/// copy is installing, held in its first sync, when `C-x C-s` saves the
-/// buffer. The save retires the copy's key without waiting for it; once
-/// the install is taken the key is removed, after the copy's rename, so
-/// the copy does not outlive the save: the autosave directory ends empty.
+/// **A kill while its copy installs leaves no copy behind.** A periodic
+/// copy is installing, held in its first sync, when `C-x k` kills the
+/// modified buffer, its question answered `y`. The kill retires the
+/// copy's key without waiting for it; once the install is taken the key
+/// is removed, after the copy's rename, so the copy does not outlive the
+/// kill: the autosave directory ends empty. A kill and not a save,
+/// because a save syncs its own file on the main thread, which `strace`
+/// holds as long as the copy's, so the copy would land before any save
+/// could retire it.
 ///
 /// Fails at `1448046`, where no periodic copy is ever installing (the
-/// precondition); fails with the key removed at the save: the copy lands
+/// precondition); fails with the key removed at the kill: the copy lands
 /// after the removal and stays.
 #[test]
-fn a_save_while_its_copy_installs_leaves_no_copy_behind() {
+fn a_kill_while_its_copy_installs_leaves_no_copy_behind() {
     if !strace_or_skip() {
         return;
     }
     let world = World::new(INTERVAL_MS, "");
-    let mut pty = world.spawn_traced(Disk::Slow(Duration::from_secs(10)));
+    let mut pty = world.spawn_traced(Disk::Slow(Duration::from_secs(20)));
     world.wait(&mut pty, "the editor's first frame", &["modified=false"]);
     pty.write_input(b"abc").expect("type abc");
     world.wait(
@@ -887,16 +905,27 @@ fn a_save_while_its_copy_installs_leaves_no_copy_behind() {
         "the sweep's copy installing",
         &["line=abcone", "pending=1"],
     );
-    pty.write_input(b"\x18\x13").expect("type C-x C-s");
+    pty.write_input(b"\x18k").expect("type C-x k");
+    world.wait_for(&mut pty, "the kill's prompt", |record| {
+        record.lines().any(|l| l.starts_with("prompt=Kill buffer"))
+    });
+    pty.write_input(b"\r")
+        .expect("take the buffer in the window");
+    world.wait_for(&mut pty, "the kill's question", |record| {
+        record
+            .lines()
+            .any(|l| l.starts_with("prompt=") && l.contains("kill anyway?"))
+    });
+    pty.write_input(b"y").expect("answer y");
     world.wait(
         &mut pty,
-        "the save done and the copy's install taken",
-        &["modified=false", "pending=0"],
+        "the buffer killed and the copy's install taken",
+        &["modified=false", "pending=0", "prompt="],
     );
     assert_eq!(
         world.autosave_entries(),
         Vec::<String>::new(),
-        "no recovery copy or temporary file outlives the save"
+        "no recovery copy or temporary file outlives the kill"
     );
     pty.write_input(b"\x18\x03").expect("type C-x C-c");
     exits(&mut pty);
@@ -922,7 +951,7 @@ fn a_save_while_its_copy_installs_leaves_no_copy_behind() {
         .unwrap_or_else(|| panic!("the copy's key is removed\n{}", trace.log));
     assert!(
         renamed < removed,
-        "the key is removed after the copy installing at the save lands: renamed at log line \
+        "the key is removed after the copy installing at the kill lands: renamed at log line \
          {renamed}, removed at {removed}\n{}",
         trace.log
     );
