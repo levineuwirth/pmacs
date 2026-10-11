@@ -3101,7 +3101,9 @@ pub struct StateDir(pub std::path::PathBuf);
 /// (Q#PS2). All keys pass [`crate::state::validate_name`], so a state
 /// call can never read or write outside the state directory. When the
 /// state dir is unconfigured every call is inert: `write`/`remove`
-/// return `false`, `read`/`path` return `nil`.
+/// return `false`, `read`/`path` return `nil`. `write` replaces the
+/// file atomically and syncs nothing ([`crate::state::write`]), so it
+/// is for state that is cheap to lose, and waits for no sync.
 fn install_state_module(lua: &Lua) -> mlua::Result<Table> {
     let m = lua.create_table()?;
 

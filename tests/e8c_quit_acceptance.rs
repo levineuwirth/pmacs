@@ -39,14 +39,14 @@
 //!
 //! **The bound is the language-server path's, and nothing else's.** Quit
 //! also runs the `editor.before-quit` hooks, and saveplace's writes the
-//! `places` state file through an `fsync` that a busy disk has held for
-//! seconds (E8c review 1 measured 2 to over 20 s under a gate sweep,
-//! #360). That wait is not this suite's subject and has no bound, so a
-//! row whose deadline included it would be measuring the disk. Every
-//! PTY row gives its editor a state root of its own, turns saveplace
-//! off, and checks that quit wrote nothing there ([`World::state_files`]),
-//! so the window [`QUIT_BOUND`] judges holds only the teardown's fixed
-//! waits. A busy disk can still make a user's quit slow; #360 is open.
+//! `places` state file. Until #360 that write synced, and a busy disk
+//! held it for seconds (E8c review 1 measured 2 to over 20 s under a
+//! gate sweep). It syncs nothing now, but it is still a write and not
+//! this suite's subject; `tests/quit_state_write_acceptance.rs` is its
+//! own. Every PTY row gives its editor a state root of its own, turns
+//! saveplace off, and checks that quit wrote nothing there
+//! ([`World::state_files`]), so the window [`QUIT_BOUND`] judges holds
+//! only the teardown's fixed waits.
 //!
 //! The in-process rows dispatch the keys a user presses and read
 //! `EditorState`'s own quit flag; `C-x C-c` invoked by name would pass
@@ -70,7 +70,7 @@ use common::pty::{PmacsPty, spawn_pmacs_in_pty};
 /// and one wait of two on output another process holds, shared by every
 /// dead server of the teardown however many hold it. At `a35b76b` that
 /// wait was four seconds per such server, one after another (E8c review
-/// 1's Low 1). No quit-time state write is in it (the module doc, #360).
+/// 1's Low 1). No quit-time state write is in it (the module doc).
 /// The rest is a slow runner's margin; #299 was a quit that never
 /// ended.
 const QUIT_BOUND: Duration = Duration::from_secs(15);
@@ -106,8 +106,7 @@ impl World {
             r#"
 pmacs.lsp.config = {{}}
 pmacs.lsp.config.rust = {server}
--- Quit's state write is not the subject: saveplace's `fsync` waits on
--- the disk, without a bound (#360).
+-- Quit's state write is not the subject (the module doc).
 pmacs.saveplace.enable(false)
 -- Each frame, what quit depends on, written when it changes: the text
 -- of `*errors*`, the question the minibuffer asks, the servers' states.
@@ -164,8 +163,8 @@ end)
     }
 
     /// Every file under the editor's state root, with its length and
-    /// modification time. Quit must leave this unchanged: a state write
-    /// at quit is an `fsync`, and a row's bound must not hold one.
+    /// modification time. Quit must leave this unchanged, so that a
+    /// row's bound holds no state write.
     fn state_files(&self) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
         let mut found = Vec::new();
         let mut dirs = vec![self.path("state")];
@@ -357,7 +356,7 @@ fn quit_and_require_exit(world: &World, pty: &mut PmacsPty, children: &[u32]) {
     assert_eq!(
         world.state_files(),
         state,
-        "quit wrote state, so the bound held its fsync (#360), not only the teardown"
+        "quit wrote state, so the bound held a state write, not only the teardown"
     );
     let deadline = Instant::now() + REAP_BOUND;
     loop {

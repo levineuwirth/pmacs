@@ -447,9 +447,9 @@ fn fake_with_heir(dir: &Path) -> String {
 }
 
 /// Every file under `root`, with its length and modification time.
-/// Quit must leave a row's state root unchanged: a state write at quit
-/// is an `fsync`, whose wait on a busy disk has no bound (#360), and a
-/// row's bound must not hold one.
+/// Quit must leave a row's state root unchanged, so that a row's bound
+/// holds no state write; until #360 that write was an `fsync`, whose
+/// wait on a busy disk had no bound.
 fn state_files(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
     let mut found = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
@@ -573,7 +573,7 @@ fn r1_two_servers_with_heirs_quit_within_one_bound() {
     assert_eq!(
         state_files(&state),
         state_before,
-        "quit wrote state, so the bound held its fsync (#360), not only the teardown"
+        "quit wrote state, so the bound held a state write, not only the teardown"
     );
     assert!(
         took < Duration::from_secs(6),

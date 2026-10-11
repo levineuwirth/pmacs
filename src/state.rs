@@ -12,6 +12,8 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
+use crate::file_io::Durability;
+
 /// The base state directory `.../pmacs`, or `None` when neither
 /// `XDG_STATE_HOME` nor `HOME` is usably set.
 ///
@@ -176,17 +178,31 @@ pub fn read(base: &Path, name: &str) -> Result<Option<String>, StateError> {
 }
 
 /// Atomically write `content` to a state file (creating parents),
-/// via [`crate::file_io::save_atomic`] — same durability the editor's
-/// own saves get, and no raw `io.open`.
+/// via [`crate::file_io::save_atomic_with_mode`] and no raw `io.open`,
+/// without a sync ([`Durability::Unsynced`]).
+///
+/// What comes here is cheap to lose and written where a wait shows:
+/// saveplace's cursor positions at quit and on every save, recentf's
+/// list on every visit and switch, the GPU zoom, the desktop at quit.
+/// Until #360 each write synced twice, inherited from the editor's own
+/// saves (F-006) when this store chose `save_atomic` for its atomicity
+/// (Q#PS1), and on a busy disk those syncs held quit for seconds (E8c
+/// review 1 measured 2 to over 20 s) with nothing on the screen. A
+/// machine crash in the kernel's writeback window now loses the latest
+/// record, or on some filesystems the file, which every reader takes as
+/// no record (desktop restore says on the status line that it could not
+/// parse it). Unsaved text is not this: [`write_private`] syncs.
 ///
 /// # Errors
 /// Invalid key, or a save failure.
 pub fn write(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> {
-    write_inner(base, name, content, None)
+    write_inner(base, name, content, None, Durability::Unsynced)
 }
 
-/// Like [`write()`], but the parent directory is created `0700` and the
-/// file written `0600` (Arc 3 Q#AS11).
+/// Like [`write()`], but the parent directory is created `0700`, the
+/// file written `0600` (Arc 3 Q#AS11), and both synced
+/// ([`Durability::Synced`]): a recovery copy is the only copy of the
+/// unsaved text it holds.
 ///
 /// Autosave stores **unsaved file contents**, a different class of secret
 /// from saveplace's cursor offsets or recentf's path list. The default
@@ -201,7 +217,7 @@ pub fn write(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> 
 /// # Errors
 /// Invalid key, or a save failure.
 pub fn write_private(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> {
-    write_inner(base, name, content, Some(0o600))
+    write_inner(base, name, content, Some(0o600), Durability::Synced)
 }
 
 /// True when a state file exists (no read, no parse).
@@ -218,6 +234,7 @@ fn write_inner(
     name: &str,
     content: &[u8],
     mode: Option<u32>,
+    durability: Durability,
 ) -> Result<(), StateError> {
     let path = resolve(base, name).map_err(StateError::Name)?;
     if let Some(parent) = path.parent() {
@@ -235,7 +252,8 @@ fn write_inner(
             enforce_dir_mode(parent, 0o700).map_err(StateError::Io)?;
         }
     }
-    crate::file_io::save_atomic_with_mode(&path, content, mode).map_err(StateError::Save)?;
+    crate::file_io::save_atomic_with_mode(&path, content, mode, durability)
+        .map_err(StateError::Save)?;
     Ok(())
 }
 
