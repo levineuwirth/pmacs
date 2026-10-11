@@ -11,6 +11,7 @@ use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 fn fresh_state_dir() -> PathBuf {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -977,6 +978,128 @@ fn a_sweep_after_quit_staged_a_copy_keeps_the_newer_text() {
         pmacs::autosave::recover_bytes(&dir, std::path::Path::new(&f)).as_deref(),
         Some(&b"new old body\n"[..]),
         "the copy holds the newest text"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #368: a copy staged while an older one of its key still waits
+/// supersedes it, so however many passes stage behind an installer,
+/// what is staged stays one copy a key, and the older copy's temporary
+/// file goes with it. Fails without the supersession: two copies staged
+/// and two temporary files.
+#[test]
+fn a_newer_staged_copy_of_a_key_supersedes_the_older() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "old ");
+    let _: (i64, i64, i64) = eval(&s, "return pmacs.autosave._stage()");
+    exec(&s, "pmacs.window.buffer():insert(0, 'new ')");
+    let _: (i64, i64, i64) = eval(&s, "return pmacs.autosave._stage()");
+    let staged: i64 = eval(&s, "return #pmacs.autosave._staged()");
+    assert_eq!(staged, 1, "one copy staged for the key");
+    let temps: Vec<_> = std::fs::read_dir(dir.join("autosave"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".pmacs-tmp."))
+        .collect();
+    assert_eq!(
+        temps.len(),
+        1,
+        "the older copy's temporary file went with it: {temps:?}"
+    );
+    let installed: i64 = eval(&s, "return pmacs.autosave._settle()");
+    assert_eq!(installed, 1);
+    assert_eq!(recovered(&s, &f), b"new old body\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #368: a pass that stages its copies clears no failure reported
+/// before it, since a staged copy is not yet synced or at its key and a
+/// sync can fail where the write did not; a round whose copies were all
+/// installed, taken by a tick, clears it. Fails at `1448046`, where
+/// quit's staging succeeding cleared the failure before its question
+/// read it.
+#[test]
+fn staging_clears_no_failure_and_a_clean_round_does() {
+    let dir = fresh_state_dir();
+    // A regular file where `autosave/` must go: every write fails.
+    let plant = dir.join("autosave");
+    std::fs::write(&plant, b"not a directory").unwrap();
+    let mut s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "precious ");
+    let _: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
+    let failed: bool = eval(&s, "return pmacs.autosave.failure() ~= nil");
+    assert!(failed, "precondition: the failed write is reported");
+
+    std::fs::remove_file(&plant).unwrap();
+    let _: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
+    let staged: i64 = eval(&s, "return #pmacs.autosave._staged()");
+    assert_eq!(staged, 1, "precondition: the copy is staged now");
+    let failed: bool = eval(&s, "return pmacs.autosave.failure() ~= nil");
+    assert!(
+        failed,
+        "a copy staged, not yet at its key, does not clear the failure"
+    );
+
+    // From the second tick the copy goes to its thread; a tick takes the
+    // thread once it is done.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        s.tick_processes();
+        let staged: i64 = eval(&s, "return #pmacs.autosave._staged()");
+        if staged == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "precondition: the copy installed and taken within a minute"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(status(&s, &f), "fresh");
+    let failed: bool = eval(&s, "return pmacs.autosave.failure() ~= nil");
+    assert!(!failed, "a clean round clears the failure");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #368: a key retired while an installer holds a copy of it is
+/// removed once the installer is taken, and until then the file there is
+/// this session's, not unclaimed crash data: an edit after the
+/// retirement is staged, not refused as blocked, and its copy is the one
+/// left at the key, installed after the older copy and the removal. The
+/// installer stays until a tick or a settle takes it, finished or not,
+/// so the order here does not depend on the thread. Fails with the
+/// retiring key read as crash data: the pass counts it blocked and
+/// stages nothing.
+#[test]
+fn an_edit_after_its_key_retires_behind_an_installer_is_still_copied() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "one ");
+    assert_eq!(sweep(&s), 1, "precondition: a copy at the key");
+    exec(&s, "pmacs.window.buffer():insert(0, 'two ')");
+    let (written, _, _): (i64, i64, i64) = eval(&s, "return pmacs.autosave._stage()");
+    assert_eq!(written, 1, "precondition: the newer copy staged");
+    exec(&s, "pmacs.autosave._install()");
+    let discarded: bool = eval(&s, &format!("return pmacs.autosave._discard({f:?})"));
+    assert!(discarded, "precondition: discard-recovery's retirement");
+    exec(&s, "pmacs.window.buffer():insert(0, 'three ')");
+    let (written, blocked, conflicted): (i64, i64, i64) =
+        eval(&s, "return pmacs.autosave._stage()");
+    assert_eq!(
+        (written, blocked, conflicted),
+        (1, 0, 0),
+        "an edit after the retirement is staged, not blocked"
+    );
+    let _: i64 = eval(&s, "return pmacs.autosave._settle()");
+    assert_eq!(
+        recovered(&s, &f),
+        b"three two one body\n",
+        "the newest copy is the one at the key"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

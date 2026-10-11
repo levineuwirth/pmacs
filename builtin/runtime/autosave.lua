@@ -22,7 +22,7 @@
 pmacs.autosave = pmacs.autosave or {}
 
 local DEFAULT_INTERVAL_MS = 30000  -- Emacs's auto-save-timeout
-local MIN_INTERVAL_MS = 1000       -- each sweep fsyncs; don't storm
+local MIN_INTERVAL_MS = 1000       -- each copy is synced; don't storm
 
 -- Migrated to `autosave.interval-ms` (Q#CR8's third adopter: integer,
 -- validated, re-read live). The tick below re-reads the registry every
@@ -67,8 +67,8 @@ function pmacs.autosave.interval_ms(ms)
   return floored
 end
 
--- One pass through `raw` (`_sweep`, or quit's `_stage`), with sweep()'s
--- status reports.
+-- One pass through `raw` (`_sweep`, or the staging `_stage`), with
+-- sweep()'s status reports.
 local function pass(raw)
   if not enabled then return 0, 0, 0 end
   local written, blocked, conflicted = raw()
@@ -84,7 +84,8 @@ local function pass(raw)
   return written, blocked, conflicted
 end
 
--- sweep() --- force a pass now. Returns (written, blocked, conflicted).
+-- sweep() --- force a pass now, its copies synced and in place when it
+-- returns. Returns (written, blocked, conflicted).
 --   blocked    --- an unclaimed crash recovery sits at the buffer's key.
 --                  Overwriting it would destroy exactly what autosave
 --                  protects; recovering or discarding it resumes autosave.
@@ -99,40 +100,56 @@ local function basename(path)
   return path:match("[^/]+$") or path
 end
 
--- The last sweep failure we reported, so a persistent fault (ENOSPC, a
+-- The last failure we reported, so a persistent fault (ENOSPC, a
 -- read-only state dir) logs once but keeps warning in the status line.
 local last_error = nil
 
--- Run `fn` (a sweep, quit's staging, or the install of what it staged),
--- surfacing any failure. A recovery write can fail --- a full disk, a
+-- Surface a failure. A recovery write can fail --- a full disk, a
 -- permission change, a clobbered state dir --- and this is a
 -- data-protection feature: silently swallowing the error would leave the
 -- user believing their work is safe when nothing is being written.
-local function reporting(fn)
-  local ok, err = pcall(fn)
-  if ok then
-    last_error = nil
-    return
-  end
+local function report(err)
   local msg = "autosave FAILED: " .. tostring(err)
   pmacs.editor.set_status(msg .. " --- your work is NOT being protected")
-  -- Log once per distinct fault; the status line keeps nagging every sweep.
+  -- Log once per distinct fault; the status line keeps nagging.
   if msg ~= last_error then
     last_error = msg
     pmacs.error(msg)
   end
 end
 
--- failure() --- the last failed sweep's message, or nil since one
--- succeeded. Quit's question names it (#365): the question takes the
--- status row, so a failure reported only there was never on the screen
--- while the user could still cancel.
+-- Run `fn` (a staging pass), surfacing any failure. Success clears
+-- nothing (#368): the copies are written but not yet synced or at their
+-- keys, and a sync can fail where the write did not (ENOSPC on btrfs).
+local function reporting(fn)
+  local ok, err = pcall(fn)
+  if not ok then report(err) end
+end
+
+-- Take a finished install, never waiting for one still running,
+-- surfacing its failure. Only a clean round --- every copy the latest pass
+-- set out to write, written and installed --- clears the last failure.
+local function collect()
+  local ok, installed_or_err, clean = pcall(pmacs.autosave._collect)
+  if not ok then
+    report(installed_or_err)
+  elseif clean then
+    last_error = nil
+  end
+end
+
+-- failure() --- the last failure reported, or nil since a clean round.
+-- Quit's question names it (#365): the question takes the status row,
+-- so a failure reported only there was never on the screen while the
+-- user could still cancel. A failure met on the installing thread is
+-- reported at the tick that takes it, so the next question names it.
 function pmacs.autosave.failure()
   return last_error
 end
 
--- Ticks until the copies quit staged are installed (#365), or nil.
-local settle_in = nil
+-- Ticks until the copies quit staged may be handed to a thread (#365),
+-- or nil.
+local hold = nil
 
 -- One aggregate message however many files are recoverable. N synchronous
 -- `after-load` fires (a desktop restore) collapse into a single report.
@@ -154,21 +171,25 @@ end
 -- get (a borrowed/copied scalar, no Lua table built -- Q#CR15) and a
 -- compare per frame, and parks no worker thread (a long `workers.sleep`
 -- would hold one of only `available_parallelism - 1` pool threads).
+--
+-- Nothing here waits on the disk (#368). A sweep writes each copy beside
+-- its key and hands them to one thread that syncs and installs them; the
+-- tick takes that thread once it is done. A sweep falling due while
+-- copies are still installing, or staged, is deferred, not queued, to
+-- the first tick after they are taken: on a disk slower than the
+-- interval the copies land at the disk's pace, at most one batch
+-- installing and one of quit's staged, and the editor never waits.
 pmacs.hook.add("process.after-tick", function()
-  -- Quit's staged copies (#365). The first tick after quit's sweep runs
-  -- in the quit's own frame, before its question is painted; the second
-  -- runs after it and hands them to a thread, so their sync never holds
-  -- the question or its answer. Once that thread is done, collect it,
-  -- reporting a failure as a sweep's.
-  if settle_in then
-    settle_in = settle_in - 1
-    if settle_in <= 0 then
-      settle_in = nil
-      pmacs.autosave._install()
-    end
-  elseif pmacs.autosave._installed() then
-    reporting(pmacs.autosave._settle)
+  if pmacs.autosave._collectable() then collect() end
+  -- Quit's staged copies (#365). The first tick after quit's pass runs
+  -- in the quit's own frame, before its question is painted; from the
+  -- second, which runs after it, they go to a thread once none is
+  -- installing, so their sync never holds the question or its answer.
+  if hold then
+    hold = hold - 1
+    if hold <= 0 then hold = nil end
   end
+  if not hold then pmacs.autosave._install() end
   if needs_report then
     needs_report = false
     pcall(report_pending)
@@ -179,9 +200,11 @@ pmacs.hook.add("process.after-tick", function()
     last_sweep_ms = now
     return
   end
-  if now - last_sweep_ms >= pmacs.config.get("autosave.interval-ms") then
+  if now - last_sweep_ms >= pmacs.config.get("autosave.interval-ms")
+      and not pmacs.autosave._busy() then
     last_sweep_ms = now
-    reporting(pmacs.autosave.sweep)
+    reporting(function() pass(pmacs.autosave._stage) end)
+    pmacs.autosave._install()
   end
 end)
 
@@ -220,10 +243,14 @@ end)
 -- appear, the screen unchanged. A copy is the only copy of the unsaved
 -- text it holds, so the sync still happens, by the same calls a sweep
 -- makes, on a thread from the second tick on, once the question is on
--- the screen; an exit waits for it, saying so on the terminal.
+-- the screen; an exit waits for it, saying so on the terminal. A
+-- periodic install still running is not waited for (#368): quit's
+-- copies are staged behind it, and a failure it has already met is
+-- taken first, so the question can name it.
 pmacs.hook.add("editor.before-quit", function()
+  if pmacs.autosave._collectable() then collect() end
   reporting(function() pass(pmacs.autosave._stage) end)
-  if #pmacs.autosave._staged() > 0 then settle_in = 2 end
+  if #pmacs.autosave._staged() > 0 then hold = 2 end
 end)
 
 pmacs.command.define {
