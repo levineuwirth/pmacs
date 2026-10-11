@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 47 items in the list below.
+Tally (311-runs): 48 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2857,6 +2857,8 @@ Tally (311-runs): 47 items in the list below.
 - `20261010T192148Z-332172` at `c33b55c` (#360's pull request's gate, `05-sweep`; recorded with
   it, below).
 - `20261011T171633Z-1297485` at `5f53b91` (#365's pull request's gate, `05-sweep`; recorded with
+  it, below).
+- `20261011T214718Z-1799868` at `1f6d0b9` (#368's pull request's gate, `05-sweep`; recorded with
   it, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
@@ -6009,6 +6011,141 @@ Tally (pr366-ci-5f53b91-success): 18 rows of the table above with `result` = `su
 So, at #365's pull request: #282 moves to seven, its third on `main`; #311's list of runs reads
 at forty-seven; #367 is filed at one; R7 stays at thirty-five, #363 and #364 at one each, their
 rows passing; every other count above stands.
+
+### #368's pull request: `main` red at `1448046` on #361's mechanism, PR #369 green at `1f6d0b9`, #311's list at forty-eight
+
+Recorded 2026-10-12 by #368's pull request, #369 at `1f6d0b9`, four signed commits on `1448046`:
+the periodic sweep's recovery copies staged as quit's are and installed on one thread, a sweep
+falling due meanwhile deferred, and the fake LSP modes moved out of `docs/invariants.md` for the
+two rules it gains. The runs were read from the jobs endpoint by conclusion and through every test
+leg's log; none was rerun.
+
+#### `main` at `1448046`, this branch's base: #361's mechanism on a second row
+
+`1448046` is #365's squash of #366 at `5f53b91`, signature `E`, trailers empty. It is `main`'s
+last code-bearing commit, so it is this branch's base control. Its runs were not recorded here
+before.
+
+`CI` 38167796490 at `1448046`, attempt 1 of 1, `push`, created 19:23:16Z and completed 19:53:00Z:
+`failure`.
+
+Tally (main-ci-1448046): 19 = 17 + 1 + 1.
+
+Tally (main-ci-1448046-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 114553881608 | success |
+| Lint (lua54) | 114553881795 | success |
+| Changed paths | 114553881804 | success |
+| Format | 114553881839 | success |
+| Commit attribution (D9) | 114553881888 | success |
+| Test (crdt) | 114553924137 | success |
+| M5 Perf Gates | 114553924184 | success |
+| M4 Perf Gates | 114553924190 | success |
+| Test (macos-latest / lua54) | 114553924215 | success |
+| GPU Render (headless) | 114553924229 | success |
+| M1 Acceptance Gates | 114553924240 | success |
+| Test (ubuntu-latest / lua54) | 114553924249 | success |
+| Perf budgets (debug) | 114553924280 | success |
+| Test (macos-latest / luajit) | 114553924282 | failure |
+| M6 Perf Gates | 114553924316 | success |
+| Test (ubuntu-latest / luajit) | 114553924322 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114553924325 | success |
+| M10 Perf Gates (crdt) | 114553924344 | success |
+| Docs consistency | 114553925258 | skipped |
+
+Tally (main-ci-1448046-success): 17 rows of the table above with `result` = `success`.
+
+Tally (main-ci-1448046-failure): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)` 114553924282, `failure`:
+  `minibuffer_accept_acceptance::switch_buffer_says_which_buffer_ret_reached`, its fragments read
+  against the job's own log: `assertion \`left == right\` failed: the refusal is as it was` at
+  `tests/minibuffer_accept_acceptance.rs:542:5`, `left: "switch-buffer: showing
+  /var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T/.tmpOLzChZ/bin-tests/a.rs"`, `right: "no buffer:
+  zzz"`, and `test result: FAILED. 8 passed; 1 failed; 0 ignored` (`running 9 tests`). No row or
+  issue named the selector. The message itself shows **#361's mechanism on a second row**: the
+  buffer is named by its path as given, the switcher matches a case-folded subsequence, and the
+  path spells `zzz` (the `z` of `snz9` in this runner's fixed temporary root, the root of #361's
+  first occurrence, and the `z` and `Z` of the random `.tmpOLzChZ`), so the row's last band read a
+  switch to `a.rs` instead of the refusal. #361 is one issue per mechanism and its signature names
+  another selector, so this was commented on #361 (issuecomment-6113638824) for the owner to rule
+  whether it stands there or alone; not rerun. The job paired 196 `running` lines with 195 `test
+  result: ok` and this one `FAILED`.
+- The other five test legs pair every `running` line with `test result: ok`: 196 on `Test (crdt)`,
+  197 on each Ubuntu leg, 198 on `Test (macos-latest / lua54)`. The row passed on all five. #282's
+  row (`e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`)
+  passed on all six legs, its Ubuntu `lua54` leg among them, so #282 did not sample.
+
+`Grammar fuzz` 38167796482 at `1448046`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+#### The pull request's gate: `20261011T214718Z-1799868` at `1f6d0b9`
+
+`scripts/gate`, the default plan: `pmacs-protocol` has no diff. Five of six; fmt, clippy, doc,
+build and diff-check ok; no `pmacs --daemon` survived (identified by environ). Every
+`PMACS_REQUIRE_*` armed but `PMACS_REQUIRE_PYRIGHT`, `PMACS_REQUIRE_STRACE` among them. `uptime`
+read 0.79, 4.17, 5.67 (one, five, fifteen minutes) twelve minutes into the run.
+
+- `05-sweep`: 206 `running` lines, 205 `test result: ok` and one `FAILED`; 5,446 passed, 1 failed,
+  65 ignored:
+  - the HLS row with #311's fragments (`Could not find module ‘Prelude’`, the trace reaching
+    `LSP:ready·processi`, `test result: FAILED. 4 passed; 1 failed; 0 ignored`, 125.87 s), so
+    #311's list gains the gate.
+  - The branch's suites passed armed: `autosave_periodic_acceptance` 12 (seven rows and the five
+    shared readiness rows), `autosave_acceptance` 35 and `autosave_quit_acceptance` 10.
+    `docs_consistency` passed 18. #367's row, #361's two rows (the dired one and the one above),
+    #282's row, #304's sibling (`pmacs-gpu`, `375 passed`) and R7's row
+    (`managed_retry_survives_transients_and_uses_the_successful_stream`) passed; `BrokenPipe`
+    appears nowhere in the log.
+
+#### `CI` 38177767878 at `1f6d0b9`, attempt 1 of 1: green
+
+`pull_request`, created 21:46:46Z and completed 22:19:31Z: `success`.
+
+Tally (pr369-ci-1f6d0b9): 19 = 18 + 1.
+
+Tally (pr369-ci-1f6d0b9-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 114583679192 | success |
+| Lint (luajit) | 114583679334 | success |
+| Lint (lua54) | 114583679348 | success |
+| Commit attribution (D9) | 114583679408 | success |
+| Format | 114583679448 | success |
+| M6 Perf Gates | 114583708687 | success |
+| GPU Render (headless) | 114583708706 | success |
+| M1 Acceptance Gates | 114583708708 | success |
+| Perf budgets (debug) | 114583708712 | success |
+| M4 Perf Gates | 114583708720 | success |
+| Test (crdt) | 114583708745 | success |
+| Test (ubuntu-latest / luajit) | 114583708775 | success |
+| Test (macos-latest / luajit) | 114583708778 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114583708781 | success |
+| M5 Perf Gates | 114583708790 | success |
+| M10 Perf Gates (crdt) | 114583708797 | success |
+| Test (macos-latest / lua54) | 114583708816 | success |
+| Test (ubuntu-latest / lua54) | 114583708833 | success |
+| Docs consistency | 114583709736 | skipped |
+
+Tally (pr369-ci-1f6d0b9-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: 197 on `Test (crdt)`, 198 on
+  each Ubuntu `test` leg, 199 on each macOS leg; none failed. The branch's new suite passed 12 of
+  12 on all six legs: on the four Linux legs its seven `strace` rows ran (139 s a leg), and on both
+  macOS legs they recorded their skip, seven `PMACS_REQUIRE_STRACE unset` lines each (0.27 and
+  0.42 s). `autosave_acceptance` passed 35 and `autosave_quit_acceptance` 10 on every leg, paired
+  by each binary's own `running` line, since on macOS a `Running` line prints before the
+  previous binary's result. #361's two rows and #282's row passed on every leg.
+
+`Grammar fuzz` 38177767847 at `1f6d0b9`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+So, at #368's pull request: #361's mechanism is seen on a second row, on `main`, commented on #361
+and not filed, so no count here moves for it; #311's list of runs reads at forty-eight; R7 stays
+at thirty-five, #282 at seven, #367 at one, their rows passing; every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
