@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 49 items in the list below.
+Tally (311-runs): 50 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2861,6 +2861,8 @@ Tally (311-runs): 49 items in the list below.
 - `20261011T214718Z-1799868` at `1f6d0b9` (#368's pull request's gate, `05-sweep`; recorded with
   it, below).
 - `20261011T223022Z-1939930` at `19a163f` (the same pull request's gate at its head, `05-sweep`;
+  recorded with it, below).
+- `20261012T170517Z-2804859` at `824ca82` (the wall-clock classification pass's gate, `05-sweep`;
   recorded with it, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
@@ -6230,6 +6232,152 @@ Tally (pr369-ci-19a163f-failure): 1 row of the table above with `result` = `fail
 So, at #368's pull request's head: #307 moves to four; #311's list of runs reads at forty-nine;
 every other count above stands.
 
+### The wall-clock classification pass: `main` green at `824ca82`, #369's rerun green, R7's thirty-sixth and #311's list at fifty
+
+Recorded 2026-10-12 by the wall-clock classification pass, PR #370 at `968b25f`, an empty commit on
+`824ca82`: the pass changes no code. The runs were read from the jobs endpoint by conclusion and
+through every test leg's log; this pass reran none.
+
+#### `main` at `824ca82`, the squash of #369: green
+
+`824ca82` is #368's squash of #369 at `19a163f`, merged 09:35:17Z, signature `E`, trailers empty;
+its only diff from `19a163f` is `docs/ci-red-signatures.md`, the registry commits `main` gained, so
+the squash is faithful.
+
+`CI` 38230858125 at `824ca82`, attempt 1 of 1, `push`, created 09:35:19Z and completed 10:08:31Z:
+`success`.
+
+Tally (main-ci-824ca82): 19 = 18 + 1.
+
+Tally (main-ci-824ca82-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 114749690522 | success |
+| Lint (lua54) | 114749690911 | success |
+| Lint (luajit) | 114749690980 | success |
+| Format | 114749690981 | success |
+| Changed paths | 114749691142 | success |
+| Test (crdt) | 114749762183 | success |
+| M4 Perf Gates | 114749762265 | success |
+| M5 Perf Gates | 114749762304 | success |
+| M1 Acceptance Gates | 114749762320 | success |
+| Test (ubuntu-latest / lua54) | 114749762325 | success |
+| GPU Render (headless) | 114749762349 | success |
+| M10 Perf Gates (crdt) | 114749762350 | success |
+| M6 Perf Gates | 114749762360 | success |
+| Test (macos-latest / luajit) | 114749762381 | success |
+| Perf budgets (debug) | 114749762386 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114749762398 | success |
+| Test (ubuntu-latest / luajit) | 114749762418 | success |
+| Test (macos-latest / lua54) | 114749762474 | success |
+| Docs consistency | 114749764398 | skipped |
+
+Tally (main-ci-824ca82-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: 197 on `Test (crdt)`, 198 on
+  each Ubuntu `test` leg, 199 on each macOS leg. #307's row
+  (`a_save_sends_did_save_and_rust_analyzer_flychecks_on_it`), #282's row, #367's row and #361's
+  minibuffer row passed on all six; #361's dired row passed on the five that compile it.
+
+`Grammar fuzz` 38230858128 at `824ca82`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+#### #369's `CI` 38180663248, attempt 2: `Test (macos-latest / luajit)` rerun alone, green
+
+After the section above recorded attempt 1, the owner reran that one job to clear the required
+check. Attempt 2 re-executed it alone as job 114737793130, 09:02:18Z to 09:34:34Z, `success`; the
+other eighteen rows of attempt 2 carry attempt 1's results and timestamps under new ids. The run's
+conclusion now reads `success`.
+
+Tally (pr369-ci-19a163f-attempt2): 19 = 18 + 1.
+
+Tally (pr369-ci-19a163f-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Test (macos-latest / luajit) | 114737793130 | success |
+| Format | 114737793138 | success |
+| Commit attribution (D9) | 114737793372 | success |
+| Changed paths | 114737793858 | success |
+| Test (crdt) | 114737793908 | success |
+| Test (macos-latest / lua54) | 114737794010 | success |
+| M5 Perf Gates | 114737794038 | success |
+| Docs consistency | 114737794180 | skipped |
+| Test (ubuntu-latest / lua54) | 114737794223 | success |
+| Perf budgets (debug) | 114737794281 | success |
+| M1 Acceptance Gates | 114737794318 | success |
+| M4 Perf Gates | 114737794324 | success |
+| Test (ubuntu-latest / luajit) | 114737794352 | success |
+| M10 Perf Gates (crdt) | 114737794494 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 114737794725 | success |
+| M6 Perf Gates | 114737794774 | success |
+| Lint (luajit) | 114737836299 | success |
+| Lint (lua54) | 114737838962 | success |
+| GPU Render (headless) | 114737847645 | success |
+
+Tally (pr369-ci-19a163f-attempt2-success): 18 rows of the table above with `result` = `success`.
+
+- The rerun job paired 199 `running` lines with 199 `test result: ok`, and #307's row passed in it
+  (`test a_save_sends_did_save_and_rust_analyzer_flychecks_on_it ... ok` at 09:15:07Z).
+- **Attempt 2 is non-reproduction and nothing more.** A rerun re-executes the same merge, so it is
+  recorded beside attempt 1 rather than in place of it: attempt 1's job 114592457729 stays #307's
+  fourth occurrence, and #307 stays at four. What argues that #369 did not cause it is still
+  `1f6d0b9`'s green `CI` 38177767878. That run is on code that differs from `19a163f`'s in two
+  comments only, a Lua comment in `builtin/runtime/autosave.lua` and a doc comment in
+  `tests/autosave_periodic_acceptance.rs` (read from `git diff 1f6d0b9 19a163f`).
+
+#### The pass's gate: `20261012T170517Z-2804859` at `824ca82`
+
+`scripts/gate`, the default plan, on `824ca82`'s tree after the pass's instrumentation was
+reverted. Five of six; fmt, clippy, doc, build and diff-check ok; no `pmacs --daemon` survived
+(identified by environ). Every `PMACS_REQUIRE_*` armed but `PMACS_REQUIRE_PYRIGHT`. `uptime` read
+69.73, 48.67, 27.33 four minutes into the run, its sweep running, which is the sweep's own load.
+
+- `05-sweep`: 206 `running` lines, 205 `test result: ok` and one `FAILED`; 5,446 passed, 1 failed,
+  65 ignored. The failure is the HLS row with #311's fragments (`Could not find module ‘Prelude’`,
+  the trace reaching `LSP:ready·processi`, `test result: FAILED. 4 passed; 1 failed; 0 ignored`,
+  126.16 s), so #311's list gains the gate. R7's row, #361's two rows, #307's, #282's and #367's
+  rows, `pmacs-gpu` (`375 passed`, #304's sibling among them) and
+  `gate_script_acceptance::every_budget_in_the_list_is_an_ignored_test_in_the_tree` passed.
+
+#### Samples outside the gate: the pass's measurement sweeps
+
+The pass measured in runs of its own, each test binary run directly in the gate's environment (its
+target dir, ambient roots, a short `TMPDIR` under `~/build/pmacs-gate-targets/tmp`, the sccache
+shim, every armed `PMACS_REQUIRE_*`). They are not gates, so #311's list does not gain them; their
+logs are archived with the pass (`~/build/wall-clock/wall-clock-20261012.tar.zst`).
+
+- The first, uninstrumented, with libtest's `--report-time`, 14:44:44Z to 14:56:58Z, the load
+  53.78 at its start: `pmacs-gpu`'s `attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`
+  failed with all three of R7's fragments (`transient sequence must attach`,
+  `Handshake(Io(Os { code: 32, kind: BrokenPipe`, `attach.rs:1971`), `test result: FAILED. 374
+  passed; 1 failed`: **R7's thirty-sixth**. In the same run
+  `e7i_review1_the_aliasing_guard_reaches_the_worker_s_build` failed on `E0514`, a `cc` compiled
+  by rustc 1.99.0. That red is the instrument's: a binary run outside cargo inherits no
+  `RUSTUP_TOOLCHAIN`, so its nested `cargo check` took the default toolchain. Every later sweep
+  set it, and the row passed in all three. It is no signature.
+- The sweep beside a looping 2 GB `fdatasync` writer, 16:51:21Z to 17:03:59Z:
+  `e8b_own_name_acceptance::c_x_k_keeps_d18_s_four` failed at
+  `tests/e8b_own_name_acceptance.rs:627:5` with `premise: nothing matches \`zzz\``, under a run
+  root `/home/jeans/build/pmacs-gate-targets/tmp/ZZVGWa` that spells two of the three. It is
+  #361's mechanism on a third row, after the selector it was filed on and
+  `minibuffer_accept_acceptance::switch_buffer_says_which_buffer_ret_reached`. Commented on #361,
+  not filed, and no count moves.
+- The writer was the brief's instrument for disk-bound rows, so the reds it induced are the
+  classification's measurements, not occurrences, and no count moves for them:
+  - `e7_format_on_save_acceptance`'s `e7_3_a_stalled_formatter_saves_unformatted_within_the_bound`
+    and `e7_3_a_late_answer_is_never_applied`;
+  - `e7_review1_probes`'s `e7_review1_a_late_answer_past_the_default_bound_never_touches_an_edited_buffer`
+    (#364's and #320's selector) and `e7_review1_a_server_killed_during_the_wait_saves_unformatted_and_says_so`;
+  - `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`.
+
+  Their values are in the pull request's table.
+
+So, at the wall-clock classification pass: R7 moves to thirty-six; #311's list of runs reads at
+fifty; #307 stays at four, its rerun recorded beside it; #361's mechanism is seen on a third row and
+commented; every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
@@ -7868,13 +8016,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least thirty-five, 2026-08-07 to 2026-10-10, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the twenty-three since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least thirty-six, 2026-08-07 to 2026-10-12, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the twenty-four since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 35 = 12 + 23.
+Tally (R7): 36 = 12 + 24.
 
-Tally (R7-held): 23 items in the list below.
+Tally (R7-held): 24 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -7899,6 +8047,7 @@ Tally (R7-held): 23 items in the list below.
 - thirty-third: gate log `20261009T205956Z-1456466`, step `05-sweep` of the six-stage gate, #347's pull request's gate on `ci/replay-mechanism` at `2c890aa` (#348), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch (recorded with that pull request, above)
 - thirty-fourth: gate log `20261010T130620Z-3845623`, step `05-sweep` of the six-stage gate, E8c review 1's third gate on `e8c/quit-must-exit` at `a35b76b` (#357), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch, and the row passed in the review's two other gates and the fix round's (recorded with E8c's fix round 1, above)
 - thirty-fifth: gate log `20261010T192148Z-332172`, step `05-sweep` of the six-stage gate, #360's pull request's gate on `fix/places-no-fsync` at `c33b55c` (#362), `attach.rs:1971`, `test result: FAILED. 373 passed; 2 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`), the other failure in the binary being #304's sibling; `pmacs-gpu` has no diff on the branch (recorded with that pull request, above)
+- thirty-sixth: not a gate but the wall-clock classification pass's first measurement sweep at `824ca82`, each test binary run directly in the gate's environment with libtest's `--report-time`, the load 53.78 at its start (other sessions' fuzzing and builds), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); the pass changes no code, and the row passed in its three later sweeps and in its gate (recorded with that pass, above)
 
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
