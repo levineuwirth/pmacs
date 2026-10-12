@@ -2948,24 +2948,26 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
     lua.set_app_data(crate::autosave::AutosaveCache::default());
     let m = lua.create_table()?;
 
-    // _sweep() -> (written, blocked). `blocked` counts buffers whose
-    // sweep was refused because unclaimed crash data sits at their key.
+    // _sweep() -> (written, blocked, conflicted): a pass forced now, its
+    // copies synced and in place before it returns. `blocked` counts
+    // buffers whose sweep was refused because unclaimed crash data sits
+    // at their key.
     m.set(
         "_sweep",
         lua.create_function(|lua, ()| crate::autosave::sweep(lua).map_err(mlua::Error::external))?,
     )?;
 
-    // _stage() -> (written, blocked, conflicted): quit's sweep (#365). Each
-    // copy is written beside its key and staged, unsynced; `_install`
-    // hands them to a thread that syncs and installs them.
+    // _stage() -> (written, blocked, conflicted): the periodic sweep and
+    // quit's (#365, #368). Each copy is written beside its key and
+    // staged, unsynced, and nothing is waited on; `_install` hands the
+    // staged copies to a thread that syncs and installs them.
     m.set(
         "_stage",
-        lua.create_function(|lua, ()| {
-            crate::autosave::stage_for_quit(lua).map_err(mlua::Error::external)
-        })?,
+        lua.create_function(|lua, ()| crate::autosave::stage(lua).map_err(mlua::Error::external))?,
     )?;
 
-    // _install(): start the thread installing the staged copies.
+    // _install(): start the thread installing the staged copies, unless
+    // one is there already.
     m.set(
         "_install",
         lua.create_function(|lua, ()| {
@@ -2974,21 +2976,38 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // _installed() -> bool: that thread is done and not yet collected.
+    // _collectable() -> bool: an installer has finished, or a failure
+    // waits to be reported.
     m.set(
-        "_installed",
-        lua.create_function(|lua, ()| Ok(crate::autosave::install_finished(lua)))?,
+        "_collectable",
+        lua.create_function(|lua, ()| Ok(crate::autosave::collectable(lua)))?,
     )?;
 
-    // _settle() -> installed: collect the thread, install what is still
-    // staged, and raise the first failure.
+    // _busy() -> bool: copies are staged or an installer is not taken.
+    m.set(
+        "_busy",
+        lua.create_function(|lua, ()| Ok(crate::autosave::busy(lua)))?,
+    )?;
+
+    // _collect() -> (installed, clean): take a finished installer without
+    // waiting for a running one, and raise the first failure. `clean`
+    // when the round wrote and installed every copy it set out to.
+    m.set(
+        "_collect",
+        lua.create_function(|lua, ()| {
+            crate::autosave::collect(lua).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    // _settle() -> installed: wait for the installer, install what is
+    // still staged, and raise the first failure.
     m.set(
         "_settle",
         lua.create_function(|lua, ()| crate::autosave::settle(lua).map_err(mlua::Error::external))?,
     )?;
 
-    // _staged() -> { path, ... }: the buffers whose quit copies are not
-    // yet collected at their keys.
+    // _staged() -> { path, ... }: the buffers whose copies are not yet
+    // collected at their keys.
     m.set(
         "_staged",
         lua.create_function(|lua, ()| Ok(crate::autosave::installing_paths(lua)))?,
@@ -3022,7 +3041,7 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
             let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
                 return Ok("none");
             };
-            // A quit copy still installing would make this read stale.
+            // A copy still installing would make this read stale.
             crate::autosave::settle_quietly(lua);
             Ok(crate::autosave::status(&base, std::path::Path::new(&path)).as_str())
         })?,

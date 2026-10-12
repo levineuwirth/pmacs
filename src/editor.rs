@@ -340,10 +340,11 @@ impl Drop for EditorState {
     /// still a ~15x improvement over leaking every pool whole.
     fn drop(&mut self) {
         // A quit answered before its recovery copies are installed
-        // (#365) leaves them staged or on their installer's thread: they
-        // are the only copy of the text the quit discards, so the exit
-        // waits for them here, and since the TUI has left the alternate
-        // screen, the wait is said on the terminal the user quit from.
+        // (#365), or while a periodic sweep's are (#368), leaves them
+        // staged or on their installer's thread: they are the only copy
+        // of the unsaved text they hold, so the exit waits for them here,
+        // and since the TUI has left the alternate screen, the wait is
+        // said on the terminal the user quit from.
         settle_recovery_copies_at_exit(self.lua_host.lua());
         let held = {
             let mut supervisor = self.process_supervisor.borrow_mut();
@@ -362,10 +363,10 @@ impl Drop for EditorState {
     }
 }
 
-/// Bring the recovery copies quit staged to their keys before the exit:
-/// wait for the thread installing them, or install them here, saying
-/// first on stderr what the exit waits for when it must wait, and after,
-/// any copy that failed (#365).
+/// Bring the recovery copies staged or installing to their keys before
+/// the exit: wait for the thread installing them, or install them here,
+/// saying first on stderr what the exit waits for when it must wait, and
+/// after, any copy that failed (#365, #368).
 fn settle_recovery_copies_at_exit(lua: &mlua::Lua) {
     // One write a line, so nothing else on the terminal lands inside it.
     fn say(line: &str) {

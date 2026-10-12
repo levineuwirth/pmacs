@@ -118,19 +118,9 @@ times, never on a clock (`save_retry`). LaTeX is served by `texlab`;
 `texlabroot`), never `.git`: a multi-file document's root is not its
 repository's.
 
-The fake server `src/bin/pmacs_fake_lsp.rs` is selected by
-`PMACS_FAKE_LSP_MODE`. Capability modes: `fullonly`, `rangeonly`,
-`rangeonly16`, `semantichold`, `incremental`, `incremental8`, `didsave`,
-`didsavenotext`, `sighelp`, `prepare`, `preprefuse`, `rename`,
-`inlaybounds`, `inlayrefresh`, `semantictokensrefresh`, `applyeditplan`,
-`resourceops`, `posecho`, `defenv`, `wsconfig`, `rooturi`, `leanprogress`.
-Failure shapes: `crash`, `abortonopen`, `error`, `contentmodified`,
-`clientfault`, `garbage`, `silent`, `stopanswering`. Watchers: `filewatch`
-(`RelativePattern` `**/*.txt`), `filewatchabs` (absolute glob),
-`filewatchflat` (no `**/`), `filewatchbare` (bare relative),
-`filewatchrereg` (one id twice), `filewatchjoin`, `filewatchretire`. Use
-these, never a real server; the binary documents each shape, and a stale
-copy here covers the shape next to the defect.
+A test drives a server shape through the fake server
+`src/bin/pmacs_fake_lsp.rs`, selected by `PMACS_FAKE_LSP_MODE`, never a
+real server; `docs/fake-lsp-modes.md` lists its modes.
 
 ## Persistence
 
@@ -139,6 +129,16 @@ points only, never in `EditorState::new()`, so tests stay hermetic;
 `PMACS_STATE_HOME` overrides the XDG state root and outranks it. Autosave:
 one buffer owns a path's recovery slot; only recover or discard releases
 unclaimed crash data; adopting clears the old owner's skip cache.
+
+`state::write` (places, recentf, the zoom, the desktop) syncs nothing:
+what it holds is cheap to lose. Unsaved text is not: a recovery copy
+(`state::write_private`, `Staged::finish`) is `Durability::Synced`, its
+temporary file synced before the rename and the directory after it.
+The periodic sweep and quit's sync nothing on the main thread, and no
+copy lands over a newer one or a retired key: one installer at a time
+takes staged copies in order (`autosave::begin_install`), a sweep due
+meanwhile is deferred, `retire` removes a key once its copy in flight
+lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
 
 ## Protocol
 
