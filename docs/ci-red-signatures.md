@@ -2779,7 +2779,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 48 items in the list below.
+Tally (311-runs): 49 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2860,6 +2860,8 @@ Tally (311-runs): 48 items in the list below.
   it, below).
 - `20261011T214718Z-1799868` at `1f6d0b9` (#368's pull request's gate, `05-sweep`; recorded with
   it, below).
+- `20261011T223022Z-1939930` at `19a163f` (the same pull request's gate at its head, `05-sweep`;
+  recorded with it, below).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -6146,6 +6148,87 @@ Tally (pr369-ci-1f6d0b9-success): 18 rows of the table above with `result` = `su
 So, at #368's pull request: #361's mechanism is seen on a second row, on `main`, commented on #361
 and not filed, so no count here moves for it; #311's list of runs reads at forty-eight; R7 stays
 at thirty-five, #282 at seven, #367 at one, their rows passing; every other count above stands.
+
+### #368's pull request, addendum: the head at `19a163f`, #307's fourth, #311's list at forty-nine
+
+Recorded 2026-10-12 by #368's pull request. After the section above was pushed, two commits moved
+#369's head from `1f6d0b9`: `28a28b1` and `19a163f`, each dropping from a comment a cause the
+session had asserted and not read (a sync failing on a full btrfs disk). Neither changes code. The
+runs were read from the jobs endpoint by conclusion and through every test leg's log; none was
+rerun.
+
+- `CI` 38180571858 at `28a28b1`, attempt 1 of 1, created 22:28:42Z and completed 22:30:27Z:
+  `cancelled`, superseded by the push of `19a163f`, so it carries no verdict.
+  `Grammar fuzz` 38180571856 at `28a28b1`, `success`.
+
+Tally (pr369-ci-28a28b1): 19 = 4 + 14 + 1.
+
+- `20261011T222856Z-1929257` at `28a28b1`: stopped by the session in its sweep, once the next
+  commit was due. It printed `05-sweep FAILED` because it was stopped; it is no result, and not in
+  #311's list.
+- `20261011T223022Z-1939930` at `19a163f`, the default plan: five of six; fmt, clippy, doc,
+  build and diff-check ok; no `pmacs --daemon` survived (identified by environ);
+  `PMACS_REQUIRE_STRACE` armed. `05-sweep`: 206 `running` lines, 205 `test result: ok` and one
+  `FAILED`; 5,446 passed, 1 failed, 65 ignored. The failure is the HLS row with #311's fragments
+  (`Could not find module ‘Prelude’`, the trace reaching `LSP:ready·processi`, `test result:
+  FAILED. 4 passed; 1 failed; 0 ignored`, 125.94 s), so #311's list gains the gate. The branch's
+  suites passed (12, 35, 10), `docs_consistency` 18, and #367's, #361's two, #282's, R7's and
+  #304's sibling's rows.
+
+#### `CI` 38180663248 at `19a163f`, attempt 1 of 1: #307's fourth
+
+`pull_request`, created 22:30:05Z and completed 23:02:56Z: `failure`.
+
+Tally (pr369-ci-19a163f): 19 = 17 + 1 + 1.
+
+Tally (pr369-ci-19a163f-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 114592421086 | success |
+| Format | 114592421290 | success |
+| Commit attribution (D9) | 114592421337 | success |
+| Lint (luajit) | 114592421379 | success |
+| Lint (lua54) | 114592421399 | success |
+| M1 Acceptance Gates | 114592457604 | success |
+| M4 Perf Gates | 114592457619 | success |
+| Test (crdt) | 114592457626 | success |
+| GPU Render (headless) | 114592457643 | success |
+| M5 Perf Gates | 114592457664 | success |
+| Test (macos-latest / lua54) | 114592457696 | success |
+| M6 Perf Gates | 114592457727 | success |
+| Test (macos-latest / luajit) | 114592457729 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 114592457732 | success |
+| M10 Perf Gates (crdt) | 114592457737 | success |
+| Test (ubuntu-latest / luajit) | 114592457749 | success |
+| Test (ubuntu-latest / lua54) | 114592457774 | success |
+| Perf budgets (debug) | 114592458005 | success |
+| Docs consistency | 114592458972 | skipped |
+
+Tally (pr369-ci-19a163f-success): 17 rows of the table above with `result` = `success`.
+
+Tally (pr369-ci-19a163f-failure): 1 row of the table above with `result` = `failure`.
+
+- `Test (macos-latest / luajit)` 114592457729, `failure`:
+  `e7b_review_wire_acceptance::a_save_sends_did_save_and_rust_analyzer_flychecks_on_it`, all
+  three of #307's fragments read against the job's own log (`the check showed as a suffix on
+  ready, or as the tracker's busy title under a reload` at `tests/e7b_review_wire_acceptance.rs:692`;
+  the labels `["4 = LSP:ready"]` with the busy field `["4 b -"]`; `test result: FAILED. 4 passed;
+  1 failed; 2 ignored`): **#307's fourth**. The wire logs the flycheck's `begin (cargo check)`,
+  two `report`s and `end` all at 237 ms after the save. Commented on #307
+  (issuecomment-6120758409); not rerun. The job paired 197 `running` lines with 196 `test
+  result: ok` and this one `FAILED`. The branch has no diff in `src/lsp.rs`, `src/lsp_status.rs`,
+  `builtin/runtime/lsp.lua` or the suite, an argument from untouched code.
+- The other five test legs pair every `running` line with `test result: ok`: 197 on `Test
+  (crdt)`, 198 on each Ubuntu leg, 199 on `Test (macos-latest / lua54)`, and passed #307's row.
+  The branch's new suite passed on all six legs, its seven `strace` rows running on the four
+  Linux legs and recording their skip on both macOS legs.
+
+`Grammar fuzz` 38180663237 at `19a163f`, attempt 1 of 1, `success`, fuzzing nothing on either arm
+(`run=false`, `no changed path can change the grammar set`).
+
+So, at #368's pull request's head: #307 moves to four; #311's list of runs reads at forty-nine;
+every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
