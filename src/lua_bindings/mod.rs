@@ -3553,6 +3553,21 @@ fn install_instance_show_binding(lua: &Lua, registry: &SharedRegistry) -> mlua::
 /// alongside the `BufferId` so this helper can queue them via
 /// `EditorCore::queue_daemon_origin_crdt_op`.
 ///
+/// This is also where the three Rust renders register round-trip
+/// input (`EditorCore::set_round_trip_input`), the invariant's second
+/// layer: the rope lock `BufferRegistry::replace_generated` leaves
+/// refuses an edit at the daemon, and the round-trip mark is what stops
+/// a semantic frontend applying a typed key to its mirror first. The
+/// registry helper cannot register it (it holds no core), so the one
+/// binding-side step every render passes through does, on every render
+/// and not only on one that produced an edit: the set is keyed by
+/// buffer id and pruned on kill, and a buffer recreated after `q` must
+/// be registered again. The owner's pass over E8d drove the gap: the
+/// GPU inserted `X` into its mirror of `*help*`, the daemon refused the
+/// op as read-only, and the mirror diverged. The Lua writers (dired,
+/// git, listview, compile, `*help*`'s `_show_help`) register it
+/// themselves beside their locks.
+///
 /// No-op when:
 /// - No `SharedCore` is registered as Lua app data (early-stage
 ///   tests use the registry without an editor core).
@@ -3563,6 +3578,7 @@ fn queue_generated_buffer_edits(lua: &Lua, buffer_id: BufferId, edits: &[crate::
         return;
     };
     let mut core = core.borrow_mut();
+    core.set_round_trip_input(buffer_id, true);
     for edit in edits {
         core.queue_daemon_origin_crdt_op(buffer_id, edit);
     }

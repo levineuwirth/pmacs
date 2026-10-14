@@ -1536,6 +1536,16 @@ local function show_help_text(text)
   -- reached the rope, and would be refused now that the Rust side
   -- leaves `*help*` read-only.
   pmacs.buffer.set_generated_contents(buf, text)
+  -- The invariant's second layer, on every write: the rope lock above
+  -- refuses an edit at the daemon, and this is what stops a semantic
+  -- frontend applying a typed key to its mirror first (the owner's
+  -- pass over E8d: the GPU inserted into its mirror, the daemon
+  -- refused the op as read-only, and the mirror diverged). Every other
+  -- generated writer registers it beside its lock (dired, git,
+  -- listview, compile); the Rust renderers of `*help*` register it in
+  -- their fan-out. The set is pruned when the buffer is killed, so a
+  -- `*help*` recreated after `q` is registered again here.
+  pmacs.buffer.set_round_trip_input(buf, true)
   if fresh or help_buffer_id ~= buf then
     pcall(function()
       pmacs.keymap.unbind { scope = "buffer", buffer = buf, sequence = "q" }
