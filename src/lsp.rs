@@ -3437,7 +3437,31 @@ impl LspManager {
         // also borrows `self.process_to_server`) doesn't conflict
         // with the `clients.get_mut` borrow.
         let mut client = self.clients.remove(&sid).expect("checked existence above");
-        let _ = self.start_generation(sid, &mut client);
+        // E8d.1: a respawn that cannot spawn (the executable gone, an
+        // invalid cwd) is a crash of its own, as `McpManager::maybe_restart`
+        // already treats it. `start_generation` has set the client to
+        // `Starting` and cleared `next_restart_at` before the spawn
+        // fails, so discarding the error left the client `Starting`
+        // forever with nothing armed and no event told --- the LSP copy
+        // of the supervisor drifted from the MCP one. Surface it as
+        // `Crashed`, re-arm the backoff per policy, and tell the
+        // consumer; the retry loop is bounded only by the user stopping
+        // the server, which is the MCP copy's stated choice.
+        if let Err(err) = self.start_generation(sid, &mut client) {
+            let reason = format!("respawn failed: {err}");
+            client.state = LspClientState::Crashed {
+                reason: reason.clone(),
+                ended: now,
+            };
+            client.next_restart_at = if should_restart(client.spec.restart) {
+                Some(now + self.restart_backoff)
+            } else {
+                None
+            };
+            self.clients.insert(sid, client);
+            self.push_event(sid, now, LspEventKind::Crashed { reason });
+            return;
+        }
         self.clients.insert(sid, client);
     }
 
