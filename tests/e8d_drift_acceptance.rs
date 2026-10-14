@@ -11,21 +11,202 @@
 //!   executable had gone sat `Starting` forever, nothing armed, nothing
 //!   told; `McpManager::maybe_restart` surfaced the same failure as
 //!   `Crashed` and re-armed the backoff.
+//! - E8d.2: `EditorCore::undo` and `redo` told the text view alone and
+//!   clamped the cursor alone, where every forward edit reaches every
+//!   overlay and clamps the selection and `view_top` too.
 
 #![cfg(unix)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::async_runtime::AsyncRuntime;
+use pmacs::editor::EditorState;
 use pmacs::lsp::{
     LspClientState, LspEvent, LspEventKind, LspManager, LspRestartPolicy, LspServerId,
     LspServerSpec,
 };
+use pmacs::protocol::FrontendId;
 
 #[path = "common/mod.rs"]
 mod common;
+
+// ---------------------------------------------------------------------------
+// The in-process editor, driven by the keys a user presses
+// ---------------------------------------------------------------------------
+
+fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: mods,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn ctrl(s: &mut EditorState, c: char) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char(c), KeyModifiers::CONTROL),
+    );
+}
+
+fn press(s: &mut EditorState, code: KeyCode) {
+    s.dispatch_key(FrontendId::LOCAL, key(code, KeyModifiers::NONE));
+}
+
+fn type_str(s: &mut EditorState, text: &str) {
+    for ch in text.chars() {
+        press(s, KeyCode::Char(ch));
+    }
+}
+
+fn exec(s: &EditorState, src: &str) {
+    s.lua_host.lua().load(src.to_string()).exec().unwrap();
+}
+
+fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
+    s.lua_host.lua().load(src.to_string()).eval().unwrap()
+}
+
+fn active_text(s: &EditorState) -> String {
+    eval(
+        s,
+        "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
+    )
+}
+
+/// An isolated editor (`common::iso`): no user `init.lua`, no real
+/// data root, no language server.
+fn editor() -> EditorState {
+    let s = EditorState::new_with_roots(&common::iso::roots());
+    s.lua_host.reopen_init_phase_for_testing();
+    exec(&s, "pmacs.lsp.config = {}");
+    s
+}
+
+/// `C-x u`, the undo chord every route round-trips to the daemon.
+fn undo(s: &mut EditorState) {
+    ctrl(s, 'x');
+    press(s, KeyCode::Char('u'));
+}
+
+// ---------------------------------------------------------------------------
+// E8d.2 --- undo and redo notify everything
+// ---------------------------------------------------------------------------
+
+/// A window overlay holding one byte offset, carried through edits the
+/// way `BufferStyleSpanTranslator` carries its spans: the shape of every
+/// overlay with byte-offset state. It only hears the edits the window's
+/// fan-out tells it.
+struct OffsetOverlay {
+    at: Arc<Mutex<u64>>,
+}
+
+impl pmacs::view::View for OffsetOverlay {
+    fn on_edit(
+        &mut self,
+        _buf: &pmacs::buffer::Buffer,
+        edit: &pmacs::rope::Edit,
+    ) -> Result<(), pmacs::buffer::BufferError> {
+        let mut at = self.at.lock().expect("offset mutex");
+        let (start, end, new_len) = (edit.range.start, edit.range.end, edit.inserted_len);
+        if *at >= end {
+            *at = *at - (end - start) + new_len;
+        } else if *at > start {
+            *at = start;
+        }
+        Ok(())
+    }
+
+    fn kind(&self) -> &'static str {
+        "e8d_offset_overlay"
+    }
+}
+
+/// Typing before an overlay's offset carries it forward; undoing the
+/// typing must carry it back. At `main` the undo told the text view
+/// alone, so the overlay kept the offset the undone insert had given it.
+#[test]
+fn e8d_2_undo_carries_an_overlay_s_byte_offset_back() {
+    let mut s = editor();
+    type_str(&mut s, "0123456789");
+    let at = Arc::new(Mutex::new(5_u64));
+    s.core
+        .borrow_mut()
+        .active_window_mut()
+        .push_overlay(Box::new(OffsetOverlay { at: at.clone() }));
+
+    // Type two characters at the start of the line: a new undo group,
+    // since the motion command between breaks the self-insert run.
+    ctrl(&mut s, 'a');
+    type_str(&mut s, "ab");
+    assert_eq!(active_text(&s), "ab0123456789", "premise: the text landed");
+    assert_eq!(
+        *at.lock().unwrap(),
+        7,
+        "premise: the forward edit carried the overlay's offset"
+    );
+
+    undo(&mut s);
+    assert_eq!(
+        active_text(&s),
+        "0123456789",
+        "premise: the undo took the typing"
+    );
+    assert_eq!(
+        *at.lock().unwrap(),
+        5,
+        "the undo is told to every overlay, so the offset is carried back"
+    );
+}
+
+/// A selection anchor and a `view_top` past the end an undo leaves are
+/// clamped, as every forward edit clamps them. At `main` the undo
+/// clamped the cursor alone and left both dangling past the buffer.
+#[test]
+fn e8d_2_undo_clamps_the_selection_and_the_view_top() {
+    let mut s = editor();
+    type_str(&mut s, "one");
+    // A script's insert of thirty more lines: one group, whoever undoes
+    // next takes it (E6c).
+    exec(
+        &s,
+        "local b = pmacs.window.buffer(); b:insert(b:len(), string.rep('\\nline', 30))",
+    );
+    let long = active_text(&s);
+    assert_eq!(long.lines().count(), 31, "premise: thirty-one lines");
+    let len = long.len() as u64;
+    {
+        let mut core = s.core.borrow_mut();
+        let win = core.active_window_mut();
+        win.cursor = 1;
+        win.selection = Some(pmacs::window::Selection { anchor: len });
+        win.view_top = 25;
+    }
+
+    undo(&mut s);
+    assert_eq!(
+        active_text(&s),
+        "one",
+        "premise: the undo took the thirty lines"
+    );
+    let core = s.core.borrow();
+    let win = core.active_window();
+    assert_eq!(
+        win.selection.map(|sel| sel.anchor),
+        Some(3),
+        "the selection anchor is clamped to the new end (and kept, since it \
+         did not collapse onto the cursor at 1); it was {len}"
+    );
+    assert_eq!(
+        win.view_top, 0,
+        "the view top is clamped to the last line; it was 25 of a one-line buffer"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // E8d.1 --- the LSP respawn

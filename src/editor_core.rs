@@ -3097,9 +3097,8 @@ impl EditorCore {
         }
     }
 
-    /// Undo the most recent edit on the active buffer; clamp the
-    /// active window's cursor to the new length and notify all
-    /// windows on this buffer.
+    /// Undo the most recent edit on the active buffer and notify every
+    /// window on it through [`Self::notify_buffer_edit`] (E8d.2).
     ///
     /// E6c: undoes the acting frontend's most recent
     /// command-boundary group through the cross-peer arbiter (see
@@ -3119,23 +3118,17 @@ impl EditorCore {
         };
         match edit {
             Ok(edit) => {
-                let reg = self.registry.borrow();
-                let Ok(buffer) = reg.get(buffer_id) else {
-                    return;
-                };
-                for win in self.windows.values_mut() {
-                    if win.buffer_id == buffer_id {
-                        let _ = win.text_view.on_edit(buffer, &edit);
-                        let max = buffer.len();
-                        if win.cursor > max {
-                            win.cursor = max;
-                        }
-                    }
-                }
-                drop(reg);
-                // Q#AI8 (PR #109 round 1): history edits move bytes
-                // like any other edit — invalidate search state.
-                self.search_invalidate_for_edit(buffer_id, &edit);
+                // E8d.2: a history edit moves bytes like any other edit,
+                // so every window on the buffer hears it the way a
+                // forward edit is heard --- the text view, every overlay,
+                // and the cursor, selection and `view_top` clamps, with
+                // the search state invalidated (Q#AI8). The loop this
+                // replaces told the text view alone and clamped the
+                // cursor alone: a copy of `apply_active_edit`'s fan-out
+                // that had drifted, leaving an overlay's byte offsets
+                // and a selection past the new end where the undone
+                // edit had put them.
+                self.notify_buffer_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27: undo on a CRDT-backed
                 // buffer produces a crdt_op that must broadcast to
                 // every replica frontend (including the one whose
@@ -3165,22 +3158,8 @@ impl EditorCore {
         };
         match edit {
             Ok(edit) => {
-                let reg = self.registry.borrow();
-                let Ok(buffer) = reg.get(buffer_id) else {
-                    return;
-                };
-                for win in self.windows.values_mut() {
-                    if win.buffer_id == buffer_id {
-                        let _ = win.text_view.on_edit(buffer, &edit);
-                        let max = buffer.len();
-                        if win.cursor > max {
-                            win.cursor = max;
-                        }
-                    }
-                }
-                drop(reg);
-                // Q#AI8 — same as undo above.
-                self.search_invalidate_for_edit(buffer_id, &edit);
+                // E8d.2 — the one notification path, as undo above.
+                self.notify_buffer_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27 — same as undo above.
                 self.queue_daemon_origin_crdt_op(buffer_id, &edit);
             }
