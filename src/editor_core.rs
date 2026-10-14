@@ -2142,8 +2142,10 @@ impl EditorCore {
     /// for every Lua mutator edit and applied CRDT op.
     ///
     /// Q#GB6: each window coordinate is also clamped against **its own**
-    /// post-edit bound, which [`Self::rebuild_views_for`] already does
-    /// (`:1853-1857`) and this path did not. A generated refresh that
+    /// post-edit bound, which this path once left to the generated
+    /// renders' separate rebuild (`rebuild_views_for`, retired at E8d
+    /// fix round 2 when the `*help*`, `*workers*` and `*pmacs-instance*`
+    /// renders joined this path). A generated refresh that
     /// shrinks its buffer otherwise leaves `cursor` past the end of the
     /// rope indefinitely — neither paint nor a motion command recovers
     /// it, because motion is computed from the stale value. The two
@@ -2198,39 +2200,6 @@ impl EditorCore {
                 && (selection.anchor != old_anchor || win.cursor != old_cursor);
             (!collapsed_by_clamp).then_some(selection)
         });
-    }
-
-    /// Force every window currently showing `buffer_id` to rebuild
-    /// its [`TextView`] from scratch.
-    ///
-    /// Used by code paths that rewrite a buffer end-to-end through
-    /// `Buffer::set_generated_contents`, whose one `Replace` is fanned
-    /// out to replicas by `queue_generated_buffer_edits` and not
-    /// through [`Self::notify_buffer_edit`]: the `*help*`, `*workers*`
-    /// and `*pmacs-instance*` renders since E8d.3. Rebuilding is
-    /// O(buffer length), which is what an end-to-end rewrite cost
-    /// anyway, and it re-clamps a window the edit did not reach.
-    ///
-    /// Cursor and `view_top` are clamped to the new buffer extent so
-    /// they don't dangle past the end after a shrinking rewrite.
-    /// Selection normalization uses the same clamp-or-clear rule as
-    /// [`Self::notify_buffer_edit`].
-    pub fn rebuild_views_for(&mut self, buffer_id: BufferId) {
-        let reg = self.registry.borrow();
-        let Ok(buffer) = reg.get(buffer_id) else {
-            return;
-        };
-        let len = buffer.len();
-        for win in self.windows.values_mut() {
-            if win.buffer_id == buffer_id {
-                win.text_view = TextView::new(buffer);
-                Self::clamp_cursor_and_selection(win, len);
-                let max_top = win.text_view.line_count().saturating_sub(1);
-                if win.view_top > max_top {
-                    win.view_top = max_top;
-                }
-            }
-        }
     }
 
     /// Save the active buffer to its backing file. Returns `true` on

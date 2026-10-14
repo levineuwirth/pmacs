@@ -1060,7 +1060,7 @@ fn acc16f_a_shrinking_generated_write_clamps_the_window_cursor() {
 /// while collapsing many lines into one, so a clamp gated on "the buffer
 /// shrank" passes criterion 8 and fails here — which is why the clamp
 /// runs unconditionally, each coordinate against its own bound, exactly
-/// as `rebuild_views_for` already does.
+/// as `rebuild_views_for` did before E8d fix round 2 retired it.
 ///
 /// *Bite:* falsify by gating the clamp on a byte-length comparison, or by
 /// deleting the `view_top` half. Unlike criterion 8 this case is argued
@@ -1211,19 +1211,21 @@ fn acc16h_a_shrinking_generated_write_clamps_or_clears_the_selection() {
 /// Criterion 8c's second clamp site, driven through its own real Lua
 /// path.
 ///
-/// `EditorCore::rebuild_views_for` had the identical defect and is a
-/// separate exit: the `*help*` renderer rewrites end to end and calls it
-/// rather than `notify_buffer_edit` (`src/lua_bindings/mod.rs:1650`, via
-/// `pmacs.help.show_command`). Fixing one function and not the other
-/// would leave a live panic reachable from `M-x` help, so this pins the
-/// second exit rather than trusting that one call site implies the
-/// other.
+/// `EditorCore::rebuild_views_for` had the identical defect and was a
+/// separate exit: the `*help*` renderer rewrote end to end and called it
+/// rather than `notify_buffer_edit` (via `pmacs.help.show_command`).
+/// Fixing one function and not the other would have left a live panic
+/// reachable from `M-x` help, so this pinned the second exit rather than
+/// trusting that one call site implied the other. Since E8d fix round 2
+/// the renderer's one `Replace` goes through `notify_buffer_edit` like
+/// every generated write and the second exit is gone; this row keeps
+/// pinning the help renderer's route.
 ///
 /// This site also asserts both halves: a clamp can preserve the
 /// shortened region, and an anchor that clamps exactly onto the cursor
 /// clears it. *Bite:* delete `clamp_cursor_and_selection` from
-/// `rebuild_views_for`; the first copy panics at `src/rope.rs:145` while
-/// `acc16h` stays green.
+/// `notify_buffer_edit`; this row panics at `src/rope.rs:145` beside
+/// `acc16h`.
 #[test]
 fn acc16i_a_shrinking_view_rebuild_clamps_or_clears_the_selection() {
     let state = EditorState::new_with_roots(&crate::iso::roots());

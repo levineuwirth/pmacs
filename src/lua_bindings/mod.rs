@@ -2078,23 +2078,6 @@ pub(crate) fn run_hook_if_defined(lua: &Lua, name: &str, args: mlua::MultiValue)
     }
 }
 
-/// Force any window showing `buffer_id` to rebuild its `TextView`.
-///
-/// Called by `pmacs.help.*` after a render rewrites `*help*` end to
-/// end. The render is one `Replace` through
-/// `Buffer::set_generated_contents` (E8d.3), queued to replicas by
-/// `queue_generated_buffer_edits` and not told to the windows; a full
-/// rebuild is what an end-to-end rewrite costs anyway. Without this, the
-/// regression we hit on `*errors*` and `*buffer-list*` recurs on
-/// `*help*`: a window already displaying it keeps the pre-render
-/// line cache and cursor motions stop updating the screen.
-fn rebuild_help_buffer_views(lua: &Lua, buffer_id: BufferId) {
-    let Some(core) = lua.app_data_ref::<SharedCore>() else {
-        return;
-    };
-    core.borrow_mut().rebuild_views_for(buffer_id);
-}
-
 fn add_meta_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
     methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
         // `BufferId` has a private inner u64 (R22), so we don't expose
@@ -3527,68 +3510,61 @@ fn install_instance_show_binding(lua: &Lua, registry: &SharedRegistry) -> mlua::
             .and_then(|s| s.get());
         let (id, edits) =
             crate::instance_buffer::render(&mut reg.borrow_mut(), &identity, attachment.as_ref());
-        queue_generated_buffer_edits(lua, id, &edits);
-        if !edits.is_empty() {
-            rebuild_generated_buffer_views(lua, id);
-        }
+        fan_out_generated_render(lua, id, &edits);
         Ok(BufferIdLua(id))
     })
 }
 
-/// T M10.10 post-audit-round-6 F31 — queue every CRDT op produced
-/// by a generated-buffer render to the daemon's broadcast queue.
+/// Fan a generated-buffer render out the way every generated write is
+/// fanned out: each `Edit` the render returned goes through
+/// [`notify_buffer_edit_to_windows`] --- every displaying window's text
+/// view and overlays, the cursor, selection and `view_top` clamped, the
+/// search state invalidated (Q#AI8), and the daemon-origin CRDT op
+/// queued to replicas (T M10.10 post-audit-round-6 F31) --- and the
+/// buffer is registered for round-trip input, the invariant's second
+/// layer (`docs/invariants.md`, Generated buffers).
 ///
-/// The three generated buffers (`*help*`, `*workers*`,
-/// `*pmacs-instance*`) get upgraded to CRDT-backed at every
-/// replica's attach via `send_buffer_snapshots`. Each subsequent
-/// regenerate is `Buffer::set_generated_contents`'s one `Replace`
-/// (E8d.3), so a render produces zero `Edit`s (the text already shown)
-/// or one carrying `crdt_op`. Replicas need every `CrdtOp` so their
-/// `BufferMirror`s converge with the daemon's new content for
-/// these buffers; without queueing, the replicas see the
-/// `CellDelta` repaint but their mirrors permanently desync.
+/// The three Rust renders (`*help*`, `*workers*`, `*pmacs-instance*`)
+/// get upgraded to CRDT-backed at every replica's attach via
+/// `send_buffer_snapshots`, and each regenerate is
+/// `Buffer::set_generated_contents`'s one `Replace` (E8d.3): zero edits
+/// when the text is already shown, one otherwise, carrying `crdt_op`.
+/// Until E8d fix round 2 this step queued that op and rebuilt the
+/// windows' text views from scratch (`EditorCore::rebuild_views_for`,
+/// since removed) and told nothing else: the owner's pass found a Rust
+/// help refresh reaching no window overlay and leaving accepted search
+/// ranges current over text the refresh had removed, where the Lua
+/// `pmacs.buffer.set_generated_contents` binding, through
+/// `notify_buffer_edit_to_windows`, reaches both. One path now.
 ///
-/// Caller: every site in `lua_bindings.rs` that drives one of the
-/// render functions. The render functions return their Edits
-/// alongside the `BufferId` so this helper can queue them via
-/// `EditorCore::queue_daemon_origin_crdt_op`.
+/// The round-trip registration lives here because the registry helper
+/// (`BufferRegistry::replace_generated`) holds no core: the rope lock it
+/// leaves refuses an edit at the daemon, and the round-trip mark is what
+/// stops a semantic frontend applying a typed key to its mirror first
+/// (the owner's pass over E8d: the GPU inserted `X` into its mirror of
+/// `*help*`, the daemon refused the op as read-only, and the mirror
+/// diverged). The Lua writers (dired, git, listview, compile, `*help*`'s
+/// `_show_help`) register it themselves beside their locks.
 ///
-/// This is also where the three Rust renders register round-trip
-/// input (`EditorCore::set_round_trip_input`), the invariant's second
-/// layer: the rope lock `BufferRegistry::replace_generated` leaves
-/// refuses an edit at the daemon, and the round-trip mark is what stops
-/// a semantic frontend applying a typed key to its mirror first. The
-/// registry helper cannot register it (it holds no core), so the one
-/// binding-side step every render passes through does, on every render
-/// and not only on one that produced an edit: the set is keyed by
-/// buffer id and pruned on kill, and a buffer recreated after `q` must
-/// be registered again. The owner's pass over E8d drove the gap: the
-/// GPU inserted `X` into its mirror of `*help*`, the daemon refused the
-/// op as read-only, and the mirror diverged. The Lua writers (dired,
-/// git, listview, compile, `*help*`'s `_show_help`) register it
-/// themselves beside their locks.
+/// Caller: every site in `lua_bindings.rs` that drives one of the render
+/// functions, on every render and not only one that produced an edit:
+/// the round-trip set is keyed by buffer id and pruned on kill, so a
+/// buffer recreated after `q` must be registered again.
 ///
-/// No-op when:
-/// - No `SharedCore` is registered as Lua app data (early-stage
-///   tests use the registry without an editor core).
-/// - The edits' buffer wasn't CRDT-backed (`queue_daemon_origin_crdt_op`
-///   itself early-returns when the edit has no `crdt_op`).
-fn queue_generated_buffer_edits(lua: &Lua, buffer_id: BufferId, edits: &[crate::rope::Edit]) {
-    let Some(core) = lua.app_data_ref::<SharedCore>() else {
-        return;
-    };
-    let mut core = core.borrow_mut();
-    core.set_round_trip_input(buffer_id, true);
-    for edit in edits {
-        core.queue_daemon_origin_crdt_op(buffer_id, edit);
+/// No-op when no `SharedCore` is registered as Lua app data (early-stage
+/// tests use the registry without an editor core). An edit without a
+/// `crdt_op` (the buffer not yet CRDT-backed) is told to the windows and
+/// queued to nobody, as `queue_daemon_origin_crdt_op` arranges.
+fn fan_out_generated_render(lua: &Lua, buffer_id: BufferId, edits: &[crate::rope::Edit]) {
+    {
+        let Some(core) = lua.app_data_ref::<SharedCore>() else {
+            return;
+        };
+        core.borrow_mut().set_round_trip_input(buffer_id, true);
     }
-}
-
-fn rebuild_generated_buffer_views(lua: &Lua, buffer_id: BufferId) {
-    let Some(core) = lua.app_data_ref::<SharedCore>() else {
-        return;
-    };
-    core.borrow_mut().rebuild_views_for(buffer_id);
+    for edit in edits {
+        notify_buffer_edit_to_windows(lua, buffer_id, edit);
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -6496,8 +6472,7 @@ fn install_help_module(
                     help::render_command(&mut r, &c, &k, &name)
                 };
                 if let Some((id, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *id, edits);
-                    rebuild_help_buffer_views(lua, *id);
+                    fan_out_generated_render(lua, *id, edits);
                 }
                 Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
@@ -6533,8 +6508,7 @@ fn install_help_module(
                     help::render_key(&mut r, &c, &k, active_buffer, active_modes, &sequence)
                 };
                 if let Some((id, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *id, edits);
-                    rebuild_help_buffer_views(lua, *id);
+                    fan_out_generated_render(lua, *id, edits);
                 }
                 Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
@@ -6551,8 +6525,7 @@ fn install_help_module(
                     help::render_buffer(&mut r, id.0)
                 };
                 if let Some((rid, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *rid, edits);
-                    rebuild_help_buffer_views(lua, *rid);
+                    fan_out_generated_render(lua, *rid, edits);
                 }
                 Ok(result.map(|(rid, _)| BufferIdLua(rid)))
             })?,
@@ -6571,8 +6544,7 @@ fn install_help_module(
                     help::render_mode(&mut r, &k, &name)
                 };
                 if let Some((id, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *id, edits);
-                    rebuild_help_buffer_views(lua, *id);
+                    fan_out_generated_render(lua, *id, edits);
                 }
                 Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
@@ -6591,8 +6563,7 @@ fn install_help_module(
                     help::render_hook(&mut r, &h, &name)
                 };
                 if let Some((id, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *id, edits);
-                    rebuild_help_buffer_views(lua, *id);
+                    fan_out_generated_render(lua, *id, edits);
                 }
                 Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
@@ -6609,8 +6580,7 @@ fn install_help_module(
                     help::render_view(&mut r, id.0)
                 };
                 if let Some((rid, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *rid, edits);
-                    rebuild_help_buffer_views(lua, *rid);
+                    fan_out_generated_render(lua, *rid, edits);
                 }
                 Ok(result.map(|(rid, _)| BufferIdLua(rid)))
             })?,
@@ -6634,8 +6604,7 @@ fn install_help_module(
                     help::follow_link_at(&mut r, &c, &k, &h, cursor)
                 };
                 if let Some((id, edits)) = result.as_ref() {
-                    queue_generated_buffer_edits(lua, *id, edits);
-                    rebuild_help_buffer_views(lua, *id);
+                    fan_out_generated_render(lua, *id, edits);
                 }
                 Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
@@ -7948,10 +7917,7 @@ pub fn install_async(
             lua.create_function(move |lua, ()| {
                 let snap = rt.workers_snapshot();
                 let (id, edits) = workers_buffer::render(&mut reg.borrow_mut(), &snap);
-                queue_generated_buffer_edits(lua, id, &edits);
-                if !edits.is_empty() {
-                    rebuild_generated_buffer_views(lua, id);
-                }
+                fan_out_generated_render(lua, id, &edits);
                 Ok(BufferIdLua(id))
             })?,
         )?;
