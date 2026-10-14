@@ -14,6 +14,11 @@
 //! - E8d.2: `EditorCore::undo` and `redo` told the text view alone and
 //!   clamped the cursor alone, where every forward edit reaches every
 //!   overlay and clamps the selection and `view_top` too.
+//! - E8d.3: `*help*`, `*workers*` and `*pmacs-instance*` were replaced
+//!   by a `Delete` then an `Insert` through `apply_edit`, never through
+//!   `Buffer::set_generated_contents`, the one authorized write
+//!   (`docs/invariants.md`), so they stayed writable with a history
+//!   that reached the rope.
 
 #![cfg(unix)]
 
@@ -336,4 +341,286 @@ fn e8d_1_a_respawn_whose_executable_is_gone_is_told_as_a_crash_and_re_armed() {
         mgr.borrow().attempt(sid)
     );
     let _ = mgr.borrow_mut().stop(sid);
+}
+
+// ---------------------------------------------------------------------------
+// E8d.3 --- generated buffers through the primitive
+// ---------------------------------------------------------------------------
+
+fn alt(s: &mut EditorState, c: char) {
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Char(c), KeyModifiers::ALT));
+}
+
+fn active_name(s: &EditorState) -> String {
+    eval(
+        s,
+        "return pmacs.describe.buffer(pmacs.window.buffer()).name",
+    )
+}
+
+/// The text of the buffer named `name`, or empty when there is none.
+fn named_text(s: &EditorState, name: &str) -> String {
+    eval(
+        s,
+        &format!(
+            "for _, id in ipairs(pmacs.buffer.list()) do
+               if pmacs.describe.buffer(id).name == {name:?} then
+                 return id:slice(0, id:len())
+               end
+             end
+             return ''"
+        ),
+    )
+}
+
+/// Whether the buffer named `name` reads as modified.
+fn named_modified(s: &EditorState, name: &str) -> bool {
+    eval(
+        s,
+        &format!(
+            "for _, id in ipairs(pmacs.buffer.list()) do
+               local d = pmacs.describe.buffer(id)
+               if d.name == {name:?} then return d.modified end
+             end
+             return false"
+        ),
+    )
+}
+
+fn status(s: &EditorState) -> String {
+    s.core.borrow().status.clone()
+}
+
+/// `*help*` through its Rust renderer (`pmacs.help.show_command`, the
+/// seam a config or `M-:` reaches; no shipped command binds it): `M-x
+/// buffer.undo` leaves it intact (its history is cleared by the
+/// primitive, where the delete-then-insert pair left two groups for the
+/// undo to pop), an ordinary insert is refused (read-only), and the Lua
+/// renderer (`pmacs.editor._show_help`, behind `help.list-commands` and
+/// the describe commands) still writes it, through the same primitive.
+#[test]
+fn e8d_3_help_is_read_only_with_no_history_and_both_renderers_write_it() {
+    let mut s = editor();
+    exec(
+        &s,
+        "pmacs.window.switch_buffer(pmacs.help.show_command('cursor.left'))",
+    );
+    assert_eq!(active_name(&s), "*help*", "premise: help shows");
+    let shown = named_text(&s, "*help*");
+    assert!(
+        shown.contains("Command: cursor.left"),
+        "premise: the Rust renderer wrote the command's help; got {shown:?}"
+    );
+
+    undo(&mut s);
+    assert_eq!(
+        named_text(&s, "*help*"),
+        shown,
+        "M-x buffer.undo leaves the generated text intact; status {:?}",
+        status(&s)
+    );
+
+    type_str(&mut s, "NOTE");
+    assert_eq!(
+        named_text(&s, "*help*"),
+        shown,
+        "an ordinary insert into *help* is refused"
+    );
+    assert!(!named_modified(&s, "*help*"), "and it reads clean");
+
+    // The Lua renderer writes the same buffer through the same primitive.
+    exec(&s, "pmacs.editor._show_help('E8d: the Lua renderer\\n')");
+    assert_eq!(
+        named_text(&s, "*help*"),
+        "E8d: the Lua renderer\n",
+        "the Lua renderer replaces the read-only *help*"
+    );
+    type_str(&mut s, "NOTE");
+    assert_eq!(
+        named_text(&s, "*help*"),
+        "E8d: the Lua renderer\n",
+        "and leaves it read-only"
+    );
+}
+
+/// `*workers*` and `*pmacs-instance*`, through their commands: each is
+/// read-only after its render and an insert is refused.
+#[test]
+fn e8d_3_workers_and_instance_buffers_are_read_only() {
+    for (command, name) in [
+        ("editor.list-workers", "*workers*"),
+        ("editor.describe-instance-buffer", "*pmacs-instance*"),
+    ] {
+        let mut s = editor();
+        alt(&mut s, 'x');
+        type_str(&mut s, command);
+        press(&mut s, KeyCode::Enter);
+        assert_eq!(active_name(&s), name, "premise: {command} shows {name}");
+        let shown = named_text(&s, name);
+        assert!(!shown.is_empty(), "premise: {name} holds its text");
+        type_str(&mut s, "NOTE");
+        assert_eq!(
+            named_text(&s, name),
+            shown,
+            "an ordinary insert into {name} is refused"
+        );
+        undo(&mut s);
+        assert_eq!(
+            named_text(&s, name),
+            shown,
+            "and M-x buffer.undo leaves {name} intact"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A real daemon and synthetic replicas (the m10_11 idiom), for the rows
+// whose subject is the daemon's own behavior.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "crdt")]
+mod daemon_rows {
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    use pmacs::buffer::BufferId;
+    use pmacs::crdt::CrdtState;
+    use pmacs::protocol::{FrontendEvent, FrontendId, InstanceMessage, Key, KeyEvent, Modifiers};
+    use pmacs::transport::{read_message, write_message};
+
+    use super::common::daemon::{TestDaemon, attach_multi};
+
+    pub struct Replica {
+        pub stream: UnixStream,
+        pub fid: FrontendId,
+        /// The daemon's first snapshot: the document buffer the replica
+        /// attached to.
+        pub document: BufferId,
+    }
+
+    /// Attach a multi-frontend, CRDT-replica frontend and read the
+    /// daemon's initial `BufferSnapshot`, which it always sends first.
+    pub fn attach(daemon: &TestDaemon) -> Replica {
+        let (hello, mut stream) = attach_multi(daemon);
+        let fid = hello.assigned_frontend_id;
+        let document = match read_message::<InstanceMessage>(&mut stream)
+            .expect("read the initial BufferSnapshot")
+        {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => buffer_id,
+            other => panic!("expected the initial BufferSnapshot, got {other:?}"),
+        };
+        Replica {
+            stream,
+            fid,
+            document,
+        }
+    }
+
+    pub fn send_key(replica: &mut Replica, key: Key, mods: Modifiers) {
+        write_message(
+            &mut replica.stream,
+            &FrontendEvent::Key(KeyEvent {
+                frontend_id: replica.fid,
+                key,
+                mods,
+                timestamp_ns: 0,
+            }),
+        )
+        .expect("send Key");
+    }
+
+    /// `M-x <name> RET`.
+    pub fn run_command(replica: &mut Replica, name: &str) {
+        send_key(replica, Key::Char('x'), Modifiers::ALT);
+        for ch in name.chars() {
+            send_key(replica, Key::Char(ch), Modifiers::NONE);
+        }
+        send_key(replica, Key::Enter, Modifiers::NONE);
+    }
+
+    /// Read the stream until `pick` accepts a message, or `timeout`
+    /// lapses (panicking, naming `what`).
+    pub fn read_until<T>(
+        replica: &mut Replica,
+        timeout: Duration,
+        what: &str,
+        mut pick: impl FnMut(InstanceMessage) -> Option<T>,
+    ) -> T {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for {what}");
+            replica
+                .stream
+                .set_read_timeout(Some(remaining.min(Duration::from_millis(200))))
+                .ok();
+            if let Ok(message) = read_message::<InstanceMessage>(&mut replica.stream)
+                && let Some(found) = pick(message)
+            {
+                return found;
+            }
+        }
+    }
+
+    /// A daemon whose config defines two commands rendering `*help*`
+    /// through its Rust renderer, so a replica reaches the renderer by
+    /// `M-x` alone.
+    const HELP_COMMANDS_CONFIG: &str = "\
+pmacs.command.define { name = 'e8d.help-a', description = 'cursor.left in *help*',
+  fn = function() pmacs.window.switch_buffer(pmacs.help.show_command('cursor.left')) end }
+pmacs.command.define { name = 'e8d.help-b', description = 'cursor.right in *help*',
+  fn = function() pmacs.window.switch_buffer(pmacs.help.show_command('cursor.right')) end }
+";
+
+    /// The CRDT fan-out of the primitive's one `Replace` reaches a
+    /// replica: the replica mirrors `*help*` from its snapshot, and the
+    /// next render's edit converges the mirror on the new text.
+    #[test]
+    fn e8d_3_the_one_replace_edit_of_help_reaches_a_replica() {
+        let daemon = TestDaemon::spawn_with_config(HELP_COMMANDS_CONFIG);
+        let mut replica = attach(&daemon);
+        let document = replica.document;
+
+        run_command(&mut replica, "e8d.help-a");
+        let (help, snapshot) = read_until(
+            &mut replica,
+            Duration::from_secs(10),
+            "the *help* BufferSnapshot",
+            |message| match message {
+                InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot,
+                } if buffer_id != document => Some((buffer_id, crdt_snapshot)),
+                _ => None,
+            },
+        );
+        let mirror = CrdtState::new(replica.fid.0).expect("CrdtState::new");
+        mirror
+            .import_snapshot(&snapshot)
+            .expect("import the *help* snapshot");
+        let first = mirror.materialize_string();
+        assert!(
+            first.contains("Command: cursor.left"),
+            "premise: the replica mirrors *help*; got {first:?}"
+        );
+
+        run_command(&mut replica, "e8d.help-b");
+        let text = read_until(
+            &mut replica,
+            Duration::from_secs(10),
+            "the CrdtOp replacing *help*",
+            |message| match message {
+                InstanceMessage::CrdtOp { buffer_id, op } if buffer_id == help => {
+                    mirror.import_updates(&op.bytes).expect("import the op");
+                    let text = mirror.materialize_string();
+                    text.contains("Command: cursor.right").then_some(text)
+                }
+                _ => None,
+            },
+        );
+        assert!(
+            !text.contains("Command: cursor.left"),
+            "the whole replacement reached the mirror; got {text:?}"
+        );
+    }
 }

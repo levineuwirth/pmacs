@@ -25,7 +25,7 @@
 
 use std::fmt::Write;
 
-use crate::buffer::{Buffer, BufferId, EditOp};
+use crate::buffer::{Buffer, BufferId};
 use crate::buffer_registry::BufferRegistry;
 use crate::command::{CommandRegistry, SourceLocation};
 use crate::hook::{Hook, HookRegistry};
@@ -43,8 +43,8 @@ pub const HELP_BUFFER_NAME: &str = "*help*";
 ///
 /// # Post-audit-round-6 F31 — broadcast queueing
 ///
-/// Returning the Edits (zero, one, or two — Delete for old
-/// non-empty content + Insert for new non-empty content) lets the
+/// Returning the Edits (zero or one: the primitive's single
+/// `Replace`, absent when the text is already shown) lets the
 /// caller queue any `crdt_op` they carry via
 /// `EditorCore::queue_daemon_origin_crdt_op`. Without this, replica
 /// frontends see the `*help*` repaint as `CellDelta` but never
@@ -347,35 +347,16 @@ fn write_mode_bindings(out: &mut String, mode: &str, map: &Keymap) {
     }
 }
 
+/// Replace `*help*` through the primitive (E8d.3,
+/// [`BufferRegistry::replace_generated`]): read-only, history cleared,
+/// one `Replace`, clean. The edit list holds that one edit, or nothing
+/// when the text is already shown.
 fn replace_help_buffer(
     registry: &mut BufferRegistry,
     text: &str,
 ) -> (BufferId, Vec<crate::rope::Edit>) {
-    let id = registry
-        .find_by_name(HELP_BUFFER_NAME)
-        .unwrap_or_else(|| registry.create(HELP_BUFFER_NAME));
-    let buf = registry.get_mut(id).expect("just resolved");
-    let mut edits = Vec::new();
-    if !buf.is_empty() {
-        let len = buf.len();
-        if let Ok(edit) = buf.apply_edit(EditOp::Delete {
-            range: crate::rope::Range::new(0, len),
-        }) {
-            edits.push(edit);
-        }
-    }
-    if !text.is_empty()
-        && let Ok(edit) = buf.apply_edit(EditOp::Insert {
-            pos: 0,
-            bytes: text.as_bytes(),
-        })
-    {
-        edits.push(edit);
-    }
-    // The help buffer is regenerated content; mark it clean so the
-    // modeline doesn't claim it has unsaved changes.
-    buf.mark_clean();
-    (id, edits)
+    let (id, edit) = registry.replace_generated(HELP_BUFFER_NAME, text);
+    (id, edit.into_iter().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -816,14 +797,11 @@ mod tests {
         // help buffer pointing at another, and follow it.
         render_command(&mut reg, &cmds, &kms, "alpha").unwrap();
         let id = reg.find_by_name(HELP_BUFFER_NAME).unwrap();
-        let suffix = "\nrelated: [command: beta]\n";
+        // `*help*` is read-only since E8d.3; the cross-reference is
+        // written the way every generated write is.
+        let body = read_help(&reg) + "\nrelated: [command: beta]\n";
         let buf = reg.get_mut(id).unwrap();
-        let pos = buf.len();
-        buf.apply_edit(EditOp::Insert {
-            pos,
-            bytes: suffix.as_bytes(),
-        })
-        .unwrap();
+        buf.set_generated_contents(body.as_bytes()).unwrap();
         // Find cursor on the cross-ref.
         let body = read_help(&reg);
         let cursor = body.find("beta").unwrap() as u64;

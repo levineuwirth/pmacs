@@ -1516,16 +1516,14 @@ end
 
 local function show_help_text(text)
   local buf, fresh = find_or_create_help_buffer()
-  -- `buf:delete(0, len)` matches `editor.list-buffers` render_list — we
-  -- replace contents wholesale rather than diffing, since *help* is
-  -- always reflowed for the new subject.
-  local len = buf:len()
-  if len > 0 then buf:delete(0, len) end
-  if #text > 0 then buf:insert(0, text) end
-  -- E8c: the editor's text, not the user's; left modified, `*help*`
-  -- held `C-x C-c` at "Modified buffers exist (*help*)" and `q` at an
-  -- "unsaved changes" question.
-  buf:mark_clean()
+  -- E8d.3: through the one authorized write (`docs/invariants.md`,
+  -- Generated buffers), as the Rust renderers of `*help*` write since
+  -- the same row: read-only, history cleared, one `Replace`, clean
+  -- (so `C-x C-c` and `q` ask nothing, E8c). The delete-then-insert
+  -- pair this replaces left the buffer writable with a history that
+  -- reached the rope, and would be refused now that the Rust side
+  -- leaves `*help*` read-only.
+  pmacs.buffer.set_generated_contents(buf, text)
   if fresh or help_buffer_id ~= buf then
     pcall(function()
       pmacs.keymap.unbind { scope = "buffer", buffer = buf, sequence = "q" }
@@ -1547,11 +1545,11 @@ end
 --- rather than growing a second help surface — `commands/default.lua`
 --- loads before the runtime chunks, so the seam is present by then.
 ---
---- Inherits this mechanism's two known gaps, recorded rather than
---- papered over: it writes with `delete`/`insert` instead of
---- `set_generated_contents` (so the buffer stays ordinarily editable and
---- keeps its undo history), and it finds `*help*` BY NAME, so a foreign
---- buffer of that name would be cleared.
+--- Inherits this mechanism's one remaining known gap, recorded rather
+--- than papered over: it finds `*help*` BY NAME, so a foreign buffer of
+--- that name would be cleared. (The other, writing with
+--- `delete`/`insert` instead of `set_generated_contents`, closed at
+--- E8d.3.)
 function pmacs.editor._show_help(text)
   show_help_text(text)
 end
