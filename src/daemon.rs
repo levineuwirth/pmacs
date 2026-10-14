@@ -1920,21 +1920,22 @@ fn dispatcher_loop(
             }
 
             if write_failed {
-                // Drop the broken connection.
-                streams.remove(fid);
-                render_states.remove(fid);
-                semantic_states.remove(fid);
-                term_sizes.remove(fid);
-                last_dispatch_idle_sent.remove(fid);
-                last_active_buffer_sent.remove(fid);
-                terminal_bell_baselines.remove(fid);
-                editor.detach_frontend_input(*fid);
-                session_registry.unregister_session(*fid);
-                editor
-                    .statusline_registry
-                    .borrow_mut()
-                    .detach_frontend(*fid);
-                editor.core.borrow_mut().unregister_frontend_view(*fid);
+                // The broken connection is detached here and now, the
+                // whole way (E8d.4): its reader thread may be blocked
+                // in `read` for as long as the peer holds the socket
+                // open, so its `SessionDetached` can come late or never.
+                detach_frontend(
+                    editor,
+                    &mut render_states,
+                    &mut semantic_states,
+                    &mut streams,
+                    &mut term_sizes,
+                    &mut last_dispatch_idle_sent,
+                    &mut last_active_buffer_sent,
+                    &mut terminal_bell_baselines,
+                    &mut session_registry,
+                    *fid,
+                );
             }
         }
 
@@ -3090,50 +3091,94 @@ fn handle_dispatcher_event(
             }
         }
         DispatcherEvent::SessionDetached { frontend_id } => {
-            // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
-            // and the only one with no later chance at all. End the live
-            // gesture, then pay it, and do BOTH before any teardown: the
-            // next line drops the state holding the record, and
-            // `detach_frontend_input` below releases the terminal
-            // controller the release still needs.
-            if let Some(state) = semantic_states.get_mut(&frontend_id) {
-                let _ = state.cancel_accepted_gesture();
-            }
-            drain_pending_release(editor, semantic_states, frontend_id);
-            render_states.remove(&frontend_id);
-            semantic_states.remove(&frontend_id);
-            streams.remove(&frontend_id);
-            term_sizes.remove(&frontend_id);
-            last_dispatch_idle_sent.remove(&frontend_id);
-            last_active_buffer_sent.remove(&frontend_id);
-            terminal_bell_baselines.remove(&frontend_id);
-            editor.detach_frontend_input(frontend_id);
-            session_registry.unregister_session(frontend_id);
-            editor
-                .statusline_registry
-                .borrow_mut()
-                .detach_frontend(frontend_id);
-            {
-                let mut core = editor.core.borrow_mut();
-                core.unregister_frontend_view(frontend_id);
-                // Kill ring Q#KR11: frontend ids are monotonic, so
-                // per-frontend state must not outlive the session.
-                core.command_history.remove(&frontend_id);
-                // E6c: its open undo run and, on every buffer, its
-                // undo groups --- handed to whoever undoes next, not
-                // dropped, and before the hook below can edit.
-                core.detach_undo_source(frontend_id);
-            }
-            // Q#KR11: let Lua modules holding per-frontend tables
-            // (killring sessions / kill flags) drop this id's entries.
-            // The first frontend-lifecycle hook; carries the raw id.
-            let mut args = mlua::MultiValue::new();
-            args.push_back(mlua::Value::Integer(
-                i64::try_from(frontend_id.0).unwrap_or(i64::MAX),
-            ));
-            editor.lua_host.run_hook("frontend.detached", args);
+            detach_frontend(
+                editor,
+                render_states,
+                semantic_states,
+                streams,
+                term_sizes,
+                last_dispatch_idle_sent,
+                last_active_buffer_sent,
+                terminal_bell_baselines,
+                session_registry,
+                frontend_id,
+            );
         }
     }
+}
+
+/// The one teardown of a frontend's session (E8d.4), run when the tick
+/// loop's write to it fails and when its reader thread reports
+/// `SessionDetached`. Until E8d the write-failure drop removed the
+/// per-frontend maps and nothing else --- a copy of this arm that had
+/// drifted --- so a frontend whose socket died under a write kept its
+/// `command_history` entry, its undo source and its Lua-side tables,
+/// and `frontend.detached` never ran for it unless its reader thread
+/// happened to end too.
+///
+/// A frontend with no registered session is a no-op: the write-failure
+/// drop runs first and the reader's `SessionDetached` follows, so the
+/// second caller finds nothing registered and changes nothing, and the
+/// hook fires once. The eight per-frontend maps stay separate here;
+/// the `Session` struct that would hold them rides E9.
+#[allow(clippy::too_many_arguments)]
+fn detach_frontend(
+    editor: &mut EditorState,
+    render_states: &mut HashMap<FrontendId, RenderState>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+    term_sizes: &mut HashMap<FrontendId, CellSize>,
+    last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
+    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
+    terminal_bell_baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
+    session_registry: &mut SessionRegistry,
+    frontend_id: FrontendId,
+) {
+    if session_registry.session_state(frontend_id).is_none() {
+        return;
+    }
+    // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
+    // and the only one with no later chance at all. End the live
+    // gesture, then pay it, and do BOTH before any teardown: the
+    // next line drops the state holding the record, and
+    // `detach_frontend_input` below releases the terminal
+    // controller the release still needs.
+    if let Some(state) = semantic_states.get_mut(&frontend_id) {
+        let _ = state.cancel_accepted_gesture();
+    }
+    drain_pending_release(editor, semantic_states, frontend_id);
+    render_states.remove(&frontend_id);
+    semantic_states.remove(&frontend_id);
+    streams.remove(&frontend_id);
+    term_sizes.remove(&frontend_id);
+    last_dispatch_idle_sent.remove(&frontend_id);
+    last_active_buffer_sent.remove(&frontend_id);
+    terminal_bell_baselines.remove(&frontend_id);
+    editor.detach_frontend_input(frontend_id);
+    session_registry.unregister_session(frontend_id);
+    editor
+        .statusline_registry
+        .borrow_mut()
+        .detach_frontend(frontend_id);
+    {
+        let mut core = editor.core.borrow_mut();
+        core.unregister_frontend_view(frontend_id);
+        // Kill ring Q#KR11: frontend ids are monotonic, so
+        // per-frontend state must not outlive the session.
+        core.command_history.remove(&frontend_id);
+        // E6c: its open undo run and, on every buffer, its
+        // undo groups --- handed to whoever undoes next, not
+        // dropped, and before the hook below can edit.
+        core.detach_undo_source(frontend_id);
+    }
+    // Q#KR11: let Lua modules holding per-frontend tables
+    // (killring sessions / kill flags) drop this id's entries.
+    // The first frontend-lifecycle hook; carries the raw id.
+    let mut args = mlua::MultiValue::new();
+    args.push_back(mlua::Value::Integer(
+        i64::try_from(frontend_id.0).unwrap_or(i64::MAX),
+    ));
+    editor.lua_host.run_hook("frontend.detached", args);
 }
 
 /// T M10.10: send one `InstanceMessage::BufferSnapshot` per buffer

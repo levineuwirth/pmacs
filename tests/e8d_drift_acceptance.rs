@@ -19,6 +19,10 @@
 //!   `Buffer::set_generated_contents`, the one authorized write
 //!   (`docs/invariants.md`), so they stayed writable with a history
 //!   that reached the rope.
+//! - E8d.4: the daemon's write-failure drop of a frontend removed the
+//!   per-frontend maps and nothing else, where `SessionDetached` also
+//!   cancels the live gesture, drops the command history, hands on the
+//!   undo source and runs `frontend.detached`.
 
 #![cfg(unix)]
 
@@ -621,6 +625,125 @@ pmacs.command.define { name = 'e8d.help-b', description = 'cursor.right in *help
         assert!(
             !text.contains("Command: cursor.left"),
             "the whole replacement reached the mirror; got {text:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // E8d.4 --- one teardown
+    // -----------------------------------------------------------------------
+
+    /// A `frontend.detached` hook that logs the departed id into the
+    /// daemon's isolated home (the undo-across-peers suite's idiom), so
+    /// a test can count the daemon's detaches without editing a buffer.
+    const DETACH_LOG_CONFIG: &str = "\
+pmacs.hook.add('frontend.detached', function(fid)
+  local f = assert(io.open(os.getenv('HOME') .. '/detached.log', 'a'))
+  f:write(tostring(fid), '\\n')
+  f:close()
+end)
+";
+
+    fn detach_log(daemon: &TestDaemon) -> std::path::PathBuf {
+        daemon
+            .socket_path()
+            .parent()
+            .expect("socket parent")
+            .join("detached.log")
+    }
+
+    fn detaches_of(daemon: &TestDaemon, fid: FrontendId) -> usize {
+        std::fs::read_to_string(detach_log(daemon))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| *line == fid.0.to_string())
+            .count()
+    }
+
+    /// Type one character on `replica` and wait for the daemon to answer
+    /// it with any message: the daemon is serving this frontend.
+    fn type_and_hear(replica: &mut Replica, ch: char) {
+        send_key(replica, Key::Char(ch), Modifiers::NONE);
+        read_until(
+            replica,
+            Duration::from_secs(5),
+            "a frame after typing",
+            |m| {
+                matches!(
+                    m,
+                    InstanceMessage::CellDelta { .. }
+                        | InstanceMessage::CrdtOp { .. }
+                        | InstanceMessage::CursorByte { .. }
+                )
+                .then_some(())
+            },
+        );
+    }
+
+    /// A frontend whose socket refuses the daemon's writes while its
+    /// reader stays open (the peer shut its read half down, nothing
+    /// more) is dropped by the tick loop's failed write. That drop is
+    /// the whole detach: `frontend.detached` runs for it, once. The
+    /// reader thread's own `SessionDetached`, when the socket finally
+    /// closes, finds no session and changes nothing.
+    #[test]
+    fn e8d_4_a_frontend_dropped_by_a_failed_write_is_detached_exactly_once() {
+        let daemon = TestDaemon::spawn_with_config(DETACH_LOG_CONFIG);
+        let broken = attach(&daemon);
+        let mut live = attach(&daemon);
+        let broken_fid = broken.fid;
+        // Both are served before anything breaks.
+        type_and_hear(&mut live, 'a');
+
+        // The daemon's next write to `broken` fails with EPIPE; its
+        // reader thread keeps blocking on a socket nobody writes to.
+        broken
+            .stream
+            .shutdown(std::net::Shutdown::Read)
+            .expect("shut the read half");
+        // A shared-buffer edit by the live frontend repaints every
+        // frontend, so the daemon writes to the broken one.
+        type_and_hear(&mut live, 'b');
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while detaches_of(&daemon, broken_fid) == 0 && Instant::now() < deadline {
+            type_and_hear(&mut live, 'c');
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            detaches_of(&daemon, broken_fid),
+            1,
+            "the failed write detaches the frontend the whole way: `frontend.detached` \
+             ran once for {} (log {:?})",
+            broken_fid.0,
+            std::fs::read_to_string(detach_log(&daemon)).unwrap_or_default()
+        );
+
+        // Now the socket closes for good: the reader thread ends and
+        // sends `SessionDetached`, a no-op on the missing session.
+        drop(broken);
+        let settle = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < settle {
+            type_and_hear(&mut live, 'd');
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            detaches_of(&daemon, broken_fid),
+            1,
+            "a later SessionDetached for the dropped frontend changes nothing (log {:?})",
+            std::fs::read_to_string(detach_log(&daemon)).unwrap_or_default()
+        );
+        // The live frontend's own detach is still told, once, when it
+        // leaves: the no-op is per missing session, not per daemon.
+        let live_fid = live.fid;
+        drop(live);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while detaches_of(&daemon, live_fid) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            detaches_of(&daemon, live_fid),
+            1,
+            "the live frontend's detach"
         );
     }
 }
