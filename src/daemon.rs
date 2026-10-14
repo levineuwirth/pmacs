@@ -11033,4 +11033,124 @@ mod tests {
             "the filter must be scoped to the popup variant"
         );
     }
+
+    /// E8d.4's `command_history` clause, asserted (review 1's Low 2).
+    /// The phase's daemon row reads `frontend.detached` through a hook
+    /// on a real daemon, where another frontend's boundary has no Lua
+    /// accessor; this row reaches `detach_frontend` itself, the one
+    /// teardown both the tick loop's write-failure drop and the
+    /// reader's `SessionDetached` call, in the write-failure shape (the
+    /// loop's own maps, the peer gone): the frontend's `command_history`
+    /// entry is gone, its session unregistered, its maps emptied, and
+    /// `frontend.detached` has run once with its id. The second call,
+    /// the reader's, finds no session and changes nothing: the hook has
+    /// still run once.
+    #[test]
+    fn e8d_4_detach_frontend_drops_the_command_history_and_runs_the_hook_once() {
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                pmacs.lsp.config = {}
+                DETACHED = {}
+                pmacs.hook.add("frontend.detached", function(fid)
+                  DETACHED[#DETACHED + 1] = fid
+                end)
+                "#,
+            )
+            .exec()
+            .expect("install the counting hook");
+        let fid = FrontendId(812);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        editor
+            .core
+            .borrow_mut()
+            .rotate_command(fid, "edit.kill-line");
+        assert!(
+            editor.core.borrow().command_history.contains_key(&fid),
+            "premise: the frontend has a command boundary"
+        );
+
+        // The write-failure shape: the peer has gone away and the next
+        // write to `server` would fail; the maps are the loop's own.
+        let (server, client) = UnixStream::pair().expect("socketpair");
+        drop(client);
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        let mut streams = HashMap::from([(fid, server)]);
+        let mut term_sizes = HashMap::from([(fid, CellSize::new(24, 80))]);
+        let mut last_dispatch_idle_sent = HashMap::from([(fid, true)]);
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+        session_registry.register_session(
+            fid,
+            crate::presence::SessionState::new(
+                PROTOCOL_VERSION,
+                crate::protocol::NegotiatedCapabilities {
+                    multi_frontend: true,
+                    crdt_replica: false,
+                    semantic_render: false,
+                },
+                0,
+            ),
+        );
+        let detached = |editor: &EditorState| -> Vec<i64> {
+            editor
+                .lua_host
+                .lua()
+                .load("return DETACHED")
+                .eval()
+                .expect("read the hook's log")
+        };
+
+        macro_rules! detach {
+            () => {
+                detach_frontend(
+                    &mut editor,
+                    &mut render_states,
+                    &mut semantic_states,
+                    &mut streams,
+                    &mut term_sizes,
+                    &mut last_dispatch_idle_sent,
+                    &mut last_active_buffer_sent,
+                    &mut terminal_bell_baselines,
+                    &mut session_registry,
+                    fid,
+                )
+            };
+        }
+
+        detach!();
+        assert!(
+            !editor.core.borrow().command_history.contains_key(&fid),
+            "E8d.4: a frontend dropped by a failed write leaves no `command_history` entry"
+        );
+        assert!(
+            session_registry.session_state(fid).is_none(),
+            "and its session is unregistered"
+        );
+        assert!(
+            streams.is_empty() && term_sizes.is_empty() && last_dispatch_idle_sent.is_empty(),
+            "and the loop's maps no longer hold it"
+        );
+        assert_eq!(
+            detached(&editor),
+            vec![812],
+            "and `frontend.detached` ran once, with its id"
+        );
+
+        // The reader thread's `SessionDetached` follows: nothing is
+        // registered, so nothing changes and the hook does not run again.
+        detach!();
+        assert_eq!(
+            detached(&editor),
+            vec![812],
+            "a later `SessionDetached` for the same frontend changes nothing"
+        );
+        assert!(session_registry.session_state(fid).is_none());
+    }
 }
