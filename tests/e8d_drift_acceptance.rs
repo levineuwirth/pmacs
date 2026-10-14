@@ -26,6 +26,10 @@
 //! - E8d.5: `lean.lua`'s root walk carried the `parent_of` and
 //!   `within_boundary` copies `lsp.lua`'s latex resolver had fixed:
 //!   `/` was never examined, and a `/` boundary silenced the walk.
+//! - E8d.6: `project-search.quit` lacked the side-window branch that
+//!   `listview.quit`, `dired.quit` and `compile.quit` carry, so `q` in
+//!   a bottom-panel `*search-results*` switched buffers inside the
+//!   panel instead of quitting the window.
 
 #![cfg(unix)]
 
@@ -92,11 +96,14 @@ fn active_text(s: &EditorState) -> String {
 }
 
 /// An isolated editor (`common::iso`): no user `init.lua`, no real
-/// data root, no language server.
+/// data root, no language server, and a declared frame geometry (a
+/// grid frontend's frame size is its geometry declaration, which a
+/// side window needs before it can be placed).
 fn editor() -> EditorState {
     let s = EditorState::new_with_roots(&common::iso::roots());
     s.lua_host.reopen_init_phase_for_testing();
     exec(&s, "pmacs.lsp.config = {}");
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::cell::CellSize::new(24, 80));
     s
 }
 
@@ -790,5 +797,103 @@ fn e8d_5_a_lean_toolchain_under_a_root_boundary_roots_the_file() {
         root,
         pkg.display().to_string(),
         "the walk under a `/` boundary reaches the marker beside the file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E8d.6 --- project-search.quit
+// ---------------------------------------------------------------------------
+
+fn pump_until(s: &mut EditorState, timeout: Duration, pred: impl Fn(&EditorState) -> bool) -> bool {
+    let stop = Instant::now() + timeout;
+    while !pred(s) {
+        if Instant::now() >= stop {
+            return false;
+        }
+        s.tick_processes();
+        s.tick_async();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+fn side_window(s: &EditorState) -> Option<pmacs::window::WindowId> {
+    s.core.borrow().side_window_for(FrontendId::LOCAL)
+}
+
+/// `q` in `*search-results*`: in a full window it restores the
+/// previous buffer, as before; in a side window it quits the window
+/// (`pmacs.window.quit`), as `listview.quit`, `dired.quit` and
+/// `compile.quit` do. At `main` the side-window `q` switched the panel
+/// slot to the previous buffer and left the side window standing.
+#[test]
+fn e8d_6_q_in_search_results_quits_a_side_window_and_restores_a_full_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let notes = root.join("notes.txt");
+    std::fs::write(&notes, "a needle here\n").expect("notes");
+    // A file buffer's name is its absolute path.
+    let notes_name = notes.display().to_string();
+    let mut s = editor();
+    exec(
+        &s,
+        &format!("pmacs.buffer.find_or_open(\"{}\")", lua_str(&notes)),
+    );
+    assert_eq!(active_name(&s), notes_name, "premise: the file is shown");
+    exec(
+        &s,
+        &format!(
+            "pmacs.project.search('needle', {{ root = \"{}\" }})",
+            lua_str(&root)
+        ),
+    );
+    assert_eq!(
+        active_name(&s),
+        "*search-results*",
+        "premise: the search shows its results"
+    );
+    assert!(
+        pump_until(&mut s, Duration::from_secs(20), |s| {
+            named_text(s, "*search-results*").contains("notes.txt")
+        }),
+        "premise: the search lists its match"
+    );
+
+    // A full window: `q` restores the previous buffer.
+    press(&mut s, KeyCode::Char('q'));
+    assert_eq!(
+        active_name(&s),
+        notes_name,
+        "`q` in a full window restores the buffer the search was run from"
+    );
+
+    // A side window: `q` quits the window.
+    exec(
+        &s,
+        "for _, id in ipairs(pmacs.buffer.list()) do
+           if pmacs.describe.buffer(id).name == '*search-results*' then
+             pmacs.window.display(id, { side = 'bottom', select = true })
+           end
+         end",
+    );
+    assert!(
+        side_window(&s).is_some(),
+        "premise: the results are in a side window"
+    );
+    assert_eq!(
+        active_name(&s),
+        "*search-results*",
+        "premise: and it is selected"
+    );
+    press(&mut s, KeyCode::Char('q'));
+    assert_eq!(
+        side_window(&s),
+        None,
+        "`q` in a side window routes through window.quit, which deletes it"
+    );
+    assert_eq!(
+        active_name(&s),
+        notes_name,
+        "and focus lands back in the document window"
     );
 }

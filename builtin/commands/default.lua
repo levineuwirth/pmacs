@@ -1417,6 +1417,18 @@ cmd { name = "project-search.quit",
       description = "Leave *search-results*, restoring the previous buffer.",
       fn = function()
         if not active_is_search_panel() then return end
+        -- Bottom-panel arc (Q#BP11b), the branch `listview.quit`,
+        -- `dired.quit` and `compile.quit` carry and this copy lacked
+        -- (E8d.6): in a side window `q` is the window's own quit,
+        -- deleting or restoring the presentation, rather than a buffer
+        -- switch that left the panel slot holding a source buffer.
+        -- Capability fallback and a document-window placement keep the
+        -- previous-buffer switch below.
+        local params = pmacs.window.params()
+        if params and params.side and params.quit_action then
+          pmacs.window.quit()
+          return
+        end
         local target = search_panel.prev
         if not (target and target:is_valid()) then
           for _, id in ipairs(pmacs.buffer.list()) do
