@@ -23,6 +23,9 @@
 //!   per-frontend maps and nothing else, where `SessionDetached` also
 //!   cancels the live gesture, drops the command history, hands on the
 //!   undo source and runs `frontend.detached`.
+//! - E8d.5: `lean.lua`'s root walk carried the `parent_of` and
+//!   `within_boundary` copies `lsp.lua`'s latex resolver had fixed:
+//!   `/` was never examined, and a `/` boundary silenced the walk.
 
 #![cfg(unix)]
 
@@ -746,4 +749,46 @@ end)
             "the live frontend's detach"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// E8d.5 --- lean's root walk
+// ---------------------------------------------------------------------------
+
+fn lua_str(path: &std::path::Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+/// Under a `/` search boundary, a `lean-toolchain` beside the file
+/// roots it at its directory. At `main` the boundary test compared
+/// string prefixes, so `/` (needle `//`) put every ancestor out of
+/// bounds and the walk returned nothing.
+#[test]
+fn e8d_5_a_lean_toolchain_under_a_root_boundary_roots_the_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pkg = std::fs::canonicalize(dir.path())
+        .expect("canonical")
+        .join("pkg");
+    std::fs::create_dir_all(&pkg).expect("pkg");
+    std::fs::write(pkg.join("lean-toolchain"), "leanprover/lean4:v4.9.0\n").expect("marker");
+    let file = pkg.join("A.lean");
+    std::fs::write(&file, "def a := 1\n").expect("file");
+
+    let s = editor();
+    exec(&s, "pmacs.project.set_search_boundary(\"/\")");
+    let root: String = eval(
+        &s,
+        &format!(
+            "return tostring(pmacs.lean.root_for(\"{}\"))",
+            lua_str(&file)
+        ),
+    );
+    assert_eq!(
+        root,
+        pkg.display().to_string(),
+        "the walk under a `/` boundary reaches the marker beside the file"
+    );
 }
