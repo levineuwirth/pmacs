@@ -2203,13 +2203,13 @@ impl EditorCore {
     /// Force every window currently showing `buffer_id` to rebuild
     /// its [`TextView`] from scratch.
     ///
-    /// Used by code paths that rewrite a buffer end-to-end without
-    /// emitting a useful [`Edit`] (the help renderer issues a
-    /// delete-all + insert pair on `*help*`; `*buffer-list*` is
-    /// regenerated from scratch on every C-x C-b). Calling
-    /// [`Self::notify_buffer_edit`] for each step works but is more
-    /// fiddly; rebuild is simpler and still O(buffer length) which is
-    /// what an end-to-end rewrite cost anyway.
+    /// Used by code paths that rewrite a buffer end-to-end through
+    /// `Buffer::set_generated_contents`, whose one `Replace` is fanned
+    /// out to replicas by `queue_generated_buffer_edits` and not
+    /// through [`Self::notify_buffer_edit`]: the `*help*`, `*workers*`
+    /// and `*pmacs-instance*` renders since E8d.3. Rebuilding is
+    /// O(buffer length), which is what an end-to-end rewrite cost
+    /// anyway, and it re-clamps a window the edit did not reach.
     ///
     /// Cursor and `view_top` are clamped to the new buffer extent so
     /// they don't dangle past the end after a shrinking rewrite.

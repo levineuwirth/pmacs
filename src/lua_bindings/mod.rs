@@ -2081,9 +2081,10 @@ pub(crate) fn run_hook_if_defined(lua: &Lua, name: &str, args: mlua::MultiValue)
 /// Force any window showing `buffer_id` to rebuild its `TextView`.
 ///
 /// Called by `pmacs.help.*` after a render rewrites `*help*` end to
-/// end. The render does delete-all + insert; tracking the individual
-/// edits would be more code than this is worth, and a full rebuild
-/// is what was implicitly happening anyway. Without this, the
+/// end. The render is one `Replace` through
+/// `Buffer::set_generated_contents` (E8d.3), queued to replicas by
+/// `queue_generated_buffer_edits` and not told to the windows; a full
+/// rebuild is what an end-to-end rewrite costs anyway. Without this, the
 /// regression we hit on `*errors*` and `*buffer-list*` recurs on
 /// `*help*`: a window already displaying it keeps the pre-render
 /// line cache and cursor motions stop updating the screen.
@@ -3540,8 +3541,9 @@ fn install_instance_show_binding(lua: &Lua, registry: &SharedRegistry) -> mlua::
 /// The three generated buffers (`*help*`, `*workers*`,
 /// `*pmacs-instance*`) get upgraded to CRDT-backed at every
 /// replica's attach via `send_buffer_snapshots`. Each subsequent
-/// regenerate (delete-all + insert-new) produces zero, one, or two
-/// `Edit`s carrying `crdt_op`. Replicas need every `CrdtOp` so their
+/// regenerate is `Buffer::set_generated_contents`'s one `Replace`
+/// (E8d.3), so a render produces zero `Edit`s (the text already shown)
+/// or one carrying `crdt_op`. Replicas need every `CrdtOp` so their
 /// `BufferMirror`s converge with the daemon's new content for
 /// these buffers; without queueing, the replicas see the
 /// `CellDelta` repaint but their mirrors permanently desync.
