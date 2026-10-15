@@ -12503,9 +12503,11 @@ mod tests {
 
     #[test]
     fn help_show_command_updates_window_on_help_buffer() {
-        // Regression: render_command does delete-all + insert on
-        // *help*; if a window is showing it, the window's TextView
-        // must be rebuilt or the new content is unreachable.
+        // Regression: render_command replaces *help* whole through
+        // `set_generated_contents` (one `Replace` since E8d.3, told to
+        // every window through `notify_buffer_edit` since E8d fix round
+        // 2); a window showing it must index the new content, or the
+        // new content is unreachable.
         let s = fresh_with(b"");
         s.lua_host
             .lua()

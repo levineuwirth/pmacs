@@ -237,12 +237,15 @@ fn r1_scratch_text_outlives_every_generated_write() {
     require_quit_asks_naming(&mut s, "*scratch*");
 }
 
-/// **`*help*`, typed into.** The one generated buffer the user can type
-/// into keeps the text as unsaved work until the editor next draws it:
-/// quit asks, naming `*help*`. The next help command then replaces the
-/// text and asks nothing, as it did before E8c, and quit no longer asks.
+/// **`*help*`, typed into.** Until E8d.3 `*help*` was the one generated
+/// buffer a user could type into, and this row pinned that the typed
+/// text held quit, naming `*help*`, until the next help command redrew
+/// it. Since E8d.3 `*help*` is written through `set_generated_contents`
+/// like every generated buffer and is read-only: typing into it is
+/// refused, so no text of the user's can sit in it for a redraw to
+/// take, and quit asks nothing.
 #[test]
-fn r1_text_typed_into_help_holds_quit_until_help_is_redrawn() {
+fn r1_text_typed_into_help_is_refused_and_quit_asks_nothing() {
     let mut s = editor();
     alt(&mut s, 'x');
     type_str(&mut s, "help.list-commands");
@@ -252,31 +255,21 @@ fn r1_text_typed_into_help_holds_quit_until_help_is_redrawn() {
         !named_modified(&s, "*help*"),
         "precondition: E8c's *help* reads clean"
     );
+    let shown = named_text(&s, "*help*");
     type_str(&mut s, "NOTE");
-    assert!(
-        named_text(&s, "*help*").contains("NOTE"),
-        "precondition: the text lands"
+    assert_eq!(
+        named_text(&s, "*help*"),
+        shown,
+        "typing into the read-only *help* is refused"
     );
+    assert!(!named_modified(&s, "*help*"), "and leaves it clean");
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'c');
     assert!(
-        named_modified(&s, "*help*"),
-        "typing into *help* modifies it"
-    );
-    require_quit_asks_naming(&mut s, "*help*");
-    press(&mut s, KeyCode::Char('n'));
-
-    alt(&mut s, 'x');
-    type_str(&mut s, "help.list-commands");
-    press(&mut s, KeyCode::Enter);
-    assert!(
-        prompt(&s).is_empty(),
-        "the redraw asks nothing; it asks {:?}",
+        s.core.borrow().quit,
+        "quit asks nothing about *help*; it asks {:?}",
         prompt(&s)
     );
-    assert!(
-        !named_text(&s, "*help*").contains("NOTE"),
-        "the redraw replaced the user's text"
-    );
-    assert!(!named_modified(&s, "*help*"), "and left *help* clean");
 }
 
 /// **A REPL keeps asking** (the owner's ruling). Its typed input lives

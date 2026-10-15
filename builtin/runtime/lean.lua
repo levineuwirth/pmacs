@@ -45,29 +45,33 @@ local M = {}
 -- whose `fopen` refuses directories fails at `io.open` instead. There
 -- is no platform where a directory both opens and yields a byte.
 local function has_toolchain(dir)
-  local f = io.open(dir .. "/lean-toolchain", "r")
+  -- `/` is reachable since E8d.5 (the walk below examines the root),
+  -- so the join must not write `//lean-toolchain`.
+  local base = (dir == "/") and "" or dir
+  local f = io.open(base .. "/lean-toolchain", "r")
   if not f then return false end
   local _, err = f:read(1)
   f:close()
   return err == nil
 end
 
-local function parent_of(dir)
-  local up = dir:match("^(.*)/[^/]+$")
-  if up == nil or up == dir or up == "" then return nil end
-  return up
-end
-
+-- E8d.5: the walk's two helpers are `lsp.lua`'s (`pmacs.lsp.parent_of`,
+-- `pmacs.lsp.within_boundary`; that chunk loads first), one walk shared
+-- with the latex resolver rather than a copy per resolver. The copies
+-- this chunk carried had the two bugs the latex resolver fixed in its
+-- own: `parent_of` returned nil when the parent was the empty string,
+-- so `/` was never examined; and `within_boundary` compared string
+-- prefixes, so a `/` boundary (needle `//`) judged every ancestor out
+-- of bounds and no marker was ever examined.
+--
 -- The walk stops at `pmacs.project.search_boundary()`. Not politeness:
 -- `detect_project_within` (`src/project.rs`) exists precisely so a
 -- stray marker above a temp fixture cannot leak into detection, and a
 -- Lua walk that ignored the boundary would break that contract — and
 -- make acceptance 23's outermost assertion non-hermetic against any
 -- `lean-toolchain` sitting above the test's tempdir.
-local function within_boundary(dir, boundary)
-  if not boundary then return true end
-  return dir == boundary or dir:sub(1, #boundary + 1) == boundary .. "/"
-end
+local parent_of = assert(pmacs.lsp.parent_of, "lsp.lua loads before lean.lua")
+local within_boundary = assert(pmacs.lsp.within_boundary, "lsp.lua loads before lean.lua")
 
 -- Returns the OUTERMOST ancestor holding a `lean-toolchain`, or nil to
 -- decline (which falls through to `pmacs.project.detect`, then the

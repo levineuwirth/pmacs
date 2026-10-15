@@ -1417,6 +1417,18 @@ cmd { name = "project-search.quit",
       description = "Leave *search-results*, restoring the previous buffer.",
       fn = function()
         if not active_is_search_panel() then return end
+        -- Bottom-panel arc (Q#BP11b), the branch `listview.quit`,
+        -- `dired.quit` and `compile.quit` carry and this copy lacked
+        -- (E8d.6): in a side window `q` is the window's own quit,
+        -- deleting or restoring the presentation, rather than a buffer
+        -- switch that left the panel slot holding a source buffer.
+        -- Capability fallback and a document-window placement keep the
+        -- previous-buffer switch below.
+        local params = pmacs.window.params()
+        if params and params.side and params.quit_action then
+          pmacs.window.quit()
+          return
+        end
         local target = search_panel.prev
         if not (target and target:is_valid()) then
           for _, id in ipairs(pmacs.buffer.list()) do
@@ -1516,16 +1528,24 @@ end
 
 local function show_help_text(text)
   local buf, fresh = find_or_create_help_buffer()
-  -- `buf:delete(0, len)` matches `editor.list-buffers` render_list — we
-  -- replace contents wholesale rather than diffing, since *help* is
-  -- always reflowed for the new subject.
-  local len = buf:len()
-  if len > 0 then buf:delete(0, len) end
-  if #text > 0 then buf:insert(0, text) end
-  -- E8c: the editor's text, not the user's; left modified, `*help*`
-  -- held `C-x C-c` at "Modified buffers exist (*help*)" and `q` at an
-  -- "unsaved changes" question.
-  buf:mark_clean()
+  -- E8d.3: through the one authorized write (`docs/invariants.md`,
+  -- Generated buffers), as the Rust renderers of `*help*` write since
+  -- the same row: read-only, history cleared, one `Replace`, clean
+  -- (so `C-x C-c` and `q` ask nothing, E8c). The delete-then-insert
+  -- pair this replaces left the buffer writable with a history that
+  -- reached the rope, and would be refused now that the Rust side
+  -- leaves `*help*` read-only.
+  pmacs.buffer.set_generated_contents(buf, text)
+  -- The invariant's second layer, on every write: the rope lock above
+  -- refuses an edit at the daemon, and this is what stops a semantic
+  -- frontend applying a typed key to its mirror first (the owner's
+  -- pass over E8d: the GPU inserted into its mirror, the daemon
+  -- refused the op as read-only, and the mirror diverged). Every other
+  -- generated writer registers it beside its lock (dired, git,
+  -- listview, compile); the Rust renderers of `*help*` register it in
+  -- their fan-out. The set is pruned when the buffer is killed, so a
+  -- `*help*` recreated after `q` is registered again here.
+  pmacs.buffer.set_round_trip_input(buf, true)
   if fresh or help_buffer_id ~= buf then
     pcall(function()
       pmacs.keymap.unbind { scope = "buffer", buffer = buf, sequence = "q" }
@@ -1547,11 +1567,11 @@ end
 --- rather than growing a second help surface — `commands/default.lua`
 --- loads before the runtime chunks, so the seam is present by then.
 ---
---- Inherits this mechanism's two known gaps, recorded rather than
---- papered over: it writes with `delete`/`insert` instead of
---- `set_generated_contents` (so the buffer stays ordinarily editable and
---- keeps its undo history), and it finds `*help*` BY NAME, so a foreign
---- buffer of that name would be cleared.
+--- Inherits this mechanism's one remaining known gap, recorded rather
+--- than papered over: it finds `*help*` BY NAME, so a foreign buffer of
+--- that name would be cleared. (The other, writing with
+--- `delete`/`insert` instead of `set_generated_contents`, closed at
+--- E8d.3.)
 function pmacs.editor._show_help(text)
   show_help_text(text)
 end

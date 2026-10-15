@@ -25,7 +25,7 @@
 
 use std::fmt::Write;
 
-use crate::buffer::{Buffer, BufferId, EditOp};
+use crate::buffer::BufferId;
 use crate::buffer_registry::BufferRegistry;
 use crate::protocol::{AttachmentHandle, InstanceIdentity};
 
@@ -69,61 +69,24 @@ pub fn format_echo_line(
 }
 
 /// Render the full description into the `*pmacs-instance*` buffer
-/// (creating it if absent), replacing its full contents. Returns
-/// the buffer id and the Edits produced by the replacement.
+/// (creating it if absent), replacing its full contents through the
+/// primitive (E8d.3, [`BufferRegistry::replace_generated`]):
+/// read-only, history cleared, clean. Returns the buffer id and the
+/// Edits produced by the replacement (zero or one).
 ///
 /// # Post-audit-round-6 F31 — broadcast queueing
 ///
 /// Returning the Edits lets the caller queue any `crdt_op` they
 /// carry via `EditorCore::queue_daemon_origin_crdt_op`. See the
 /// equivalent doc on `workers_buffer::render`.
-///
-/// The buffer is marked clean — the modeline shouldn't claim unsaved
-/// changes for a generated buffer.
 pub fn render(
     registry: &mut BufferRegistry,
     identity: &InstanceIdentity,
     attachment: Option<&AttachmentHandle>,
 ) -> (BufferId, Vec<crate::rope::Edit>) {
     let text = format_full_text(identity, attachment);
-    let id = registry
-        .find_by_name(INSTANCE_BUFFER_NAME)
-        .unwrap_or_else(|| registry.create(INSTANCE_BUFFER_NAME));
-    let buf = registry.get_mut(id).expect("just resolved");
-    let mut edits = Vec::new();
-    if buffer_contents_equal(buf, &text) {
-        buf.mark_clean();
-        return (id, edits);
-    }
-    if !buf.is_empty() {
-        let len = buf.len();
-        if let Ok(edit) = buf.apply_edit(EditOp::Delete {
-            range: crate::rope::Range::new(0, len),
-        }) {
-            edits.push(edit);
-        }
-    }
-    if !text.is_empty()
-        && let Ok(edit) = buf.apply_edit(EditOp::Insert {
-            pos: 0,
-            bytes: text.as_bytes(),
-        })
-    {
-        edits.push(edit);
-    }
-    buf.mark_clean();
-    (id, edits)
-}
-
-fn buffer_contents_equal(buf: &Buffer, text: &str) -> bool {
-    if buf.len() != text.len() as u64 {
-        return false;
-    }
-    let mut bytes = vec![0u8; text.len()];
-    if !bytes.is_empty() {
-        buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
-    }
-    bytes == text.as_bytes()
+    let (id, edit) = registry.replace_generated(INSTANCE_BUFFER_NAME, &text);
+    (id, edit.into_iter().collect())
 }
 
 /// Multi-section text payload for the buffer view. Sections:

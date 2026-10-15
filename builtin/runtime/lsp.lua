@@ -460,6 +460,15 @@ local function latex_within_boundary(dir, boundary)
   return true
 end
 
+-- E8d.5: the root walk's two helpers, exported for the resolvers that
+-- load after this chunk (`lean.lua`). One walk, fixed here for the
+-- filesystem root in both of its halves, rather than a copy per
+-- resolver: lean's copy still returned nil for a top-level directory's
+-- parent and compared string prefixes, so a `/` boundary silenced its
+-- walk entirely.
+pmacs.lsp.parent_of = latex_parent_of
+pmacs.lsp.within_boundary = latex_within_boundary
+
 -- Returns the INNERMOST ancestor holding a texlab root marker, or the
 -- file's own directory when there is none.
 --

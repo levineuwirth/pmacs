@@ -2142,8 +2142,10 @@ impl EditorCore {
     /// for every Lua mutator edit and applied CRDT op.
     ///
     /// Q#GB6: each window coordinate is also clamped against **its own**
-    /// post-edit bound, which [`Self::rebuild_views_for`] already does
-    /// (`:1853-1857`) and this path did not. A generated refresh that
+    /// post-edit bound, which this path once left to the generated
+    /// renders' separate rebuild (`rebuild_views_for`, retired at E8d
+    /// fix round 2 when the `*help*`, `*workers*` and `*pmacs-instance*`
+    /// renders joined this path). A generated refresh that
     /// shrinks its buffer otherwise leaves `cursor` past the end of the
     /// rope indefinitely — neither paint nor a motion command recovers
     /// it, because motion is computed from the stale value. The two
@@ -2198,39 +2200,6 @@ impl EditorCore {
                 && (selection.anchor != old_anchor || win.cursor != old_cursor);
             (!collapsed_by_clamp).then_some(selection)
         });
-    }
-
-    /// Force every window currently showing `buffer_id` to rebuild
-    /// its [`TextView`] from scratch.
-    ///
-    /// Used by code paths that rewrite a buffer end-to-end without
-    /// emitting a useful [`Edit`] (the help renderer issues a
-    /// delete-all + insert pair on `*help*`; `*buffer-list*` is
-    /// regenerated from scratch on every C-x C-b). Calling
-    /// [`Self::notify_buffer_edit`] for each step works but is more
-    /// fiddly; rebuild is simpler and still O(buffer length) which is
-    /// what an end-to-end rewrite cost anyway.
-    ///
-    /// Cursor and `view_top` are clamped to the new buffer extent so
-    /// they don't dangle past the end after a shrinking rewrite.
-    /// Selection normalization uses the same clamp-or-clear rule as
-    /// [`Self::notify_buffer_edit`].
-    pub fn rebuild_views_for(&mut self, buffer_id: BufferId) {
-        let reg = self.registry.borrow();
-        let Ok(buffer) = reg.get(buffer_id) else {
-            return;
-        };
-        let len = buffer.len();
-        for win in self.windows.values_mut() {
-            if win.buffer_id == buffer_id {
-                win.text_view = TextView::new(buffer);
-                Self::clamp_cursor_and_selection(win, len);
-                let max_top = win.text_view.line_count().saturating_sub(1);
-                if win.view_top > max_top {
-                    win.view_top = max_top;
-                }
-            }
-        }
     }
 
     /// Save the active buffer to its backing file. Returns `true` on
@@ -3097,9 +3066,8 @@ impl EditorCore {
         }
     }
 
-    /// Undo the most recent edit on the active buffer; clamp the
-    /// active window's cursor to the new length and notify all
-    /// windows on this buffer.
+    /// Undo the most recent edit on the active buffer and notify every
+    /// window on it through [`Self::notify_buffer_edit`] (E8d.2).
     ///
     /// E6c: undoes the acting frontend's most recent
     /// command-boundary group through the cross-peer arbiter (see
@@ -3119,23 +3087,17 @@ impl EditorCore {
         };
         match edit {
             Ok(edit) => {
-                let reg = self.registry.borrow();
-                let Ok(buffer) = reg.get(buffer_id) else {
-                    return;
-                };
-                for win in self.windows.values_mut() {
-                    if win.buffer_id == buffer_id {
-                        let _ = win.text_view.on_edit(buffer, &edit);
-                        let max = buffer.len();
-                        if win.cursor > max {
-                            win.cursor = max;
-                        }
-                    }
-                }
-                drop(reg);
-                // Q#AI8 (PR #109 round 1): history edits move bytes
-                // like any other edit — invalidate search state.
-                self.search_invalidate_for_edit(buffer_id, &edit);
+                // E8d.2: a history edit moves bytes like any other edit,
+                // so every window on the buffer hears it the way a
+                // forward edit is heard --- the text view, every overlay,
+                // and the cursor, selection and `view_top` clamps, with
+                // the search state invalidated (Q#AI8). The loop this
+                // replaces told the text view alone and clamped the
+                // cursor alone: a copy of `apply_active_edit`'s fan-out
+                // that had drifted, leaving an overlay's byte offsets
+                // and a selection past the new end where the undone
+                // edit had put them.
+                self.notify_buffer_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27: undo on a CRDT-backed
                 // buffer produces a crdt_op that must broadcast to
                 // every replica frontend (including the one whose
@@ -3165,22 +3127,8 @@ impl EditorCore {
         };
         match edit {
             Ok(edit) => {
-                let reg = self.registry.borrow();
-                let Ok(buffer) = reg.get(buffer_id) else {
-                    return;
-                };
-                for win in self.windows.values_mut() {
-                    if win.buffer_id == buffer_id {
-                        let _ = win.text_view.on_edit(buffer, &edit);
-                        let max = buffer.len();
-                        if win.cursor > max {
-                            win.cursor = max;
-                        }
-                    }
-                }
-                drop(reg);
-                // Q#AI8 — same as undo above.
-                self.search_invalidate_for_edit(buffer_id, &edit);
+                // E8d.2 — the one notification path, as undo above.
+                self.notify_buffer_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27 — same as undo above.
                 self.queue_daemon_origin_crdt_op(buffer_id, &edit);
             }

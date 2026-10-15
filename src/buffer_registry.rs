@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::buffer::{Buffer, BufferId};
+use crate::rope::Edit;
 
 /// Errors raised by the registry.
 #[derive(Debug, Error)]
@@ -53,6 +54,18 @@ pub enum RegistryError {
         /// The buffer's name, for diagnostics.
         name: String,
     },
+}
+
+/// True iff `buf`'s whole contents are exactly `bytes`.
+fn buffer_holds(buf: &Buffer, bytes: &[u8]) -> bool {
+    if buf.len() != bytes.len() as u64 {
+        return false;
+    }
+    let mut held = vec![0u8; bytes.len()];
+    if !held.is_empty() {
+        buf.snapshot_rope().slice(0, buf.len(), &mut held);
+    }
+    held == bytes
 }
 
 /// Owns [`Buffer`]s behind their [`BufferId`]s.
@@ -141,6 +154,33 @@ impl BufferRegistry {
             .ok_or(RegistryError::Missing { id })?;
         self.order.retain(|x| *x != id);
         Ok(buf)
+    }
+
+    /// Replace the contents of the generated buffer named `name`
+    /// through the one authorized write, [`Buffer::set_generated_contents`]
+    /// (`docs/invariants.md`, "Generated buffers"), creating the buffer
+    /// when there is none. Returns the buffer's id and the one `Replace`
+    /// edit, which the caller fans out --- every displaying window and
+    /// the daemon-origin CRDT op --- or `None` when nothing was written
+    /// because the buffer already holds `text` under the primitive's
+    /// contract (read-only, so nothing a user typed is being kept).
+    ///
+    /// E8d.3: `*help*`, `*workers*` and `*pmacs-instance*` each wrote
+    /// by a `Delete` then an `Insert` through `apply_edit`, a copy per
+    /// buffer of the operation this primitive exists for, and each copy
+    /// left its buffer writable with a history that reached the rope
+    /// (`M-x buffer.undo` emptied `*help*`), which is the failure the
+    /// invariant's first bullet describes. One helper, one write.
+    pub fn replace_generated(&mut self, name: &str, text: &str) -> (BufferId, Option<Edit>) {
+        let id = self.find_by_name(name).unwrap_or_else(|| self.create(name));
+        let buf = self.get_mut(id).expect("just resolved");
+        if buf.is_read_only() && buffer_holds(buf, text.as_bytes()) {
+            // Regenerated content equal to what is shown: no edit to
+            // fan out, and nothing for the modeline to call unsaved.
+            buf.mark_clean();
+            return (id, None);
+        }
+        (id, buf.set_generated_contents(text.as_bytes()).ok())
     }
 
     /// True iff `id` currently resolves.
