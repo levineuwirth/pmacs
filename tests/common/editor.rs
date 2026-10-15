@@ -18,9 +18,9 @@
 //! use editor::{eval, exec};
 //! ```
 //!
-//! Both are pure functions of their arguments, so two copies of this
-//! module in one binary (one via `mod common;`, one via `#[path]`) do
-//! the same thing.
+//! Not declared in `common/mod.rs`: ten suites pull both `mod common;`
+//! and this include, and `clippy::duplicate_mod` refuses a file loaded
+//! as a module twice, so the include is the one route.
 
 #![allow(dead_code)] // not every including suite uses both
 

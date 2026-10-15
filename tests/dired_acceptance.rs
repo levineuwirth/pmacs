@@ -104,13 +104,9 @@ fn set_read_only(s: &EditorState, id: BufferId, value: bool) {
         .set_read_only(value);
 }
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// A fresh editor with a declared frame geometry (a grid frontend's real
 /// frame size *is* its geometry declaration, and the panel tests need

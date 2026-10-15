@@ -39,13 +39,9 @@ fn session(name: &str) -> EditorState {
     state
 }
 
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
-
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// The resolved mode for the buffer currently in the window.
 fn mode_here(s: &EditorState) -> String {

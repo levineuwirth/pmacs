@@ -26,9 +26,9 @@ mod common;
 // Harness (theme_faces_acceptance conventions)
 // ---------------------------------------------------------------------------
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 fn exec_err(s: &EditorState, src: &str) -> mlua::Error {
     s.lua_host
@@ -36,10 +36,6 @@ fn exec_err(s: &EditorState, src: &str) -> mlua::Error {
         .load(src.to_string())
         .exec()
         .expect_err("chunk must error")
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
 }
 
 /// Fresh editor with LSP spawning disabled.

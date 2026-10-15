@@ -27,13 +27,9 @@ use pmacs::protocol::FrontendId;
 // Harness (mirrors tests/auto_pair_acceptance.rs)
 // ---------------------------------------------------------------------------
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 fn fresh_state_dir() -> PathBuf {
     static SEQ: AtomicUsize = AtomicUsize::new(0);

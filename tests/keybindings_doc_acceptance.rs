@@ -36,9 +36,9 @@ fn doc_path() -> PathBuf {
     repo_root().join("docs/keybindings.md")
 }
 
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::eval;
 
 /// Every binding the live keymap holds, as `scope\u{1}sequence\u{1}command`.
 fn bindings() -> Vec<(String, String, String)> {

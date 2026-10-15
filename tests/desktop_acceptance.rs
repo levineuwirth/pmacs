@@ -46,9 +46,9 @@ fn write_file(dir: &std::path::Path, name: &str, body: &str) -> String {
     p.display().to_string()
 }
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::exec;
 
 fn save(s: &EditorState) -> bool {
     pmacs::desktop::save_session(s.lua_host.lua()).unwrap()

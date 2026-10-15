@@ -50,9 +50,9 @@ fn type_str(s: &mut EditorState, text: &str) {
     }
 }
 
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::eval;
 
 fn text(s: &EditorState) -> String {
     eval(
