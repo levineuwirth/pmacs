@@ -7,7 +7,8 @@
 //! at `587de75` (64 at the audit's `2440089`), unchanged here but for
 //! `pub`. The copies that differ --- `to_owned` for `to_string`, an
 //! `expect` naming the failing chunk, an `eval` fixed to `String` ---
-//! stay where they are until a later batch has compared each class.
+//! stay where they are until a later batch has compared each class;
+//! `tests/test_kit_consistency.rs` lists them and refuses a new one.
 //!
 //! Included per file rather than through `mod common;`, the way `iso`
 //! is, so a suite that spawns no daemon or PTY compiles neither:
