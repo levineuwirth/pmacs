@@ -53,13 +53,9 @@ use tempfile::TempDir;
 // Harness
 // ---------------------------------------------------------------------------
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// A fresh editor with LSP disabled: no test here asserts anything about
 /// a language server, so the wipe cannot make an assertion vacuous.

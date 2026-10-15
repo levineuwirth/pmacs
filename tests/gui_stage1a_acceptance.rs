@@ -16,13 +16,9 @@
 use pmacs::editor::EditorState;
 use pmacs::protocol::FrontendId;
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 fn editor_with(body: &str) -> EditorState {
     let s = EditorState::new_with_roots(&crate::iso::roots());

@@ -49,13 +49,9 @@ use tempfile::TempDir;
 // Harness
 // ---------------------------------------------------------------------------
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// Drive the async runtime to quiescence — no parked coroutine, no
 /// pending worker job. The directory listing is invisible until this

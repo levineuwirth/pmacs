@@ -39,13 +39,9 @@ fn write_file(dir: &std::path::Path, name: &str, body: &str) -> String {
     p.display().to_string()
 }
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// Force a sweep; returns how many buffers were written.
 fn sweep(s: &EditorState) -> i64 {

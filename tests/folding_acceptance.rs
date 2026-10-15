@@ -358,13 +358,9 @@ fn self_insert_at_head_line_end_does_not_unfold() {
 // 11. Data-API validation (Q#FD11) — driven through the Lua surface.
 // ---------------------------------------------------------------------------
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// Install a settled rust parse over the active scratch buffer so the
 /// `pmacs.fold` surface can drive it end to end.

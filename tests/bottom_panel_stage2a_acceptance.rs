@@ -28,9 +28,9 @@ fn editor() -> EditorState {
     s
 }
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::exec;
 
 fn side_window_of(core: &pmacs::editor_core::EditorCore, fid: FrontendId) -> Option<WindowId> {
     core.views[&fid].layout.iter_ids().into_iter().find(|id| {

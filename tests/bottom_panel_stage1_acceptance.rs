@@ -48,9 +48,9 @@ fn editor() -> EditorState {
     s
 }
 
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 fn try_exec(s: &EditorState, src: &str) -> Result<(), String> {
     s.lua_host
@@ -58,10 +58,6 @@ fn try_exec(s: &EditorState, src: &str) -> Result<(), String> {
         .load(src.to_string())
         .exec()
         .map_err(|e| e.to_string())
-}
-
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
 }
 
 /// Render one real frame and return the per-window outer rects keyed by

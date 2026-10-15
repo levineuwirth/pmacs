@@ -41,13 +41,9 @@ fn session(roots: &BootstrapRoots) -> EditorState {
     state
 }
 
-fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
-    s.lua_host.lua().load(src.to_string()).eval().unwrap()
-}
-
-fn exec(s: &EditorState, src: &str) {
-    s.lua_host.lua().load(src.to_string()).exec().unwrap();
-}
+#[path = "common/editor.rs"]
+mod editor;
+use editor::{eval, exec};
 
 /// Current preference size in logical px, or `None` when unset — the
 /// real "frontend's own default" state, never inferred from silence.

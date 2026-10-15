@@ -23,6 +23,11 @@
 //!   into their real data root. Most suites include it directly via
 //!   `#[path = "common/iso.rs"] mod iso;` rather than through this
 //!   module; it is re-exported here for `daemon`'s use.
+//! - `editor` (`common/editor.rs`): the in-process editor's Lua driver,
+//!   `exec` and `eval`, the byte-identical bodies 67 suites once carried
+//!   each (E8e). Included per file the way `iso` is and NOT declared
+//!   here: ten suites pull both `mod common;` and the include, and
+//!   `clippy::duplicate_mod` refuses a file loaded as a module twice.
 
 #![allow(dead_code)] // not every integration-test file uses every helper
 
