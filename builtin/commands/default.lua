@@ -404,6 +404,34 @@ end
 
 -- Editor session -------------------------------------------------------------
 
+-- The quit itself, once every gate before it has passed: the daemon
+-- (or the in-process editor) stops, asking first when buffers carry
+-- unsaved changes.
+local function quit_asking_about_unsaved()
+  local dirty = modified_buffer_names()
+  if #dirty == 0 then
+    ed.quit()
+    return
+  end
+  local summary = table.concat(dirty, ", ")
+  if #dirty > 3 then
+    summary = table.concat({ dirty[1], dirty[2], dirty[3] }, ", ")
+      .. string.format(" and %d more", #dirty - 3)
+  end
+  -- #365: a recovery copy the hook could not write is named here.
+  -- Its report went to the status row, which the question takes in
+  -- the same frame, so until now only the mode line's error count
+  -- was on the screen while the user could still cancel.
+  local failed = pmacs.autosave and pmacs.autosave.failure
+    and pmacs.autosave.failure()
+  pmacs.minibuffer.y_or_n {
+    prompt = string.format("Modified buffers exist (%s)%s; quit anyway?", summary,
+      failed and "; autosave FAILED, see *errors*" or ""),
+    on_yes = function() ed.quit() end,
+    on_no = function() ed.set_status("quit cancelled") end,
+  }
+end
+
 cmd { name = "editor.quit",   description = "Exit the editor.",
       fn = function()
         -- The hook stays the FIRST gate, unchanged: it is a veto, and a
@@ -413,28 +441,25 @@ cmd { name = "editor.quit",   description = "Exit the editor.",
           ed.set_status("quit vetoed by editor.before-quit")
           return
         end
-        local dirty = modified_buffer_names()
-        if #dirty == 0 then
-          ed.quit()
+        -- E9.3: from a frontend attached to a daemon, quit is this
+        -- frontend's detach --- the daemon and every other frontend go
+        -- on, and the daemon keeps this window's view for its session
+        -- token. The last frontend attached is asked whether the daemon
+        -- should stop with it; `n` detaches, `y` is the quit below, its
+        -- unsaved-buffers question included.
+        if pmacs.session.is_daemon() and not pmacs.frontend.is_local() then
+          if pmacs.frontend.attached_count() > 1 then
+            ed.detach()
+            return
+          end
+          pmacs.minibuffer.y_or_n {
+            prompt = "Last frontend attached; stop the daemon too? (y stops it, n detaches)",
+            on_yes = quit_asking_about_unsaved,
+            on_no = function() ed.detach() end,
+          }
           return
         end
-        local summary = table.concat(dirty, ", ")
-        if #dirty > 3 then
-          summary = table.concat({ dirty[1], dirty[2], dirty[3] }, ", ")
-            .. string.format(" and %d more", #dirty - 3)
-        end
-        -- #365: a recovery copy the hook could not write is named here.
-        -- Its report went to the status row, which the question takes in
-        -- the same frame, so until now only the mode line's error count
-        -- was on the screen while the user could still cancel.
-        local failed = pmacs.autosave and pmacs.autosave.failure
-          and pmacs.autosave.failure()
-        pmacs.minibuffer.y_or_n {
-          prompt = string.format("Modified buffers exist (%s)%s; quit anyway?", summary,
-            failed and "; autosave FAILED, see *errors*" or ""),
-          on_yes = function() ed.quit() end,
-          on_no = function() ed.set_status("quit cancelled") end,
-        }
+        quit_asking_about_unsaved()
       end }
 cmd { name = "editor.cancel", description = "Cancel a pending key prefix.",
       fn = function() ed.cancel() end }

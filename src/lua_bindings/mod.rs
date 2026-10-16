@@ -7219,6 +7219,34 @@ fn install_frontend_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> 
         })?,
     )?;
 
+    // E9.3 --- whether the acting frontend is the in-process one
+    // (LOCAL), which has no socket to detach from, rather than an
+    // attached session of a daemon.
+    let core_clone = core.clone();
+    frontend.set(
+        "is_local",
+        lua.create_function(move |_, ()| {
+            Ok(core_clone.borrow().active_frontend == crate::protocol::FrontendId::LOCAL)
+        })?,
+    )?;
+
+    // E9.3 --- how many frontends are attached over a socket: the
+    // registered views other than LOCAL's, which the daemon keeps for
+    // its own document whether or not a TUI runs in-process.
+    let core_clone = core.clone();
+    frontend.set(
+        "attached_count",
+        lua.create_function(move |_, ()| {
+            let count = core_clone
+                .borrow()
+                .views
+                .keys()
+                .filter(|fid| **fid != crate::protocol::FrontendId::LOCAL)
+                .count();
+            Ok(i64::try_from(count).unwrap_or(i64::MAX))
+        })?,
+    )?;
+
     Ok(frontend)
 }
 
@@ -14591,6 +14619,16 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         )?;
     }
     register(editor, lua, core, "quit", |c| c.quit = true)?;
+    // E9.3 --- the acting frontend asks to leave the daemon; the
+    // dispatcher answers it after this event. From the in-process TUI
+    // (LOCAL) there is no socket to leave, so the request is a quit.
+    register(editor, lua, core, "detach", |c| {
+        if c.active_frontend == crate::protocol::FrontendId::LOCAL {
+            c.quit = true;
+        } else {
+            c.detach_requested = Some(c.active_frontend);
+        }
+    })?;
     // E1.2 --- `C-g` is the universal cancel, so it drops the selection
     // and with it the mark (a `Selection` IS the mark: one anchor, and
     // `active_region` reports nothing once it is gone). Done HERE and

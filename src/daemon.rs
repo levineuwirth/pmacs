@@ -3345,6 +3345,34 @@ fn handle_dispatcher_event(
             );
         }
     }
+    // E9.3 --- a frontend whose own quit asked to leave: told, if its
+    // session can decode the reason, then torn down the one way, its
+    // view retained for its token. Taken here, after the event, so the
+    // request's own frame never reaches a stream being closed.
+    let requested = editor.core.borrow_mut().detach_requested.take();
+    if let Some(frontend_id) = requested {
+        let Some(session) = session_registry.session_state(frontend_id) else {
+            return;
+        };
+        if let Some(stream) = streams.get_mut(&frontend_id) {
+            if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
+                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        detach_frontend(
+            editor,
+            render_states,
+            semantic_states,
+            streams,
+            term_sizes,
+            last_dispatch_idle_sent,
+            last_active_buffer_sent,
+            terminal_bell_baselines,
+            session_registry,
+            frontend_id,
+        );
+    }
 }
 
 /// The one teardown of a frontend's session (E8d.4), run when the tick

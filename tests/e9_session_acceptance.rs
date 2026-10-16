@@ -119,7 +119,33 @@ impl Session {
             });
             session.token = Some(token);
         }
+        // The daemon emits nothing semantic (status facts, minibuffer
+        // rows) to a session until it declares a viewport, and a
+        // `Viewport` also moves the window to the buffer it names: so
+        // it is declared on the buffer the daemon's own cursor says the
+        // window is on, never on the last snapshot of the bootstrap
+        // sweep, which is whichever buffer the registry listed last.
+        let (document, _) = session.where_am_i();
+        session.declare_viewport(document);
         session
+    }
+
+    /// Declare a viewport on `buffer`, as `pmacs-gpu` does after every
+    /// snapshot; the semantic frames for it follow.
+    fn declare_viewport(&mut self, buffer: BufferId) {
+        write_message(
+            &mut self.stream,
+            &FrontendEvent::Viewport {
+                frontend_id: self.fid,
+                buffer_id: buffer,
+                visible: pmacs_protocol::ByteRange {
+                    start: 0,
+                    end: 4096,
+                },
+                generation: 0,
+            },
+        )
+        .expect("declare a viewport");
     }
 
     fn key(&mut self, key: Key, mods: Modifiers) {
@@ -141,12 +167,17 @@ impl Session {
         }
     }
 
-    /// Drain until `pick` accepts a message, or ten seconds.
+    /// Drain until `pick` accepts a message, or ten seconds; the timeout
+    /// names every message that came meanwhile.
     fn wait<T>(&mut self, what: &str, mut pick: impl FnMut(&InstanceMessage) -> Option<T>) -> T {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen: Vec<String> = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            assert!(!remaining.is_zero(), "timed out waiting for {what}");
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for {what}; the daemon wrote {seen:?}"
+            );
             match self
                 .rx
                 .recv_timeout(remaining.min(Duration::from_millis(200)))
@@ -155,6 +186,9 @@ impl Session {
                     if let Some(found) = pick(&msg) {
                         return found;
                     }
+                    let mut summary = format!("{msg:?}");
+                    summary.truncate(80);
+                    seen.push(summary);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -211,12 +245,14 @@ impl Session {
     /// until the daemon's cursor says the window left `current`.
     fn open_note(&mut self, current: BufferId) -> BufferId {
         self.run_command("e9.open");
-        self.wait("the window to reach the note", |m| match m {
+        let note = self.wait("the window to reach the note", |m| match m {
             InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id != current => {
                 Some(*buffer_id)
             }
             _ => None,
-        })
+        });
+        self.declare_viewport(note);
+        note
     }
 }
 
@@ -684,4 +720,130 @@ fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
         text.starts_with("abc!"),
         "the op typed at the close was drained before the socket closed; the daemon holds {text:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// E9.3 --- quit
+// ---------------------------------------------------------------------------
+
+impl Session {
+    /// `C-x C-c`.
+    fn quit_chord(&mut self) {
+        self.key(Key::Char('x'), Modifiers::CTRL);
+        self.key(Key::Char('c'), Modifiers::CTRL);
+    }
+
+    /// The session's close: `Goodbye(reason)`, or the daemon's EOF.
+    fn ended(&mut self) -> Option<GoodbyeReason> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "the session did not end");
+            match self.rx.recv_timeout(remaining) {
+                Ok(InstanceMessage::Goodbye(reason)) => return Some(reason),
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+}
+
+/// `C-x C-c` from one of two attached frontends detaches that frontend
+/// alone: it is told `Goodbye(Detached)`, the other is served on, the
+/// daemon lives, and the view the quitter left is retained for its
+/// token like any detach's.
+#[test]
+fn e9_3_quit_from_an_attached_frontend_detaches_it_and_nothing_else() {
+    let mut daemon = daemon_with_note("");
+    let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    let token = first.token.expect("token");
+    let (scratch, _) = first.where_am_i();
+    let note = first.open_note(scratch);
+    let mut second = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    second.where_am_i();
+
+    first.quit_chord();
+    assert_eq!(
+        first.ended(),
+        Some(GoodbyeReason::Detached),
+        "the quitter is told it was detached"
+    );
+    // The other is served still, and the daemon is up.
+    second.type_str("k");
+    second.wait("the other frontend's echo", |m| {
+        matches!(m, InstanceMessage::CursorByte { byte_pos: 1, .. }).then_some(())
+    });
+    assert!(
+        daemon.is_alive(),
+        "a frontend's quit does not stop the daemon"
+    );
+    // And the quitter's view is retained for its token.
+    let mut back = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
+    assert_eq!(back.where_am_i().0, note, "the quit retained the view");
+}
+
+/// The last frontend attached is asked whether the daemon should stop
+/// with it: `n` detaches it and the daemon lives; `y` stops the daemon,
+/// which tells the frontend it is shutting down and exits.
+#[test]
+fn e9_3_the_last_frontend_is_asked_and_its_answer_decides_the_daemon() {
+    let mut daemon = daemon_with_note("");
+    let mut only = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    only.where_am_i();
+    only.quit_chord();
+    let prompt = only.wait("the question", |m| match m {
+        InstanceMessage::MinibufferPromptRows { prompt, .. } => prompt.clone(),
+        _ => None,
+    });
+    assert!(
+        prompt.contains("stop the daemon"),
+        "the last frontend is asked about the daemon: {prompt:?}"
+    );
+    only.key(Key::Char('n'), Modifiers::NONE);
+    assert_eq!(only.ended(), Some(GoodbyeReason::Detached), "n detaches");
+    assert!(daemon.is_alive(), "n leaves the daemon up");
+
+    let mut last = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    last.where_am_i();
+    last.quit_chord();
+    last.wait("the question again", |m| match m {
+        InstanceMessage::MinibufferPromptRows { prompt, .. }
+            if prompt
+                .as_deref()
+                .is_some_and(|p| p.contains("stop the daemon")) =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    last.key(Key::Char('y'), Modifiers::NONE);
+    assert_eq!(
+        last.ended(),
+        Some(GoodbyeReason::ShuttingDown),
+        "y stops the daemon, which says so"
+    );
+    let status = daemon.wait_for_exit().expect("the daemon exits");
+    assert!(status.success(), "a clean stop: {status:?}");
+}
+
+/// A v26 frontend's quit detaches it too, told nothing it could not
+/// decode: its socket closes without a `Goodbye`.
+#[test]
+fn e9_3_a_v26_frontend_s_quit_detaches_it_with_no_goodbye() {
+    let mut daemon = daemon_with_note("");
+    let mut legacy = Session::attach(&daemon, SESSION_MIN_VERSION - 1, None);
+    legacy.where_am_i();
+    let mut other = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    other.where_am_i();
+    legacy.quit_chord();
+    assert_eq!(
+        legacy.ended(),
+        None,
+        "closed, with no Goodbye a v26 peer could not decode"
+    );
+    assert!(daemon.is_alive());
+    other.type_str("k");
+    other.wait("the other frontend's echo", |m| {
+        matches!(m, InstanceMessage::CursorByte { byte_pos: 1, .. }).then_some(())
+    });
 }

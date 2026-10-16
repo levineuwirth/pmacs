@@ -644,6 +644,13 @@ pub struct EditorCore {
     pub status: String,
     /// True iff the editor should exit at the next iteration.
     pub quit: bool,
+    /// E9.3 --- the attached frontend whose own quit asked to be
+    /// detached (`pmacs.editor.detach()`), taken by the daemon's
+    /// dispatcher after the event that set it: that frontend is told
+    /// `Goodbye(Detached)` and its session torn down, its view retained
+    /// for its token; nothing else changes. Never set by the in-process
+    /// TUI, whose quit is `quit`.
+    pub detach_requested: Option<FrontendId>,
     /// Universal minibuffer (T M2.7).
     pub minibuffer: Minibuffer,
     /// The frontend that produced the most recent input event
@@ -866,6 +873,7 @@ impl EditorCore {
             views,
             status: String::new(),
             quit: false,
+            detach_requested: None,
             minibuffer: Minibuffer::new(),
             active_frontend: FrontendId::LOCAL,
             pending_crdt_ops: Vec::new(),
