@@ -1436,6 +1436,10 @@ mod tests {
             let _: AttachRequest = read_message(&mut server_stream).expect("read AttachRequest");
             let bootstrap: SessionBootstrapRequest =
                 read_message(&mut server_stream).expect("read bootstrap");
+            // E9 — the v27 step; read, so the fixture never drops its
+            // end while the client is still writing its handshake.
+            let resume: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
+            assert!(matches!(resume, FrontendEvent::Resume { token: None, .. }));
             let target = bootstrap.initial_target.expect("initial target");
             assert_eq!(target.cwd, expected.cwd.as_os_str().as_bytes());
             assert_eq!(target.path, expected.path.as_os_str().as_bytes());
@@ -1984,6 +1988,14 @@ mod tests {
             write_message(&mut server_stream, &hello).expect("write Hello");
             let _: AttachRequest =
                 read_message(&mut server_stream).expect("read real AttachRequest");
+            // The whole v27 semantic handshake, read before this end is
+            // dropped: a fixture that returned here, with the client's
+            // bootstrap and `Resume` still to be written, raced the
+            // client's writes against its own drop, and lost under
+            // load as `Handshake(Io(BrokenPipe))` (the registry's R7).
+            let _: SessionBootstrapRequest =
+                read_message(&mut server_stream).expect("read bootstrap");
+            let _: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
         });
         let mut attempts = 0;
         let mut client_stream = Some(client_stream);
