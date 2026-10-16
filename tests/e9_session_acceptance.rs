@@ -14,6 +14,7 @@
 mod common;
 
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -230,7 +231,9 @@ fn daemon_with_note(extra: &str) -> TestDaemon {
            fn = function() pmacs.buffer.find_or_open({path:?}) end }}\n{extra}",
         path = note.to_str().expect("utf-8 path"),
     );
-    let daemon = TestDaemon::spawn_with_config(&init);
+    // The daemon's handshake breadcrumbs go to its stderr file, which a
+    // failing row prints.
+    let daemon = TestDaemon::spawn_with_env_and_init(&[("PMACS_ATTACH_DEBUG", "1")], &init);
     // The tempdir outlives the daemon: leak it into the process.
     std::mem::forget(dir);
     daemon
@@ -429,5 +432,256 @@ fn e9_1_a_resume_after_the_handshake_is_dropped_and_the_session_served() {
         resumed.where_am_i().0,
         note,
         "the retained view was not consumed by the late Resume"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E9.2 --- GPU reconnect
+// ---------------------------------------------------------------------------
+
+/// A Unix-socket proxy the test can cut. It listens at `path`, forwards
+/// each accepted connection to `target` through two copy threads, and
+/// keeps every stream it opened so [`Proxy::cut`] can shut them all:
+/// the daemon then sees EOF on its socket (a detach that retains the
+/// view) and the frontend its reader's `Disconnected`, while the daemon
+/// itself is untouched. A later connection is forwarded afresh.
+struct Proxy {
+    path: std::path::PathBuf,
+    held: std::sync::Arc<std::sync::Mutex<Vec<UnixStream>>>,
+}
+
+impl Proxy {
+    fn start(target: &Path, dir: &Path) -> Self {
+        let path = dir.join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the proxy");
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target = target.to_path_buf();
+        let keep = std::sync::Arc::clone(&held);
+        std::thread::spawn(move || {
+            for accepted in listener.incoming() {
+                let Ok(front) = accepted else { break };
+                let Ok(back) = UnixStream::connect(&target) else {
+                    break;
+                };
+                let (mut f_read, mut f_write) = (
+                    front.try_clone().expect("clone"),
+                    front.try_clone().expect("clone"),
+                );
+                let (mut b_read, mut b_write) = (
+                    back.try_clone().expect("clone"),
+                    back.try_clone().expect("clone"),
+                );
+                keep.lock().expect("held").push(front);
+                keep.lock().expect("held").push(back);
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut f_read, &mut b_write);
+                    let _ = b_write.shutdown(std::net::Shutdown::Write);
+                });
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut b_read, &mut f_write);
+                    let _ = f_write.shutdown(std::net::Shutdown::Write);
+                });
+            }
+        });
+        Self { path, held }
+    }
+
+    /// Shut every stream forwarded so far, both ways, at once.
+    fn cut(&self) {
+        for stream in self.held.lock().expect("held").drain(..) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+/// Run `pmacs-gpu --headless-probe` under the reconnect action against
+/// `socket`, cutting `proxy` once the probe says it has typed, and
+/// return the report's facts. `None` when skipped (no `pmacs-gpu`
+/// binary or no wgpu adapter), which panics under `PMACS_REQUIRE_GPU`
+/// so the gate's GPU leg never passes vacuously.
+fn run_reconnect_probe(
+    socket: &Path,
+    proxy: &Proxy,
+    dir: &Path,
+    text: &str,
+    command: Option<&str>,
+) -> Option<std::collections::HashMap<String, String>> {
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("test binary directory")
+        .join("pmacs-gpu");
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+            binary.display()
+        );
+        eprintln!("skipping the GPU probe: {} is not built", binary.display());
+        return None;
+    }
+    let report = dir.join("reconnect.report");
+    let mut ready = report.as_os_str().to_owned();
+    ready.push(".ready");
+    let ready = std::path::PathBuf::from(ready);
+    let mut child = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(socket)
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", text)
+        .env("PMACS_GPU_PROBE_ACTION", "reconnect")
+        .env("PMACS_GPU_PROBE_COMMAND", command.unwrap_or(""))
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "60000")
+        // The schedule's test curve: 20, 40, 80, ... ms, so the attempts
+        // land inside the row rather than the production half second.
+        .env(pmacs::attach_reconnect::PMACS_TEST_BACKOFF_SCALE_MS, "20")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the headless GPU probe");
+    // The probe says when its typing has been echoed; then the socket
+    // goes.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while !ready.exists() && Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let cut_at = if ready.exists() {
+        proxy.cut();
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let output = child
+        .wait_with_output()
+        .expect("wait for the headless GPU probe");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "headless GPU probe failed (status {:?}, cut at {cut_at:?}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping the GPU probe: no wgpu adapter available");
+        return None;
+    }
+    assert!(
+        cut_at.is_some(),
+        "the probe never wrote its ready marker; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The probe's own log, shown by libtest when the row fails.
+    eprintln!("probe stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    let text = std::fs::read_to_string(&report).expect("read the probe report");
+    Some(
+        text.lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+    )
+}
+
+fn fact<'a>(facts: &'a std::collections::HashMap<String, String>, key: &str) -> &'a str {
+    facts.get(key).map_or_else(
+        || panic!("the report has no {key}; facts: {facts:?}"),
+        String::as_str,
+    )
+}
+
+/// The window loses its socket and gets its view back: the document
+/// stays on screen with the band saying it is reconnecting, the chrome
+/// is gone and keys are dropped meanwhile; the reconnect on the shared
+/// schedule presents the token and lands on the same buffer at the same
+/// cursor with a token of its own; and an op typed at the close reaches
+/// the daemon through the close's drain.
+#[test]
+fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
+    let daemon = daemon_with_note("");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("chmod");
+    let proxy = Proxy::start(daemon.socket_path(), dir.path());
+    let Some(facts) = run_reconnect_probe(&proxy.path, &proxy, dir.path(), "abc", Some("e9.open"))
+    else {
+        return;
+    };
+    eprintln!(
+        "daemon log:\n{}",
+        std::fs::read_to_string({
+            let mut log = daemon.socket_path().as_os_str().to_os_string();
+            log.push(".stderr.log");
+            log
+        })
+        .unwrap_or_default()
+    );
+    eprintln!("facts: {facts:?}");
+    assert_eq!(fact(&facts, "phase.done"), "true", "{facts:?}");
+    assert_eq!(fact(&facts, "lost"), "true");
+    assert!(
+        fact(&facts, "banner.lost")
+            .starts_with("\"(daemon closed the connection without a Goodbye); reconnecting in "),
+        "the band names the loss and the next attempt: {}",
+        fact(&facts, "banner.lost")
+    );
+    assert_eq!(
+        fact(&facts, "text.during"),
+        fact(&facts, "text.before"),
+        "the document stays on screen while reconnecting"
+    );
+    assert_eq!(fact(&facts, "chrome.cleared"), "true");
+    assert_eq!(fact(&facts, "client.dropped"), "true");
+    assert_eq!(fact(&facts, "key.while.lost.dropped"), "true");
+    assert_eq!(fact(&facts, "reconnected"), "true");
+    assert!(
+        fact(&facts, "attempts").parse::<u32>().expect("attempts") >= 1,
+        "{facts:?}"
+    );
+    assert_eq!(
+        fact(&facts, "banner.after"),
+        "\"\"",
+        "the banner goes with the reconnect"
+    );
+    assert_eq!(
+        fact(&facts, "buffer.after"),
+        fact(&facts, "buffer.before"),
+        "the resumed session is on the note, not LOCAL's document"
+    );
+    assert_eq!(fact(&facts, "cursor.after"), fact(&facts, "cursor.before"));
+    assert_eq!(fact(&facts, "text.after"), fact(&facts, "text.before"));
+    assert_eq!(fact(&facts, "token.changed"), "true");
+    assert_eq!(fact(&facts, "closed"), "true");
+    assert_eq!(
+        fact(&facts, "text.closing"),
+        r#""abc!one\ntwo\n""#,
+        "the mirror holds the character typed at the close"
+    );
+
+    // The op in flight at the close reached the daemon: a fresh session
+    // reads the note with the typed text, the `!` included.
+    let note = fact(&facts, "buffer.before")
+        .parse::<u64>()
+        .expect("buffer id");
+    let mut reader = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    let (scratch, _) = reader.where_am_i();
+    reader.open_note(scratch);
+    let snapshot = reader.wait("the note's snapshot", |m| match m {
+        InstanceMessage::BufferSnapshot {
+            buffer_id,
+            crdt_snapshot,
+        } if buffer_id.raw() == note => Some(crdt_snapshot.clone()),
+        _ => None,
+    });
+    let mirror = pmacs::crdt::CrdtState::new(reader.fid.0).expect("CrdtState::new");
+    mirror.import_snapshot(&snapshot).expect("import");
+    let text = mirror.materialize_string();
+    assert!(
+        text.starts_with("abc!"),
+        "the op typed at the close was drained before the socket closed; the daemon holds {text:?}"
     );
 }

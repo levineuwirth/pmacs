@@ -2425,16 +2425,24 @@ fn handle_session_established(
     // registry does not hold is a fresh view, as `None` is.
     let fold_projection = !session_state.negotiated_capabilities.semantic_render;
     let panel_capable = peer_declared_panel_support(session_state);
-    let fresh_view = match resume.and_then(|t| session_registry.take_retained(t)) {
-        Some(mut retained) => {
+    let mut resumed = false;
+    let fresh_view =
+        if let Some(mut retained) = resume.and_then(|t| session_registry.take_retained(t)) {
+            daemon_debug(format!("{frontend_id:?} resumes a retained view"));
+            resumed = true;
             retained.fold_projection = fold_projection;
             retained.panel_capable = panel_capable;
             retained.frame_geometry = None;
             retained.document_viewport = None;
             retained
-        }
-        None => build_fresh_frontend_view(editor, fold_projection, panel_capable),
-    };
+        } else {
+            if let Some(token) = resume {
+                daemon_debug(format!(
+                    "{frontend_id:?} presented {token} but no view is retained for it"
+                ));
+            }
+            build_fresh_frontend_view(editor, fold_projection, panel_capable)
+        };
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
@@ -2463,6 +2471,19 @@ fn handle_session_established(
     let crdt_replica = session_state.negotiated_capabilities.crdt_replica;
     let semantic_render = session_state.negotiated_capabilities.semantic_render;
     let negotiated_protocol_version = session_state.negotiated_protocol_version;
+
+    // E9 --- a resumed session bootstraps on the one buffer its
+    // retained window shows, as a target session does on its target,
+    // never on the all-buffer sweep: a semantic frontend answers every
+    // snapshot with a `Viewport` that moves its window to that buffer,
+    // so a sweep would leave the resumed window wherever the sweep's
+    // last snapshot landed, which is the wrong-buffer return E9 exists
+    // to remove.
+    let resumed_buffer = if resumed && opened_target.is_none() {
+        editor.core.borrow().primary_document_buffer(frontend_id)
+    } else {
+        None
+    };
 
     if let Some(opened) = opened_target.as_ref() {
         let target_snapshot = match initial_target_snapshot(editor, opened.buffer_id) {
@@ -2497,6 +2518,42 @@ fn handle_session_established(
                 .borrow_mut()
                 .unregister_frontend_view(frontend_id);
             return;
+        }
+    } else if let Some(buffer_id) = resumed_buffer {
+        match initial_target_snapshot(editor, buffer_id) {
+            Ok(snapshot) => {
+                let message = InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot: snapshot.crdt_snapshot,
+                };
+                if snapshot.upgraded_to_crdt {
+                    publish_buffer_snapshot_to_replicas(
+                        editor,
+                        buffer_id,
+                        &message,
+                        session_registry,
+                        streams,
+                        semantic_states,
+                    );
+                }
+                if write_message(&mut write_stream, &message).is_err() {
+                    let _ = write_stream.shutdown(Shutdown::Both);
+                    editor
+                        .core
+                        .borrow_mut()
+                        .unregister_frontend_view(frontend_id);
+                    return;
+                }
+            }
+            Err(message) => {
+                eprintln!("pmacs: snapshot of the resumed buffer failed: {message}");
+                let _ = write_stream.shutdown(Shutdown::Both);
+                editor
+                    .core
+                    .borrow_mut()
+                    .unregister_frontend_view(frontend_id);
+                return;
+            }
         }
     } else if crdt_replica {
         // Legacy no-target attach remains an all-buffer replica bootstrap.
@@ -2535,6 +2592,9 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
+    if let Some(buffer_id) = resumed_buffer {
+        last_active_buffer_sent.insert(frontend_id, buffer_id);
+    }
     if let Some(opened) = opened_target {
         last_active_buffer_sent.insert(frontend_id, opened.buffer_id);
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
