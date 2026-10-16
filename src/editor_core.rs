@@ -1131,18 +1131,22 @@ impl EditorCore {
     /// took 98 after half an hour of scripted typing. A window another
     /// view still shows is kept.
     pub fn unregister_frontend_view(&mut self, fid: FrontendId) {
-        if let Some(view) = self.views.remove(&fid) {
-            let still_shown: HashSet<WindowId> = self
-                .views
-                .values()
-                .flat_map(|v| v.layout.iter_ids())
-                .collect();
-            for id in view.layout.iter_ids() {
-                if !still_shown.contains(&id) {
-                    self.windows.remove(&id);
-                }
-            }
+        if let Some(view) = self.take_frontend_view(fid) {
+            self.discard_view_windows(&view);
         }
+    }
+
+    /// E9 --- remove a frontend's view and hand it back with its
+    /// windows still in `self.windows`, so a session resuming under
+    /// the token the frontend held can register it again and land on
+    /// the same window, buffer, cursor and scroll. Everything else a
+    /// detach drops goes here as in [`Self::unregister_frontend_view`]:
+    /// the navigation trail (Q#BP11c, its `WindowId`s are not this
+    /// frontend's to pop any more), the popup mark and the active
+    /// frontend. The caller owns the windows from here: it registers
+    /// the view again or passes it to [`Self::discard_view_windows`].
+    pub fn take_frontend_view(&mut self, fid: FrontendId) -> Option<FrontendView> {
+        let view = self.views.remove(&fid);
         // Bottom-panel arc (Q#BP11c): a detached frontend's navigation
         // trail dies with its view — its `WindowId`s are gone, and no
         // other frontend may pop or destroy those entries.
@@ -1150,6 +1154,24 @@ impl EditorCore {
         self.frontends_without_popup.remove(&fid);
         if self.active_frontend == fid {
             self.active_frontend = FrontendId::LOCAL;
+        }
+        view
+    }
+
+    /// E9 --- drop the windows only `view` showed (E6d.5's rule: a
+    /// window another registered view still shows is kept). The
+    /// second half of [`Self::unregister_frontend_view`], run on a
+    /// retained view when its retention expires.
+    pub fn discard_view_windows(&mut self, view: &FrontendView) {
+        let still_shown: HashSet<WindowId> = self
+            .views
+            .values()
+            .flat_map(|v| v.layout.iter_ids())
+            .collect();
+        for id in view.layout.iter_ids() {
+            if !still_shown.contains(&id) {
+                self.windows.remove(&id);
+            }
         }
     }
 

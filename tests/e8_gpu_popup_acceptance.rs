@@ -160,7 +160,7 @@ fn e8_3_the_gpu_shows_scrolls_keeps_on_click_and_closes_on_motion_the_hover() {
     ) else {
         return;
     };
-    assert_eq!(fact(&facts, "session_protocol_version"), "26");
+    assert_eq!(fact(&facts, "session_protocol_version"), "27");
     assert_eq!(fact(&facts, "open.open"), "true", "{facts:?}");
     assert_eq!(fact(&facts, "open.kind"), "hover");
     assert_eq!(fact(&facts, "open.lines"), "202", "the whole text arrives");

@@ -456,6 +456,9 @@ impl Frontend {
             // HoverView and SignatureView cell overlays, so it drops
             // this silently like CompletionPopup.
             | InstanceMessage::Popup(_)
+            // E9 — the session token is minted for semantic sessions
+            // only; the grid attach never negotiates one and drops it.
+            | InstanceMessage::SessionToken(_)
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

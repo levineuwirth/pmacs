@@ -41,6 +41,22 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E9: how long the daemon keeps a detached frontend's view --- its
+-- window, buffer, cursor and scroll --- for the session token that
+-- frontend holds, so a GUI that loses its socket and reconnects lands
+-- where it was. The retained windows are still updated by every edit
+-- (E6d.5 measured what leaked windows cost), so the window is bounded;
+-- 0 retains nothing, and a frontend reconnecting later than this starts
+-- on a fresh view. Read by the daemon on every tick.
+pmacs.config.define {
+  name = "session.view-retention-secs",
+  description = "Seconds a detached frontend's window, buffer and cursor are kept for its session token, so a reconnecting GUI resumes where it was; 0 keeps nothing.",
+  type = "integer",
+  default = 600,
+  min = 0,
+  mutability = "live",
+}
+
 pmacs.command.define {
   name = "window.quit",
   description = "Quit the selected side window: restore or delete it",

@@ -73,6 +73,8 @@ use crate::protocol::{
     PANEL_MAPPING_MIN_VERSION, PANEL_MIN_VERSION, PointerKind, SelectionSnapshot,
     SessionBootstrapRequest, TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
+use pmacs_protocol::{SESSION_MIN_VERSION, SessionToken};
+
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
 
@@ -121,6 +123,10 @@ enum DispatcherEvent {
         initial_size: CellSize,
         /// Validated protocol-v20 semantic bootstrap target, if requested.
         initial_target: Option<InitialTarget>,
+        /// E9 --- the token the frontend presented in its v27 `Resume`
+        /// step, to take back the view retained for it; `None` for a
+        /// fresh view, and for every session below v27.
+        resume: Option<SessionToken>,
         /// Write-half of the per-attach stream. The dispatcher owns
         /// this end; the per-attach reader thread keeps the
         /// read-half via `try_clone`.
@@ -808,6 +814,36 @@ fn per_attach_thread(
         None
     };
 
+    // E9 (v27) — a semantic session's one handshake step past the
+    // bootstrap: `Resume`, naming the token of the view it takes back
+    // or `None` for a fresh one. Read only from a session that
+    // negotiated the family, since reading it from an older one would
+    // desynchronize that stream; a v27 session that sends anything
+    // else here is refused as a protocol error.
+    let session_version = crate::protocol::negotiated_session_version(req.protocol_version);
+    let resume = if session_version >= SESSION_MIN_VERSION && negotiated_caps.semantic_render {
+        match read_message::<FrontendEvent>(&mut stream) {
+            Ok(FrontendEvent::Resume { token, .. }) => token.filter(|t| !t.is_zero()),
+            Ok(other) => {
+                eprintln!(
+                    "pmacs: {frontend_id:?} sent {} where its v27 Resume step was due",
+                    frontend_event_name(&other)
+                );
+                let _ = write_message(
+                    &mut stream,
+                    &InstanceMessage::Goodbye(GoodbyeReason::ProtocolError),
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("pmacs: read Resume failed: {e}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     // T M10.8 Day 4 — Q5 non-multi-session admission control.
     let _non_multi_guard = if negotiated_caps.multi_frontend {
         None
@@ -839,11 +875,8 @@ fn per_attach_thread(
     // today; it is applied through the shared rule anyway so a future
     // ladder widening cannot silently record a version this binary is
     // unable to produce.
-    let session_state = crate::presence::SessionState::new(
-        crate::protocol::negotiated_session_version(req.protocol_version),
-        negotiated_caps,
-        color_slot,
-    );
+    let session_state =
+        crate::presence::SessionState::new(session_version, negotiated_caps, color_slot);
 
     // Hand the write-half to the dispatcher; keep a read-half for
     // this thread's reader loop. **Reader loop starts immediately
@@ -865,6 +898,7 @@ fn per_attach_thread(
             session_state,
             initial_size: req.initial_size,
             initial_target,
+            resume,
             write_stream,
         })
         .is_err()
@@ -991,6 +1025,15 @@ fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) 
 /// prevents an unknown discriminant reaching one, so neither gate alone
 /// is load-bearing. Both read the protocol crate's constant, as the
 /// GPU frontend's gates do.
+/// E9 --- belt-and-braces write-loop gate for the v27 session family:
+/// the token is produced only at establishment, for a session that
+/// negotiated the family, so a copy reaching the frame vector for an
+/// older peer would be a defect; it is withheld here rather than
+/// mis-decoded there.
+fn peer_accepts_session_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= SESSION_MIN_VERSION || !matches!(message, InstanceMessage::SessionToken(_))
+}
+
 fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) -> bool {
     protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
         || !matches!(message, InstanceMessage::Popup(_))
@@ -1474,6 +1517,19 @@ fn dispatcher_loop(
             .copied()
             .collect();
 
+        // E9 --- a retained view past `session.view-retention-secs`
+        // gives up its windows here, so a detached frontend that never
+        // returns costs the daemon nothing past the window.
+        {
+            let expired = session_registry.expire_retained(view_retention(editor), Instant::now());
+            if !expired.is_empty() {
+                let mut core = editor.core.borrow_mut();
+                for view in &expired {
+                    core.discard_view_windows(view);
+                }
+            }
+        }
+
         // T M10.10 post-audit-round-3 F18 — drain + broadcast pending
         // CRDT ops **before** the render pass. Otherwise frontends
         // receive `CellDelta` + `CursorByte` (showing the edit
@@ -1846,6 +1902,13 @@ fn dispatcher_loop(
                     // line instead (`peer_shows_popup`), and `*lsp-help*`
                     // (`C-c H`) still carries the whole text.
                     if !peer_accepts_popup_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
+                    // E9 — the session token is written once at
+                    // establishment and never rides a frame; the gate
+                    // here is the belt-and-braces half, as for every
+                    // other appended variant.
+                    if !peer_accepts_session_message(negotiated_protocol_version, msg) {
                         continue;
                     }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
@@ -2330,8 +2393,16 @@ fn handle_session_established(
     session_state: crate::presence::SessionState,
     initial_size: CellSize,
     initial_target: Option<InitialTarget>,
+    resume: Option<SessionToken>,
     mut write_stream: UnixStream,
 ) {
+    // E9 --- a session that negotiated the family is minted a token,
+    // registered with it (so its detach retains its view) and told it
+    // once its bootstrap is on the wire, below.
+    let token = (session_state.negotiated_protocol_version >= SESSION_MIN_VERSION
+        && session_state.negotiated_capabilities.semantic_render)
+        .then(mint_session_token);
+    let session_state = session_state.with_token(token);
     // Register the frontend's view (M10.8 Day 3: fresh scratch
     // buffer view; future milestones may clone LOCAL's view or
     // take an explicit initial-buffer argument).
@@ -2347,11 +2418,23 @@ fn handle_session_established(
     // `PANEL_MIN_VERSION` or later can render the GPU band and is
     // panel-capable, while a v6-v20 semantic session still falls back to
     // its document target with every side-specific parameter discarded.
-    let fresh_view = build_fresh_frontend_view(
-        editor,
-        !session_state.negotiated_capabilities.semantic_render,
-        peer_declared_panel_support(session_state),
-    );
+    // E9 --- the view a previous session of this frontend left behind
+    // is taken back under the token it presented, with this session's
+    // own projection and panel facts (the negotiation is per session)
+    // and no geometry, which the new socket declares afresh. A token the
+    // registry does not hold is a fresh view, as `None` is.
+    let fold_projection = !session_state.negotiated_capabilities.semantic_render;
+    let panel_capable = peer_declared_panel_support(session_state);
+    let fresh_view = match resume.and_then(|t| session_registry.take_retained(t)) {
+        Some(mut retained) => {
+            retained.fold_projection = fold_projection;
+            retained.panel_capable = panel_capable;
+            retained.frame_geometry = None;
+            retained.document_viewport = None;
+            retained
+        }
+        None => build_fresh_frontend_view(editor, fold_projection, panel_capable),
+    };
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
@@ -2474,7 +2557,102 @@ fn handle_session_established(
                 session_registry,
                 frontend_id,
             );
+            return;
         }
+    }
+
+    // E9 --- the token goes after the bootstrap, so a frontend reading
+    // its target's snapshot and result synchronously is not handed a
+    // message it did not ask for, and before the first frame.
+    if let Some(token) = token {
+        let write_result = {
+            let stream = streams
+                .get_mut(&frontend_id)
+                .expect("new session stream installed");
+            write_message(stream, &InstanceMessage::SessionToken(token))
+        };
+        if write_result.is_err() {
+            cleanup_provisional_session(
+                editor,
+                render_states,
+                semantic_states,
+                streams,
+                term_sizes,
+                last_active_buffer_sent,
+                session_registry,
+                frontend_id,
+            );
+        }
+    }
+}
+
+/// E9 --- sixteen random bytes for a session token, from the system's
+/// entropy; should that be unreadable, a mix of the clock, the pid and a
+/// counter, which is unique within the daemon and is all a token must
+/// be (the socket is the user's own; see `pmacs_protocol::session`).
+fn mint_session_token() -> SessionToken {
+    use std::io::Read as _;
+    let mut bytes = [0u8; pmacs_protocol::SESSION_TOKEN_BYTES];
+    let read = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !read || SessionToken(bytes).is_zero() {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let seed = nanos
+            ^ (u64::from(std::process::id()) << 32)
+            ^ COUNTER.fetch_add(1, Ordering::SeqCst).rotate_left(17);
+        let mut rng = SplitMix64::new(seed);
+        for chunk in bytes.chunks_mut(8) {
+            let word = rng.next_u64().to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+    SessionToken(bytes)
+}
+
+/// E9 --- `session.view-retention-secs` as the daemon reads it on a
+/// tick and at a detach; zero when the registry is unreachable, so a
+/// view is never retained by a daemon that cannot say for how long.
+fn view_retention(editor: &EditorState) -> Duration {
+    let secs = editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .and_then(
+            |registry| match registry.borrow().get("session.view-retention-secs", None) {
+                Ok(crate::config_registry::ConfigValue::Int(n)) => u64::try_from(*n).ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0);
+    Duration::from_secs(secs)
+}
+
+/// The variant's name, for a log line about a message out of place.
+fn frontend_event_name(event: &FrontendEvent) -> &'static str {
+    match event {
+        FrontendEvent::Key(_) => "Key",
+        FrontendEvent::Mouse(_) => "Mouse",
+        FrontendEvent::Resize { .. } => "Resize",
+        FrontendEvent::Paste { .. } => "Paste",
+        FrontendEvent::FocusGained(_) => "FocusGained",
+        FrontendEvent::FocusLost(_) => "FocusLost",
+        FrontendEvent::Detach(_) => "Detach",
+        FrontendEvent::CrdtOp { .. } => "CrdtOp",
+        FrontendEvent::Viewport { .. } => "Viewport",
+        FrontendEvent::Pointer { .. } => "Pointer",
+        FrontendEvent::MenuPointer { .. } => "MenuPointer",
+        FrontendEvent::TerminalResize { .. } => "TerminalResize",
+        FrontendEvent::TerminalPointer { .. } => "TerminalPointer",
+        FrontendEvent::FrontendCellGeometry { .. } => "FrontendCellGeometry",
+        FrontendEvent::PanelResizeRows { .. } => "PanelResizeRows",
+        FrontendEvent::PanelPointer { .. } => "PanelPointer",
+        FrontendEvent::TextInput { .. } => "TextInput",
+        FrontendEvent::PanelPointerMapped { .. } => "PanelPointerMapped",
+        FrontendEvent::Resume { .. } => "Resume",
     }
 }
 
@@ -2499,6 +2677,7 @@ fn handle_dispatcher_event(
             session_state,
             initial_size,
             initial_target,
+            resume,
             write_stream,
         } => {
             handle_session_established(
@@ -2513,6 +2692,7 @@ fn handle_dispatcher_event(
                 session_state,
                 initial_size,
                 initial_target,
+                resume,
                 write_stream,
             );
         }
@@ -3134,9 +3314,9 @@ fn detach_frontend(
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
-    if session_registry.session_state(frontend_id).is_none() {
+    let Some(session) = session_registry.session_state(frontend_id) else {
         return;
-    }
+    };
     // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
     // and the only one with no later chance at all. End the live
     // gesture, then pay it, and do BOTH before any teardown: the
@@ -3160,9 +3340,22 @@ fn detach_frontend(
         .statusline_registry
         .borrow_mut()
         .detach_frontend(frontend_id);
+    // E9 --- a session that holds a token leaves its view behind for
+    // the token, for `session.view-retention-secs`; the next session
+    // presenting the token in its `Resume` step starts on it. A zero
+    // retention, or no token (a pre-v27 or grid session), drops the
+    // view as before.
+    let retention = view_retention(editor);
     {
         let mut core = editor.core.borrow_mut();
-        core.unregister_frontend_view(frontend_id);
+        match session.token {
+            Some(token) if !retention.is_zero() => {
+                if let Some(view) = core.take_frontend_view(frontend_id) {
+                    session_registry.retain_view(token, view, Instant::now());
+                }
+            }
+            _ => core.unregister_frontend_view(frontend_id),
+        }
         // Kill ring Q#KR11: frontend ids are monotonic, so
         // per-frontend state must not outlive the session.
         core.command_history.remove(&frontend_id);
@@ -4399,6 +4592,10 @@ fn apply_event(
         // the family gate; arriving here it is dropped, never unwrapped
         // to the legacy family.
         | FrontendEvent::PanelPointerMapped { .. }
+        // E9: `Resume` is a handshake step, read by the per-attach
+        // thread before the session exists; one arriving here is a
+        // protocol slip and is dropped, never applied.
+        | FrontendEvent::Resume { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
@@ -6277,6 +6474,7 @@ mod tests {
                     ..Default::default()
                 },
                 color_slot: 0,
+                token: None,
             },
         );
 
@@ -6680,6 +6878,7 @@ mod tests {
                     ..Default::default()
                 },
                 color_slot: 0,
+                token: None,
             },
         );
         handle_dispatcher_event(
@@ -6770,6 +6969,7 @@ mod tests {
                 ..Default::default()
             },
             color_slot: 0,
+            token: None,
         }
     }
 

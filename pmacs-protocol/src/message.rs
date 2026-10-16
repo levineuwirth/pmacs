@@ -607,6 +607,35 @@ pub enum FrontendEvent {
         /// diffable by eye.
         mapping_generation: u64,
     },
+    /// E9 (**protocol v27**, [`crate::session::SESSION_MIN_VERSION`]):
+    /// the one message of a semantic session's handshake step at v27,
+    /// written right after its [`SessionBootstrapRequest`] and read by
+    /// the daemon before the session is established, so the view it
+    /// names is the one the session starts on and no frame of another
+    /// is ever shown first.
+    ///
+    /// `Some(token)` presents the token a previous session of this
+    /// frontend was given in [`InstanceMessage::SessionToken`]: the
+    /// daemon takes the `FrontendView` it retained for that token ---
+    /// the window, its buffer, cursor and scroll --- as this session's
+    /// view, and the token is consumed. A token the daemon does not
+    /// hold (expired, never minted, consumed, or all zero) is treated as
+    /// `None`: the session starts on a fresh view and is told nothing,
+    /// since the frontend can see which buffer arrived. `None` asks for
+    /// a fresh view, as every pre-v27 session gets.
+    ///
+    /// **Gated receiver-side**: the daemon reads this step only from a
+    /// session that negotiated v27 or later with `semantic_render`,
+    /// and never reads it from an older one, which would desynchronize
+    /// that stream; a `Resume` arriving on an established session's
+    /// event stream is dropped as a protocol slip, never applied.
+    Resume {
+        /// Which frontend sent it (untrusted, as above; the daemon's
+        /// authenticated source is the handshake's own connection).
+        frontend_id: FrontendId,
+        /// The token of the session to resume, or `None` for a fresh view.
+        token: Option<crate::session::SessionToken>,
+    },
 }
 
 /// First protocol version carrying the **mapped panel family** —
@@ -685,7 +714,8 @@ impl FrontendEvent {
             | Self::PanelResizeRows { frontend_id, .. }
             | Self::PanelPointer { frontend_id, .. }
             | Self::TextInput { frontend_id, .. }
-            | Self::PanelPointerMapped { frontend_id, .. } => *frontend_id,
+            | Self::PanelPointerMapped { frontend_id, .. }
+            | Self::Resume { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -766,6 +796,22 @@ pub enum GoodbyeReason {
         /// `FrontendCapabilities` field name.
         missing: Vec<String>,
     },
+    /// E9 (**protocol v27**): the frontend's own quit detached it, and
+    /// nothing else changed. A `C-x C-c` from an attached frontend ends
+    /// that frontend's session rather than the daemon (the daemon
+    /// quits only when its last frontend answers that it should), so
+    /// the frontend is told to close its window and not to reconnect;
+    /// its view is retained as any detach's is, for the token it holds.
+    ///
+    /// Sent only to a session that negotiated
+    /// [`crate::session::SESSION_MIN_VERSION`] or later; an older
+    /// peer's socket is closed without a `Goodbye`, as a `Detach` of
+    /// its own always was, since the discriminant would not decode
+    /// there. Appended after `CapabilityMismatch`, the final v6
+    /// variant, so no existing discriminant moves; a literal byte
+    /// fixture of that variant, through its nesting in
+    /// [`InstanceMessage::Goodbye`], guards the placement.
+    Detached,
 }
 
 /// Rendering and signals from instance to frontend.
@@ -1515,6 +1561,23 @@ pub enum InstanceMessage {
     /// byte fixture of that variant guards the placement. Gated at
     /// [`crate::popup::POPUP_MIN_VERSION`] on both sides.
     Popup(crate::popup::PopupPayload),
+    /// E9 (**protocol v27**, [`crate::session::SESSION_MIN_VERSION`]):
+    /// the token the daemon minted for this session, written once, after
+    /// the session's bootstrap (its initial target's snapshot and
+    /// result, or the legacy all-buffer snapshots) and before its first
+    /// frame, to a session that negotiated v27 or later with
+    /// `semantic_render`. The frontend keeps it and presents it in
+    /// [`FrontendEvent::Resume`] on its next socket; while the daemon
+    /// retains the detached session's view (`session.view-retention-secs`),
+    /// that socket starts on the same window, buffer and cursor.
+    ///
+    /// Minted after negotiation and never carried in [`Hello`], which is
+    /// the pre-negotiation message no version can widen (D34). Outbound
+    /// only; the write filter withholds it from an older peer as it does
+    /// every gated variant. Appended after [`Self::Popup`], the final
+    /// v26 variant, so no existing postcard discriminant moves; a
+    /// literal byte fixture of that variant guards the placement.
+    SessionToken(crate::session::SessionToken),
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -2029,7 +2092,19 @@ pub enum ResourceBody {
 /// moves. Outbound only, gated at [`crate::popup::POPUP_MIN_VERSION`] by
 /// the daemon's producer and write filter and by the GPU frontend's
 /// apply and paint gates. The advertised baseline remains 20.
-pub const PROTOCOL_VERSION: u32 = 26;
+///
+/// E9: bumped 26 → 27 for the session family: [`InstanceMessage::
+/// SessionToken`], appended after `Popup`, the final v26 `InstanceMessage`
+/// variant; [`FrontendEvent::Resume`], appended after
+/// `PanelPointerMapped`, the final v25 `FrontendEvent` variant; and
+/// [`GoodbyeReason::Detached`], appended after `CapabilityMismatch`, the
+/// final `GoodbyeReason` variant since v6. The token is minted after
+/// negotiation and never carried in [`Hello`] (D34). Gated in both
+/// directions at [`crate::session::SESSION_MIN_VERSION`]: the daemon
+/// writes the token and the `Detached` goodbye only to a v27 session,
+/// and reads the `Resume` step only from one. The advertised baseline
+/// remains 20.
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -2229,8 +2304,13 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// E8: extended to `[6, ..., 26]` for [`InstanceMessage::Popup`].
 /// Additive and outbound only: a v25 peer negotiates v25 and never
 /// receives the variant. [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
+///
+/// E9: extended to `[6, ..., 27]` for the session family. Additive in
+/// both directions: a v26 peer negotiates v26, receives no token and no
+/// `Detached` goodbye, and is never read for the `Resume` step.
+/// [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
 ];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if

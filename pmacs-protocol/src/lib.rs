@@ -44,6 +44,7 @@ pub mod message;
 pub mod panel;
 pub mod popup;
 pub mod scroll;
+pub mod session;
 pub mod terminal;
 pub mod transport;
 pub mod wire_grid;
@@ -81,6 +82,7 @@ pub use popup::{
     MAX_POPUP_LINE_BYTES, MAX_POPUP_LINES, MAX_POPUP_TEXT_BYTES, POPUP_MIN_VERSION,
     PopupActiveRange, PopupFrame, PopupFrameError, PopupKind, PopupPayload, place_popup,
 };
+pub use session::{SESSION_MIN_VERSION, SESSION_TOKEN_BYTES, SessionToken};
 pub use terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_FRAME_GLYPH_BYTES, MAX_TERMINAL_GRAPHEME_BYTES,
     MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,

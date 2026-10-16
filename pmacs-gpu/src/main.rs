@@ -4381,6 +4381,11 @@ struct State {
     /// The daemon's post-handshake `Goodbye`, when one arrived before
     /// the socket closed (E2.3); the disconnect notice names it.
     goodbye: Option<pmacs_protocol::GoodbyeReason>,
+    /// E9 --- the token the daemon minted for this session
+    /// (`InstanceMessage::SessionToken`, v27), presented in the next
+    /// socket's `Resume` step so the daemon starts it on the view it
+    /// retained; `None` before the token arrives and on a pre-v27 session.
+    session_token: Option<pmacs_protocol::SessionToken>,
     /// The title last pushed to the window (E2.3), so an unchanged
     /// title is not re-set on every `StatusFacts`.
     last_title: Option<String>,
@@ -10470,6 +10475,7 @@ impl State {
             focused: true,
             bell_flash_until: None,
             goodbye: None,
+            session_token: None,
             last_title: None,
             zoom_wheel_residual: 0.0,
             caret_blink_epoch: std::time::Instant::now(),
@@ -11529,6 +11535,13 @@ impl State {
             // closes next and `Disconnected` follows; the notice set here
             // is what that arm keeps, so the reason is not lost to a
             // generic "(daemon disconnected)".
+            // E9 --- the session's token, kept for the next socket's
+            // `Resume` step; a later token (a resumed session is minted
+            // its own) replaces the earlier one.
+            InstanceMessage::SessionToken(token) => {
+                self.session_token = Some(token);
+                None
+            }
             InstanceMessage::Goodbye(reason) => {
                 let notice = disconnect_notice(Some(&reason), None);
                 self.goodbye = Some(reason);
@@ -18677,6 +18690,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
         InstanceMessage::PanelFrame(_) => "PanelFrame",
         InstanceMessage::Popup(_) => "Popup",
+        InstanceMessage::SessionToken(_) => "SessionToken",
     }
 }
 
@@ -18695,6 +18709,7 @@ fn describe_goodbye(reason: &pmacs_protocol::GoodbyeReason) -> String {
         GoodbyeReason::CapabilityMismatch { missing } => {
             format!("capabilities missing: {}", missing.join(", "))
         }
+        GoodbyeReason::Detached => "this frontend quit and was detached".to_owned(),
     }
 }
 

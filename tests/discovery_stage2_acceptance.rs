@@ -67,10 +67,11 @@ use common::daemon::{TestDaemon, build_default_caps};
 /// server-first, so moving it locks out every already-shipped frontend
 /// before it can counter-offer. An additive family never needs it.
 #[test]
-fn the_wire_is_v26_and_the_advertised_baseline_is_unmoved() {
+fn the_wire_is_v27_and_the_advertised_baseline_is_unmoved() {
     assert_eq!(
-        PROTOCOL_VERSION, 26,
-        "v26 is the hover and signature Popup (E8); v25 was the mapped \
+        PROTOCOL_VERSION, 27,
+        "v27 is the session family (E9); v26 was the hover and signature \
+         Popup (E8); v25 was the mapped \
          panel family (bottom-panel §5b); v24 was TextInput (GUI arc \
          Stage 1a); v23 was MinibufferPromptRows"
     );
@@ -510,6 +511,19 @@ fn attach_semantic(daemon: &TestDaemon, offer: u32) -> (UnixStream, pmacs_protoc
             },
         )
         .expect("write bootstrap");
+        // E9 (v27): the session's one handshake step past the bootstrap,
+        // read by the daemon only from a session that negotiated the
+        // family; `None` asks for a fresh view.
+        if offer >= pmacs::protocol::SESSION_MIN_VERSION {
+            write_message(
+                &mut stream,
+                &FrontendEvent::Resume {
+                    frontend_id: fid,
+                    token: None,
+                },
+            )
+            .expect("write Resume");
+        }
     }
     let document = pump(&mut stream, "first BufferSnapshot", |msg| match msg {
         InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
@@ -616,7 +630,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
     // rather than after the interesting half has already passed.
     let (mut legacy, _legacy_fid) = attach_semantic(&daemon, 22);
     let (mut current, current_fid) = attach_semantic(&daemon, PROTOCOL_VERSION);
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 27);
 
     // Open the real `M-x` through the real key path, then narrow to the
     // probe command by typing it — the candidate window is ten rows out

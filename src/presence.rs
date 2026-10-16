@@ -51,6 +51,9 @@
 //!   attach/detach; the sweep's broadcast list becomes non-empty.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use pmacs_protocol::SessionToken;
 
 use crate::buffer::BufferId;
 use crate::protocol::{FrontendId, InstanceMessage, NegotiatedCapabilities, SelectionSnapshot};
@@ -88,12 +91,18 @@ pub struct SessionState {
     /// reconnect → same slot. Slot resolves to a `Color` via
     /// [`crate::overlay_color::color_for_slot`].
     pub color_slot: u8,
+    /// E9 --- the token the daemon minted for this session, `None` for
+    /// a session below [`pmacs_protocol::SESSION_MIN_VERSION`] or
+    /// without `semantic_render`. A session with a token has its
+    /// `FrontendView` retained at detach (`SessionRegistry::retain_view`)
+    /// instead of dropped, for the retention window.
+    pub token: Option<SessionToken>,
 }
 
 impl SessionState {
     /// Convenience constructor used by tests and the daemon's
     /// handshake path. Takes the version, capabilities, and color
-    /// slot.
+    /// slot; the session gets no token (see [`Self::with_token`]).
     #[must_use]
     pub fn new(
         negotiated_protocol_version: u32,
@@ -104,8 +113,31 @@ impl SessionState {
             negotiated_protocol_version,
             negotiated_capabilities,
             color_slot,
+            token: None,
         }
     }
+
+    /// The same state carrying a minted token (E9).
+    #[must_use]
+    pub fn with_token(mut self, token: Option<SessionToken>) -> Self {
+        self.token = token;
+        self
+    }
+}
+
+/// A detached session's view, kept for the token its session held (E9).
+///
+/// The windows the view lays out stay in `EditorCore::windows` while the
+/// view is retained, so every edit still updates them; that is the cost
+/// E6d.5 measured when detached views leaked, bounded here by
+/// `session.view-retention-secs`, after which [`SessionRegistry::
+/// expire_retained`] hands the view back for its windows to be dropped.
+#[derive(Debug)]
+pub struct RetainedView {
+    /// The detached session's view, as it stood at the detach.
+    pub view: crate::window::FrontendView,
+    /// When it was retained.
+    pub since: Instant,
 }
 
 /// One source frontend's presence at a tick boundary.
@@ -155,6 +187,11 @@ pub struct SessionRegistry {
     /// declared bit defaults to `false` and the AND with any
     /// instance bit is `false`.
     sessions: HashMap<FrontendId, SessionState>,
+    /// E9 --- views of detached sessions, by the token each held,
+    /// until resumed or expired. Keyed by token rather than frontend
+    /// id because the resuming session has a new id; the token is what
+    /// survives the socket.
+    retained: HashMap<SessionToken, RetainedView>,
 }
 
 impl SessionRegistry {
@@ -195,6 +232,51 @@ impl SessionRegistry {
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// E9 --- keep a detached session's view for `token`, from `now`.
+    /// A view retained under the same token earlier is replaced.
+    pub fn retain_view(
+        &mut self,
+        token: SessionToken,
+        view: crate::window::FrontendView,
+        now: Instant,
+    ) {
+        self.retained
+            .insert(token, RetainedView { view, since: now });
+    }
+
+    /// E9 --- take the view retained for `token`, consuming it, or
+    /// `None` when none is held (expired, never retained, or taken).
+    pub fn take_retained(&mut self, token: SessionToken) -> Option<crate::window::FrontendView> {
+        self.retained.remove(&token).map(|r| r.view)
+    }
+
+    /// E9 --- remove and return every view retained longer than `ttl`
+    /// at `now`, for its windows to be dropped. A zero `ttl` returns
+    /// them all.
+    pub fn expire_retained(
+        &mut self,
+        ttl: Duration,
+        now: Instant,
+    ) -> Vec<crate::window::FrontendView> {
+        let expired: Vec<SessionToken> = self
+            .retained
+            .iter()
+            .filter(|(_, r)| now.saturating_duration_since(r.since) >= ttl)
+            .map(|(t, _)| *t)
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|t| self.retained.remove(&t))
+            .map(|r| r.view)
+            .collect()
+    }
+
+    /// E9 --- the tokens of the views currently retained.
+    #[must_use]
+    pub fn retained_tokens(&self) -> Vec<SessionToken> {
+        self.retained.keys().copied().collect()
     }
 
     /// T M10.9 — gather `OtherPresence` entries for the overlay
