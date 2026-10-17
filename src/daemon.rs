@@ -1594,17 +1594,21 @@ fn dispatcher_loop(
                 // is displaying this buffer: applying a foreign-buffer
                 // snapshot would switch the GPU window away from its
                 // own active view.
-                if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid) {
-                    broadcast_buffer_snapshot_to_replicas(
+                if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid)
+                    && broadcast_buffer_snapshot_to_replicas(
                         editor,
                         upgraded,
                         &session_registry,
                         &mut streams,
                         &mut semantic_states,
-                    );
+                    )
+                {
                     // The broadcast just delivered this buffer to this
                     // frontend too; record it so the follow check below
-                    // doesn't send a duplicate on the same tick.
+                    // doesn't send a duplicate on the same tick. An
+                    // oversize snapshot (E9.5) is not recorded: the
+                    // follow check below then refuses the switch and
+                    // says so.
                     last_active_buffer_sent.insert(*fid, upgraded);
                 }
 
@@ -1635,16 +1639,34 @@ fn dispatcher_loop(
                     if let Some(active_now) = active_now
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
                     {
-                        send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
-                        // PR #120 round 2 — the snapshot just wiped
-                        // this frontend's buffer-scoped render state;
-                        // the emission baselines must die with it or
-                        // an unchanged-generation revisit (A → B → A)
-                        // suppresses every re-send.
-                        if let Some(sem) = semantic_states.get_mut(fid) {
-                            sem.on_buffer_snapshot_sent(active_now);
+                        match send_buffer_snapshot_to_frontend(
+                            editor,
+                            active_now,
+                            *fid,
+                            &mut streams,
+                        ) {
+                            Ok(()) => {
+                                // PR #120 round 2 — the snapshot just
+                                // wiped this frontend's buffer-scoped
+                                // render state; the emission baselines
+                                // must die with it or an
+                                // unchanged-generation revisit
+                                // (A → B → A) suppresses every re-send.
+                                if let Some(sem) = semantic_states.get_mut(fid) {
+                                    sem.on_buffer_snapshot_sent(active_now);
+                                }
+                                last_active_buffer_sent.insert(*fid, active_now);
+                            }
+                            // E9.5 — refused, said, and the window put
+                            // back on the buffer the frontend mirrors.
+                            Err(len) => refuse_oversize_snapshot(
+                                editor,
+                                *fid,
+                                active_now,
+                                len,
+                                last_active_buffer_sent.get(fid).copied(),
+                            ),
                         }
-                        last_active_buffer_sent.insert(*fid, active_now);
                     }
                 }
             }
@@ -2503,7 +2525,7 @@ fn handle_session_established(
     // so a sweep would leave the resumed window wherever the sweep's
     // last snapshot landed, which is the wrong-buffer return E9 exists
     // to remove.
-    let resumed_buffer = if resumed && opened_target.is_none() {
+    let mut resumed_buffer = if resumed && opened_target.is_none() {
         editor.core.borrow().primary_document_buffer(frontend_id)
     } else {
         None
@@ -2525,6 +2547,24 @@ fn handle_session_established(
             buffer_id: opened.buffer_id,
             crdt_snapshot: target_snapshot.crdt_snapshot,
         };
+        // E9.5 — a target past the frame cap is a failed target, told
+        // as one, never a session left at "(connecting...)".
+        let frame_len = snapshot_frame_len(&snapshot_message);
+        if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+            send_initial_target_failure(
+                &mut write_stream,
+                format!(
+                    "the file is {:.1} MiB, past the {:.0} MiB a frontend can mirror",
+                    frame_len as f64 / (1024.0 * 1024.0),
+                    pmacs_protocol::MAX_FRAME_BYTES as f64 / (1024.0 * 1024.0)
+                ),
+            );
+            editor
+                .core
+                .borrow_mut()
+                .unregister_frontend_view(frontend_id);
+            return;
+        }
         if opened.publish_to_replicas || target_snapshot.upgraded_to_crdt {
             publish_buffer_snapshot_to_replicas(
                 editor,
@@ -2550,23 +2590,38 @@ fn handle_session_established(
                     buffer_id,
                     crdt_snapshot: snapshot.crdt_snapshot,
                 };
-                if snapshot.upgraded_to_crdt {
-                    publish_buffer_snapshot_to_replicas(
-                        editor,
-                        buffer_id,
-                        &message,
-                        session_registry,
-                        streams,
-                        semantic_states,
-                    );
-                }
-                if write_message(&mut write_stream, &message).is_err() {
-                    let _ = write_stream.shutdown(Shutdown::Both);
-                    editor
+                // E9.5 — a retained window on a buffer past the frame
+                // cap is refused and put back on LOCAL's document, said
+                // so; the sweep below bootstraps the session as a fresh
+                // one would be.
+                let frame_len = snapshot_frame_len(&message);
+                if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+                    let back_to = editor
                         .core
-                        .borrow_mut()
-                        .unregister_frontend_view(frontend_id);
-                    return;
+                        .borrow()
+                        .primary_document_buffer(FrontendId::LOCAL);
+                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
+                    send_buffer_snapshots(editor, &mut write_stream);
+                    resumed_buffer = None;
+                } else {
+                    if snapshot.upgraded_to_crdt {
+                        publish_buffer_snapshot_to_replicas(
+                            editor,
+                            buffer_id,
+                            &message,
+                            session_registry,
+                            streams,
+                            semantic_states,
+                        );
+                    }
+                    if write_message(&mut write_stream, &message).is_err() {
+                        let _ = write_stream.shutdown(Shutdown::Both);
+                        editor
+                            .core
+                            .borrow_mut()
+                            .unregister_frontend_view(frontend_id);
+                        return;
+                    }
                 }
             }
             Err(message) => {
@@ -3584,6 +3639,16 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
             buffer_id,
             crdt_snapshot: snapshot,
         };
+        // E9.5 — a buffer past the frame cap is left out of the sweep
+        // and said so; the follow path refuses a switch onto it later,
+        // visibly.
+        if !snapshot_fits_a_frame(&msg) {
+            eprintln!(
+                "pmacs: BufferSnapshot for {buffer_id:?} is past the {} byte frame; left out of the attach sweep",
+                pmacs_protocol::MAX_FRAME_BYTES
+            );
+            continue;
+        }
         if let Err(e) = write_message(write_stream, &msg) {
             eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} failed: {e:?}");
             // Continue trying other buffers — the stream may
@@ -3715,6 +3780,69 @@ fn export_buffer_snapshot(
     }
 }
 
+/// E9.5 --- the bytes a `BufferSnapshot` message would put on the wire,
+/// measured before any write, so a snapshot past
+/// `pmacs_protocol::MAX_FRAME_BYTES` is refused where the caller can
+/// say so rather than failing inside `write_message` and being logged
+/// as if it had been skipped by accident.
+fn snapshot_frame_len(message: &InstanceMessage) -> usize {
+    postcard::to_allocvec(message).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// E9.5 --- whether `message` fits the transport's frame.
+#[cfg(feature = "crdt")]
+fn snapshot_fits_a_frame(message: &InstanceMessage) -> bool {
+    snapshot_frame_len(message) <= pmacs_protocol::MAX_FRAME_BYTES
+}
+
+/// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:
+/// say so on the status line every frontend reads, naming the buffer
+/// and both sizes, and put `fid`'s document window back on `back_to`,
+/// the buffer that frontend still mirrors, so the daemon's view and the
+/// frontend's never show different buffers. A frontend with nothing to
+/// go back to keeps its window; its band still says why nothing came.
+fn refuse_oversize_snapshot(
+    editor: &EditorState,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+    frame_len: usize,
+    back_to: Option<crate::buffer::BufferId>,
+) {
+    let mut core = editor.core.borrow_mut();
+    let name = core
+        .registry
+        .borrow()
+        .get(buffer_id)
+        .map_or_else(|_| format!("{buffer_id:?}"), |b| b.name().to_owned());
+    let back_name = back_to.and_then(|id| {
+        core.registry
+            .borrow()
+            .get(id)
+            .ok()
+            .map(|b| b.name().to_owned())
+    });
+    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    core.status = match back_name {
+        Some(back) => format!(
+            "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; this window stays on {back}",
+            mib(frame_len),
+            mib(pmacs_protocol::MAX_FRAME_BYTES)
+        ),
+        None => format!(
+            "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; it cannot be shown here",
+            mib(frame_len),
+            mib(pmacs_protocol::MAX_FRAME_BYTES)
+        ),
+    };
+    eprintln!("pmacs: {}", core.status);
+    if let Some(back) = back_to
+        && back != buffer_id
+        && let Err(e) = core.switch_active_buffer_for(fid, back)
+    {
+        eprintln!("pmacs: putting {fid:?} back on {back:?} failed: {e}");
+    }
+}
+
 /// Arc 1b — send `buffer_id`'s snapshot to ONE frontend. The
 /// active-buffer-follow path (see the per-tick loop) uses this when a
 /// semantic frontend's own active buffer changes to an
@@ -3724,24 +3852,32 @@ fn export_buffer_snapshot(
 /// displaying the old buffer while daemon-side input targeted the new
 /// one.
 #[cfg(feature = "crdt")]
+///
+/// E9.5: a snapshot past the frame cap is not written; `Err(len)` names
+/// its size so the caller refuses the switch visibly.
 fn send_buffer_snapshot_to_frontend(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
     fid: FrontendId,
     streams: &mut HashMap<FrontendId, UnixStream>,
-) {
+) -> Result<(), usize> {
     let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
-        return;
+        return Ok(());
     };
     let msg = InstanceMessage::BufferSnapshot {
         buffer_id,
         crdt_snapshot: snapshot_bytes,
     };
+    let len = snapshot_frame_len(&msg);
+    if len > pmacs_protocol::MAX_FRAME_BYTES {
+        return Err(len);
+    }
     if let Some(stream) = streams.get_mut(&fid)
         && let Err(e) = write_message(stream, &msg)
     {
         eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
     }
+    Ok(())
 }
 
 #[cfg(feature = "crdt")]
@@ -3751,14 +3887,26 @@ fn broadcast_buffer_snapshot_to_replicas(
     session_registry: &SessionRegistry,
     streams: &mut HashMap<FrontendId, UnixStream>,
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-) {
+) -> bool {
     let Some(snapshot) = export_buffer_snapshot(editor, buffer_id) else {
-        return;
+        return true;
     };
     let message = InstanceMessage::BufferSnapshot {
         buffer_id,
         crdt_snapshot: snapshot,
     };
+    // E9.5 — past the frame cap nothing is written to anyone: a grid
+    // replica composes its own cells and loses only its mirror, and a
+    // semantic one is refused the switch by the follow path, which
+    // says so. The log line names the size for the daemon's operator.
+    let len = snapshot_frame_len(&message);
+    if len > pmacs_protocol::MAX_FRAME_BYTES {
+        eprintln!(
+            "pmacs: BufferSnapshot for {buffer_id:?} is {len} bytes, past the {} byte frame; not sent",
+            pmacs_protocol::MAX_FRAME_BYTES
+        );
+        return false;
+    }
     publish_buffer_snapshot_to_replicas(
         editor,
         buffer_id,
@@ -3767,6 +3915,7 @@ fn broadcast_buffer_snapshot_to_replicas(
         streams,
         semantic_states,
     );
+    true
 }
 
 fn publish_buffer_snapshot_to_replicas(

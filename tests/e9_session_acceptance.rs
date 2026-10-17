@@ -976,3 +976,105 @@ fn e9_4_idle_exit_is_opt_in() {
     std::thread::sleep(Duration::from_secs(2));
     assert!(default.is_alive(), "by default an idle daemon stays up");
 }
+
+// ---------------------------------------------------------------------------
+// E9.5 --- oversize snapshots
+// ---------------------------------------------------------------------------
+
+/// A daemon whose init defines `e9.open-big`, opening a file whose
+/// snapshot is past `MAX_FRAME_BYTES` (twenty-four MiB of
+/// pseudo-random printable text, which no snapshot encoding packs
+/// under sixteen), and `e9.open-small`, a one-line file.
+fn daemon_with_big_and_small() -> TestDaemon {
+    let dir = tempfile::TempDir::new().expect("tempdir for the files");
+    let big = dir.path().join("big.txt");
+    let mut text = String::with_capacity(24 * 1024 * 1024 + 80);
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    while text.len() < 24 * 1024 * 1024 {
+        // xorshift64: every byte a printable character, 95 of them.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        for byte in state.to_le_bytes() {
+            text.push(char::from(b' ' + byte % 95));
+        }
+        if text.len() % 80 < 8 {
+            text.push('\n');
+        }
+    }
+    std::fs::write(&big, &text).expect("write the big file");
+    let small = dir.path().join("small.txt");
+    std::fs::write(&small, "small\n").expect("write the small file");
+    let init = format!(
+        "pmacs.command.define {{ name = 'e9.open-big', description = 'open the big file',\n\
+           fn = function() pmacs.buffer.find_or_open({big:?}) end }}\n\
+         pmacs.command.define {{ name = 'e9.open-small', description = 'open the small file',\n\
+           fn = function() pmacs.buffer.find_or_open({small:?}) end }}\n",
+        big = big.to_str().expect("utf-8"),
+        small = small.to_str().expect("utf-8"),
+    );
+    let daemon = TestDaemon::spawn_with_config(&init);
+    std::mem::forget(dir);
+    daemon
+}
+
+/// A buffer whose snapshot is past the frame cap is refused with a
+/// status every frontend reads, and the semantic frontend's window is
+/// put back on the buffer it still mirrors: no snapshot of it arrives,
+/// the band says what it weighs, and the daemon's cursor is back on
+/// the document that was there. A buffer that fits arrives as before.
+#[test]
+fn e9_5_an_oversize_snapshot_is_refused_with_a_visible_status_not_skipped() {
+    let daemon = daemon_with_big_and_small();
+    let mut session = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    let (scratch, _) = session.where_am_i();
+
+    session.run_command("e9.open-big");
+    // The refusal: the status names the weight and the window stays.
+    let (message, seen) = {
+        let mut seen = Vec::new();
+        let message = session.wait("the refusal on the status line", |m| {
+            seen.push(
+                format!("{m:?}")
+                    .split(['(', ' ', '{'])
+                    .next()
+                    .unwrap_or("")
+                    .to_owned(),
+            );
+            match m {
+                InstanceMessage::StatusFacts {
+                    message: Some(message),
+                    ..
+                } if message.contains("a frontend can mirror") => Some(message.clone()),
+                InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id != scratch => {
+                    panic!("a snapshot of the oversize buffer {buffer_id:?} was sent")
+                }
+                _ => None,
+            }
+        });
+        (message, seen)
+    };
+    assert!(
+        message.contains("MiB, past the 16 MiB") && message.contains("this window stays on"),
+        "the status says what weighed too much and where the window stayed: {message:?} (saw {seen:?})"
+    );
+    // The window is back on the document the frontend mirrors.
+    session.type_str("k");
+    session.wait("the echo on the kept document", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == scratch)
+            .then_some(())
+    });
+
+    // Control: a buffer that fits arrives, and the window moves.
+    session.run_command("e9.open-small");
+    let small = session.wait("the small buffer's snapshot", |m| match m {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id != scratch => {
+            Some(*buffer_id)
+        }
+        _ => None,
+    });
+    session.wait("the cursor on the small buffer", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id == small)
+            .then_some(())
+    });
+}
