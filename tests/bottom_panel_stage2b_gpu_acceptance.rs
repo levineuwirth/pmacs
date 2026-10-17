@@ -124,6 +124,19 @@ fn attach_semantic(daemon: &TestDaemon, offer: u32) -> Session {
             },
         )
         .expect("write bootstrap");
+        // E9 (v27): the session's one handshake step past the bootstrap,
+        // read by the daemon only from a session that negotiated the
+        // family; `None` asks for a fresh view.
+        if offer >= pmacs::protocol::SESSION_MIN_VERSION {
+            write_message(
+                &mut stream,
+                &FrontendEvent::Resume {
+                    frontend_id: hello.assigned_frontend_id,
+                    token: None,
+                },
+            )
+            .expect("write Resume");
+        }
     }
     Session {
         stream,
@@ -342,12 +355,13 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
 #[test]
 fn the_baseline_stays_and_the_counter_offer_activates() {
     // A deliberate tripwire: bumping the wire must be a conscious edit
-    // here, not a silent one. v26 is the hover and signature `Popup`
+    // here, not a silent one. v27 is the session family (E9); v26 is
+    // the hover and signature `Popup`
     // (E8); v25 is the mapped panel family (`PanelPointerMapped` +
     // `PresentMapped`, bottom-panel §5b); v24 is `TextInput` (GUI arc
     // Stage 1a); v23 was `MinibufferPromptRows` (Discovery Stage 2); v22
     // was `LineWrapFacts` (long-lines Stage 3).
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 27);
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
         "moving this is the incompatible act the mechanism exists to avoid"

@@ -73,6 +73,19 @@ impl Session {
             },
         )
         .expect("bootstrap");
+        // E9 (v27): the session's one handshake step past the bootstrap,
+        // read by the daemon only from a session that negotiated the
+        // family; `None` asks for a fresh view.
+        if offer >= pmacs::protocol::SESSION_MIN_VERSION {
+            write_message(
+                &mut stream,
+                &FrontendEvent::Resume {
+                    frontend_id: fid,
+                    token: None,
+                },
+            )
+            .expect("write Resume");
+        }
         let mut reader = stream.try_clone().expect("clone stream");
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -242,7 +255,7 @@ const FAKE_HOVER: [&str; 3] = [
 #[test]
 fn e8_2_hover_opens_once_closes_on_motion_cg_and_edit_and_never_reaches_v25() {
     let (daemon, _dir) = daemon_with("hover", &[], "");
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 27);
     let mut current = Session::attach(&daemon, PROTOCOL_VERSION);
 
     let frame = current.ask_until_present('h');

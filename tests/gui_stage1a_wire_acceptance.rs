@@ -63,6 +63,19 @@ fn attach_semantic(
     )
     .expect("write AttachRequest");
     write_message(&mut stream, &SessionBootstrapRequest::default()).expect("write bootstrap");
+    // E9 (v27): the session's one handshake step past the bootstrap,
+    // read by the daemon only from a session that negotiated the
+    // family; `None` asks for a fresh view.
+    if offer >= pmacs::protocol::SESSION_MIN_VERSION {
+        write_message(
+            &mut stream,
+            &FrontendEvent::Resume {
+                frontend_id: fid,
+                token: None,
+            },
+        )
+        .expect("write Resume");
+    }
     (stream, fid)
 }
 

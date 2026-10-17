@@ -32,9 +32,9 @@ use std::time::{Duration, Instant};
 use pmacs_protocol::{
     AttachRequest, BufferId, ByteRange, CellCoord, CellSize, CrdtOp, FrontendCapabilities,
     FrontendEvent, FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceMessage, Key,
-    KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS,
-    SessionBootstrapRequest, TransportError, is_supported_protocol_version, read_message,
-    requested_protocol_version, write_message,
+    KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SESSION_MIN_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionBootstrapRequest, SessionToken, TransportError,
+    is_supported_protocol_version, read_message, requested_protocol_version, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -553,7 +553,19 @@ pub fn connect(
     socket_path: &Path,
     proxy: EventLoopProxy<AppEvent>,
 ) -> Result<AttachClient, AttachClientError> {
-    connect_with_sink(socket_path, move |event| {
+    connect_resuming(socket_path, None, proxy)
+}
+
+/// [`connect`], presenting `resume` in the session's v27 `Resume` step
+/// (E9): the token a previous session of this window was given, so the
+/// daemon starts the new socket on the view it retained for it. `None`
+/// asks for a fresh view, which is what [`connect`] does.
+pub fn connect_resuming(
+    socket_path: &Path,
+    resume: Option<SessionToken>,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<AttachClient, AttachClientError> {
+    connect_with_sink_resuming(socket_path, resume, move |event| {
         proxy.send_event(AppEvent::Attach(event)).is_ok()
     })
 }
@@ -571,8 +583,18 @@ pub fn connect_with_sink(
     socket_path: &Path,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
+    connect_with_sink_resuming(socket_path, None, sink)
+}
+
+/// [`connect_with_sink`] presenting `resume` in the v27 `Resume` step
+/// (E9); see [`connect_resuming`].
+pub fn connect_with_sink_resuming(
+    socket_path: &Path,
+    resume: Option<SessionToken>,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
-    connect_stream_with_sink(stream, None, sink)
+    connect_stream_with_sink(stream, None, resume, sink)
 }
 
 /// [`connect_with_sink`] carrying an initial target, so the daemon opens
@@ -585,7 +607,7 @@ pub fn connect_with_target_and_sink(
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
-    connect_stream_with_sink(stream, Some(initial_target), sink)
+    connect_stream_with_sink(stream, Some(initial_target), None, sink)
 }
 
 #[allow(
@@ -595,6 +617,7 @@ pub fn connect_with_target_and_sink(
 fn connect_stream_with_sink(
     stream: UnixStream,
     initial_target: Option<InitialTargetPaths>,
+    resume: Option<SessionToken>,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     // Hello round-trip.
@@ -672,6 +695,20 @@ fn connect_stream_with_sink(
             }),
         };
         write_message(&mut handshake_stream, &bootstrap).map_err(AttachClientError::Handshake)?;
+    }
+    // E9 (v27): the session's one handshake step past the bootstrap.
+    // Sent only to a session that negotiated the family, since the
+    // daemon reads it only from one; the token names the view the
+    // daemon retained for this window's previous session, or `None`.
+    if session_protocol_version >= SESSION_MIN_VERSION {
+        write_message(
+            &mut handshake_stream,
+            &FrontendEvent::Resume {
+                frontend_id: hello.assigned_frontend_id,
+                token: resume,
+            },
+        )
+        .map_err(AttachClientError::Handshake)?;
     }
     let initial_message = match target_display_path {
         Some(path) => Some(read_initial_target_bootstrap(&mut handshake_stream, path)?),
@@ -887,7 +924,7 @@ where
 {
     match connector(socket_path) {
         Ok(stream) => {
-            let client = connect_stream_with_sink(stream, initial_target, sink)?;
+            let client = connect_stream_with_sink(stream, initial_target, None, sink)?;
             return Ok(ManagedAttach {
                 client,
                 daemon: ManagedDaemonFacts::existing(),
@@ -913,7 +950,7 @@ where
     loop {
         match connector(socket_path) {
             Ok(stream) => {
-                let client = connect_stream_with_sink(stream, initial_target, sink)?;
+                let client = connect_stream_with_sink(stream, initial_target, None, sink)?;
                 return Ok(ManagedAttach { client, daemon });
             }
             Err(error) => {
@@ -1347,7 +1384,7 @@ pub(crate) fn connect_stream_for_test(
     stream: UnixStream,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
-    connect_stream_with_sink(stream, None, sink)
+    connect_stream_with_sink(stream, None, None, sink)
 }
 
 #[cfg(test)]
@@ -1399,6 +1436,10 @@ mod tests {
             let _: AttachRequest = read_message(&mut server_stream).expect("read AttachRequest");
             let bootstrap: SessionBootstrapRequest =
                 read_message(&mut server_stream).expect("read bootstrap");
+            // E9 — the v27 step; read, so the fixture never drops its
+            // end while the client is still writing its handshake.
+            let resume: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
+            assert!(matches!(resume, FrontendEvent::Resume { token: None, .. }));
             let target = bootstrap.initial_target.expect("initial target");
             assert_eq!(target.cwd, expected.cwd.as_os_str().as_bytes());
             assert_eq!(target.path, expected.path.as_os_str().as_bytes());
@@ -1419,7 +1460,7 @@ mod tests {
             .expect("write target result");
         });
 
-        let mut client = connect_stream_with_sink(client_stream, Some(paths), |_| true)
+        let mut client = connect_stream_with_sink(client_stream, Some(paths), None, |_| true)
             .expect("target bootstrap");
         assert!(matches!(
             client.take_initial_message(),
@@ -1444,6 +1485,7 @@ mod tests {
                 cwd: PathBuf::from("/launcher"),
                 path: PathBuf::from("note"),
             }),
+            None,
             |_| true,
         ) else {
             panic!("legacy target must fail");
@@ -1946,6 +1988,14 @@ mod tests {
             write_message(&mut server_stream, &hello).expect("write Hello");
             let _: AttachRequest =
                 read_message(&mut server_stream).expect("read real AttachRequest");
+            // The whole v27 semantic handshake, read before this end is
+            // dropped: a fixture that returned here, with the client's
+            // bootstrap and `Resume` still to be written, raced the
+            // client's writes against its own drop, and lost under
+            // load as `Handshake(Io(BrokenPipe))` (the registry's R7).
+            let _: SessionBootstrapRequest =
+                read_message(&mut server_stream).expect("read bootstrap");
+            let _: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
         });
         let mut attempts = 0;
         let mut client_stream = Some(client_stream);

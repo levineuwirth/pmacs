@@ -207,3 +207,14 @@ whole. Under one cap a growing register squeezes the rules.
   `unsafe` call this codebase forbids; on Linux, a delegated cgroup in
   every session that runs the editor. Removed when macOS bounds a
   worker's memory before it exists.
+- **Reconnect.** A `pmacs-gpu` window that loses its daemon's socket
+  without a `Goodbye` keeps its document on screen, says so on the
+  status band, drops the chrome of the session that is gone and every
+  key until a session is back, and reconnects on the backoff schedule
+  the SSH attach uses (`pmacs_protocol::reconnect`, E9.2), presenting
+  the token of its last session so the daemon starts the new socket on
+  the view it retained (E9.1). The local grid attach (`pmacs --attach`
+  on a socket) does neither: it exits when the daemon's socket closes,
+  as it always has, and never presents a token, since a grid session is
+  minted none. Removed when the local attach reconnects on the same
+  schedule and the token family reaches grid sessions.

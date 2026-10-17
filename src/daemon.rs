@@ -73,6 +73,8 @@ use crate::protocol::{
     PANEL_MAPPING_MIN_VERSION, PANEL_MIN_VERSION, PointerKind, SelectionSnapshot,
     SessionBootstrapRequest, TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
+use pmacs_protocol::{SESSION_MIN_VERSION, SessionToken};
+
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
 
@@ -121,6 +123,10 @@ enum DispatcherEvent {
         initial_size: CellSize,
         /// Validated protocol-v20 semantic bootstrap target, if requested.
         initial_target: Option<InitialTarget>,
+        /// E9 --- the token the frontend presented in its v27 `Resume`
+        /// step, to take back the view retained for it; `None` for a
+        /// fresh view, and for every session below v27.
+        resume: Option<SessionToken>,
         /// Write-half of the per-attach stream. The dispatcher owns
         /// this end; the per-attach reader thread keeps the
         /// read-half via `try_clone`.
@@ -808,6 +814,36 @@ fn per_attach_thread(
         None
     };
 
+    // E9 (v27) — a semantic session's one handshake step past the
+    // bootstrap: `Resume`, naming the token of the view it takes back
+    // or `None` for a fresh one. Read only from a session that
+    // negotiated the family, since reading it from an older one would
+    // desynchronize that stream; a v27 session that sends anything
+    // else here is refused as a protocol error.
+    let session_version = crate::protocol::negotiated_session_version(req.protocol_version);
+    let resume = if session_version >= SESSION_MIN_VERSION && negotiated_caps.semantic_render {
+        match read_message::<FrontendEvent>(&mut stream) {
+            Ok(FrontendEvent::Resume { token, .. }) => token.filter(|t| !t.is_zero()),
+            Ok(other) => {
+                eprintln!(
+                    "pmacs: {frontend_id:?} sent {} where its v27 Resume step was due",
+                    frontend_event_name(&other)
+                );
+                let _ = write_message(
+                    &mut stream,
+                    &InstanceMessage::Goodbye(GoodbyeReason::ProtocolError),
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("pmacs: read Resume failed: {e}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     // T M10.8 Day 4 — Q5 non-multi-session admission control.
     let _non_multi_guard = if negotiated_caps.multi_frontend {
         None
@@ -839,11 +875,8 @@ fn per_attach_thread(
     // today; it is applied through the shared rule anyway so a future
     // ladder widening cannot silently record a version this binary is
     // unable to produce.
-    let session_state = crate::presence::SessionState::new(
-        crate::protocol::negotiated_session_version(req.protocol_version),
-        negotiated_caps,
-        color_slot,
-    );
+    let session_state =
+        crate::presence::SessionState::new(session_version, negotiated_caps, color_slot);
 
     // Hand the write-half to the dispatcher; keep a read-half for
     // this thread's reader loop. **Reader loop starts immediately
@@ -865,6 +898,7 @@ fn per_attach_thread(
             session_state,
             initial_size: req.initial_size,
             initial_target,
+            resume,
             write_stream,
         })
         .is_err()
@@ -991,6 +1025,15 @@ fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) 
 /// prevents an unknown discriminant reaching one, so neither gate alone
 /// is load-bearing. Both read the protocol crate's constant, as the
 /// GPU frontend's gates do.
+/// E9 --- belt-and-braces write-loop gate for the v27 session family:
+/// the token is produced only at establishment, for a session that
+/// negotiated the family, so a copy reaching the frame vector for an
+/// older peer would be a defect; it is withheld here rather than
+/// mis-decoded there.
+fn peer_accepts_session_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= SESSION_MIN_VERSION || !matches!(message, InstanceMessage::SessionToken(_))
+}
+
 fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) -> bool {
     protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
         || !matches!(message, InstanceMessage::Popup(_))
@@ -1451,6 +1494,11 @@ fn dispatcher_loop(
     let mut terminal_bell_baselines: HashMap<FrontendId, (crate::buffer::BufferId, u64)> =
         HashMap::new();
     let mut session_registry = SessionRegistry::new();
+    // E9.4 — when the last attached frontend left, for the opt-in idle
+    // exit (`daemon.idle-exit-secs`); `None` while any is attached.
+    // A daemon starts idle: one that nothing ever attaches to leaves
+    // on the same clock.
+    let mut idle_since: Option<Instant> = Some(Instant::now());
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
     // reproducible. Mutated across the loop; one stream of delays
@@ -1473,6 +1521,19 @@ fn dispatcher_loop(
             .chain(semantic_states.keys())
             .copied()
             .collect();
+
+        // E9 --- a retained view past `session.view-retention-secs`
+        // gives up its windows here, so a detached frontend that never
+        // returns costs the daemon nothing past the window.
+        {
+            let expired = session_registry.expire_retained(view_retention(editor), Instant::now());
+            if !expired.is_empty() {
+                let mut core = editor.core.borrow_mut();
+                for view in &expired {
+                    core.discard_view_windows(view);
+                }
+            }
+        }
 
         // T M10.10 post-audit-round-3 F18 — drain + broadcast pending
         // CRDT ops **before** the render pass. Otherwise frontends
@@ -1533,17 +1594,21 @@ fn dispatcher_loop(
                 // is displaying this buffer: applying a foreign-buffer
                 // snapshot would switch the GPU window away from its
                 // own active view.
-                if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid) {
-                    broadcast_buffer_snapshot_to_replicas(
+                if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid)
+                    && broadcast_buffer_snapshot_to_replicas(
                         editor,
                         upgraded,
                         &session_registry,
                         &mut streams,
                         &mut semantic_states,
-                    );
+                    )
+                {
                     // The broadcast just delivered this buffer to this
                     // frontend too; record it so the follow check below
-                    // doesn't send a duplicate on the same tick.
+                    // doesn't send a duplicate on the same tick. An
+                    // oversize snapshot (E9.5) is not recorded: the
+                    // follow check below then refuses the switch and
+                    // says so.
                     last_active_buffer_sent.insert(*fid, upgraded);
                 }
 
@@ -1574,16 +1639,34 @@ fn dispatcher_loop(
                     if let Some(active_now) = active_now
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
                     {
-                        send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
-                        // PR #120 round 2 — the snapshot just wiped
-                        // this frontend's buffer-scoped render state;
-                        // the emission baselines must die with it or
-                        // an unchanged-generation revisit (A → B → A)
-                        // suppresses every re-send.
-                        if let Some(sem) = semantic_states.get_mut(fid) {
-                            sem.on_buffer_snapshot_sent(active_now);
+                        match send_buffer_snapshot_to_frontend(
+                            editor,
+                            active_now,
+                            *fid,
+                            &mut streams,
+                        ) {
+                            Ok(()) => {
+                                // PR #120 round 2 — the snapshot just
+                                // wiped this frontend's buffer-scoped
+                                // render state; the emission baselines
+                                // must die with it or an
+                                // unchanged-generation revisit
+                                // (A → B → A) suppresses every re-send.
+                                if let Some(sem) = semantic_states.get_mut(fid) {
+                                    sem.on_buffer_snapshot_sent(active_now);
+                                }
+                                last_active_buffer_sent.insert(*fid, active_now);
+                            }
+                            // E9.5 — refused, said, and the window put
+                            // back on the buffer the frontend mirrors.
+                            Err(len) => refuse_oversize_snapshot(
+                                editor,
+                                *fid,
+                                active_now,
+                                len,
+                                last_active_buffer_sent.get(fid).copied(),
+                            ),
                         }
-                        last_active_buffer_sent.insert(*fid, active_now);
                     }
                 }
             }
@@ -1848,6 +1931,13 @@ fn dispatcher_loop(
                     if !peer_accepts_popup_message(negotiated_protocol_version, msg) {
                         continue;
                     }
+                    // E9 — the session token is written once at
+                    // establishment and never rides a frame; the gate
+                    // here is the belt-and-braces half, as for every
+                    // other appended variant.
+                    if !peer_accepts_session_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
                     // jitter site: render-write latency.
                     //
@@ -1944,6 +2034,25 @@ fn dispatcher_loop(
         // of the loop now (post-audit-round-3 F18 reorder); CrdtOp
         // broadcasts arrive at replicas before the CellDelta /
         // CursorByte for the same edit.
+
+        // E9.4 — opt-in idle exit: with no frontend attached for
+        // `daemon.idle-exit-secs` (0, the default, never), the daemon
+        // stops as `--stop` would stop it. Meant for a daemon a GUI
+        // started for itself, which otherwise outlives every window.
+        let attached_now = render_states.len() + semantic_states.len();
+        if attached_now == 0 {
+            let idle_for = idle_since.get_or_insert_with(Instant::now).elapsed();
+            let limit = idle_exit_after(editor);
+            if !limit.is_zero() && idle_for >= limit {
+                eprintln!(
+                    "pmacs: no frontend attached for {} s (daemon.idle-exit-secs); stopping",
+                    idle_for.as_secs()
+                );
+                shutdown.store(true, Ordering::SeqCst);
+            }
+        } else {
+            idle_since = None;
+        }
 
         // Shutdown / quit checks. Send Goodbye to all attached
         // frontends before exiting.
@@ -2330,8 +2439,16 @@ fn handle_session_established(
     session_state: crate::presence::SessionState,
     initial_size: CellSize,
     initial_target: Option<InitialTarget>,
+    resume: Option<SessionToken>,
     mut write_stream: UnixStream,
 ) {
+    // E9 --- a session that negotiated the family is minted a token,
+    // registered with it (so its detach retains its view) and told it
+    // once its bootstrap is on the wire, below.
+    let token = (session_state.negotiated_protocol_version >= SESSION_MIN_VERSION
+        && session_state.negotiated_capabilities.semantic_render)
+        .then(mint_session_token);
+    let session_state = session_state.with_token(token);
     // Register the frontend's view (M10.8 Day 3: fresh scratch
     // buffer view; future milestones may clone LOCAL's view or
     // take an explicit initial-buffer argument).
@@ -2347,11 +2464,31 @@ fn handle_session_established(
     // `PANEL_MIN_VERSION` or later can render the GPU band and is
     // panel-capable, while a v6-v20 semantic session still falls back to
     // its document target with every side-specific parameter discarded.
-    let fresh_view = build_fresh_frontend_view(
-        editor,
-        !session_state.negotiated_capabilities.semantic_render,
-        peer_declared_panel_support(session_state),
-    );
+    // E9 --- the view a previous session of this frontend left behind
+    // is taken back under the token it presented, with this session's
+    // own projection and panel facts (the negotiation is per session)
+    // and no geometry, which the new socket declares afresh. A token the
+    // registry does not hold is a fresh view, as `None` is.
+    let fold_projection = !session_state.negotiated_capabilities.semantic_render;
+    let panel_capable = peer_declared_panel_support(session_state);
+    let mut resumed = false;
+    let fresh_view =
+        if let Some(mut retained) = resume.and_then(|t| session_registry.take_retained(t)) {
+            daemon_debug(format!("{frontend_id:?} resumes a retained view"));
+            resumed = true;
+            retained.fold_projection = fold_projection;
+            retained.panel_capable = panel_capable;
+            retained.frame_geometry = None;
+            retained.document_viewport = None;
+            retained
+        } else {
+            if let Some(token) = resume {
+                daemon_debug(format!(
+                    "{frontend_id:?} presented {token} but no view is retained for it"
+                ));
+            }
+            build_fresh_frontend_view(editor, fold_projection, panel_capable)
+        };
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
@@ -2381,6 +2518,19 @@ fn handle_session_established(
     let semantic_render = session_state.negotiated_capabilities.semantic_render;
     let negotiated_protocol_version = session_state.negotiated_protocol_version;
 
+    // E9 --- a resumed session bootstraps on the one buffer its
+    // retained window shows, as a target session does on its target,
+    // never on the all-buffer sweep: a semantic frontend answers every
+    // snapshot with a `Viewport` that moves its window to that buffer,
+    // so a sweep would leave the resumed window wherever the sweep's
+    // last snapshot landed, which is the wrong-buffer return E9 exists
+    // to remove.
+    let mut resumed_buffer = if resumed && opened_target.is_none() {
+        editor.core.borrow().primary_document_buffer(frontend_id)
+    } else {
+        None
+    };
+
     if let Some(opened) = opened_target.as_ref() {
         let target_snapshot = match initial_target_snapshot(editor, opened.buffer_id) {
             Ok(snapshot) => snapshot,
@@ -2397,6 +2547,24 @@ fn handle_session_established(
             buffer_id: opened.buffer_id,
             crdt_snapshot: target_snapshot.crdt_snapshot,
         };
+        // E9.5 — a target past the frame cap is a failed target, told
+        // as one, never a session left at "(connecting...)".
+        let frame_len = snapshot_frame_len(&snapshot_message);
+        if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+            send_initial_target_failure(
+                &mut write_stream,
+                format!(
+                    "the file is {:.1} MiB, past the {:.0} MiB a frontend can mirror",
+                    frame_len as f64 / (1024.0 * 1024.0),
+                    pmacs_protocol::MAX_FRAME_BYTES as f64 / (1024.0 * 1024.0)
+                ),
+            );
+            editor
+                .core
+                .borrow_mut()
+                .unregister_frontend_view(frontend_id);
+            return;
+        }
         if opened.publish_to_replicas || target_snapshot.upgraded_to_crdt {
             publish_buffer_snapshot_to_replicas(
                 editor,
@@ -2414,6 +2582,57 @@ fn handle_session_established(
                 .borrow_mut()
                 .unregister_frontend_view(frontend_id);
             return;
+        }
+    } else if let Some(buffer_id) = resumed_buffer {
+        match initial_target_snapshot(editor, buffer_id) {
+            Ok(snapshot) => {
+                let message = InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot: snapshot.crdt_snapshot,
+                };
+                // E9.5 — a retained window on a buffer past the frame
+                // cap is refused and put back on LOCAL's document, said
+                // so; the sweep below bootstraps the session as a fresh
+                // one would be.
+                let frame_len = snapshot_frame_len(&message);
+                if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+                    let back_to = editor
+                        .core
+                        .borrow()
+                        .primary_document_buffer(FrontendId::LOCAL);
+                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
+                    send_buffer_snapshots(editor, &mut write_stream);
+                    resumed_buffer = None;
+                } else {
+                    if snapshot.upgraded_to_crdt {
+                        publish_buffer_snapshot_to_replicas(
+                            editor,
+                            buffer_id,
+                            &message,
+                            session_registry,
+                            streams,
+                            semantic_states,
+                        );
+                    }
+                    if write_message(&mut write_stream, &message).is_err() {
+                        let _ = write_stream.shutdown(Shutdown::Both);
+                        editor
+                            .core
+                            .borrow_mut()
+                            .unregister_frontend_view(frontend_id);
+                        return;
+                    }
+                }
+            }
+            Err(message) => {
+                eprintln!("pmacs: snapshot of the resumed buffer failed: {message}");
+                let _ = write_stream.shutdown(Shutdown::Both);
+                editor
+                    .core
+                    .borrow_mut()
+                    .unregister_frontend_view(frontend_id);
+                return;
+            }
         }
     } else if crdt_replica {
         // Legacy no-target attach remains an all-buffer replica bootstrap.
@@ -2452,6 +2671,9 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
+    if let Some(buffer_id) = resumed_buffer {
+        last_active_buffer_sent.insert(frontend_id, buffer_id);
+    }
     if let Some(opened) = opened_target {
         last_active_buffer_sent.insert(frontend_id, opened.buffer_id);
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
@@ -2474,7 +2696,120 @@ fn handle_session_established(
                 session_registry,
                 frontend_id,
             );
+            return;
         }
+    }
+
+    // E9 --- the token goes after the bootstrap, so a frontend reading
+    // its target's snapshot and result synchronously is not handed a
+    // message it did not ask for, and before the first frame.
+    if let Some(token) = token {
+        let write_result = {
+            let stream = streams
+                .get_mut(&frontend_id)
+                .expect("new session stream installed");
+            write_message(stream, &InstanceMessage::SessionToken(token))
+        };
+        if write_result.is_err() {
+            cleanup_provisional_session(
+                editor,
+                render_states,
+                semantic_states,
+                streams,
+                term_sizes,
+                last_active_buffer_sent,
+                session_registry,
+                frontend_id,
+            );
+        }
+    }
+}
+
+/// E9 --- sixteen random bytes for a session token, from the system's
+/// entropy; should that be unreadable, a mix of the clock, the pid and a
+/// counter, which is unique within the daemon and is all a token must
+/// be (the socket is the user's own; see `pmacs_protocol::session`).
+fn mint_session_token() -> SessionToken {
+    use std::io::Read as _;
+    let mut bytes = [0u8; pmacs_protocol::SESSION_TOKEN_BYTES];
+    let read = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !read || SessionToken(bytes).is_zero() {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let seed = nanos
+            ^ (u64::from(std::process::id()) << 32)
+            ^ COUNTER.fetch_add(1, Ordering::SeqCst).rotate_left(17);
+        let mut rng = SplitMix64::new(seed);
+        for chunk in bytes.chunks_mut(8) {
+            let word = rng.next_u64().to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+    SessionToken(bytes)
+}
+
+/// E9 --- `session.view-retention-secs` as the daemon reads it on a
+/// tick and at a detach; zero when the registry is unreachable, so a
+/// view is never retained by a daemon that cannot say for how long.
+fn view_retention(editor: &EditorState) -> Duration {
+    let secs = editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .and_then(
+            |registry| match registry.borrow().get("session.view-retention-secs", None) {
+                Ok(crate::config_registry::ConfigValue::Int(n)) => u64::try_from(*n).ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0);
+    Duration::from_secs(secs)
+}
+
+/// E9.4 --- `daemon.idle-exit-secs` as the daemon reads it on a tick;
+/// zero (never) when the registry is unreachable.
+fn idle_exit_after(editor: &EditorState) -> Duration {
+    let secs = editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .and_then(
+            |registry| match registry.borrow().get("daemon.idle-exit-secs", None) {
+                Ok(crate::config_registry::ConfigValue::Int(n)) => u64::try_from(*n).ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0);
+    Duration::from_secs(secs)
+}
+
+/// The variant's name, for a log line about a message out of place.
+fn frontend_event_name(event: &FrontendEvent) -> &'static str {
+    match event {
+        FrontendEvent::Key(_) => "Key",
+        FrontendEvent::Mouse(_) => "Mouse",
+        FrontendEvent::Resize { .. } => "Resize",
+        FrontendEvent::Paste { .. } => "Paste",
+        FrontendEvent::FocusGained(_) => "FocusGained",
+        FrontendEvent::FocusLost(_) => "FocusLost",
+        FrontendEvent::Detach(_) => "Detach",
+        FrontendEvent::CrdtOp { .. } => "CrdtOp",
+        FrontendEvent::Viewport { .. } => "Viewport",
+        FrontendEvent::Pointer { .. } => "Pointer",
+        FrontendEvent::MenuPointer { .. } => "MenuPointer",
+        FrontendEvent::TerminalResize { .. } => "TerminalResize",
+        FrontendEvent::TerminalPointer { .. } => "TerminalPointer",
+        FrontendEvent::FrontendCellGeometry { .. } => "FrontendCellGeometry",
+        FrontendEvent::PanelResizeRows { .. } => "PanelResizeRows",
+        FrontendEvent::PanelPointer { .. } => "PanelPointer",
+        FrontendEvent::TextInput { .. } => "TextInput",
+        FrontendEvent::PanelPointerMapped { .. } => "PanelPointerMapped",
+        FrontendEvent::Resume { .. } => "Resume",
+        FrontendEvent::Shutdown { .. } => "Shutdown",
     }
 }
 
@@ -2499,6 +2834,7 @@ fn handle_dispatcher_event(
             session_state,
             initial_size,
             initial_target,
+            resume,
             write_stream,
         } => {
             handle_session_established(
@@ -2513,6 +2849,7 @@ fn handle_dispatcher_event(
                 session_state,
                 initial_size,
                 initial_target,
+                resume,
                 write_stream,
             );
         }
@@ -2527,6 +2864,24 @@ fn handle_dispatcher_event(
                     // `SessionDetached` event after its reader
                     // loop exits; cleanup happens there. Just stop
                     // processing here.
+                }
+                // E9.4 — `pmacs --daemon --stop`. Refused from a session
+                // below the family's version (a peer compiled from this
+                // crate can encode any discriminant); honored as the
+                // editor's own quit, which the tick loop answers with
+                // `Goodbye(ShuttingDown)` to every frontend and an exit.
+                FrontendEvent::Shutdown { .. } => {
+                    let version = session_registry
+                        .session_state(source)
+                        .map_or(0, |s| s.negotiated_protocol_version);
+                    if version >= SESSION_MIN_VERSION {
+                        eprintln!("pmacs: stop requested by {source:?}");
+                        editor.core.borrow_mut().quit = true;
+                    } else {
+                        eprintln!(
+                            "pmacs: refusing Shutdown from {source:?}: its session is v{version}"
+                        );
+                    }
                 }
                 FrontendEvent::Resize { size, .. } => {
                     if let Some(rs) = render_states.get_mut(&source) {
@@ -3105,6 +3460,34 @@ fn handle_dispatcher_event(
             );
         }
     }
+    // E9.3 --- a frontend whose own quit asked to leave: told, if its
+    // session can decode the reason, then torn down the one way, its
+    // view retained for its token. Taken here, after the event, so the
+    // request's own frame never reaches a stream being closed.
+    let requested = editor.core.borrow_mut().detach_requested.take();
+    if let Some(frontend_id) = requested {
+        let Some(session) = session_registry.session_state(frontend_id) else {
+            return;
+        };
+        if let Some(stream) = streams.get_mut(&frontend_id) {
+            if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
+                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        detach_frontend(
+            editor,
+            render_states,
+            semantic_states,
+            streams,
+            term_sizes,
+            last_dispatch_idle_sent,
+            last_active_buffer_sent,
+            terminal_bell_baselines,
+            session_registry,
+            frontend_id,
+        );
+    }
 }
 
 /// The one teardown of a frontend's session (E8d.4), run when the tick
@@ -3134,9 +3517,9 @@ fn detach_frontend(
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
-    if session_registry.session_state(frontend_id).is_none() {
+    let Some(session) = session_registry.session_state(frontend_id) else {
         return;
-    }
+    };
     // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
     // and the only one with no later chance at all. End the live
     // gesture, then pay it, and do BOTH before any teardown: the
@@ -3160,9 +3543,22 @@ fn detach_frontend(
         .statusline_registry
         .borrow_mut()
         .detach_frontend(frontend_id);
+    // E9 --- a session that holds a token leaves its view behind for
+    // the token, for `session.view-retention-secs`; the next session
+    // presenting the token in its `Resume` step starts on it. A zero
+    // retention, or no token (a pre-v27 or grid session), drops the
+    // view as before.
+    let retention = view_retention(editor);
     {
         let mut core = editor.core.borrow_mut();
-        core.unregister_frontend_view(frontend_id);
+        match session.token {
+            Some(token) if !retention.is_zero() => {
+                if let Some(view) = core.take_frontend_view(frontend_id) {
+                    session_registry.retain_view(token, view, Instant::now());
+                }
+            }
+            _ => core.unregister_frontend_view(frontend_id),
+        }
         // Kill ring Q#KR11: frontend ids are monotonic, so
         // per-frontend state must not outlive the session.
         core.command_history.remove(&frontend_id);
@@ -3243,6 +3639,16 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
             buffer_id,
             crdt_snapshot: snapshot,
         };
+        // E9.5 — a buffer past the frame cap is left out of the sweep
+        // and said so; the follow path refuses a switch onto it later,
+        // visibly.
+        if !snapshot_fits_a_frame(&msg) {
+            eprintln!(
+                "pmacs: BufferSnapshot for {buffer_id:?} is past the {} byte frame; left out of the attach sweep",
+                pmacs_protocol::MAX_FRAME_BYTES
+            );
+            continue;
+        }
         if let Err(e) = write_message(write_stream, &msg) {
             eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} failed: {e:?}");
             // Continue trying other buffers — the stream may
@@ -3374,6 +3780,69 @@ fn export_buffer_snapshot(
     }
 }
 
+/// E9.5 --- the bytes a `BufferSnapshot` message would put on the wire,
+/// measured before any write, so a snapshot past
+/// `pmacs_protocol::MAX_FRAME_BYTES` is refused where the caller can
+/// say so rather than failing inside `write_message` and being logged
+/// as if it had been skipped by accident.
+fn snapshot_frame_len(message: &InstanceMessage) -> usize {
+    postcard::to_allocvec(message).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// E9.5 --- whether `message` fits the transport's frame.
+#[cfg(feature = "crdt")]
+fn snapshot_fits_a_frame(message: &InstanceMessage) -> bool {
+    snapshot_frame_len(message) <= pmacs_protocol::MAX_FRAME_BYTES
+}
+
+/// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:
+/// say so on the status line every frontend reads, naming the buffer
+/// and both sizes, and put `fid`'s document window back on `back_to`,
+/// the buffer that frontend still mirrors, so the daemon's view and the
+/// frontend's never show different buffers. A frontend with nothing to
+/// go back to keeps its window; its band still says why nothing came.
+fn refuse_oversize_snapshot(
+    editor: &EditorState,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+    frame_len: usize,
+    back_to: Option<crate::buffer::BufferId>,
+) {
+    let mut core = editor.core.borrow_mut();
+    let name = core
+        .registry
+        .borrow()
+        .get(buffer_id)
+        .map_or_else(|_| format!("{buffer_id:?}"), |b| b.name().to_owned());
+    let back_name = back_to.and_then(|id| {
+        core.registry
+            .borrow()
+            .get(id)
+            .ok()
+            .map(|b| b.name().to_owned())
+    });
+    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    core.status = match back_name {
+        Some(back) => format!(
+            "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; this window stays on {back}",
+            mib(frame_len),
+            mib(pmacs_protocol::MAX_FRAME_BYTES)
+        ),
+        None => format!(
+            "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; it cannot be shown here",
+            mib(frame_len),
+            mib(pmacs_protocol::MAX_FRAME_BYTES)
+        ),
+    };
+    eprintln!("pmacs: {}", core.status);
+    if let Some(back) = back_to
+        && back != buffer_id
+        && let Err(e) = core.switch_active_buffer_for(fid, back)
+    {
+        eprintln!("pmacs: putting {fid:?} back on {back:?} failed: {e}");
+    }
+}
+
 /// Arc 1b — send `buffer_id`'s snapshot to ONE frontend. The
 /// active-buffer-follow path (see the per-tick loop) uses this when a
 /// semantic frontend's own active buffer changes to an
@@ -3383,24 +3852,32 @@ fn export_buffer_snapshot(
 /// displaying the old buffer while daemon-side input targeted the new
 /// one.
 #[cfg(feature = "crdt")]
+///
+/// E9.5: a snapshot past the frame cap is not written; `Err(len)` names
+/// its size so the caller refuses the switch visibly.
 fn send_buffer_snapshot_to_frontend(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
     fid: FrontendId,
     streams: &mut HashMap<FrontendId, UnixStream>,
-) {
+) -> Result<(), usize> {
     let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
-        return;
+        return Ok(());
     };
     let msg = InstanceMessage::BufferSnapshot {
         buffer_id,
         crdt_snapshot: snapshot_bytes,
     };
+    let len = snapshot_frame_len(&msg);
+    if len > pmacs_protocol::MAX_FRAME_BYTES {
+        return Err(len);
+    }
     if let Some(stream) = streams.get_mut(&fid)
         && let Err(e) = write_message(stream, &msg)
     {
         eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
     }
+    Ok(())
 }
 
 #[cfg(feature = "crdt")]
@@ -3410,14 +3887,26 @@ fn broadcast_buffer_snapshot_to_replicas(
     session_registry: &SessionRegistry,
     streams: &mut HashMap<FrontendId, UnixStream>,
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-) {
+) -> bool {
     let Some(snapshot) = export_buffer_snapshot(editor, buffer_id) else {
-        return;
+        return true;
     };
     let message = InstanceMessage::BufferSnapshot {
         buffer_id,
         crdt_snapshot: snapshot,
     };
+    // E9.5 — past the frame cap nothing is written to anyone: a grid
+    // replica composes its own cells and loses only its mirror, and a
+    // semantic one is refused the switch by the follow path, which
+    // says so. The log line names the size for the daemon's operator.
+    let len = snapshot_frame_len(&message);
+    if len > pmacs_protocol::MAX_FRAME_BYTES {
+        eprintln!(
+            "pmacs: BufferSnapshot for {buffer_id:?} is {len} bytes, past the {} byte frame; not sent",
+            pmacs_protocol::MAX_FRAME_BYTES
+        );
+        return false;
+    }
     publish_buffer_snapshot_to_replicas(
         editor,
         buffer_id,
@@ -3426,6 +3915,7 @@ fn broadcast_buffer_snapshot_to_replicas(
         streams,
         semantic_states,
     );
+    true
 }
 
 fn publish_buffer_snapshot_to_replicas(
@@ -4399,6 +4889,14 @@ fn apply_event(
         // the family gate; arriving here it is dropped, never unwrapped
         // to the legacy family.
         | FrontendEvent::PanelPointerMapped { .. }
+        // E9: `Resume` is a handshake step, read by the per-attach
+        // thread before the session exists; one arriving here is a
+        // protocol slip and is dropped, never applied.
+        | FrontendEvent::Resume { .. }
+        // E9.4: the stop request has its own dispatcher arm, which
+        // gates it on the session's negotiated version; arriving here
+        // it is dropped.
+        | FrontendEvent::Shutdown { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
@@ -6277,6 +6775,7 @@ mod tests {
                     ..Default::default()
                 },
                 color_slot: 0,
+                token: None,
             },
         );
 
@@ -6680,6 +7179,7 @@ mod tests {
                     ..Default::default()
                 },
                 color_slot: 0,
+                token: None,
             },
         );
         handle_dispatcher_event(
@@ -6770,6 +7270,7 @@ mod tests {
                 ..Default::default()
             },
             color_slot: 0,
+            token: None,
         }
     }
 

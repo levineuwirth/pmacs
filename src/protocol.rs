@@ -1746,7 +1746,12 @@ mod tests {
         // hover and signature `InstanceMessage::Popup` (E8) — all
         // APPENDED variants, which is why the freeze above survives them
         // untouched: nothing in `MinibufferPrompt`'s encoding moved.
-        assert_eq!(PROTOCOL_VERSION, 26);
+        // v27 is the session family (E9): `InstanceMessage::SessionToken`
+        // after `Popup`, `FrontendEvent::Resume` after
+        // `PanelPointerMapped`, `GoodbyeReason::Detached` after
+        // `CapabilityMismatch`, all APPENDED, each with a pin on the
+        // variant it follows.
+        assert_eq!(PROTOCOL_VERSION, 27);
     }
 
     #[test]
@@ -2153,8 +2158,9 @@ mod tests {
     fn the_supported_set_ends_at_the_current_wire_version() {
         assert!(pmacs_protocol::is_supported_protocol_version(25));
         assert!(pmacs_protocol::is_supported_protocol_version(26));
+        assert!(pmacs_protocol::is_supported_protocol_version(27));
         assert!(
-            !pmacs_protocol::is_supported_protocol_version(27),
+            !pmacs_protocol::is_supported_protocol_version(28),
             "an unreleased version must not negotiate"
         );
         // The family boundary is stated against a LITERAL, not against
@@ -2178,7 +2184,9 @@ mod tests {
     /// the advertised baseline does not move.
     #[test]
     fn the_popup_family_takes_v26_and_the_advertised_baseline_stays_pinned() {
-        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 26);
+        // E9 bumped the wire to 27; the popup's own gate stays at its
+        // literal below, which is the point of the test.
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 27);
         // A literal, not `PROTOCOL_VERSION`: stated arithmetically the
         // gate would follow the next bump and admit sessions that never
         // negotiated the popup.
@@ -2271,6 +2279,176 @@ mod tests {
         assert_eq!(postcard::to_allocvec(&absent).expect("encode"), [31, 1]);
         let decoded: InstanceMessage = postcard::from_bytes(&[31, 1]).expect("decode");
         assert_eq!(decoded, absent);
+    }
+
+    /// E9 — the session family takes v27 and its gate is its own
+    /// literal; the advertised baseline does not move.
+    #[test]
+    fn the_session_family_takes_v27_and_the_advertised_baseline_stays_pinned() {
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 27);
+        // A literal, not `PROTOCOL_VERSION`: stated arithmetically the
+        // gate would follow the next bump and read the `Resume` step
+        // from sessions that never negotiated it, desynchronizing them.
+        assert_eq!(27, pmacs_protocol::SESSION_MIN_VERSION);
+        assert_ne!(
+            pmacs_protocol::SESSION_MIN_VERSION,
+            pmacs_protocol::POPUP_MIN_VERSION,
+            "the session family must not share v26's gate"
+        );
+        assert!(
+            pmacs_protocol::SUPPORTED_PROTOCOL_VERSIONS
+                .contains(&pmacs_protocol::SESSION_MIN_VERSION)
+        );
+        assert_eq!(
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            20,
+            "the advertised baseline is PERMANENT — it is not bumped to \
+             chase the wire version"
+        );
+    }
+
+    /// E9 placement pin: `SessionToken` must be APPENDED after `Popup`,
+    /// the final v26 `InstanceMessage` variant. The new variant's own
+    /// round-trip cannot see a discriminant shift, so the pin sits on
+    /// the PREVIOUS final variant, as literal bytes, decoded back too.
+    #[test]
+    fn popup_encoding_is_unchanged_by_the_v27_build() {
+        const WIRE: [u8; 2] = [31, 1];
+        let msg = InstanceMessage::Popup(pmacs_protocol::PopupPayload::Absent);
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            WIRE,
+            "Popup's v26 wire bytes changed — a variant was inserted \
+             before it; append new InstanceMessage variants at the end"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, msg, "the frozen bytes must decode back");
+    }
+
+    /// E9 — exact **encode and decode** for the token message: the
+    /// discriminant after `Popup`'s 31, then the sixteen bytes with no
+    /// length prefix, every byte distinct so a reordering is visible.
+    #[test]
+    fn session_token_encodes_and_decodes_exactly() {
+        const WIRE: [u8; 17] = [32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let msg = InstanceMessage::SessionToken(pmacs_protocol::SessionToken([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+        ]));
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            WIRE,
+            "SessionToken's v27 wire bytes changed — it must be APPENDED \
+             after Popup, carrying the sixteen bytes bare"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, msg, "the frozen bytes must decode back");
+    }
+
+    /// E9 placement pin: `Resume` must be APPENDED after
+    /// `PanelPointerMapped`, the final v25 `FrontendEvent` variant (v26
+    /// appended no event). Pins accumulate: the v25 exact pin above
+    /// still protects that population; this one names the edit that
+    /// would shift it.
+    #[test]
+    fn panel_pointer_mapped_encoding_is_unchanged_by_the_v27_build() {
+        const WIRE: [u8; 11] = [17, 2, 3, 7, 4, 5, 9, 0, 0, 0, 11];
+        let ev = FrontendEvent::PanelPointerMapped {
+            frontend_id: FrontendId(2),
+            geometry_epoch: 3,
+            panel_epoch: 7,
+            buffer_id: pmacs_protocol::BufferId::from_raw(4),
+            coord: CellCoord { row: 5, col: 9 },
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: Modifiers::NONE,
+            mapping_generation: 11,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&ev).expect("encode"),
+            WIRE,
+            "PanelPointerMapped's v25 wire bytes changed — a variant was \
+             inserted before it; append new FrontendEvent variants at the end"
+        );
+        let decoded: FrontendEvent = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, ev, "the frozen bytes must decode back");
+    }
+
+    /// E9 — exact **encode and decode** for the resume step, both
+    /// shapes: the discriminant after `PanelPointerMapped`'s 17, the
+    /// frontend id, then `0` for no token or `1` and the sixteen bytes.
+    #[test]
+    fn resume_encodes_and_decodes_exactly() {
+        const FRESH: [u8; 3] = [18, 2, 0];
+        const RESUMING: [u8; 19] = [
+            18, 2, 1, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+        ];
+        let fresh = FrontendEvent::Resume {
+            frontend_id: FrontendId(2),
+            token: None,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&fresh).expect("encode"),
+            FRESH,
+            "Resume's v27 wire bytes changed — it must be APPENDED after \
+             PanelPointerMapped, frontend_id first, the token last"
+        );
+        let decoded: FrontendEvent = postcard::from_bytes(&FRESH).expect("decode");
+        assert_eq!(decoded, fresh);
+
+        let resuming = FrontendEvent::Resume {
+            frontend_id: FrontendId(2),
+            token: Some(pmacs_protocol::SessionToken([
+                16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+            ])),
+        };
+        assert_eq!(postcard::to_allocvec(&resuming).expect("encode"), RESUMING);
+        let decoded: FrontendEvent = postcard::from_bytes(&RESUMING).expect("decode");
+        assert_eq!(decoded, resuming, "the frozen bytes must decode back");
+    }
+
+    /// E9.4 — exact **encode and decode** for the stop request, the
+    /// discriminant after `Resume`'s 18; `Resume`'s own exact pin above
+    /// is what guards this variant's placement after it.
+    #[test]
+    fn shutdown_encodes_and_decodes_exactly() {
+        const WIRE: [u8; 2] = [19, 2];
+        let ev = FrontendEvent::Shutdown {
+            frontend_id: FrontendId(2),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&ev).expect("encode"),
+            WIRE,
+            "Shutdown's v27 wire bytes changed — it must be APPENDED after Resume"
+        );
+        let decoded: FrontendEvent = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, ev, "the frozen bytes must decode back");
+    }
+
+    /// E9 placement pin: `Detached` must be APPENDED after
+    /// `CapabilityMismatch`, the final `GoodbyeReason` variant since v6,
+    /// pinned through its real nesting inside `InstanceMessage::Goodbye`
+    /// (discriminant 4), with one missing name so the string's length
+    /// prefix is visible.
+    #[test]
+    fn capability_mismatch_goodbye_encoding_is_unchanged_by_the_v27_build() {
+        const WIRE: [u8; 9] = [4, 4, 1, 5, b'm', b'o', b'u', b's', b'e'];
+        const DETACHED: [u8; 2] = [4, 5];
+        let msg = InstanceMessage::Goodbye(GoodbyeReason::CapabilityMismatch {
+            missing: vec!["mouse".to_owned()],
+        });
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            WIRE,
+            "CapabilityMismatch's wire bytes changed — a GoodbyeReason \
+             variant was inserted before it, or Goodbye's discriminant \
+             moved; append Detached AFTER CapabilityMismatch"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, msg, "the frozen bytes must decode back");
+
+        let detached = InstanceMessage::Goodbye(GoodbyeReason::Detached);
+        assert_eq!(postcard::to_allocvec(&detached).expect("encode"), DETACHED);
+        let decoded: InstanceMessage = postcard::from_bytes(&DETACHED).expect("decode");
+        assert_eq!(decoded, detached);
     }
 
     #[test]
