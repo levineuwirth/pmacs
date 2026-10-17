@@ -35,6 +35,7 @@ const USAGE: &str = "\
 usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
        pmacs --gpu [--socket NAME|PATH] [--] [FILE]
        pmacs --daemon [--socket NAME|PATH]
+       pmacs --daemon --status|--stop [--socket NAME|PATH]
        pmacs --attach [--socket NAME|PATH]
        pmacs --attach <target>
        pmacs --daemon-attach [--socket NAME|PATH]
@@ -51,6 +52,14 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
   --daemon           run as a foreground daemon listening on a Unix
                      socket; supervised by the user (systemd, tmux,
                      `nohup &`, etc.)
+  --status           with --daemon: report the daemon at the socket
+                     (version, instance, uptime, cwd) over the socket;
+                     exit 1 when none answers. A socket file nothing
+                     answers is removed.
+  --stop             with --daemon: stop the daemon at the socket over
+                     the socket; every attached frontend is told. Asks
+                     nothing about unsaved buffers, whose recovery
+                     copies the autosave keeps.
   --attach           connect to a running daemon as a frontend; F12
                      detaches without killing the daemon. With a
                      positional <target>, attach over the named
@@ -111,8 +120,12 @@ enum Mode {
         file: Option<PathBuf>,
     },
     /// `pmacs --daemon [--socket ...]`: run a foreground daemon on a
-    /// Unix socket, supervised by the user.
-    Daemon { socket: Option<String> },
+    /// Unix socket, supervised by the user; with `--status` or `--stop`
+    /// (E9.4), ask the one at that socket instead.
+    Daemon {
+        socket: Option<String>,
+        action: DaemonAction,
+    },
     /// `pmacs --attach [...]`: connect to a daemon and pump the
     /// local terminal. The form depends on whether the user gave a
     /// positional `<target>` or relied on `--socket NAME` / the
@@ -122,6 +135,17 @@ enum Mode {
     /// to the local daemon. The far-side mode used by SSH and other
     /// remote transports — does not take over the terminal.
     DaemonAttach { socket: Option<String> },
+}
+
+/// What `--daemon` does (E9.4).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum DaemonAction {
+    /// Run the daemon in the foreground.
+    Run,
+    /// `--status`: report the daemon at the socket, over the socket.
+    Status,
+    /// `--stop`: stop the daemon at the socket, over the socket.
+    Stop,
 }
 
 /// Sub-form of [`Mode::Attach`].
@@ -204,6 +228,7 @@ fn parse_args(args: &[OsString]) -> CliResult {
     let mut gpu = false;
     let mut attach = false;
     let mut daemon_attach = false;
+    let mut daemon_action = DaemonAction::Run;
     let mut socket: Option<String> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -216,6 +241,18 @@ fn parse_args(args: &[OsString]) -> CliResult {
             Some("--daemon") => daemon = true,
             Some("--attach") => attach = true,
             Some("--daemon-attach") => daemon_attach = true,
+            Some("--status") => {
+                if daemon_action != DaemonAction::Run {
+                    return CliResult::Error("--status and --stop are mutually exclusive".into());
+                }
+                daemon_action = DaemonAction::Status;
+            }
+            Some("--stop") => {
+                if daemon_action != DaemonAction::Run {
+                    return CliResult::Error("--status and --stop are mutually exclusive".into());
+                }
+                daemon_action = DaemonAction::Stop;
+            }
             Some("--socket") => match iter.next() {
                 Some(value) => match value.to_str() {
                     Some(value) => socket = Some(value.to_owned()),
@@ -271,8 +308,14 @@ fn parse_args(args: &[OsString]) -> CliResult {
             return CliResult::Error("--daemon and --no-window are mutually exclusive".into());
         }
         return CliResult::Run(CliArgs {
-            mode: Mode::Daemon { socket },
+            mode: Mode::Daemon {
+                socket,
+                action: daemon_action,
+            },
         });
+    }
+    if daemon_action != DaemonAction::Run {
+        return CliResult::Error("--status and --stop require --daemon".into());
     }
     if attach {
         return match build_attach_mode(file, socket) {
@@ -306,6 +349,59 @@ fn parse_args(args: &[OsString]) -> CliResult {
 }
 
 const PMACS_TEST_GPU_BIN: &str = "PMACS_TEST_GPU_BIN";
+
+/// `pmacs --daemon [--socket NAME|PATH]`: the foreground daemon.
+fn run_daemon(socket: Option<String>) -> ExitCode {
+    let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
+    // The user-provided NAME (no slashes) becomes the instance's
+    // `instance_name` for display in `Hello.instance_identity`.
+    // Absolute / relative paths don't have a natural name; treat as
+    // None.
+    let instance_name = match socket {
+        Some(s) if !s.contains('/') => Some(s),
+        _ => None,
+    };
+    match pmacs::daemon::run_daemon(socket_path, instance_name) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("pmacs: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// E9.4 --- `pmacs --daemon --status` and `--stop`, over the socket.
+fn run_daemon_control(socket: Option<&str>, action: DaemonAction) -> ExitCode {
+    let socket_path = pmacs::socket_path::resolve_socket_path(socket);
+    let outcome = match action {
+        DaemonAction::Status => {
+            pmacs::daemon_control::status(&socket_path).map(|status| status.to_string())
+        }
+        DaemonAction::Stop => pmacs::daemon_control::stop(&socket_path).map(|hello| {
+            format!(
+                "pmacs: stopped the daemon at {} (instance {}, up {} s)",
+                socket_path.display(),
+                hello
+                    .instance_identity
+                    .instance_name
+                    .as_deref()
+                    .unwrap_or("default"),
+                hello.instance_identity.uptime_secs
+            )
+        }),
+        DaemonAction::Run => unreachable!("Run is dispatched to run_daemon"),
+    };
+    match outcome {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("pmacs: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
 fn gpu_binary(current_exe: &Path, override_bin: Option<PathBuf>) -> (PathBuf, PathBuf) {
     let sibling = current_exe
@@ -422,24 +518,14 @@ fn main() -> ExitCode {
                 }
             },
             Mode::Gpu { socket, file } => run_gpu(socket.as_deref(), file.as_deref()),
-            Mode::Daemon { socket } => {
-                let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
-                // The user-provided NAME (no slashes) becomes the
-                // instance's `instance_name` for display in
-                // `Hello.instance_identity`. Absolute / relative paths
-                // don't have a natural name; treat as None.
-                let instance_name = match socket {
-                    Some(s) if !s.contains('/') => Some(s),
-                    _ => None,
-                };
-                match pmacs::daemon::run_daemon(socket_path, instance_name) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("pmacs: {e}");
-                        ExitCode::FAILURE
-                    }
-                }
-            }
+            Mode::Daemon {
+                socket,
+                action: action @ (DaemonAction::Status | DaemonAction::Stop),
+            } => run_daemon_control(socket.as_deref(), action),
+            Mode::Daemon {
+                socket,
+                action: DaemonAction::Run,
+            } => run_daemon(socket),
             Mode::Attach(AttachMode::LocalSocket(socket)) => {
                 let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
                 match pmacs::attach::run_attach(socket_path) {
@@ -604,7 +690,11 @@ mod tests {
     fn daemon_flag_selects_daemon_mode_with_no_socket() {
         match parse_args(&args(&["--daemon"])) {
             CliResult::Run(CliArgs {
-                mode: Mode::Daemon { socket },
+                mode:
+                    Mode::Daemon {
+                        socket,
+                        action: DaemonAction::Run,
+                    },
             }) => assert!(socket.is_none()),
             other => panic!("expected Daemon; got {other:?}"),
         }
@@ -614,7 +704,11 @@ mod tests {
     fn daemon_with_socket_name() {
         match parse_args(&args(&["--daemon", "--socket", "research"])) {
             CliResult::Run(CliArgs {
-                mode: Mode::Daemon { socket },
+                mode:
+                    Mode::Daemon {
+                        socket,
+                        action: DaemonAction::Run,
+                    },
             }) => assert_eq!(socket, Some("research".into())),
             other => panic!("expected Daemon with socket; got {other:?}"),
         }
@@ -624,9 +718,54 @@ mod tests {
     fn daemon_with_absolute_socket_path() {
         match parse_args(&args(&["--daemon", "--socket", "/tmp/foo.sock"])) {
             CliResult::Run(CliArgs {
-                mode: Mode::Daemon { socket },
+                mode:
+                    Mode::Daemon {
+                        socket,
+                        action: DaemonAction::Run,
+                    },
             }) => assert_eq!(socket, Some("/tmp/foo.sock".into())),
             other => panic!("expected Daemon; got {other:?}"),
+        }
+    }
+
+    /// E9.4 --- `--status` and `--stop` ride `--daemon`, one at a time.
+    #[test]
+    fn daemon_status_and_stop_select_their_actions() {
+        for (flag, action) in [
+            ("--status", DaemonAction::Status),
+            ("--stop", DaemonAction::Stop),
+        ] {
+            match parse_args(&args(&["--daemon", flag, "--socket", "research"])) {
+                CliResult::Run(CliArgs {
+                    mode:
+                        Mode::Daemon {
+                            socket,
+                            action: got,
+                        },
+                }) => {
+                    assert_eq!(socket, Some("research".into()));
+                    assert_eq!(got, action);
+                }
+                other => panic!("expected Daemon {flag}; got {other:?}"),
+            }
+            match parse_args(&args(&[flag, "--daemon"])) {
+                CliResult::Run(CliArgs {
+                    mode: Mode::Daemon { action: got, .. },
+                }) => assert_eq!(got, action, "either order"),
+                other => panic!("expected Daemon {flag}; got {other:?}"),
+            }
+        }
+        match parse_args(&args(&["--daemon", "--status", "--stop"])) {
+            CliResult::Error(msg) => assert!(msg.contains("mutually exclusive"), "{msg}"),
+            other => panic!("expected an error; got {other:?}"),
+        }
+        match parse_args(&args(&["--status"])) {
+            CliResult::Error(msg) => assert!(msg.contains("require --daemon"), "{msg}"),
+            other => panic!("expected an error; got {other:?}"),
+        }
+        match parse_args(&args(&["--attach", "--stop"])) {
+            CliResult::Error(msg) => assert!(msg.contains("require --daemon"), "{msg}"),
+            other => panic!("expected an error; got {other:?}"),
         }
     }
 

@@ -2405,6 +2405,24 @@ mod tests {
         assert_eq!(decoded, resuming, "the frozen bytes must decode back");
     }
 
+    /// E9.4 — exact **encode and decode** for the stop request, the
+    /// discriminant after `Resume`'s 18; `Resume`'s own exact pin above
+    /// is what guards this variant's placement after it.
+    #[test]
+    fn shutdown_encodes_and_decodes_exactly() {
+        const WIRE: [u8; 2] = [19, 2];
+        let ev = FrontendEvent::Shutdown {
+            frontend_id: FrontendId(2),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&ev).expect("encode"),
+            WIRE,
+            "Shutdown's v27 wire bytes changed — it must be APPENDED after Resume"
+        );
+        let decoded: FrontendEvent = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, ev, "the frozen bytes must decode back");
+    }
+
     /// E9 placement pin: `Detached` must be APPENDED after
     /// `CapabilityMismatch`, the final `GoodbyeReason` variant since v6,
     /// pinned through its real nesting inside `InstanceMessage::Goodbye`

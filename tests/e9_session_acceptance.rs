@@ -822,7 +822,7 @@ fn e9_3_the_last_frontend_is_asked_and_its_answer_decides_the_daemon() {
         Some(GoodbyeReason::ShuttingDown),
         "y stops the daemon, which says so"
     );
-    let status = daemon.wait_for_exit().expect("the daemon exits");
+    let status = exit_within(&mut daemon, 10);
     assert!(status.success(), "a clean stop: {status:?}");
 }
 
@@ -846,4 +846,133 @@ fn e9_3_a_v26_frontend_s_quit_detaches_it_with_no_goodbye() {
     other.wait("the other frontend's echo", |m| {
         matches!(m, InstanceMessage::CursorByte { byte_pos: 1, .. }).then_some(())
     });
+}
+
+// ---------------------------------------------------------------------------
+// E9.4 --- lifecycle
+// ---------------------------------------------------------------------------
+
+/// The daemon's exit status, waited for with a bound: a daemon that does
+/// not exit within `secs` fails the row rather than hanging it.
+fn exit_within(daemon: &mut TestDaemon, secs: u64) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while daemon.is_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !daemon.is_alive(),
+        "the daemon did not exit within {secs} s"
+    );
+    daemon.wait_for_exit().expect("the daemon's exit status")
+}
+
+/// `pmacs --daemon <action> --socket <path>`: its status, stdout and stderr.
+fn daemon_cli(action: &str, socket: &Path) -> (std::process::ExitStatus, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs"))
+        .arg("--daemon")
+        .arg(action)
+        .arg("--socket")
+        .arg(socket)
+        .output()
+        .expect("run pmacs --daemon");
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// `--status` reports the daemon at the socket from its `Hello`, and
+/// `--stop` stops it over the socket: every attached frontend is told
+/// it is shutting down, the process exits cleanly, the socket file is
+/// gone, and `--status` then says so.
+#[test]
+fn e9_4_status_reports_and_stop_stops_over_the_socket() {
+    let mut daemon = daemon_with_note("");
+    let socket = daemon.socket_path().to_path_buf();
+    let mut attached = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    attached.where_am_i();
+
+    let (status, out, err) = daemon_cli("--status", &socket);
+    assert!(status.success(), "status exit: {status:?}; {err}");
+    assert!(
+        out.contains(&format!("daemon at {}", socket.display()))
+            && out.contains("protocol baseline v20")
+            && out.contains("  up ")
+            && out.contains("  cwd "),
+        "the status names the daemon from its Hello:\n{out}"
+    );
+
+    let (status, out, err) = daemon_cli("--stop", &socket);
+    assert!(status.success(), "stop exit: {status:?}; {err}");
+    assert!(out.contains("stopped the daemon at"), "{out}");
+    assert_eq!(
+        attached.ended(),
+        Some(GoodbyeReason::ShuttingDown),
+        "the attached frontend is told"
+    );
+    let exit = exit_within(&mut daemon, 10);
+    assert!(exit.success(), "a clean stop: {exit:?}");
+    assert!(!socket.exists(), "the daemon removed its socket");
+
+    let (status, _, err) = daemon_cli("--status", &socket);
+    assert!(!status.success(), "no daemon: exit 1");
+    assert!(err.contains("no daemon at"), "{err}");
+}
+
+/// A socket file nothing answers is a daemon's leftover: `--status`
+/// says so and removes it, so the path is free for the next start; a
+/// path that is not a socket is left alone and named.
+#[test]
+fn e9_4_a_stale_socket_is_removed_and_a_non_socket_left_alone() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let stale = dir.path().join("stale.sock");
+    // A socket file whose listener is gone: bound, then dropped.
+    drop(std::os::unix::net::UnixListener::bind(&stale).expect("bind"));
+    assert!(stale.exists());
+    let (status, _, err) = daemon_cli("--status", &stale);
+    assert!(!status.success());
+    assert!(
+        err.contains("stale socket") && err.contains("removed"),
+        "{err}"
+    );
+    assert!(!stale.exists(), "the stale socket file is gone");
+
+    let plain = dir.path().join("plain.sock");
+    std::fs::write(&plain, "not a socket").expect("write");
+    let (status, _, err) = daemon_cli("--stop", &plain);
+    assert!(!status.success());
+    assert!(err.contains("is not a socket; left alone"), "{err}");
+    assert!(plain.exists(), "a non-socket is never removed");
+}
+
+/// With `daemon.idle-exit-secs` set, a daemon no frontend is attached
+/// to for that long stops on its own; by default it never does.
+#[test]
+fn e9_4_idle_exit_is_opt_in() {
+    let mut daemon = daemon_with_note("pmacs.config.set('daemon.idle-exit-secs', 1)\n");
+    let session = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    // Attached: no idle clock runs. A window before a negative
+    // assertion, named with its length: 2 s, past the knob.
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        daemon.is_alive(),
+        "an attached daemon stays up past the knob"
+    );
+    drop(session);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon.is_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        exit_within(&mut daemon, 1).success(),
+        "the idle daemon stopped within the window, cleanly"
+    );
+
+    let mut default = daemon_with_note("");
+    let session = Session::attach(&default, PROTOCOL_VERSION, None);
+    drop(session);
+    // Named window: 2 s with no frontend, the knob at its default.
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(default.is_alive(), "by default an idle daemon stays up");
 }

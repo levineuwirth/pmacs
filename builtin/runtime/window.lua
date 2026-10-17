@@ -57,6 +57,20 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E9.4: a daemon with no frontend attached for this long stops, as
+-- `pmacs --daemon --stop` would stop it. Opt-in: the default never
+-- stops, since a daemon the user started by hand is theirs to stop. The
+-- case it exists for is the daemon `pmacs --gpu` starts for itself,
+-- which otherwise outlives every window it ever served.
+pmacs.config.define {
+  name = "daemon.idle-exit-secs",
+  description = "Seconds a daemon stays up with no frontend attached before it stops on its own; 0 never stops it.",
+  type = "integer",
+  default = 0,
+  min = 0,
+  mutability = "live",
+}
+
 pmacs.command.define {
   name = "window.quit",
   description = "Quit the selected side window: restore or delete it",

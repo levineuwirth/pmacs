@@ -636,6 +636,21 @@ pub enum FrontendEvent {
         /// The token of the session to resume, or `None` for a fresh view.
         token: Option<crate::session::SessionToken>,
     },
+    /// E9.4 (**protocol v27**): `pmacs --daemon --stop`'s request. The
+    /// daemon answers every attached frontend, the sender included,
+    /// with [`GoodbyeReason::ShuttingDown`] and exits, as it does for
+    /// `SIGTERM`; it asks nothing about unsaved buffers, whose recovery
+    /// copies the autosave keeps.
+    ///
+    /// **Gated receiver-side** at [`crate::session::SESSION_MIN_VERSION`]:
+    /// the daemon refuses it from a session that negotiated less, so a
+    /// peer cannot stop a daemon over a wire it never declared the
+    /// variant on. Appended after [`Self::Resume`], the final v27
+    /// variant before it, so no existing discriminant moves.
+    Shutdown {
+        /// Which frontend asked (untrusted, as above).
+        frontend_id: FrontendId,
+    },
 }
 
 /// First protocol version carrying the **mapped panel family** —
@@ -715,7 +730,8 @@ impl FrontendEvent {
             | Self::PanelPointer { frontend_id, .. }
             | Self::TextInput { frontend_id, .. }
             | Self::PanelPointerMapped { frontend_id, .. }
-            | Self::Resume { frontend_id, .. } => *frontend_id,
+            | Self::Resume { frontend_id, .. }
+            | Self::Shutdown { frontend_id } => *frontend_id,
         }
     }
 }
@@ -2095,10 +2111,10 @@ pub enum ResourceBody {
 ///
 /// E9: bumped 26 → 27 for the session family: [`InstanceMessage::
 /// SessionToken`], appended after `Popup`, the final v26 `InstanceMessage`
-/// variant; [`FrontendEvent::Resume`], appended after
-/// `PanelPointerMapped`, the final v25 `FrontendEvent` variant; and
-/// [`GoodbyeReason::Detached`], appended after `CapabilityMismatch`, the
-/// final `GoodbyeReason` variant since v6. The token is minted after
+/// variant; [`FrontendEvent::Resume`] and then [`FrontendEvent::Shutdown`],
+/// appended after `PanelPointerMapped`, the final v25 `FrontendEvent`
+/// variant; and [`GoodbyeReason::Detached`], appended after
+/// `CapabilityMismatch`, the final `GoodbyeReason` variant since v6. The token is minted after
 /// negotiation and never carried in [`Hello`] (D34). Gated in both
 /// directions at [`crate::session::SESSION_MIN_VERSION`]: the daemon
 /// writes the token and the `Detached` goodbye only to a v27 session,

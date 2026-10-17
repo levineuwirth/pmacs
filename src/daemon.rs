@@ -1494,6 +1494,11 @@ fn dispatcher_loop(
     let mut terminal_bell_baselines: HashMap<FrontendId, (crate::buffer::BufferId, u64)> =
         HashMap::new();
     let mut session_registry = SessionRegistry::new();
+    // E9.4 — when the last attached frontend left, for the opt-in idle
+    // exit (`daemon.idle-exit-secs`); `None` while any is attached.
+    // A daemon starts idle: one that nothing ever attaches to leaves
+    // on the same clock.
+    let mut idle_since: Option<Instant> = Some(Instant::now());
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
     // reproducible. Mutated across the loop; one stream of delays
@@ -2007,6 +2012,25 @@ fn dispatcher_loop(
         // of the loop now (post-audit-round-3 F18 reorder); CrdtOp
         // broadcasts arrive at replicas before the CellDelta /
         // CursorByte for the same edit.
+
+        // E9.4 — opt-in idle exit: with no frontend attached for
+        // `daemon.idle-exit-secs` (0, the default, never), the daemon
+        // stops as `--stop` would stop it. Meant for a daemon a GUI
+        // started for itself, which otherwise outlives every window.
+        let attached_now = render_states.len() + semantic_states.len();
+        if attached_now == 0 {
+            let idle_for = idle_since.get_or_insert_with(Instant::now).elapsed();
+            let limit = idle_exit_after(editor);
+            if !limit.is_zero() && idle_for >= limit {
+                eprintln!(
+                    "pmacs: no frontend attached for {} s (daemon.idle-exit-secs); stopping",
+                    idle_for.as_secs()
+                );
+                shutdown.store(true, Ordering::SeqCst);
+            }
+        } else {
+            idle_since = None;
+        }
 
         // Shutdown / quit checks. Send Goodbye to all attached
         // frontends before exiting.
@@ -2691,6 +2715,23 @@ fn view_retention(editor: &EditorState) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// E9.4 --- `daemon.idle-exit-secs` as the daemon reads it on a tick;
+/// zero (never) when the registry is unreachable.
+fn idle_exit_after(editor: &EditorState) -> Duration {
+    let secs = editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .and_then(
+            |registry| match registry.borrow().get("daemon.idle-exit-secs", None) {
+                Ok(crate::config_registry::ConfigValue::Int(n)) => u64::try_from(*n).ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0);
+    Duration::from_secs(secs)
+}
+
 /// The variant's name, for a log line about a message out of place.
 fn frontend_event_name(event: &FrontendEvent) -> &'static str {
     match event {
@@ -2713,6 +2754,7 @@ fn frontend_event_name(event: &FrontendEvent) -> &'static str {
         FrontendEvent::TextInput { .. } => "TextInput",
         FrontendEvent::PanelPointerMapped { .. } => "PanelPointerMapped",
         FrontendEvent::Resume { .. } => "Resume",
+        FrontendEvent::Shutdown { .. } => "Shutdown",
     }
 }
 
@@ -2767,6 +2809,24 @@ fn handle_dispatcher_event(
                     // `SessionDetached` event after its reader
                     // loop exits; cleanup happens there. Just stop
                     // processing here.
+                }
+                // E9.4 — `pmacs --daemon --stop`. Refused from a session
+                // below the family's version (a peer compiled from this
+                // crate can encode any discriminant); honored as the
+                // editor's own quit, which the tick loop answers with
+                // `Goodbye(ShuttingDown)` to every frontend and an exit.
+                FrontendEvent::Shutdown { .. } => {
+                    let version = session_registry
+                        .session_state(source)
+                        .map_or(0, |s| s.negotiated_protocol_version);
+                    if version >= SESSION_MIN_VERSION {
+                        eprintln!("pmacs: stop requested by {source:?}");
+                        editor.core.borrow_mut().quit = true;
+                    } else {
+                        eprintln!(
+                            "pmacs: refusing Shutdown from {source:?}: its session is v{version}"
+                        );
+                    }
                 }
                 FrontendEvent::Resize { size, .. } => {
                     if let Some(rs) = render_states.get_mut(&source) {
@@ -4684,6 +4744,10 @@ fn apply_event(
         // thread before the session exists; one arriving here is a
         // protocol slip and is dropped, never applied.
         | FrontendEvent::Resume { .. }
+        // E9.4: the stop request has its own dispatcher arm, which
+        // gates it on the session's negotiated version; arriving here
+        // it is dropped.
+        | FrontendEvent::Shutdown { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
