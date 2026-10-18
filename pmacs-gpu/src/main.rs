@@ -4321,6 +4321,14 @@ struct Reconnect {
     last_error: String,
 }
 
+/// E9.2 (fix round 1, review 1's Low 4) --- failed attempts after which
+/// the reconnect loop stops and the band says to close the window: on
+/// the schedule (0.5 s doubling to a 30 s plateau) about twelve
+/// minutes, long past any daemon restart, and the window was answering
+/// no key until then but `C-x C-c`. The reconnect never respawns a
+/// daemon, so a managed daemon that died is not coming back on its own.
+const RECONNECT_ATTEMPT_CAP: u32 = 30;
+
 /// A delay for the banner: whole seconds, or tenths under one minute.
 fn describe_delay(delay: std::time::Duration) -> String {
     let secs = delay.as_secs_f64();
@@ -4718,8 +4726,13 @@ struct State {
     /// E9.2 --- the banner the status band shows while the daemon's
     /// socket is lost and the window is reconnecting; `None` while
     /// attached. While it is up every key is dropped rather than applied
-    /// to a mirror no daemon will hear about.
+    /// to a mirror no daemon will hear about, but for `C-x C-c`, which
+    /// closes the window (fix round 1, review 1's Low 4).
     connection_notice: Option<String>,
+    /// E9.2 (fix round 1) --- `C-x` was pressed while the socket is
+    /// lost; the `C-c` after it closes the window. Cleared by any other
+    /// key, by the loss and by the reconnect.
+    lost_chord_prefix: bool,
     /// The title last pushed to the window (E2.3), so an unchanged
     /// title is not re-set on every `StatusFacts`.
     last_title: Option<String>,
@@ -5664,6 +5677,7 @@ impl App {
                 self.reconnect = None;
                 if let Some(state) = self.state.as_mut() {
                     state.connection_notice = None;
+                    state.lost_chord_prefix = false;
                     state.goodbye = None;
                     state.request_redraw();
                 }
@@ -5676,16 +5690,32 @@ impl App {
                 let delay = reconnect.schedule.next_delay();
                 reconnect.next_at = now + delay;
                 let attempt = reconnect.schedule.step();
-                let notice = format!(
-                    "daemon connection lost; reconnect attempt {attempt} failed ({error}); \
-                     next in {}",
-                    describe_delay(delay)
-                );
+                // Past the cap the loop ends; the banner stays, saying
+                // what to do, and `C-x C-c` is the key that does it.
+                let capped = attempt >= RECONNECT_ATTEMPT_CAP;
+                let notice = if capped {
+                    format!(
+                        "daemon connection lost; {attempt} reconnect attempts failed ({error}); \
+                         close the window (C-x C-c)"
+                    )
+                } else {
+                    format!(
+                        "daemon connection lost; reconnect attempt {attempt} failed ({error}); \
+                         next in {}",
+                        describe_delay(delay)
+                    )
+                };
+                let next_at = reconnect.next_at;
                 if let Some(state) = self.state.as_mut() {
                     state.connection_notice = Some(notice);
                     state.request_redraw();
                 }
-                Some(reconnect.next_at)
+                if capped {
+                    self.reconnect = None;
+                    None
+                } else {
+                    Some(next_at)
+                }
             }
         }
     }
@@ -6867,6 +6897,13 @@ impl App {
                 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement as _;
                 let unmodified = key.key_without_modifiers();
                 self.apply_keyboard(&key.logical_key, key.text.as_deref(), Some(&unmodified));
+                // E9.2 (fix round 1) --- `C-x C-c` while the socket is
+                // lost: the window goes, its geometry kept, as on the
+                // daemon's `Goodbye(Detached)`.
+                if self.exit_requested {
+                    self.save_geometry();
+                    return EventOutcome::Exit;
+                }
             }
             Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
             Route::Pointer(PointerRoute::Left(button_state)) => {
@@ -6914,12 +6951,28 @@ impl App {
     fn apply_keyboard(&mut self, logical: &Key, text: Option<&str>, unmodified: Option<&Key>) {
         // E9.2 --- no daemon is listening: a key applied to the mirror
         // now would be silently undone by the resumed session's
-        // snapshot, so none is, and the band says why.
+        // snapshot, so none is, and the band says why. The one chord
+        // that still means something is `C-x C-c`, the quit the user
+        // would reach for, which closes the window (fix round 1,
+        // review 1's Low 4: before it a window whose daemon was gone
+        // answered no key, forever, and its only exit was the close
+        // button).
         if self
             .state
             .as_ref()
             .is_some_and(|s| s.connection_notice.is_some())
         {
+            let ctrl = translate_mods(self.modifiers) == Modifiers::CTRL;
+            let is = |c: &str| matches!(logical, Key::Character(ch) if ch.eq_ignore_ascii_case(c));
+            let state = self.state.as_mut().expect("checked above");
+            if ctrl && is("x") {
+                state.lost_chord_prefix = true;
+            } else if ctrl && is("c") && state.lost_chord_prefix {
+                state.lost_chord_prefix = false;
+                self.exit_requested = true;
+            } else {
+                state.lost_chord_prefix = false;
+            }
             return;
         }
         // While the daemon is intercepting keystrokes — an active
@@ -7829,6 +7882,113 @@ fn test_hello() -> pmacs_protocol::Hello {
             crdt_replica: true,
             semantic_render: true,
         },
+    }
+}
+
+/// E9.2, fix round 1 (review 1's Low 4): the lost-socket window's two
+/// exits, driven through the production `App` over the effect harness's
+/// socketpair.
+#[cfg(test)]
+mod lost_socket_tests {
+    use super::*;
+    use winit::keyboard::ModifiersState;
+
+    fn press(app: &mut App, key: &str, ctrl: bool) {
+        app.modifiers = if ctrl {
+            ModifiersState::CONTROL
+        } else {
+            ModifiersState::empty()
+        };
+        app.apply_keyboard(&Key::Character(key.into()), (!ctrl).then_some(key), None);
+        app.modifiers = ModifiersState::empty();
+    }
+
+    /// While the socket is lost every key is dropped, as E9.2 says, but
+    /// `C-x C-c` closes the window; a broken chord (`C-x` then anything
+    /// else) closes nothing and drops its keys like the rest.
+    #[test]
+    fn a_lost_window_closes_on_c_x_c_c_and_drops_every_other_key() {
+        let mut h = EffectHarness::with_document("one\ntwo\n");
+        let before = h.app.state.as_ref().expect("state").current_text.clone();
+        h.app
+            .state
+            .as_mut()
+            .expect("state")
+            .on_connection_lost("daemon connection lost; reconnecting in 20 ms");
+        press(&mut h.app, "q", false);
+        press(&mut h.app, "x", true);
+        press(&mut h.app, "q", false);
+        press(&mut h.app, "c", true);
+        assert!(
+            !h.app.exit_requested,
+            "a broken chord closes nothing: C-x, q, C-c"
+        );
+        press(&mut h.app, "x", true);
+        press(&mut h.app, "c", true);
+        assert!(h.app.exit_requested, "C-x C-c while lost closes the window");
+        let state = h.app.state.as_ref().expect("state");
+        assert_eq!(state.current_text, before, "no key reached the mirror");
+        assert!(state.connection_notice.is_some(), "the banner stayed up");
+    }
+
+    /// The reconnect loop stops after `RECONNECT_ATTEMPT_CAP` failed
+    /// attempts and the band says to close the window; one short of
+    /// the cap it is still booking the next attempt.
+    #[test]
+    fn a_reconnect_past_the_cap_stops_and_says_to_close_the_window() {
+        let mut h = EffectHarness::with_document("one\ntwo\n");
+        h.app
+            .state
+            .as_mut()
+            .expect("state")
+            .on_connection_lost("daemon connection lost; reconnecting in 20 ms");
+        h.app.attach_client = None;
+        let mut now = std::time::Instant::now();
+        h.app.reconnect = Some(Reconnect {
+            schedule: pmacs_protocol::BackoffSchedule::new(),
+            next_at: now,
+            last_error: "cut".to_owned(),
+        });
+        let refused = || {
+            Err(attach::AttachClientError::Connect(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "Connection refused",
+            )))
+        };
+        for attempt in 1..RECONNECT_ATTEMPT_CAP {
+            let due = h.app.tick_reconnect(now, |_, _| refused());
+            let due = due.unwrap_or_else(|| panic!("attempt {attempt} books the next"));
+            assert!(
+                h.app.reconnect.is_some(),
+                "attempt {attempt} keeps the loop"
+            );
+            let notice = h
+                .app
+                .state
+                .as_ref()
+                .and_then(|s| s.connection_notice.clone())
+                .unwrap_or_default();
+            assert!(
+                notice.contains(&format!("attempt {attempt} failed")) && notice.contains("next in"),
+                "{notice}"
+            );
+            now = due;
+        }
+        let due = h.app.tick_reconnect(now, |_, _| refused());
+        assert!(due.is_none(), "past the cap nothing is booked");
+        assert!(h.app.reconnect.is_none(), "the loop is over");
+        let notice = h
+            .app
+            .state
+            .as_ref()
+            .and_then(|s| s.connection_notice.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains(&format!(
+                "{RECONNECT_ATTEMPT_CAP} reconnect attempts failed"
+            )) && notice.contains("close the window (C-x C-c)"),
+            "{notice}"
+        );
     }
 }
 
@@ -10939,6 +11099,7 @@ impl State {
             goodbye: None,
             session_token: None,
             connection_notice: None,
+            lost_chord_prefix: false,
             last_title: None,
             zoom_wheel_residual: 0.0,
             caret_blink_epoch: std::time::Instant::now(),
@@ -12458,6 +12619,7 @@ impl State {
         self.minibuffer = None;
         self.peer_presences.clear();
         self.connection_notice = Some(notice.to_owned());
+        self.lost_chord_prefix = false;
         self.reshape();
         self.request_redraw();
     }
