@@ -18,14 +18,18 @@
 //! without its `cleanup`, and is removed so a later `pmacs --gpu` or
 //! `--daemon` finds the path free. A live daemon is never touched this
 //! way --- it holds the lockfile and answers its socket --- and a path
-//! that is not a socket is left alone and reported.
+//! that is not a socket is left alone and reported. The verdict is read
+//! from the path, not the errno (`pmacs_protocol::socket_file`): Linux
+//! refuses a connect to a regular file with `ECONNREFUSED`, macOS with
+//! `ENOTSOCK`, and the first cut's split on the former printed the raw
+//! errno on macOS where this sentence was promised (review 1's High 1).
 
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use pmacs_protocol::SESSION_MIN_VERSION;
+use pmacs_protocol::{ConnectFailure, SESSION_MIN_VERSION, classify_connect_failure};
 
 use crate::protocol::{
     AttachRequest, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello, InstanceMessage,
@@ -159,30 +163,26 @@ fn connect(socket: &Path) -> Result<UnixStream, DaemonControlError> {
             stream.set_write_timeout(Some(ANSWER_TIMEOUT))?;
             Ok(stream)
         }
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            Err(DaemonControlError::NoDaemon(socket.to_path_buf()))
-        }
-        Err(e) if e.kind() == ErrorKind::ConnectionRefused => Err(clear_stale_socket(socket)),
-        Err(e) => Err(DaemonControlError::Io(e)),
+        Err(e) => Err(connect_failure(socket, e)),
     }
 }
 
-/// E9.4 --- a socket file nothing answers is removed. Called only after
-/// a connect was refused, which a live daemon never does: it answers
-/// its own socket, and a daemon that has not yet bound holds the path
-/// free.
-pub fn clear_stale_socket(socket: &Path) -> DaemonControlError {
-    use std::os::unix::fs::FileTypeExt as _;
-    match std::fs::symlink_metadata(socket) {
-        Ok(meta) if meta.file_type().is_socket() => match std::fs::remove_file(socket) {
+/// E9.4 --- what a failed connect to `socket` means, by the path: a
+/// socket file nothing answers is removed (a live daemon never refuses
+/// its own socket, and one that has not yet bound holds the path
+/// free), a path that is not a socket is left alone and named, and
+/// nothing at the path is no daemon. Any other failure is reported as
+/// the error it was.
+pub fn connect_failure(socket: &Path, error: std::io::Error) -> DaemonControlError {
+    match classify_connect_failure(socket, &error) {
+        ConnectFailure::Missing => DaemonControlError::NoDaemon(socket.to_path_buf()),
+        ConnectFailure::Stale => match std::fs::remove_file(socket) {
             Ok(()) => DaemonControlError::StaleSocketRemoved(socket.to_path_buf()),
             Err(e) => DaemonControlError::StaleSocket(socket.to_path_buf(), e),
         },
-        Ok(_) => DaemonControlError::NotASocket(socket.to_path_buf()),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            DaemonControlError::NoDaemon(socket.to_path_buf())
-        }
-        Err(e) => DaemonControlError::Io(e),
+        ConnectFailure::NotASocket => DaemonControlError::NotASocket(socket.to_path_buf()),
+        ConnectFailure::Other => DaemonControlError::Io(error),
+        ConnectFailure::Inspect(e) => DaemonControlError::Io(e),
     }
 }
 
@@ -257,5 +257,60 @@ pub fn stop(socket: &Path) -> Result<Hello, DaemonControlError> {
             Ok(_) => {}
             Err(e) => return Err(e.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// macOS's `connect(2)` on a regular file: `ENOTSOCK`, which `std`
+    /// carries under no named kind. Linux returns `ECONNREFUSED` there,
+    /// so the E9.4 row on a Linux leg never reaches this shape; this
+    /// row does, by synthesizing the error the macOS legs of CI printed
+    /// raw at `e7c8fd5`.
+    fn enotsock() -> std::io::Error {
+        std::io::Error::other("Socket operation on non-socket (os error 38)")
+    }
+
+    #[test]
+    fn a_non_socket_is_named_and_left_alone_on_an_enotsock_connect() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let plain = dir.path().join("plain.sock");
+        std::fs::write(&plain, "not a socket").expect("write");
+        let verdict = connect_failure(&plain, enotsock());
+        assert!(
+            matches!(&verdict, DaemonControlError::NotASocket(p) if p == &plain),
+            "{verdict:?}"
+        );
+        assert_eq!(
+            verdict.to_string(),
+            format!("{} exists and is not a socket; left alone", plain.display())
+        );
+        assert!(plain.exists());
+        // Linux's answer for the same file: the same verdict.
+        let refused = std::io::Error::new(ErrorKind::ConnectionRefused, "Connection refused");
+        assert!(matches!(
+            connect_failure(&plain, refused),
+            DaemonControlError::NotASocket(_)
+        ));
+        assert!(plain.exists());
+    }
+
+    #[test]
+    fn a_refused_socket_file_is_removed_and_a_missing_path_is_no_daemon() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let stale = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).expect("bind"));
+        let refused = std::io::Error::new(ErrorKind::ConnectionRefused, "Connection refused");
+        assert!(matches!(
+            connect_failure(&stale, refused),
+            DaemonControlError::StaleSocketRemoved(_)
+        ));
+        assert!(!stale.exists(), "the stale socket file is gone");
+        assert!(matches!(
+            connect_failure(&stale, enotsock()),
+            DaemonControlError::NoDaemon(_)
+        ));
     }
 }

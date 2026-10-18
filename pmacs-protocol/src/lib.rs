@@ -46,6 +46,7 @@ pub mod popup;
 pub mod reconnect;
 pub mod scroll;
 pub mod session;
+pub mod socket_file;
 pub mod terminal;
 pub mod transport;
 pub mod wire_grid;
@@ -85,6 +86,7 @@ pub use popup::{
 };
 pub use reconnect::{BackoffSchedule, PMACS_TEST_BACKOFF_SCALE_MS};
 pub use session::{SESSION_MIN_VERSION, SESSION_TOKEN_BYTES, SessionToken};
+pub use socket_file::{ConnectFailure, classify_connect_failure};
 pub use terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_FRAME_GLYPH_BYTES, MAX_TERMINAL_GRAPHEME_BYTES,
     MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,

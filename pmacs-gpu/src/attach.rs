@@ -20,7 +20,6 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -864,22 +863,37 @@ fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Chil
     command.spawn()
 }
 
+/// Whether a failed first connect authorizes starting a daemon: nothing
+/// at the path, or a socket file nothing answers (a daemon's leftover),
+/// does; a path that is not a socket is refused by name, never spawned
+/// over; any other failure fails closed. The verdict is read from the
+/// path (`pmacs_protocol::socket_file`), not the errno: Linux refuses a
+/// connect to a regular file with `ECONNREFUSED`, macOS with `ENOTSOCK`,
+/// and a split on the errno alone fell to the fail-closed arm there (E9
+/// review 1's High 1, the same shape as `pmacs --daemon --status`'s).
 fn initial_startup_authorized(
     socket_path: &Path,
     error: &io::Error,
 ) -> Result<bool, ManagedAttachError> {
-    match error.kind() {
-        io::ErrorKind::NotFound => Ok(true),
-        io::ErrorKind::ConnectionRefused => match fs::metadata(socket_path) {
-            Ok(metadata) if metadata.file_type().is_socket() => Ok(true),
-            Ok(_) => Err(ManagedAttachError::NonSocketPath(socket_path.to_owned())),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(source) => Err(ManagedAttachError::InspectSocket {
-                path: socket_path.to_owned(),
-                source,
-            }),
-        },
-        _ => Ok(false),
+    use pmacs_protocol::{ConnectFailure, classify_connect_failure};
+    match classify_connect_failure(socket_path, error) {
+        // Absent at the connect, or vanished between it and the look:
+        // a daemon's startup is what the path is waiting for. Any
+        // other errno on a path that is gone is still a failure of its
+        // own kind, and fails closed as it always did.
+        ConnectFailure::Missing => Ok(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        )),
+        ConnectFailure::Stale => Ok(true),
+        ConnectFailure::NotASocket => {
+            Err(ManagedAttachError::NonSocketPath(socket_path.to_owned()))
+        }
+        ConnectFailure::Other => Ok(false),
+        ConnectFailure::Inspect(source) => Err(ManagedAttachError::InspectSocket {
+            path: socket_path.to_owned(),
+            source,
+        }),
     }
 }
 
@@ -1392,6 +1406,7 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::net::UnixListener;
 
     use pmacs_protocol::{InstanceCapabilities, InstanceIdentity, MouseButton};
 
@@ -1891,6 +1906,41 @@ mod tests {
                 "{kind:?} must not authorize daemon startup"
             );
         }
+    }
+
+    /// macOS's `connect(2)` on a regular file is `ENOTSOCK`, an errno
+    /// `std` names no kind for; the verdict is the path's, so it is the
+    /// non-socket refusal there as on Linux, and a stale socket file is
+    /// still a start.
+    #[test]
+    fn managed_attach_classifies_by_the_path_not_the_errno() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plain = temp.path().join("plain.sock");
+        std::fs::write(&plain, "not a socket").expect("write");
+        let enotsock = io::Error::other("Socket operation on non-socket (os error 38)");
+        assert!(matches!(
+            initial_startup_authorized(&plain, &enotsock),
+            Err(ManagedAttachError::NonSocketPath(rejected)) if rejected == plain
+        ));
+        assert!(plain.exists(), "never removed, never spawned over");
+        let stale = temp.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).expect("bind"));
+        assert!(
+            initial_startup_authorized(
+                &stale,
+                &io::Error::new(io::ErrorKind::ConnectionRefused, "refused")
+            )
+            .expect("classify a stale socket file"),
+            "a socket file nothing answers authorizes the start"
+        );
+        assert!(
+            !initial_startup_authorized(
+                &stale,
+                &io::Error::new(io::ErrorKind::PermissionDenied, "denied")
+            )
+            .expect("classify a denied socket"),
+            "another errno on a socket file fails closed"
+        );
     }
 
     #[test]
