@@ -58,8 +58,10 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
                      answers is removed.
   --stop             with --daemon: stop the daemon at the socket over
                      the socket; every attached frontend is told. Asks
-                     nothing about unsaved buffers, whose recovery
-                     copies the autosave keeps.
+                     nothing about unsaved buffers: the quit's hooks run
+                     first (the autosave's last sweep of unsaved text,
+                     the desktop session, saveplace), and a veto from
+                     them does not hold the stop.
   --attach           connect to a running daemon as a frontend; F12
                      detaches without killing the daemon. With a
                      positional <target>, attach over the named

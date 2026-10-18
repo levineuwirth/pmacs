@@ -2048,6 +2048,7 @@ fn dispatcher_loop(
                     "pmacs: no frontend attached for {} s (daemon.idle-exit-secs); stopping",
                     idle_for.as_secs()
                 );
+                run_before_quit_hooks(editor, "the idle exit");
                 shutdown.store(true, Ordering::SeqCst);
             }
         } else {
@@ -2770,6 +2771,27 @@ fn view_retention(editor: &EditorState) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// E9.4 (fix round 1, review 1's Medium 1) --- the quit's own hooks
+/// before a stop the Lua `editor.quit` did not run: `editor.before-quit`
+/// is where the autosave takes its last sweep of unsaved text (the
+/// periodic copy is up to `autosave.interval-ms` behind), the desktop
+/// saves its session and saveplace its places, and until this round
+/// `--stop` and the idle exit set `quit` from Rust and skipped all
+/// three. The hook is short-circuit and the three say of themselves
+/// that they never veto; a veto from another subscriber is said and
+/// does not hold the stop, which asks nothing. The copies the sweep
+/// stages are installed by the exit's own wait (`EditorState::drop`),
+/// as after the Lua quit.
+fn run_before_quit_hooks(editor: &mut EditorState, why: &str) {
+    if let Some(outcome) = editor
+        .lua_host
+        .run_hook("editor.before-quit", mlua::MultiValue::new())
+        && !outcome.proceed
+    {
+        eprintln!("pmacs: editor.before-quit vetoed {why}; stopping anyway");
+    }
+}
+
 /// E9.4 --- `daemon.idle-exit-secs` as the daemon reads it on a tick;
 /// zero (never) when the registry is unreachable.
 fn idle_exit_after(editor: &EditorState) -> Duration {
@@ -2876,6 +2898,7 @@ fn handle_dispatcher_event(
                         .map_or(0, |s| s.negotiated_protocol_version);
                     if version >= SESSION_MIN_VERSION {
                         eprintln!("pmacs: stop requested by {source:?}");
+                        run_before_quit_hooks(editor, "--stop");
                         editor.core.borrow_mut().quit = true;
                     } else {
                         eprintln!(
