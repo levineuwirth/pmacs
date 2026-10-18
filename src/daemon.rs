@@ -2618,16 +2618,21 @@ fn handle_session_established(
                     crdt_snapshot: snapshot.crdt_snapshot,
                 };
                 // E9.5 — a retained window on a buffer past the frame
-                // cap is refused and put back on LOCAL's document, said
-                // so; the sweep below bootstraps the session as a fresh
-                // one would be.
+                // cap is refused and sent to the buffer `kill_buffer`
+                // would send it to, said so; the sweep below bootstraps
+                // the session as a fresh one would be. (Until fix round
+                // 1 it went to LOCAL's document, which can be the
+                // oversize buffer itself.)
                 let frame_len = snapshot_frame_len(&message);
                 if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
-                    let back_to = editor
-                        .core
-                        .borrow()
-                        .primary_document_buffer(FrontendId::LOCAL);
-                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
+                    let back_to = editor.core.borrow().fallback_buffer_for(buffer_id);
+                    refuse_oversize_snapshot(
+                        editor,
+                        frontend_id,
+                        buffer_id,
+                        frame_len,
+                        Some(back_to),
+                    );
                     send_buffer_snapshots(editor, &mut write_stream);
                     resumed_buffer = None;
                 } else {
@@ -2663,7 +2668,21 @@ fn handle_session_established(
         }
     } else if crdt_replica {
         // Legacy no-target attach remains an all-buffer replica bootstrap.
-        send_buffer_snapshots(editor, &mut write_stream);
+        let left_out = send_buffer_snapshots(editor, &mut write_stream);
+        // E9.5 (fix round 1, review 1's Medium 3) — the fresh view is on
+        // LOCAL's document; when the sweep left that buffer out, the
+        // session would start on a buffer no snapshot reached, with a
+        // line in this log and nothing on any band (the state E9.5
+        // names as its falsifier, on the path every `pmacs --gpu` with
+        // no file takes). Refused as the follow path refuses, the
+        // window sent where `kill_buffer` would send it.
+        let document = editor.core.borrow().primary_document_buffer(frontend_id);
+        if let Some(document) = document
+            && let Some((_, frame_len)) = left_out.iter().find(|(id, _)| *id == document)
+        {
+            let back_to = editor.core.borrow().fallback_buffer_for(document);
+            refuse_oversize_snapshot(editor, frontend_id, document, *frame_len, Some(back_to));
+        }
     }
 
     session_registry.register_session(frontend_id, session_state);
@@ -3674,12 +3693,20 @@ fn detach_frontend(
 /// Errors on individual buffers (upgrade failure, snapshot export
 /// failure, write failure) are logged and skipped; one failed buffer
 /// doesn't abort the others.
+///
+/// Returns the buffers left out because their snapshot is past the
+/// frame cap (E9.5), each with its frame length, so the caller can
+/// refuse a window on one of them visibly.
 #[cfg(feature = "crdt")]
-fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
+fn send_buffer_snapshots(
+    editor: &EditorState,
+    write_stream: &mut UnixStream,
+) -> Vec<(crate::buffer::BufferId, usize)> {
     let core = editor.core.borrow();
     let mut registry = core.registry.borrow_mut();
     let buffer_ids: Vec<_> = registry.ids().to_vec();
     let instance_peer_id = crate::crdt::peer_id_from_frontend(FrontendId::LOCAL);
+    let mut left_out = Vec::new();
 
     for buffer_id in buffer_ids {
         let Ok(buf) = registry.get_mut(buffer_id) else {
@@ -3712,12 +3739,14 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
         };
         // E9.5 — a buffer past the frame cap is left out of the sweep
         // and said so; the follow path refuses a switch onto it later,
-        // visibly.
-        if !snapshot_fits_a_frame(&msg) {
+        // visibly, and the caller refuses a window already on it.
+        let frame_len = snapshot_frame_len(&msg);
+        if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
             eprintln!(
                 "pmacs: BufferSnapshot for {buffer_id:?} is past the {} byte frame; left out of the attach sweep",
                 pmacs_protocol::MAX_FRAME_BYTES
             );
+            left_out.push((buffer_id, frame_len));
             continue;
         }
         if let Err(e) = write_message(write_stream, &msg) {
@@ -3727,6 +3756,7 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
             // detach the session.
         }
     }
+    left_out
 }
 
 /// No-op stub for non-CRDT builds. v0.1 frontends never advertise
@@ -3734,7 +3764,12 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
 /// always false in non-CRDT builds; this stub keeps the call site
 /// compiling without conditional logic.
 #[cfg(not(feature = "crdt"))]
-fn send_buffer_snapshots(_editor: &EditorState, _write_stream: &mut UnixStream) {}
+fn send_buffer_snapshots(
+    _editor: &EditorState,
+    _write_stream: &mut UnixStream,
+) -> Vec<(crate::buffer::BufferId, usize)> {
+    Vec::new()
+}
 
 /// T M10.10 Day 3 — ensure the active buffer for `fid`'s window is
 /// CRDT-backed, upgrading in place if needed.
@@ -3858,12 +3893,6 @@ fn export_buffer_snapshot(
 /// as if it had been skipped by accident.
 fn snapshot_frame_len(message: &InstanceMessage) -> usize {
     postcard::to_allocvec(message).map_or(usize::MAX, |bytes| bytes.len())
-}
-
-/// E9.5 --- whether `message` fits the transport's frame.
-#[cfg(feature = "crdt")]
-fn snapshot_fits_a_frame(message: &InstanceMessage) -> bool {
-    snapshot_frame_len(message) <= pmacs_protocol::MAX_FRAME_BYTES
 }
 
 /// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:

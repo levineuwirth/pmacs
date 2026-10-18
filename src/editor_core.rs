@@ -1183,6 +1183,26 @@ impl EditorCore {
         }
     }
 
+    /// The buffer a window goes to when the one it shows cannot stay:
+    /// `*scratch*` unless that is `victim`, else any other buffer, else
+    /// a fresh `*scratch*`. `kill_buffer`'s choice, shared since E9's
+    /// fix round 1 with the daemon's refusal of a snapshot too large for
+    /// a frontend's frame (E9.5), which sends the window here when the
+    /// buffer it would have stayed on is the oversize one itself.
+    pub fn fallback_buffer_for(&self, victim: BufferId) -> BufferId {
+        let mut reg = self.registry.borrow_mut();
+        match reg.find_by_name("*scratch*") {
+            Some(id) if id != victim => id,
+            _ => {
+                let candidate = reg.ids().iter().copied().find(|id| *id != victim);
+                match candidate {
+                    Some(id) => id,
+                    None => reg.create("*scratch*"),
+                }
+            }
+        }
+    }
+
     /// [`BufferId`] of the active window's buffer.
     #[must_use]
     pub fn active_buffer_id(&self) -> BufferId {
@@ -6125,19 +6145,7 @@ impl EditorCore {
             }
         }
         self.round_trip_buffers.remove(&buffer_id);
-        let fallback = {
-            let mut reg = self.registry.borrow_mut();
-            match reg.find_by_name("*scratch*") {
-                Some(id) if id != buffer_id => id,
-                _ => {
-                    let candidate = reg.ids().iter().copied().find(|id| *id != buffer_id);
-                    match candidate {
-                        Some(id) => id,
-                        None => reg.create("*scratch*"),
-                    }
-                }
-            }
-        };
+        let fallback = self.fallback_buffer_for(buffer_id);
         // Q#BP10a: a side window showing the victim is CLOSED, not
         // redirected to `*scratch*`. Redirecting would strand an
         // unrelated buffer in the panel slot; the wrapper collapse

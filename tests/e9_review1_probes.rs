@@ -34,6 +34,13 @@ struct Session {
     rx: mpsc::Receiver<InstanceMessage>,
     fid: FrontendId,
     token: Option<SessionToken>,
+    /// Every `BufferSnapshot` and every status message that passed
+    /// through a wait, matched or not: a bootstrap writes its snapshots
+    /// and its first status before the first `CursorByte`, which
+    /// `where_am_i` consumes, so a row that asks what reached the
+    /// session reads these rather than what came after.
+    snapshots_seen: Vec<BufferId>,
+    statuses_seen: Vec<String>,
 }
 
 fn semantic_caps() -> FrontendCapabilities {
@@ -107,6 +114,8 @@ impl Session {
             rx,
             fid,
             token: None,
+            snapshots_seen: Vec::new(),
+            statuses_seen: Vec::new(),
         };
         if offer >= SESSION_MIN_VERSION {
             let token = session.wait("the SessionToken", |m| match m {
@@ -181,6 +190,16 @@ impl Session {
                 .recv_timeout(remaining.min(Duration::from_millis(200)))
             {
                 Ok(msg) => {
+                    match &msg {
+                        InstanceMessage::BufferSnapshot { buffer_id, .. } => {
+                            self.snapshots_seen.push(*buffer_id);
+                        }
+                        InstanceMessage::StatusFacts {
+                            message: Some(message),
+                            ..
+                        } => self.statuses_seen.push(message.clone()),
+                        _ => {}
+                    }
                     if let Some(found) = pick(&msg) {
                         return Ok(found);
                     }
@@ -619,36 +638,36 @@ fn daemon_showing_big(extra: &str) -> (TestDaemon, std::path::PathBuf) {
 /// with a line in the daemon's log and nothing else, so the session
 /// starts on a buffer no snapshot reached --- the pre-E9.5 state the
 /// row names as its falsifier, on the path every `pmacs --gpu` with no
-/// file takes. The window should be put back on a buffer that fits,
-/// or the status should say what weighed too much, within the
-/// bootstrap. FAILS at `e7c8fd5`: the cursor sits on the big buffer and
-/// no `StatusFacts` names it.
+/// file takes. The window must be put on a buffer whose snapshot
+/// reached the session, and the status must say what weighed too much,
+/// within the bootstrap. FAILS at `e7c8fd5`: the cursor sits on the big
+/// buffer, no snapshot of it came, and no `StatusFacts` names it. (The
+/// review's first text of this row read only what came after the first
+/// `CursorByte`, where a bootstrap's snapshots and first status never
+/// are; rewritten at fix round 1 to read what reached the session.)
 #[test]
 fn e9_review1_a_fresh_attach_onto_an_oversize_document_is_refused_visibly() {
     let (daemon, _big) = daemon_showing_big("");
     let mut session = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let (document, _) = session.where_am_i();
-    let mut saw_snapshot_of_document = false;
-    let status = session.wait_for(
-        "a refusal or the window moved",
-        Duration::from_secs(5),
-        &mut |m| match m {
-            InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id == document => {
-                saw_snapshot_of_document = true;
-                None
-            }
-            InstanceMessage::StatusFacts {
-                message: Some(message),
-                ..
-            } if message.contains("a frontend can mirror") => Some(message.clone()),
-            _ => None,
-        },
+    // Two more seconds of frames, named: the status is in the first
+    // frame after the viewport declaration or not at all.
+    let _ = session.wait_for("two seconds of frames", Duration::from_secs(2), &mut |_| {
+        None::<()>
+    });
+    assert!(
+        session.snapshots_seen.contains(&document),
+        "the session's window is on {document:?} and no snapshot of it reached the session \
+         (snapshots of {:?} did); its bootstrap left it on the oversize buffer",
+        session.snapshots_seen
     );
     assert!(
-        saw_snapshot_of_document || status.is_ok(),
-        "the session's window is on {document:?} and no snapshot of it came, nor a status \
-         saying why; the daemon wrote {:?}",
-        status.err()
+        session
+            .statuses_seen
+            .iter()
+            .any(|m| m.contains("a frontend can mirror")),
+        "no status said what weighed too much; the statuses were {:?}",
+        session.statuses_seen
     );
 }
 
