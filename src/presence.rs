@@ -307,12 +307,6 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// E9 --- the tokens of the views currently retained.
-    #[must_use]
-    pub fn retained_tokens(&self) -> Vec<SessionToken> {
-        self.retained.keys().copied().collect()
-    }
-
     /// E9 (fix round 1) --- whether any view is retained for a lost
     /// socket's token; the daemon's idle clock holds while one is.
     #[must_use]
