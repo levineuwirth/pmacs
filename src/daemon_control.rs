@@ -11,7 +11,13 @@
 //! * [`stop`] attaches as a v27 grid frontend and sends
 //!   [`FrontendEvent::Shutdown`]; the daemon answers every attached
 //!   frontend with `Goodbye(ShuttingDown)` and exits. A daemon below
-//!   v27 cannot be stopped this way and is named as such.
+//!   v27 cannot be stopped this way: it refuses the attach with
+//!   `VersionMismatch`, which names its ceiling, and that is reported
+//!   as an older daemon to stop with a signal. The client cannot know
+//!   sooner, since `Hello` carries the advertised baseline alone and
+//!   never the daemon's ceiling (review 1's Low 1: the first cut
+//!   compared the version the `Hello` implied, which is this build's
+//!   own offer for every daemon since v20, and the arm never fired).
 //!
 //! Both clean up a stale socket: a socket file nothing listens on
 //! (`ECONNREFUSED` on connect) is the leftover of a daemon that died
@@ -33,7 +39,7 @@ use pmacs_protocol::{ConnectFailure, SESSION_MIN_VERSION, classify_connect_failu
 
 use crate::protocol::{
     AttachRequest, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello, InstanceMessage,
-    PROTOCOL_VERSION, negotiated_session_version, requested_protocol_version,
+    PROTOCOL_VERSION, requested_protocol_version,
 };
 use crate::transport::{read_message, write_message};
 
@@ -51,14 +57,9 @@ pub enum DaemonControlError {
     StaleSocket(PathBuf, std::io::Error),
     /// The path exists and is not a socket; left alone.
     NotASocket(PathBuf),
-    /// The daemon answered, but speaks a wire without the stop request.
-    TooOldToStop {
-        /// The socket that answered.
-        socket: PathBuf,
-        /// The version the session with it would speak.
-        version: u32,
-    },
-    /// The daemon refused the attach the stop request rides on.
+    /// The daemon refused the attach the stop request rides on. A
+    /// `VersionMismatch` is the one way an older daemon says it has no
+    /// stop request, and is reported as such.
     Rejected(GoodbyeReason),
     /// Any other failure to reach or read the daemon.
     Io(std::io::Error),
@@ -85,12 +86,19 @@ impl std::fmt::Display for DaemonControlError {
                     path.display()
                 )
             }
-            Self::TooOldToStop { socket, version } => write!(
+            Self::Rejected(GoodbyeReason::VersionMismatch { server, client })
+                if server < &SESSION_MIN_VERSION =>
+            {
+                write!(
+                    f,
+                    "the daemon speaks protocol v{server}, before the stop request \
+                     (v{SESSION_MIN_VERSION}); stop it with a signal"
+                )
+            }
+            Self::Rejected(GoodbyeReason::VersionMismatch { server, client }) => write!(
                 f,
-                "the daemon at {} speaks protocol v{version}, before the stop request (v{}); \
-                 stop it with a signal",
-                socket.display(),
-                SESSION_MIN_VERSION
+                "the daemon refused protocol v{client}, the version this build offered \
+                 (it speaks v{server}); a newer pmacs is needed to stop it this way"
             ),
             Self::Rejected(reason) => write!(
                 f,
@@ -129,9 +137,13 @@ impl std::fmt::Display for DaemonStatus {
         let id = &self.hello.instance_identity;
         writeln!(f, "daemon at {}", self.socket.display())?;
         writeln!(f, "  pmacs {}", id.pmacs_version)?;
+        // The daemon's own ceiling is not in its `Hello`, which carries
+        // the baseline every shipped frontend accepts; what this build
+        // would offer it is the one version this line can name.
         writeln!(
             f,
-            "  protocol baseline v{} (this build speaks v{PROTOCOL_VERSION})",
+            "  protocol baseline v{} (this build offers v{PROTOCOL_VERSION}; the daemon's \
+             ceiling is not in its Hello)",
             self.hello.protocol_version
         )?;
         writeln!(
@@ -202,14 +214,10 @@ pub fn status(socket: &Path) -> Result<DaemonStatus, DaemonControlError> {
 pub fn stop(socket: &Path) -> Result<Hello, DaemonControlError> {
     let mut stream = connect(socket)?;
     let hello: Hello = read_message(&mut stream)?;
+    // The offer is this build's own version: `Hello` carries only the
+    // baseline, so whether the daemon speaks v27 is learned from its
+    // answer to the `AttachRequest`, a `VersionMismatch` if not.
     let offer = requested_protocol_version(hello.protocol_version);
-    let version = negotiated_session_version(offer);
-    if version < SESSION_MIN_VERSION {
-        return Err(DaemonControlError::TooOldToStop {
-            socket: socket.to_path_buf(),
-            version,
-        });
-    }
     // A grid attach (no semantic bootstrap, no `Resume` step), multi
     // so the single non-multi slot a TUI may hold does not refuse it.
     write_message(
@@ -295,6 +303,33 @@ mod tests {
             DaemonControlError::NotASocket(_)
         ));
         assert!(plain.exists());
+    }
+
+    /// An older daemon refuses the v27 attach with `VersionMismatch`
+    /// naming its ceiling; that is the one way the stop client learns
+    /// it, and it says so (review 1's Low 1: the `TooOldToStop` arm it
+    /// replaces compared a version the `Hello` cannot carry).
+    #[test]
+    fn a_version_mismatch_names_an_older_daemon_to_stop_with_a_signal() {
+        let older = DaemonControlError::Rejected(GoodbyeReason::VersionMismatch {
+            server: SESSION_MIN_VERSION - 1,
+            client: PROTOCOL_VERSION,
+        });
+        let text = older.to_string();
+        assert!(
+            text.contains(&format!("speaks protocol v{}", SESSION_MIN_VERSION - 1))
+                && text.contains("stop it with a signal"),
+            "{text}"
+        );
+        let newer = DaemonControlError::Rejected(GoodbyeReason::VersionMismatch {
+            server: PROTOCOL_VERSION + 5,
+            client: PROTOCOL_VERSION,
+        });
+        let text = newer.to_string();
+        assert!(
+            text.contains("a newer pmacs is needed") && !text.contains("signal"),
+            "{text}"
+        );
     }
 
     #[test]
