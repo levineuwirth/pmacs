@@ -64,7 +64,7 @@ pmacs.config.define {
 -- which otherwise outlives every window it ever served.
 pmacs.config.define {
   name = "daemon.idle-exit-secs",
-  description = "Seconds a daemon stays up with no frontend attached before it stops on its own; 0 never stops it.",
+  description = "Seconds a daemon stays up with no frontend attached, and no window's view retained for a lost socket, before it stops on its own; 0 never stops it.",
   type = "integer",
   default = 0,
   min = 0,

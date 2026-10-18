@@ -728,6 +728,14 @@ fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
 
 impl Session {
     /// `C-x C-c`.
+    /// Leave as a window closing does: `Detach`, then the socket goes.
+    /// A departure the daemon is told of retains no view (E9, fix
+    /// round 1); a socket that just goes is a loss, whose view is kept
+    /// for `session.view-retention-secs`.
+    fn close_as_a_window_does(mut self) {
+        write_message(&mut self.stream, &FrontendEvent::Detach(self.fid)).expect("Detach");
+    }
+
     fn quit_chord(&mut self) {
         self.key(Key::Char('x'), Modifiers::CTRL);
         self.key(Key::Char('c'), Modifiers::CTRL);
@@ -750,8 +758,11 @@ impl Session {
 
 /// `C-x C-c` from one of two attached frontends detaches that frontend
 /// alone: it is told `Goodbye(Detached)`, the other is served on, the
-/// daemon lives, and the view the quitter left is retained for its
-/// token like any detach's.
+/// daemon lives, and the quitter's view is dropped, not retained: its
+/// window closes on the `Goodbye`, so its token dies with it and a
+/// session presenting the token starts fresh (review 1's Medium 2;
+/// until fix round 1 this row read "retained for its token like any
+/// detach's", the state the review found no one could resume).
 #[test]
 fn e9_3_quit_from_an_attached_frontend_detaches_it_and_nothing_else() {
     let mut daemon = daemon_with_note("");
@@ -777,9 +788,13 @@ fn e9_3_quit_from_an_attached_frontend_detaches_it_and_nothing_else() {
         daemon.is_alive(),
         "a frontend's quit does not stop the daemon"
     );
-    // And the quitter's view is retained for its token.
+    // The quitter left on purpose: nothing is retained for its token.
     let mut back = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
-    assert_eq!(back.where_am_i().0, note, "the quit retained the view");
+    assert_eq!(
+        back.where_am_i(),
+        (scratch, 0),
+        "a quit retains no view; the note ({note:?}) is not resumed"
+    );
 }
 
 /// The last frontend attached is asked whether the daemon should stop
@@ -947,7 +962,11 @@ fn e9_4_a_stale_socket_is_removed_and_a_non_socket_left_alone() {
 }
 
 /// With `daemon.idle-exit-secs` set, a daemon no frontend is attached
-/// to for that long stops on its own; by default it never does.
+/// to for that long stops on its own; by default it never does. The
+/// frontend leaves as a window closes (`Detach`, then the socket): a
+/// socket that just went would be a loss whose view is retained and
+/// holds the clock for the retention (review 1's Medium 2, the row
+/// `e9_review1_idle_exit_waits_while_a_lost_socket_s_view_is_retained`).
 #[test]
 fn e9_4_idle_exit_is_opt_in() {
     let mut daemon = daemon_with_note("pmacs.config.set('daemon.idle-exit-secs', 1)\n");
@@ -959,7 +978,7 @@ fn e9_4_idle_exit_is_opt_in() {
         daemon.is_alive(),
         "an attached daemon stays up past the knob"
     );
-    drop(session);
+    session.close_as_a_window_does();
     let deadline = Instant::now() + Duration::from_secs(10);
     while daemon.is_alive() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -971,7 +990,7 @@ fn e9_4_idle_exit_is_opt_in() {
 
     let mut default = daemon_with_note("");
     let session = Session::attach(&default, PROTOCOL_VERSION, None);
-    drop(session);
+    session.close_as_a_window_does();
     // Named window: 2 s with no frontend, the knob at its default.
     std::thread::sleep(Duration::from_secs(2));
     assert!(default.is_alive(), "by default an idle daemon stays up");

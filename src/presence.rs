@@ -51,6 +51,8 @@
 //!   attach/detach; the sweep's broadcast list becomes non-empty.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use pmacs_protocol::SessionToken;
@@ -192,6 +194,10 @@ pub struct SessionRegistry {
     /// id because the resuming session has a new id; the token is what
     /// survives the socket.
     retained: HashMap<SessionToken, RetainedView>,
+    /// E9 (fix round 1) --- per session, the flag its reader thread
+    /// sets on the frontend's `Detach` and the dispatcher on its quit's
+    /// request; read at the teardown, whichever path runs it first.
+    departures: HashMap<FrontendId, Arc<AtomicBool>>,
 }
 
 impl SessionRegistry {
@@ -219,6 +225,34 @@ impl SessionRegistry {
     pub fn unregister_session(&mut self, frontend_id: FrontendId) {
         self.sessions.remove(&frontend_id);
         self.last_broadcast.remove(&frontend_id);
+        self.departures.remove(&frontend_id);
+    }
+
+    /// E9 (fix round 1) --- the flag a session's reader thread sets
+    /// when it reads the frontend's `Detach`, shared with the
+    /// dispatcher so that the teardown that runs first reads it.
+    pub fn set_departure_flag(&mut self, frontend_id: FrontendId, flag: Arc<AtomicBool>) {
+        self.departures.insert(frontend_id, flag);
+    }
+
+    /// E9 (fix round 1) --- the frontend said it was leaving (its quit
+    /// asked to be detached); its view is dropped at its teardown, not
+    /// retained. A no-op for a frontend with no flag.
+    pub fn mark_departing(&self, frontend_id: FrontendId) {
+        if let Some(flag) = self.departures.get(&frontend_id) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// E9 (fix round 1) --- whether the frontend said it was leaving,
+    /// by its `Detach` or its quit's request; `false` for a frontend
+    /// with no flag (a loss, or a session the tests register without
+    /// a reader thread).
+    #[must_use]
+    pub fn is_departing(&self, frontend_id: FrontendId) -> bool {
+        self.departures
+            .get(&frontend_id)
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     /// The negotiated state for `frontend_id`, or `None` if no
@@ -277,6 +311,13 @@ impl SessionRegistry {
     #[must_use]
     pub fn retained_tokens(&self) -> Vec<SessionToken> {
         self.retained.keys().copied().collect()
+    }
+
+    /// E9 (fix round 1) --- whether any view is retained for a lost
+    /// socket's token; the daemon's idle clock holds while one is.
+    #[must_use]
+    pub fn retains_views(&self) -> bool {
+        !self.retained.is_empty()
     }
 
     /// T M10.9 — gather `OtherPresence` entries for the overlay

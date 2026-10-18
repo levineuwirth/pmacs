@@ -131,6 +131,15 @@ enum DispatcherEvent {
         /// this end; the per-attach reader thread keeps the
         /// read-half via `try_clone`.
         write_stream: UnixStream,
+        /// E9 (fix round 1) --- set by the reader thread the moment it
+        /// reads the frontend's `FrontendEvent::Detach`, and by the
+        /// dispatcher on the quit's own request: the frontend is
+        /// leaving on purpose, so its view is dropped at its teardown,
+        /// not retained. Shared rather than carried on an event because
+        /// the two teardowns race: a window that sent `Detach` closes
+        /// its socket, and the tick loop's write to it can fail while
+        /// the `Detach` is still queued behind that tick.
+        departing: Arc<AtomicBool>,
     },
     /// An attached frontend dispatched an event (key, mouse, resize,
     /// etc.). The dispatcher applies it to the editor and renders
@@ -142,6 +151,11 @@ enum DispatcherEvent {
     /// An attached frontend's connection closed (EOF, decode error,
     /// or explicit `FrontendEvent::Detach`). The dispatcher
     /// unregisters the session and drops the write stream.
+    /// Whether the frontend said it was leaving is not carried here:
+    /// the reader thread sets the session's shared `departing` flag
+    /// when it reads the `FrontendEvent::Detach`, so the teardown that
+    /// runs first --- this event's, or the tick loop's on a failed
+    /// write --- reads one fact (E9, fix round 1).
     SessionDetached { frontend_id: FrontendId },
 }
 
@@ -892,6 +906,7 @@ fn per_attach_thread(
         }
     };
 
+    let departing = Arc::new(AtomicBool::new(false));
     if dispatcher_tx
         .send(DispatcherEvent::SessionEstablished {
             frontend_id,
@@ -900,6 +915,7 @@ fn per_attach_thread(
             initial_target,
             resume,
             write_stream,
+            departing: Arc::clone(&departing),
         })
         .is_err()
     {
@@ -910,9 +926,14 @@ fn per_attach_thread(
     // Reader loop: read FrontendEvents from the stream, push to
     // dispatcher tagged with this frontend_id. Any error (EOF,
     // decode error, broken pipe) ends the loop; final
-    // `SessionDetached` lets the dispatcher clean up.
+    // `SessionDetached` lets the dispatcher clean up. A `Detach` sets
+    // the shared flag here, before anything else can tear the session
+    // down (E9, fix round 1): the frontend is leaving on purpose.
     let mut read_stream = stream;
     while let Ok(event) = read_message::<FrontendEvent>(&mut read_stream) {
+        if matches!(event, FrontendEvent::Detach(_)) {
+            departing.store(true, Ordering::SeqCst);
+        }
         if dispatcher_tx
             .send(DispatcherEvent::FrontendEvent {
                 source: frontend_id,
@@ -2039,8 +2060,13 @@ fn dispatcher_loop(
         // `daemon.idle-exit-secs` (0, the default, never), the daemon
         // stops as `--stop` would stop it. Meant for a daemon a GUI
         // started for itself, which otherwise outlives every window.
+        // A view retained for a lost socket holds the clock (fix round
+        // 1): a window reconnecting on its schedule is owed the view
+        // for the retention, and the clock starts when the last view
+        // expires or is resumed and dropped. A window that left on
+        // purpose retains nothing, so the clock runs from its close.
         let attached_now = render_states.len() + semantic_states.len();
-        if attached_now == 0 {
+        if attached_now == 0 && !session_registry.retains_views() {
             let idle_for = idle_since.get_or_insert_with(Instant::now).elapsed();
             let limit = idle_exit_after(editor);
             if !limit.is_zero() && idle_for >= limit {
@@ -2858,7 +2884,9 @@ fn handle_dispatcher_event(
             initial_target,
             resume,
             write_stream,
+            departing,
         } => {
+            session_registry.set_departure_flag(frontend_id, departing);
             handle_session_established(
                 editor,
                 render_states,
@@ -2882,10 +2910,14 @@ fn handle_dispatcher_event(
             }
             match event {
                 FrontendEvent::Detach(_) => {
-                    // The per-attach thread will follow up with a
-                    // `SessionDetached` event after its reader
-                    // loop exits; cleanup happens there. Just stop
-                    // processing here.
+                    // The frontend is leaving on purpose (a window
+                    // closing): its reader thread set the session's
+                    // shared flag as it read this, so the teardown ---
+                    // the reader's `SessionDetached` after its loop
+                    // exits, or the tick loop's on the write that fails
+                    // first once the window has closed its socket ---
+                    // drops its view instead of retaining it (E9, fix
+                    // round 1). Nothing happens here.
                 }
                 // E9.4 — `pmacs --daemon --stop`. Refused from a session
                 // below the family's version (a peer compiled from this
@@ -3484,14 +3516,16 @@ fn handle_dispatcher_event(
         }
     }
     // E9.3 --- a frontend whose own quit asked to leave: told, if its
-    // session can decode the reason, then torn down the one way, its
-    // view retained for its token. Taken here, after the event, so the
-    // request's own frame never reaches a stream being closed.
+    // session can decode the reason, then torn down the one way, as a
+    // departure (its window closes on the `Goodbye`, so its token dies
+    // with it and nothing is retained). Taken here, after the event,
+    // so the request's own frame never reaches a stream being closed.
     let requested = editor.core.borrow_mut().detach_requested.take();
     if let Some(frontend_id) = requested {
         let Some(session) = session_registry.session_state(frontend_id) else {
             return;
         };
+        session_registry.mark_departing(frontend_id);
         if let Some(stream) = streams.get_mut(&frontend_id) {
             if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
                 let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
@@ -3527,6 +3561,17 @@ fn handle_dispatcher_event(
 /// second caller finds nothing registered and changes nothing, and the
 /// hook fires once. The eight per-frontend maps stay separate here;
 /// the `Session` struct that would hold them rides E9.
+///
+/// Whether the frontend said it was leaving is the session's shared
+/// `departing` flag (E9, fix round 1): set by its reader thread as it
+/// reads the `FrontendEvent::Detach` (a window closing), or by the
+/// dispatcher on its quit's own request (E9.3). Its token dies with
+/// it, so its view is dropped at once; a loss --- a close with no
+/// `Detach`, or a write that failed --- retains the view for the
+/// token. The flag is shared and not carried on an event because the
+/// two teardowns race: a window that sent `Detach` closes its socket,
+/// the tick loop's next write to it fails first, and the reader's
+/// `SessionDetached` finds the session gone.
 #[allow(clippy::too_many_arguments)]
 fn detach_frontend(
     editor: &mut EditorState,
@@ -3543,6 +3588,9 @@ fn detach_frontend(
     let Some(session) = session_registry.session_state(frontend_id) else {
         return;
     };
+    // Read before `unregister_session` below drops the flag with the
+    // session.
+    let departing = session_registry.is_departing(frontend_id);
     // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
     // and the only one with no later chance at all. End the live
     // gesture, then pay it, and do BOTH before any teardown: the
@@ -3566,16 +3614,16 @@ fn detach_frontend(
         .statusline_registry
         .borrow_mut()
         .detach_frontend(frontend_id);
-    // E9 --- a session that holds a token leaves its view behind for
-    // the token, for `session.view-retention-secs`; the next session
-    // presenting the token in its `Resume` step starts on it. A zero
-    // retention, or no token (a pre-v27 or grid session), drops the
-    // view as before.
+    // E9 --- a session that holds a token and was lost leaves its view
+    // behind for the token, for `session.view-retention-secs`; the next
+    // session presenting the token in its `Resume` step starts on it.
+    // A departure the frontend announced, a zero retention, or no
+    // token (a pre-v27 or grid session) drops the view as before.
     let retention = view_retention(editor);
     {
         let mut core = editor.core.borrow_mut();
         match session.token {
-            Some(token) if !retention.is_zero() => {
+            Some(token) if !departing && !retention.is_zero() => {
                 if let Some(view) = core.take_frontend_view(frontend_id) {
                     session_registry.retain_view(token, view, Instant::now());
                 }
