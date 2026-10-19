@@ -4524,6 +4524,11 @@ struct Reconnect {
     schedule: pmacs_protocol::BackoffSchedule,
     next_at: std::time::Instant,
     last_error: String,
+    /// E9 fix round 3 --- the attempts that have failed, the count the
+    /// band names and [`RECONNECT_ATTEMPT_CAP`] bounds. Counted here, not
+    /// read from the schedule, whose first delay is drawn at the loss
+    /// before any attempt is made.
+    failed: u32,
     /// E9 fix round 3 (review 3's Medium 1) --- an attempt whose
     /// handshake is done and whose `Resume` is sent, held until the
     /// daemon accepts it; `None` between attempts.
@@ -5962,7 +5967,8 @@ impl App {
         error.clone_into(&mut reconnect.last_error);
         let delay = reconnect.schedule.next_delay();
         reconnect.next_at = now + delay;
-        let attempt = reconnect.schedule.step();
+        reconnect.failed += 1;
+        let attempt = reconnect.failed;
         // Past the cap the loop ends; the banner stays, saying
         // what to do, and `C-x C-c` is the key that does it.
         let capped = attempt >= RECONNECT_ATTEMPT_CAP;
@@ -6358,6 +6364,7 @@ impl App {
                             schedule: pmacs_protocol::BackoffSchedule::new(),
                             next_at: std::time::Instant::now(),
                             last_error: reason,
+                            failed: 0,
                             pending: None,
                         };
                         let delay = reconnect.schedule.next_delay();
@@ -8289,6 +8296,7 @@ mod lost_socket_tests {
             schedule: pmacs_protocol::BackoffSchedule::new(),
             next_at: now,
             last_error: "cut".to_owned(),
+            failed: 0,
             pending: None,
         });
         let refused = || {
@@ -8581,7 +8589,12 @@ mod lost_socket_tests {
     /// daemon still holds, a copy whose original window stays alive, is
     /// refused on every attempt; each refusal counts, and the loop stops
     /// at the cap with the window's token unchanged and the band saying
-    /// to close the window.
+    /// to close the window. From the loss production takes, the band
+    /// counts the attempts made: the first failure is attempt 1, and the
+    /// loop makes [`RECONNECT_ATTEMPT_CAP`] attempts, as the band says at
+    /// the end (the count named the schedule's step until this round,
+    /// one delay ahead of the attempts: "attempt 2" first, and 29 made
+    /// under "30 reconnect attempts failed").
     #[test]
     fn a_token_refused_on_every_attempt_stops_the_loop_at_the_cap() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -8610,7 +8623,18 @@ mod lost_socket_tests {
                 h.app.attach_client.is_none(),
                 "attempt {connects} installs nothing"
             );
+            if h.app.reconnect.is_some() {
+                let notice = band(&h.app);
+                assert!(
+                    notice.contains(&format!("reconnect attempt {connects} failed")),
+                    "the band counts the attempts made: {notice}"
+                );
+            }
         }
+        assert_eq!(
+            connects, RECONNECT_ATTEMPT_CAP,
+            "the cap is the attempts made"
+        );
         let state = h.app.state.as_ref().expect("state");
         assert_eq!(
             state.session_token,
@@ -8619,10 +8643,10 @@ mod lost_socket_tests {
         );
         let notice = band(&h.app);
         assert!(
-            notice.contains(
-                "reconnect attempts failed (the daemon closed the connection before accepting \
-                 the session); close the window (C-x C-c)"
-            ),
+            notice.contains(&format!(
+                "{RECONNECT_ATTEMPT_CAP} reconnect attempts failed (the daemon closed the \
+                 connection before accepting the session); close the window (C-x C-c)"
+            )),
             "after {connects} attempts: {notice}"
         );
     }

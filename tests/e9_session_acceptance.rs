@@ -1140,16 +1140,22 @@ fn e9_2_input_in_flight_at_a_loss_lands_in_the_view_the_window_resumes() {
             .any(|line| line.contains("bytes in flight forwarded") && !line.contains(" 0 bytes")),
         "the window's in-flight input reached the daemon on the old socket: {timeline:?}"
     );
-    // The first attempt met the live session and was refused.
+    // The first attempt met the live session and was refused; the band
+    // says what the window saw, and counts the attempts made.
+    let refused = fact(&facts, "refused").parse::<u32>().expect("refused");
+    assert!(refused >= 1, "{facts:?}");
     assert!(
-        fact(&facts, "refused").parse::<u32>().expect("refused") >= 1,
-        "{facts:?}"
+        fact(&facts, "banner.refused").contains(&format!(
+            "reconnect attempt {refused} failed (the daemon closed the connection before \
+             accepting the session)"
+        )),
+        "the band says what the window saw, after {refused} refused: {}",
+        fact(&facts, "banner.refused")
     );
-    assert!(
-        fact(&facts, "banner.refused")
-            .contains("failed (the daemon closed the connection before accepting the session)"),
-        "the band says what the window saw: {}",
-        fact(&facts, "banner.refused")
+    assert_eq!(
+        fact(&facts, "attempts"),
+        (refused + 1).to_string(),
+        "every attempt but the last was refused: {facts:?}"
     );
     // The view the window resumes holds the input that was in flight.
     assert_eq!(fact(&facts, "reconnected"), "true", "{facts:?}");
