@@ -2596,13 +2596,16 @@ fn handle_session_established(
         // as one, never a session left at "(connecting...)".
         let frame_len = snapshot_frame_len(&snapshot_message);
         if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+            let text_len = editor
+                .core
+                .borrow()
+                .registry
+                .borrow()
+                .get(opened.buffer_id)
+                .map_or(0, crate::buffer::Buffer::len);
             send_initial_target_failure(
                 &mut write_stream,
-                format!(
-                    "the file is {:.1} MiB, past the {:.0} MiB a frontend can mirror",
-                    frame_len as f64 / (1024.0 * 1024.0),
-                    pmacs_protocol::MAX_FRAME_BYTES as f64 / (1024.0 * 1024.0)
-                ),
+                format!("the file {}", oversize_sizes(text_len, frame_len)),
             );
             editor
                 .core
@@ -3914,6 +3917,22 @@ fn snapshot_frame_len(message: &InstanceMessage) -> usize {
     postcard::to_allocvec(message).map_or(usize::MAX, |bytes| bytes.len())
 }
 
+/// E9.5 (fix round 2, review 2's Low 6) --- the sizes a refusal names:
+/// the text's own, which a user can square with `ls`, and its
+/// snapshot's, which is what is past the frame (for pseudo-random text
+/// about twice the text). Until this round both refusals printed the
+/// snapshot's size as the file's. One phrase for the status line's
+/// refusal and the initial target's failure.
+fn oversize_sizes(text_len: u64, frame_len: usize) -> String {
+    let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
+    format!(
+        "is {:.1} MiB and its snapshot {:.1} MiB, past the {:.0} MiB a frontend can mirror",
+        mib(text_len as f64),
+        mib(frame_len as f64),
+        mib(pmacs_protocol::MAX_FRAME_BYTES as f64)
+    )
+}
+
 /// E9.5 (fix round 2, review 2's Low 1) --- the buffer a window refused
 /// at its bootstrap goes to: `kill_buffer`'s fallback, chosen among the
 /// buffers the attach sweep delivered, never one it left out past the
@@ -3956,11 +3975,14 @@ fn refuse_oversize_snapshot(
     };
     let name = name_of(&core, buffer_id);
     let back = name_of(&core, back_to);
-    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    let text_len = core
+        .registry
+        .borrow()
+        .get(buffer_id)
+        .map_or(0, crate::buffer::Buffer::len);
     core.status = format!(
-        "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; this window stays on {back}",
-        mib(frame_len),
-        mib(pmacs_protocol::MAX_FRAME_BYTES)
+        "{name} {}; this window stays on {back}",
+        oversize_sizes(text_len, frame_len)
     );
     eprintln!("pmacs: {}", core.status);
     if back_to != buffer_id

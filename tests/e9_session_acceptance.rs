@@ -1150,6 +1150,13 @@ fn e9_5_an_oversize_snapshot_is_refused_with_a_visible_status_not_skipped() {
         message.contains("MiB, past the 16 MiB") && message.contains("this window stays on"),
         "the status says what weighed too much and where the window stayed: {message:?} (saw {seen:?})"
     );
+    // E9 fix round 2 (review 2's Low 6): the size a user can square
+    // with `ls` is the file's, 24 MiB; the snapshot past the frame is
+    // named as the snapshot, never as the file.
+    assert!(
+        message.contains("big.txt is 24.0 MiB and its snapshot "),
+        "the status names the file's own size and the snapshot's apart: {message:?}"
+    );
     // The window is back on the document the frontend mirrors.
     session.type_str("k");
     session.wait("the echo on the kept document", |m| {
