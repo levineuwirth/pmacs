@@ -1679,14 +1679,20 @@ fn dispatcher_loop(
                                 last_active_buffer_sent.insert(*fid, active_now);
                             }
                             // E9.5 — refused, said, and the window put
-                            // back on the buffer the frontend mirrors.
-                            Err(len) => refuse_oversize_snapshot(
-                                editor,
-                                *fid,
-                                active_now,
-                                len,
-                                last_active_buffer_sent.get(fid).copied(),
-                            ),
+                            // back on the buffer the frontend mirrors; a
+                            // session that was never sent one goes where
+                            // `kill_buffer` would send it, so the refusal
+                            // happens once and the next tick sends that
+                            // buffer (fix round 2, review 2's Low 1: left
+                            // in place, the window was refused again on
+                            // every tick that reached here).
+                            Err(len) => {
+                                let back_to =
+                                    last_active_buffer_sent.get(fid).copied().unwrap_or_else(
+                                        || editor.core.borrow().fallback_buffer_for(active_now),
+                                    );
+                                refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
+                            }
                         }
                     }
                 }
@@ -2619,21 +2625,17 @@ fn handle_session_established(
                 };
                 // E9.5 — a retained window on a buffer past the frame
                 // cap is refused and sent to the buffer `kill_buffer`
-                // would send it to, said so; the sweep below bootstraps
-                // the session as a fresh one would be. (Until fix round
-                // 1 it went to LOCAL's document, which can be the
+                // would send it to, said so; the sweep bootstraps the
+                // session as a fresh one would be, and runs first so the
+                // fallback is chosen among the buffers it delivered (fix
+                // round 2, review 2's Low 1). (Until fix round 1 the
+                // window went to LOCAL's document, which can be the
                 // oversize buffer itself.)
                 let frame_len = snapshot_frame_len(&message);
                 if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
-                    let back_to = editor.core.borrow().fallback_buffer_for(buffer_id);
-                    refuse_oversize_snapshot(
-                        editor,
-                        frontend_id,
-                        buffer_id,
-                        frame_len,
-                        Some(back_to),
-                    );
-                    send_buffer_snapshots(editor, &mut write_stream);
+                    let left_out = send_buffer_snapshots(editor, &mut write_stream);
+                    let back_to = fallback_among_delivered(editor, buffer_id, &left_out);
+                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
                     resumed_buffer = None;
                 } else {
                     if snapshot.upgraded_to_crdt {
@@ -2675,13 +2677,14 @@ fn handle_session_established(
         // line in this log and nothing on any band (the state E9.5
         // names as its falsifier, on the path every `pmacs --gpu` with
         // no file takes). Refused as the follow path refuses, the
-        // window sent where `kill_buffer` would send it.
+        // window sent where `kill_buffer` would send it, among the
+        // buffers the sweep delivered (fix round 2, review 2's Low 1).
         let document = editor.core.borrow().primary_document_buffer(frontend_id);
         if let Some(document) = document
             && let Some((_, frame_len)) = left_out.iter().find(|(id, _)| *id == document)
         {
-            let back_to = editor.core.borrow().fallback_buffer_for(document);
-            refuse_oversize_snapshot(editor, frontend_id, document, *frame_len, Some(back_to));
+            let back_to = fallback_among_delivered(editor, document, &left_out);
+            refuse_oversize_snapshot(editor, frontend_id, document, *frame_len, back_to);
         }
     }
 
@@ -3895,51 +3898,59 @@ fn snapshot_frame_len(message: &InstanceMessage) -> usize {
     postcard::to_allocvec(message).map_or(usize::MAX, |bytes| bytes.len())
 }
 
+/// E9.5 (fix round 2, review 2's Low 1) --- the buffer a window refused
+/// at its bootstrap goes to: `kill_buffer`'s fallback, chosen among the
+/// buffers the attach sweep delivered, never one it left out past the
+/// frame (`left_out`, as `send_buffer_snapshots` returns it), else a
+/// fresh `*scratch*`, which the tick loop's upgrade sends on the next
+/// tick.
+fn fallback_among_delivered(
+    editor: &EditorState,
+    victim: crate::buffer::BufferId,
+    left_out: &[(crate::buffer::BufferId, usize)],
+) -> crate::buffer::BufferId {
+    let excluded: Vec<crate::buffer::BufferId> = left_out.iter().map(|(id, _)| *id).collect();
+    editor
+        .core
+        .borrow()
+        .fallback_buffer_for_excluding(victim, &excluded)
+}
+
 /// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:
 /// say so on the status line every frontend reads, naming the buffer
 /// and both sizes, and put `fid`'s document window back on `back_to`,
-/// the buffer that frontend still mirrors, so the daemon's view and the
-/// frontend's never show different buffers. A frontend with nothing to
-/// go back to keeps its window; its band still says why nothing came.
+/// the buffer that frontend still mirrors (or, for a session never sent
+/// one, the fallback its caller chose), so the daemon's view and the
+/// frontend's never show different buffers. Until fix round 2 a caller
+/// with nothing to go back to left the window where it was, and the
+/// follow path refused it again every tick (review 2's Low 1).
 fn refuse_oversize_snapshot(
     editor: &EditorState,
     fid: FrontendId,
     buffer_id: crate::buffer::BufferId,
     frame_len: usize,
-    back_to: Option<crate::buffer::BufferId>,
+    back_to: crate::buffer::BufferId,
 ) {
     let mut core = editor.core.borrow_mut();
-    let name = core
-        .registry
-        .borrow()
-        .get(buffer_id)
-        .map_or_else(|_| format!("{buffer_id:?}"), |b| b.name().to_owned());
-    let back_name = back_to.and_then(|id| {
+    let name_of = |core: &crate::editor_core::EditorCore, id: crate::buffer::BufferId| {
         core.registry
             .borrow()
             .get(id)
-            .ok()
-            .map(|b| b.name().to_owned())
-    });
-    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
-    core.status = match back_name {
-        Some(back) => format!(
-            "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; this window stays on {back}",
-            mib(frame_len),
-            mib(pmacs_protocol::MAX_FRAME_BYTES)
-        ),
-        None => format!(
-            "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; it cannot be shown here",
-            mib(frame_len),
-            mib(pmacs_protocol::MAX_FRAME_BYTES)
-        ),
+            .map_or_else(|_| format!("{id:?}"), |b| b.name().to_owned())
     };
+    let name = name_of(&core, buffer_id);
+    let back = name_of(&core, back_to);
+    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    core.status = format!(
+        "{name} is {:.1} MiB, past the {:.0} MiB a frontend can mirror; this window stays on {back}",
+        mib(frame_len),
+        mib(pmacs_protocol::MAX_FRAME_BYTES)
+    );
     eprintln!("pmacs: {}", core.status);
-    if let Some(back) = back_to
-        && back != buffer_id
-        && let Err(e) = core.switch_active_buffer_for(fid, back)
+    if back_to != buffer_id
+        && let Err(e) = core.switch_active_buffer_for(fid, back_to)
     {
-        eprintln!("pmacs: putting {fid:?} back on {back:?} failed: {e}");
+        eprintln!("pmacs: putting {fid:?} back on {back_to:?} failed: {e}");
     }
 }
 

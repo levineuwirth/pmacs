@@ -1190,11 +1190,28 @@ impl EditorCore {
     /// a frontend's frame (E9.5), which sends the window here when the
     /// buffer it would have stayed on is the oversize one itself.
     pub fn fallback_buffer_for(&self, victim: BufferId) -> BufferId {
+        self.fallback_buffer_for_excluding(victim, &[])
+    }
+
+    /// [`Self::fallback_buffer_for`] with buffers the window cannot go
+    /// to either: the daemon's attach sweep (E9.5) knows which buffers'
+    /// snapshots it left out, and a fallback among them is no fallback
+    /// (E9 fix round 2, review 2's Low 1: with `*scratch*` killed and
+    /// two oversize buffers open, the "any other buffer" arm chose the
+    /// other oversize one and the window stayed blank behind a status
+    /// that repeated every tick). When nothing else remains a fresh
+    /// `*scratch*` is created, as it is when no other buffer exists.
+    pub fn fallback_buffer_for_excluding(
+        &self,
+        victim: BufferId,
+        excluded: &[BufferId],
+    ) -> BufferId {
         let mut reg = self.registry.borrow_mut();
+        let usable = |id: BufferId| id != victim && !excluded.contains(&id);
         match reg.find_by_name("*scratch*") {
-            Some(id) if id != victim => id,
+            Some(id) if usable(id) => id,
             _ => {
-                let candidate = reg.ids().iter().copied().find(|id| *id != victim);
+                let candidate = reg.ids().iter().copied().find(|id| usable(*id));
                 match candidate {
                     Some(id) => id,
                     None => reg.create("*scratch*"),
