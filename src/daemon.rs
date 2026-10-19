@@ -5674,6 +5674,11 @@ mod tests {
         let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
         let (write_stream, mut peer) = UnixStream::pair().expect("socketpair");
+        // Before the bootstrap, which shuts the pair down when it fails:
+        // macOS refuses `SO_RCVTIMEO` on a shut-down socket with EINVAL
+        // (CI's macOS lua54 leg at `9024c22`), where Linux accepts it.
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
 
         handle_dispatcher_event(
             DispatcherEvent::SessionEstablished {
@@ -5710,8 +5715,6 @@ mod tests {
         );
         // The precondition, read from what the frontend was told: the
         // bootstrap took its early return, and no session exists.
-        peer.set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("read timeout");
         let told: InstanceMessage = read_message(&mut peer).expect("the target's answer");
         assert!(
             matches!(
