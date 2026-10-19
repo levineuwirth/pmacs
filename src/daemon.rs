@@ -2474,6 +2474,7 @@ fn handle_session_established(
     initial_target: Option<InitialTarget>,
     resume: Option<SessionToken>,
     mut write_stream: UnixStream,
+    departing: Arc<AtomicBool>,
 ) {
     // E9 --- a session that negotiated the family is minted a token,
     // registered with it (so its detach retains its view) and told it
@@ -2689,6 +2690,10 @@ fn handle_session_established(
     }
 
     session_registry.register_session(frontend_id, session_state);
+    // E9 (fix round 2, review 2's Low 2) --- the departure flag is held
+    // from here, with the session: every early return above leaves no
+    // session, so nothing of the attach outlives it.
+    session_registry.set_departure_flag(frontend_id, departing);
     if semantic_render {
         semantic_states.insert(
             frontend_id,
@@ -2908,7 +2913,6 @@ fn handle_dispatcher_event(
             write_stream,
             departing,
         } => {
-            session_registry.set_departure_flag(frontend_id, departing);
             handle_session_established(
                 editor,
                 render_states,
@@ -2923,6 +2927,7 @@ fn handle_dispatcher_event(
                 initial_target,
                 resume,
                 write_stream,
+                departing,
             );
         }
         DispatcherEvent::FrontendEvent { source, event } => {
@@ -5583,6 +5588,103 @@ mod tests {
             "an unchanged grid size must not mutate the screen again"
         );
 
+        editor.process_supervisor.borrow_mut().shutdown();
+    }
+
+    /// E9 fix round 2 (review 2's Low 2) --- an attach whose bootstrap
+    /// fails never becomes a session, and after its reader's
+    /// `SessionDetached` nothing of it is held: before the fix the
+    /// departure flag was set ahead of the bootstrap and only
+    /// `unregister_session` removed it, which an attach that returned
+    /// early never reached, so the map grew by one per failed attach for
+    /// the daemon's life (`pmacs --gpu` on a file it cannot open, or one
+    /// past the frame, is such an attach).
+    #[test]
+    fn an_attach_whose_bootstrap_fails_leaves_no_departure_flag() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").expect("write a plain file");
+        // Under a regular file: the open fails with ENOTDIR, not
+        // NotFound, so the target is refused rather than created.
+        let target = plain.join("child.txt");
+        let fid = FrontendId(91);
+        let mut editor = EditorState::new();
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+        let (write_stream, mut peer) = UnixStream::pair().expect("socketpair");
+
+        handle_dispatcher_event(
+            DispatcherEvent::SessionEstablished {
+                frontend_id: fid,
+                session_state: crate::presence::SessionState {
+                    negotiated_protocol_version: PROTOCOL_VERSION,
+                    negotiated_capabilities: crate::protocol::NegotiatedCapabilities {
+                        multi_frontend: true,
+                        crdt_replica: true,
+                        semantic_render: true,
+                    },
+                    color_slot: 0,
+                    token: None,
+                },
+                initial_size: CellSize::new(24, 80),
+                initial_target: Some(InitialTarget {
+                    cwd: dir.path().as_os_str().as_bytes().to_vec(),
+                    path: target.as_os_str().as_bytes().to_vec(),
+                }),
+                resume: None,
+                write_stream,
+                departing: Arc::new(AtomicBool::new(false)),
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+        );
+        // The precondition, read from what the frontend was told: the
+        // bootstrap took its early return, and no session exists.
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let told: InstanceMessage = read_message(&mut peer).expect("the target's answer");
+        assert!(
+            matches!(
+                told,
+                InstanceMessage::InitialTargetResult(InitialTargetResult::Failed { .. })
+            ),
+            "precondition: the target fails; the frontend was told {told:?}"
+        );
+        assert!(session_registry.session_state(fid).is_none());
+
+        // The reader thread ends at the closed socket and reports it.
+        handle_dispatcher_event(
+            DispatcherEvent::SessionDetached { frontend_id: fid },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+        );
+        assert_eq!(
+            session_registry.departure_flag_count(),
+            0,
+            "an attach that never became a session holds no departure flag"
+        );
         editor.process_supervisor.borrow_mut().shutdown();
     }
 

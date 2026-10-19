@@ -231,8 +231,24 @@ impl SessionRegistry {
     /// E9 (fix round 1) --- the flag a session's reader thread sets
     /// when it reads the frontend's `Detach`, shared with the
     /// dispatcher so that the teardown that runs first reads it.
+    ///
+    /// Held only for a registered session, so it lives and dies with
+    /// the session (`unregister_session` drops it): the dispatcher sets
+    /// it right after `register_session`, and an attach that never
+    /// became a session leaves nothing here (E9 fix round 2, review 2's
+    /// Low 2: set before the bootstrap, it outlived every attach whose
+    /// bootstrap failed, one entry each for the daemon's life).
     pub fn set_departure_flag(&mut self, frontend_id: FrontendId, flag: Arc<AtomicBool>) {
-        self.departures.insert(frontend_id, flag);
+        if self.sessions.contains_key(&frontend_id) {
+            self.departures.insert(frontend_id, flag);
+        }
+    }
+
+    /// Departure flags held, one per registered session at most.
+    /// Useful for tests + diagnostics, as [`Self::session_count`] is.
+    #[must_use]
+    pub fn departure_flag_count(&self) -> usize {
+        self.departures.len()
     }
 
     /// E9 (fix round 1) --- the frontend said it was leaving (its quit
@@ -511,6 +527,27 @@ mod tests {
         let t = SessionRegistry::new();
         assert_eq!(t.session_count(), 0);
         assert_eq!(t.session_state(FrontendId(2)), None);
+    }
+
+    /// E9 fix round 2 (review 2's Low 2) --- a departure flag lives and
+    /// dies with its session: one offered for an id never registered is
+    /// not held, one for a registered session is, and forgetting the
+    /// session forgets it.
+    #[test]
+    fn a_departure_flag_is_held_only_while_its_session_is_registered() {
+        let mut t = SessionRegistry::new();
+        let flag = Arc::new(AtomicBool::new(true));
+        t.set_departure_flag(FrontendId(9), Arc::clone(&flag));
+        assert_eq!(t.departure_flag_count(), 0, "no session, no flag");
+        assert!(!t.is_departing(FrontendId(9)));
+
+        t.register_session(FrontendId(9), multi_session());
+        t.set_departure_flag(FrontendId(9), Arc::clone(&flag));
+        assert_eq!(t.departure_flag_count(), 1);
+        assert!(t.is_departing(FrontendId(9)), "the registered flag reads");
+
+        t.unregister_session(FrontendId(9));
+        assert_eq!(t.departure_flag_count(), 0, "gone with the session");
     }
 
     #[test]
