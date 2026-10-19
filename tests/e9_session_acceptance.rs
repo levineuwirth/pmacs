@@ -262,14 +262,15 @@ impl Session {
 }
 
 /// A daemon whose init defines `e9.open`, opening the note written
-/// beside its socket, plus `extra` config.
+/// beside its socket, logs each frontend its detach arm tears down
+/// ([`DETACH_LOG`], read by [`Session::lose`]), plus `extra` config.
 fn daemon_with_note(extra: &str) -> TestDaemon {
     let dir = tempfile::TempDir::new().expect("tempdir for the note");
     let note = dir.path().join("note.txt");
     std::fs::write(&note, "one\ntwo\n").expect("write the note");
     let init = format!(
         "pmacs.command.define {{ name = 'e9.open', description = 'open the note',\n\
-           fn = function() pmacs.buffer.find_or_open({path:?}) end }}\n{extra}",
+           fn = function() pmacs.buffer.find_or_open({path:?}) end }}\n{DETACH_LOG}{extra}",
         path = note.to_str().expect("utf-8 path"),
     );
     // The daemon's handshake breadcrumbs go to its stderr file, which a
@@ -278,6 +279,54 @@ fn daemon_with_note(extra: &str) -> TestDaemon {
     // The tempdir outlives the daemon: leak it into the process.
     std::mem::forget(dir);
     daemon
+}
+
+/// A `frontend.detached` hook that logs the departed id into the
+/// daemon's isolated home (its `HOME` is the socket's directory), so a
+/// row can wait for a loss to have been handled: the hook runs last in
+/// the daemon's detach arm, after the view is retained or dropped. It
+/// edits nothing (the undo suite's `DETACH_LOG_CONFIG`).
+const DETACH_LOG: &str = "\
+pmacs.hook.add('frontend.detached', function(fid)
+  local f = assert(io.open(os.getenv('HOME') .. '/detached.log', 'a'))
+  f:write(tostring(fid), '\\n')
+  f:close()
+end)
+";
+
+/// The frontend ids the daemon's detach arm has torn down, in order.
+fn detached(daemon: &TestDaemon) -> Vec<String> {
+    let log = daemon
+        .socket_path()
+        .parent()
+        .expect("the socket's directory")
+        .join("detached.log");
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+impl Session {
+    /// The socket goes with no `Detach`, as a lost window's does, and
+    /// this returns once the daemon has handled the loss: its detach
+    /// hook logged this session's id, after the view was retained. A
+    /// token presented after that names a retained view; presented
+    /// before it, it names a session the daemon still holds, and the
+    /// new socket is refused (E9 fix round 3, review 3's Medium 1). The
+    /// row waits on the loss itself, never on the resume it wants.
+    fn lose(self, daemon: &TestDaemon) {
+        let id = self.fid.0.to_string();
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        drop(self);
+        common::ready::expect_true(
+            &format!("the daemon's detach arm for frontend {id}"),
+            Duration::from_secs(10),
+            || detached(daemon).contains(&id),
+            || format!("detached: {:?}", detached(daemon)),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,10 +365,22 @@ fn e9_1_a_v27_session_is_minted_a_token_and_a_v26_one_is_not() {
 }
 
 /// The view survives the socket under its token: a session that opened
-/// the note and moved its cursor drops; the next socket presenting the
-/// token starts on the note at that cursor, while a socket presenting
+/// the note and moved its cursor loses its socket; once the daemon has
+/// handled the loss, the next socket presenting the token starts on the
+/// note at that cursor, presented once, while a socket presenting
 /// nothing starts on LOCAL's document, and the consumed token resumes
 /// nothing a second time.
+///
+/// E9 fix round 3 (review 3): `f991f7b` made this row present the token
+/// again and again until the note came back, each miss leaving as a
+/// window does, which no window does (the GUI took the first session it
+/// got), so the row could not show that a real reconnect waits for the
+/// old session's loss. It now waits for that loss itself, through the
+/// daemon's detach hook ([`Session::lose`]), and presents the token
+/// once: a retained-view unit of behavior. A token presented before the
+/// loss is handled is refused, which
+/// `e9_review1_a_token_presented_while_its_session_lives_resumes_nothing`
+/// and review 3's GPU rows hold.
 #[test]
 fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
     let daemon = daemon_with_note("");
@@ -333,7 +394,7 @@ fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
         matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 3 } if *buffer_id == note)
             .then_some(())
     });
-    drop(first);
+    first.lose(&daemon);
 
     // A fresh socket, nothing presented: LOCAL's document, as before E9.
     let mut fresh = Session::attach(&daemon, PROTOCOL_VERSION, None);
@@ -343,10 +404,10 @@ fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
         "a fresh view is LOCAL's document"
     );
 
-    // The token: the note, at the cursor the first session left.
-    let (resumed, landed) = resume_once_the_loss_is_seen(&daemon, token, (note, 3));
+    // The token, once: the note, at the cursor the first session left.
+    let mut resumed = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
     assert_eq!(
-        landed,
+        resumed.where_am_i(),
         (note, 3),
         "the resumed session starts on the retained window"
     );
@@ -364,39 +425,9 @@ fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
     );
 
     // And the resumed session's own token carries the same view on.
-    drop(resumed);
-    let (_third, landed) = resume_once_the_loss_is_seen(&daemon, resumed_token, (note, 3));
-    assert_eq!(landed, (note, 3), "the chain continues");
-}
-
-/// Present `token` on a new socket once the daemon has processed the
-/// loss of the socket that held it, and return the session with where
-/// it landed: within ten seconds, an attempt that lands elsewhere leaves
-/// as a window does and the next follows 50 ms later. A token presented
-/// while its own session is still registered resumes nothing, by design
-/// (`e9_review1_a_token_presented_while_its_session_lives_resumes_nothing`),
-/// and the daemon learns of a dropped socket from its reader thread's
-/// EOF or the tick loop's next failed write, whichever comes first; a
-/// row that drops a socket and presents its token at once races both,
-/// and lost on CI's macOS lua54 leg at `9024c22` (E9 fix round 2). A
-/// real window's first reconnect waits the schedule's first delay. The
-/// attempts that land fresh retain nothing (they leave with `Detach`)
-/// and consume nothing, so the token's view is still there to take.
-fn resume_once_the_loss_is_seen(
-    daemon: &TestDaemon,
-    token: SessionToken,
-    expect: (BufferId, u64),
-) -> (Session, (BufferId, u64)) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut session = Session::attach(daemon, PROTOCOL_VERSION, Some(token));
-        let landed = session.where_am_i();
-        if landed == expect || Instant::now() >= deadline {
-            return (session, landed);
-        }
-        session.close_as_a_window_does();
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    resumed.lose(&daemon);
+    let mut third = Session::attach(&daemon, PROTOCOL_VERSION, Some(resumed_token));
+    assert_eq!(third.where_am_i(), (note, 3), "the chain continues");
 }
 
 /// A retained view is kept for `session.view-retention-secs` and no
@@ -459,8 +490,10 @@ fn e9_1_a_window_whose_view_expired_is_told_it_starts_fresh() {
     );
 }
 
-/// With the knob at zero nothing is retained: the token presented at
-/// once resumes nothing.
+/// With the knob at zero nothing is retained: the token presented once
+/// the loss is handled resumes nothing. (Presented before it, the token
+/// would name a live session and be refused, since E9 fix round 3, so
+/// the row waits for the loss: `Session::lose`.)
 #[test]
 fn e9_1_zero_retention_keeps_no_view() {
     let daemon = daemon_with_note("pmacs.config.set('session.view-retention-secs', 0)\n");
@@ -468,7 +501,7 @@ fn e9_1_zero_retention_keeps_no_view() {
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();
     first.open_note(scratch);
-    drop(first);
+    first.lose(&daemon);
     let mut next = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
     assert_eq!(next.where_am_i(), (scratch, 0));
 }
@@ -842,6 +875,299 @@ fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
     assert!(
         text.starts_with("abc!"),
         "the op typed at the close was drained before the socket closed; the daemon holds {text:?}"
+    );
+}
+
+/// E9 fix round 3 --- a forwarding socket for review 3's ordering with
+/// the window's last input in flight. The first connection forwards
+/// both ways until [`InflightProxy::hold`], after which what the window
+/// writes is kept back; at [`InflightProxy::cut`] the window's side
+/// closes at once, the kept input is forwarded to the daemon only once
+/// the window's first reconnect has connected through the proxy, and
+/// the old socket's EOF follows `eof_delay` later. Later connections
+/// forward both ways afresh. The timeline is kept for the failure text.
+struct InflightProxy {
+    path: std::path::PathBuf,
+    first_front: std::sync::Arc<std::sync::Mutex<Option<UnixStream>>>,
+    holding: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    timeline: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl InflightProxy {
+    fn start(target: &Path, dir: &Path, eof_delay: Duration) -> Self {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let path = dir.join("inflight.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the proxy");
+        let target = target.to_path_buf();
+        let first_front = Arc::new(Mutex::new(None));
+        let holding = Arc::new(AtomicBool::new(false));
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let timeline = Arc::new(Mutex::new(Vec::new()));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let started = Instant::now();
+        let mark = {
+            let timeline = Arc::clone(&timeline);
+            move |what: String| {
+                timeline
+                    .lock()
+                    .expect("timeline")
+                    .push(format!("{:>6} ms {what}", started.elapsed().as_millis()));
+            }
+        };
+        let (front_slot, hold, keep) = (
+            Arc::clone(&first_front),
+            Arc::clone(&holding),
+            Arc::clone(&kept),
+        );
+        std::thread::spawn(move || {
+            let mut later = Vec::new();
+            for incoming in listener.incoming() {
+                let Ok(front) = incoming else { break };
+                let Ok(back) = UnixStream::connect(&target) else {
+                    break;
+                };
+                let index = accepted.fetch_add(1, Ordering::SeqCst);
+                mark(format!("connection {index} accepted"));
+                let mut f_read = front.try_clone().expect("clone");
+                let mut f_write = front.try_clone().expect("clone");
+                let mut b_read = back.try_clone().expect("clone");
+                let mut b_write = back.try_clone().expect("clone");
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut b_read, &mut f_write);
+                    let _ = f_write.shutdown(std::net::Shutdown::Write);
+                });
+                if index > 0 {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut f_read, &mut b_write);
+                        let _ = b_write.shutdown(std::net::Shutdown::Write);
+                    });
+                    later.push((front, back));
+                    continue;
+                }
+                *front_slot.lock().expect("front") = Some(front);
+                let (hold, keep, accepted, mark) = (
+                    Arc::clone(&hold),
+                    Arc::clone(&keep),
+                    Arc::clone(&accepted),
+                    mark.clone(),
+                );
+                std::thread::spawn(move || {
+                    let _keep_back_open = back;
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match f_read.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) if hold.load(Ordering::SeqCst) => {
+                                keep.lock().expect("kept").extend_from_slice(&buf[..n]);
+                            }
+                            Ok(n) => {
+                                if b_write.write_all(&buf[..n]).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    mark("the window's side closed".to_owned());
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while accepted.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let input = std::mem::take(&mut *keep.lock().expect("kept"));
+                    let _ = b_write.write_all(&input);
+                    mark(format!("{} bytes in flight forwarded", input.len()));
+                    std::thread::sleep(eof_delay);
+                    mark("the old socket's EOF forwarded".to_owned());
+                    let _ = b_write.shutdown(std::net::Shutdown::Write);
+                });
+            }
+        });
+        Self {
+            path,
+            first_front,
+            holding,
+            kept,
+            timeline,
+        }
+    }
+
+    /// Keep back what the window writes on the first connection.
+    fn hold(&self) {
+        self.holding
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Bytes kept back so far.
+    fn kept_len(&self) -> usize {
+        self.kept.lock().expect("kept").len()
+    }
+
+    /// Close the window's side of the first connection, both ways.
+    fn cut(&self) {
+        if let Some(front) = self.first_front.lock().expect("front").as_ref() {
+            let _ = front.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    fn timeline(&self) -> Vec<String> {
+        self.timeline.lock().expect("timeline").clone()
+    }
+}
+
+/// Run `pmacs-gpu --headless-probe` under the reconnect action through
+/// `proxy` with `XY` typed in flight: once the probe says `abc` echoed,
+/// the proxy holds what the window writes and says so; once the probe
+/// says it typed `XY` and the proxy has kept its bytes, steady for
+/// 300 ms, the window's side is cut. Returns the report's facts and the
+/// proxy's timeline, `None` when skipped (as [`run_reconnect_probe`]).
+fn run_inflight_probe(
+    proxy: &InflightProxy,
+    dir: &Path,
+) -> Option<(std::collections::HashMap<String, String>, Vec<String>)> {
+    let binary = gpu_probe_binary()?;
+    let report = dir.join("inflight.report");
+    let marker = |suffix: &str| {
+        let mut path = report.as_os_str().to_owned();
+        path.push(suffix);
+        std::path::PathBuf::from(path)
+    };
+    let mut child = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(&proxy.path)
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_ACTION", "reconnect")
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", "abc")
+        .env("PMACS_GPU_PROBE_COMMAND", "e9.open")
+        .env("PMACS_GPU_PROBE_INFLIGHT_TEXT", "XY")
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "30000")
+        // The production half-second first delay, as review 3's rows.
+        .env_remove(pmacs::attach_reconnect::PMACS_TEST_BACKOFF_SCALE_MS)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the headless GPU probe");
+    // Typed and echoed: hold the window's writes, and say so.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut stage = "ready";
+    let mut cut = false;
+    let mut kept_since: Option<(usize, Instant)> = None;
+    while Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        match stage {
+            "ready" if marker(".ready").exists() => {
+                proxy.hold();
+                std::fs::write(marker(".hold"), "holding\n").expect("write the hold marker");
+                stage = "inflight";
+            }
+            // `XY` typed: cut once the proxy has kept its bytes and no
+            // more have come for 300 ms.
+            "inflight" if marker(".inflight").exists() => {
+                let len = proxy.kept_len();
+                match kept_since {
+                    Some((seen, since)) if seen == len && len > 0 => {
+                        if since.elapsed() >= Duration::from_millis(300) {
+                            proxy.cut();
+                            cut = true;
+                            stage = "cut";
+                        }
+                    }
+                    _ => kept_since = Some((len, Instant::now())),
+                }
+            }
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if child.try_wait().expect("poll the probe").is_none() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().expect("reap the probe");
+    let timeline = proxy.timeline();
+    let facts = probe_facts(&output, &report, &format!("stage {stage}; {timeline:?}"))?;
+    eprintln!("facts: {facts:?}\nproxy: {timeline:#?}");
+    assert!(cut, "the probe never typed in flight; {timeline:?}");
+    Some((facts, timeline))
+}
+
+/// E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+/// 2026-10-19) --- the reason for refusal and retry: input the old
+/// socket carried before its delayed EOF lands in the view the window
+/// resumes. The window types `abc` on the note, then `XY` while the
+/// proxy keeps back what it writes, so no daemon has seen `XY` when the
+/// window loses its socket. The kept input reaches the daemon only once
+/// the window's first reconnect (500 ms, the production schedule) has
+/// connected, and the old socket's EOF 1.5 s after that: the first
+/// attempt finds the old session still registered and is refused, the
+/// band saying the daemon closed it before accepting it; the old
+/// session takes `XY` into its view; its loss retains that view; and a
+/// later attempt resumes it, at the cursor after `XY`, where the next
+/// key lands. At `f991f7b` the first attempt was accepted as a fresh
+/// view and the window resumed nowhere near `XY`; under a takeover
+/// (the policy the owner declined) the view would have moved before the
+/// input that was in flight for it arrived.
+#[test]
+fn e9_2_input_in_flight_at_a_loss_lands_in_the_view_the_window_resumes() {
+    let daemon = daemon_with_note("");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("chmod");
+    let proxy = InflightProxy::start(
+        daemon.socket_path(),
+        dir.path(),
+        Duration::from_millis(1500),
+    );
+    let Some((facts, timeline)) = run_inflight_probe(&proxy, dir.path()) else {
+        return;
+    };
+    assert_eq!(fact(&facts, "phase.done"), "true", "{facts:?}");
+    // Preconditions: typed on the note, `XY` on the window's mirror and
+    // nowhere else when the socket went.
+    assert_eq!(fact(&facts, "cursor.before"), "3", "{facts:?}");
+    assert_eq!(fact(&facts, "text.before"), r#""abcone\ntwo\n""#);
+    assert_eq!(fact(&facts, "text.inflight"), r#""abcXYone\ntwo\n""#);
+    assert_eq!(fact(&facts, "lost"), "true");
+    assert!(
+        timeline
+            .iter()
+            .any(|line| line.contains("bytes in flight forwarded") && !line.contains(" 0 bytes")),
+        "the window's in-flight input reached the daemon on the old socket: {timeline:?}"
+    );
+    // The first attempt met the live session and was refused.
+    assert!(
+        fact(&facts, "refused").parse::<u32>().expect("refused") >= 1,
+        "{facts:?}"
+    );
+    assert!(
+        fact(&facts, "banner.refused")
+            .contains("failed (the daemon closed the connection before accepting the session)"),
+        "the band says what the window saw: {}",
+        fact(&facts, "banner.refused")
+    );
+    // The view the window resumes holds the input that was in flight.
+    assert_eq!(fact(&facts, "reconnected"), "true", "{facts:?}");
+    assert_eq!(
+        fact(&facts, "buffer.after"),
+        fact(&facts, "buffer.before"),
+        "{facts:?}"
+    );
+    assert_eq!(
+        fact(&facts, "cursor.after"),
+        "5",
+        "the resumed cursor is after the in-flight XY: {facts:?}"
+    );
+    assert_eq!(fact(&facts, "text.after"), r#""abcXYone\ntwo\n""#);
+    assert_eq!(
+        fact(&facts, "text.closing"),
+        r#""abcXY!one\ntwo\n""#,
+        "the next key lands after the in-flight input"
     );
 }
 

@@ -2499,6 +2499,43 @@ fn handle_session_established(
     mut write_stream: UnixStream,
     departing: Arc<AtomicBool>,
 ) {
+    // E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+    // 2026-10-19) --- what a presented token names is told apart first,
+    // before anything of this attach exists. A token whose session is
+    // still registered is live: its socket has not been seen to close
+    // (a loss reaches the daemon by its reader's EOF or a failed write,
+    // and a window's reconnect can come first). The new socket is
+    // closed, with no view built, no token minted, no session or flag
+    // registered and no hook run; the old socket is read to its end,
+    // its last input applied to its view, which a loss then retains
+    // for the token as any loss does, and the window, which counts the
+    // close as a failed attempt and keeps its token, takes it on a later
+    // attempt. Until this round a live token fell through to a fresh
+    // view and was replaced by its token, so a window back before the
+    // daemon saw its loss abandoned a view that was still there. A
+    // token the registry holds nowhere --- expired, consumed, or minted
+    // by a daemon that has since restarted --- is a fresh view, said.
+    enum Presented {
+        Nothing,
+        Retained(crate::window::FrontendView),
+        Gone(SessionToken),
+    }
+    let presented = match resume {
+        None => Presented::Nothing,
+        Some(token) => {
+            if let Some(holder) = session_registry.session_holding(token) {
+                eprintln!(
+                    "pmacs: {frontend_id:?} presented the token of {holder:?}, whose socket is \
+                     still open; closing the new socket"
+                );
+                let _ = write_stream.shutdown(Shutdown::Both);
+                return;
+            }
+            session_registry
+                .take_retained(token)
+                .map_or(Presented::Gone(token), Presented::Retained)
+        }
+    };
     // E9 --- a session that negotiated the family is minted a token,
     // registered with it (so its detach retains its view) and told it
     // once its bootstrap is on the wire, below.
@@ -2529,8 +2566,8 @@ fn handle_session_established(
     let fold_projection = !session_state.negotiated_capabilities.semantic_render;
     let panel_capable = peer_declared_panel_support(session_state);
     let mut resumed = false;
-    let fresh_view =
-        if let Some(mut retained) = resume.and_then(|t| session_registry.take_retained(t)) {
+    let fresh_view = match presented {
+        Presented::Retained(mut retained) => {
             daemon_debug(format!("{frontend_id:?} resumes a retained view"));
             resumed = true;
             retained.fold_projection = fold_projection;
@@ -2538,25 +2575,26 @@ fn handle_session_established(
             retained.frame_geometry = None;
             retained.document_viewport = None;
             retained
-        } else {
-            if let Some(token) = resume {
-                daemon_debug(format!(
-                    "{frontend_id:?} presented {token} but no view is retained for it"
-                ));
-                // E9 fix round 2 (review 2's Low 5) --- a window that
-                // reconnects after its view expired (the GUI's thirty
-                // attempts span 751.5 s against the default 600 s), or to
-                // a daemon that restarted, starts fresh; said on the
-                // status line its first frame carries, as E9.5's
-                // refusals are, so the buffer it lands on is explained.
-                let kept = view_retention(editor).as_secs();
-                editor.core.borrow_mut().status = format!(
-                    "this window's earlier view is gone (a lost socket's view is kept {kept} s, \
-                     session.view-retention-secs; a restarted daemon holds none); starting fresh"
-                );
-            }
+        }
+        Presented::Gone(token) => {
+            daemon_debug(format!(
+                "{frontend_id:?} presented {token} but no view is retained for it"
+            ));
+            // E9 fix round 2 (review 2's Low 5) --- a window that
+            // reconnects after its view expired (the GUI's thirty
+            // attempts span 751.5 s against the default 600 s), or to
+            // a daemon that restarted, starts fresh; said on the
+            // status line its first frame carries, as E9.5's
+            // refusals are, so the buffer it lands on is explained.
+            let kept = view_retention(editor).as_secs();
+            editor.core.borrow_mut().status = format!(
+                "this window's earlier view is gone (a lost socket's view is kept {kept} s, \
+                 session.view-retention-secs; a restarted daemon holds none); starting fresh"
+            );
             build_fresh_frontend_view(editor, fold_projection, panel_capable)
-        };
+        }
+        Presented::Nothing => build_fresh_frontend_view(editor, fold_projection, panel_capable),
+    };
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
@@ -5744,6 +5782,173 @@ mod tests {
             0,
             "an attach that never became a session holds no departure flag"
         );
+        editor.process_supervisor.borrow_mut().shutdown();
+    }
+
+    /// E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+    /// 2026-10-19) --- a token whose session is still registered is
+    /// refused before anything of the attach exists: the new socket is
+    /// closed with nothing written, and no view, token, session, stream,
+    /// render state or departure flag of it is left; its reader's end
+    /// tears nothing down and runs no hook. The live session keeps its
+    /// token, and its loss then retains its view for the token, as any
+    /// loss does. Until this round the live token fell through to a
+    /// fresh view, registered with a token of its own.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one attach refused and one lost, each read through the registry"
+    )]
+    fn e9_a_live_token_is_refused_before_anything_of_the_attach_exists() {
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                pmacs.lsp.config = {}
+                DETACHED = {}
+                pmacs.hook.add("frontend.detached", function(fid)
+                  DETACHED[#DETACHED + 1] = fid
+                end)
+                "#,
+            )
+            .exec()
+            .expect("install the counting hook");
+        let detached = |editor: &EditorState| -> Vec<i64> {
+            editor
+                .lua_host
+                .lua()
+                .load("return DETACHED")
+                .eval()
+                .expect("read the hook's log")
+        };
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+        let semantic = crate::presence::SessionState::new(
+            PROTOCOL_VERSION,
+            crate::protocol::NegotiatedCapabilities {
+                multi_frontend: true,
+                crdt_replica: true,
+                semantic_render: true,
+            },
+            0,
+        );
+        let establish =
+            |frontend_id, resume, write_stream, departing| DispatcherEvent::SessionEstablished {
+                frontend_id,
+                session_state: semantic,
+                initial_size: CellSize::new(24, 80),
+                initial_target: None,
+                resume,
+                write_stream,
+                departing,
+            };
+        macro_rules! feed {
+            ($event:expr) => {
+                handle_dispatcher_event(
+                    $event,
+                    &mut editor,
+                    &mut render_states,
+                    &mut semantic_states,
+                    &mut streams,
+                    &mut term_sizes,
+                    &mut last_dispatch_idle_sent,
+                    &mut last_active_buffer_sent,
+                    &mut terminal_bell_baselines,
+                    &mut session_registry,
+                    &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+                )
+            };
+        }
+
+        // The live session, its token read off its socket.
+        let first = FrontendId(31);
+        let (stream, mut first_peer) = UnixStream::pair().expect("socketpair");
+        first_peer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        feed!(establish(
+            first,
+            None,
+            stream,
+            Arc::new(AtomicBool::new(false))
+        ));
+        let token = loop {
+            if let InstanceMessage::SessionToken(token) =
+                read_message::<InstanceMessage>(&mut first_peer).expect("the first's bootstrap")
+            {
+                break token;
+            }
+        };
+        assert_eq!(session_registry.session_holding(token), Some(first));
+        let views_before = editor.core.borrow().views.len();
+
+        // Another socket presents it. (The read timeout goes on before
+        // the refusal shuts the pair: macOS refuses it after, EINVAL.)
+        let second = FrontendId(32);
+        let (stream, mut second_peer) = UnixStream::pair().expect("socketpair");
+        second_peer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let departing = Arc::new(AtomicBool::new(false));
+        feed!(establish(
+            second,
+            Some(token),
+            stream,
+            Arc::clone(&departing)
+        ));
+        match read_message::<InstanceMessage>(&mut second_peer) {
+            Err(pmacs_protocol::transport::TransportError::Eof) => {}
+            other => panic!("the refused socket is closed with nothing written; got {other:?}"),
+        }
+        assert!(
+            session_registry.session_state(second).is_none(),
+            "no session"
+        );
+        assert_eq!(session_registry.session_count(), 1, "the live one alone");
+        assert_eq!(
+            session_registry.departure_flag_count(),
+            1,
+            "the live session's flag alone"
+        );
+        assert_eq!(
+            Arc::strong_count(&departing),
+            1,
+            "nothing kept the refused attempt's flag"
+        );
+        assert!(!editor.core.borrow().views.contains_key(&second), "no view");
+        assert_eq!(editor.core.borrow().views.len(), views_before);
+        assert!(!streams.contains_key(&second), "no stream");
+        assert!(!semantic_states.contains_key(&second), "no render state");
+        assert!(!session_registry.retains_views(), "nothing retained");
+        assert_eq!(
+            session_registry.session_holding(token),
+            Some(first),
+            "the live session keeps its token"
+        );
+        // The refused attempt's reader ends at the closed socket.
+        feed!(DispatcherEvent::SessionDetached {
+            frontend_id: second
+        });
+        assert!(detached(&editor).is_empty(), "no teardown, no hook");
+        assert_eq!(session_registry.session_count(), 1);
+
+        // The live session's loss retains its view for the token.
+        drop(first_peer);
+        feed!(DispatcherEvent::SessionDetached { frontend_id: first });
+        assert_eq!(detached(&editor), vec![31]);
+        assert!(
+            session_registry.retains_views(),
+            "the loss retained the view"
+        );
+        assert_eq!(session_registry.session_holding(token), None);
         editor.process_supervisor.borrow_mut().shutdown();
     }
 

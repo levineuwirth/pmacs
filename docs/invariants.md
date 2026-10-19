@@ -151,7 +151,8 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   from `VersionMismatch`. A handshake step a frontend writes after the
   bootstrap (`Resume`) is read by the per-attach thread before the
   session exists, only from a session whose negotiated version and
-  `semantic_render` admit it; anything else there is a `ProtocolError`.
+  `semantic_render` admit it; anything else there is a `ProtocolError`,
+  and a token whose session is live shuts the new socket, unanswered.
 - A new wire message is an appended variant, bumping `PROTOCOL_VERSION`
   and extending `SUPPORTED_PROTOCOL_VERSIONS`, guarded by a byte pin on
   the previous final variant: an appended variant's own round-trip cannot

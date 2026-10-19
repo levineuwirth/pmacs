@@ -296,6 +296,18 @@ impl SessionRegistry {
             .insert(token, RetainedView { view, since: now });
     }
 
+    /// E9 (fix round 3, review 3's Medium 1) --- the registered session
+    /// minted `token`, if one is: its socket has not been seen to close,
+    /// so its view is neither retained nor gone, and a new socket
+    /// presenting the token is refused rather than given a fresh view.
+    #[must_use]
+    pub fn session_holding(&self, token: SessionToken) -> Option<FrontendId> {
+        self.sessions
+            .iter()
+            .find(|(_, state)| state.token == Some(token))
+            .map(|(id, _)| *id)
+    }
+
     /// E9 --- take the view retained for `token`, consuming it, or
     /// `None` when none is held (expired, never retained, or taken).
     pub fn take_retained(&mut self, token: SessionToken) -> Option<crate::window::FrontendView> {

@@ -268,15 +268,82 @@ fn daemon_with_note_in(extra: &str) -> (TestDaemon, std::path::PathBuf) {
     let dir = tempfile::TempDir::new().expect("tempdir for the note");
     let note = dir.path().join("note.txt");
     std::fs::write(&note, "one\ntwo\n").expect("write the note");
+    // E9 fix round 3: the detach hook logs each frontend torn down, so
+    // a row can wait for a loss to have been handled (`Session::lose`).
     let init = format!(
         "pmacs.command.define {{ name = 'e9.open', description = 'open the note',\n\
-           fn = function() pmacs.buffer.find_or_open({path:?}) end }}\n{extra}",
+           fn = function() pmacs.buffer.find_or_open({path:?}) end }}\n{DETACH_LOG}{extra}",
         path = note.to_str().expect("utf-8 path"),
     );
     let daemon = TestDaemon::spawn_with_env_and_init(&[("PMACS_ATTACH_DEBUG", "1")], &init);
     let path = dir.path().to_path_buf();
     std::mem::forget(dir);
     (daemon, path)
+}
+
+/// A `frontend.detached` hook that logs the departed id into the
+/// daemon's isolated home (its `HOME` is the socket's directory); the
+/// hook runs last in the detach arm and edits nothing.
+const DETACH_LOG: &str = "\
+pmacs.hook.add('frontend.detached', function(fid)
+  local f = assert(io.open(os.getenv('HOME') .. '/detached.log', 'a'))
+  f:write(tostring(fid), '\\n')
+  f:close()
+end)
+";
+
+/// The frontend ids the daemon's detach arm has torn down, in order.
+fn detached(daemon: &TestDaemon) -> Vec<String> {
+    let log = daemon
+        .socket_path()
+        .parent()
+        .expect("the socket's directory")
+        .join("detached.log");
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+impl Session {
+    /// E9 fix round 3 --- the socket goes, and this returns once the
+    /// daemon has handled it (the detach hook logged this session's
+    /// id): a token presented sooner names a session the daemon still
+    /// holds, and is refused (review 3's Medium 1, the owner's ruling).
+    fn lose(self, daemon: &TestDaemon) {
+        let id = self.fid.0.to_string();
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        drop(self);
+        common::ready::expect_true(
+            &format!("the daemon's detach arm for frontend {id}"),
+            Duration::from_secs(10),
+            || detached(daemon).contains(&id),
+            || format!("detached: {:?}", detached(daemon)),
+        );
+    }
+}
+
+/// E9 fix round 3 --- present `token` through the handshake on a new
+/// socket and read what the daemon writes next: `None` when it closes
+/// the socket with nothing written (the refusal of a token whose
+/// session it still holds), else the first message's variant, with the
+/// frontend id `Hello` assigned the attempt. A read that times out (ten
+/// seconds) is neither, and fails the row.
+fn answer_to(daemon: &TestDaemon, token: SessionToken) -> (FrontendId, Option<String>) {
+    let (mut stream, fid) = handshake(daemon, PROTOCOL_VERSION, Some(token));
+    let first = match read_message::<InstanceMessage>(&mut stream) {
+        Ok(message) => Some(
+            format!("{message:?}")
+                .split(['(', ' ', '{'])
+                .next()
+                .unwrap_or("")
+                .to_owned(),
+        ),
+        Err(pmacs_protocol::transport::TransportError::Eof) => None,
+        Err(other) => panic!("the daemon neither answered nor closed the attempt: {other}"),
+    };
+    (fid, first)
 }
 
 fn daemon_with_note(extra: &str) -> TestDaemon {
@@ -456,9 +523,11 @@ fn e9_review1_a_deliberate_detach_retains_no_view() {
     let (scratch, _) = first.where_am_i();
     let note = first.open_note(scratch);
     assert_ne!(note, scratch);
-    // As the window's close does it: `Detach`, then the socket goes.
+    // As the window's close does it: `Detach`, then the socket goes;
+    // the token is presented once the daemon has torn the session down
+    // (E9 fix round 3: before that it names a live session, refused).
     write_message(&mut first.stream, &FrontendEvent::Detach(first.fid)).expect("Detach");
-    drop(first);
+    first.lose(&daemon);
     let mut next = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
     assert_eq!(
         next.where_am_i(),
@@ -519,11 +588,25 @@ fn e9_review1_a_zero_token_is_a_fresh_view_and_the_session_is_served() {
     });
 }
 
-/// A token presented by a second socket while the session it names is
-/// still alive resumes nothing and disturbs nothing: the second socket
-/// is a fresh view, the first keeps its window; once the first is lost
-/// its view is retained and a third socket takes it. Passes at
-/// `e7c8fd5` (by reading: only a detached session's view is retained).
+/// A token presented by another socket while the session it names is
+/// still registered resumes nothing and disturbs nothing: the daemon
+/// closes the new socket before writing anything, on every attempt,
+/// and runs no detach for it (it never registered it); the first keeps
+/// its window; once the first is lost its view is retained and a socket
+/// presenting the token takes it.
+///
+/// Changed at E9 fix round 3 by the owner's ruling of 2026-10-19 on
+/// review 3's Medium 1 (refusal and retry). The row expected a fresh
+/// view for the second socket, the policy at `e7c8fd5`, and that is the
+/// state review 3 showed a real reconnect reaching whenever the window
+/// comes back before the daemon has seen its old socket's loss: a fresh
+/// view accepted, the window's token replaced, the view it came back
+/// for abandoned while still there. The ruling refuses the new socket
+/// instead, so the old one is read to its end and its view retained,
+/// and the window retries; a copied token whose original window stays
+/// alive is refused on every attempt, as here, and the GUI stops at its
+/// cap. The second presentation's view here would have been LOCAL's
+/// document; the third socket's resume is unchanged.
 #[test]
 fn e9_review1_a_token_presented_while_its_session_lives_resumes_nothing() {
     let daemon = daemon_with_note("");
@@ -532,20 +615,29 @@ fn e9_review1_a_token_presented_while_its_session_lives_resumes_nothing() {
     let (scratch, _) = first.where_am_i();
     let note = first.open_note(scratch);
 
-    let mut second = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
-    assert_eq!(
-        second.where_am_i(),
-        (scratch, 0),
-        "a live token is not a view"
-    );
-    assert_ne!(second.token, Some(token));
+    let mut refused = Vec::new();
+    for attempt in 1..=3 {
+        let (fid, answer) = answer_to(&daemon, token);
+        assert_eq!(
+            answer, None,
+            "attempt {attempt}: a live token is refused, the socket closed with nothing written"
+        );
+        refused.push(fid.0.to_string());
+    }
     // The first is untouched: its typing echoes on the note.
     first.type_str("q");
     first.wait("the first session's echo on the note", |m| {
         matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == note)
             .then_some(())
     });
-    drop(first);
+    first.lose(&daemon);
+    // The detach arm ran for the first and for no refused attempt: a
+    // refusal registers nothing, so its reader's end tears nothing down.
+    let torn_down = detached(&daemon);
+    assert!(
+        refused.iter().all(|fid| !torn_down.contains(fid)),
+        "no refused attempt was ever a session: refused {refused:?}, detached {torn_down:?}"
+    );
     let mut third = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
     assert_eq!(
         third.where_am_i(),
@@ -577,7 +669,9 @@ fn e9_review1_the_last_frontend_s_question_survives_the_socket_and_is_answerable
         }
         _ => None,
     });
-    drop(only);
+    // E9 fix round 3: the token is presented once the loss is handled;
+    // sooner it names a live session, and is refused.
+    only.lose(&daemon);
     let mut back = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
     let seen = back.wait_for(
         "the pending question",

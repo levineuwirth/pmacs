@@ -2096,6 +2096,16 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
 /// acceptance can read whether the in-flight op reached the daemon
 /// through the close's drain. The report is one `key=value` line per
 /// fact and asserts nothing.
+///
+/// E9 fix round 3: the loop ends when the App's reconnect does, on the
+/// daemon's acceptance (`reconnected=true`) or past the cap
+/// (`reconnected=false`); `attempts` counts the connects the loop made
+/// and `refused` the attempts the daemon closed before accepting, with
+/// the band each left (`banner.refused`). With
+/// `PMACS_GPU_PROBE_INFLIGHT_TEXT` set, once `<report>.ready` is written
+/// the probe waits for the acceptance's `<report>.hold` (its socket now
+/// holding what the window writes), types that text, which no daemon
+/// has seen when the socket goes, and writes `<report>.inflight`.
 #[allow(
     clippy::too_many_lines,
     reason = "one linear attach-type-lose-reconnect-close session, reported line by line"
@@ -2166,11 +2176,22 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     let mut buffer_before: Option<BufferId> = None;
     let mut token_first: Option<pmacs_protocol::SessionToken> = None;
     let mut attempts: u32 = 0;
+    let mut refused: u32 = 0;
+    let mut banner_refused = String::new();
     let mut resumed_at: Option<std::time::Instant> = None;
     let command = std::env::var("PMACS_GPU_PROBE_COMMAND")
         .ok()
         .filter(|c| !c.is_empty());
     let mut opened_from: Option<BufferId> = None;
+    let inflight = std::env::var("PMACS_GPU_PROBE_INFLIGHT_TEXT")
+        .ok()
+        .filter(|t| !t.is_empty());
+    let mut inflight_typed = false;
+    let marker = |suffix: &str| {
+        let mut path = report.as_os_str().to_owned();
+        path.push(suffix);
+        PathBuf::from(path)
+    };
 
     while std::time::Instant::now() < deadline && phase != Phase::Done {
         let now = std::time::Instant::now();
@@ -2184,7 +2205,20 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 }
             }
             let lost = matches!(event, AttachEvent::Disconnected(_));
+            // While lost, a close is an attempt's: the daemon closed it
+            // before accepting the session.
+            let attempt_closed = lost && phase == Phase::Lost;
             app.dispatch_app_event(AppEvent::Attach(event));
+            if attempt_closed {
+                refused += 1;
+                banner_refused = app
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.connection_notice.clone())
+                    .unwrap_or_default();
+                snapshot_seen = false;
+                cursor_seen = false;
+            }
             if lost && phase == Phase::Typed {
                 let s = app.state.as_ref().expect("state");
                 let _ = writeln!(out, "lost=true");
@@ -2217,17 +2251,21 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         }
         // The reconnect loop, as the deadline pump drives it.
         if phase == Phase::Lost {
-            let was_armed = app.reconnect.is_some();
             let reconnect_tx = tx.clone();
             let _ = app.tick_reconnect(now, |socket, token| {
+                attempts += 1;
                 attach::connect_with_sink_resuming(socket, token, move |event| {
                     reconnect_tx.send(event).is_ok()
                 })
             });
-            if was_armed && app.reconnect.is_none() {
-                attempts = attempts.max(1);
-                let _ = writeln!(out, "reconnected=true");
+            // The loop is over: the daemon accepted an attempt (its
+            // token installed the client), or the cap ended it.
+            if app.reconnect.is_none() {
+                let accepted = app.attach_client.is_some();
+                let _ = writeln!(out, "reconnected={accepted}");
                 let _ = writeln!(out, "attempts={attempts}");
+                let _ = writeln!(out, "refused={refused}");
+                let _ = writeln!(out, "banner.refused={banner_refused:?}");
                 let _ = writeln!(
                     out,
                     "banner.after={:?}",
@@ -2236,10 +2274,12 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                         .and_then(|s| s.connection_notice.clone())
                         .unwrap_or_default()
                 );
-                resumed_at = Some(now);
-                phase = Phase::Resumed;
-            } else if let Some(reconnect) = app.reconnect.as_ref() {
-                attempts = attempts.max(reconnect.schedule.step());
+                if accepted {
+                    resumed_at = Some(now);
+                    phase = Phase::Resumed;
+                } else {
+                    phase = Phase::Done;
+                }
             }
         }
         let s = app.state.as_ref().expect("state");
@@ -2307,12 +2347,32 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                     let _ = writeln!(out, "buffer.before={}", own.buffer_id.raw());
                     let _ = writeln!(out, "cursor.before={}", own.byte);
                     let _ = writeln!(out, "text.before={:?}", s.current_text);
-                    let mut ready = report.as_os_str().to_owned();
-                    ready.push(".ready");
-                    if let Err(error) = std::fs::write(&ready, "ready\n") {
+                    if let Err(error) = std::fs::write(marker(".ready"), "ready\n") {
                         eprintln!("pmacs-gpu probe: write ready marker: {error}");
                         return 5;
                     }
+                } else if buffer_before.is_some()
+                    && !inflight_typed
+                    && let Some(extra) = inflight.as_deref()
+                    && marker(".hold").exists()
+                {
+                    // Typed while the acceptance's socket holds what the
+                    // window writes: in flight when the socket goes.
+                    for ch in extra.chars() {
+                        let mut buf = [0u8; 4];
+                        let k = ch.encode_utf8(&mut buf);
+                        app.apply_keyboard(&Key::Character(k.into()), Some(k), None);
+                    }
+                    let _ = writeln!(
+                        out,
+                        "text.inflight={:?}",
+                        app.state.as_ref().expect("state").current_text
+                    );
+                    if let Err(error) = std::fs::write(marker(".inflight"), "typed\n") {
+                        eprintln!("pmacs-gpu probe: write in-flight marker: {error}");
+                        return 5;
+                    }
+                    inflight_typed = true;
                 }
             }
             Phase::Resumed => {
@@ -4458,11 +4518,42 @@ struct App {
 
 /// E9.2 --- one lost socket's reconnect loop: the shared backoff
 /// schedule (`pmacs_protocol::reconnect`, the SSH attach's own curve),
-/// when the next attempt is due, and what the last one said.
+/// when the next attempt is due, what the last one said, and the
+/// attempt the daemon has not yet accepted.
 struct Reconnect {
     schedule: pmacs_protocol::BackoffSchedule,
     next_at: std::time::Instant,
     last_error: String,
+    /// E9 fix round 3 (review 3's Medium 1) --- an attempt whose
+    /// handshake is done and whose `Resume` is sent, held until the
+    /// daemon accepts it; `None` between attempts.
+    pending: Option<PendingAttach>,
+}
+
+/// E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+/// 2026-10-19) --- a reconnect attempt the daemon has not accepted yet.
+///
+/// **The acceptance point** is the `SessionToken` the daemon writes on
+/// the new socket, for a session that negotiated
+/// [`pmacs_protocol::SESSION_MIN_VERSION`]: the daemon writes it once it
+/// has registered the session, after the bootstrap's snapshots, and to
+/// no session it refused. Before it the client is held here, not
+/// installed: nothing is sent on it, the band keeps the lost-socket
+/// banner (so keys are dropped and `C-x C-c` still closes the window),
+/// and what the daemon writes is held unapplied. At the token the client
+/// is installed and the held messages replayed through the one dispatch,
+/// in order, as if it had been installed at the connect. A close before
+/// the token is a failed attempt: the window keeps its token, the band
+/// says so, and the next attempt is booked on the same schedule and
+/// counts toward [`RECONNECT_ATTEMPT_CAP`]. The daemon gives no reason
+/// when it closes a socket presenting a token whose session it still
+/// holds, and the window cannot tell that from a daemon that failed the
+/// bootstrap, so the band says only what the window saw. A session below
+/// the family's version is written no token and is accepted at the
+/// connect, as every reconnect was before this round.
+struct PendingAttach {
+    client: AttachClient,
+    held: Vec<InstanceMessage>,
 }
 
 /// E9.2 (fix round 1, review 1's Low 4) --- failed attempts after which
@@ -5789,12 +5880,15 @@ impl App {
     }
 
     /// E9.2 --- one tick of the reconnect loop at `now`: nothing before
-    /// the due time, else one attempt through `connect` on the socket
-    /// this window attached to, presenting the token its last session
-    /// was given. Success installs the client and clears the banner;
-    /// failure says so on the band and books the next attempt on the
-    /// schedule. Returns when the pump should wake next, `None` when
-    /// nothing is pending.
+    /// the due time, or while an attempt waits on the daemon's answer,
+    /// else one attempt through `connect` on the socket this window
+    /// attached to, presenting the token its last session was given. A
+    /// connect that fails says so on the band and books the next attempt
+    /// on the schedule; one that succeeds is held until the daemon
+    /// accepts the session ([`PendingAttach`], E9 fix round 3), or, for
+    /// a session below the family's version, which is written no token,
+    /// installed at once. Returns when the pump should wake next, `None`
+    /// when nothing is due (an attempt's answer arrives as an event).
     ///
     /// The connector is a parameter so the headless probe drives this
     /// same loop with a channel sink where the window hands the
@@ -5807,7 +5901,11 @@ impl App {
             Option<pmacs_protocol::SessionToken>,
         ) -> Result<AttachClient, attach::AttachClientError>,
     ) -> Option<std::time::Instant> {
-        let due = self.reconnect.as_ref()?.next_at;
+        let reconnect = self.reconnect.as_ref()?;
+        if reconnect.pending.is_some() {
+            return None;
+        }
+        let due = reconnect.next_at;
         if now < due {
             return Some(due);
         }
@@ -5817,49 +5915,144 @@ impl App {
         };
         let token = self.state.as_ref().and_then(|s| s.session_token);
         match connect(&socket, token) {
-            Ok(client) => {
-                self.reconnect = None;
-                if let Some(state) = self.state.as_mut() {
-                    state.connection_notice = None;
-                    state.lost_chord_prefix = false;
-                    state.goodbye = None;
-                    state.request_redraw();
-                }
-                self.install_client(client);
+            Ok(client)
+                if client.session_protocol_version() < pmacs_protocol::SESSION_MIN_VERSION =>
+            {
+                self.accept_reconnect(client);
                 None
             }
-            Err(error) => {
+            Ok(client) => {
                 let reconnect = self.reconnect.as_mut().expect("checked above");
-                reconnect.last_error = error.to_string();
-                let delay = reconnect.schedule.next_delay();
-                reconnect.next_at = now + delay;
-                let attempt = reconnect.schedule.step();
-                // Past the cap the loop ends; the banner stays, saying
-                // what to do, and `C-x C-c` is the key that does it.
-                let capped = attempt >= RECONNECT_ATTEMPT_CAP;
-                let notice = if capped {
-                    format!(
-                        "daemon connection lost; {attempt} reconnect attempts failed ({error}); \
-                         close the window (C-x C-c)"
-                    )
-                } else {
-                    format!(
-                        "daemon connection lost; reconnect attempt {attempt} failed ({error}); \
-                         next in {}",
-                        describe_delay(delay)
-                    )
-                };
-                let next_at = reconnect.next_at;
-                if let Some(state) = self.state.as_mut() {
-                    state.connection_notice = Some(notice);
-                    state.request_redraw();
+                reconnect.pending = Some(PendingAttach {
+                    client,
+                    held: Vec::new(),
+                });
+                None
+            }
+            Err(error) => self.fail_reconnect_attempt(now, &error.to_string()),
+        }
+    }
+
+    /// E9.2 --- a reconnect the daemon accepted: the loop ends, the band
+    /// clears, and the client becomes this window's session.
+    fn accept_reconnect(&mut self, client: AttachClient) {
+        self.reconnect = None;
+        if let Some(state) = self.state.as_mut() {
+            state.connection_notice = None;
+            state.lost_chord_prefix = false;
+            state.goodbye = None;
+            state.request_redraw();
+        }
+        self.install_client(client);
+    }
+
+    /// E9.2 --- one failed reconnect attempt at `now`, whether its
+    /// connect failed or (E9 fix round 3) the daemon closed it before
+    /// accepting it: the band says so, the next attempt is booked on the
+    /// schedule, and past [`RECONNECT_ATTEMPT_CAP`] the loop ends. The
+    /// window's token is untouched, so the next attempt presents it
+    /// again. Returns when the next attempt is due, `None` past the cap.
+    fn fail_reconnect_attempt(
+        &mut self,
+        now: std::time::Instant,
+        error: &str,
+    ) -> Option<std::time::Instant> {
+        let reconnect = self.reconnect.as_mut()?;
+        reconnect.pending = None;
+        error.clone_into(&mut reconnect.last_error);
+        let delay = reconnect.schedule.next_delay();
+        reconnect.next_at = now + delay;
+        let attempt = reconnect.schedule.step();
+        // Past the cap the loop ends; the banner stays, saying
+        // what to do, and `C-x C-c` is the key that does it.
+        let capped = attempt >= RECONNECT_ATTEMPT_CAP;
+        let notice = if capped {
+            format!(
+                "daemon connection lost; {attempt} reconnect attempts failed ({error}); \
+                 close the window (C-x C-c)"
+            )
+        } else {
+            format!(
+                "daemon connection lost; reconnect attempt {attempt} failed ({error}); \
+                 next in {}",
+                describe_delay(delay)
+            )
+        };
+        let next_at = reconnect.next_at;
+        if let Some(state) = self.state.as_mut() {
+            state.connection_notice = Some(notice);
+            state.request_redraw();
+        }
+        if capped {
+            self.reconnect = None;
+            None
+        } else {
+            Some(next_at)
+        }
+    }
+
+    /// E9 fix round 3 --- route an event while a reconnect attempt waits
+    /// on the daemon ([`PendingAttach`]): a message other than the token
+    /// is held, the token accepts the attempt and replays what was held
+    /// before it, and a close is the attempt's failure, or the loop's end
+    /// when a held `Goodbye` gave the daemon's reason (E2.3: a daemon
+    /// that says goodbye means it, and nothing reconnects). Returns the
+    /// event for the ordinary dispatch when no attempt is pending, or
+    /// when it is the token that accepted one.
+    fn route_pending_attach_event(&mut self, event: AppEvent) -> Option<AppEvent> {
+        let Some(pending) = self.reconnect.as_mut().and_then(|r| r.pending.as_mut()) else {
+            return Some(event);
+        };
+        match event {
+            AppEvent::Attach(AttachEvent::Message(msg)) => match *msg {
+                InstanceMessage::SessionToken(_) => {
+                    let pending = self
+                        .reconnect
+                        .as_mut()
+                        .and_then(|r| r.pending.take())
+                        .expect("checked above");
+                    self.accept_reconnect(pending.client);
+                    for held in pending.held {
+                        self.dispatch_app_event(AppEvent::Attach(AttachEvent::Message(Box::new(
+                            held,
+                        ))));
+                    }
+                    Some(AppEvent::Attach(AttachEvent::Message(msg)))
                 }
-                if capped {
-                    self.reconnect = None;
+                other => {
+                    pending.held.push(other);
                     None
-                } else {
-                    Some(next_at)
                 }
+            },
+            AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
+                eprintln!(
+                    "pmacs-gpu: the daemon closed a reconnect attempt before accepting it \
+                     ({reason})"
+                );
+                let goodbye = pending.held.iter().find_map(|message| match message {
+                    InstanceMessage::Goodbye(why) => Some(why.clone()),
+                    _ => None,
+                });
+                match goodbye {
+                    Some(why) => {
+                        self.reconnect = None;
+                        if let Some(state) = self.state.as_mut() {
+                            state.connection_notice = Some(format!(
+                                "daemon connection lost; the reconnect was refused {}; \
+                                 close the window (C-x C-c)",
+                                disconnect_notice(Some(&why), None)
+                            ));
+                            state.request_redraw();
+                        }
+                    }
+                    None => {
+                        let _ = self.fail_reconnect_attempt(
+                            std::time::Instant::now(),
+                            "the daemon closed the connection before accepting the session",
+                        );
+                    }
+                }
+                None
             }
         }
     }
@@ -6065,6 +6258,9 @@ impl App {
     }
 
     fn dispatch_app_event(&mut self, event: AppEvent) {
+        let Some(event) = self.route_pending_attach_event(event) else {
+            return;
+        };
         let state = self
             .state
             .as_mut()
@@ -6162,6 +6358,7 @@ impl App {
                             schedule: pmacs_protocol::BackoffSchedule::new(),
                             next_at: std::time::Instant::now(),
                             last_error: reason,
+                            pending: None,
                         };
                         let delay = reconnect.schedule.next_delay();
                         reconnect.next_at += delay;
@@ -8092,6 +8289,7 @@ mod lost_socket_tests {
             schedule: pmacs_protocol::BackoffSchedule::new(),
             next_at: now,
             last_error: "cut".to_owned(),
+            pending: None,
         });
         let refused = || {
             Err(attach::AttachClientError::Connect(std::io::Error::new(
@@ -8132,6 +8330,300 @@ mod lost_socket_tests {
                 "{RECONNECT_ATTEMPT_CAP} reconnect attempts failed"
             )) && notice.contains("close the window (C-x C-c)"),
             "{notice}"
+        );
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A daemon in miniature at `dir/fake.sock`, for the reconnect's
+    /// acceptance (E9 fix round 3): per connection, the handshake as the
+    /// daemon reads it --- `Hello`, then the window's `AttachRequest`,
+    /// bootstrap and `Resume` --- with the token each attempt presented
+    /// sent back, then `answer(n)` for the `n`th connection: `None`
+    /// closes the socket with nothing written, as the daemon closes one
+    /// presenting a token whose session it still holds; `Some(messages)`
+    /// writes them and keeps the socket open, unless one is a `Goodbye`,
+    /// after which it closes the socket.
+    fn fake_daemon(
+        dir: &Path,
+        answer: impl Fn(usize) -> Option<Vec<InstanceMessage>> + Send + 'static,
+    ) -> (
+        PathBuf,
+        std::sync::mpsc::Receiver<Option<pmacs_protocol::SessionToken>>,
+    ) {
+        let path = dir.join("fake.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut open = Vec::new();
+            for (n, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { break };
+                pmacs_protocol::write_message(&mut stream, &test_hello()).expect("write Hello");
+                let _: pmacs_protocol::AttachRequest =
+                    pmacs_protocol::read_message(&mut stream).expect("read AttachRequest");
+                let _: pmacs_protocol::SessionBootstrapRequest =
+                    pmacs_protocol::read_message(&mut stream).expect("read bootstrap");
+                let presented = match pmacs_protocol::read_message::<pmacs_protocol::FrontendEvent>(
+                    &mut stream,
+                ) {
+                    Ok(pmacs_protocol::FrontendEvent::Resume { token, .. }) => token,
+                    other => panic!("the Resume step was due: {other:?}"),
+                };
+                if tx.send(presented).is_err() {
+                    break;
+                }
+                match answer(n) {
+                    None => {
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    Some(messages) => {
+                        for message in &messages {
+                            pmacs_protocol::write_message(&mut stream, message).expect("write");
+                        }
+                        if messages
+                            .iter()
+                            .any(|m| matches!(m, InstanceMessage::Goodbye(_)))
+                        {
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        } else {
+                            open.push(stream);
+                        }
+                    }
+                }
+            }
+        });
+        (path, rx)
+    }
+
+    /// The harness's window, attached to `socket` and holding `token`,
+    /// after the loss production takes: its client's reader reports EOF.
+    fn lose_window(h: &mut EffectHarness, socket: PathBuf, token: pmacs_protocol::SessionToken) {
+        h.app.mode = Mode::Attach { socket };
+        h.app.state.as_mut().expect("state").session_token = Some(token);
+        h.app
+            .dispatch_app_event(AppEvent::Attach(AttachEvent::Disconnected(
+                pmacs_protocol::TransportError::Eof.to_string(),
+            )));
+        assert!(
+            h.app.reconnect.is_some(),
+            "precondition: the loss arms the loop"
+        );
+        assert!(h.app.attach_client.is_none(), "precondition: no client");
+    }
+
+    /// One attempt, at the moment it is due, through the production
+    /// connector into `tx`, as the deadline pump makes it.
+    fn attempt(
+        app: &mut App,
+        tx: &std::sync::mpsc::Sender<AttachEvent>,
+    ) -> Option<std::time::Instant> {
+        let due = app.reconnect.as_ref().expect("the loop is armed").next_at;
+        let tx = tx.clone();
+        app.tick_reconnect(due, move |socket, token| {
+            attach::connect_with_sink_resuming(socket, token, move |event| tx.send(event).is_ok())
+        })
+    }
+
+    fn band(app: &App) -> String {
+        app.state
+            .as_ref()
+            .and_then(|s| s.connection_notice.clone())
+            .unwrap_or_default()
+    }
+
+    /// E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+    /// 2026-10-19) --- the reconnect's acceptance point is the daemon's
+    /// `SessionToken`. An attempt the daemon closes with nothing written
+    /// (as it closes one presenting a token whose session it still
+    /// holds) installs nothing and is a failed attempt: the window keeps
+    /// its token, the band says what the window saw, and the next
+    /// attempt is booked on the schedule. The next attempt presents the
+    /// same token; what the daemon writes before its token is held, not
+    /// applied, and the token installs the client, replays it, and ends
+    /// the loop. Until this round the connect alone installed the client
+    /// and ended the loop, so a close that followed began a fresh one.
+    #[test]
+    fn a_reconnect_the_daemon_closes_before_its_token_is_a_failed_attempt() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let window = pmacs_protocol::SessionToken([7; pmacs_protocol::SESSION_TOKEN_BYTES]);
+        let minted = pmacs_protocol::SessionToken([9; pmacs_protocol::SESSION_TOKEN_BYTES]);
+        let mut h = EffectHarness::with_document("one\ntwo\n");
+        let idle_before = h.app.state.as_ref().expect("state").dispatch_idle;
+        let (socket, presented) = fake_daemon(dir.path(), move |n| {
+            (n > 0).then(|| {
+                vec![
+                    InstanceMessage::DispatchIdle { idle: !idle_before },
+                    InstanceMessage::SessionToken(minted),
+                ]
+            })
+        });
+        lose_window(&mut h, socket, window);
+        assert_eq!(
+            h.app.state.as_ref().expect("state").dispatch_idle,
+            idle_before
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // The first attempt: connected, handshaken, held.
+        assert_eq!(
+            attempt(&mut h.app, &tx),
+            None,
+            "nothing is due while it waits"
+        );
+        assert_eq!(presented.recv_timeout(WAIT), Ok(Some(window)));
+        assert!(
+            h.app
+                .reconnect
+                .as_ref()
+                .is_some_and(|r| r.pending.is_some()),
+            "the connected attempt is held until the daemon accepts it"
+        );
+        assert!(h.app.attach_client.is_none(), "and not installed");
+        // The daemon closes it with nothing written.
+        let closed = rx.recv_timeout(WAIT).expect("the attempt's close");
+        assert!(
+            matches!(closed, AttachEvent::Disconnected(_)),
+            "precondition: nothing came before the close"
+        );
+        h.app.dispatch_app_event(AppEvent::Attach(closed));
+        let reconnect = h
+            .app
+            .reconnect
+            .as_ref()
+            .expect("a failed attempt keeps the loop");
+        assert!(reconnect.pending.is_none());
+        assert!(
+            reconnect.next_at > std::time::Instant::now(),
+            "the next attempt is booked on the schedule"
+        );
+        assert!(
+            h.app.attach_client.is_none(),
+            "a refused attempt installs nothing"
+        );
+        let state = h.app.state.as_ref().expect("state");
+        assert_eq!(
+            state.session_token,
+            Some(window),
+            "the window keeps its token"
+        );
+        let notice = band(&h.app);
+        assert!(
+            notice.contains(
+                "failed (the daemon closed the connection before accepting the session); next in"
+            ),
+            "{notice}"
+        );
+
+        // The next attempt presents the same token and is accepted.
+        assert_eq!(attempt(&mut h.app, &tx), None);
+        assert_eq!(presented.recv_timeout(WAIT), Ok(Some(window)));
+        let before_token = rx.recv_timeout(WAIT).expect("the bootstrap's message");
+        h.app.dispatch_app_event(AppEvent::Attach(before_token));
+        assert!(
+            h.app.attach_client.is_none(),
+            "not installed before the token"
+        );
+        assert_eq!(
+            h.app.state.as_ref().expect("state").dispatch_idle,
+            idle_before,
+            "what comes before the token is held, not applied"
+        );
+        let token = rx.recv_timeout(WAIT).expect("the token");
+        h.app.dispatch_app_event(AppEvent::Attach(token));
+        assert!(h.app.reconnect.is_none(), "the token ends the loop");
+        assert!(h.app.attach_client.is_some(), "and installs the client");
+        let state = h.app.state.as_ref().expect("state");
+        assert_eq!(
+            state.dispatch_idle, !idle_before,
+            "what was held is applied once the attempt is accepted"
+        );
+        assert_eq!(state.session_token, Some(minted), "the new session's token");
+        assert_eq!(state.connection_notice, None, "the band clears");
+    }
+
+    /// E9 fix round 3 --- a reconnect the daemon answers with a `Goodbye`
+    /// before its token, then closes, gave its reason: the loop ends as
+    /// E2.3 ends a session the daemon said goodbye to, nothing is
+    /// installed, and the band names the reason and says to close the
+    /// window, which `C-x C-c` still does.
+    #[test]
+    fn a_reconnect_refused_with_a_goodbye_ends_the_loop_with_its_reason() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let window = pmacs_protocol::SessionToken([3; pmacs_protocol::SESSION_TOKEN_BYTES]);
+        let (socket, presented) = fake_daemon(dir.path(), |_| {
+            Some(vec![InstanceMessage::Goodbye(
+                pmacs_protocol::GoodbyeReason::ShuttingDown,
+            )])
+        });
+        let mut h = EffectHarness::with_document("one\ntwo\n");
+        lose_window(&mut h, socket, window);
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert_eq!(attempt(&mut h.app, &tx), None);
+        assert_eq!(presented.recv_timeout(WAIT), Ok(Some(window)));
+        for _ in 0..2 {
+            let event = rx.recv_timeout(WAIT).expect("the Goodbye, then the close");
+            h.app.dispatch_app_event(AppEvent::Attach(event));
+        }
+        assert!(h.app.reconnect.is_none(), "the loop is over");
+        assert!(h.app.attach_client.is_none(), "nothing installed");
+        let notice = band(&h.app);
+        assert!(
+            notice.contains("the reconnect was refused (daemon said goodbye:")
+                && notice.contains("close the window (C-x C-c)"),
+            "{notice}"
+        );
+        press(&mut h.app, "x", true);
+        press(&mut h.app, "c", true);
+        assert!(h.app.exit_requested, "C-x C-c closes the window");
+    }
+
+    /// E9 fix round 3 --- a window presenting a token whose session the
+    /// daemon still holds, a copy whose original window stays alive, is
+    /// refused on every attempt; each refusal counts, and the loop stops
+    /// at the cap with the window's token unchanged and the band saying
+    /// to close the window.
+    #[test]
+    fn a_token_refused_on_every_attempt_stops_the_loop_at_the_cap() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let copied = pmacs_protocol::SessionToken([5; pmacs_protocol::SESSION_TOKEN_BYTES]);
+        let (socket, presented) = fake_daemon(dir.path(), |_| None);
+        let mut h = EffectHarness::with_document("one\ntwo\n");
+        lose_window(&mut h, socket, copied);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut connects = 0u32;
+        while h.app.reconnect.is_some() {
+            assert!(
+                connects < 2 * RECONNECT_ATTEMPT_CAP,
+                "the loop does not end"
+            );
+            let _ = attempt(&mut h.app, &tx);
+            connects += 1;
+            assert_eq!(
+                presented.recv_timeout(WAIT),
+                Ok(Some(copied)),
+                "attempt {connects}"
+            );
+            let closed = rx.recv_timeout(WAIT).expect("the attempt's close");
+            assert!(matches!(closed, AttachEvent::Disconnected(_)));
+            h.app.dispatch_app_event(AppEvent::Attach(closed));
+            assert!(
+                h.app.attach_client.is_none(),
+                "attempt {connects} installs nothing"
+            );
+        }
+        let state = h.app.state.as_ref().expect("state");
+        assert_eq!(
+            state.session_token,
+            Some(copied),
+            "the token is the window's still"
+        );
+        let notice = band(&h.app);
+        assert!(
+            notice.contains(
+                "reconnect attempts failed (the daemon closed the connection before accepting \
+                 the session); close the window (C-x C-c)"
+            ),
+            "after {connects} attempts: {notice}"
         );
     }
 }

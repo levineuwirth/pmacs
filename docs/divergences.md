@@ -215,7 +215,15 @@ whole. Under one cap a growing register squeezes the rules.
   (`pmacs_protocol::reconnect`, E9.2), presenting the token of its last
   session so the daemon starts the new socket on the view it retained
   (E9.1); after thirty failed attempts, about twelve minutes, it stops
-  and the band says to close the window. A window closed by `C-x C-c`
+  and the band says to close the window. An attempt succeeds only at the
+  daemon's `SessionToken` on the new socket: until then nothing is sent
+  on it and what the daemon writes is held. The daemon closes, with
+  nothing written, a socket presenting the token of a session it still
+  holds (its old socket not yet seen to close, or a copied token whose
+  window lives), so the old socket's last input reaches the view first;
+  the window counts that close as a failed attempt, keeps its token,
+  and says only that the daemon closed the connection before accepting
+  the session, which is all it can see. A window closed by `C-x C-c`
   while lost is a loss to the daemon, which has no socket to hear its
   `Detach` on: the view stays retained for
   `session.view-retention-secs` and holds `daemon.idle-exit-secs`'s
