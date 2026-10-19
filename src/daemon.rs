@@ -2520,6 +2520,17 @@ fn handle_session_established(
                 daemon_debug(format!(
                     "{frontend_id:?} presented {token} but no view is retained for it"
                 ));
+                // E9 fix round 2 (review 2's Low 5) --- a window that
+                // reconnects after its view expired (the GUI's thirty
+                // attempts span 751.5 s against the default 600 s), or to
+                // a daemon that restarted, starts fresh; said on the
+                // status line its first frame carries, as E9.5's
+                // refusals are, so the buffer it lands on is explained.
+                let kept = view_retention(editor).as_secs();
+                editor.core.borrow_mut().status = format!(
+                    "this window's earlier view is gone (a lost socket's view is kept {kept} s, \
+                     session.view-retention-secs; a restarted daemon holds none); starting fresh"
+                );
             }
             build_fresh_frontend_view(editor, fold_projection, panel_capable)
         };

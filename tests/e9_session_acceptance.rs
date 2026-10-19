@@ -392,6 +392,43 @@ fn e9_1_a_retained_view_expires_after_the_retention_window() {
     );
 }
 
+/// E9 fix round 2 (review 2's Low 5) --- a window whose view expired
+/// before it got back (the GUI's thirty attempts run to 751.5 s, past
+/// the default 600 s retention), or that reached a restarted daemon,
+/// starts on a fresh view and is told so on the status line its first
+/// frame carries: until this round it landed somewhere else in silence.
+#[test]
+fn e9_1_a_window_whose_view_expired_is_told_it_starts_fresh() {
+    let daemon = daemon_with_note("pmacs.config.set('session.view-retention-secs', 1)\n");
+    let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    let token = first.token.expect("token");
+    let (scratch, _) = first.where_am_i();
+    let note = first.open_note(scratch);
+    assert_ne!(note, scratch);
+    drop(first);
+    std::thread::sleep(Duration::from_millis(2500));
+    let mut late = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
+    // The status first: a wait drops what it does not match, and the
+    // first frame after the viewport's declaration carries it. The
+    // cursor, which every tick repeats, after.
+    let said = late.wait("the status saying the view is gone", |m| match m {
+        InstanceMessage::StatusFacts {
+            message: Some(message),
+            ..
+        } if message.contains("earlier view is gone") => Some(message.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        late.where_am_i(),
+        (scratch, 0),
+        "a fresh view, not the note"
+    );
+    assert!(
+        said.contains("kept 1 s") && said.contains("starting fresh"),
+        "the status names the retention and what happened: {said:?}"
+    );
+}
+
 /// With the knob at zero nothing is retained: the token presented at
 /// once resumes nothing.
 #[test]
