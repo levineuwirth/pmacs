@@ -60,8 +60,9 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
                      the socket; every attached frontend is told. Asks
                      nothing about unsaved buffers: the quit's hooks run
                      first (the autosave's last sweep of unsaved text,
-                     the desktop session, saveplace), and a veto from
-                     them does not hold the stop.
+                     saveplace; a daemon saves no desktop session, which
+                     is local-only), and a veto from them does not hold
+                     the stop.
   --attach           connect to a running daemon as a frontend; F12
                      detaches without killing the daemon. With a
                      positional <target>, attach over the named
@@ -728,6 +729,35 @@ mod tests {
             }) => assert_eq!(socket, Some("/tmp/foo.sock".into())),
             other => panic!("expected Daemon; got {other:?}"),
         }
+    }
+
+    /// E9 fix round 2 (review 2's Low 3) --- `--stop`'s text promises
+    /// what the quit's hooks do under a daemon and nothing more: the
+    /// autosave's last sweep and saveplace run, while `desktop.lua`
+    /// refuses to enable itself whenever `pmacs.session.is_daemon()`, so
+    /// its `editor.before-quit` subscriber saves nothing there. The text
+    /// once listed "the desktop session" among what the hooks run.
+    #[test]
+    fn stop_usage_promises_no_desktop_save() {
+        let stop = USAGE
+            .split("  --stop")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  --").next())
+            .expect("the --stop paragraph");
+        let stop = stop.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            stop.contains("the autosave's last sweep of unsaved text"),
+            "{stop}"
+        );
+        assert!(stop.contains("saveplace"), "{stop}");
+        assert!(
+            stop.contains("a daemon saves no desktop session, which is local-only"),
+            "{stop}"
+        );
+        assert!(
+            !stop.contains("the desktop session, saveplace"),
+            "the hooks are not said to save the desktop: {stop}"
+        );
     }
 
     /// E9.4 --- `--status` and `--stop` ride `--daemon`, one at a time.
