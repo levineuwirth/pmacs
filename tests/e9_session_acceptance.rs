@@ -28,6 +28,11 @@ use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
 use common::daemon::{TestDaemon, build_default_caps};
 
+#[path = "common/editor.rs"]
+mod editor;
+use editor::eval;
+use pmacs::editor::EditorState;
+
 /// One attached semantic session: its writer, a channel of everything
 /// the daemon wrote to it, its id and the token it was minted.
 struct Session {
@@ -468,6 +473,37 @@ fn e9_1_a_resume_after_the_handshake_is_dropped_and_the_session_served() {
         resumed.where_am_i().0,
         note,
         "the retained view was not consumed by the late Resume"
+    );
+}
+
+/// E9 fix round 2 (review 2's Low 4) --- the retention knob says whose
+/// view it keeps, as `describe-variable` shows it: a frontend whose
+/// socket was lost, since a frontend that detaches or quits keeps
+/// nothing (fix round 1), and that a GUI window closed with `C-x C-c`
+/// while lost is one of those, the daemon having heard no `Detach`. The
+/// text said "a detached frontend's window" until this round.
+#[test]
+fn e9_1_the_retention_knob_says_it_keeps_a_lost_socket_s_view() {
+    let editor = EditorState::new_with_roots(&common::iso::roots());
+    let description: String = eval(
+        &editor,
+        "return pmacs.config.describe('session.view-retention-secs').description",
+    );
+    assert!(
+        description.contains("a frontend whose socket was lost"),
+        "{description}"
+    );
+    assert!(
+        description.contains("a frontend that detaches or quits keeps nothing"),
+        "{description}"
+    );
+    assert!(
+        description.contains("closed with C-x C-c while lost counts as lost"),
+        "{description}"
+    );
+    assert!(
+        !description.contains("a detached frontend's window"),
+        "{description}"
     );
 }
 

@@ -215,8 +215,12 @@ whole. Under one cap a growing register squeezes the rules.
   (`pmacs_protocol::reconnect`, E9.2), presenting the token of its last
   session so the daemon starts the new socket on the view it retained
   (E9.1); after thirty failed attempts, about twelve minutes, it stops
-  and the band says to close the window. The local grid attach (`pmacs
-  --attach` on a socket) does neither: it exits when the daemon's socket
-  closes, as it always has, and never presents a token, since a grid
-  session is minted none. Removed when the local attach reconnects on
-  the same schedule and the token family reaches grid sessions.
+  and the band says to close the window. A window closed by `C-x C-c`
+  while lost is a loss to the daemon, which has no socket to hear its
+  `Detach` on: the view stays retained for
+  `session.view-retention-secs` and holds `daemon.idle-exit-secs`'s
+  clock that long. The local grid attach (`pmacs --attach` on a socket)
+  does neither: it exits when the daemon's socket closes, as it always
+  has, and never presents a token, since a grid session is minted none.
+  Removed when the local attach reconnects on the same schedule and the
+  token family reaches grid sessions.

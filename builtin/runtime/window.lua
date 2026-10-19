@@ -41,16 +41,20 @@ pmacs.config.define {
   mutability = "live",
 }
 
--- E9: how long the daemon keeps a detached frontend's view --- its
--- window, buffer, cursor and scroll --- for the session token that
--- frontend holds, so a GUI that loses its socket and reconnects lands
--- where it was. The retained windows are still updated by every edit
--- (E6d.5 measured what leaked windows cost), so the window is bounded;
--- 0 retains nothing, and a frontend reconnecting later than this starts
--- on a fresh view. Read by the daemon on every tick.
+-- E9: how long the daemon keeps the view of a frontend whose socket was
+-- lost --- its window, buffer, cursor and scroll --- for the session
+-- token that frontend holds, so a GUI that loses its socket and
+-- reconnects lands where it was. A frontend that said it was leaving
+-- (its window's close, its own quit) keeps nothing; a GUI window closed
+-- with C-x C-c while lost had no socket to say so on, so the daemon saw
+-- a loss and keeps its view (E9 fix round 2). The retained windows are
+-- still updated by every edit (E6d.5 measured what leaked windows cost),
+-- so the window is bounded; 0 retains nothing, and a frontend
+-- reconnecting later than this starts on a fresh view. Read by the
+-- daemon on every tick.
 pmacs.config.define {
   name = "session.view-retention-secs",
-  description = "Seconds a detached frontend's window, buffer and cursor are kept for its session token, so a reconnecting GUI resumes where it was; 0 keeps nothing.",
+  description = "Seconds the window, buffer and cursor of a frontend whose socket was lost are kept for its session token, so a reconnecting GUI resumes where it was; a frontend that detaches or quits keeps nothing, and a GUI window closed with C-x C-c while lost counts as lost. 0 keeps nothing.",
   type = "integer",
   default = 600,
   min = 0,
