@@ -344,9 +344,9 @@ fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
     );
 
     // The token: the note, at the cursor the first session left.
-    let mut resumed = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
+    let (resumed, landed) = resume_once_the_loss_is_seen(&daemon, token, (note, 3));
     assert_eq!(
-        resumed.where_am_i(),
+        landed,
         (note, 3),
         "the resumed session starts on the retained window"
     );
@@ -365,8 +365,38 @@ fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
 
     // And the resumed session's own token carries the same view on.
     drop(resumed);
-    let mut third = Session::attach(&daemon, PROTOCOL_VERSION, Some(resumed_token));
-    assert_eq!(third.where_am_i(), (note, 3), "the chain continues");
+    let (_third, landed) = resume_once_the_loss_is_seen(&daemon, resumed_token, (note, 3));
+    assert_eq!(landed, (note, 3), "the chain continues");
+}
+
+/// Present `token` on a new socket once the daemon has processed the
+/// loss of the socket that held it, and return the session with where
+/// it landed: within ten seconds, an attempt that lands elsewhere leaves
+/// as a window does and the next follows 50 ms later. A token presented
+/// while its own session is still registered resumes nothing, by design
+/// (`e9_review1_a_token_presented_while_its_session_lives_resumes_nothing`),
+/// and the daemon learns of a dropped socket from its reader thread's
+/// EOF or the tick loop's next failed write, whichever comes first; a
+/// row that drops a socket and presents its token at once races both,
+/// and lost on CI's macOS lua54 leg at `9024c22` (E9 fix round 2). A
+/// real window's first reconnect waits the schedule's first delay. The
+/// attempts that land fresh retain nothing (they leave with `Detach`)
+/// and consume nothing, so the token's view is still there to take.
+fn resume_once_the_loss_is_seen(
+    daemon: &TestDaemon,
+    token: SessionToken,
+    expect: (BufferId, u64),
+) -> (Session, (BufferId, u64)) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut session = Session::attach(daemon, PROTOCOL_VERSION, Some(token));
+        let landed = session.where_am_i();
+        if landed == expect || Instant::now() >= deadline {
+            return (session, landed);
+        }
+        session.close_as_a_window_does();
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// A retained view is kept for `session.view-retention-secs` and no
