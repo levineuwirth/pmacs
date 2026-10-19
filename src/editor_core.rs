@@ -644,6 +644,15 @@ pub struct EditorCore {
     pub status: String,
     /// True iff the editor should exit at the next iteration.
     pub quit: bool,
+    /// E9 (fix round 2, Medium 4, the owner's ruling) --- the attached
+    /// frontend whose own quit set `quit` (the last frontend's `y` to
+    /// "stop the daemon too?"), recorded by the Lua `quit` binding when
+    /// the acting frontend is not LOCAL. The daemon's shutdown tells it
+    /// `Goodbye(Detached)` before the others' `ShuttingDown`, so its
+    /// window closes as on `n` rather than staying open under E2.3's
+    /// notice. `None` for a quit from LOCAL, `--stop`, a signal or the
+    /// idle exit.
+    pub quit_by: Option<FrontendId>,
     /// E9.3 --- the attached frontend whose own quit asked to be
     /// detached (`pmacs.editor.detach()`), taken by the daemon's
     /// dispatcher after the event that set it: that frontend is told
@@ -873,6 +882,7 @@ impl EditorCore {
             views,
             status: String::new(),
             quit: false,
+            quit_by: None,
             detach_requested: None,
             minibuffer: Minibuffer::new(),
             active_frontend: FrontendId::LOCAL,

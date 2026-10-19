@@ -1591,6 +1591,10 @@ fn probe_scroll_top(app: &App) -> usize {
 /// its whole run, which the generic loop cannot: that loop reads both
 /// directly. The undo probe is its own loop for the same reason.
 fn run_probe(socket: &Path, report: &Path) -> i32 {
+    // E9.3 (fix round 2): the quit probe types nothing.
+    if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "quit") {
+        return run_quit_probe(socket, report);
+    }
     match std::env::var_os("PMACS_GPU_PROBE_TYPE_TEXT")
         .and_then(|value| value.into_string().ok())
         .filter(|value| !value.is_empty())
@@ -2355,6 +2359,146 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
+    let _ = writeln!(out, "phase.done={}", phase == Phase::Done);
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!("pmacs-gpu probe: write report: {error}");
+        return 6;
+    }
+    0
+}
+
+/// E9.3 (fix round 2, the owner's ruling on review 1's Medium 4) ---
+/// the last window's quit, through the production `App` against a real
+/// daemon: attach, `C-x C-c` once the session is idle (the `C-x` waits
+/// for the daemon's pending prefix, as the undo probe's does), wait for
+/// the daemon's "stop the daemon too?" on the minibuffer, answer `y`,
+/// and pump what the daemon writes until its socket closes. The report
+/// says whether the question came, which `Goodbye` arrived, whether the
+/// window asked to exit (`exit_requested`, which the event loop's
+/// `user_event` acts on) and the text it would show if it stayed (E2.3's
+/// notice replaces it). It asserts nothing; the acceptance reads it.
+/// `PMACS_GPU_PROBE_DEADLINE_MS` bounds the run (30 s by default).
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-chord-answer-close session, reported line by line"
+)]
+fn run_quit_probe(socket: &Path, report: &Path) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Attaching,
+        PrefixSent,
+        ChordSent,
+        Answered,
+        Done,
+    }
+
+    let Some(state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    let mut app = App {
+        mode: Mode::Attach {
+            socket: socket.to_path_buf(),
+        },
+        proxy: None,
+        #[cfg(test)]
+        test_force_non_linux: false,
+        state: Some(state),
+        pending_events: Vec::new(),
+        attach_client: None,
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        geometry: geometry::WindowGeometry::default(),
+        geometry_path: None,
+        geometry_dirty_since: None,
+        platform: Platform::current(),
+        exit_code: 0,
+        reconnect: None,
+        exit_requested: false,
+    };
+    app.install_client(client);
+
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(
+            std::env::var("PMACS_GPU_PROBE_DEADLINE_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30_000),
+        );
+    let mut out = String::new();
+    let mut phase = Phase::Attaching;
+    let mut snapshot_seen = false;
+    let mut cursor_seen = false;
+    let mut asked: Option<String> = None;
+    let mut disconnect: Option<String> = None;
+
+    while std::time::Instant::now() < deadline && phase != Phase::Done {
+        // Everything the daemon wrote, through the production dispatch.
+        while let Ok(event) = rx.try_recv() {
+            match &event {
+                AttachEvent::Message(message) => match message.as_ref() {
+                    InstanceMessage::BufferSnapshot { .. } => snapshot_seen = true,
+                    InstanceMessage::CursorByte { .. } => cursor_seen = true,
+                    _ => {}
+                },
+                AttachEvent::Disconnected(reason) => disconnect = Some(reason.clone()),
+            }
+            app.dispatch_app_event(AppEvent::Attach(event));
+        }
+        let s = app.state.as_ref().expect("state");
+        let prompt = s.minibuffer.as_ref().map(|m| m.prompt.clone());
+        match phase {
+            Phase::Attaching => {
+                if snapshot_seen && cursor_seen && s.dispatch_idle && s.own_cursor.is_some() {
+                    app.modifiers = winit::keyboard::ModifiersState::CONTROL;
+                    app.apply_keyboard(&Key::Character("x".into()), None, None);
+                    app.modifiers = winit::keyboard::ModifiersState::empty();
+                    phase = Phase::PrefixSent;
+                }
+            }
+            Phase::PrefixSent => {
+                if !s.dispatch_idle {
+                    app.modifiers = winit::keyboard::ModifiersState::CONTROL;
+                    app.apply_keyboard(&Key::Character("c".into()), None, None);
+                    app.modifiers = winit::keyboard::ModifiersState::empty();
+                    phase = Phase::ChordSent;
+                }
+            }
+            Phase::ChordSent => {
+                if let Some(prompt) = prompt.filter(|p| p.contains("stop the daemon")) {
+                    asked = Some(prompt);
+                    app.apply_keyboard(&Key::Character("y".into()), Some("y"), None);
+                    phase = Phase::Answered;
+                }
+            }
+            Phase::Answered => {
+                if disconnect.is_some() {
+                    phase = Phase::Done;
+                }
+            }
+            Phase::Done => {}
+        }
+        if phase != Phase::Done {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    let s = app.state.as_ref().expect("state");
+    let _ = writeln!(out, "asked={}", asked.is_some());
+    let _ = writeln!(out, "prompt={:?}", asked.unwrap_or_default());
+    let _ = writeln!(out, "goodbye={:?}", s.goodbye);
+    let _ = writeln!(out, "exit_requested={}", app.exit_requested);
+    let _ = writeln!(out, "text.after={:?}", s.current_text);
+    let _ = writeln!(out, "disconnect={:?}", disconnect.unwrap_or_default());
     let _ = writeln!(out, "phase.done={}", phase == Phase::Done);
     if let Err(error) = std::fs::write(report, out) {
         eprintln!("pmacs-gpu probe: write report: {error}");

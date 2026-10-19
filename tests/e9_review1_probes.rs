@@ -363,7 +363,10 @@ fn e9_review1_stop_runs_the_before_quit_hooks() {
 }
 
 /// Control for the row above: the last frontend's `y` is the Lua
-/// quit, which runs the hooks. Passes at `e7c8fd5`.
+/// quit, which runs the hooks. Passes at `e7c8fd5`. Its `Goodbye` read
+/// changed at E9's fix round 2 with the owner's ruling on review 1's
+/// Medium 4: the quitter is told `Detached`, as on `n`, not
+/// `ShuttingDown`.
 #[test]
 fn e9_review1_the_last_frontend_s_y_runs_the_before_quit_hooks() {
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -383,7 +386,7 @@ fn e9_review1_the_last_frontend_s_y_runs_the_before_quit_hooks() {
         _ => None,
     });
     only.key(Key::Char('y'), Modifiers::NONE);
-    assert_eq!(only.ended(), Some(GoodbyeReason::ShuttingDown));
+    assert_eq!(only.ended(), Some(GoodbyeReason::Detached));
     let exit = exit_within(&mut daemon, 10);
     assert!(exit.success(), "{exit:?}");
     assert!(marker.exists(), "y is the quit and runs its hooks");

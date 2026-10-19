@@ -2092,7 +2092,30 @@ fn dispatcher_loop(
         let core_wants_quit = editor.core.borrow().quit;
         let shutting_down = shutdown.load(Ordering::SeqCst) || core_wants_quit;
         if shutting_down {
-            for stream in streams.values_mut() {
+            // E9 (fix round 2, Medium 4, the owner's ruling) --- the
+            // frontend whose own quit stopped the daemon (the last
+            // frontend's `y`) is told `Goodbye(Detached)` first, as its
+            // `n` would have told it, so its window closes rather than
+            // staying open under E2.3's notice; every other frontend is
+            // told `ShuttingDown`. A session below the family's version
+            // cannot decode `Detached` and is told `ShuttingDown`.
+            let quitter = core_wants_quit
+                .then(|| editor.core.borrow().quit_by)
+                .flatten()
+                .filter(|fid| {
+                    session_registry
+                        .session_state(*fid)
+                        .is_some_and(|s| s.negotiated_protocol_version >= SESSION_MIN_VERSION)
+                });
+            if let Some(fid) = quitter
+                && let Some(stream) = streams.get_mut(&fid)
+            {
+                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            }
+            for (fid, stream) in &mut streams {
+                if Some(*fid) == quitter {
+                    continue;
+                }
                 let _ = write_message(
                     stream,
                     &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),

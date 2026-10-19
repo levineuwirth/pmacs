@@ -603,6 +603,57 @@ impl Proxy {
     }
 }
 
+/// The `pmacs-gpu` binary beside this build's `pmacs`, or `None` when
+/// it is not built, which panics under `PMACS_REQUIRE_GPU` so the gate's
+/// GPU leg never passes vacuously.
+fn gpu_probe_binary() -> Option<std::path::PathBuf> {
+    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("test binary directory")
+        .join("pmacs-gpu");
+    if binary.exists() {
+        return Some(binary);
+    }
+    assert!(
+        std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
+        "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+        binary.display()
+    );
+    eprintln!("skipping the GPU probe: {} is not built", binary.display());
+    None
+}
+
+/// A finished headless probe's report as `key=value` facts, or `None`
+/// when it had no wgpu adapter (status 3), which panics under
+/// `PMACS_REQUIRE_GPU`; any other failure panics with the probe's
+/// stderr and `context`.
+fn probe_facts(
+    output: &std::process::Output,
+    report: &Path,
+    context: &str,
+) -> Option<std::collections::HashMap<String, String>> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
+            "headless GPU probe failed (status {:?}, {context}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping the GPU probe: no wgpu adapter available");
+        return None;
+    }
+    // The probe's own log, shown by libtest when the row fails.
+    eprintln!("probe stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    let text = std::fs::read_to_string(report).expect("read the probe report");
+    Some(
+        text.lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+    )
+}
+
 /// Run `pmacs-gpu --headless-probe` under the reconnect action against
 /// `socket`, cutting `proxy` once the probe says it has typed, and
 /// return the report's facts. `None` when skipped (no `pmacs-gpu`
@@ -615,20 +666,7 @@ fn run_reconnect_probe(
     text: &str,
     command: Option<&str>,
 ) -> Option<std::collections::HashMap<String, String>> {
-    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
-    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
-        .parent()
-        .expect("test binary directory")
-        .join("pmacs-gpu");
-    if !binary.exists() {
-        assert!(
-            !required,
-            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
-            binary.display()
-        );
-        eprintln!("skipping the GPU probe: {} is not built", binary.display());
-        return None;
-    }
+    let binary = gpu_probe_binary()?;
     let report = dir.join("reconnect.report");
     let mut ready = report.as_os_str().to_owned();
     ready.push(".ready");
@@ -666,31 +704,13 @@ fn run_reconnect_probe(
     let output = child
         .wait_with_output()
         .expect("wait for the headless GPU probe");
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let no_adapter = output.status.code() == Some(3);
-        assert!(
-            no_adapter && !required,
-            "headless GPU probe failed (status {:?}, cut at {cut_at:?}):\n{stderr}",
-            output.status.code()
-        );
-        eprintln!("skipping the GPU probe: no wgpu adapter available");
-        return None;
-    }
+    let facts = probe_facts(&output, &report, &format!("cut at {cut_at:?}"))?;
     assert!(
         cut_at.is_some(),
         "the probe never wrote its ready marker; stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The probe's own log, shown by libtest when the row fails.
-    eprintln!("probe stderr:\n{}", String::from_utf8_lossy(&output.stderr));
-    let text = std::fs::read_to_string(&report).expect("read the probe report");
-    Some(
-        text.lines()
-            .filter_map(|l| l.split_once('='))
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect(),
-    )
+    Some(facts)
 }
 
 fn fact<'a>(facts: &'a std::collections::HashMap<String, String>, key: &str) -> &'a str {
@@ -872,7 +892,8 @@ fn e9_3_quit_from_an_attached_frontend_detaches_it_and_nothing_else() {
 
 /// The last frontend attached is asked whether the daemon should stop
 /// with it: `n` detaches it and the daemon lives; `y` stops the daemon,
-/// which tells the frontend it is shutting down and exits.
+/// which tells the quitter `Detached`, as `n` does, and exits (since
+/// E9's fix round 2; it told it `ShuttingDown` before).
 #[test]
 fn e9_3_the_last_frontend_is_asked_and_its_answer_decides_the_daemon() {
     let mut daemon = daemon_with_note("");
@@ -905,13 +926,69 @@ fn e9_3_the_last_frontend_is_asked_and_its_answer_decides_the_daemon() {
         _ => None,
     });
     last.key(Key::Char('y'), Modifiers::NONE);
+    // Changed at E9's fix round 2 with the owner's ruling on review 1's
+    // Medium 4: the quitter is told `Detached`, as on `n`, so its window
+    // closes silently; until then it was told `ShuttingDown` and the GPU
+    // window stayed open under E2.3's notice. The daemon still stops.
     assert_eq!(
         last.ended(),
-        Some(GoodbyeReason::ShuttingDown),
-        "y stops the daemon, which says so"
+        Some(GoodbyeReason::Detached),
+        "y stops the daemon and closes the quitter's window as n does"
     );
     let status = exit_within(&mut daemon, 10);
     assert!(status.success(), "a clean stop: {status:?}");
+}
+
+/// E9 fix round 2 (the owner's ruling on review 1's Medium 4) --- the
+/// last GPU window's quit closes it, as its `n` would: through the
+/// production `App` (the headless probe's `quit` action) `C-x C-c` is
+/// asked "stop the daemon too?", `y` stops the daemon, and the window is
+/// told `Detached` and asks to exit. Until this round the daemon told it
+/// `ShuttingDown` and the window stayed open under E2.3's notice, a
+/// window to close by hand after the quit the user asked for.
+#[test]
+fn e9_3_the_last_gpu_window_s_y_closes_it_and_stops_the_daemon() {
+    let mut daemon = daemon_with_note("");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let Some(facts) = run_quit_probe(daemon.socket_path(), dir.path()) else {
+        return;
+    };
+    assert_eq!(
+        fact(&facts, "asked"),
+        "true",
+        "the question reached the window: {facts:?}"
+    );
+    assert_eq!(
+        fact(&facts, "goodbye"),
+        "Some(Detached)",
+        "the quitter is told it was detached: {facts:?}"
+    );
+    assert_eq!(
+        fact(&facts, "exit_requested"),
+        "true",
+        "the window closes, not left open under a notice: {facts:?}"
+    );
+    let status = exit_within(&mut daemon, 10);
+    assert!(status.success(), "y stopped the daemon cleanly: {status:?}");
+}
+
+/// Run `pmacs-gpu --headless-probe` under the quit action against
+/// `socket` and return the report's facts; `None` when skipped, as
+/// [`run_reconnect_probe`] is.
+fn run_quit_probe(socket: &Path, dir: &Path) -> Option<std::collections::HashMap<String, String>> {
+    let binary = gpu_probe_binary()?;
+    let report = dir.join("quit.report");
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(socket)
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_ACTION", "quit")
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "30000")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the headless GPU probe");
+    probe_facts(&output, &report, "the quit probe")
 }
 
 /// A v26 frontend's quit detaches it too, told nothing it could not

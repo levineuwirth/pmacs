@@ -14618,7 +14618,16 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             })?,
         )?;
     }
-    register(editor, lua, core, "quit", |c| c.quit = true)?;
+    // E9 (fix round 2, Medium 4): a quit from an attached frontend is
+    // recorded as that frontend's, so the daemon closes its window
+    // silently (`Goodbye(Detached)`) while the others are told the
+    // daemon is shutting down.
+    register(editor, lua, core, "quit", |c| {
+        c.quit = true;
+        if c.active_frontend != crate::protocol::FrontendId::LOCAL {
+            c.quit_by = Some(c.active_frontend);
+        }
+    })?;
     // E9.3 --- the acting frontend asks to leave the daemon; the
     // dispatcher answers it after this event. From the in-process TUI
     // (LOCAL) there is no socket to leave, so the request is a quit.
