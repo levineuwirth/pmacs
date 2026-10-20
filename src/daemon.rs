@@ -1120,7 +1120,7 @@ fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) 
 ///   (review round 1, R1-2).
 fn panel_event_epochs_are_current(
     editor: &EditorState,
-    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    semantic: Option<&crate::semantic_render::SemanticRenderState>,
     source: FrontendId,
     geometry_epoch: u64,
     panel_epoch: u64,
@@ -1131,7 +1131,7 @@ fn panel_event_epochs_are_current(
             .get(&window_id)
             .map(|window| (window_id, window.buffer_id))
     });
-    semantic_states.get(&source).is_some_and(|sem| {
+    semantic.is_some_and(|sem| {
         sem.panel_declaration_matches(geometry_epoch, panel_epoch, live_presentation)
     }) && core
         .frame_geometry_for(source)
@@ -1157,14 +1157,14 @@ fn panel_event_epochs_are_current(
 /// Grid sessions do not come here: they hold no panel and no gesture.
 fn project_semantic_frame(
     editor: &mut EditorState,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    mut semantic: Option<&mut crate::semantic_render::SemanticRenderState>,
     fid: FrontendId,
 ) -> Vec<InstanceMessage> {
-    let messages = semantic_states
-        .get_mut(&fid)
+    let messages = semantic
+        .as_deref_mut()
         .map(|sem| sem.render_frame(editor))
         .unwrap_or_default();
-    drain_pending_release(editor, semantic_states, fid);
+    drain_pending_release(editor, semantic, fid);
     messages
 }
 
@@ -1190,12 +1190,11 @@ fn project_semantic_frame(
 /// never made.
 fn drain_pending_release(
     editor: &mut EditorState,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    semantic: Option<&mut crate::semantic_render::SemanticRenderState>,
     source: FrontendId,
 ) {
-    let Some(record) = semantic_states
-        .get_mut(&source)
-        .and_then(crate::semantic_render::SemanticRenderState::take_pending_release)
+    let Some(record) =
+        semantic.and_then(crate::semantic_render::SemanticRenderState::take_pending_release)
     else {
         return;
     };
@@ -1216,7 +1215,7 @@ fn drain_pending_release(
 /// RECORDED completion and takes the record. Running both is P5.
 fn replay_panel_pointer(
     editor: &mut EditorState,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    mut semantic: Option<&mut crate::semantic_render::SemanticRenderState>,
     source: FrontendId,
     buffer_id: crate::buffer::BufferId,
     coord: pmacs_protocol::CellCoord,
@@ -1230,7 +1229,7 @@ fn replay_panel_pointer(
     // gesture's press does; draining afterwards would put them on the
     // wire in the wrong order, which reads to the child as a press
     // followed by a release of the gesture BEFORE it.
-    drain_pending_release(editor, semantic_states, source);
+    drain_pending_release(editor, semantic.as_deref_mut(), source);
 
     let disposition = editor.classify_panel_pointer(source, buffer_id, coord, kind);
     let outcome = disposition.outcome();
@@ -1239,8 +1238,8 @@ fn replay_panel_pointer(
         // event cannot be known to concern the live gesture at all.
         return;
     }
-    let live = semantic_states
-        .get(&source)
+    let live = semantic
+        .as_deref()
         .is_some_and(crate::semantic_render::SemanticRenderState::has_accepted_gesture);
 
     match kind {
@@ -1260,10 +1259,10 @@ fn replay_panel_pointer(
             // replacement lands, so the wire carries
             // `old press, old release, new press`.
             if live {
-                if let Some(state) = semantic_states.get_mut(&source) {
+                if let Some(state) = semantic.as_deref_mut() {
                     let _ = state.cancel_accepted_gesture();
                 }
-                drain_pending_release(editor, semantic_states, source);
+                drain_pending_release(editor, semantic.as_deref_mut(), source);
             }
 
             // ARMED FROM THE EFFECT RESULT, and only if there was one.
@@ -1274,7 +1273,7 @@ fn replay_panel_pointer(
             else {
                 return;
             };
-            if let Some(state) = semantic_states.get_mut(&source) {
+            if let Some(state) = semantic.as_deref_mut() {
                 state.arm_accepted_gesture(crate::semantic_render::AcceptedPanelGesture {
                     button: MouseButton::Left,
                     coord,
@@ -1294,15 +1293,15 @@ fn replay_panel_pointer(
             // The disposition above decided only whether this cell is
             // ours and in content; WHERE the drag goes is the domain the
             // press resolved (G5k).
-            let Some(domain) = semantic_states
-                .get(&source)
+            let Some(domain) = semantic
+                .as_deref()
                 .and_then(crate::semantic_render::SemanticRenderState::accepted_gesture)
                 .map(|record| record.domain)
             else {
                 return;
             };
             editor.replay_panel_gesture_in_domain(source, domain, coord, kind, mods);
-            if let Some(state) = semantic_states.get_mut(&source) {
+            if let Some(state) = semantic.as_deref_mut() {
                 state.note_gesture_content_cell(coord);
             }
         }
@@ -1319,7 +1318,7 @@ fn replay_panel_pointer(
                     // still in the RECORDED domain, or a mid-gesture mode
                     // flip would route this release away from the target
                     // that received the press (G5k).
-                    let record = semantic_states.get_mut(&source).and_then(
+                    let record = semantic.and_then(
                         crate::semantic_render::SemanticRenderState::consume_accepted_gesture,
                     );
                     if let Some(record) = record {
@@ -1340,7 +1339,7 @@ fn replay_panel_pointer(
                     // The release landed on chrome, so the content path
                     // never ran. Terminate from the record, at its last
                     // valid content cell.
-                    let record = semantic_states.get_mut(&source).and_then(
+                    let record = semantic.and_then(
                         crate::semantic_render::SemanticRenderState::consume_accepted_gesture,
                     );
                     if let Some(record) = record {
@@ -1418,7 +1417,7 @@ fn peer_uses_mapped_panel_family(session_registry: &SessionRegistry, source: Fro
 /// frontend was shown" and "what the daemon checks" cannot drift.
 fn panel_mapping_is_current(
     editor: &EditorState,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    semantic: Option<&mut crate::semantic_render::SemanticRenderState>,
     source: FrontendId,
     kind: pmacs_protocol::MouseKind,
     echoed: u64,
@@ -1437,8 +1436,7 @@ fn panel_mapping_is_current(
         return true;
     }
     let snapshot = editor.panel_mapping_snapshot(source);
-    semantic_states
-        .get_mut(&source)
+    semantic
         .and_then(|state| state.panel_mapping_generation(snapshot))
         .is_some_and(|current| current == echoed)
 }
@@ -1460,10 +1458,9 @@ fn panel_mapping_is_current(
 fn peer_may_send_panel_events(
     editor: &EditorState,
     session_registry: &SessionRegistry,
-    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
     source: FrontendId,
 ) -> bool {
-    semantic_states.contains_key(&source)
+    session_registry.semantic(source).is_some()
         && session_registry
             .session_state(source)
             .is_some_and(|state| state.negotiated_protocol_version >= PANEL_MIN_VERSION)
@@ -1514,36 +1511,24 @@ fn dispatcher_loop(
     injected_render_latency_jitter_ms: u64,
     jitter_seed: u64,
 ) -> Result<(), DaemonError> {
-    // Per-frontend dispatcher state.
-    let mut render_states: HashMap<FrontendId, RenderState> = HashMap::new();
-    // T M11.2 — parallel to `render_states`, but for `semantic_render`
-    // sessions: the dispatcher selects the projection *per session*,
-    // so a frontend has exactly one of a `RenderState` (grid) or a
+    // Per-frontend dispatcher state, one `Session` per frontend (E9b).
+    // T M11.2 — the dispatcher selects the projection *per session*, so
+    // a frontend has exactly one of a `RenderState` (grid) or a
     // `SemanticRenderState` (layout-local), never both. A grid and a
     // semantic frontend can attach to the same buffer simultaneously.
-    let mut semantic_states: HashMap<FrontendId, crate::semantic_render::SemanticRenderState> =
-        HashMap::new();
-    let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
-    let mut term_sizes: HashMap<FrontendId, CellSize> = HashMap::new();
-    // T M11.6 — last `DispatchIdle` value broadcast per `crdt_replica`
-    // frontend. Absence means "never sent" — the first tick after
-    // attach emits an initial `DispatchIdle` so the frontend starts
-    // from a known idle state (its default is pessimistic-`false`).
-    let mut last_dispatch_idle_sent: HashMap<FrontendId, bool> = HashMap::new();
-    // Arc 1b — the buffer each replica frontend last received a
-    // `BufferSnapshot` for via the active-buffer-follow path. Absence
-    // means "never sent": the first tick after attach ships the
-    // frontend its own active buffer, which also repairs the
-    // attach-time last-snapshot-wins ambiguity (the initial
-    // `send_buffer_snapshots` sweep sends every buffer; the display
-    // follows whichever arrived last, not necessarily the active one).
-    // Declared for both flavors (the follow path is crdt-gated; the
-    // detach cleanup isn't).
-    let mut last_active_buffer_sent: HashMap<FrontendId, crate::buffer::BufferId> = HashMap::new();
-    // Active-terminal BEL delivery baseline. Switching away forgets the
-    // terminal so historical bells are never replayed on later activation.
-    let mut terminal_bell_baselines: HashMap<FrontendId, (crate::buffer::BufferId, u64)> =
-        HashMap::new();
+    // T M11.6 — a session's `last_dispatch_idle_sent` is `None` until
+    // the first tick after attach emits an initial `DispatchIdle`, so
+    // the frontend starts from a known idle state (its default is
+    // pessimistic-`false`). Arc 1b — its `last_active_buffer_sent` is
+    // `None` until the first tick after attach ships the frontend its
+    // own active buffer, which also repairs the attach-time
+    // last-snapshot-wins ambiguity (the initial `send_buffer_snapshots`
+    // sweep sends every buffer; the display follows whichever arrived
+    // last, not necessarily the active one); kept for both flavors (the
+    // follow path is crdt-gated; the detach cleanup isn't). Its
+    // `bell_baseline` is the active terminal's BEL delivery baseline:
+    // switching away forgets the terminal so historical bells are never
+    // replayed on later activation.
     let mut session_registry = SessionRegistry::new();
     // E9.4 — when the last attached frontend left, for the opt-in idle
     // exit (`daemon.idle-exit-secs`); `None` while any is attached.
@@ -1570,18 +1555,7 @@ fn dispatcher_loop(
                 "pmacs: {fid:?} sent no EOF within {} ms of its failed write; tearing it down",
                 WRITE_FAILURE_DRAIN.as_millis()
             );
-            detach_frontend(
-                editor,
-                &mut render_states,
-                &mut semantic_states,
-                &mut streams,
-                &mut term_sizes,
-                &mut last_dispatch_idle_sent,
-                &mut last_active_buffer_sent,
-                &mut terminal_bell_baselines,
-                &mut session_registry,
-                fid,
-            );
+            detach_frontend(editor, &mut session_registry, fid);
         }
         // Per-tick render + presence sweep for each attached
         // frontend. T M10.8 — temporarily flip `active_frontend` to
@@ -1590,15 +1564,14 @@ fn dispatcher_loop(
         // loop to the last-dispatched value (Q11: tick-driven render
         // doesn't update active_frontend in the user-driving sense).
         let last_dispatched = editor.core.borrow().active_frontend;
-        // Union of grid + semantic sessions — each fid is in exactly
-        // one of the two maps (projection selected per session). A
-        // draining session (E9 fix round 4) keeps its projection, for
-        // the input its reader still delivers, but has no pass: nothing
-        // is rendered, followed, swept or written for it again.
-        let attached_fids: Vec<FrontendId> = render_states
-            .keys()
-            .chain(semantic_states.keys())
-            .copied()
+        // Union of grid + semantic sessions — each fid has exactly one
+        // of the two projections (selected per session). A draining
+        // session (E9 fix round 4) keeps its projection, for the input
+        // its reader still delivers, but has no pass: nothing is
+        // rendered, followed, swept or written for it again.
+        let attached_fids: Vec<FrontendId> = session_registry
+            .projected_ids()
+            .into_iter()
             .filter(|fid| !session_registry.is_draining(*fid))
             .collect();
 
@@ -1628,7 +1601,6 @@ fn dispatcher_loop(
         broadcast_pending_crdt_ops(
             editor,
             &mut session_registry,
-            &mut streams,
             &mut CrdtBroadcastLatency {
                 jitter_ms: injected_render_latency_jitter_ms,
                 fixed_ms: injected_render_latency_ms,
@@ -1643,7 +1615,7 @@ fn dispatcher_loop(
         // the OS clipboard (OSC 52 / arboard). One-shot, like the CRDT
         // drain above.
         if let Some((fid, bytes)) = editor.core.borrow_mut().take_pending_clipboard()
-            && let Some(stream) = streams.get_mut(&fid)
+            && let Some(stream) = session_registry.stream_mut(fid)
         {
             let _ = write_message(
                 stream,
@@ -1678,10 +1650,9 @@ fn dispatcher_loop(
                     && broadcast_buffer_snapshot_to_replicas(
                         editor,
                         upgraded,
-                        &session_registry,
-                        &mut streams,
-                        &mut semantic_states,
+                        &mut session_registry,
                     )
+                    && let Some(session) = session_registry.session_mut(*fid)
                 {
                     // The broadcast just delivered this buffer to this
                     // frontend too; record it so the follow check below
@@ -1689,7 +1660,7 @@ fn dispatcher_loop(
                     // oversize snapshot (E9.5) is not recorded: the
                     // follow check below then refuses the switch and
                     // says so.
-                    last_active_buffer_sent.insert(*fid, upgraded);
+                    session.last_active_buffer_sent = Some(upgraded);
                 }
 
                 // Arc 1b — follow this frontend's active buffer. The
@@ -1716,14 +1687,17 @@ fn dispatcher_loop(
                     .is_some_and(|s| s.negotiated_capabilities.semantic_render)
                 {
                     let active_now = document_buffer_to_follow(editor, *fid);
+                    let last_sent = session_registry
+                        .session(*fid)
+                        .and_then(|session| session.last_active_buffer_sent);
                     if let Some(active_now) = active_now
-                        && last_active_buffer_sent.get(fid) != Some(&active_now)
+                        && last_sent != Some(active_now)
                     {
                         match send_buffer_snapshot_to_frontend(
                             editor,
                             active_now,
                             *fid,
-                            &mut streams,
+                            &mut session_registry,
                         ) {
                             Ok(()) => {
                                 // PR #120 round 2 — the snapshot just
@@ -1732,10 +1706,12 @@ fn dispatcher_loop(
                                 // must die with it or an
                                 // unchanged-generation revisit
                                 // (A → B → A) suppresses every re-send.
-                                if let Some(sem) = semantic_states.get_mut(fid) {
-                                    sem.on_buffer_snapshot_sent(active_now);
+                                if let Some(session) = session_registry.session_mut(*fid) {
+                                    if let Some(sem) = session.semantic.as_mut() {
+                                        sem.on_buffer_snapshot_sent(active_now);
+                                    }
+                                    session.last_active_buffer_sent = Some(active_now);
                                 }
-                                last_active_buffer_sent.insert(*fid, active_now);
                             }
                             // E9.5 — refused, said, and the window put
                             // back on the buffer the frontend mirrors; a
@@ -1746,10 +1722,9 @@ fn dispatcher_loop(
                             // in place, the window was refused again on
                             // every tick that reached here).
                             Err(len) => {
-                                let back_to =
-                                    last_active_buffer_sent.get(fid).copied().unwrap_or_else(
-                                        || editor.core.borrow().fallback_buffer_for(active_now),
-                                    );
+                                let back_to = last_sent.unwrap_or_else(|| {
+                                    editor.core.borrow().fallback_buffer_for(active_now)
+                                });
                                 refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
                             }
                         }
@@ -1768,22 +1743,20 @@ fn dispatcher_loop(
             // out locally); it still receives `CursorByte` below
             // (semantic implies `crdt_replica`) and participates in
             // presence. A grid session takes the M5.2 cell path.
-            let messages = if semantic_states.contains_key(fid) {
-                project_semantic_frame(editor, &mut semantic_states, *fid)
+            let messages = if session_registry.semantic(*fid).is_some() {
+                project_semantic_frame(editor, session_registry.semantic_mut(*fid), *fid)
             } else {
                 // T M10.9 — gather other-frontend presences for the
                 // overlay paint. Reads `last_broadcast` (updated by
                 // the sweep below); other-frontend snapshots lag by
                 // at most one tick. Imperceptible at frame cadence.
                 let other_presences = session_registry.other_presences_for(*fid);
-                let render_size = render_states
-                    .get(fid)
-                    .expect("render_state present for attached grid fid")
-                    .size();
-                let terminal_snapshots = editor.prepare_terminal_views(*fid, render_size);
-                let render_state = render_states
-                    .get_mut(fid)
+                let render_state = session_registry
+                    .session_mut(*fid)
+                    .and_then(|session| session.render.as_mut())
                     .expect("render_state present for attached grid fid");
+                let render_size = render_state.size();
+                let terminal_snapshots = editor.prepare_terminal_views(*fid, render_size);
                 render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
             };
 
@@ -1791,8 +1764,8 @@ fn dispatcher_loop(
             // no document cursor: the identity buffer is empty, so a
             // `CursorByte` would describe byte 0 of a buffer with no
             // text and scroll the frontend's document view against it.
-            let terminal_mode = semantic_states
-                .get(fid)
+            let terminal_mode = session_registry
+                .semantic(*fid)
                 .is_some_and(crate::semantic_render::SemanticRenderState::in_terminal_mode);
 
             // T M10.6 per-frontend presence sweep. The snapshot is
@@ -1830,11 +1803,12 @@ fn dispatcher_loop(
             // gate their optimistic-apply path on this; we ship it
             // before the frame's other messages so a frontend that
             // wakes mid-tick sees the gate flip first. Diff-suppressed
-            // — initial-after-attach (`last_dispatch_idle_sent` absent)
+            // — initial-after-attach (`last_dispatch_idle_sent` `None`)
             // and value-change emissions only.
             let mut write_failed = false;
-            if take_pending_terminal_bell(editor, *fid, &mut terminal_bell_baselines)
-                && let Some(stream) = streams.get_mut(fid)
+            if let Some(session) = session_registry.session_mut(*fid)
+                && take_pending_terminal_bell(editor, *fid, &mut session.bell_baseline)
+                && let Some(stream) = session.stream.as_mut()
                 && let Err(error) =
                     write_message(stream, &InstanceMessage::Signal(InstanceSignal::Bell))
             {
@@ -1846,23 +1820,27 @@ fn dispatcher_loop(
                 // optimistic-apply frontends care) and the negotiated
                 // wire version (>= 4 means peer knows the variant).
                 s.negotiated_capabilities.crdt_replica && s.negotiated_protocol_version >= 4
-            }) && let Some(stream) = streams.get_mut(fid)
+            }) && let Some(session) = session_registry.session_mut(*fid)
+                && let Some(stream) = session.stream.as_mut()
             {
                 let idle_now = editor.dispatch_idle_for(*fid);
-                if last_dispatch_idle_sent.get(fid) != Some(&idle_now) {
+                if session.last_dispatch_idle_sent != Some(idle_now) {
                     if let Err(e) =
                         write_message(stream, &InstanceMessage::DispatchIdle { idle: idle_now })
                     {
                         eprintln!("pmacs: write DispatchIdle for {fid:?} failed: {e}");
                         write_failed = true;
                     } else {
-                        last_dispatch_idle_sent.insert(*fid, idle_now);
+                        session.last_dispatch_idle_sent = Some(idle_now);
                     }
                 }
             }
 
-            // Write frame messages to this frontend's stream.
-            if let Some(stream) = streams.get_mut(fid)
+            // Write frame messages to this frontend's stream. The
+            // session's state is read first, since the stream borrows the
+            // session for the rest of the block.
+            let state = session_registry.session_state(*fid);
+            if let Some(stream) = session_registry.stream_mut(*fid)
                 && !write_failed
             {
                 // Q#S1 — `StatusFacts` is a v8 variant; an older peer
@@ -1873,19 +1851,16 @@ fn dispatcher_loop(
                 // moved 8 → 15: an older peer's band goes dark rather
                 // than mis-decoding the wider shape (the v10
                 // SearchPrompt / v14 LineNumbers precedent).
-                let peer_knows_status_facts = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 15);
+                let peer_knows_status_facts =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 15);
                 // Q#SR5 / Q#RX6 — `SearchPrompt` gained regex/invalid
                 // fields in v10 (encoding change); gate at >= 10 so a v9
                 // peer is sent no SearchPrompt rather than the wider
                 // shape it would mis-decode.
-                let peer_knows_search_prompt = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 10);
-                let peer_knows_menu_prompt = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 11);
+                let peer_knows_search_prompt =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 10);
+                let peer_knows_menu_prompt =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 11);
                 // Q#MB1 / Discovery Stage 2 — the minibuffer is the one
                 // surface with TWO live variants, and the gate is a
                 // RANGE on both sides rather than a floor. The legacy
@@ -1893,44 +1868,37 @@ fn dispatcher_loop(
                 // `MinibufferPromptRows` belongs to `>= 23`. Writing the
                 // legacy gate as a bare `>= 12` would let a v23 peer
                 // receive both and double-render its dropdown.
-                let peer_knows_minibuffer_prompt =
-                    session_registry.session_state(*fid).is_some_and(|s| {
-                        (12..crate::semantic_render::MINIBUFFER_ROWS_MIN_VERSION)
-                            .contains(&s.negotiated_protocol_version)
-                    });
-                let peer_knows_minibuffer_rows =
-                    session_registry.session_state(*fid).is_some_and(|s| {
-                        s.negotiated_protocol_version
-                            >= crate::semantic_render::MINIBUFFER_ROWS_MIN_VERSION
-                    });
+                let peer_knows_minibuffer_prompt = state.is_some_and(|s| {
+                    (12..crate::semantic_render::MINIBUFFER_ROWS_MIN_VERSION)
+                        .contains(&s.negotiated_protocol_version)
+                });
+                let peer_knows_minibuffer_rows = state.is_some_and(|s| {
+                    s.negotiated_protocol_version
+                        >= crate::semantic_render::MINIBUFFER_ROWS_MIN_VERSION
+                });
                 // UX gutter — `LineNumbers` carries a `LineNumberMode` since
                 // v14 (was `enabled: bool` in v13); a peer below 14 keeps
                 // its gutter off rather than mis-decoding the wider shape.
-                let peer_knows_line_numbers = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 14);
+                let peer_knows_line_numbers =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 14);
                 // Arc 1a Q#C5 — CompletionPopup gated at v15; a v14 peer
                 // still completes via the daemon-side session + key
                 // round-trip, it just gets no GPU dropdown.
-                let peer_knows_completion_popup = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 15);
+                let peer_knows_completion_popup =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 15);
                 // Themes Q#TH7 — ThemeFacts gated at v16; a v15 peer's
                 // chrome simply stays on its frontend defaults.
-                let peer_knows_theme_facts = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 16);
+                let peer_knows_theme_facts =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 16);
                 // Themes stage 2 Q#F4 — FontFacts gated at v17; a v16
                 // peer simply keeps its built-in font.
-                let peer_knows_font_facts = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 17);
+                let peer_knows_font_facts =
+                    state.is_some_and(|s| s.negotiated_protocol_version >= 17);
                 // Q#SL7 — independently gate the v18 statusline variant
                 // even though the semantic producer also skips callbacks
                 // and message construction for older peers.
-                let negotiated_protocol_version = session_registry
-                    .session_state(*fid)
-                    .map_or(0, |s| s.negotiated_protocol_version);
+                let negotiated_protocol_version =
+                    state.map_or(0, |s| s.negotiated_protocol_version);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -2071,9 +2039,7 @@ fn dispatcher_loop(
                 // paint path consumes the grid coord.
                 if !write_failed
                     && !terminal_mode
-                    && session_registry
-                        .session_state(*fid)
-                        .is_some_and(|s| s.negotiated_capabilities.crdt_replica)
+                    && state.is_some_and(|s| s.negotiated_capabilities.crdt_replica)
                     && let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, *fid)
                 {
                     let cursor_byte_msg = InstanceMessage::CursorByte {
@@ -2090,12 +2056,16 @@ fn dispatcher_loop(
             // Route presence broadcasts to their recipient streams
             // (recipients != fid per sender-exclusion).
             for entry in &broadcasts {
-                if let Some(stream) = streams.get_mut(&entry.recipient) {
+                if let Some(stream) = session_registry.stream_mut(entry.recipient) {
                     let _ = write_message(stream, &entry.message);
                 }
             }
 
-            if write_failed && let Some(stream) = streams.remove(fid) {
+            if write_failed
+                && let Some(stream) = session_registry
+                    .session_mut(*fid)
+                    .and_then(|session| session.stream.take())
+            {
                 // E9 fix round 4 (review 4's Medium 1; the owner's ruling
                 // of 2026-10-20, a bounded drain) --- output stops here
                 // and input does not. E8d.4 tore the frontend down at
@@ -2105,8 +2075,8 @@ fn dispatcher_loop(
                 // late or never; the refusal-and-retry ruling (fix round
                 // 3) needs the old socket read to its end before its
                 // view is retained for the token. A failed write stops
-                // the output and nothing else: the stream leaves the
-                // write map, so no frame, presence, bell, op, snapshot
+                // the output and nothing else: the stream is taken out of
+                // its session, so no frame, presence, bell, op, snapshot
                 // or `Goodbye` reaches it again, and its session stays
                 // registered, so what its reader still reads is
                 // dispatched to its view and its token is live (a
@@ -2146,7 +2116,7 @@ fn dispatcher_loop(
         // owed the input still on its way and then, unless it said it
         // was leaving, the retention, so the clock holds through the
         // drain and starts no earlier than its teardown.
-        let attached_now = render_states.len() + semantic_states.len();
+        let attached_now = session_registry.projected_ids().len();
         if attached_now == 0 && !session_registry.retains_views() {
             let idle_for = idle_since.get_or_insert_with(Instant::now).elapsed();
             let limit = idle_exit_after(editor);
@@ -2183,14 +2153,17 @@ fn dispatcher_loop(
                         .is_some_and(|s| s.negotiated_protocol_version >= SESSION_MIN_VERSION)
                 });
             if let Some(fid) = quitter
-                && let Some(stream) = streams.get_mut(&fid)
+                && let Some(stream) = session_registry.stream_mut(fid)
             {
                 let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
             }
-            for (fid, stream) in &mut streams {
-                if Some(*fid) == quitter {
+            for (fid, session) in session_registry.sessions_mut() {
+                if Some(fid) == quitter {
                     continue;
                 }
+                let Some(stream) = session.stream.as_mut() else {
+                    continue;
+                };
                 let _ = write_message(
                     stream,
                     &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
@@ -2209,13 +2182,6 @@ fn dispatcher_loop(
                 handle_dispatcher_event(
                     event,
                     editor,
-                    &mut render_states,
-                    &mut semantic_states,
-                    &mut streams,
-                    &mut term_sizes,
-                    &mut last_dispatch_idle_sent,
-                    &mut last_active_buffer_sent,
-                    &mut terminal_bell_baselines,
                     &mut session_registry,
                     &mut CrdtBroadcastLatency {
                         jitter_ms: injected_render_latency_jitter_ms,
@@ -2231,13 +2197,6 @@ fn dispatcher_loop(
                     handle_dispatcher_event(
                         event,
                         editor,
-                        &mut render_states,
-                        &mut semantic_states,
-                        &mut streams,
-                        &mut term_sizes,
-                        &mut last_dispatch_idle_sent,
-                        &mut last_active_buffer_sent,
-                        &mut terminal_bell_baselines,
                         &mut session_registry,
                         &mut CrdtBroadcastLatency {
                             jitter_ms: injected_render_latency_jitter_ms,
@@ -2254,7 +2213,7 @@ fn dispatcher_loop(
         // Accepted terminal context controls PTY size. Apply any focus,
         // window, or resize changes before consuming another child-output
         // batch so screen reflow and subsequent bytes share one geometry.
-        sync_terminal_layouts_for_tick(editor, &attached_fids, &term_sizes, &semantic_states);
+        sync_terminal_layouts_for_tick(editor, &attached_fids, &session_registry);
 
         // `tick_async` last: the M4.5 async bridge settles awaiters
         // inside `tick_lsp` (via the message bus); draining + resuming
@@ -2282,7 +2241,7 @@ fn dispatcher_loop(
 fn take_pending_terminal_bell(
     editor: &EditorState,
     frontend_id: FrontendId,
-    baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
+    baseline: &mut Option<(crate::buffer::BufferId, u64)>,
 ) -> bool {
     let buffer_id = editor
         .core
@@ -2296,11 +2255,11 @@ fn take_pending_terminal_bell(
             .bell_count(buffer_id)
             .map(|count| (buffer_id, count))
     }) else {
-        baselines.remove(&frontend_id);
+        *baseline = None;
         return false;
     };
 
-    match baselines.get_mut(&frontend_id) {
+    match baseline.as_mut() {
         Some((baseline_buffer, delivered))
             if *baseline_buffer == buffer_id && count > *delivered =>
         {
@@ -2312,7 +2271,7 @@ fn take_pending_terminal_bell(
             false
         }
         _ => {
-            baselines.insert(frontend_id, (buffer_id, count));
+            *baseline = Some((buffer_id, count));
             false
         }
     }
@@ -2528,24 +2487,17 @@ fn initial_target_snapshot(
     Err("initial target requires a CRDT-enabled daemon".to_owned())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cleanup_provisional_session(
     editor: &mut EditorState,
-    render_states: &mut HashMap<FrontendId, RenderState>,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    term_sizes: &mut HashMap<FrontendId, CellSize>,
-    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
-    render_states.remove(&frontend_id);
-    semantic_states.remove(&frontend_id);
-    if let Some(stream) = streams.remove(&frontend_id) {
+    if let Some(stream) = session_registry
+        .session_mut(frontend_id)
+        .and_then(|session| session.stream.take())
+    {
         let _ = stream.shutdown(Shutdown::Both);
     }
-    term_sizes.remove(&frontend_id);
-    last_active_buffer_sent.remove(&frontend_id);
     session_registry.unregister_session(frontend_id);
     editor
         .core
@@ -2560,11 +2512,6 @@ fn cleanup_provisional_session(
 )]
 fn handle_session_established(
     editor: &mut EditorState,
-    render_states: &mut HashMap<FrontendId, RenderState>,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    term_sizes: &mut HashMap<FrontendId, CellSize>,
-    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
     session_state: crate::presence::SessionState,
@@ -2756,8 +2703,6 @@ fn handle_session_established(
                 opened.buffer_id,
                 &snapshot_message,
                 session_registry,
-                streams,
-                semantic_states,
             );
         }
         if write_message(&mut write_stream, &snapshot_message).is_err() {
@@ -2796,8 +2741,6 @@ fn handle_session_established(
                             buffer_id,
                             &message,
                             session_registry,
-                            streams,
-                            semantic_states,
                         );
                     }
                     if write_message(&mut write_stream, &message).is_err() {
@@ -2845,21 +2788,21 @@ fn handle_session_established(
     // from here, with the session: every early return above leaves no
     // session, so nothing of the attach outlives it.
     session_registry.set_departure_flag(frontend_id, departing);
+    let session = session_registry
+        .session_mut(frontend_id)
+        .expect("new session registered");
     if semantic_render {
-        semantic_states.insert(
+        session.semantic = Some(crate::semantic_render::SemanticRenderState::for_peer(
             frontend_id,
-            crate::semantic_render::SemanticRenderState::for_peer(
-                frontend_id,
-                negotiated_protocol_version,
-            ),
-        );
+            negotiated_protocol_version,
+        ));
     } else {
         let mut render_state = RenderState::new(initial_size);
         render_state.force_full_grid_resync();
-        render_states.insert(frontend_id, render_state);
+        session.render = Some(render_state);
     }
-    streams.insert(frontend_id, write_stream);
-    term_sizes.insert(frontend_id, initial_size);
+    session.stream = Some(write_stream);
+    session.term_size = Some(initial_size);
     // Bottom-panel arc (Q#BP2b): a grid session's real attach size IS its
     // authoritative geometry declaration, cached BEFORE any input can
     // reach it. A semantic session deliberately stays UNKNOWN — its
@@ -2876,31 +2819,26 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
-    if let Some(buffer_id) = resumed_buffer {
-        last_active_buffer_sent.insert(frontend_id, buffer_id);
+    if let Some(buffer_id) = resumed_buffer
+        && let Some(session) = session_registry.session_mut(frontend_id)
+    {
+        session.last_active_buffer_sent = Some(buffer_id);
     }
     if let Some(opened) = opened_target {
-        last_active_buffer_sent.insert(frontend_id, opened.buffer_id);
+        if let Some(session) = session_registry.session_mut(frontend_id) {
+            session.last_active_buffer_sent = Some(opened.buffer_id);
+        }
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
             buffer_id: opened.buffer_id,
         });
         let write_result = {
-            let stream = streams
-                .get_mut(&frontend_id)
+            let stream = session_registry
+                .stream_mut(frontend_id)
                 .expect("new session stream installed");
             write_message(stream, &result)
         };
         if write_result.is_err() {
-            cleanup_provisional_session(
-                editor,
-                render_states,
-                semantic_states,
-                streams,
-                term_sizes,
-                last_active_buffer_sent,
-                session_registry,
-                frontend_id,
-            );
+            cleanup_provisional_session(editor, session_registry, frontend_id);
             return;
         }
     }
@@ -2910,22 +2848,13 @@ fn handle_session_established(
     // message it did not ask for, and before the first frame.
     if let Some(token) = token {
         let write_result = {
-            let stream = streams
-                .get_mut(&frontend_id)
+            let stream = session_registry
+                .stream_mut(frontend_id)
                 .expect("new session stream installed");
             write_message(stream, &InstanceMessage::SessionToken(token))
         };
         if write_result.is_err() {
-            cleanup_provisional_session(
-                editor,
-                render_states,
-                semantic_states,
-                streams,
-                term_sizes,
-                last_active_buffer_sent,
-                session_registry,
-                frontend_id,
-            );
+            cleanup_provisional_session(editor, session_registry, frontend_id);
         }
     }
 }
@@ -3039,18 +2968,10 @@ fn frontend_event_name(event: &FrontendEvent) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)] // per-variant dispatcher match.
 fn handle_dispatcher_event(
     event: DispatcherEvent,
     editor: &mut EditorState,
-    render_states: &mut HashMap<FrontendId, RenderState>,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    term_sizes: &mut HashMap<FrontendId, CellSize>,
-    last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
-    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
-    terminal_bell_baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
     session_registry: &mut SessionRegistry,
     broadcast_latency: &mut CrdtBroadcastLatency<'_>,
 ) {
@@ -3066,11 +2987,6 @@ fn handle_dispatcher_event(
         } => {
             handle_session_established(
                 editor,
-                render_states,
-                semantic_states,
-                streams,
-                term_sizes,
-                last_active_buffer_sent,
                 session_registry,
                 frontend_id,
                 session_state,
@@ -3117,11 +3033,13 @@ fn handle_dispatcher_event(
                     }
                 }
                 FrontendEvent::Resize { size, .. } => {
-                    if let Some(rs) = render_states.get_mut(&source) {
-                        rs.resize(size);
-                    }
-                    if let Some(ts) = term_sizes.get_mut(&source) {
-                        *ts = size;
+                    if let Some(session) = session_registry.session_mut(source) {
+                        if let Some(rs) = session.render.as_mut() {
+                            rs.resize(size);
+                        }
+                        if let Some(ts) = session.term_size.as_mut() {
+                            *ts = size;
+                        }
                     }
                     // Bottom-panel arc (Q#BP2b): a frame that can no
                     // longer satisfy the panel hides it, moves focus out,
@@ -3135,7 +3053,7 @@ fn handle_dispatcher_event(
                     // is its authoritative cell-equivalent declaration
                     // (Q#BP15a), and letting `Resize` mint an epoch here
                     // would let the two allocators interleave.
-                    if !semantic_states.contains_key(&source)
+                    if session_registry.semantic(source).is_none()
                         && editor.core.borrow().panel_capable_for(source)
                     {
                         editor.sync_frame_geometry(source, size);
@@ -3175,23 +3093,11 @@ fn handle_dispatcher_event(
                         );
                     } else {
                         handle_remote_crdt_op(editor, source, buffer_id, op, |editor| {
-                            confirm_cursor_early(
-                                editor,
-                                source,
-                                session_registry,
-                                semantic_states,
-                                streams,
-                                last_dispatch_idle_sent,
-                            );
+                            confirm_cursor_early(editor, source, session_registry);
                         });
                         // The op itself reaches the other replicas
                         // now rather than after the ticks (E6d.3).
-                        broadcast_pending_crdt_ops(
-                            editor,
-                            session_registry,
-                            streams,
-                            broadcast_latency,
-                        );
+                        broadcast_pending_crdt_ops(editor, session_registry, broadcast_latency);
                     }
                 }
                 FrontendEvent::Viewport {
@@ -3236,7 +3142,7 @@ fn handle_dispatcher_event(
                             .is_some_and(|document| manager.is_terminal(document));
                         active || manager.is_terminal(buffer_id)
                     };
-                    if semantic_states.contains_key(&source) && !terminal_context {
+                    if session_registry.semantic(source).is_some() && !terminal_context {
                         // Phase B (B1) — the Viewport declares *which
                         // buffer this frontend is displaying*. Align its
                         // editor window to that buffer so keyboard input
@@ -3258,7 +3164,7 @@ fn handle_dispatcher_event(
                         if let Some(view) = editor.core.borrow_mut().views.get_mut(&source) {
                             view.document_viewport = Some((buffer_id, visible));
                         }
-                        if let Some(sem) = semantic_states.get_mut(&source) {
+                        if let Some(sem) = session_registry.semantic_mut(source) {
                             sem.set_viewport(buffer_id, visible, generation);
                         }
                     }
@@ -3275,11 +3181,11 @@ fn handle_dispatcher_event(
                     // record happens for any accepted declaration. Only
                     // the durable controller's declaration reaches the
                     // shared PTY — a declaration never claims control.
-                    if semantic_states.contains_key(&source)
+                    if session_registry.semantic(source).is_some()
                         && peer_declared_terminal_support(session_registry, source)
                         && editor.semantic_terminal_declaration_is_active(source, buffer_id)
                     {
-                        if let Some(sem) = semantic_states.get_mut(&source) {
+                        if let Some(sem) = session_registry.semantic_mut(source) {
                             sem.set_terminal_viewport(buffer_id, size);
                         }
                         editor.sync_semantic_terminal_layout(source, buffer_id, size);
@@ -3299,7 +3205,7 @@ fn handle_dispatcher_event(
                     // forged id, a stale buffer, a missing declaration,
                     // or an out-of-bounds cell all drop before any view,
                     // controller, selection, menu, or PTY mutation.
-                    if semantic_states.contains_key(&source)
+                    if session_registry.semantic(source).is_some()
                         && peer_declared_terminal_support(session_registry, source)
                     {
                         editor.dispatch_semantic_terminal_pointer(
@@ -3323,8 +3229,7 @@ fn handle_dispatcher_event(
                     // deadlock the first open. "Without a side window"
                     // refers to side-window presence only — the protocol,
                     // session, and capability gates all still apply.
-                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
-                    {
+                    if peer_may_send_panel_events(editor, session_registry, source) {
                         editor.accept_semantic_frame_geometry(source, geometry_epoch, total);
                     }
                 }
@@ -3341,10 +3246,10 @@ fn handle_dispatcher_event(
                     // declaration's presentation epoch, so a drag racing a
                     // font change or a panel reopen cannot resize its
                     // successor.
-                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
+                    if peer_may_send_panel_events(editor, session_registry, source)
                         && panel_event_epochs_are_current(
                             editor,
-                            semantic_states,
+                            session_registry.semantic(source),
                             source,
                             geometry_epoch,
                             panel_epoch,
@@ -3383,15 +3288,10 @@ fn handle_dispatcher_event(
                     // leave the mapping hole reachable by choosing a
                     // discriminant, which is the whole of the bypass.
                     if !peer_uses_mapped_panel_family(session_registry, source)
-                        && peer_may_send_panel_events(
-                            editor,
-                            session_registry,
-                            semantic_states,
-                            source,
-                        )
+                        && peer_may_send_panel_events(editor, session_registry, source)
                         && panel_event_epochs_are_current(
                             editor,
-                            semantic_states,
+                            session_registry.semantic(source),
                             source,
                             geometry_epoch,
                             panel_epoch,
@@ -3416,7 +3316,7 @@ fn handle_dispatcher_event(
                         // child holds the button down forever.
                         replay_panel_pointer(
                             editor,
-                            semantic_states,
+                            session_registry.semantic_mut(source),
                             source,
                             buffer_id,
                             coord,
@@ -3452,22 +3352,17 @@ fn handle_dispatcher_event(
                     // from this crate can encode the discriminant.
                     // Negotiation is a gate, not a sender convention.
                     if peer_uses_mapped_panel_family(session_registry, source)
-                        && peer_may_send_panel_events(
-                            editor,
-                            session_registry,
-                            semantic_states,
-                            source,
-                        )
+                        && peer_may_send_panel_events(editor, session_registry, source)
                         && panel_event_epochs_are_current(
                             editor,
-                            semantic_states,
+                            session_registry.semantic(source),
                             source,
                             geometry_epoch,
                             panel_epoch,
                         )
                         && panel_mapping_is_current(
                             editor,
-                            semantic_states,
+                            session_registry.semantic_mut(source),
                             source,
                             kind,
                             mapping_generation,
@@ -3481,7 +3376,7 @@ fn handle_dispatcher_event(
                         // gate.
                         replay_panel_pointer(
                             editor,
-                            semantic_states,
+                            session_registry.semantic_mut(source),
                             source,
                             buffer_id,
                             coord,
@@ -3504,7 +3399,7 @@ fn handle_dispatcher_event(
                     // CrdtOp / Viewport source-trust rule). The window
                     // aligns to the buffer the frontend says it was
                     // displaying: a click can race a buffer switch.
-                    if semantic_states.contains_key(&source) {
+                    if session_registry.semantic(source).is_some() {
                         // Bottom-panel §1.3 #8 — Projection + focus. A
                         // click in the DOCUMENT area means "work here",
                         // so unlike `Viewport` (#7) this one also takes
@@ -3523,7 +3418,7 @@ fn handle_dispatcher_event(
                 FrontendEvent::MenuPointer { index, invoke, .. } => {
                     // Q#CM1 — semantic frontend menu navigation (hover /
                     // click), hit-tested against the popup it drew locally.
-                    if semantic_states.contains_key(&source) {
+                    if session_registry.semantic(source).is_some() {
                         editor.dispatch_menu_pointer(source, index, invoke);
                     }
                 }
@@ -3607,23 +3502,14 @@ fn handle_dispatcher_event(
                         return;
                     }
                     editor.dispatch_text_input(source, &text);
-                    broadcast_pending_crdt_ops(
-                        editor,
-                        session_registry,
-                        streams,
-                        broadcast_latency,
-                    );
-                    confirm_cursor_early(
-                        editor,
-                        source,
-                        session_registry,
-                        semantic_states,
-                        streams,
-                        last_dispatch_idle_sent,
-                    );
+                    broadcast_pending_crdt_ops(editor, session_registry, broadcast_latency);
+                    confirm_cursor_early(editor, source, session_registry);
                 }
                 _ => {
-                    let Some(&term_size) = term_sizes.get(&source) else {
+                    let Some(term_size) = session_registry
+                        .session(source)
+                        .and_then(|session| session.term_size)
+                    else {
                         eprintln!(
                             "pmacs: dropping frontend event without size state for {source:?}"
                         );
@@ -3635,10 +3521,12 @@ fn handle_dispatcher_event(
                     // GPU is in round-trip input until it hears where,
                     // so it hears as soon as the command returns.
                     let moves_caret = matches!(event, FrontendEvent::Key(_));
-                    if let Some(render_state) = render_states.get_mut(&source) {
+                    if let Some(session) = session_registry.session_mut(source)
+                        && let Some(render_state) = session.render.as_mut()
+                    {
                         apply_event(editor, source, event, &mut term_size, render_state);
-                        term_sizes.insert(source, term_size);
-                    } else if semantic_states.contains_key(&source) {
+                        session.term_size = Some(term_size);
+                    } else if session_registry.semantic(source).is_some() {
                         // Phase B (session B1) — a semantic (grid-less)
                         // session has no `RenderState`, but its keyboard
                         // input still drives the shared editor core. The
@@ -3660,20 +3548,8 @@ fn handle_dispatcher_event(
                         // F18 for the early confirmation: the edit's
                         // op (a newline, a pair's closer) reaches the
                         // replica before it hears where its caret went.
-                        broadcast_pending_crdt_ops(
-                            editor,
-                            session_registry,
-                            streams,
-                            broadcast_latency,
-                        );
-                        confirm_cursor_early(
-                            editor,
-                            source,
-                            session_registry,
-                            semantic_states,
-                            streams,
-                            last_dispatch_idle_sent,
-                        );
+                        broadcast_pending_crdt_ops(editor, session_registry, broadcast_latency);
+                        confirm_cursor_early(editor, source, session_registry);
                     }
                 }
             }
@@ -3682,18 +3558,7 @@ fn handle_dispatcher_event(
         // one draining after a failed write (E9 fix round 4), whose
         // input, queued ahead of this event, has all been dispatched.
         DispatcherEvent::SessionDetached { frontend_id } => {
-            detach_frontend(
-                editor,
-                render_states,
-                semantic_states,
-                streams,
-                term_sizes,
-                last_dispatch_idle_sent,
-                last_active_buffer_sent,
-                terminal_bell_baselines,
-                session_registry,
-                frontend_id,
-            );
+            detach_frontend(editor, session_registry, frontend_id);
         }
     }
     // E9.3 --- a frontend whose own quit asked to leave: told, if its
@@ -3707,24 +3572,13 @@ fn handle_dispatcher_event(
             return;
         };
         session_registry.mark_departing(frontend_id);
-        if let Some(stream) = streams.get_mut(&frontend_id) {
+        if let Some(stream) = session_registry.stream_mut(frontend_id) {
             if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
                 let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
             }
             let _ = stream.shutdown(Shutdown::Both);
         }
-        detach_frontend(
-            editor,
-            render_states,
-            semantic_states,
-            streams,
-            term_sizes,
-            last_dispatch_idle_sent,
-            last_active_buffer_sent,
-            terminal_bell_baselines,
-            session_registry,
-            frontend_id,
-        );
+        detach_frontend(editor, session_registry, frontend_id);
     }
 }
 
@@ -3748,8 +3602,8 @@ fn handle_dispatcher_event(
 /// A frontend with no registered session is a no-op: the reader's
 /// `SessionDetached` after a drain's deadline, or after a requested
 /// detach, finds nothing registered and changes nothing, and the hook
-/// fires once. The eight per-frontend maps stay separate here; the
-/// `Session` struct that would hold them is E9b's.
+/// fires once. Since E9b the session holds every per-frontend field the
+/// dispatcher keeps, and `unregister_session` drops them with it.
 ///
 /// Whether the frontend said it was leaving is the session's shared
 /// `departing` flag (E9, fix round 1): set by its reader thread as it
@@ -3761,16 +3615,8 @@ fn handle_dispatcher_event(
 /// teardowns race the event queue: the reader sets it before it queues
 /// the `Detach`, so a drain's deadline that falls between the two still
 /// reads the departure.
-#[allow(clippy::too_many_arguments)]
 fn detach_frontend(
     editor: &mut EditorState,
-    render_states: &mut HashMap<FrontendId, RenderState>,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    term_sizes: &mut HashMap<FrontendId, CellSize>,
-    last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
-    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
-    terminal_bell_baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
@@ -3782,22 +3628,22 @@ fn detach_frontend(
     let departing = session_registry.is_departing(frontend_id);
     // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
     // and the only one with no later chance at all. End the live
-    // gesture, then pay it, and do BOTH before any teardown: the
-    // next line drops the state holding the record, and
-    // `detach_frontend_input` below releases the terminal
-    // controller the release still needs.
-    if let Some(state) = semantic_states.get_mut(&frontend_id) {
+    // gesture, then pay it, and do BOTH before any teardown:
+    // `unregister_session` below drops the state holding the record,
+    // and `detach_frontend_input` releases the terminal controller the
+    // release still needs.
+    if let Some(state) = session_registry.semantic_mut(frontend_id) {
         let _ = state.cancel_accepted_gesture();
     }
-    drain_pending_release(editor, semantic_states, frontend_id);
-    render_states.remove(&frontend_id);
-    semantic_states.remove(&frontend_id);
-    streams.remove(&frontend_id);
-    term_sizes.remove(&frontend_id);
-    last_dispatch_idle_sent.remove(&frontend_id);
-    last_active_buffer_sent.remove(&frontend_id);
-    terminal_bell_baselines.remove(&frontend_id);
+    drain_pending_release(
+        editor,
+        session_registry.semantic_mut(frontend_id),
+        frontend_id,
+    );
     editor.detach_frontend_input(frontend_id);
+    // The session goes whole (E9b): its projection, its stream, its
+    // sizes, the follow's and the bell's baselines and its departure
+    // flag, which the seven maps and the flag map held before.
     session_registry.unregister_session(frontend_id);
     editor
         .statusline_registry
@@ -4156,7 +4002,7 @@ fn send_buffer_snapshot_to_frontend(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
     fid: FrontendId,
-    streams: &mut HashMap<FrontendId, UnixStream>,
+    session_registry: &mut SessionRegistry,
 ) -> Result<(), usize> {
     let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
         return Ok(());
@@ -4169,7 +4015,7 @@ fn send_buffer_snapshot_to_frontend(
     if len > pmacs_protocol::MAX_FRAME_BYTES {
         return Err(len);
     }
-    if let Some(stream) = streams.get_mut(&fid)
+    if let Some(stream) = session_registry.stream_mut(fid)
         && let Err(e) = write_message(stream, &msg)
     {
         eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
@@ -4181,9 +4027,7 @@ fn send_buffer_snapshot_to_frontend(
 fn broadcast_buffer_snapshot_to_replicas(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
-    session_registry: &SessionRegistry,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    session_registry: &mut SessionRegistry,
 ) -> bool {
     let Some(snapshot) = export_buffer_snapshot(editor, buffer_id) else {
         return true;
@@ -4204,14 +4048,7 @@ fn broadcast_buffer_snapshot_to_replicas(
         );
         return false;
     }
-    publish_buffer_snapshot_to_replicas(
-        editor,
-        buffer_id,
-        &message,
-        session_registry,
-        streams,
-        semantic_states,
-    );
+    publish_buffer_snapshot_to_replicas(editor, buffer_id, &message, session_registry);
     true
 }
 
@@ -4219,19 +4056,18 @@ fn publish_buffer_snapshot_to_replicas(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
     message: &InstanceMessage,
-    session_registry: &SessionRegistry,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    session_registry: &mut SessionRegistry,
 ) {
-    for (peer_id, stream) in streams {
-        let Some(session) = session_registry.session_state(*peer_id) else {
+    for (peer_id, peer) in session_registry.sessions_mut() {
+        let Some(stream) = peer.stream.as_mut() else {
             continue;
         };
+        let session = peer.state;
         if !session.negotiated_capabilities.crdt_replica {
             continue;
         }
         if session.negotiated_capabilities.semantic_render {
-            let displays_buffer = peer_displays_buffer_as_document(editor, *peer_id, buffer_id);
+            let displays_buffer = peer_displays_buffer_as_document(editor, peer_id, buffer_id);
             if !displays_buffer {
                 continue;
             }
@@ -4242,7 +4078,7 @@ fn publish_buffer_snapshot_to_replicas(
             );
             continue;
         }
-        if let Some(semantic) = semantic_states.get_mut(peer_id) {
+        if let Some(semantic) = peer.semantic.as_mut() {
             semantic.on_buffer_snapshot_sent(buffer_id);
         }
     }
@@ -4776,7 +4612,6 @@ impl CrdtBroadcastLatency<'_> {
 fn broadcast_pending_crdt_ops(
     editor: &mut EditorState,
     session_registry: &mut SessionRegistry,
-    streams: &mut HashMap<FrontendId, UnixStream>,
     latency: &mut CrdtBroadcastLatency<'_>,
 ) {
     #[cfg(feature = "crdt")]
@@ -4789,7 +4624,7 @@ fn broadcast_pending_crdt_ops(
             };
             let entries = session_registry.broadcast_crdt_op(exclude, buffer_id, op);
             for entry in entries {
-                if let Some(stream) = streams.get_mut(&entry.recipient) {
+                if let Some(stream) = session_registry.stream_mut(entry.recipient) {
                     // T M10.11 F2 — THE criterion-3 jitter site.
                     // CRDT convergence is driven by these
                     // `broadcast_crdt_op` writes, NOT by render
@@ -4812,7 +4647,7 @@ fn broadcast_pending_crdt_ops(
     // to keep the non-CRDT build free of unused imports.
     #[cfg(not(feature = "crdt"))]
     {
-        let _ = (session_registry, streams);
+        let _ = session_registry;
         let _ = (latency.jitter_ms, latency.fixed_ms, &*latency.rng);
         // Defensive: empty the queue in case shared state was
         // populated through some path we haven't traced.
@@ -4843,10 +4678,7 @@ fn broadcast_pending_crdt_ops(
 fn confirm_cursor_early(
     editor: &EditorState,
     source: FrontendId,
-    session_registry: &SessionRegistry,
-    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-    streams: &mut HashMap<FrontendId, UnixStream>,
-    last_dispatch_idle_sent: &HashMap<FrontendId, bool>,
+    session_registry: &mut SessionRegistry,
 ) {
     if !session_registry
         .session_state(source)
@@ -4854,19 +4686,22 @@ fn confirm_cursor_early(
     {
         return;
     }
-    if semantic_states
-        .get(&source)
+    if session_registry
+        .semantic(source)
         .is_some_and(crate::semantic_render::SemanticRenderState::in_terminal_mode)
     {
         return;
     }
-    if last_dispatch_idle_sent.get(&source) != Some(&true) || !editor.dispatch_idle_for(source) {
+    let last_idle = session_registry
+        .session(source)
+        .and_then(|session| session.last_dispatch_idle_sent);
+    if last_idle != Some(true) || !editor.dispatch_idle_for(source) {
         return;
     }
     let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, source) else {
         return;
     };
-    if let Some(stream) = streams.get_mut(&source)
+    if let Some(stream) = session_registry.stream_mut(source)
         && let Err(e) = write_message(
             stream,
             &InstanceMessage::CursorByte {
@@ -5055,11 +4890,11 @@ fn build_presence_snapshot(editor: &EditorState, frontend_id: FrontendId) -> Pre
 ///
 /// The shape that matters: liveness is frontend-kind NEUTRAL and runs for
 /// everyone, exactly once; the geometry arms are EXCLUSIVE alternatives keyed
-/// on the same `semantic_states` membership that session establishment uses,
-/// so a session can never be caught by both.
+/// on the same semantic projection that session establishment installs, so a
+/// session can never be caught by both.
 ///
 /// Before this existed, both arms ran for every frontend. A semantic session
-/// has a `term_sizes` entry (from `AttachRequest`) *and* a terminal
+/// has a `term_size` (from `AttachRequest`) *and* a terminal
 /// declaration, so its PTY was resized twice per tick, forever: the grid arm
 /// installed the TUI placement size, the semantic arm installed the declared
 /// content rectangle, and each arm's own idempotence guard saw only the size
@@ -5069,8 +4904,7 @@ fn build_presence_snapshot(editor: &EditorState, frontend_id: FrontendId) -> Pre
 fn sync_terminal_layouts_for_tick(
     editor: &mut EditorState,
     attached_fids: &[FrontendId],
-    term_sizes: &HashMap<FrontendId, CellSize>,
-    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    session_registry: &SessionRegistry,
 ) {
     for frontend_id in attached_fids {
         // Neutral half: panel reconciliation (Q#BP2b's only per-tick
@@ -5081,7 +4915,7 @@ fn sync_terminal_layouts_for_tick(
         editor.sync_terminal_controller_liveness(*frontend_id);
 
         // Geometry: exactly one arm per frontend kind.
-        if let Some(state) = semantic_states.get(frontend_id) {
+        if let Some(state) = session_registry.semantic(*frontend_id) {
             // Vterm Stage 3 — the frontend declared a CONTENT rectangle,
             // so this consumes the size directly instead of running the
             // TUI placement helper, which would subtract a modeline the
@@ -5101,7 +4935,10 @@ fn sync_terminal_layouts_for_tick(
             // window. Both calls target disjoint windows, so this is a
             // second CASE, not a second resize of the same child.
             editor.sync_semantic_panel_terminal_layout(*frontend_id);
-        } else if let Some(size) = term_sizes.get(frontend_id).copied() {
+        } else if let Some(size) = session_registry
+            .session(*frontend_id)
+            .and_then(|session| session.term_size)
+        {
             editor.sync_terminal_grid_geometry(*frontend_id, size);
         }
     }
@@ -5420,25 +5257,20 @@ mod tests {
         let (dead_grid_server, dead_grid_client) =
             UnixStream::pair().expect("dead grid socketpair");
         drop(dead_grid_client);
-        let mut streams = HashMap::from([
+        for (peer, stream) in [
             (semantic_peer, semantic_server),
             (live_grid_peer, live_grid_server),
             (dead_grid_peer, dead_grid_server),
-        ]);
+        ] {
+            registry.session_mut(peer).expect("registered peer").stream = Some(stream);
+        }
         let published_buffer = crate::buffer::BufferId::from_raw(900);
         let message = InstanceMessage::BufferSnapshot {
             buffer_id: published_buffer,
             crdt_snapshot: vec![1, 2, 3],
         };
 
-        publish_buffer_snapshot_to_replicas(
-            &editor,
-            published_buffer,
-            &message,
-            &registry,
-            &mut streams,
-            &mut HashMap::new(),
-        );
+        publish_buffer_snapshot_to_replicas(&editor, published_buffer, &message, &mut registry);
 
         let delivered: InstanceMessage =
             read_message(&mut live_grid_client).expect("live grid snapshot");
@@ -5493,19 +5325,12 @@ mod tests {
             client
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .expect("delivery timeout");
-            let mut streams = HashMap::from([(fid, server)]);
+            registry.session_mut(fid).expect("registered").stream = Some(server);
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: doc_buf,
                 crdt_snapshot: vec![1, 2, 3],
             };
-            publish_buffer_snapshot_to_replicas(
-                &editor,
-                doc_buf,
-                &message,
-                &registry,
-                &mut streams,
-                &mut HashMap::new(),
-            );
+            publish_buffer_snapshot_to_replicas(&editor, doc_buf, &message, &mut registry);
             let delivered: InstanceMessage =
                 read_message(&mut client).expect("the document snapshot must arrive");
             assert_eq!(
@@ -5518,19 +5343,12 @@ mod tests {
         // The PANEL-only buffer's snapshot must NOT be delivered.
         {
             let (server, mut client) = UnixStream::pair().expect("socketpair");
-            let mut streams = HashMap::from([(fid, server)]);
+            registry.session_mut(fid).expect("registered").stream = Some(server);
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: panel_buf,
                 crdt_snapshot: vec![4, 5, 6],
             };
-            publish_buffer_snapshot_to_replicas(
-                &editor,
-                panel_buf,
-                &message,
-                &registry,
-                &mut streams,
-                &mut HashMap::new(),
-            );
+            publish_buffer_snapshot_to_replicas(&editor, panel_buf, &message, &mut registry);
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("timeout");
@@ -5608,6 +5426,32 @@ mod tests {
         (buffer_id, window_id)
     }
 
+    /// One registered session for the layout rows, as the dispatcher holds
+    /// it: its semantic projection, if it has one, and its attach size.
+    fn tick_registry(
+        fid: FrontendId,
+        semantic: Option<crate::semantic_render::SemanticRenderState>,
+        term_size: CellSize,
+    ) -> SessionRegistry {
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            fid,
+            crate::presence::SessionState::new(
+                PROTOCOL_VERSION,
+                crate::protocol::NegotiatedCapabilities {
+                    multi_frontend: true,
+                    crdt_replica: true,
+                    semantic_render: semantic.is_some(),
+                },
+                0,
+            ),
+        );
+        let session = registry.session_mut(fid).expect("registered");
+        session.semantic = semantic;
+        session.term_size = Some(term_size);
+        registry
+    }
+
     fn screen_generation(editor: &EditorState, buffer_id: crate::buffer::BufferId) -> u64 {
         editor
             .terminal_manager
@@ -5635,11 +5479,10 @@ mod tests {
         let declared = CellSize::new(25, 92);
         let mut semantic = crate::semantic_render::SemanticRenderState::for_peer(fid, 20);
         semantic.set_terminal_viewport(buffer_id, declared);
-        let semantic_states = HashMap::from([(fid, semantic)]);
-        let term_sizes = HashMap::from([(fid, CellSize::new(24, 80))]);
+        let registry = tick_registry(fid, Some(semantic), CellSize::new(24, 80));
         let attached = vec![fid];
 
-        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &registry);
         let after_first = screen_generation(&editor, buffer_id);
         assert_eq!(
             editor.terminal_manager.borrow().screen_size(buffer_id),
@@ -5649,7 +5492,7 @@ mod tests {
 
         // Acceptance 2: every further tick is a no-op.
         for _ in 0..8 {
-            sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+            sync_terminal_layouts_for_tick(&mut editor, &attached, &registry);
         }
         assert_eq!(
             screen_generation(&editor, buffer_id),
@@ -5686,11 +5529,10 @@ mod tests {
         let declared = CellSize::new(25, 92);
         let mut semantic = crate::semantic_render::SemanticRenderState::for_peer(fid, 20);
         semantic.set_terminal_viewport(buffer_id, declared);
-        let mut semantic_states = HashMap::from([(fid, semantic)]);
-        let term_sizes = HashMap::from([(fid, CellSize::new(24, 80))]);
+        let mut registry = tick_registry(fid, Some(semantic), CellSize::new(24, 80));
         let attached = vec![fid];
 
-        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &registry);
         assert_eq!(
             editor
                 .terminal_manager
@@ -5716,12 +5558,12 @@ mod tests {
             let window = core.windows.get_mut(&window_id).expect("window");
             *window = crate::window::Window::new(window_id, document, text_view);
         }
-        semantic_states
-            .get_mut(&fid)
+        registry
+            .semantic_mut(fid)
             .expect("semantic state")
             .on_buffer_snapshot_sent(document);
 
-        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &registry);
         assert_eq!(
             editor
                 .terminal_manager
@@ -5744,12 +5586,11 @@ mod tests {
         let mut editor = EditorState::new();
         let (buffer_id, _window) = quiet_terminal_for(&editor, fid);
 
-        let semantic_states = HashMap::new();
-        let term_sizes = HashMap::from([(fid, CellSize::new(40, 100))]);
+        let registry = tick_registry(fid, None, CellSize::new(40, 100));
         let attached = vec![fid];
 
         let before = editor.terminal_manager.borrow().screen_size(buffer_id);
-        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &registry);
         let after = editor.terminal_manager.borrow().screen_size(buffer_id);
 
         assert_ne!(before, after, "a grid frontend must still resize its PTY");
@@ -5761,7 +5602,7 @@ mod tests {
         // And it too settles.
         let settled = screen_generation(&editor, buffer_id);
         for _ in 0..4 {
-            sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+            sync_terminal_layouts_for_tick(&mut editor, &attached, &registry);
         }
         assert_eq!(
             screen_generation(&editor, buffer_id),
@@ -5790,13 +5631,6 @@ mod tests {
         let target = plain.join("child.txt");
         let fid = FrontendId(91);
         let mut editor = EditorState::new();
-        let mut render_states = HashMap::new();
-        let mut semantic_states = HashMap::new();
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        let mut last_dispatch_idle_sent = HashMap::new();
-        let mut last_active_buffer_sent = HashMap::new();
-        let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
         let (write_stream, mut peer) = UnixStream::pair().expect("socketpair");
         // Before the bootstrap, which shuts the pair down when it fails:
@@ -5828,13 +5662,6 @@ mod tests {
                 departing: Arc::new(AtomicBool::new(false)),
             },
             &mut editor,
-            &mut render_states,
-            &mut semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_dispatch_idle_sent,
-            &mut last_active_buffer_sent,
-            &mut terminal_bell_baselines,
             &mut session_registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
@@ -5854,13 +5681,6 @@ mod tests {
         handle_dispatcher_event(
             DispatcherEvent::SessionDetached { frontend_id: fid },
             &mut editor,
-            &mut render_states,
-            &mut semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_dispatch_idle_sent,
-            &mut last_active_buffer_sent,
-            &mut terminal_bell_baselines,
             &mut session_registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
@@ -5910,13 +5730,6 @@ mod tests {
                 .eval()
                 .expect("read the hook's log")
         };
-        let mut render_states = HashMap::new();
-        let mut semantic_states = HashMap::new();
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        let mut last_dispatch_idle_sent = HashMap::new();
-        let mut last_active_buffer_sent = HashMap::new();
-        let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
         let semantic = crate::presence::SessionState::new(
             PROTOCOL_VERSION,
@@ -5942,13 +5755,6 @@ mod tests {
                 handle_dispatcher_event(
                     $event,
                     &mut editor,
-                    &mut render_states,
-                    &mut semantic_states,
-                    &mut streams,
-                    &mut term_sizes,
-                    &mut last_dispatch_idle_sent,
-                    &mut last_active_buffer_sent,
-                    &mut terminal_bell_baselines,
                     &mut session_registry,
                     &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
                 )
@@ -6012,8 +5818,16 @@ mod tests {
         );
         assert!(!editor.core.borrow().views.contains_key(&second), "no view");
         assert_eq!(editor.core.borrow().views.len(), views_before);
-        assert!(!streams.contains_key(&second), "no stream");
-        assert!(!semantic_states.contains_key(&second), "no render state");
+        assert!(
+            session_registry
+                .session(second)
+                .is_none_or(|session| session.stream.is_none()),
+            "no stream"
+        );
+        assert!(
+            session_registry.semantic(second).is_none(),
+            "no render state"
+        );
         assert!(!session_registry.retains_views(), "nothing retained");
         assert_eq!(
             session_registry.session_holding(token),
@@ -6043,13 +5857,6 @@ mod tests {
     fn frontend_events_from_uninstalled_sessions_are_dropped_without_state_access() {
         let source = FrontendId(77);
         let mut editor = EditorState::new();
-        let mut render_states = HashMap::new();
-        let mut semantic_states = HashMap::new();
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        let mut last_dispatch_idle_sent = HashMap::new();
-        let mut last_active_buffer_sent = HashMap::new();
-        let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
 
         handle_dispatcher_event(
@@ -6063,19 +5870,16 @@ mod tests {
                 }),
             },
             &mut editor,
-            &mut render_states,
-            &mut semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_dispatch_idle_sent,
-            &mut last_active_buffer_sent,
-            &mut terminal_bell_baselines,
             &mut session_registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
 
         assert_eq!(editor.core.borrow().active_frontend, FrontendId::LOCAL);
-        assert!(term_sizes.is_empty());
+        assert!(
+            session_registry
+                .session(source)
+                .is_none_or(|session| session.term_size.is_none())
+        );
     }
 
     #[test]
@@ -6610,17 +6414,6 @@ mod tests {
         let old_size = CellSize::new(24, 80);
         let new_size = CellSize::new(31, 97);
         let mut editor = EditorState::new();
-        let mut render_states = HashMap::from([
-            (source, RenderState::new(old_size)),
-            (forged, RenderState::new(old_size)),
-        ]);
-        let mut semantic_states: HashMap<FrontendId, crate::semantic_render::SemanticRenderState> =
-            HashMap::new();
-        let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
-        let mut term_sizes = HashMap::from([(source, old_size), (forged, old_size)]);
-        let mut last_dispatch_idle_sent = HashMap::new();
-        let mut last_active_buffer_sent = HashMap::new();
-        let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
         session_registry.register_session(
             source,
@@ -6634,6 +6427,26 @@ mod tests {
                 0,
             ),
         );
+        // The forged id's grid projection and size live in its own
+        // session (E9b), so it is registered too, as a peer would be.
+        session_registry.register_session(
+            forged,
+            session_registry.session_state(source).expect("registered"),
+        );
+        for fid in [source, forged] {
+            let session = session_registry.session_mut(fid).expect("registered");
+            session.render = Some(RenderState::new(old_size));
+            session.term_size = Some(old_size);
+        }
+        let render_size = |registry: &SessionRegistry, fid| {
+            registry
+                .session(fid)
+                .and_then(|session| session.render.as_ref())
+                .map(RenderState::size)
+        };
+        let term_size = |registry: &SessionRegistry, fid| {
+            registry.session(fid).and_then(|session| session.term_size)
+        };
 
         handle_dispatcher_event(
             DispatcherEvent::FrontendEvent {
@@ -6644,21 +6457,14 @@ mod tests {
                 },
             },
             &mut editor,
-            &mut render_states,
-            &mut semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_dispatch_idle_sent,
-            &mut last_active_buffer_sent,
-            &mut terminal_bell_baselines,
             &mut session_registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
 
-        assert_eq!(render_states[&source].size(), new_size);
-        assert_eq!(term_sizes[&source], new_size);
-        assert_eq!(render_states[&forged].size(), old_size);
-        assert_eq!(term_sizes[&forged], old_size);
+        assert_eq!(render_size(&session_registry, source), Some(new_size));
+        assert_eq!(term_size(&session_registry, source), Some(new_size));
+        assert_eq!(render_size(&session_registry, forged), Some(old_size));
+        assert_eq!(term_size(&session_registry, forged), Some(old_size));
     }
     #[test]
     fn terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once() {
@@ -6689,7 +6495,7 @@ mod tests {
             assert!(Instant::now() < deadline, "initial terminal bell timed out");
             thread::sleep(Duration::from_millis(10));
         }
-        let mut baselines = HashMap::new();
+        let mut baselines = None;
         assert!(!take_pending_terminal_bell(
             &editor,
             FrontendId::LOCAL,
@@ -7315,15 +7121,6 @@ mod tests {
             (document, panel_id, dead_buffer)
         };
 
-        let mut render_states = HashMap::new();
-        let mut semantic_states = HashMap::new();
-        semantic_states.insert(fid, crate::semantic_render::SemanticRenderState::new(fid));
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        term_sizes.insert(fid, CellSize::new(24, 80));
-        let mut last_idle = HashMap::new();
-        let mut last_active = HashMap::new();
-        let mut bells = HashMap::new();
         // The dispatcher drops any event from an UNINSTALLED session
         // (#148's defense-in-depth membership check), so the session must
         // be registered or this test passes for the wrong reason — it did,
@@ -7342,6 +7139,11 @@ mod tests {
                 token: None,
             },
         );
+        {
+            let session = registry.session_mut(fid).expect("registered");
+            session.semantic = Some(crate::semantic_render::SemanticRenderState::new(fid));
+            session.term_size = Some(CellSize::new(24, 80));
+        }
 
         handle_dispatcher_event(
             DispatcherEvent::FrontendEvent {
@@ -7355,13 +7157,6 @@ mod tests {
                 },
             },
             &mut editor,
-            &mut render_states,
-            &mut semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_idle,
-            &mut last_active,
-            &mut bells,
             &mut registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
@@ -7723,15 +7518,6 @@ mod tests {
         fid: FrontendId,
         event: FrontendEvent,
     ) {
-        let mut render_states = HashMap::new();
-        let mut semantic_states = HashMap::new();
-        semantic_states.insert(fid, crate::semantic_render::SemanticRenderState::new(fid));
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        term_sizes.insert(fid, CellSize::new(24, 80));
-        let mut last_idle = HashMap::new();
-        let mut last_active = HashMap::new();
-        let mut bells = HashMap::new();
         let mut registry = SessionRegistry::new();
         registry.register_session(
             fid,
@@ -7746,16 +7532,14 @@ mod tests {
                 token: None,
             },
         );
+        {
+            let session = registry.session_mut(fid).expect("registered");
+            session.semantic = Some(crate::semantic_render::SemanticRenderState::new(fid));
+            session.term_size = Some(CellSize::new(24, 80));
+        }
         handle_dispatcher_event(
             DispatcherEvent::FrontendEvent { source: fid, event },
             editor,
-            &mut render_states,
-            &mut semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_idle,
-            &mut last_active,
-            &mut bells,
             &mut registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
@@ -7874,14 +7658,9 @@ mod tests {
         render_states: &mut HashMap<FrontendId, RenderState>,
         event: FrontendEvent,
     ) {
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        term_sizes.insert(fid, CellSize::new(24, 80));
-        let mut last_idle = HashMap::new();
-        let mut last_active = HashMap::new();
-        let mut bells = HashMap::new();
         let mut registry = SessionRegistry::new();
         registry.register_session(fid, session(version, !render_states.contains_key(&fid)));
+        registry.session_mut(fid).expect("registered").term_size = Some(CellSize::new(24, 80));
         // §5b G8e — a SECOND session that speaks the mapped family, so a
         // payload claiming its id has something real to borrow. Without
         // it, a payload-keyed lookup would fail for want of a session
@@ -7899,19 +7678,48 @@ mod tests {
                 session(LEGACY_PANEL_VERSION, true),
             );
         }
-        handle_dispatcher_event(
-            DispatcherEvent::FrontendEvent { source: fid, event },
+        dispatch_with_projection(
             editor,
-            render_states,
-            semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_idle,
-            &mut last_active,
-            &mut bells,
             &mut registry,
+            fid,
+            semantic_states,
+            render_states,
+            DispatcherEvent::FrontendEvent { source: fid, event },
+        );
+    }
+
+    /// Drive `event` through the real dispatcher with `fid`'s projection
+    /// moved out of the caller's maps into its registered session for the
+    /// call, and back out after it if the session still holds one, so a
+    /// row can ship a frame before an event and read the projection after
+    /// it (E9b: the dispatcher keeps a projection in its session). Only
+    /// `fid`'s entries move; the dispatcher reads no other frontend's.
+    fn dispatch_with_projection(
+        editor: &mut crate::editor::EditorState,
+        registry: &mut SessionRegistry,
+        fid: FrontendId,
+        semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        render_states: &mut HashMap<FrontendId, RenderState>,
+        event: DispatcherEvent,
+    ) {
+        if let Some(session) = registry.session_mut(fid) {
+            session.semantic = semantic_states.remove(&fid);
+            session.render = render_states.remove(&fid);
+        }
+        handle_dispatcher_event(
+            event,
+            editor,
+            registry,
             &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
         );
+        if let Some(session) = registry.session_mut(fid) {
+            if let Some(semantic) = session.semantic.take() {
+                semantic_states.insert(fid, semantic);
+            }
+            if let Some(render) = session.render.take() {
+                render_states.insert(fid, render);
+            }
+        }
     }
 
     fn geometry_event(claimed: FrontendId, epoch: u64, rows: u32, cols: u32) -> FrontendEvent {
@@ -8485,14 +8293,20 @@ mod tests {
 
         // The exempt kind with an INVALID generation: refused.
         assert!(
-            !panel_mapping_is_current(&editor, &mut semantic_states, fid, MouseKind::ScrollDown, 0),
+            !panel_mapping_is_current(
+                &editor,
+                semantic_states.get_mut(&fid),
+                fid,
+                MouseKind::ScrollDown,
+                0
+            ),
             "a zeroed wheel is refused: the exemption must not run first"
         );
         // A non-exempt kind with the same zero: also refused, so the
         // above is the zero and not the kind.
         assert!(!panel_mapping_is_current(
             &editor,
-            &mut semantic_states,
+            semantic_states.get_mut(&fid),
             fid,
             MouseKind::Down(MouseButton::Left),
             0
@@ -8502,7 +8316,7 @@ mod tests {
         assert!(
             panel_mapping_is_current(
                 &editor,
-                &mut semantic_states,
+                semantic_states.get_mut(&fid),
                 fid,
                 MouseKind::ScrollDown,
                 generation
@@ -8579,7 +8393,7 @@ mod tests {
         assert!(
             panel_mapping_is_current(
                 &editor,
-                &mut semantic_states,
+                semantic_states.get_mut(&fid),
                 fid,
                 MouseKind::ScrollDown,
                 stale
@@ -8601,7 +8415,7 @@ mod tests {
         assert!(
             !panel_mapping_is_current(
                 &editor,
-                &mut semantic_states,
+                semantic_states.get_mut(&fid),
                 fid,
                 MouseKind::Down(MouseButton::Left),
                 stale
@@ -8618,7 +8432,7 @@ mod tests {
             MouseKind::ScrollRight,
         ] {
             assert!(
-                panel_mapping_is_current(&editor, &mut semantic_states, fid, kind, stale),
+                panel_mapping_is_current(&editor, semantic_states.get_mut(&fid), fid, kind, stale),
                 "{kind:?} is coordinate-free and exempt"
             );
         }
@@ -10032,25 +9846,15 @@ mod tests {
         render_states: &mut HashMap<FrontendId, RenderState>,
         fid: FrontendId,
     ) {
-        let mut streams = HashMap::new();
-        let mut term_sizes = HashMap::new();
-        let mut last_idle = HashMap::new();
-        let mut last_active = HashMap::new();
-        let mut bells = HashMap::new();
         let mut registry = SessionRegistry::new();
         registry.register_session(fid, session(LEGACY_PANEL_VERSION, true));
-        handle_dispatcher_event(
-            DispatcherEvent::SessionDetached { frontend_id: fid },
+        dispatch_with_projection(
             editor,
-            render_states,
-            semantic_states,
-            &mut streams,
-            &mut term_sizes,
-            &mut last_idle,
-            &mut last_active,
-            &mut bells,
             &mut registry,
-            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+            fid,
+            semantic_states,
+            render_states,
+            DispatcherEvent::SessionDetached { frontend_id: fid },
         );
     }
 
@@ -10329,7 +10133,7 @@ mod tests {
         // cancels from INSIDE projection, which cannot deliver.
         editor.hide_panel_for_test(fid);
 
-        let messages = project_semantic_frame(&mut editor, &mut states, fid);
+        let messages = project_semantic_frame(&mut editor, states.get_mut(&fid), fid);
 
         assert_eq!(
             child_stream(&editor),
@@ -10658,7 +10462,7 @@ mod tests {
                             "{label}: the gesture must END --- it belongs to \
                              a presentation that no longer exists"
                         );
-                        drain_pending_release(&mut editor, &mut states, fid);
+                        drain_pending_release(&mut editor, states.get_mut(&fid), fid);
                         assert!(
                             !states[&fid].has_pending_release(),
                             "{label}: and the slot must be empty afterwards"
@@ -10773,7 +10577,7 @@ mod tests {
                  composite's name and the row proves nothing about \
                  coincidence"
             );
-            drain_pending_release(&mut editor, &mut states, fid);
+            drain_pending_release(&mut editor, states.get_mut(&fid), fid);
 
             assert_eq!(
                 child_stream(&editor),
@@ -10839,7 +10643,7 @@ mod tests {
 
             editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(24, 80));
             render_and_redeclare(&editor, &mut states, fid);
-            drain_pending_release(&mut editor, &mut states, fid);
+            drain_pending_release(&mut editor, states.get_mut(&fid), fid);
 
             let after = {
                 let core = editor.core.borrow();
@@ -12052,8 +11856,7 @@ mod tests {
         sync_terminal_layouts_for_tick(
             &mut editor,
             &[fid],
-            &HashMap::from([(fid, CellSize::new(24, 120))]),
-            &semantic_states,
+            &tick_registry(fid, semantic_states.remove(&fid), CellSize::new(24, 120)),
         );
 
         assert_eq!(
@@ -12140,16 +11943,9 @@ mod tests {
         );
 
         // The write-failure shape: the peer has gone away and the next
-        // write to `server` would fail; the maps are the loop's own.
+        // write to `server` would fail; the session is the loop's own.
         let (server, client) = UnixStream::pair().expect("socketpair");
         drop(client);
-        let mut render_states = HashMap::new();
-        let mut semantic_states = HashMap::new();
-        let mut streams = HashMap::from([(fid, server)]);
-        let mut term_sizes = HashMap::from([(fid, CellSize::new(24, 80))]);
-        let mut last_dispatch_idle_sent = HashMap::from([(fid, true)]);
-        let mut last_active_buffer_sent = HashMap::new();
-        let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
         session_registry.register_session(
             fid,
@@ -12163,6 +11959,12 @@ mod tests {
                 0,
             ),
         );
+        {
+            let session = session_registry.session_mut(fid).expect("registered");
+            session.stream = Some(server);
+            session.term_size = Some(CellSize::new(24, 80));
+            session.last_dispatch_idle_sent = Some(true);
+        }
         let detached = |editor: &EditorState| -> Vec<i64> {
             editor
                 .lua_host
@@ -12174,18 +11976,7 @@ mod tests {
 
         macro_rules! detach {
             () => {
-                detach_frontend(
-                    &mut editor,
-                    &mut render_states,
-                    &mut semantic_states,
-                    &mut streams,
-                    &mut term_sizes,
-                    &mut last_dispatch_idle_sent,
-                    &mut last_active_buffer_sent,
-                    &mut terminal_bell_baselines,
-                    &mut session_registry,
-                    fid,
-                )
+                detach_frontend(&mut editor, &mut session_registry, fid)
             };
         }
 
@@ -12199,8 +11990,8 @@ mod tests {
             "and its session is unregistered"
         );
         assert!(
-            streams.is_empty() && term_sizes.is_empty() && last_dispatch_idle_sent.is_empty(),
-            "and the loop's maps no longer hold it"
+            session_registry.session(fid).is_none(),
+            "and the loop's session no longer holds its stream, size or idle baseline"
         );
         assert_eq!(
             detached(&editor),
