@@ -886,16 +886,96 @@ fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
 /// the window's first reconnect has connected through the proxy, and
 /// the old socket's EOF follows `eof_delay` later. Later connections
 /// forward both ways afresh. The timeline is kept for the failure text.
+///
+/// Fix round 4 (review 4's Medium 1) adds the forwarder whose
+/// downstream fails first ([`InflightProxy::failing_writes`]): at the
+/// cut the proxy also stops reading the daemon's side of the first
+/// connection, so the daemon's next write to the old socket fails, and
+/// the kept input goes only once the daemon has said so as well.
 struct InflightProxy {
     path: std::path::PathBuf,
     first_front: std::sync::Arc<std::sync::Mutex<Option<UnixStream>>>,
+    first_back: std::sync::Arc<std::sync::Mutex<Option<UnixStream>>>,
+    fail_writes: bool,
     holding: std::sync::Arc<std::sync::atomic::AtomicBool>,
     kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     timeline: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+/// What the proxy waits on before it forwards the kept input: the
+/// daemon's word that its write to the old socket failed.
+type WriteFailed = Box<dyn Fn() -> bool + Send>;
+
+/// Copy `from` into `to` on a thread of its own, then shut `to`'s
+/// writing half, as one direction of a forwarded connection.
+fn pump(mut from: UnixStream, mut to: UnixStream) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut from, &mut to);
+        let _ = to.shutdown(std::net::Shutdown::Write);
+    });
+}
+
+/// The first connection once the window's side has closed: wait for
+/// the window's first reconnect to connect through the proxy and, for
+/// [`InflightProxy::failing_writes`], for the daemon's word that its
+/// write to the old socket failed; then forward the kept input to the
+/// daemon on the old socket, and its EOF `eof_delay` later.
+fn forward_kept_then_eof(
+    b_write: &mut UnixStream,
+    kept: &std::sync::Mutex<Vec<u8>>,
+    accepted: &std::sync::atomic::AtomicUsize,
+    write_failed: Option<&WriteFailed>,
+    eof_delay: Duration,
+    mark: &dyn Fn(String),
+) {
+    use std::io::Write as _;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while accepted.load(std::sync::atomic::Ordering::SeqCst) < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if let Some(write_failed) = write_failed {
+        while !write_failed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        mark(format!(
+            "the daemon's write to the old socket failed: {}",
+            write_failed()
+        ));
+    }
+    let input = std::mem::take(&mut *kept.lock().expect("kept"));
+    let _ = b_write.write_all(&input);
+    mark(format!("{} bytes in flight forwarded", input.len()));
+    std::thread::sleep(eof_delay);
+    mark("the old socket's EOF forwarded".to_owned());
+    let _ = b_write.shutdown(std::net::Shutdown::Write);
+}
+
 impl InflightProxy {
     fn start(target: &Path, dir: &Path, eof_delay: Duration) -> Self {
+        Self::start_with(target, dir, eof_delay, None)
+    }
+
+    /// As [`Self::start`], with the daemon's side of the first
+    /// connection unread from the cut on: the daemon's next write to the
+    /// old socket fails (on Linux, `EPIPE`), and the kept input is
+    /// forwarded only once `write_failed` says the daemon has logged it
+    /// and the window's first reconnect has connected.
+    #[cfg(target_os = "linux")]
+    fn failing_writes(
+        target: &Path,
+        dir: &Path,
+        eof_delay: Duration,
+        write_failed: WriteFailed,
+    ) -> Self {
+        Self::start_with(target, dir, eof_delay, Some(write_failed))
+    }
+
+    fn start_with(
+        target: &Path,
+        dir: &Path,
+        eof_delay: Duration,
+        write_failed: Option<WriteFailed>,
+    ) -> Self {
         use std::io::{Read as _, Write as _};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
@@ -904,6 +984,8 @@ impl InflightProxy {
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the proxy");
         let target = target.to_path_buf();
         let first_front = Arc::new(Mutex::new(None));
+        let first_back = Arc::new(Mutex::new(None));
+        let fail_writes = write_failed.is_some();
         let holding = Arc::new(AtomicBool::new(false));
         let kept = Arc::new(Mutex::new(Vec::new()));
         let timeline = Arc::new(Mutex::new(Vec::new()));
@@ -918,12 +1000,14 @@ impl InflightProxy {
                     .push(format!("{:>6} ms {what}", started.elapsed().as_millis()));
             }
         };
-        let (front_slot, hold, keep) = (
+        let (front_slot, back_slot, hold, keep) = (
             Arc::clone(&first_front),
+            Arc::clone(&first_back),
             Arc::clone(&holding),
             Arc::clone(&kept),
         );
         std::thread::spawn(move || {
+            let mut write_failed = write_failed;
             let mut later = Vec::new();
             for incoming in listener.incoming() {
                 let Ok(front) = incoming else { break };
@@ -933,22 +1017,19 @@ impl InflightProxy {
                 let index = accepted.fetch_add(1, Ordering::SeqCst);
                 mark(format!("connection {index} accepted"));
                 let mut f_read = front.try_clone().expect("clone");
-                let mut f_write = front.try_clone().expect("clone");
-                let mut b_read = back.try_clone().expect("clone");
                 let mut b_write = back.try_clone().expect("clone");
-                std::thread::spawn(move || {
-                    let _ = std::io::copy(&mut b_read, &mut f_write);
-                    let _ = f_write.shutdown(std::net::Shutdown::Write);
-                });
+                pump(
+                    back.try_clone().expect("clone"),
+                    front.try_clone().expect("clone"),
+                );
                 if index > 0 {
-                    std::thread::spawn(move || {
-                        let _ = std::io::copy(&mut f_read, &mut b_write);
-                        let _ = b_write.shutdown(std::net::Shutdown::Write);
-                    });
+                    pump(f_read, b_write);
                     later.push((front, back));
                     continue;
                 }
                 *front_slot.lock().expect("front") = Some(front);
+                *back_slot.lock().expect("back") = Some(back.try_clone().expect("clone"));
+                let write_failed = write_failed.take();
                 let (hold, keep, accepted, mark) = (
                     Arc::clone(&hold),
                     Arc::clone(&keep),
@@ -972,22 +1053,22 @@ impl InflightProxy {
                         }
                     }
                     mark("the window's side closed".to_owned());
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    while accepted.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    let input = std::mem::take(&mut *keep.lock().expect("kept"));
-                    let _ = b_write.write_all(&input);
-                    mark(format!("{} bytes in flight forwarded", input.len()));
-                    std::thread::sleep(eof_delay);
-                    mark("the old socket's EOF forwarded".to_owned());
-                    let _ = b_write.shutdown(std::net::Shutdown::Write);
+                    forward_kept_then_eof(
+                        &mut b_write,
+                        &keep,
+                        &accepted,
+                        write_failed.as_ref(),
+                        eof_delay,
+                        &mark,
+                    );
                 });
             }
         });
         Self {
             path,
             first_front,
+            first_back,
+            fail_writes,
             holding,
             kept,
             timeline,
@@ -1005,10 +1086,16 @@ impl InflightProxy {
         self.kept.lock().expect("kept").len()
     }
 
-    /// Close the window's side of the first connection, both ways.
+    /// Close the window's side of the first connection, both ways; for
+    /// [`Self::failing_writes`], stop reading the daemon's side too.
     fn cut(&self) {
         if let Some(front) = self.first_front.lock().expect("front").as_ref() {
             let _ = front.shutdown(std::net::Shutdown::Both);
+        }
+        if self.fail_writes
+            && let Some(back) = self.first_back.lock().expect("back").as_ref()
+        {
+            let _ = back.shutdown(std::net::Shutdown::Read);
         }
     }
 
@@ -1175,6 +1262,375 @@ fn e9_2_input_in_flight_at_a_loss_lands_in_the_view_the_window_resumes() {
         r#""abcXY!one\ntwo\n""#,
         "the next key lands after the in-flight input"
     );
+}
+
+// ---------------------------------------------------------------------------
+// E9 fix round 4 --- a failed write drains (review 4's Medium 1)
+// ---------------------------------------------------------------------------
+
+/// The owner's ruling of 2026-10-20 on review 4's Medium 1, a bounded
+/// drain: a write to a frontend that fails stops the daemon's output to
+/// it at once and nothing else; its input route and its view stay until
+/// its reader's EOF or `pmacs::daemon::WRITE_FAILURE_DRAIN`, then the
+/// one teardown runs and the view is retained for the token. These rows
+/// reach a failed write the way review 4's probe does, a session that
+/// stops reading the daemon's side of its socket and keeps its sending
+/// half open, which only Linux answers with `EPIPE`: BSD lets a write to
+/// a peer that stopped reading succeed (E8d.4's row, macOS CI run
+/// 38558729706), so the precondition cannot be made on macOS and the
+/// rows are compiled on Linux alone rather than reported `ok` there for
+/// a drain they never saw.
+#[cfg(target_os = "linux")]
+mod write_failure_drain {
+    use super::*;
+
+    /// The drain's bound, `pmacs::daemon::WRITE_FAILURE_DRAIN`, which
+    /// the daemon names in the line it logs at the failed write; the
+    /// deadline row reads that line, so the two cannot part silently.
+    const DRAIN: Duration = Duration::from_secs(2);
+
+    fn daemon_log(daemon: &TestDaemon) -> String {
+        std::fs::read_to_string(format!("{}.stderr.log", daemon.socket_path().display()))
+            .unwrap_or_default()
+    }
+
+    /// The daemon's log lines of a write to `fid` that failed on a
+    /// broken pipe.
+    fn write_failures(daemon: &TestDaemon, fid: FrontendId) -> usize {
+        let who = format!("{fid:?} ");
+        daemon_log(daemon)
+            .lines()
+            .filter(|line| line.contains(&who) && line.contains("Broken pipe"))
+            .count()
+    }
+
+    impl Session {
+        /// Stop reading the daemon's side of this socket, as a
+        /// forwarder whose downstream failed does, and ask for a frame
+        /// (the same viewport declared again): the daemon's next write
+        /// fails. Returns once the daemon has logged that failure, the
+        /// moment this row saw it. The sending half stays open, so what
+        /// this session types next still reaches the daemon.
+        fn stop_reading(&mut self, daemon: &TestDaemon, document: BufferId) -> Instant {
+            self.stream
+                .shutdown(std::net::Shutdown::Read)
+                .expect("shut the receiving half");
+            self.declare_viewport(document);
+            let fid = self.fid;
+            common::ready::expect_true(
+                &format!("the daemon's failed write to {fid:?}"),
+                Duration::from_secs(10),
+                || write_failures(daemon, fid) > 0,
+                || daemon_log(daemon),
+            );
+            Instant::now()
+        }
+
+        /// A key sent past the point the daemon may have shut the
+        /// socket, and whether the write went through.
+        fn key_regardless(&mut self, ch: char) -> bool {
+            write_message(
+                &mut self.stream,
+                &FrontendEvent::Key(KeyEvent {
+                    frontend_id: self.fid,
+                    key: Key::Char(ch),
+                    mods: Modifiers::NONE,
+                    timestamp_ns: 0,
+                }),
+            )
+            .is_ok()
+        }
+    }
+
+    /// Whether the daemon closes, with nothing written, a socket that
+    /// presents `token`: the refusal a live token gets.
+    fn refused(daemon: &TestDaemon, token: SessionToken) -> bool {
+        let (mut stream, _) = handshake(daemon, PROTOCOL_VERSION, Some(token));
+        match read_message::<InstanceMessage>(&mut stream) {
+            Ok(_) => false,
+            Err(pmacs_protocol::transport::TransportError::Eof) => true,
+            Err(other) => panic!("the daemon neither answered nor closed the attempt: {other}"),
+        }
+    }
+
+    /// A session on the note, `abc` typed and echoed.
+    fn typed_abc(daemon: &TestDaemon) -> (Session, SessionToken, BufferId) {
+        let mut session = Session::attach(daemon, PROTOCOL_VERSION, None);
+        let token = session.token.expect("token");
+        let (scratch, _) = session.where_am_i();
+        let note = session.open_note(scratch);
+        session.type_str("abc");
+        session.wait("abc applied", |m| {
+            matches!(m,
+                InstanceMessage::CursorByte { buffer_id, byte_pos: 3 } if *buffer_id == note
+            )
+            .then_some(())
+        });
+        (session, token, note)
+    }
+
+    /// The deadline, and the loss boundary it states. A session whose
+    /// write failed and which sends no EOF: the daemon writes nothing
+    /// more to it (one failed write in its log, none after), keeps it
+    /// (no teardown in the first half second), dispatches its `X` to its
+    /// view, refuses a socket presenting its token; at the deadline it
+    /// tears it down without the EOF and shuts the old socket, so the
+    /// `Y` sent after that is refused and reaches no view; the token
+    /// then resumes the view at the cursor after `X`. At `3522b2f` the failed write tore the session down at
+    /// once, its `X` was dropped from an uninstalled session, and its
+    /// token resumed at cursor 3.
+    #[test]
+    fn e9_fr4_a_failed_write_drains_input_until_the_deadline_and_no_later() {
+        let daemon = daemon_with_note("pmacs.lsp.config = {}\n");
+        let (mut first, token, note) = typed_abc(&daemon);
+        let id = first.fid.0.to_string();
+        let failed_at = first.stop_reading(&daemon, note);
+        first.type_str("X");
+        // A window before a negative assertion, named with its length:
+        // half a second, a quarter of the drain.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !detached(&daemon).contains(&id),
+            "a failed write stops the output, not the session; log:\n{}",
+            daemon_log(&daemon)
+        );
+        let announced = format!(
+            "{:?}'s write failed; nothing more is written to it, and its input is read until \
+             its EOF or {} ms",
+            first.fid,
+            DRAIN.as_millis()
+        );
+        assert!(
+            daemon_log(&daemon).contains(&announced),
+            "the daemon says it drains, for {} ms: {}",
+            DRAIN.as_millis(),
+            daemon_log(&daemon)
+        );
+        assert!(
+            refused(&daemon, token),
+            "the draining session's token is live: a socket presenting it is refused"
+        );
+        // No EOF is sent: the teardown is the deadline's.
+        common::ready::expect_true(
+            "the drain's teardown",
+            Duration::from_secs(10),
+            || detached(&daemon).contains(&id),
+            || daemon_log(&daemon),
+        );
+        let torn_after = failed_at.elapsed();
+        assert!(
+            torn_after >= DRAIN.saturating_sub(Duration::from_millis(250))
+                && torn_after <= DRAIN + Duration::from_secs(3),
+            "torn down at the deadline, {} ms after the failed write was seen",
+            torn_after.as_millis()
+        );
+        assert!(
+            daemon_log(&daemon).contains(&format!(
+                "{:?} sent no EOF within {} ms of its failed write; tearing it down",
+                first.fid,
+                DRAIN.as_millis()
+            )),
+            "{}",
+            daemon_log(&daemon)
+        );
+        // Past the deadline: lost. The daemon shut the old socket both
+        // ways at the teardown, so its reader has ended and the peer's
+        // next write is refused.
+        assert!(
+            !first.key_regardless('Y'),
+            "the teardown shut the old socket: a key sent after it is refused"
+        );
+        assert_eq!(
+            write_failures(&daemon, first.fid),
+            1,
+            "nothing was written to the frontend after its failed write: {}",
+            daemon_log(&daemon)
+        );
+        let mut resumed = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
+        assert_eq!(
+            resumed.where_am_i(),
+            (note, 4),
+            "the token resumes the view with the drained X and without the late Y; log:\n{}",
+            daemon_log(&daemon)
+        );
+    }
+
+    /// The last-frontend question while another frontend drains. Two
+    /// sessions; `a`'s write fails and it sends no EOF; `b`'s `C-x C-c`
+    /// is asked whether the daemon stops too, since `b` is the last
+    /// window the daemon still serves (as it is once `a`'s drain ends),
+    /// and `n` detaches it. A draining frontend is not counted as a live
+    /// window by `pmacs.frontend.attached_count` unless it is the asker.
+    /// At `3522b2f` `a` was gone at its failed write, which this row's
+    /// premise refuses.
+    #[test]
+    fn e9_fr4_the_last_window_served_is_asked_while_another_drains() {
+        let mut daemon = daemon_with_note("");
+        let mut a = Session::attach(&daemon, PROTOCOL_VERSION, None);
+        let (document, _) = a.where_am_i();
+        let mut b = Session::attach(&daemon, PROTOCOL_VERSION, None);
+        b.where_am_i();
+        let id_a = a.fid.0.to_string();
+        a.stop_reading(&daemon, document);
+        assert!(
+            !detached(&daemon).contains(&id_a),
+            "premise: `a` drains, its session still registered"
+        );
+        b.quit_chord();
+        let prompt = b.wait("the question", |m| match m {
+            InstanceMessage::MinibufferPromptRows { prompt, .. } => prompt.clone(),
+            _ => None,
+        });
+        assert!(
+            prompt.contains("stop the daemon"),
+            "the last window served is asked about the daemon: {prompt:?}"
+        );
+        assert!(
+            !detached(&daemon).contains(&id_a),
+            "asked while `a` drained, not after its teardown; log:\n{}",
+            daemon_log(&daemon)
+        );
+        b.key(Key::Char('n'), Modifiers::NONE);
+        assert_eq!(b.ended(), Some(GoodbyeReason::Detached), "n detaches");
+        assert!(daemon.is_alive(), "n leaves the daemon up");
+    }
+
+    /// The idle clock holds through a drain. With `daemon.idle-exit-secs`
+    /// at one second, the only session's write fails and it sends no
+    /// EOF: a second and a half later, past the knob and inside the
+    /// drain, the daemon is up and takes the session's `X` into its
+    /// view, and the token resumes it after the deadline's teardown.
+    /// A draining session is owed its input and then the retention, so
+    /// it counts as attached for the clock.
+    #[test]
+    fn e9_fr4_a_draining_session_holds_the_idle_clock() {
+        let mut daemon = daemon_with_note(
+            "pmacs.lsp.config = {}\npmacs.config.set('daemon.idle-exit-secs', 1)\n",
+        );
+        let (mut only, token, note) = typed_abc(&daemon);
+        let id = only.fid.0.to_string();
+        let failed_at = only.stop_reading(&daemon, note);
+        // Named window: a second and a half from the failed write, past
+        // the one-second knob and inside the two-second drain.
+        std::thread::sleep(Duration::from_millis(1500).saturating_sub(failed_at.elapsed()));
+        assert!(
+            daemon.is_alive(),
+            "a draining session holds the idle clock; log:\n{}",
+            daemon_log(&daemon)
+        );
+        only.type_str("X");
+        common::ready::expect_true(
+            "the drain's teardown",
+            Duration::from_secs(10),
+            || detached(&daemon).contains(&id),
+            || daemon_log(&daemon),
+        );
+        let mut resumed = Session::attach(&daemon, PROTOCOL_VERSION, Some(token));
+        assert_eq!(
+            resumed.where_am_i(),
+            (note, 4),
+            "the X typed past the knob reached the view; log:\n{}",
+            daemon_log(&daemon)
+        );
+    }
+
+    /// Review 4's ordering on the real GPU window, through the
+    /// production `App`: the same window and the same in-flight `XY` as
+    /// `e9_2_input_in_flight_at_a_loss_lands_in_the_view_the_window_resumes`,
+    /// behind a forwarder whose downstream fails first. At the cut the
+    /// proxy stops reading the daemon's side of the old connection, so
+    /// the daemon's next write to it fails; `XY` is forwarded only once
+    /// the daemon has logged that and the window's first reconnect has
+    /// connected, and the old socket's EOF 500 ms later, inside the
+    /// drain. The old session is still registered, so the first attempt
+    /// is refused, `XY` lands in its view and the EOF retains it for the
+    /// attempt that resumes. At `3522b2f` the failed write tore the
+    /// session down at once: the first attempt resumed at cursor 3 and
+    /// `XY` was dropped from an uninstalled session.
+    #[test]
+    fn e9_fr4_input_in_flight_behind_a_failed_write_lands_in_the_view_the_window_resumes() {
+        let daemon = daemon_with_note("");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::set_permissions(
+            dir.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("chmod");
+        let log = format!("{}.stderr.log", daemon.socket_path().display());
+        let proxy = InflightProxy::failing_writes(
+            daemon.socket_path(),
+            dir.path(),
+            Duration::from_millis(500),
+            Box::new(move || {
+                std::fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .contains("Broken pipe")
+            }),
+        );
+        let Some((facts, timeline)) = run_inflight_probe(&proxy, dir.path()) else {
+            return;
+        };
+        eprintln!("daemon log:\n{}", daemon_log(&daemon));
+        assert_eq!(fact(&facts, "phase.done"), "true", "{facts:?}");
+        assert_eq!(fact(&facts, "cursor.before"), "3", "{facts:?}");
+        assert_eq!(fact(&facts, "text.before"), r#""abcone\ntwo\n""#);
+        assert_eq!(fact(&facts, "text.inflight"), r#""abcXYone\ntwo\n""#);
+        assert_eq!(fact(&facts, "lost"), "true");
+        // The ordering's first half: the daemon's write failed before
+        // `XY` reached it on the old socket.
+        let at = |needle: &str| {
+            timeline
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} on the proxy's timeline: {timeline:?}"))
+        };
+        let failed = at("the daemon's write to the old socket failed: true");
+        let forwarded = at("bytes in flight forwarded");
+        assert!(
+            failed < forwarded && !timeline[forwarded].contains(" 0 bytes"),
+            "the failed write, then the input in flight: {timeline:?}"
+        );
+        let refused = fact(&facts, "refused").parse::<u32>().expect("refused");
+        assert!(
+            refused >= 1,
+            "the draining session's token is live, so the first attempt is refused: {facts:?}"
+        );
+        assert_eq!(
+            fact(&facts, "attempts"),
+            (refused + 1).to_string(),
+            "every attempt but the last was refused: {facts:?}"
+        );
+        assert_eq!(fact(&facts, "reconnected"), "true", "{facts:?}");
+        assert_eq!(
+            fact(&facts, "buffer.after"),
+            fact(&facts, "buffer.before"),
+            "{facts:?}"
+        );
+        assert_eq!(
+            fact(&facts, "cursor.after"),
+            "5",
+            "the resumed cursor is after the XY the old socket carried past its failed write: \
+             {facts:?}"
+        );
+        assert_eq!(fact(&facts, "text.after"), r#""abcXYone\ntwo\n""#);
+        assert_eq!(
+            fact(&facts, "text.closing"),
+            r#""abcXY!one\ntwo\n""#,
+            "the next key lands after the drained input"
+        );
+        assert!(
+            !daemon_log(&daemon).contains("dropping frontend event from uninstalled session"),
+            "no input of the old socket was dropped: {}",
+            daemon_log(&daemon)
+        );
+        // And its second half: the old socket's EOF came after `XY`, so
+        // the session the first attempt met was draining, not ended.
+        let eof = at("the old socket's EOF forwarded");
+        assert!(
+            forwarded < eof,
+            "the input in flight, then the EOF: {timeline:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

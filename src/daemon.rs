@@ -46,7 +46,9 @@
 //! - Shutdown flag set → send `Goodbye(ShuttingDown)`, return.
 //! - Editor `quit` flag set → send `Goodbye(ShuttingDown)`, propagate
 //!   shutdown to the outer accept loop.
-//! - Write fails (broken pipe) → return; ungraceful disconnect.
+//! - Write fails (broken pipe) → nothing more is written to that
+//!   frontend; its input is still dispatched until its reader's EOF or
+//!   [`WRITE_FAILURE_DRAIN`], then it is torn down (E9 fix round 4).
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -136,9 +138,9 @@ enum DispatcherEvent {
         /// dispatcher on the quit's own request: the frontend is
         /// leaving on purpose, so its view is dropped at its teardown,
         /// not retained. Shared rather than carried on an event because
-        /// the two teardowns race: a window that sent `Detach` closes
-        /// its socket, and the tick loop's write to it can fail while
-        /// the `Detach` is still queued behind that tick.
+        /// a teardown can run ahead of the queued `Detach`: until fix
+        /// round 4 the tick loop's failed write to a window that had
+        /// closed its socket, since then a drain's deadline.
         departing: Arc<AtomicBool>,
     },
     /// An attached frontend dispatched an event (key, mouse, resize,
@@ -154,8 +156,9 @@ enum DispatcherEvent {
     /// Whether the frontend said it was leaving is not carried here:
     /// the reader thread sets the session's shared `departing` flag
     /// when it reads the `FrontendEvent::Detach`, so the teardown that
-    /// runs first --- this event's, or the tick loop's on a failed
-    /// write --- reads one fact (E9, fix round 1).
+    /// runs first --- this event's, or a drain's at its deadline after
+    /// a failed write (fix round 4) --- reads one fact (E9, fix round
+    /// 1).
     SessionDetached { frontend_id: FrontendId },
 }
 
@@ -216,6 +219,33 @@ impl From<SocketPathError> for DaemonError {
 /// Short enough that SIGTERM-to-exit latency is bounded by ~50 ms.
 /// Long enough that an idle daemon doesn't burn CPU.
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// E9 fix round 4 (review 4's Medium 1, the owner's ruling of
+/// 2026-10-20) --- how long a frontend whose socket failed a write keeps
+/// its input route and its view while the daemon waits for its reader's
+/// EOF. Nothing is written to it from the failed write on; what its
+/// reader reads meanwhile is dispatched to its view as any input is;
+/// the one teardown runs at the EOF, or here without it, and what the
+/// peer sends after that is lost (the ruling's stated boundary).
+///
+/// Two seconds, a constant and not a `pmacs.config` knob. A write fails
+/// only once the peer has stopped reading, and a peer that closed its
+/// socket is read to its EOF at once, so the drain ends there: what the
+/// deadline bounds is a connection that goes on sending after it
+/// stopped receiving, a forwarder whose downstream failed with its
+/// upstream still open (review 4's half-close), or a peer that never
+/// closes. Input such a forwarder already holds arrives within its
+/// round trip, which two seconds covers several times over on a long
+/// link. The cost falls on a window reconnecting meanwhile: the token
+/// is live for the drain, so its attempts are refused, and on the
+/// reconnect schedule (0.5, 1.5, 3.5 s after a loss) a drain that runs
+/// two seconds from the loss is over before the third attempt. What a
+/// user would tune it for --- longer for a worse link, shorter to come
+/// back sooner --- trades those two inside a pathological connection,
+/// and zero would bring back the loss the ruling removed, so it is not
+/// offered as a setting; the schedule and the attempt cap it is sized
+/// against are constants too.
+pub const WRITE_FAILURE_DRAIN: Duration = Duration::from_secs(2);
 
 /// Per-daemon state shared between the accept loop and per-attach
 /// handlers.
@@ -1528,6 +1558,31 @@ fn dispatcher_loop(
     let mut jitter_rng = SplitMix64::new(jitter_seed);
 
     loop {
+        // E9 fix round 4 --- a frontend whose write failed and whose
+        // reader has not reached EOF within `WRITE_FAILURE_DRAIN` is
+        // torn down here, the one teardown, without the EOF: what its
+        // reader had read is dispatched (the events ahead of this pass
+        // were handled at the end of the last one), and what its peer
+        // sends from now on is lost. Before the pass reads the active
+        // frontend, so the pass never restores a frontend just gone.
+        for fid in session_registry.drains_past(WRITE_FAILURE_DRAIN, Instant::now()) {
+            eprintln!(
+                "pmacs: {fid:?} sent no EOF within {} ms of its failed write; tearing it down",
+                WRITE_FAILURE_DRAIN.as_millis()
+            );
+            detach_frontend(
+                editor,
+                &mut render_states,
+                &mut semantic_states,
+                &mut streams,
+                &mut term_sizes,
+                &mut last_dispatch_idle_sent,
+                &mut last_active_buffer_sent,
+                &mut terminal_bell_baselines,
+                &mut session_registry,
+                fid,
+            );
+        }
         // Per-tick render + presence sweep for each attached
         // frontend. T M10.8 — temporarily flip `active_frontend` to
         // the frontend being rendered so its FrontendView is the one
@@ -1536,11 +1591,15 @@ fn dispatcher_loop(
         // doesn't update active_frontend in the user-driving sense).
         let last_dispatched = editor.core.borrow().active_frontend;
         // Union of grid + semantic sessions — each fid is in exactly
-        // one of the two maps (projection selected per session).
+        // one of the two maps (projection selected per session). A
+        // draining session (E9 fix round 4) keeps its projection, for
+        // the input its reader still delivers, but has no pass: nothing
+        // is rendered, followed, swept or written for it again.
         let attached_fids: Vec<FrontendId> = render_states
             .keys()
             .chain(semantic_states.keys())
             .copied()
+            .filter(|fid| !session_registry.is_draining(*fid))
             .collect();
 
         // E9 --- a retained view past `session.view-retention-secs`
@@ -2036,23 +2095,34 @@ fn dispatcher_loop(
                 }
             }
 
-            if write_failed {
-                // The broken connection is detached here and now, the
-                // whole way (E8d.4): its reader thread may be blocked
-                // in `read` for as long as the peer holds the socket
-                // open, so its `SessionDetached` can come late or never.
-                detach_frontend(
-                    editor,
-                    &mut render_states,
-                    &mut semantic_states,
-                    &mut streams,
-                    &mut term_sizes,
-                    &mut last_dispatch_idle_sent,
-                    &mut last_active_buffer_sent,
-                    &mut terminal_bell_baselines,
-                    &mut session_registry,
-                    *fid,
+            if write_failed && let Some(stream) = streams.remove(fid) {
+                // E9 fix round 4 (review 4's Medium 1; the owner's ruling
+                // of 2026-10-20, a bounded drain) --- output stops here
+                // and input does not. E8d.4 tore the frontend down at
+                // this line, the whole way and at once, because its
+                // reader may block in `read` for as long as the peer
+                // holds the socket open, so its `SessionDetached` can come
+                // late or never; the refusal-and-retry ruling (fix round
+                // 3) needs the old socket read to its end before its
+                // view is retained for the token. A failed write stops
+                // the output and nothing else: the stream leaves the
+                // write map, so no frame, presence, bell, op, snapshot
+                // or `Goodbye` reaches it again, and its session stays
+                // registered, so what its reader still reads is
+                // dispatched to its view and its token is live (a
+                // reconnect presenting it is refused and retried). The
+                // one teardown E8d.4 made still runs once, and only
+                // once: at the reader's EOF (`SessionDetached`), or at
+                // `WRITE_FAILURE_DRAIN` without it (the top of this
+                // loop), which keeps E8d.4's bound on a reader that
+                // never ends; input after the deadline is lost.
+                eprintln!(
+                    "pmacs: {fid:?}'s write failed; nothing more is written to it, and its \
+                     input is read until its EOF or {} ms",
+                    WRITE_FAILURE_DRAIN.as_millis()
                 );
+                session_registry.begin_drain(*fid, stream, Instant::now());
+                editor.core.borrow_mut().draining_frontends.insert(*fid);
             }
         }
 
@@ -2071,6 +2141,11 @@ fn dispatcher_loop(
         // for the retention, and the clock starts when the last view
         // expires or is resumed and dropped. A window that left on
         // purpose retains nothing, so the clock runs from its close.
+        // A session draining after a failed write (fix round 4) keeps
+        // its projection until its teardown and is counted here: it is
+        // owed the input still on its way and then, unless it said it
+        // was leaving, the retention, so the clock holds through the
+        // drain and starts no earlier than its teardown.
         let attached_now = render_states.len() + semantic_states.len();
         if attached_now == 0 && !session_registry.retains_views() {
             let idle_for = idle_since.get_or_insert_with(Instant::now).elapsed();
@@ -2503,8 +2578,9 @@ fn handle_session_established(
     // 2026-10-19) --- what a presented token names is told apart first,
     // before anything of this attach exists. A token whose session is
     // still registered is live: its socket has not been seen to close
-    // (a loss reaches the daemon by its reader's EOF or a failed write,
-    // and a window's reconnect can come first). The new socket is
+    // (a loss reaches the daemon by its reader's EOF, or by a failed
+    // write and then that EOF or `WRITE_FAILURE_DRAIN`, fix round 4;
+    // a window's reconnect can come first). The new socket is
     // closed, with no view built, no token minted, no session or flag
     // registered and no hook run; the old socket is read to its end,
     // its last input applied to its view, which a loss then retains
@@ -3602,6 +3678,9 @@ fn handle_dispatcher_event(
                 }
             }
         }
+        // The reader's EOF: the teardown of a session that ended, and of
+        // one draining after a failed write (E9 fix round 4), whose
+        // input, queued ahead of this event, has all been dispatched.
         DispatcherEvent::SessionDetached { frontend_id } => {
             detach_frontend(
                 editor,
@@ -3649,20 +3728,28 @@ fn handle_dispatcher_event(
     }
 }
 
-/// The one teardown of a frontend's session (E8d.4), run when the tick
-/// loop's write to it fails and when its reader thread reports
-/// `SessionDetached`. Until E8d the write-failure drop removed the
-/// per-frontend maps and nothing else --- a copy of this arm that had
-/// drifted --- so a frontend whose socket died under a write kept its
-/// `command_history` entry, its undo source and its Lua-side tables,
-/// and `frontend.detached` never ran for it unless its reader thread
-/// happened to end too.
+/// The one teardown of a frontend's session (E8d.4), run when its
+/// reader thread reports `SessionDetached`, when a session draining
+/// after a failed write reaches `WRITE_FAILURE_DRAIN` without that EOF,
+/// and on its quit's own request (E9.3). Until E8d the write-failure
+/// drop removed the per-frontend maps and nothing else --- a copy of
+/// this arm that had drifted --- so a frontend whose socket died under
+/// a write kept its `command_history` entry, its undo source and its
+/// Lua-side tables, and `frontend.detached` never ran for it unless its
+/// reader thread happened to end too. E8d.4 had the failed write call
+/// this at once; since E9's fix round 4 (the owner's ruling of
+/// 2026-10-20) the failed write only stops the output and begins the
+/// drain, and this runs at the drain's end, still once: the gesture,
+/// the command history, the undo source and the maps below live
+/// through the drain, because the input it dispatches uses them, and
+/// go here. A drain's socket is shut both ways with the session, so a
+/// reader still in `read` ends.
 ///
-/// A frontend with no registered session is a no-op: the write-failure
-/// drop runs first and the reader's `SessionDetached` follows, so the
-/// second caller finds nothing registered and changes nothing, and the
-/// hook fires once. The eight per-frontend maps stay separate here;
-/// the `Session` struct that would hold them rides E9.
+/// A frontend with no registered session is a no-op: the reader's
+/// `SessionDetached` after a drain's deadline, or after a requested
+/// detach, finds nothing registered and changes nothing, and the hook
+/// fires once. The eight per-frontend maps stay separate here; the
+/// `Session` struct that would hold them is E9b's.
 ///
 /// Whether the frontend said it was leaving is the session's shared
 /// `departing` flag (E9, fix round 1): set by its reader thread as it
@@ -3671,9 +3758,9 @@ fn handle_dispatcher_event(
 /// it, so its view is dropped at once; a loss --- a close with no
 /// `Detach`, or a write that failed --- retains the view for the
 /// token. The flag is shared and not carried on an event because the
-/// two teardowns race: a window that sent `Detach` closes its socket,
-/// the tick loop's next write to it fails first, and the reader's
-/// `SessionDetached` finds the session gone.
+/// teardowns race the event queue: the reader sets it before it queues
+/// the `Detach`, so a drain's deadline that falls between the two still
+/// reads the departure.
 #[allow(clippy::too_many_arguments)]
 fn detach_frontend(
     editor: &mut EditorState,
@@ -3836,7 +3923,7 @@ fn send_buffer_snapshots(
             eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} failed: {e:?}");
             // Continue trying other buffers — the stream may
             // recover, or the next per-tick error handling will
-            // detach the session.
+            // stop writing to the session and drain it.
         }
     }
     left_out
@@ -4788,8 +4875,8 @@ fn confirm_cursor_early(
             },
         )
     {
-        // The tick's own write will fail the same way and drop the
-        // connection there, where the cleanup lives.
+        // The tick's own write will fail the same way and begin the
+        // drain there (E9 fix round 4), where the cleanup lives.
         eprintln!("pmacs: early CursorByte for {source:?} failed: {e}");
     }
 }
@@ -12016,13 +12103,13 @@ mod tests {
     /// The phase's daemon row reads `frontend.detached` through a hook
     /// on a real daemon, where another frontend's boundary has no Lua
     /// accessor; this row reaches `detach_frontend` itself, the one
-    /// teardown both the tick loop's write-failure drop and the
-    /// reader's `SessionDetached` call, in the write-failure shape (the
-    /// loop's own maps, the peer gone): the frontend's `command_history`
-    /// entry is gone, its session unregistered, its maps emptied, and
-    /// `frontend.detached` has run once with its id. The second call,
-    /// the reader's, finds no session and changes nothing: the hook has
-    /// still run once.
+    /// teardown the reader's `SessionDetached` and, since E9's fix
+    /// round 4, a failed write's drain at its deadline call, in the
+    /// write-failure shape (the loop's own maps, the peer gone): the
+    /// frontend's `command_history` entry is gone, its session
+    /// unregistered, its maps emptied, and `frontend.detached` has run
+    /// once with its id. The second call, the reader's, finds no
+    /// session and changes nothing: the hook has still run once.
     #[test]
     fn e8d_4_detach_frontend_drops_the_command_history_and_runs_the_hook_once() {
         let mut editor = EditorState::new();

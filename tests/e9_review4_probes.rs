@@ -339,6 +339,12 @@ fn e9_review4_healthy_downstream_drains_input_before_resume() {
     old_input_before_eof(false);
 }
 
+/// Compiled on Linux alone (E9 fix round 4): the half-close makes the
+/// daemon's write fail only where a write to a peer that stopped reading
+/// is refused, and BSD lets it succeed (E8d.4's row, macOS CI run
+/// 38558729706), so on macOS the row would wait for a failure that never
+/// comes rather than test the drain.
+#[cfg(target_os = "linux")]
 #[test]
 fn e9_review4_failed_write_must_drain_old_input_before_resume() {
     old_input_before_eof(true);

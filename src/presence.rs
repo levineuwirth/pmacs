@@ -51,6 +51,8 @@
 //!   attach/detach; the sweep's broadcast list becomes non-empty.
 
 use std::collections::HashMap;
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -142,6 +144,17 @@ pub struct RetainedView {
     pub since: Instant,
 }
 
+/// A session whose output failed while its input may still be on its
+/// way (E9 fix round 4): when the write failed, and the socket, which
+/// nothing writes to again and which is kept only to be shut at the
+/// teardown, so the reader thread a peer that never closes would hold
+/// in `read` ends with it.
+#[derive(Debug)]
+struct Drain {
+    since: Instant,
+    socket: UnixStream,
+}
+
 /// One source frontend's presence at a tick boundary.
 ///
 /// Equality is wire-equality — two snapshots compare equal iff they
@@ -198,6 +211,10 @@ pub struct SessionRegistry {
     /// sets on the frontend's `Detach` and the dispatcher on its quit's
     /// request; read at the teardown, whichever path runs it first.
     departures: HashMap<FrontendId, Arc<AtomicBool>>,
+    /// E9 fix round 4 --- per session whose write failed, its drain:
+    /// the session stays registered, its input dispatched and its token
+    /// live, until its reader's EOF or the drain's deadline.
+    drains: HashMap<FrontendId, Drain>,
 }
 
 impl SessionRegistry {
@@ -221,11 +238,57 @@ impl SessionRegistry {
 
     /// Unregister a session on detach. Drops both the session entry
     /// and any last-broadcast state for that frontend so a future
-    /// re-attach starts with no prior state.
+    /// re-attach starts with no prior state. A session draining after a
+    /// failed write has its socket shut both ways here (E9 fix round
+    /// 4): its reader, still in `read` when the drain ends at its
+    /// deadline, reads EOF and ends, and whatever the peer sends later
+    /// reaches no one.
     pub fn unregister_session(&mut self, frontend_id: FrontendId) {
         self.sessions.remove(&frontend_id);
         self.last_broadcast.remove(&frontend_id);
         self.departures.remove(&frontend_id);
+        if let Some(drain) = self.drains.remove(&frontend_id) {
+            let _ = drain.socket.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// E9 fix round 4 (review 4's Medium 1, the owner's ruling of
+    /// 2026-10-20) --- `frontend_id`'s write failed at `now`. The caller
+    /// has taken its stream out of the dispatcher's write map, so
+    /// nothing more is written to it, and hands the socket here; the
+    /// session stays registered, so what its reader still reads is
+    /// dispatched to its view and its token stays live (a reconnect
+    /// presenting it is refused), until the one teardown runs at the
+    /// reader's EOF or once [`Self::drains_past`] names it. Held only
+    /// for a registered session, as the departure flag is; anything
+    /// else has its socket shut at once.
+    pub fn begin_drain(&mut self, frontend_id: FrontendId, socket: UnixStream, now: Instant) {
+        if self.sessions.contains_key(&frontend_id) {
+            self.drains
+                .insert(frontend_id, Drain { since: now, socket });
+        } else {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// E9 fix round 4 --- whether `frontend_id`'s write failed and its
+    /// session is still draining: registered, its input dispatched, its
+    /// output stopped.
+    #[must_use]
+    pub fn is_draining(&self, frontend_id: FrontendId) -> bool {
+        self.drains.contains_key(&frontend_id)
+    }
+
+    /// E9 fix round 4 --- the draining sessions whose write failed
+    /// `deadline` or longer before `now`, for the teardown their EOF
+    /// has not brought.
+    #[must_use]
+    pub fn drains_past(&self, deadline: Duration, now: Instant) -> Vec<FrontendId> {
+        self.drains
+            .iter()
+            .filter(|(_, drain)| now.saturating_duration_since(drain.since) >= deadline)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// E9 (fix round 1) --- the flag a session's reader thread sets
@@ -298,7 +361,8 @@ impl SessionRegistry {
 
     /// E9 (fix round 3, review 3's Medium 1) --- the registered session
     /// minted `token`, if one is: its socket has not been seen to close,
-    /// so its view is neither retained nor gone, and a new socket
+    /// or its write failed and it is still draining (fix round 4), so
+    /// its view is neither retained nor gone, and a new socket
     /// presenting the token is refused rather than given a fresh view.
     #[must_use]
     pub fn session_holding(&self, token: SessionToken) -> Option<FrontendId> {

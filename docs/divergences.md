@@ -221,11 +221,15 @@ whole. Under one cap a growing register squeezes the rules.
   nothing written, a socket presenting the token of a session it still
   holds (its old socket not yet seen to close, or a copied token whose
   window lives), so the old socket's last input reaches the view first;
-  the window counts that close as a failed attempt, keeps its token,
-  and says only that the daemon closed the connection before accepting
-  the session, which is all it can see. A window closed by `C-x C-c`
-  while lost is a loss to the daemon, which has no socket to hear its
-  `Detach` on: the view stays retained for
+  a write to the old socket that fails stops the daemon writing to it
+  and nothing else, so the session is held, its input dispatched to its
+  view, until its EOF or two seconds (`WRITE_FAILURE_DRAIN`), and what
+  it carries after those two seconds is lost (E9 fix round 4). The
+  window counts the refused socket's close as a failed attempt, keeps
+  its token, and says only that the daemon closed the connection before
+  accepting the session, which is all it can see. A window closed by
+  `C-x C-c` while lost is a loss to the daemon, which has no socket to
+  hear its `Detach` on: the view stays retained for
   `session.view-retention-secs` and holds `daemon.idle-exit-secs`'s
   clock that long. The local grid attach (`pmacs --attach` on a socket)
   does neither: it exits when the daemon's socket closes, as it always

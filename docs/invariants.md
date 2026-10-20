@@ -148,11 +148,11 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   incompatible act reserved for a change that cannot be additive.
 - `Hello` carries the baseline alone, so no client knows the daemon's
   ceiling before its offer is answered; what the daemon lacks is learned
-  from `VersionMismatch`. A handshake step a frontend writes after the
-  bootstrap (`Resume`) is read by the per-attach thread before the
-  session exists, only from a session whose negotiated version and
-  `semantic_render` admit it; anything else there is a `ProtocolError`,
-  and a token whose session is live shuts the new socket, unanswered.
+  from `VersionMismatch`. `Resume`, a step after the bootstrap, is read by
+  the per-attach thread before the session exists, only from a session
+  whose version and `semantic_render` admit it, else a `ProtocolError`. A
+  live token's socket is shut unanswered; a failed write stops only the
+  output, and the session lives until EOF or `WRITE_FAILURE_DRAIN`.
 - A new wire message is an appended variant, bumping `PROTOCOL_VERSION`
   and extending `SUPPORTED_PROTOCOL_VERSIONS`, guarded by a byte pin on
   the previous final variant: an appended variant's own round-trip cannot

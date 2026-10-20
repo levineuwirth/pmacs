@@ -786,6 +786,14 @@ pub struct EditorCore {
     /// status line ([`PopupOutcome::Told`]); a grid frontend, of any
     /// version, paints the popup itself and is never here.
     pub frontends_without_popup: HashSet<FrontendId>,
+    /// E9 fix round 4 --- attached frontends whose socket failed a
+    /// write and whose input the daemon is still draining (until its
+    /// reader's EOF or the drain's deadline, then the one teardown).
+    /// Set by the daemon at the failed write and dropped with the view.
+    /// Such a frontend's view still takes its input, but nothing reaches
+    /// its window any more, so it is not one of the windows a quit asks
+    /// about (`pmacs.frontend.attached_count`) unless it is the asker.
+    pub draining_frontends: HashSet<FrontendId>,
     /// Buffers whose input must round-trip (Arc 1b, Q#P6). While one
     /// of these is the active buffer,
     /// [`crate::editor::EditorState::dispatch_idle`] reports `false`,
@@ -899,6 +907,7 @@ impl EditorCore {
             completion_popup: crate::completion::make_shared_popup(),
             lsp_popup: crate::lsp_popup::make_shared_popup(),
             frontends_without_popup: HashSet::new(),
+            draining_frontends: HashSet::new(),
             round_trip_buffers: std::collections::HashSet::new(),
             query_replace: None,
             typed_edit_pending: None,
@@ -1160,8 +1169,9 @@ impl EditorCore {
     /// the same window, buffer, cursor and scroll. Everything else a
     /// detach drops goes here as in [`Self::unregister_frontend_view`]:
     /// the navigation trail (Q#BP11c, its `WindowId`s are not this
-    /// frontend's to pop any more), the popup mark and the active
-    /// frontend. The caller owns the windows from here: it registers
+    /// frontend's to pop any more), the popup mark, the drain mark (E9
+    /// fix round 4) and the active frontend. The caller owns the
+    /// windows from here: it registers
     /// the view again or passes it to [`Self::discard_view_windows`].
     pub fn take_frontend_view(&mut self, fid: FrontendId) -> Option<FrontendView> {
         let view = self.views.remove(&fid);
@@ -1170,6 +1180,7 @@ impl EditorCore {
         // other frontend may pop or destroy those entries.
         self.jump_ring.remove(&fid);
         self.frontends_without_popup.remove(&fid);
+        self.draining_frontends.remove(&fid);
         if self.active_frontend == fid {
             self.active_frontend = FrontendId::LOCAL;
         }

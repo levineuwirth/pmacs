@@ -7232,16 +7232,24 @@ fn install_frontend_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> 
 
     // E9.3 --- how many frontends are attached over a socket: the
     // registered views other than LOCAL's, which the daemon keeps for
-    // its own document whether or not a TUI runs in-process.
+    // its own document whether or not a TUI runs in-process. E9 fix
+    // round 4: a frontend whose socket failed a write is not counted
+    // while the daemon drains its input (nothing reaches its window, and
+    // its teardown is at most `WRITE_FAILURE_DRAIN` away), unless it is
+    // the one asking; so the last window still served is asked whether
+    // the daemon stops with it, as it would be once the drain ends, and
+    // a draining window's own quit counts the windows still served.
     let core_clone = core.clone();
     frontend.set(
         "attached_count",
         lua.create_function(move |_, ()| {
-            let count = core_clone
-                .borrow()
+            let core = core_clone.borrow();
+            let asker = core.active_frontend;
+            let count = core
                 .views
                 .keys()
                 .filter(|fid| **fid != crate::protocol::FrontendId::LOCAL)
+                .filter(|fid| **fid == asker || !core.draining_frontends.contains(*fid))
                 .count();
             Ok(i64::try_from(count).unwrap_or(i64::MAX))
         })?,
