@@ -7077,6 +7077,121 @@ fifty. #377 and #380 are filed on local samples and stand at no CI occurrence. E
 above is listed and not counted, under the owner's ruling of 2026-10-20, and #288, #289, #304 and
 #305, which met only local samples, do not move. Every other count above stands.
 
+### E9b's close: PR #392's run at `985ace1`, `main` green at `5a0998b` and `3c313e0`, the gates' samples listed, #391 and #393 filed
+
+Recorded 2026-10-20 at E9b's checkpoint, PR #392 at `985ace1` (two signed commits on `5a0998b`:
+E9 review 5's probes, and the fold of the daemon's per-frontend maps into one `Session`). Every
+run was read from the jobs endpoint by conclusion, and every test leg of the code-bearing run
+through its own log, fetched with escape sequences allowed and stripped, each `running` line
+paired with its own result line. Both gates were read from their log directories under
+`~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/` (copied to `~/build/e9b/gate-logs/`).
+Every run id, job id and gate log below was searched for in this file before it was written, and
+none was here. Nothing was rerun.
+
+#### `main` at `5a0998b` and `3c313e0`, E9's close: green
+
+`5a0998b` and `3c313e0` are the two registry commits for E9's close, above; each changes this file
+alone. PR #392 was rebased onto `5a0998b` and pushed at 18:19Z; `3c313e0` landed at 18:46Z, and
+the branch, which has a drafts entry, is not rewritten for it (D10). It merges into `3c313e0`
+without conflict (`git merge-tree`).
+
+`CI` 39468668979 at `5a0998b`, attempt 1 of 1, `push`, created 17:44:15Z and completed 17:46:25Z:
+`success`, every test leg skipped, `Docs consistency` 118786744743 among the six.
+
+Tally (main-ci-5a0998b): 15 = 6 + 9.
+
+`CI` 39477730802 at `3c313e0`, attempt 1 of 1, `push`, created 18:46:51Z and completed 18:48:41Z:
+`success`, every test leg skipped, `Docs consistency` 118818034939 among the six.
+
+Tally (main-ci-3c313e0): 15 = 6 + 9.
+
+`Grammar fuzz` 39468668925 at `5a0998b` and 39477730726 at `3c313e0`, each `success` with both
+arms deciding `run=false`: `ubsan` 118786656599 and 118817941682, `asan-strict` 118786657036 and
+118817943095.
+
+#### PR #392's `CI` 39473773462 at `985ace1`: two reds, and no test among them
+
+`CI` 39473773462, attempt 1 of 1, `pull_request`, testing the merge into `5a0998b`, created
+18:19:48Z and completed 18:55:11Z: `failure`.
+
+Tally (pr392-ci-985ace1): 19 = 16 + 1 + 1 + 1.
+
+Tally (pr392-ci-985ace1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 118804322826 | success |
+| Commit attribution (D9) | 118804323215 | success |
+| Lint (luajit) | 118804323332 | success |
+| Lint (lua54) | 118804323441 | success |
+| Changed paths | 118804323695 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 118804426656 | failure |
+| M4 Perf Gates | 118804426697 | success |
+| M1 Acceptance Gates | 118804426766 | success |
+| M10 Perf Gates (crdt) | 118804426771 | success |
+| Perf budgets (debug) | 118804426815 | success |
+| M5 Perf Gates | 118804426838 | success |
+| M6 Perf Gates | 118804426862 | success |
+| Test (macos-latest / luajit) | 118804426921 | success |
+| Test (ubuntu-latest / luajit) | 118804426924 | success |
+| GPU Render (headless) | 118804426931 | success |
+| Test (macos-latest / lua54) | 118804427002 | success |
+| Test (ubuntu-latest / lua54) | 118804427226 | success |
+| Test (crdt) | 118804427695 | cancelled |
+| Docs consistency | 118804430305 | skipped |
+
+Tally (pr392-ci-985ace1-success): 16 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit, no crdt)` failed in its tool setup, before any build or test
+  (no `test result` line in its 731-line log): `go install golang.org/x/tools/gopls@v0.16.2`
+  stopped at `mvdan.cc/gofumpt@v0.6.0: verifying module: mvdan.cc/gofumpt@v0.6.0: reading
+  https://sum.golang.org/tile/8/0/x087/358: stream error: stream ID 77; INTERNAL_ERROR; received
+  from peer`. #249's checksum-database shape, with another module than its required
+  `golang.org/x/telemetry`, so not its exact fragments; commented on #249, as PR #272's
+  occurrence was.
+- `Test (crdt)` ran every test green, 207 `running` lines paired with 207 `test result: ok`,
+  `WouldBlock` absent, and `cargo test --doc`'s one doc test `ok` at 18:55:06Z; the job was then
+  `cancelled` with `The job has exceeded the maximum execution time of 35m0s`, 18:20:04Z to
+  18:55:10Z. Its test step took 1,955 s and its workspace build 70 s, where `main`'s run at
+  `1ff2603` (job 118764311659, 34m14s, `success`) took 1,977 s and 21 s; the PR recompiles the
+  `pmacs` crate. No row names the job at its ceiling: filed as **#393**, a first occurrence.
+- The four other test legs pair each `running` line with a `test result: ok`: 209 on each macOS
+  leg, 208 on each Ubuntu leg, `WouldBlock` in none. #286's row
+  (`m10_10_f14_production_path_keystroke_flows_to_broadcast`) passed on all five legs that ran
+  tests; E9 review 5's probes passed on the two Ubuntu legs and on `Test (crdt)`, and compile to
+  nothing on macOS by their own gate.
+
+`Grammar fuzz` 39473773891 at `985ace1`, `success`, both arms deciding `run=false`: `ubsan`
+118804325769, `asan-strict` 118804325169.
+
+#### E9b's gates and hand samples: listed, not tallied
+
+Both gates are `scripts/gate --protocol`, six of eight, `fmt`, both lints, `doc`, `build` and
+`diff-check` ok, no daemon surviving, each sweep pairing 216 `running` lines with as many result
+lines. Each sample is on its issue. None moves a count.
+
+- `20261020T174241Z-1518534` at `15d0c16`, the branch before its rebase onto `5a0998b` (the same
+  code as `985ace1`): #311 in both sweeps; #288's fragments in `06-sweep` (`the check's diagnostic
+  landed: ["pmacs-fake-lsp"]`, `4 passed; 1 failed`); #316's outside-kill row on kill 3, the
+  template reading, in `07-sweep-luajit`; and in `06-sweep`
+  `e7h_grammar_gate_acceptance::e7h2_a_large_slow_input_that_first_meets_the_memory_limit_is_filed_slow`,
+  the report row holding `"slow=0"`, `"hangs=0"` and `"unconfirmed=1"`, a **lua** hang over 1000
+  ms not reproduced, `22 passed; 1 failed; 2 ignored`: filed as **#391**, a local first sample,
+  #339's report fragments on another selector.
+- `20261020T181724Z-1913073` at `985ace1`: #311 in both sweeps; #286's fragments in `06-sweep`
+  (`F14: B must receive A's CrdtOp broadcast end-to-end`, `40 passed; 1 failed`), its second
+  sample and first since 2026-09-25.
+- By hand, outside any gate, the suite binary of the second gate run directly: #286's row failed
+  once in 50 suite runs at `985ace1` and once in 50 with `src/daemon.rs` and `src/presence.rs`
+  copied in from `85714d2`, both fragments each time, load averages 4 to 7. The branch's fold
+  touches the relay the row drives, so this control stands where an untouched-files argument
+  would otherwise.
+
+So, at E9b's close: `main` is green at `5a0998b` and `3c313e0`; by CI alone #393 is filed at one, and #249,
+whose fragments name another module, does not move. #391 is filed on a local sample and stands at
+no CI occurrence. #286, #288, #311 and #316 met only local samples here and do not move. Every
+other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
