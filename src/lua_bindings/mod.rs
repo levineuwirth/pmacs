@@ -7219,6 +7219,42 @@ fn install_frontend_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> 
         })?,
     )?;
 
+    // E9.3 --- whether the acting frontend is the in-process one
+    // (LOCAL), which has no socket to detach from, rather than an
+    // attached session of a daemon.
+    let core_clone = core.clone();
+    frontend.set(
+        "is_local",
+        lua.create_function(move |_, ()| {
+            Ok(core_clone.borrow().active_frontend == crate::protocol::FrontendId::LOCAL)
+        })?,
+    )?;
+
+    // E9.3 --- how many frontends are attached over a socket: the
+    // registered views other than LOCAL's, which the daemon keeps for
+    // its own document whether or not a TUI runs in-process. E9 fix
+    // round 4: a frontend whose socket failed a write is not counted
+    // while the daemon drains its input (nothing reaches its window, and
+    // its teardown is at most `WRITE_FAILURE_DRAIN` away), unless it is
+    // the one asking; so the last window still served is asked whether
+    // the daemon stops with it, as it would be once the drain ends, and
+    // a draining window's own quit counts the windows still served.
+    let core_clone = core.clone();
+    frontend.set(
+        "attached_count",
+        lua.create_function(move |_, ()| {
+            let core = core_clone.borrow();
+            let asker = core.active_frontend;
+            let count = core
+                .views
+                .keys()
+                .filter(|fid| **fid != crate::protocol::FrontendId::LOCAL)
+                .filter(|fid| **fid == asker || !core.draining_frontends.contains(*fid))
+                .count();
+            Ok(i64::try_from(count).unwrap_or(i64::MAX))
+        })?,
+    )?;
+
     Ok(frontend)
 }
 
@@ -14590,7 +14626,26 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             })?,
         )?;
     }
-    register(editor, lua, core, "quit", |c| c.quit = true)?;
+    // E9 (fix round 2, Medium 4): a quit from an attached frontend is
+    // recorded as that frontend's, so the daemon closes its window
+    // silently (`Goodbye(Detached)`) while the others are told the
+    // daemon is shutting down.
+    register(editor, lua, core, "quit", |c| {
+        c.quit = true;
+        if c.active_frontend != crate::protocol::FrontendId::LOCAL {
+            c.quit_by = Some(c.active_frontend);
+        }
+    })?;
+    // E9.3 --- the acting frontend asks to leave the daemon; the
+    // dispatcher answers it after this event. From the in-process TUI
+    // (LOCAL) there is no socket to leave, so the request is a quit.
+    register(editor, lua, core, "detach", |c| {
+        if c.active_frontend == crate::protocol::FrontendId::LOCAL {
+            c.quit = true;
+        } else {
+            c.detach_requested = Some(c.active_frontend);
+        }
+    })?;
     // E1.2 --- `C-g` is the universal cancel, so it drops the selection
     // and with it the mark (a `Selection` IS the mark: one anchor, and
     // `active_region` reports nothing once it is gone). Done HERE and

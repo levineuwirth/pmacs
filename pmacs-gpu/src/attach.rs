@@ -20,7 +20,6 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -32,9 +31,9 @@ use std::time::{Duration, Instant};
 use pmacs_protocol::{
     AttachRequest, BufferId, ByteRange, CellCoord, CellSize, CrdtOp, FrontendCapabilities,
     FrontendEvent, FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceMessage, Key,
-    KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS,
-    SessionBootstrapRequest, TransportError, is_supported_protocol_version, read_message,
-    requested_protocol_version, write_message,
+    KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SESSION_MIN_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionBootstrapRequest, SessionToken, TransportError,
+    is_supported_protocol_version, read_message, requested_protocol_version, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -553,7 +552,19 @@ pub fn connect(
     socket_path: &Path,
     proxy: EventLoopProxy<AppEvent>,
 ) -> Result<AttachClient, AttachClientError> {
-    connect_with_sink(socket_path, move |event| {
+    connect_resuming(socket_path, None, proxy)
+}
+
+/// [`connect`], presenting `resume` in the session's v27 `Resume` step
+/// (E9): the token a previous session of this window was given, so the
+/// daemon starts the new socket on the view it retained for it. `None`
+/// asks for a fresh view, which is what [`connect`] does.
+pub fn connect_resuming(
+    socket_path: &Path,
+    resume: Option<SessionToken>,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<AttachClient, AttachClientError> {
+    connect_with_sink_resuming(socket_path, resume, move |event| {
         proxy.send_event(AppEvent::Attach(event)).is_ok()
     })
 }
@@ -571,8 +582,18 @@ pub fn connect_with_sink(
     socket_path: &Path,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
+    connect_with_sink_resuming(socket_path, None, sink)
+}
+
+/// [`connect_with_sink`] presenting `resume` in the v27 `Resume` step
+/// (E9); see [`connect_resuming`].
+pub fn connect_with_sink_resuming(
+    socket_path: &Path,
+    resume: Option<SessionToken>,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
-    connect_stream_with_sink(stream, None, sink)
+    connect_stream_with_sink(stream, None, resume, sink)
 }
 
 /// [`connect_with_sink`] carrying an initial target, so the daemon opens
@@ -585,7 +606,7 @@ pub fn connect_with_target_and_sink(
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
-    connect_stream_with_sink(stream, Some(initial_target), sink)
+    connect_stream_with_sink(stream, Some(initial_target), None, sink)
 }
 
 #[allow(
@@ -595,6 +616,7 @@ pub fn connect_with_target_and_sink(
 fn connect_stream_with_sink(
     stream: UnixStream,
     initial_target: Option<InitialTargetPaths>,
+    resume: Option<SessionToken>,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     // Hello round-trip.
@@ -672,6 +694,20 @@ fn connect_stream_with_sink(
             }),
         };
         write_message(&mut handshake_stream, &bootstrap).map_err(AttachClientError::Handshake)?;
+    }
+    // E9 (v27): the session's one handshake step past the bootstrap.
+    // Sent only to a session that negotiated the family, since the
+    // daemon reads it only from one; the token names the view the
+    // daemon retained for this window's previous session, or `None`.
+    if session_protocol_version >= SESSION_MIN_VERSION {
+        write_message(
+            &mut handshake_stream,
+            &FrontendEvent::Resume {
+                frontend_id: hello.assigned_frontend_id,
+                token: resume,
+            },
+        )
+        .map_err(AttachClientError::Handshake)?;
     }
     let initial_message = match target_display_path {
         Some(path) => Some(read_initial_target_bootstrap(&mut handshake_stream, path)?),
@@ -827,22 +863,37 @@ fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Chil
     command.spawn()
 }
 
+/// Whether a failed first connect authorizes starting a daemon: nothing
+/// at the path, or a socket file nothing answers (a daemon's leftover),
+/// does; a path that is not a socket is refused by name, never spawned
+/// over; any other failure fails closed. The verdict is read from the
+/// path (`pmacs_protocol::socket_file`), not the errno: Linux refuses a
+/// connect to a regular file with `ECONNREFUSED`, macOS with `ENOTSOCK`,
+/// and a split on the errno alone fell to the fail-closed arm there (E9
+/// review 1's High 1, the same shape as `pmacs --daemon --status`'s).
 fn initial_startup_authorized(
     socket_path: &Path,
     error: &io::Error,
 ) -> Result<bool, ManagedAttachError> {
-    match error.kind() {
-        io::ErrorKind::NotFound => Ok(true),
-        io::ErrorKind::ConnectionRefused => match fs::metadata(socket_path) {
-            Ok(metadata) if metadata.file_type().is_socket() => Ok(true),
-            Ok(_) => Err(ManagedAttachError::NonSocketPath(socket_path.to_owned())),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(source) => Err(ManagedAttachError::InspectSocket {
-                path: socket_path.to_owned(),
-                source,
-            }),
-        },
-        _ => Ok(false),
+    use pmacs_protocol::{ConnectFailure, classify_connect_failure};
+    match classify_connect_failure(socket_path, error) {
+        // Absent at the connect, or vanished between it and the look:
+        // a daemon's startup is what the path is waiting for. Any
+        // other errno on a path that is gone is still a failure of its
+        // own kind, and fails closed as it always did.
+        ConnectFailure::Missing => Ok(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        )),
+        ConnectFailure::Stale => Ok(true),
+        ConnectFailure::NotASocket => {
+            Err(ManagedAttachError::NonSocketPath(socket_path.to_owned()))
+        }
+        ConnectFailure::Other => Ok(false),
+        ConnectFailure::Inspect(source) => Err(ManagedAttachError::InspectSocket {
+            path: socket_path.to_owned(),
+            source,
+        }),
     }
 }
 
@@ -887,7 +938,7 @@ where
 {
     match connector(socket_path) {
         Ok(stream) => {
-            let client = connect_stream_with_sink(stream, initial_target, sink)?;
+            let client = connect_stream_with_sink(stream, initial_target, None, sink)?;
             return Ok(ManagedAttach {
                 client,
                 daemon: ManagedDaemonFacts::existing(),
@@ -913,7 +964,7 @@ where
     loop {
         match connector(socket_path) {
             Ok(stream) => {
-                let client = connect_stream_with_sink(stream, initial_target, sink)?;
+                let client = connect_stream_with_sink(stream, initial_target, None, sink)?;
                 return Ok(ManagedAttach { client, daemon });
             }
             Err(error) => {
@@ -1347,7 +1398,7 @@ pub(crate) fn connect_stream_for_test(
     stream: UnixStream,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
-    connect_stream_with_sink(stream, None, sink)
+    connect_stream_with_sink(stream, None, None, sink)
 }
 
 #[cfg(test)]
@@ -1355,6 +1406,7 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::net::UnixListener;
 
     use pmacs_protocol::{InstanceCapabilities, InstanceIdentity, MouseButton};
 
@@ -1399,6 +1451,10 @@ mod tests {
             let _: AttachRequest = read_message(&mut server_stream).expect("read AttachRequest");
             let bootstrap: SessionBootstrapRequest =
                 read_message(&mut server_stream).expect("read bootstrap");
+            // E9 — the v27 step; read, so the fixture never drops its
+            // end while the client is still writing its handshake.
+            let resume: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
+            assert!(matches!(resume, FrontendEvent::Resume { token: None, .. }));
             let target = bootstrap.initial_target.expect("initial target");
             assert_eq!(target.cwd, expected.cwd.as_os_str().as_bytes());
             assert_eq!(target.path, expected.path.as_os_str().as_bytes());
@@ -1419,7 +1475,7 @@ mod tests {
             .expect("write target result");
         });
 
-        let mut client = connect_stream_with_sink(client_stream, Some(paths), |_| true)
+        let mut client = connect_stream_with_sink(client_stream, Some(paths), None, |_| true)
             .expect("target bootstrap");
         assert!(matches!(
             client.take_initial_message(),
@@ -1444,6 +1500,7 @@ mod tests {
                 cwd: PathBuf::from("/launcher"),
                 path: PathBuf::from("note"),
             }),
+            None,
             |_| true,
         ) else {
             panic!("legacy target must fail");
@@ -1851,6 +1908,41 @@ mod tests {
         }
     }
 
+    /// macOS's `connect(2)` on a regular file is `ENOTSOCK`, an errno
+    /// `std` names no kind for; the verdict is the path's, so it is the
+    /// non-socket refusal there as on Linux, and a stale socket file is
+    /// still a start.
+    #[test]
+    fn managed_attach_classifies_by_the_path_not_the_errno() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plain = temp.path().join("plain.sock");
+        std::fs::write(&plain, "not a socket").expect("write");
+        let enotsock = io::Error::other("Socket operation on non-socket (os error 38)");
+        assert!(matches!(
+            initial_startup_authorized(&plain, &enotsock),
+            Err(ManagedAttachError::NonSocketPath(rejected)) if rejected == plain
+        ));
+        assert!(plain.exists(), "never removed, never spawned over");
+        let stale = temp.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).expect("bind"));
+        assert!(
+            initial_startup_authorized(
+                &stale,
+                &io::Error::new(io::ErrorKind::ConnectionRefused, "refused")
+            )
+            .expect("classify a stale socket file"),
+            "a socket file nothing answers authorizes the start"
+        );
+        assert!(
+            !initial_startup_authorized(
+                &stale,
+                &io::Error::new(io::ErrorKind::PermissionDenied, "denied")
+            )
+            .expect("classify a denied socket"),
+            "another errno on a socket file fails closed"
+        );
+    }
+
     #[test]
     fn managed_retry_adds_only_interrupted_and_would_block() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1946,6 +2038,14 @@ mod tests {
             write_message(&mut server_stream, &hello).expect("write Hello");
             let _: AttachRequest =
                 read_message(&mut server_stream).expect("read real AttachRequest");
+            // The whole v27 semantic handshake, read before this end is
+            // dropped: a fixture that returned here, with the client's
+            // bootstrap and `Resume` still to be written, raced the
+            // client's writes against its own drop, and lost under
+            // load as `Handshake(Io(BrokenPipe))` (the registry's R7).
+            let _: SessionBootstrapRequest =
+                read_message(&mut server_stream).expect("read bootstrap");
+            let _: FrontendEvent = read_message(&mut server_stream).expect("read Resume");
         });
         let mut attempts = 0;
         let mut client_stream = Some(client_stream);

@@ -67,6 +67,19 @@ impl Session {
             },
         )
         .expect("bootstrap");
+        // E9 (v27): the session's one handshake step past the bootstrap,
+        // read by the daemon only from a session that negotiated the
+        // family; `None` asks for a fresh view.
+        if offer >= pmacs::protocol::SESSION_MIN_VERSION {
+            write_message(
+                &mut stream,
+                &FrontendEvent::Resume {
+                    frontend_id: fid,
+                    token: None,
+                },
+            )
+            .expect("write Resume");
+        }
         let mut reader = stream.try_clone().expect("clone stream");
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {

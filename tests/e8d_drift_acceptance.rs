@@ -698,10 +698,14 @@ end)
 
         /// A frontend whose socket refuses the daemon's writes while its
         /// reader stays open (the peer shut its read half down, nothing
-        /// more) is dropped by the tick loop's failed write. That drop is
-        /// the whole detach: `frontend.detached` runs for it, once. The
-        /// reader thread's own `SessionDetached`, when the socket finally
-        /// closes, finds no session and changes nothing.
+        /// more) is torn down once. Since E9's fix round 4 (the owner's
+        /// ruling of 2026-10-20) the failed write stops the output and the
+        /// teardown follows at the reader's EOF or, as here, where the
+        /// peer never closes, at `pmacs::daemon::WRITE_FAILURE_DRAIN`
+        /// (two seconds, inside this row's five); that teardown is the
+        /// whole detach: `frontend.detached` runs for it, once. The
+        /// reader thread's own `SessionDetached`, when the socket closes,
+        /// finds no session and changes nothing.
         #[test]
         fn e8d_4_a_frontend_dropped_by_a_failed_write_is_detached_exactly_once() {
             let daemon = TestDaemon::spawn_with_config(DETACH_LOG_CONFIG);
@@ -721,10 +725,21 @@ end)
             // frontend, so the daemon writes to the broken one.
             type_and_hear(&mut live, 'b');
 
+            // Since E9's fix round 4 the teardown is the drain's, at its
+            // deadline, this peer sending no EOF. Meanwhile `live` is read
+            // as a frontend reads, a cursor a tick: a socket left to fill
+            // blocks the dispatcher's write to it (the daemon writes a
+            // frontend with no timeout), and with it the loop the
+            // deadline is read on. Every replica is written its cursor
+            // each tick, so `broken`'s next write fails without a key.
             let deadline = Instant::now() + Duration::from_secs(5);
             while detaches_of(&daemon, broken_fid) == 0 && Instant::now() < deadline {
-                type_and_hear(&mut live, 'c');
-                std::thread::sleep(Duration::from_millis(50));
+                read_until(
+                    &mut live,
+                    Duration::from_secs(5),
+                    "live's next cursor",
+                    |m| matches!(m, InstanceMessage::CursorByte { .. }).then_some(()),
+                );
             }
             assert_eq!(
                 detaches_of(&daemon, broken_fid),

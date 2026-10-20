@@ -5,24 +5,22 @@ it true, so a session can check the rule against the code rather than
 trust this file. Symbols are authoritative; nothing here is dated, and a
 rule that stops being true is removed rather than annotated. Workflow
 rules (branches, gates, commits, the vault) live in `CLAUDE.md`, and the
-declared-divergence register — what a frontend-only capability is
-recorded in — lives in `docs/divergences.md`. This file stays under 300
-lines, which `tests/docs_consistency.rs` pins; the register has no cap,
-because the two halves grow by opposite laws.
+declared-divergence register in `docs/divergences.md`. This file stays
+under 300 lines, which `tests/docs_consistency.rs` pins; the register
+has no cap, because the two halves grow by opposite laws.
 
 ## Generated buffers
 
-`Buffer::set_generated_contents` is the one authorized write into a
-buffer the editor generates (`*help*`, listviews, dired, compilation
-output, and the like). It lifts `read_only`, replaces the whole buffer
-with a single `Replace` that skips intercepts, discards history,
-re-asserts `read_only`, marks the buffer clean, and returns the `Edit`.
-Quit asks about `is_modified`, so `buf:mark_clean()` follows a Lua write
-only if it replaced the whole buffer, never an append to one the user
-can type into, which would drop their text from quit's question.
-`*errors*` is the live case: its append does not mark clean but keeps
-the state it found, and that keeps it safe. The pairing, not the setter,
-is the primitive, for three reasons:
+`Buffer::set_generated_contents` is the one authorized write into a buffer
+the editor generates (`*help*`, listviews, dired, compilation output, and
+the like). It lifts `read_only`, replaces the whole buffer with a single
+`Replace` that skips intercepts, discards history, re-asserts `read_only`,
+marks the buffer clean, and returns the `Edit`. Quit asks about
+`is_modified`, so `buf:mark_clean()` follows a Lua write only if it replaced
+the whole buffer, never an append to one the user can type into, which would
+drop their text from quit's question. `*errors*` is the live case: its
+append does not mark clean but keeps the state it found, and that keeps it
+safe. The pairing, not the setter, is the primitive, for three reasons:
 
 - An intercept is not read-only: `Buffer::undo` reaches the rope through
   `ensure_writable`, never the intercept chain, so `M-x buffer.undo`
@@ -30,10 +28,10 @@ is the primitive, for three reasons:
   are bound to; only rope-level `read_only` closes this.
 - A bare `set_read_only` would refuse the owner's own refresh, the
   operation such buffers exist for; there is deliberately no Lua one.
-- A rope write is half of an edit: the returned `Edit` must be fanned
-  out through `notify_buffer_edit_to_windows`, which also queues the
-  daemon-origin CRDT op, or a displaying window keeps a `TextView` line
-  index for the previous contents and replica mirrors never import it.
+- A rope write is half of an edit: the returned `Edit` is fanned out
+  through `notify_buffer_edit_to_windows`, which also queues the
+  daemon-origin CRDT op, or a displaying window keeps a stale `TextView`
+  line index and replica mirrors never import it.
 
 History clearing clears whichever history the buffer has: the v0.1 rope
 stacks and, in CRDT mode, the cross-peer arbiter's per-source stacks on
@@ -41,20 +39,19 @@ the `Buffer`, with a remote import's pending record.
 
 Both layers are needed: rope-level `read_only` refuses the op at the
 daemon, and `set_round_trip_input` stops a semantic frontend applying it
-optimistically to its mirror. A daemon-side refusal alone comes after
-the frontend has painted: divergence, not prevention.
+to its mirror first; a daemon-side refusal alone comes after the paint,
+divergence, not prevention.
 
 ## Command boundaries
 
 `EditorCore.command_history` holds a `CommandBoundary { this, last }` per
-frontend. It rotates on a keybound command, self-insert, menu invoke,
-and `pmacs.command.invoke_interactive` (the `M-x` path). It breaks on an
-unbound key, GPU optimistic CRDT edits, pointer gestures (wheel scroll
-deliberately does not break), and unified paste. Plain
-`pmacs.command.invoke` stamps nothing; it is the programmatic API.
-A single-codepoint optimistic CRDT insert classifies as
-`buffer.self-insert` by exact decode; a longer insert breaks. Lua reads
-the boundary through `ed.this_command()` and `ed.last_command()`.
+frontend. It rotates on a keybound command, self-insert, menu invoke, and
+`pmacs.command.invoke_interactive` (the `M-x` path). It breaks on an unbound
+key, GPU optimistic CRDT edits, pointer gestures (wheel scroll deliberately
+does not break), and unified paste. Plain `pmacs.command.invoke` stamps
+nothing; it is the programmatic API. A single-codepoint optimistic CRDT insert
+classifies as `buffer.self-insert` by exact decode; a longer insert breaks.
+Lua reads the boundary through `ed.this_command()` and `ed.last_command()`.
 
 ## Undo
 
@@ -90,37 +87,35 @@ the server holds; a `didChange` ranged by negotiation uses
 address the text as each change left it. Semantic tokens `full`,
 `full.delta` and `range` are three capabilities, gated one by one.
 
-The semantic-token store answers in the document's current bytes, never
-the server's: every attached buffer carries a `SemanticEditRecorder` view
-logging each edit it broadcasts, a token request carries the text the
-server holds and its edit number, and the answer is resolved against that
-text and carried across the edits since, so a stale store shifts its
-tokens, never drops them; both merge sites read `positioned_tokens` and
-neither converts a column per frame. The same log feeds a ranged
-`didChange`, places an accepted completion's `additionalTextEdits` from
-the answer's edit number, and carries diagnostics and inlay hints from the
-text they were computed for (the file on disk for a `check_sources`
-source, else the text last sent); an edit deleting the whole of a
-diagnostic's text or a hint's anchor drops it until the next publish
-(`DocumentEdit::deletes`, at the recorder and the absorb alike), one
-that overlaps it keeps what stood outside; what the log cannot account
-for sends the whole document, applies none, or paints the published
-position, said. Busy is not a state: only `INDEXING_TOKENS`
-(`src/lsp_status.rs`) move the kind to `Indexing`; other `$/progress` is
-a suffix on `ready` in a fixed slot. The activity indicator names a job
-only after `ui.activity-indicator-threshold-ms` in flight, an LSP request
-as its method alone, at a fixed width, leftmost of the right group. A
-save sends `didSave` as the server's `save` asks, after the `didChange`,
-and that runs its check; while the flycheck token's begin has not come, a
-`didChange` going out sends the save again behind it, at most three
-times, never on a clock (`save_retry`). LaTeX is served by `texlab`;
-`pmacs.lsp.config.latex` walks up for its own markers (`.texlabroot`,
-`texlabroot`), never `.git`: a multi-file document's root is not its
-repository's.
+The semantic-token store answers in the document's current bytes, never the
+server's: every attached buffer carries a `SemanticEditRecorder` view
+logging each edit it broadcasts, a token request carries the text the server
+holds and its edit number, and the answer is resolved against that text and
+carried across the edits since, so a stale store shifts its tokens, never
+drops them; both merge sites read `positioned_tokens` and neither converts a
+column per frame. The same log feeds a ranged `didChange`, places an
+accepted completion's `additionalTextEdits` from the answer's edit number,
+and carries diagnostics and inlay hints from the text they were computed for
+(the file on disk for a `check_sources` source, else the text last sent); an
+edit deleting the whole of a diagnostic's text or a hint's anchor drops it
+until the next publish (`DocumentEdit::deletes`, at the recorder and the
+absorb alike), one that overlaps it keeps what stood outside; what the log
+cannot account for sends the whole document, applies none, or paints the
+published position, said. Busy is not a state: only `INDEXING_TOKENS`
+(`src/lsp_status.rs`) move the kind to `Indexing`; other `$/progress` is a
+suffix on `ready` in a fixed slot. The activity indicator names a job only
+after `ui.activity-indicator-threshold-ms` in flight, an LSP request as its
+method alone, at a fixed width, leftmost of the right group. A save sends
+`didSave` as the server's `save` asks, after the `didChange`, and that runs
+its check; while the flycheck token's begin has not come, a `didChange`
+going out sends the save again behind it, at most three times, never on a
+clock (`save_retry`). LaTeX is served by `texlab`; `pmacs.lsp.config.latex`
+walks up for its own markers (`.texlabroot`, `texlabroot`), never `.git`: a
+multi-file document's root is not its repository's.
 
 A test drives a server shape through the fake server
-`src/bin/pmacs_fake_lsp.rs`, selected by `PMACS_FAKE_LSP_MODE`, never a
-real server; `docs/fake-lsp-modes.md` lists its modes.
+`src/bin/pmacs_fake_lsp.rs` (`PMACS_FAKE_LSP_MODE`; `docs/fake-lsp-modes.md`
+lists its modes), never a real server.
 
 ## Persistence
 
@@ -151,17 +146,23 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   version is settled by the frontend's counter-offer in `AttachRequest`
   and `negotiated_session_version`. Moving the baseline is a deliberately
   incompatible act reserved for a change that cannot be additive.
+- `Hello` carries the baseline alone, so no client knows the daemon's
+  ceiling before its offer is answered; what the daemon lacks is learned
+  from `VersionMismatch`. `Resume`, a step after the bootstrap, is read by
+  the per-attach thread before the session exists, only from a session
+  whose version and `semantic_render` admit it, else a `ProtocolError`. A
+  live token's socket is shut unanswered; a failed write stops only the
+  output, and the session lives until EOF or `WRITE_FAILURE_DRAIN`.
 - A new wire message is an appended variant, bumping `PROTOCOL_VERSION`
   and extending `SUPPORTED_PROTOCOL_VERSIONS`, guarded by a byte pin on
   the previous final variant: an appended variant's own round-trip cannot
   detect a discriminant shift, only a literal fixture of the neighbor can.
-- A widened field is a break. postcard encodes positionally, so every
-  older peer mis-decodes rather than ignores. A superseded variant is
-  frozen, kept unchanged and still sent to the versions that know only
-  it, and the richer variant is appended; the daemon gates with a range
-  on both sides so exactly one variant reaches any peer. A frozen
-  variant needs a literal byte fixture, because a round-trip with the
-  same types freezes nothing.
+- A widened field is a break. postcard encodes positionally, so every older
+  peer mis-decodes rather than ignores. A superseded variant is frozen, kept
+  unchanged and still sent to the versions that know only it, and the richer
+  variant is appended; the daemon gates with a range on both sides so
+  exactly one variant reaches any peer. A frozen variant needs a literal
+  byte fixture, because a round-trip with the same types freezes nothing.
 - The close message of a surface uses the same variant family as its
   open, or a session closed by the other family leaves it on screen.
 - New wire surface means a version bump, support in both frontends, and
@@ -176,22 +177,21 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   source's active buffer, and when two messages declare competing views
   the arbiter is the daemon's own state, never a claim inside either.
 - A provisional session that fails mid-bootstrap calls
-  `shutdown(Shutdown::Both)` on the socket. Dropping a cloned write half
-  shares the descriptor and leaves the reader thread alive with no
-  installed session; the session registry is checked before any
-  `FrontendEvent` touches editor state.
-- An upgrade decision is tracked independently of the outcome that
-  triggered it: a helper that may upgrade a buffer to CRDT reports
-  whether it did, and the publish decision ORs that in rather than
-  inferring it from the caller's load-or-create branch.
+  `shutdown(Shutdown::Both)`: dropping a cloned write half shares the
+  descriptor and leaves the reader thread alive with no installed session, and
+  the registry is checked before any `FrontendEvent` touches editor state.
+- An upgrade decision is tracked apart from the outcome that triggered
+  it: a helper that may upgrade a buffer to CRDT reports whether it did,
+  and the publish decision ORs that in rather than inferring it from
+  the caller's load-or-create branch.
 
 ## Daemon and dispatch
 
 - Two operations that must be alternatives are not made alternatives by
-  being adjacent. Per-frontend-kind work that is mutually exclusive is
-  one `if`/`else` keyed on the same fact session establishment uses,
-  with the loop body extracted so a test can drive it; two arms with
-  individually correct idempotence guards were jointly useless.
+  adjacency: mutually exclusive per-frontend-kind work is one `if`/`else`
+  keyed on the fact session establishment uses, the loop body extracted
+  so a test can drive it; two arms with correct idempotence guards were
+  jointly useless.
 - A pass that sets a mode flag clears it on every exit, including the
   `?` early returns; `terminal_active` suppresses `CursorByte` and the
   presence sweep, and was once left set by an early return.
@@ -237,7 +237,7 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   falsified by revert or by `scripts/bite`. A guard with no production
   caller passes every direct-call test; a test that shares a file with
   the code it pins is bitten by hand-breaking the production line.
-- A sub-crate's acceptance needs a real seam, not a fixture. `pmacs-gpu`
+- A sub-crate's acceptance needs a real seam, not a fixture: `pmacs-gpu`
   links only `pmacs-protocol`, so a decoded-message fixture shows its
   parts agree with the fixture and nothing more; the acceptance drives
   the real handshake, outbox, writer and view through
@@ -258,28 +258,28 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   *following* means advancing the world and asserting the view came
   along, and across a height change the invariant is the frozen anchor.
 - A reproduction is a measurement and needs its own positive control:
-  assert the precondition the reproduction depends on, in the test,
-  before exercising the thing under test.
+  assert the precondition it depends on, in the test, before exercising
+  the thing under test.
 - An observation helper that advances the system is not an observation.
   Draining an event stream ticks, and a tick reaps; read state from the
   record that does not tick.
-- A quiet child is an instrument. Storms and oscillations are invisible
-  against a fixture that legitimately emits hundreds of frames; assert
-  upper bounds over a fixed window against a child that produces
-  nothing, and have the child self-report with fresh distinct markers.
+- A quiet child is an instrument: storms and oscillations are invisible
+  against a fixture that emits hundreds of frames, so assert upper bounds
+  over a fixed window against a child that produces nothing, and have
+  the child self-report with fresh distinct markers.
 - `TerminalMode::Raw` has no `ICRNL`, so `sh -c 'read -r'` fixtures wait
   forever; use `exec cat`. A PTY in default mode does not translate LF to
   CRLF, so `echo` fixtures staircase and clip to blanks; emit `\r\n` and
   guard every text comparison with a non-empty assertion.
-- A `Drop` body runs before its fields. If a `Drop` body waits on
-  anything, check what the waited-on party needs that only a field drop
-  releases, and move that release into the body.
+- A `Drop` body runs before its fields: if it waits on anything, check
+  what the waited-on party needs that only a field drop releases, and
+  move that release into the body.
 - A cancel flag beside a blocking syscall is documentation, not a
   mechanism; a thread blocked in `read` never polls it.
 - A red is matched by its required fragments, never by test name or
-  resemblance; two rows can share a test and differ only in one
-  fragment. A green rerun after a red establishes non-reproduction and
-  nothing more; the same fragments again are a second occurrence.
+  resemblance; two rows can share a test and differ in one fragment. A
+  green rerun after a red establishes non-reproduction and nothing
+  more; the same fragments again are a second occurrence.
 - A gate summary assembled through a pipe reports the last command's
   status. Each stage is redirected to its own file and the file is read.
 - Scripted edits in files with repeated similar blocks anchor on a
@@ -288,9 +288,9 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
 ## Process mechanisms
 
 - `git stash` is repository-global across worktrees and shared with the
-  owner; it is never used. `scripts/bite` is the tool for running tests
-  against an older version of one file. A fix is committed before it is
-  bitten, so the gate describes the pushed tree.
+  owner; it is never used. `scripts/bite` runs tests against an older
+  version of one file; a fix is committed before it is bitten, so the
+  gate describes the pushed tree.
 - A conflicting pull request runs no CI at all and reports nothing about
   the absence; check that a run exists for the current head sha.
 - A stacked pull request is retargeted to `main` before its parent

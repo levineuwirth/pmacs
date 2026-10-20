@@ -76,6 +76,7 @@ pub mod crdt;
 pub mod buffer_mirror;
 pub mod daemon;
 pub mod daemon_attach;
+pub mod daemon_control;
 pub mod definition;
 pub mod desktop;
 pub mod diag;

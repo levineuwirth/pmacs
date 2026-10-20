@@ -46,7 +46,9 @@
 //! - Shutdown flag set → send `Goodbye(ShuttingDown)`, return.
 //! - Editor `quit` flag set → send `Goodbye(ShuttingDown)`, propagate
 //!   shutdown to the outer accept loop.
-//! - Write fails (broken pipe) → return; ungraceful disconnect.
+//! - Write fails (broken pipe) → nothing more is written to that
+//!   frontend; its input is still dispatched until its reader's EOF or
+//!   [`WRITE_FAILURE_DRAIN`], then it is torn down (E9 fix round 4).
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -73,6 +75,8 @@ use crate::protocol::{
     PANEL_MAPPING_MIN_VERSION, PANEL_MIN_VERSION, PointerKind, SelectionSnapshot,
     SessionBootstrapRequest, TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
+use pmacs_protocol::{SESSION_MIN_VERSION, SessionToken};
+
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
 
@@ -121,10 +125,23 @@ enum DispatcherEvent {
         initial_size: CellSize,
         /// Validated protocol-v20 semantic bootstrap target, if requested.
         initial_target: Option<InitialTarget>,
+        /// E9 --- the token the frontend presented in its v27 `Resume`
+        /// step, to take back the view retained for it; `None` for a
+        /// fresh view, and for every session below v27.
+        resume: Option<SessionToken>,
         /// Write-half of the per-attach stream. The dispatcher owns
         /// this end; the per-attach reader thread keeps the
         /// read-half via `try_clone`.
         write_stream: UnixStream,
+        /// E9 (fix round 1) --- set by the reader thread the moment it
+        /// reads the frontend's `FrontendEvent::Detach`, and by the
+        /// dispatcher on the quit's own request: the frontend is
+        /// leaving on purpose, so its view is dropped at its teardown,
+        /// not retained. Shared rather than carried on an event because
+        /// a teardown can run ahead of the queued `Detach`: until fix
+        /// round 4 the tick loop's failed write to a window that had
+        /// closed its socket, since then a drain's deadline.
+        departing: Arc<AtomicBool>,
     },
     /// An attached frontend dispatched an event (key, mouse, resize,
     /// etc.). The dispatcher applies it to the editor and renders
@@ -136,6 +153,12 @@ enum DispatcherEvent {
     /// An attached frontend's connection closed (EOF, decode error,
     /// or explicit `FrontendEvent::Detach`). The dispatcher
     /// unregisters the session and drops the write stream.
+    /// Whether the frontend said it was leaving is not carried here:
+    /// the reader thread sets the session's shared `departing` flag
+    /// when it reads the `FrontendEvent::Detach`, so the teardown that
+    /// runs first --- this event's, or a drain's at its deadline after
+    /// a failed write (fix round 4) --- reads one fact (E9, fix round
+    /// 1).
     SessionDetached { frontend_id: FrontendId },
 }
 
@@ -196,6 +219,33 @@ impl From<SocketPathError> for DaemonError {
 /// Short enough that SIGTERM-to-exit latency is bounded by ~50 ms.
 /// Long enough that an idle daemon doesn't burn CPU.
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// E9 fix round 4 (review 4's Medium 1, the owner's ruling of
+/// 2026-10-20) --- how long a frontend whose socket failed a write keeps
+/// its input route and its view while the daemon waits for its reader's
+/// EOF. Nothing is written to it from the failed write on; what its
+/// reader reads meanwhile is dispatched to its view as any input is;
+/// the one teardown runs at the EOF, or here without it, and what the
+/// peer sends after that is lost (the ruling's stated boundary).
+///
+/// Two seconds, a constant and not a `pmacs.config` knob. A write fails
+/// only once the peer has stopped reading, and a peer that closed its
+/// socket is read to its EOF at once, so the drain ends there: what the
+/// deadline bounds is a connection that goes on sending after it
+/// stopped receiving, a forwarder whose downstream failed with its
+/// upstream still open (review 4's half-close), or a peer that never
+/// closes. Input such a forwarder already holds arrives within its
+/// round trip, which two seconds covers several times over on a long
+/// link. The cost falls on a window reconnecting meanwhile: the token
+/// is live for the drain, so its attempts are refused, and on the
+/// reconnect schedule (0.5, 1.5, 3.5 s after a loss) a drain that runs
+/// two seconds from the loss is over before the third attempt. What a
+/// user would tune it for --- longer for a worse link, shorter to come
+/// back sooner --- trades those two inside a pathological connection,
+/// and zero would bring back the loss the ruling removed, so it is not
+/// offered as a setting; the schedule and the attempt cap it is sized
+/// against are constants too.
+pub const WRITE_FAILURE_DRAIN: Duration = Duration::from_secs(2);
 
 /// Per-daemon state shared between the accept loop and per-attach
 /// handlers.
@@ -808,6 +858,36 @@ fn per_attach_thread(
         None
     };
 
+    // E9 (v27) — a semantic session's one handshake step past the
+    // bootstrap: `Resume`, naming the token of the view it takes back
+    // or `None` for a fresh one. Read only from a session that
+    // negotiated the family, since reading it from an older one would
+    // desynchronize that stream; a v27 session that sends anything
+    // else here is refused as a protocol error.
+    let session_version = crate::protocol::negotiated_session_version(req.protocol_version);
+    let resume = if session_version >= SESSION_MIN_VERSION && negotiated_caps.semantic_render {
+        match read_message::<FrontendEvent>(&mut stream) {
+            Ok(FrontendEvent::Resume { token, .. }) => token.filter(|t| !t.is_zero()),
+            Ok(other) => {
+                eprintln!(
+                    "pmacs: {frontend_id:?} sent {} where its v27 Resume step was due",
+                    frontend_event_name(&other)
+                );
+                let _ = write_message(
+                    &mut stream,
+                    &InstanceMessage::Goodbye(GoodbyeReason::ProtocolError),
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("pmacs: read Resume failed: {e}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     // T M10.8 Day 4 — Q5 non-multi-session admission control.
     let _non_multi_guard = if negotiated_caps.multi_frontend {
         None
@@ -839,11 +919,8 @@ fn per_attach_thread(
     // today; it is applied through the shared rule anyway so a future
     // ladder widening cannot silently record a version this binary is
     // unable to produce.
-    let session_state = crate::presence::SessionState::new(
-        crate::protocol::negotiated_session_version(req.protocol_version),
-        negotiated_caps,
-        color_slot,
-    );
+    let session_state =
+        crate::presence::SessionState::new(session_version, negotiated_caps, color_slot);
 
     // Hand the write-half to the dispatcher; keep a read-half for
     // this thread's reader loop. **Reader loop starts immediately
@@ -859,13 +936,16 @@ fn per_attach_thread(
         }
     };
 
+    let departing = Arc::new(AtomicBool::new(false));
     if dispatcher_tx
         .send(DispatcherEvent::SessionEstablished {
             frontend_id,
             session_state,
             initial_size: req.initial_size,
             initial_target,
+            resume,
             write_stream,
+            departing: Arc::clone(&departing),
         })
         .is_err()
     {
@@ -876,9 +956,14 @@ fn per_attach_thread(
     // Reader loop: read FrontendEvents from the stream, push to
     // dispatcher tagged with this frontend_id. Any error (EOF,
     // decode error, broken pipe) ends the loop; final
-    // `SessionDetached` lets the dispatcher clean up.
+    // `SessionDetached` lets the dispatcher clean up. A `Detach` sets
+    // the shared flag here, before anything else can tear the session
+    // down (E9, fix round 1): the frontend is leaving on purpose.
     let mut read_stream = stream;
     while let Ok(event) = read_message::<FrontendEvent>(&mut read_stream) {
+        if matches!(event, FrontendEvent::Detach(_)) {
+            departing.store(true, Ordering::SeqCst);
+        }
         if dispatcher_tx
             .send(DispatcherEvent::FrontendEvent {
                 source: frontend_id,
@@ -991,6 +1076,15 @@ fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) 
 /// prevents an unknown discriminant reaching one, so neither gate alone
 /// is load-bearing. Both read the protocol crate's constant, as the
 /// GPU frontend's gates do.
+/// E9 --- belt-and-braces write-loop gate for the v27 session family:
+/// the token is produced only at establishment, for a session that
+/// negotiated the family, so a copy reaching the frame vector for an
+/// older peer would be a defect; it is withheld here rather than
+/// mis-decoded there.
+fn peer_accepts_session_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= SESSION_MIN_VERSION || !matches!(message, InstanceMessage::SessionToken(_))
+}
+
 fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) -> bool {
     protocol_version >= pmacs_protocol::POPUP_MIN_VERSION
         || !matches!(message, InstanceMessage::Popup(_))
@@ -1451,6 +1545,11 @@ fn dispatcher_loop(
     let mut terminal_bell_baselines: HashMap<FrontendId, (crate::buffer::BufferId, u64)> =
         HashMap::new();
     let mut session_registry = SessionRegistry::new();
+    // E9.4 — when the last attached frontend left, for the opt-in idle
+    // exit (`daemon.idle-exit-secs`); `None` while any is attached.
+    // A daemon starts idle: one that nothing ever attaches to leaves
+    // on the same clock.
+    let mut idle_since: Option<Instant> = Some(Instant::now());
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
     // reproducible. Mutated across the loop; one stream of delays
@@ -1459,6 +1558,31 @@ fn dispatcher_loop(
     let mut jitter_rng = SplitMix64::new(jitter_seed);
 
     loop {
+        // E9 fix round 4 --- a frontend whose write failed and whose
+        // reader has not reached EOF within `WRITE_FAILURE_DRAIN` is
+        // torn down here, the one teardown, without the EOF: what its
+        // reader had read is dispatched (the events ahead of this pass
+        // were handled at the end of the last one), and what its peer
+        // sends from now on is lost. Before the pass reads the active
+        // frontend, so the pass never restores a frontend just gone.
+        for fid in session_registry.drains_past(WRITE_FAILURE_DRAIN, Instant::now()) {
+            eprintln!(
+                "pmacs: {fid:?} sent no EOF within {} ms of its failed write; tearing it down",
+                WRITE_FAILURE_DRAIN.as_millis()
+            );
+            detach_frontend(
+                editor,
+                &mut render_states,
+                &mut semantic_states,
+                &mut streams,
+                &mut term_sizes,
+                &mut last_dispatch_idle_sent,
+                &mut last_active_buffer_sent,
+                &mut terminal_bell_baselines,
+                &mut session_registry,
+                fid,
+            );
+        }
         // Per-tick render + presence sweep for each attached
         // frontend. T M10.8 — temporarily flip `active_frontend` to
         // the frontend being rendered so its FrontendView is the one
@@ -1467,12 +1591,29 @@ fn dispatcher_loop(
         // doesn't update active_frontend in the user-driving sense).
         let last_dispatched = editor.core.borrow().active_frontend;
         // Union of grid + semantic sessions — each fid is in exactly
-        // one of the two maps (projection selected per session).
+        // one of the two maps (projection selected per session). A
+        // draining session (E9 fix round 4) keeps its projection, for
+        // the input its reader still delivers, but has no pass: nothing
+        // is rendered, followed, swept or written for it again.
         let attached_fids: Vec<FrontendId> = render_states
             .keys()
             .chain(semantic_states.keys())
             .copied()
+            .filter(|fid| !session_registry.is_draining(*fid))
             .collect();
+
+        // E9 --- a retained view past `session.view-retention-secs`
+        // gives up its windows here, so a detached frontend that never
+        // returns costs the daemon nothing past the window.
+        {
+            let expired = session_registry.expire_retained(view_retention(editor), Instant::now());
+            if !expired.is_empty() {
+                let mut core = editor.core.borrow_mut();
+                for view in &expired {
+                    core.discard_view_windows(view);
+                }
+            }
+        }
 
         // T M10.10 post-audit-round-3 F18 — drain + broadcast pending
         // CRDT ops **before** the render pass. Otherwise frontends
@@ -1533,17 +1674,21 @@ fn dispatcher_loop(
                 // is displaying this buffer: applying a foreign-buffer
                 // snapshot would switch the GPU window away from its
                 // own active view.
-                if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid) {
-                    broadcast_buffer_snapshot_to_replicas(
+                if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid)
+                    && broadcast_buffer_snapshot_to_replicas(
                         editor,
                         upgraded,
                         &session_registry,
                         &mut streams,
                         &mut semantic_states,
-                    );
+                    )
+                {
                     // The broadcast just delivered this buffer to this
                     // frontend too; record it so the follow check below
-                    // doesn't send a duplicate on the same tick.
+                    // doesn't send a duplicate on the same tick. An
+                    // oversize snapshot (E9.5) is not recorded: the
+                    // follow check below then refuses the switch and
+                    // says so.
                     last_active_buffer_sent.insert(*fid, upgraded);
                 }
 
@@ -1574,16 +1719,40 @@ fn dispatcher_loop(
                     if let Some(active_now) = active_now
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
                     {
-                        send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
-                        // PR #120 round 2 — the snapshot just wiped
-                        // this frontend's buffer-scoped render state;
-                        // the emission baselines must die with it or
-                        // an unchanged-generation revisit (A → B → A)
-                        // suppresses every re-send.
-                        if let Some(sem) = semantic_states.get_mut(fid) {
-                            sem.on_buffer_snapshot_sent(active_now);
+                        match send_buffer_snapshot_to_frontend(
+                            editor,
+                            active_now,
+                            *fid,
+                            &mut streams,
+                        ) {
+                            Ok(()) => {
+                                // PR #120 round 2 — the snapshot just
+                                // wiped this frontend's buffer-scoped
+                                // render state; the emission baselines
+                                // must die with it or an
+                                // unchanged-generation revisit
+                                // (A → B → A) suppresses every re-send.
+                                if let Some(sem) = semantic_states.get_mut(fid) {
+                                    sem.on_buffer_snapshot_sent(active_now);
+                                }
+                                last_active_buffer_sent.insert(*fid, active_now);
+                            }
+                            // E9.5 — refused, said, and the window put
+                            // back on the buffer the frontend mirrors; a
+                            // session that was never sent one goes where
+                            // `kill_buffer` would send it, so the refusal
+                            // happens once and the next tick sends that
+                            // buffer (fix round 2, review 2's Low 1: left
+                            // in place, the window was refused again on
+                            // every tick that reached here).
+                            Err(len) => {
+                                let back_to =
+                                    last_active_buffer_sent.get(fid).copied().unwrap_or_else(
+                                        || editor.core.borrow().fallback_buffer_for(active_now),
+                                    );
+                                refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
+                            }
                         }
-                        last_active_buffer_sent.insert(*fid, active_now);
                     }
                 }
             }
@@ -1848,6 +2017,13 @@ fn dispatcher_loop(
                     if !peer_accepts_popup_message(negotiated_protocol_version, msg) {
                         continue;
                     }
+                    // E9 — the session token is written once at
+                    // establishment and never rides a frame; the gate
+                    // here is the belt-and-braces half, as for every
+                    // other appended variant.
+                    if !peer_accepts_session_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
                     // jitter site: render-write latency.
                     //
@@ -1919,23 +2095,34 @@ fn dispatcher_loop(
                 }
             }
 
-            if write_failed {
-                // The broken connection is detached here and now, the
-                // whole way (E8d.4): its reader thread may be blocked
-                // in `read` for as long as the peer holds the socket
-                // open, so its `SessionDetached` can come late or never.
-                detach_frontend(
-                    editor,
-                    &mut render_states,
-                    &mut semantic_states,
-                    &mut streams,
-                    &mut term_sizes,
-                    &mut last_dispatch_idle_sent,
-                    &mut last_active_buffer_sent,
-                    &mut terminal_bell_baselines,
-                    &mut session_registry,
-                    *fid,
+            if write_failed && let Some(stream) = streams.remove(fid) {
+                // E9 fix round 4 (review 4's Medium 1; the owner's ruling
+                // of 2026-10-20, a bounded drain) --- output stops here
+                // and input does not. E8d.4 tore the frontend down at
+                // this line, the whole way and at once, because its
+                // reader may block in `read` for as long as the peer
+                // holds the socket open, so its `SessionDetached` can come
+                // late or never; the refusal-and-retry ruling (fix round
+                // 3) needs the old socket read to its end before its
+                // view is retained for the token. A failed write stops
+                // the output and nothing else: the stream leaves the
+                // write map, so no frame, presence, bell, op, snapshot
+                // or `Goodbye` reaches it again, and its session stays
+                // registered, so what its reader still reads is
+                // dispatched to its view and its token is live (a
+                // reconnect presenting it is refused and retried). The
+                // one teardown E8d.4 made still runs once, and only
+                // once: at the reader's EOF (`SessionDetached`), or at
+                // `WRITE_FAILURE_DRAIN` without it (the top of this
+                // loop), which keeps E8d.4's bound on a reader that
+                // never ends; input after the deadline is lost.
+                eprintln!(
+                    "pmacs: {fid:?}'s write failed; nothing more is written to it, and its \
+                     input is read until its EOF or {} ms",
+                    WRITE_FAILURE_DRAIN.as_millis()
                 );
+                session_registry.begin_drain(*fid, stream, Instant::now());
+                editor.core.borrow_mut().draining_frontends.insert(*fid);
             }
         }
 
@@ -1945,12 +2132,65 @@ fn dispatcher_loop(
         // broadcasts arrive at replicas before the CellDelta /
         // CursorByte for the same edit.
 
+        // E9.4 — opt-in idle exit: with no frontend attached for
+        // `daemon.idle-exit-secs` (0, the default, never), the daemon
+        // stops as `--stop` would stop it. Meant for a daemon a GUI
+        // started for itself, which otherwise outlives every window.
+        // A view retained for a lost socket holds the clock (fix round
+        // 1): a window reconnecting on its schedule is owed the view
+        // for the retention, and the clock starts when the last view
+        // expires or is resumed and dropped. A window that left on
+        // purpose retains nothing, so the clock runs from its close.
+        // A session draining after a failed write (fix round 4) keeps
+        // its projection until its teardown and is counted here: it is
+        // owed the input still on its way and then, unless it said it
+        // was leaving, the retention, so the clock holds through the
+        // drain and starts no earlier than its teardown.
+        let attached_now = render_states.len() + semantic_states.len();
+        if attached_now == 0 && !session_registry.retains_views() {
+            let idle_for = idle_since.get_or_insert_with(Instant::now).elapsed();
+            let limit = idle_exit_after(editor);
+            if !limit.is_zero() && idle_for >= limit {
+                eprintln!(
+                    "pmacs: no frontend attached for {} s (daemon.idle-exit-secs); stopping",
+                    idle_for.as_secs()
+                );
+                run_before_quit_hooks(editor, "the idle exit");
+                shutdown.store(true, Ordering::SeqCst);
+            }
+        } else {
+            idle_since = None;
+        }
+
         // Shutdown / quit checks. Send Goodbye to all attached
         // frontends before exiting.
         let core_wants_quit = editor.core.borrow().quit;
         let shutting_down = shutdown.load(Ordering::SeqCst) || core_wants_quit;
         if shutting_down {
-            for stream in streams.values_mut() {
+            // E9 (fix round 2, Medium 4, the owner's ruling) --- the
+            // frontend whose own quit stopped the daemon (the last
+            // frontend's `y`) is told `Goodbye(Detached)` first, as its
+            // `n` would have told it, so its window closes rather than
+            // staying open under E2.3's notice; every other frontend is
+            // told `ShuttingDown`. A session below the family's version
+            // cannot decode `Detached` and is told `ShuttingDown`.
+            let quitter = core_wants_quit
+                .then(|| editor.core.borrow().quit_by)
+                .flatten()
+                .filter(|fid| {
+                    session_registry
+                        .session_state(*fid)
+                        .is_some_and(|s| s.negotiated_protocol_version >= SESSION_MIN_VERSION)
+                });
+            if let Some(fid) = quitter
+                && let Some(stream) = streams.get_mut(&fid)
+            {
+                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            }
+            for (fid, stream) in &mut streams {
+                if Some(*fid) == quitter {
+                    continue;
+                }
                 let _ = write_message(
                     stream,
                     &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
@@ -2330,8 +2570,55 @@ fn handle_session_established(
     session_state: crate::presence::SessionState,
     initial_size: CellSize,
     initial_target: Option<InitialTarget>,
+    resume: Option<SessionToken>,
     mut write_stream: UnixStream,
+    departing: Arc<AtomicBool>,
 ) {
+    // E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+    // 2026-10-19) --- what a presented token names is told apart first,
+    // before anything of this attach exists. A token whose session is
+    // still registered is live: its socket has not been seen to close
+    // (a loss reaches the daemon by its reader's EOF, or by a failed
+    // write and then that EOF or `WRITE_FAILURE_DRAIN`, fix round 4;
+    // a window's reconnect can come first). The new socket is
+    // closed, with no view built, no token minted, no session or flag
+    // registered and no hook run; the old socket is read to its end,
+    // its last input applied to its view, which a loss then retains
+    // for the token as any loss does, and the window, which counts the
+    // close as a failed attempt and keeps its token, takes it on a later
+    // attempt. Until this round a live token fell through to a fresh
+    // view and was replaced by its token, so a window back before the
+    // daemon saw its loss abandoned a view that was still there. A
+    // token the registry holds nowhere --- expired, consumed, or minted
+    // by a daemon that has since restarted --- is a fresh view, said.
+    enum Presented {
+        Nothing,
+        Retained(crate::window::FrontendView),
+        Gone(SessionToken),
+    }
+    let presented = match resume {
+        None => Presented::Nothing,
+        Some(token) => {
+            if let Some(holder) = session_registry.session_holding(token) {
+                eprintln!(
+                    "pmacs: {frontend_id:?} presented the token of {holder:?}, whose socket is \
+                     still open; closing the new socket"
+                );
+                let _ = write_stream.shutdown(Shutdown::Both);
+                return;
+            }
+            session_registry
+                .take_retained(token)
+                .map_or(Presented::Gone(token), Presented::Retained)
+        }
+    };
+    // E9 --- a session that negotiated the family is minted a token,
+    // registered with it (so its detach retains its view) and told it
+    // once its bootstrap is on the wire, below.
+    let token = (session_state.negotiated_protocol_version >= SESSION_MIN_VERSION
+        && session_state.negotiated_capabilities.semantic_render)
+        .then(mint_session_token);
+    let session_state = session_state.with_token(token);
     // Register the frontend's view (M10.8 Day 3: fresh scratch
     // buffer view; future milestones may clone LOCAL's view or
     // take an explicit initial-buffer argument).
@@ -2347,11 +2634,43 @@ fn handle_session_established(
     // `PANEL_MIN_VERSION` or later can render the GPU band and is
     // panel-capable, while a v6-v20 semantic session still falls back to
     // its document target with every side-specific parameter discarded.
-    let fresh_view = build_fresh_frontend_view(
-        editor,
-        !session_state.negotiated_capabilities.semantic_render,
-        peer_declared_panel_support(session_state),
-    );
+    // E9 --- the view a previous session of this frontend left behind
+    // is taken back under the token it presented, with this session's
+    // own projection and panel facts (the negotiation is per session)
+    // and no geometry, which the new socket declares afresh. A token the
+    // registry does not hold is a fresh view, as `None` is.
+    let fold_projection = !session_state.negotiated_capabilities.semantic_render;
+    let panel_capable = peer_declared_panel_support(session_state);
+    let mut resumed = false;
+    let fresh_view = match presented {
+        Presented::Retained(mut retained) => {
+            daemon_debug(format!("{frontend_id:?} resumes a retained view"));
+            resumed = true;
+            retained.fold_projection = fold_projection;
+            retained.panel_capable = panel_capable;
+            retained.frame_geometry = None;
+            retained.document_viewport = None;
+            retained
+        }
+        Presented::Gone(token) => {
+            daemon_debug(format!(
+                "{frontend_id:?} presented {token} but no view is retained for it"
+            ));
+            // E9 fix round 2 (review 2's Low 5) --- a window that
+            // reconnects after its view expired (the GUI's thirty
+            // attempts span 751.5 s against the default 600 s), or to
+            // a daemon that restarted, starts fresh; said on the
+            // status line its first frame carries, as E9.5's
+            // refusals are, so the buffer it lands on is explained.
+            let kept = view_retention(editor).as_secs();
+            editor.core.borrow_mut().status = format!(
+                "this window's earlier view is gone (a lost socket's view is kept {kept} s, \
+                 session.view-retention-secs; a restarted daemon holds none); starting fresh"
+            );
+            build_fresh_frontend_view(editor, fold_projection, panel_capable)
+        }
+        Presented::Nothing => build_fresh_frontend_view(editor, fold_projection, panel_capable),
+    };
     {
         let mut core = editor.core.borrow_mut();
         core.register_frontend_view(frontend_id, fresh_view);
@@ -2381,6 +2700,19 @@ fn handle_session_established(
     let semantic_render = session_state.negotiated_capabilities.semantic_render;
     let negotiated_protocol_version = session_state.negotiated_protocol_version;
 
+    // E9 --- a resumed session bootstraps on the one buffer its
+    // retained window shows, as a target session does on its target,
+    // never on the all-buffer sweep: a semantic frontend answers every
+    // snapshot with a `Viewport` that moves its window to that buffer,
+    // so a sweep would leave the resumed window wherever the sweep's
+    // last snapshot landed, which is the wrong-buffer return E9 exists
+    // to remove.
+    let mut resumed_buffer = if resumed && opened_target.is_none() {
+        editor.core.borrow().primary_document_buffer(frontend_id)
+    } else {
+        None
+    };
+
     if let Some(opened) = opened_target.as_ref() {
         let target_snapshot = match initial_target_snapshot(editor, opened.buffer_id) {
             Ok(snapshot) => snapshot,
@@ -2397,6 +2729,27 @@ fn handle_session_established(
             buffer_id: opened.buffer_id,
             crdt_snapshot: target_snapshot.crdt_snapshot,
         };
+        // E9.5 — a target past the frame cap is a failed target, told
+        // as one, never a session left at "(connecting...)".
+        let frame_len = snapshot_frame_len(&snapshot_message);
+        if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+            let text_len = editor
+                .core
+                .borrow()
+                .registry
+                .borrow()
+                .get(opened.buffer_id)
+                .map_or(0, crate::buffer::Buffer::len);
+            send_initial_target_failure(
+                &mut write_stream,
+                format!("the file {}", oversize_sizes(text_len, frame_len)),
+            );
+            editor
+                .core
+                .borrow_mut()
+                .unregister_frontend_view(frontend_id);
+            return;
+        }
         if opened.publish_to_replicas || target_snapshot.upgraded_to_crdt {
             publish_buffer_snapshot_to_replicas(
                 editor,
@@ -2415,12 +2768,83 @@ fn handle_session_established(
                 .unregister_frontend_view(frontend_id);
             return;
         }
+    } else if let Some(buffer_id) = resumed_buffer {
+        match initial_target_snapshot(editor, buffer_id) {
+            Ok(snapshot) => {
+                let message = InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot: snapshot.crdt_snapshot,
+                };
+                // E9.5 — a retained window on a buffer past the frame
+                // cap is refused and sent to the buffer `kill_buffer`
+                // would send it to, said so; the sweep bootstraps the
+                // session as a fresh one would be, and runs first so the
+                // fallback is chosen among the buffers it delivered (fix
+                // round 2, review 2's Low 1). (Until fix round 1 the
+                // window went to LOCAL's document, which can be the
+                // oversize buffer itself.)
+                let frame_len = snapshot_frame_len(&message);
+                if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+                    let left_out = send_buffer_snapshots(editor, &mut write_stream);
+                    let back_to = fallback_among_delivered(editor, buffer_id, &left_out);
+                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
+                    resumed_buffer = None;
+                } else {
+                    if snapshot.upgraded_to_crdt {
+                        publish_buffer_snapshot_to_replicas(
+                            editor,
+                            buffer_id,
+                            &message,
+                            session_registry,
+                            streams,
+                            semantic_states,
+                        );
+                    }
+                    if write_message(&mut write_stream, &message).is_err() {
+                        let _ = write_stream.shutdown(Shutdown::Both);
+                        editor
+                            .core
+                            .borrow_mut()
+                            .unregister_frontend_view(frontend_id);
+                        return;
+                    }
+                }
+            }
+            Err(message) => {
+                eprintln!("pmacs: snapshot of the resumed buffer failed: {message}");
+                let _ = write_stream.shutdown(Shutdown::Both);
+                editor
+                    .core
+                    .borrow_mut()
+                    .unregister_frontend_view(frontend_id);
+                return;
+            }
+        }
     } else if crdt_replica {
         // Legacy no-target attach remains an all-buffer replica bootstrap.
-        send_buffer_snapshots(editor, &mut write_stream);
+        let left_out = send_buffer_snapshots(editor, &mut write_stream);
+        // E9.5 (fix round 1, review 1's Medium 3) — the fresh view is on
+        // LOCAL's document; when the sweep left that buffer out, the
+        // session would start on a buffer no snapshot reached, with a
+        // line in this log and nothing on any band (the state E9.5
+        // names as its falsifier, on the path every `pmacs --gpu` with
+        // no file takes). Refused as the follow path refuses, the
+        // window sent where `kill_buffer` would send it, among the
+        // buffers the sweep delivered (fix round 2, review 2's Low 1).
+        let document = editor.core.borrow().primary_document_buffer(frontend_id);
+        if let Some(document) = document
+            && let Some((_, frame_len)) = left_out.iter().find(|(id, _)| *id == document)
+        {
+            let back_to = fallback_among_delivered(editor, document, &left_out);
+            refuse_oversize_snapshot(editor, frontend_id, document, *frame_len, back_to);
+        }
     }
 
     session_registry.register_session(frontend_id, session_state);
+    // E9 (fix round 2, review 2's Low 2) --- the departure flag is held
+    // from here, with the session: every early return above leaves no
+    // session, so nothing of the attach outlives it.
+    session_registry.set_departure_flag(frontend_id, departing);
     if semantic_render {
         semantic_states.insert(
             frontend_id,
@@ -2452,6 +2876,9 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
+    if let Some(buffer_id) = resumed_buffer {
+        last_active_buffer_sent.insert(frontend_id, buffer_id);
+    }
     if let Some(opened) = opened_target {
         last_active_buffer_sent.insert(frontend_id, opened.buffer_id);
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
@@ -2474,7 +2901,141 @@ fn handle_session_established(
                 session_registry,
                 frontend_id,
             );
+            return;
         }
+    }
+
+    // E9 --- the token goes after the bootstrap, so a frontend reading
+    // its target's snapshot and result synchronously is not handed a
+    // message it did not ask for, and before the first frame.
+    if let Some(token) = token {
+        let write_result = {
+            let stream = streams
+                .get_mut(&frontend_id)
+                .expect("new session stream installed");
+            write_message(stream, &InstanceMessage::SessionToken(token))
+        };
+        if write_result.is_err() {
+            cleanup_provisional_session(
+                editor,
+                render_states,
+                semantic_states,
+                streams,
+                term_sizes,
+                last_active_buffer_sent,
+                session_registry,
+                frontend_id,
+            );
+        }
+    }
+}
+
+/// E9 --- sixteen random bytes for a session token, from the system's
+/// entropy; should that be unreadable, a mix of the clock, the pid and a
+/// counter, which is unique within the daemon and is all a token must
+/// be (the socket is the user's own; see `pmacs_protocol::session`).
+fn mint_session_token() -> SessionToken {
+    use std::io::Read as _;
+    let mut bytes = [0u8; pmacs_protocol::SESSION_TOKEN_BYTES];
+    let read = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !read || SessionToken(bytes).is_zero() {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let seed = nanos
+            ^ (u64::from(std::process::id()) << 32)
+            ^ COUNTER.fetch_add(1, Ordering::SeqCst).rotate_left(17);
+        let mut rng = SplitMix64::new(seed);
+        for chunk in bytes.chunks_mut(8) {
+            let word = rng.next_u64().to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+    SessionToken(bytes)
+}
+
+/// E9 --- `session.view-retention-secs` as the daemon reads it on a
+/// tick and at a detach; zero when the registry is unreachable, so a
+/// view is never retained by a daemon that cannot say for how long.
+fn view_retention(editor: &EditorState) -> Duration {
+    let secs = editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .and_then(
+            |registry| match registry.borrow().get("session.view-retention-secs", None) {
+                Ok(crate::config_registry::ConfigValue::Int(n)) => u64::try_from(*n).ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0);
+    Duration::from_secs(secs)
+}
+
+/// E9.4 (fix round 1, review 1's Medium 1) --- the quit's own hooks
+/// before a stop the Lua `editor.quit` did not run: `editor.before-quit`
+/// is where the autosave takes its last sweep of unsaved text (the
+/// periodic copy is up to `autosave.interval-ms` behind), the desktop
+/// saves its session and saveplace its places, and until this round
+/// `--stop` and the idle exit set `quit` from Rust and skipped all
+/// three. The hook is short-circuit and the three say of themselves
+/// that they never veto; a veto from another subscriber is said and
+/// does not hold the stop, which asks nothing. The copies the sweep
+/// stages are installed by the exit's own wait (`EditorState::drop`),
+/// as after the Lua quit.
+fn run_before_quit_hooks(editor: &mut EditorState, why: &str) {
+    if let Some(outcome) = editor
+        .lua_host
+        .run_hook("editor.before-quit", mlua::MultiValue::new())
+        && !outcome.proceed
+    {
+        eprintln!("pmacs: editor.before-quit vetoed {why}; stopping anyway");
+    }
+}
+
+/// E9.4 --- `daemon.idle-exit-secs` as the daemon reads it on a tick;
+/// zero (never) when the registry is unreachable.
+fn idle_exit_after(editor: &EditorState) -> Duration {
+    let secs = editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .and_then(
+            |registry| match registry.borrow().get("daemon.idle-exit-secs", None) {
+                Ok(crate::config_registry::ConfigValue::Int(n)) => u64::try_from(*n).ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0);
+    Duration::from_secs(secs)
+}
+
+/// The variant's name, for a log line about a message out of place.
+fn frontend_event_name(event: &FrontendEvent) -> &'static str {
+    match event {
+        FrontendEvent::Key(_) => "Key",
+        FrontendEvent::Mouse(_) => "Mouse",
+        FrontendEvent::Resize { .. } => "Resize",
+        FrontendEvent::Paste { .. } => "Paste",
+        FrontendEvent::FocusGained(_) => "FocusGained",
+        FrontendEvent::FocusLost(_) => "FocusLost",
+        FrontendEvent::Detach(_) => "Detach",
+        FrontendEvent::CrdtOp { .. } => "CrdtOp",
+        FrontendEvent::Viewport { .. } => "Viewport",
+        FrontendEvent::Pointer { .. } => "Pointer",
+        FrontendEvent::MenuPointer { .. } => "MenuPointer",
+        FrontendEvent::TerminalResize { .. } => "TerminalResize",
+        FrontendEvent::TerminalPointer { .. } => "TerminalPointer",
+        FrontendEvent::FrontendCellGeometry { .. } => "FrontendCellGeometry",
+        FrontendEvent::PanelResizeRows { .. } => "PanelResizeRows",
+        FrontendEvent::PanelPointer { .. } => "PanelPointer",
+        FrontendEvent::TextInput { .. } => "TextInput",
+        FrontendEvent::PanelPointerMapped { .. } => "PanelPointerMapped",
+        FrontendEvent::Resume { .. } => "Resume",
+        FrontendEvent::Shutdown { .. } => "Shutdown",
     }
 }
 
@@ -2499,7 +3060,9 @@ fn handle_dispatcher_event(
             session_state,
             initial_size,
             initial_target,
+            resume,
             write_stream,
+            departing,
         } => {
             handle_session_established(
                 editor,
@@ -2513,7 +3076,9 @@ fn handle_dispatcher_event(
                 session_state,
                 initial_size,
                 initial_target,
+                resume,
                 write_stream,
+                departing,
             );
         }
         DispatcherEvent::FrontendEvent { source, event } => {
@@ -2523,10 +3088,33 @@ fn handle_dispatcher_event(
             }
             match event {
                 FrontendEvent::Detach(_) => {
-                    // The per-attach thread will follow up with a
-                    // `SessionDetached` event after its reader
-                    // loop exits; cleanup happens there. Just stop
-                    // processing here.
+                    // The frontend is leaving on purpose (a window
+                    // closing): its reader thread set the session's
+                    // shared flag as it read this, so the teardown ---
+                    // the reader's `SessionDetached` after its loop
+                    // exits, or the tick loop's on the write that fails
+                    // first once the window has closed its socket ---
+                    // drops its view instead of retaining it (E9, fix
+                    // round 1). Nothing happens here.
+                }
+                // E9.4 — `pmacs --daemon --stop`. Refused from a session
+                // below the family's version (a peer compiled from this
+                // crate can encode any discriminant); honored as the
+                // editor's own quit, which the tick loop answers with
+                // `Goodbye(ShuttingDown)` to every frontend and an exit.
+                FrontendEvent::Shutdown { .. } => {
+                    let version = session_registry
+                        .session_state(source)
+                        .map_or(0, |s| s.negotiated_protocol_version);
+                    if version >= SESSION_MIN_VERSION {
+                        eprintln!("pmacs: stop requested by {source:?}");
+                        run_before_quit_hooks(editor, "--stop");
+                        editor.core.borrow_mut().quit = true;
+                    } else {
+                        eprintln!(
+                            "pmacs: refusing Shutdown from {source:?}: its session is v{version}"
+                        );
+                    }
                 }
                 FrontendEvent::Resize { size, .. } => {
                     if let Some(rs) = render_states.get_mut(&source) {
@@ -3090,6 +3678,9 @@ fn handle_dispatcher_event(
                 }
             }
         }
+        // The reader's EOF: the teardown of a session that ended, and of
+        // one draining after a failed write (E9 fix round 4), whose
+        // input, queued ahead of this event, has all been dispatched.
         DispatcherEvent::SessionDetached { frontend_id } => {
             detach_frontend(
                 editor,
@@ -3105,22 +3696,71 @@ fn handle_dispatcher_event(
             );
         }
     }
+    // E9.3 --- a frontend whose own quit asked to leave: told, if its
+    // session can decode the reason, then torn down the one way, as a
+    // departure (its window closes on the `Goodbye`, so its token dies
+    // with it and nothing is retained). Taken here, after the event,
+    // so the request's own frame never reaches a stream being closed.
+    let requested = editor.core.borrow_mut().detach_requested.take();
+    if let Some(frontend_id) = requested {
+        let Some(session) = session_registry.session_state(frontend_id) else {
+            return;
+        };
+        session_registry.mark_departing(frontend_id);
+        if let Some(stream) = streams.get_mut(&frontend_id) {
+            if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
+                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        detach_frontend(
+            editor,
+            render_states,
+            semantic_states,
+            streams,
+            term_sizes,
+            last_dispatch_idle_sent,
+            last_active_buffer_sent,
+            terminal_bell_baselines,
+            session_registry,
+            frontend_id,
+        );
+    }
 }
 
-/// The one teardown of a frontend's session (E8d.4), run when the tick
-/// loop's write to it fails and when its reader thread reports
-/// `SessionDetached`. Until E8d the write-failure drop removed the
-/// per-frontend maps and nothing else --- a copy of this arm that had
-/// drifted --- so a frontend whose socket died under a write kept its
-/// `command_history` entry, its undo source and its Lua-side tables,
-/// and `frontend.detached` never ran for it unless its reader thread
-/// happened to end too.
+/// The one teardown of a frontend's session (E8d.4), run when its
+/// reader thread reports `SessionDetached`, when a session draining
+/// after a failed write reaches `WRITE_FAILURE_DRAIN` without that EOF,
+/// and on its quit's own request (E9.3). Until E8d the write-failure
+/// drop removed the per-frontend maps and nothing else --- a copy of
+/// this arm that had drifted --- so a frontend whose socket died under
+/// a write kept its `command_history` entry, its undo source and its
+/// Lua-side tables, and `frontend.detached` never ran for it unless its
+/// reader thread happened to end too. E8d.4 had the failed write call
+/// this at once; since E9's fix round 4 (the owner's ruling of
+/// 2026-10-20) the failed write only stops the output and begins the
+/// drain, and this runs at the drain's end, still once: the gesture,
+/// the command history, the undo source and the maps below live
+/// through the drain, because the input it dispatches uses them, and
+/// go here. A drain's socket is shut both ways with the session, so a
+/// reader still in `read` ends.
 ///
-/// A frontend with no registered session is a no-op: the write-failure
-/// drop runs first and the reader's `SessionDetached` follows, so the
-/// second caller finds nothing registered and changes nothing, and the
-/// hook fires once. The eight per-frontend maps stay separate here;
-/// the `Session` struct that would hold them rides E9.
+/// A frontend with no registered session is a no-op: the reader's
+/// `SessionDetached` after a drain's deadline, or after a requested
+/// detach, finds nothing registered and changes nothing, and the hook
+/// fires once. The eight per-frontend maps stay separate here; the
+/// `Session` struct that would hold them is E9b's.
+///
+/// Whether the frontend said it was leaving is the session's shared
+/// `departing` flag (E9, fix round 1): set by its reader thread as it
+/// reads the `FrontendEvent::Detach` (a window closing), or by the
+/// dispatcher on its quit's own request (E9.3). Its token dies with
+/// it, so its view is dropped at once; a loss --- a close with no
+/// `Detach`, or a write that failed --- retains the view for the
+/// token. The flag is shared and not carried on an event because the
+/// teardowns race the event queue: the reader sets it before it queues
+/// the `Detach`, so a drain's deadline that falls between the two still
+/// reads the departure.
 #[allow(clippy::too_many_arguments)]
 fn detach_frontend(
     editor: &mut EditorState,
@@ -3134,9 +3774,12 @@ fn detach_frontend(
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
-    if session_registry.session_state(frontend_id).is_none() {
+    let Some(session) = session_registry.session_state(frontend_id) else {
         return;
-    }
+    };
+    // Read before `unregister_session` below drops the flag with the
+    // session.
+    let departing = session_registry.is_departing(frontend_id);
     // Parent 48 G5b/G5i — DETACH is the fifth authority loss,
     // and the only one with no later chance at all. End the live
     // gesture, then pay it, and do BOTH before any teardown: the
@@ -3160,9 +3803,22 @@ fn detach_frontend(
         .statusline_registry
         .borrow_mut()
         .detach_frontend(frontend_id);
+    // E9 --- a session that holds a token and was lost leaves its view
+    // behind for the token, for `session.view-retention-secs`; the next
+    // session presenting the token in its `Resume` step starts on it.
+    // A departure the frontend announced, a zero retention, or no
+    // token (a pre-v27 or grid session) drops the view as before.
+    let retention = view_retention(editor);
     {
         let mut core = editor.core.borrow_mut();
-        core.unregister_frontend_view(frontend_id);
+        match session.token {
+            Some(token) if !departing && !retention.is_zero() => {
+                if let Some(view) = core.take_frontend_view(frontend_id) {
+                    session_registry.retain_view(token, view, Instant::now());
+                }
+            }
+            _ => core.unregister_frontend_view(frontend_id),
+        }
         // Kill ring Q#KR11: frontend ids are monotonic, so
         // per-frontend state must not outlive the session.
         core.command_history.remove(&frontend_id);
@@ -3207,12 +3863,20 @@ fn detach_frontend(
 /// Errors on individual buffers (upgrade failure, snapshot export
 /// failure, write failure) are logged and skipped; one failed buffer
 /// doesn't abort the others.
+///
+/// Returns the buffers left out because their snapshot is past the
+/// frame cap (E9.5), each with its frame length, so the caller can
+/// refuse a window on one of them visibly.
 #[cfg(feature = "crdt")]
-fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
+fn send_buffer_snapshots(
+    editor: &EditorState,
+    write_stream: &mut UnixStream,
+) -> Vec<(crate::buffer::BufferId, usize)> {
     let core = editor.core.borrow();
     let mut registry = core.registry.borrow_mut();
     let buffer_ids: Vec<_> = registry.ids().to_vec();
     let instance_peer_id = crate::crdt::peer_id_from_frontend(FrontendId::LOCAL);
+    let mut left_out = Vec::new();
 
     for buffer_id in buffer_ids {
         let Ok(buf) = registry.get_mut(buffer_id) else {
@@ -3243,13 +3907,26 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
             buffer_id,
             crdt_snapshot: snapshot,
         };
+        // E9.5 — a buffer past the frame cap is left out of the sweep
+        // and said so; the follow path refuses a switch onto it later,
+        // visibly, and the caller refuses a window already on it.
+        let frame_len = snapshot_frame_len(&msg);
+        if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+            eprintln!(
+                "pmacs: BufferSnapshot for {buffer_id:?} is past the {} byte frame; left out of the attach sweep",
+                pmacs_protocol::MAX_FRAME_BYTES
+            );
+            left_out.push((buffer_id, frame_len));
+            continue;
+        }
         if let Err(e) = write_message(write_stream, &msg) {
             eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} failed: {e:?}");
             // Continue trying other buffers — the stream may
             // recover, or the next per-tick error handling will
-            // detach the session.
+            // stop writing to the session and drain it.
         }
     }
+    left_out
 }
 
 /// No-op stub for non-CRDT builds. v0.1 frontends never advertise
@@ -3257,7 +3934,12 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
 /// always false in non-CRDT builds; this stub keeps the call site
 /// compiling without conditional logic.
 #[cfg(not(feature = "crdt"))]
-fn send_buffer_snapshots(_editor: &EditorState, _write_stream: &mut UnixStream) {}
+fn send_buffer_snapshots(
+    _editor: &EditorState,
+    _write_stream: &mut UnixStream,
+) -> Vec<(crate::buffer::BufferId, usize)> {
+    Vec::new()
+}
 
 /// T M10.10 Day 3 — ensure the active buffer for `fid`'s window is
 /// CRDT-backed, upgrading in place if needed.
@@ -3374,6 +4056,90 @@ fn export_buffer_snapshot(
     }
 }
 
+/// E9.5 --- the bytes a `BufferSnapshot` message would put on the wire,
+/// measured before any write, so a snapshot past
+/// `pmacs_protocol::MAX_FRAME_BYTES` is refused where the caller can
+/// say so rather than failing inside `write_message` and being logged
+/// as if it had been skipped by accident.
+fn snapshot_frame_len(message: &InstanceMessage) -> usize {
+    postcard::to_allocvec(message).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// E9.5 (fix round 2, review 2's Low 6) --- the sizes a refusal names:
+/// the text's own, which a user can square with `ls`, and its
+/// snapshot's, which is what is past the frame (for pseudo-random text
+/// about twice the text). Until this round both refusals printed the
+/// snapshot's size as the file's. One phrase for the status line's
+/// refusal and the initial target's failure.
+fn oversize_sizes(text_len: u64, frame_len: usize) -> String {
+    let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
+    format!(
+        "is {:.1} MiB and its snapshot {:.1} MiB, past the {:.0} MiB a frontend can mirror",
+        mib(text_len as f64),
+        mib(frame_len as f64),
+        mib(pmacs_protocol::MAX_FRAME_BYTES as f64)
+    )
+}
+
+/// E9.5 (fix round 2, review 2's Low 1) --- the buffer a window refused
+/// at its bootstrap goes to: `kill_buffer`'s fallback, chosen among the
+/// buffers the attach sweep delivered, never one it left out past the
+/// frame (`left_out`, as `send_buffer_snapshots` returns it), else a
+/// fresh `*scratch*`, which the tick loop's upgrade sends on the next
+/// tick.
+fn fallback_among_delivered(
+    editor: &EditorState,
+    victim: crate::buffer::BufferId,
+    left_out: &[(crate::buffer::BufferId, usize)],
+) -> crate::buffer::BufferId {
+    let excluded: Vec<crate::buffer::BufferId> = left_out.iter().map(|(id, _)| *id).collect();
+    editor
+        .core
+        .borrow()
+        .fallback_buffer_for_excluding(victim, &excluded)
+}
+
+/// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:
+/// say so on the status line every frontend reads, naming the buffer
+/// and both sizes, and put `fid`'s document window back on `back_to`,
+/// the buffer that frontend still mirrors (or, for a session never sent
+/// one, the fallback its caller chose), so the daemon's view and the
+/// frontend's never show different buffers. Until fix round 2 a caller
+/// with nothing to go back to left the window where it was, and the
+/// follow path refused it again every tick (review 2's Low 1).
+fn refuse_oversize_snapshot(
+    editor: &EditorState,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+    frame_len: usize,
+    back_to: crate::buffer::BufferId,
+) {
+    let mut core = editor.core.borrow_mut();
+    let name_of = |core: &crate::editor_core::EditorCore, id: crate::buffer::BufferId| {
+        core.registry
+            .borrow()
+            .get(id)
+            .map_or_else(|_| format!("{id:?}"), |b| b.name().to_owned())
+    };
+    let name = name_of(&core, buffer_id);
+    let back = name_of(&core, back_to);
+    let text_len = core
+        .registry
+        .borrow()
+        .get(buffer_id)
+        .map_or(0, crate::buffer::Buffer::len);
+    core.status = format!(
+        "{name} {}; this window stays on {back}",
+        oversize_sizes(text_len, frame_len)
+    );
+    eprintln!("pmacs: {}", core.status);
+    if back_to != buffer_id
+        && let Err(e) = core.switch_active_buffer_for(fid, back_to)
+    {
+        eprintln!("pmacs: putting {fid:?} back on {back_to:?} failed: {e}");
+    }
+}
+
 /// Arc 1b — send `buffer_id`'s snapshot to ONE frontend. The
 /// active-buffer-follow path (see the per-tick loop) uses this when a
 /// semantic frontend's own active buffer changes to an
@@ -3383,24 +4149,32 @@ fn export_buffer_snapshot(
 /// displaying the old buffer while daemon-side input targeted the new
 /// one.
 #[cfg(feature = "crdt")]
+///
+/// E9.5: a snapshot past the frame cap is not written; `Err(len)` names
+/// its size so the caller refuses the switch visibly.
 fn send_buffer_snapshot_to_frontend(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
     fid: FrontendId,
     streams: &mut HashMap<FrontendId, UnixStream>,
-) {
+) -> Result<(), usize> {
     let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
-        return;
+        return Ok(());
     };
     let msg = InstanceMessage::BufferSnapshot {
         buffer_id,
         crdt_snapshot: snapshot_bytes,
     };
+    let len = snapshot_frame_len(&msg);
+    if len > pmacs_protocol::MAX_FRAME_BYTES {
+        return Err(len);
+    }
     if let Some(stream) = streams.get_mut(&fid)
         && let Err(e) = write_message(stream, &msg)
     {
         eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
     }
+    Ok(())
 }
 
 #[cfg(feature = "crdt")]
@@ -3410,14 +4184,26 @@ fn broadcast_buffer_snapshot_to_replicas(
     session_registry: &SessionRegistry,
     streams: &mut HashMap<FrontendId, UnixStream>,
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-) {
+) -> bool {
     let Some(snapshot) = export_buffer_snapshot(editor, buffer_id) else {
-        return;
+        return true;
     };
     let message = InstanceMessage::BufferSnapshot {
         buffer_id,
         crdt_snapshot: snapshot,
     };
+    // E9.5 — past the frame cap nothing is written to anyone: a grid
+    // replica composes its own cells and loses only its mirror, and a
+    // semantic one is refused the switch by the follow path, which
+    // says so. The log line names the size for the daemon's operator.
+    let len = snapshot_frame_len(&message);
+    if len > pmacs_protocol::MAX_FRAME_BYTES {
+        eprintln!(
+            "pmacs: BufferSnapshot for {buffer_id:?} is {len} bytes, past the {} byte frame; not sent",
+            pmacs_protocol::MAX_FRAME_BYTES
+        );
+        return false;
+    }
     publish_buffer_snapshot_to_replicas(
         editor,
         buffer_id,
@@ -3426,6 +4212,7 @@ fn broadcast_buffer_snapshot_to_replicas(
         streams,
         semantic_states,
     );
+    true
 }
 
 fn publish_buffer_snapshot_to_replicas(
@@ -4088,8 +4875,8 @@ fn confirm_cursor_early(
             },
         )
     {
-        // The tick's own write will fail the same way and drop the
-        // connection there, where the cleanup lives.
+        // The tick's own write will fail the same way and begin the
+        // drain there (E9 fix round 4), where the cleanup lives.
         eprintln!("pmacs: early CursorByte for {source:?} failed: {e}");
     }
 }
@@ -4399,6 +5186,14 @@ fn apply_event(
         // the family gate; arriving here it is dropped, never unwrapped
         // to the legacy family.
         | FrontendEvent::PanelPointerMapped { .. }
+        // E9: `Resume` is a handshake step, read by the per-attach
+        // thread before the session exists; one arriving here is a
+        // protocol slip and is dropped, never applied.
+        | FrontendEvent::Resume { .. }
+        // E9.4: the stop request has its own dispatcher arm, which
+        // gates it on the session's negotiated version; arriving here
+        // it is dropped.
+        | FrontendEvent::Shutdown { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
@@ -4974,6 +5769,273 @@ mod tests {
             "an unchanged grid size must not mutate the screen again"
         );
 
+        editor.process_supervisor.borrow_mut().shutdown();
+    }
+
+    /// E9 fix round 2 (review 2's Low 2) --- an attach whose bootstrap
+    /// fails never becomes a session, and after its reader's
+    /// `SessionDetached` nothing of it is held: before the fix the
+    /// departure flag was set ahead of the bootstrap and only
+    /// `unregister_session` removed it, which an attach that returned
+    /// early never reached, so the map grew by one per failed attach for
+    /// the daemon's life (`pmacs --gpu` on a file it cannot open, or one
+    /// past the frame, is such an attach).
+    #[test]
+    fn an_attach_whose_bootstrap_fails_leaves_no_departure_flag() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").expect("write a plain file");
+        // Under a regular file: the open fails with ENOTDIR, not
+        // NotFound, so the target is refused rather than created.
+        let target = plain.join("child.txt");
+        let fid = FrontendId(91);
+        let mut editor = EditorState::new();
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+        let (write_stream, mut peer) = UnixStream::pair().expect("socketpair");
+        // Before the bootstrap, which shuts the pair down when it fails:
+        // macOS refuses `SO_RCVTIMEO` on a shut-down socket with EINVAL
+        // (CI's macOS lua54 leg at `9024c22`), where Linux accepts it.
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+
+        handle_dispatcher_event(
+            DispatcherEvent::SessionEstablished {
+                frontend_id: fid,
+                session_state: crate::presence::SessionState {
+                    negotiated_protocol_version: PROTOCOL_VERSION,
+                    negotiated_capabilities: crate::protocol::NegotiatedCapabilities {
+                        multi_frontend: true,
+                        crdt_replica: true,
+                        semantic_render: true,
+                    },
+                    color_slot: 0,
+                    token: None,
+                },
+                initial_size: CellSize::new(24, 80),
+                initial_target: Some(InitialTarget {
+                    cwd: dir.path().as_os_str().as_bytes().to_vec(),
+                    path: target.as_os_str().as_bytes().to_vec(),
+                }),
+                resume: None,
+                write_stream,
+                departing: Arc::new(AtomicBool::new(false)),
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+        );
+        // The precondition, read from what the frontend was told: the
+        // bootstrap took its early return, and no session exists.
+        let told: InstanceMessage = read_message(&mut peer).expect("the target's answer");
+        assert!(
+            matches!(
+                told,
+                InstanceMessage::InitialTargetResult(InitialTargetResult::Failed { .. })
+            ),
+            "precondition: the target fails; the frontend was told {told:?}"
+        );
+        assert!(session_registry.session_state(fid).is_none());
+
+        // The reader thread ends at the closed socket and reports it.
+        handle_dispatcher_event(
+            DispatcherEvent::SessionDetached { frontend_id: fid },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+            &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+        );
+        assert_eq!(
+            session_registry.departure_flag_count(),
+            0,
+            "an attach that never became a session holds no departure flag"
+        );
+        editor.process_supervisor.borrow_mut().shutdown();
+    }
+
+    /// E9 fix round 3 (review 3's Medium 1, the owner's ruling of
+    /// 2026-10-19) --- a token whose session is still registered is
+    /// refused before anything of the attach exists: the new socket is
+    /// closed with nothing written, and no view, token, session, stream,
+    /// render state or departure flag of it is left; its reader's end
+    /// tears nothing down and runs no hook. The live session keeps its
+    /// token, and its loss then retains its view for the token, as any
+    /// loss does. Until this round the live token fell through to a
+    /// fresh view, registered with a token of its own.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one attach refused and one lost, each read through the registry"
+    )]
+    fn e9_a_live_token_is_refused_before_anything_of_the_attach_exists() {
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                pmacs.lsp.config = {}
+                DETACHED = {}
+                pmacs.hook.add("frontend.detached", function(fid)
+                  DETACHED[#DETACHED + 1] = fid
+                end)
+                "#,
+            )
+            .exec()
+            .expect("install the counting hook");
+        let detached = |editor: &EditorState| -> Vec<i64> {
+            editor
+                .lua_host
+                .lua()
+                .load("return DETACHED")
+                .eval()
+                .expect("read the hook's log")
+        };
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+        let semantic = crate::presence::SessionState::new(
+            PROTOCOL_VERSION,
+            crate::protocol::NegotiatedCapabilities {
+                multi_frontend: true,
+                crdt_replica: true,
+                semantic_render: true,
+            },
+            0,
+        );
+        let establish =
+            |frontend_id, resume, write_stream, departing| DispatcherEvent::SessionEstablished {
+                frontend_id,
+                session_state: semantic,
+                initial_size: CellSize::new(24, 80),
+                initial_target: None,
+                resume,
+                write_stream,
+                departing,
+            };
+        macro_rules! feed {
+            ($event:expr) => {
+                handle_dispatcher_event(
+                    $event,
+                    &mut editor,
+                    &mut render_states,
+                    &mut semantic_states,
+                    &mut streams,
+                    &mut term_sizes,
+                    &mut last_dispatch_idle_sent,
+                    &mut last_active_buffer_sent,
+                    &mut terminal_bell_baselines,
+                    &mut session_registry,
+                    &mut CrdtBroadcastLatency::none(&mut SplitMix64::new(0)),
+                )
+            };
+        }
+
+        // The live session, its token read off its socket.
+        let first = FrontendId(31);
+        let (stream, mut first_peer) = UnixStream::pair().expect("socketpair");
+        first_peer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        feed!(establish(
+            first,
+            None,
+            stream,
+            Arc::new(AtomicBool::new(false))
+        ));
+        let token = loop {
+            if let InstanceMessage::SessionToken(token) =
+                read_message::<InstanceMessage>(&mut first_peer).expect("the first's bootstrap")
+            {
+                break token;
+            }
+        };
+        assert_eq!(session_registry.session_holding(token), Some(first));
+        let views_before = editor.core.borrow().views.len();
+
+        // Another socket presents it. (The read timeout goes on before
+        // the refusal shuts the pair: macOS refuses it after, EINVAL.)
+        let second = FrontendId(32);
+        let (stream, mut second_peer) = UnixStream::pair().expect("socketpair");
+        second_peer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let departing = Arc::new(AtomicBool::new(false));
+        feed!(establish(
+            second,
+            Some(token),
+            stream,
+            Arc::clone(&departing)
+        ));
+        match read_message::<InstanceMessage>(&mut second_peer) {
+            Err(pmacs_protocol::transport::TransportError::Eof) => {}
+            other => panic!("the refused socket is closed with nothing written; got {other:?}"),
+        }
+        assert!(
+            session_registry.session_state(second).is_none(),
+            "no session"
+        );
+        assert_eq!(session_registry.session_count(), 1, "the live one alone");
+        assert_eq!(
+            session_registry.departure_flag_count(),
+            1,
+            "the live session's flag alone"
+        );
+        assert_eq!(
+            Arc::strong_count(&departing),
+            1,
+            "nothing kept the refused attempt's flag"
+        );
+        assert!(!editor.core.borrow().views.contains_key(&second), "no view");
+        assert_eq!(editor.core.borrow().views.len(), views_before);
+        assert!(!streams.contains_key(&second), "no stream");
+        assert!(!semantic_states.contains_key(&second), "no render state");
+        assert!(!session_registry.retains_views(), "nothing retained");
+        assert_eq!(
+            session_registry.session_holding(token),
+            Some(first),
+            "the live session keeps its token"
+        );
+        // The refused attempt's reader ends at the closed socket.
+        feed!(DispatcherEvent::SessionDetached {
+            frontend_id: second
+        });
+        assert!(detached(&editor).is_empty(), "no teardown, no hook");
+        assert_eq!(session_registry.session_count(), 1);
+
+        // The live session's loss retains its view for the token.
+        drop(first_peer);
+        feed!(DispatcherEvent::SessionDetached { frontend_id: first });
+        assert_eq!(detached(&editor), vec![31]);
+        assert!(
+            session_registry.retains_views(),
+            "the loss retained the view"
+        );
+        assert_eq!(session_registry.session_holding(token), None);
         editor.process_supervisor.borrow_mut().shutdown();
     }
 
@@ -6277,6 +7339,7 @@ mod tests {
                     ..Default::default()
                 },
                 color_slot: 0,
+                token: None,
             },
         );
 
@@ -6680,6 +7743,7 @@ mod tests {
                     ..Default::default()
                 },
                 color_slot: 0,
+                token: None,
             },
         );
         handle_dispatcher_event(
@@ -6770,6 +7834,7 @@ mod tests {
                 ..Default::default()
             },
             color_slot: 0,
+            token: None,
         }
     }
 
@@ -11038,13 +12103,13 @@ mod tests {
     /// The phase's daemon row reads `frontend.detached` through a hook
     /// on a real daemon, where another frontend's boundary has no Lua
     /// accessor; this row reaches `detach_frontend` itself, the one
-    /// teardown both the tick loop's write-failure drop and the
-    /// reader's `SessionDetached` call, in the write-failure shape (the
-    /// loop's own maps, the peer gone): the frontend's `command_history`
-    /// entry is gone, its session unregistered, its maps emptied, and
-    /// `frontend.detached` has run once with its id. The second call,
-    /// the reader's, finds no session and changes nothing: the hook has
-    /// still run once.
+    /// teardown the reader's `SessionDetached` and, since E9's fix
+    /// round 4, a failed write's drain at its deadline call, in the
+    /// write-failure shape (the loop's own maps, the peer gone): the
+    /// frontend's `command_history` entry is gone, its session
+    /// unregistered, its maps emptied, and `frontend.detached` has run
+    /// once with its id. The second call, the reader's, finds no
+    /// session and changes nothing: the hook has still run once.
     #[test]
     fn e8d_4_detach_frontend_drops_the_command_history_and_runs_the_hook_once() {
         let mut editor = EditorState::new();

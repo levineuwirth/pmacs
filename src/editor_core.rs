@@ -644,6 +644,22 @@ pub struct EditorCore {
     pub status: String,
     /// True iff the editor should exit at the next iteration.
     pub quit: bool,
+    /// E9 (fix round 2, Medium 4, the owner's ruling) --- the attached
+    /// frontend whose own quit set `quit` (the last frontend's `y` to
+    /// "stop the daemon too?"), recorded by the Lua `quit` binding when
+    /// the acting frontend is not LOCAL. The daemon's shutdown tells it
+    /// `Goodbye(Detached)` before the others' `ShuttingDown`, so its
+    /// window closes as on `n` rather than staying open under E2.3's
+    /// notice. `None` for a quit from LOCAL, `--stop`, a signal or the
+    /// idle exit.
+    pub quit_by: Option<FrontendId>,
+    /// E9.3 --- the attached frontend whose own quit asked to be
+    /// detached (`pmacs.editor.detach()`), taken by the daemon's
+    /// dispatcher after the event that set it: that frontend is told
+    /// `Goodbye(Detached)` and its session torn down, its view retained
+    /// for its token; nothing else changes. Never set by the in-process
+    /// TUI, whose quit is `quit`.
+    pub detach_requested: Option<FrontendId>,
     /// Universal minibuffer (T M2.7).
     pub minibuffer: Minibuffer,
     /// The frontend that produced the most recent input event
@@ -770,6 +786,14 @@ pub struct EditorCore {
     /// status line ([`PopupOutcome::Told`]); a grid frontend, of any
     /// version, paints the popup itself and is never here.
     pub frontends_without_popup: HashSet<FrontendId>,
+    /// E9 fix round 4 --- attached frontends whose socket failed a
+    /// write and whose input the daemon is still draining (until its
+    /// reader's EOF or the drain's deadline, then the one teardown).
+    /// Set by the daemon at the failed write and dropped with the view.
+    /// Such a frontend's view still takes its input, but nothing reaches
+    /// its window any more, so it is not one of the windows a quit asks
+    /// about (`pmacs.frontend.attached_count`) unless it is the asker.
+    pub draining_frontends: HashSet<FrontendId>,
     /// Buffers whose input must round-trip (Arc 1b, Q#P6). While one
     /// of these is the active buffer,
     /// [`crate::editor::EditorState::dispatch_idle`] reports `false`,
@@ -866,6 +890,8 @@ impl EditorCore {
             views,
             status: String::new(),
             quit: false,
+            quit_by: None,
+            detach_requested: None,
             minibuffer: Minibuffer::new(),
             active_frontend: FrontendId::LOCAL,
             pending_crdt_ops: Vec::new(),
@@ -881,6 +907,7 @@ impl EditorCore {
             completion_popup: crate::completion::make_shared_popup(),
             lsp_popup: crate::lsp_popup::make_shared_popup(),
             frontends_without_popup: HashSet::new(),
+            draining_frontends: HashSet::new(),
             round_trip_buffers: std::collections::HashSet::new(),
             query_replace: None,
             typed_edit_pending: None,
@@ -1131,25 +1158,86 @@ impl EditorCore {
     /// took 98 after half an hour of scripted typing. A window another
     /// view still shows is kept.
     pub fn unregister_frontend_view(&mut self, fid: FrontendId) {
-        if let Some(view) = self.views.remove(&fid) {
-            let still_shown: HashSet<WindowId> = self
-                .views
-                .values()
-                .flat_map(|v| v.layout.iter_ids())
-                .collect();
-            for id in view.layout.iter_ids() {
-                if !still_shown.contains(&id) {
-                    self.windows.remove(&id);
-                }
-            }
+        if let Some(view) = self.take_frontend_view(fid) {
+            self.discard_view_windows(&view);
         }
+    }
+
+    /// E9 --- remove a frontend's view and hand it back with its
+    /// windows still in `self.windows`, so a session resuming under
+    /// the token the frontend held can register it again and land on
+    /// the same window, buffer, cursor and scroll. Everything else a
+    /// detach drops goes here as in [`Self::unregister_frontend_view`]:
+    /// the navigation trail (Q#BP11c, its `WindowId`s are not this
+    /// frontend's to pop any more), the popup mark, the drain mark (E9
+    /// fix round 4) and the active frontend. The caller owns the
+    /// windows from here: it registers
+    /// the view again or passes it to [`Self::discard_view_windows`].
+    pub fn take_frontend_view(&mut self, fid: FrontendId) -> Option<FrontendView> {
+        let view = self.views.remove(&fid);
         // Bottom-panel arc (Q#BP11c): a detached frontend's navigation
         // trail dies with its view — its `WindowId`s are gone, and no
         // other frontend may pop or destroy those entries.
         self.jump_ring.remove(&fid);
         self.frontends_without_popup.remove(&fid);
+        self.draining_frontends.remove(&fid);
         if self.active_frontend == fid {
             self.active_frontend = FrontendId::LOCAL;
+        }
+        view
+    }
+
+    /// E9 --- drop the windows only `view` showed (E6d.5's rule: a
+    /// window another registered view still shows is kept). The
+    /// second half of [`Self::unregister_frontend_view`], run on a
+    /// retained view when its retention expires.
+    pub fn discard_view_windows(&mut self, view: &FrontendView) {
+        let still_shown: HashSet<WindowId> = self
+            .views
+            .values()
+            .flat_map(|v| v.layout.iter_ids())
+            .collect();
+        for id in view.layout.iter_ids() {
+            if !still_shown.contains(&id) {
+                self.windows.remove(&id);
+            }
+        }
+    }
+
+    /// The buffer a window goes to when the one it shows cannot stay:
+    /// `*scratch*` unless that is `victim`, else any other buffer, else
+    /// a fresh `*scratch*`. `kill_buffer`'s choice, shared since E9's
+    /// fix round 1 with the daemon's refusal of a snapshot too large for
+    /// a frontend's frame (E9.5), which sends the window here when the
+    /// buffer it would have stayed on is the oversize one itself.
+    pub fn fallback_buffer_for(&self, victim: BufferId) -> BufferId {
+        self.fallback_buffer_for_excluding(victim, &[])
+    }
+
+    /// [`Self::fallback_buffer_for`] with buffers the window cannot go
+    /// to either: the daemon's attach sweep (E9.5) knows which buffers'
+    /// snapshots it left out, and a fallback among them is no fallback
+    /// (E9 fix round 2, review 2's Low 1: with `*scratch*` killed and
+    /// two oversize buffers open, the "any other buffer" arm chose the
+    /// other oversize one and the window stayed blank behind a status
+    /// that repeated every tick). When nothing else remains a fresh
+    /// `*scratch*` is created, as it is when no other buffer exists.
+    pub fn fallback_buffer_for_excluding(
+        &self,
+        victim: BufferId,
+        excluded: &[BufferId],
+    ) -> BufferId {
+        let mut reg = self.registry.borrow_mut();
+        let usable = |id: BufferId| id != victim && !excluded.contains(&id);
+        match reg.find_by_name("*scratch*") {
+            Some(id) if usable(id) => id,
+            _ => {
+                let candidate = reg.ids().iter().copied().find(|id| usable(*id));
+                match candidate {
+                    Some(id) => id,
+                    None => reg.create("*scratch*"),
+                }
+            }
         }
     }
 
@@ -6095,19 +6183,7 @@ impl EditorCore {
             }
         }
         self.round_trip_buffers.remove(&buffer_id);
-        let fallback = {
-            let mut reg = self.registry.borrow_mut();
-            match reg.find_by_name("*scratch*") {
-                Some(id) if id != buffer_id => id,
-                _ => {
-                    let candidate = reg.ids().iter().copied().find(|id| *id != buffer_id);
-                    match candidate {
-                        Some(id) => id,
-                        None => reg.create("*scratch*"),
-                    }
-                }
-            }
-        };
+        let fallback = self.fallback_buffer_for(buffer_id);
         // Q#BP10a: a side window showing the victim is CLOSED, not
         // redirected to `*scratch*`. Redirecting would strand an
         // unrelated buffer in the panel slot; the wrapper collapse
