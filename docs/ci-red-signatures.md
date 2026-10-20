@@ -108,12 +108,12 @@ samples of 16, 38, 47 and 35), each caught by a reviewer recounting by
 hand.
 
 **Since D38 (the owner's ruling of 2026-10-18) a row's tally counts CI
-alone**, and every close records its runs here on `main`'s tip. A local
-gate sample is listed on its issue and in the pass, and here under no
-tally. The counts written before the ruling, local samples among them,
-stand as written; E9's close records the samples the passes before the
-ruling met and left unrecorded as those counts were kept, and says how
-it reads the ruling.
+alone**, and every close records its runs here on `main`'s tip. By the
+owner's ruling of 2026-10-20, no local gate sample is counted whatever
+its date, those met before 2026-10-18 included: a local sample is
+listed on its issue, in the pass, and here in a block no tally counts.
+The counts written before E9's close, local samples among them, stand
+as written.
 
 ### `main` after E3: run 34483416251 at `2ca2094`, red on the family's first trunk sample
 
@@ -194,21 +194,23 @@ with both of #264's fragments (`expected Ok, got Err(AutoStartTimeout`,
 target at 21.78 s. `src/daemon_attach.rs` has no diff on the branch.
 **#264 is at two**; on the issue, not re-run.
 
-Tally (264): 5 items in the list below.
+Tally (264): 2 items in the list below.
 
 - gate log `20260909T204440Z-3628136`, `06-sweep`, `2201 passed; 1
   failed` (E3's fix-round tree; filed as #264)
 - gate log `20260910T135544Z-49662`, `05-sweep`, `2205 passed; 1
   failed`, at `bbc4dca`
-- gate log `20261015T172141Z-3943`, `05-sweep`, `2293 passed; 1
-  failed; 13 ignored`, at `b73abbe` (E8e.3; recorded at E9's close, below)
-- gate log `20261016T100845Z-734980`, `07-sweep-luajit`, `2094 passed; 1
-  failed; 12 ignored`, at `772b039` (E9.2; recorded at E9's close, below)
-- gate log `20261017T170736Z-1690674`, `06-sweep`, `2288 passed; 2
-  failed; 13 ignored`, the other failure #377's, at `e7c8fd5` (E9's
-  tip; recorded at E9's close, below)
 
-#264 is at five since E9's close, which recorded the three after E4's.
+#264 stays at two. The local samples since E4's, listed and not counted
+under the owner's ruling of 2026-10-20 (recorded at E9's close, below):
+
+- gate log `20261015T172141Z-3943`, `05-sweep`, `2293 passed; 1
+  failed; 13 ignored`, at `b73abbe` (E8e.3)
+- gate log `20261016T100845Z-734980`, `07-sweep-luajit`, `2094 passed; 1
+  failed; 12 ignored`, at `772b039` (E9.2)
+- gate log `20261017T170736Z-1690674`, `06-sweep`, `2288 passed; 2
+  failed; 13 ignored`, the other failure #377's, at `e7c8fd5` (E9's tip)
+
 The panic now sits at `src/daemon_attach.rs:859:9`; the line moves and
 the issue says so.
 
@@ -2201,11 +2203,11 @@ Tally (283): 14 items in the list below.
 
 #283 is at fourteen (thirteen until E8's fix round 3, eleven until E8's fix round 2, ten until E7i's fix round 2); the list above is the one the count is read from.
 
-#### #291, nineteen occurrences, all local
+#### #291, seventeen occurrences, all local
 
 `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`, armed by `PMACS_REQUIRE_HLS` and run only on this laptop, with the three fragments `HLS reports the type error; store []`, a trace reaching `LSP:ready·setting` and never `processi`, and `4 passed; 1 failed; 0 ignored`. Each occurrence:
 
-Tally (291): 19 items in the list below.
+Tally (291): 17 items in the list below.
 
 - 2026-09-27, `scripts/gate` on `e7g/grammar-fuzz` at `549d1c5`, `20260927T124215Z-1010709` (the first, recorded above);
 - 2026-09-29, a hand run of the touched suites under `--no-default-features --features lua54,crdt` on `e7h/grammar-gate` at `7f98c03`, beside a niced fuzz run holding four cores, 135.22 s;
@@ -2224,10 +2226,13 @@ Tally (291): 19 items in the list below.
 - 2026-10-09, `scripts/gate --protocol` at `2ad0b6c`, the pre-release PR's fix round 2 gate `20261009T122310Z-3757634`, step `06-sweep`, 126.47 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `07-sweep-luajit` failed the row with #311's fragments (recorded with that round, below).
 - 2026-10-09, `scripts/gate --protocol` at `29b5b81`, the same round's tip gate `20261009T135200Z-4043146`, step `07-sweep-luajit`, 126.46 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments (recorded with that round, below).
 - 2026-10-10, `scripts/gate --protocol` on `tests/bounded-rows` at `ae7e8c2` (#353), `20261010T084217Z-2263254`, step `07-sweep-luajit`, 133.91 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments (recorded with that pull request, below).
-- 2026-10-17, `scripts/gate --protocol` on `e9/session-identity` at `e7c8fd5` (#378, E9's tip), `20261017T170736Z-1690674`, step `07-sweep-luajit`, 126.72 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments (recorded at E9's close, below).
-- 2026-10-18, `scripts/gate --protocol` at `e04aa9a`, E9 fix round 1's gate `20261018T143623Z-2650551`, step `07-sweep-luajit`, 128.20 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments (recorded at E9's close, below).
 
-#291 is at nineteen; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
+The local samples since, listed and not counted under the owner's ruling of 2026-10-20 (recorded at E9's close, below):
+
+- 2026-10-17, `scripts/gate --protocol` on `e9/session-identity` at `e7c8fd5` (#378, E9's tip), `20261017T170736Z-1690674`, step `07-sweep-luajit`, 126.72 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments.
+- 2026-10-18, `scripts/gate --protocol` at `e04aa9a`, E9 fix round 1's gate `20261018T143623Z-2650551`, step `07-sweep-luajit`, 128.20 s, `store []`, the trace reaching `LSP:ready·setting` and never `processi`; that gate's `06-sweep` failed the row with #311's fragments.
+
+#291 is at seventeen; each is commented on the issue. Until E7h's third fix round this paragraph attributed it to load, as "four of them E7h's and all four beside heavy load": niced fuzz runs, a compile matrix, a game. **The sixth falsifies that.** `20261002T012705Z-3618489` began on a nearly idle machine (load about 1.5, rising to 3 to 10 as other sessions resumed) with nothing of the round's beside it, and the row failed on all three fragments. Nor did the attribution hold before it. The first sample's alone runs in the gate's environment, eight and then sixteen interleaved pairs, failed four times in forty with no load recorded, and the third occurrence came at a load of about 4 on sixteen threads. Load is not this row's cause, and this file attributes it none. Its trace shows haskell-language-server finishing its session setup and never processing the typed edit, which does not separate the server from pmacs's side of the exchange. The row passed in E7h review 2's two gates on a quieter machine (`20261001T083032Z-718803` at `17c3c8f` and `20261001T155727Z-1465534` at `d1cbca6`), which is non-reproduction and nothing more.
 
 #### #298, first sample, local
 
@@ -2800,7 +2805,7 @@ the machine and not the branch, which has no diff in that suite or the LSP
 path, and it fails every local gate on this laptop until `ghc-static` is
 installed or the fixture passes `-dynamic`.
 
-Tally (311-runs): 72 items in the list below.
+Tally (311-runs): 50 items in the list below.
 
 - `20261004T123921Z-3949386` at `79d2895` (E7i fix round 2's first gate);
 - `20261004T125601Z-4051540` at `db697a2` (the same round's tip);
@@ -2885,28 +2890,32 @@ Tally (311-runs): 72 items in the list below.
   recorded with it, below).
 - `20261012T170517Z-2804859` at `824ca82` (the wall-clock classification pass's gate, `05-sweep`;
   recorded with it, below).
-- `20261014T095325Z-3770109` at E8d.1's tree, its commit `d41a83b` (E8d's first gate, `05-sweep`; recorded at E9's close, below).
-- `20261014T102208Z-3956285` at E8d.2's tree, `81b8a2e` (`05-sweep`; recorded at E9's close, below).
-- `20261014T104006Z-4087067` at E8d.3's tree, `5560202` (`05-sweep`; recorded at E9's close, below).
-- `20261014T105531Z-4623` at E8d.4's tree, `e4c846d` (`05-sweep`; recorded at E9's close, below).
-- `20261014T111114Z-169009` at E8d.5's tree, `33a981f` (`05-sweep`; recorded at E9's close, below).
-- `20261014T112755Z-283384` at `e4a0cb8` (E8d.6's gate, `05-sweep`; recorded at E9's close, below).
-- `20261014T122022Z-409760` at `d628b21` (E8d's tip gate, `05-sweep`; recorded at E9's close, below).
-- `20261014T135856Z-532336` at `d628b21` (E8d review 1's gate, `05-sweep`; recorded at E9's close, below).
-- `20261014T161137Z-777377` at `22de659` (E8d fix round 1's gate, `05-sweep`; recorded at E9's close, below).
-- `20261014T171638Z-1006348` at `22de659` (the owner's pass gate over E8d, `05-sweep`; recorded at E9's close, below).
-- `20261014T180411Z-1322112` at `7ef32d1` (E8d fix round 2's gate, `05-sweep`; recorded at E9's close, below).
-- `20261015T112921Z-1698319` at `a7f915b` (E8e.1's gate, `05-sweep`; recorded at E9's close, below).
-- `20261015T122545Z-1811476` at `7ae872a` (E8e.2's gate, `05-sweep`; recorded at E9's close, below).
-- `20261015T172141Z-3943` at `b73abbe` (E8e.3's gate, `05-sweep`; recorded at E9's close, below).
-- `20261015T183629Z-118839` at `b73abbe` (E8e review 1's gate, `05-sweep`; recorded at E9's close, below).
-- `20261016T092821Z-377716` at `9b02148` (E9.1's gate, both sweeps; recorded at E9's close, below).
-- `20261016T100845Z-734980` at `772b039` (E9.2's gate, both sweeps; recorded at E9's close, below).
-- `20261016T154436Z-987086` at `fd32170` (E9's gate at E9.2's amend, both sweeps; recorded at E9's close, below).
-- `20261016T162234Z-1345997` at `c9fe513` (E9.3's gate, both sweeps; recorded at E9's close, below).
-- `20261017T170736Z-1690674` at `e7c8fd5` (E9's tip gate; `06-sweep` only, its `07-sweep-luajit` failing the row with #291's fragments instead; recorded at E9's close, below).
-- `20261018T131101Z-2048560` at `e7c8fd5` (E9 review 1's gate, both sweeps; recorded at E9's close, below).
-- `20261018T143623Z-2650551` at `e04aa9a` (E9 fix round 1's gate; `06-sweep` only, its `07-sweep-luajit` failing the row with #291's fragments instead; recorded at E9's close, below).
+
+The gate runs read since, listed and not counted under the owner's ruling of 2026-10-20
+(recorded at E9's close, below):
+
+- `20261014T095325Z-3770109` at E8d.1's tree, its commit `d41a83b` (E8d's first gate, `05-sweep`).
+- `20261014T102208Z-3956285` at E8d.2's tree, `81b8a2e` (`05-sweep`).
+- `20261014T104006Z-4087067` at E8d.3's tree, `5560202` (`05-sweep`).
+- `20261014T105531Z-4623` at E8d.4's tree, `e4c846d` (`05-sweep`).
+- `20261014T111114Z-169009` at E8d.5's tree, `33a981f` (`05-sweep`).
+- `20261014T112755Z-283384` at `e4a0cb8` (E8d.6's gate, `05-sweep`).
+- `20261014T122022Z-409760` at `d628b21` (E8d's tip gate, `05-sweep`).
+- `20261014T135856Z-532336` at `d628b21` (E8d review 1's gate, `05-sweep`).
+- `20261014T161137Z-777377` at `22de659` (E8d fix round 1's gate, `05-sweep`).
+- `20261014T171638Z-1006348` at `22de659` (the owner's pass gate over E8d, `05-sweep`).
+- `20261014T180411Z-1322112` at `7ef32d1` (E8d fix round 2's gate, `05-sweep`).
+- `20261015T112921Z-1698319` at `a7f915b` (E8e.1's gate, `05-sweep`).
+- `20261015T122545Z-1811476` at `7ae872a` (E8e.2's gate, `05-sweep`).
+- `20261015T172141Z-3943` at `b73abbe` (E8e.3's gate, `05-sweep`).
+- `20261015T183629Z-118839` at `b73abbe` (E8e review 1's gate, `05-sweep`).
+- `20261016T092821Z-377716` at `9b02148` (E9.1's gate, both sweeps).
+- `20261016T100845Z-734980` at `772b039` (E9.2's gate, both sweeps).
+- `20261016T154436Z-987086` at `fd32170` (E9's gate at E9.2's amend, both sweeps).
+- `20261016T162234Z-1345997` at `c9fe513` (E9.3's gate, both sweeps).
+- `20261017T170736Z-1690674` at `e7c8fd5` (E9's tip gate; `06-sweep` only, its `07-sweep-luajit` failing the row with #291's fragments instead).
+- `20261018T131101Z-2048560` at `e7c8fd5` (E9 review 1's gate, both sweeps).
+- `20261018T143623Z-2650551` at `e04aa9a` (E9 fix round 1's gate; `06-sweep` only, its `07-sweep-luajit` failing the row with #291's fragments instead).
 
 #311 is **deterministic, not intermittent**: every local gate on this laptop fails
 it until `ghc-static` is installed or the fixture passes `-dynamic`. So what the
@@ -6421,7 +6430,7 @@ So, at the wall-clock classification pass: R7 moves to thirty-six; #311's list o
 fifty; #307 stays at four, its rerun recorded beside it; #361's mechanism is seen on a third row and
 commented; every other count above stands.
 
-### E9's close: PR #378's runs, `main` at `587de75`, `53d116c` and `1ff2603`, the counts E8d, E8e and E9 left, #373 to #375, #381 and #382 filed, R7 at forty-two and #311's list at seventy-two
+### E9's close: PR #378's runs, `main` at `587de75`, `53d116c` and `1ff2603`, #306 at three, #316 at sixteen, #373 to #375, #381 and #382 filed, and the local samples E8d, E8e and E9 left, listed
 
 Recorded 2026-10-20 at E9's close, on `main` at `1ff2603`, as D38 asks of every close: the
 first registry commit since `de4177d`. E8d (#372), E8e (#376) and E9 (#378) merged without one,
@@ -6432,24 +6441,17 @@ line paired with its own result line. Every gate was read from its log directory
 `~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/`. Every run id, job id and gate log
 below was searched for in this file before it was written, and none was here. Nothing was rerun.
 
-#### How D38 is read here
+#### How D38 applies here: the owner's ruling of 2026-10-20
 
 D38 (the owner's ruling of 2026-10-18) says a row's tally counts CI alone, local gate samples are
 listed on the issue and in the pass and never tallied, and the stale counts E8d, E8e and E9 left
-(R7, #264, #311, #306, #375) are recorded at E9's close. The ruling came between E9's fix round 1
-and its review 2. This record reads it in two halves, and the reading is this commit's, for the
-owner to correct:
-
-- the samples met by the passes before the ruling (E8d's, E8e's, and E9's handoff, review 1 and
-  fix round 1) are the stale counts, and they are counted as this file counted every sample
-  before the ruling, local ones included: R7, #264, #291, #311's list, #316, #361 and #377 move
-  by them;
-- the samples met by the passes after it (E9's review 2 onward) are counted from CI alone; their
-  local samples are listed in their own block below, each already on its issue, under no tally.
-
-Read the other way, with every local sample listed and none counted, R7 would stand at
-thirty-six, #264 at two, #291 at seventeen, #311's list at fifty, #316 at sixteen, #361 at one
-and #377 at none; every CI count below is the same under both readings.
+(R7, #264, #311, #306, #375) are recorded at E9's close. On 2026-10-20 the owner ruled how that
+applies to the samples met before 2026-10-18: strictly. No local gate sample is counted, whatever
+its date. So every count here moves by CI alone, and every local sample E8d, E8e and E9 met is
+listed in a block no tally counts: in its own row's untallied block for R7, #264, #291 and #311's
+list, and in this section's two blocks below, split at the 2026-10-18 ruling only so that a reader
+can find each by its pass. This section was first written by `5a0998b`, which counted the samples
+met before 2026-10-18; it is corrected in place under the ruling.
 
 #### `main` between `de4177d` and `587de75`, and the wall-clock pass's own runs
 
@@ -6652,7 +6654,7 @@ Tally (pr378-fuzz-runs): 6 items in the list below.
 - `Grammar fuzz` 39322015544 at `3522b2f`: `asan-strict` 118298166892, `ubsan` 118298167304.
 - `Grammar fuzz` 39425693709 at `88ce655`: `asan-strict` 118637558059, `ubsan` 118637558436.
 
-##### `CI` 39054498392 at `e7c8fd5`, attempt 1 of 1: #316's sixteenth, #363's second, and the branch's E9.4 row on macOS
+##### `CI` 39054498392 at `e7c8fd5`, attempt 1 of 1: #316's fifteenth, #363's second, and the branch's E9.4 row on macOS
 
 `pull_request`, the merge `94fbce6`, created 17:36:27Z and completed 18:08:57Z: `failure`.
 
@@ -6693,9 +6695,9 @@ Tally (pr378-ci-e7c8fd5-failure): 3 rows of the table above with `result` = `fai
   held=false pending=0 stopped=false tree=true unit=pid_26803 death=killed, " +*
   /tmp/.tmpA2D1nB/a.rs  (rust) … parse:killed !3  L1:C1 Top"`, and `test result: FAILED. 10
   passed; 1 failed; 0 ignored` (18.00 s): the loop's third kill and a modified buffer, so its
-  literal fragments do not match and it is **#316's sixteenth, under the template reading** its
-  third, sixth and twelfth were counted by (the fifteenth is E8d's local sample, below); its first
-  on this leg, commented there (issuecomment-6250286129). 201 paired, 200 `ok`.
+  literal fragments do not match and it is **#316's fifteenth, under the template reading** its
+  third, sixth and twelfth were counted by; its first on this leg, commented there
+  (issuecomment-6250286129). 201 paired, 200 `ok`.
 - `Test (macos-latest / luajit)` 117459636470 and `Test (macos-latest / lua54)` 117459636488:
   the branch's own E9.4 row, `e9_session_acceptance::e9_4_a_stale_socket_is_removed_and_a_non_socket_left_alone`
   at `tests/e9_session_acceptance.rs:945:5`, `pmacs: Socket operation on non-socket (os error
@@ -6829,7 +6831,7 @@ Tally (pr378-ci-f991f7b-success): 18 rows of the table above with `result` = `su
   on each Ubuntu leg, 206 on each macOS leg; the two rows red at `9024c22` passed on both macOS
   legs.
 
-##### `CI` 39322015547 at `3522b2f`, attempt 1 of 1: #381's and #382's first, and #316's eighteenth
+##### `CI` 39322015547 at `3522b2f`, attempt 1 of 1: #381's and #382's first, and #316's sixteenth
 
 `pull_request`, the merge `42093c4`, created 20:45:44Z and completed 21:20:04Z: `failure`.
 
@@ -6883,8 +6885,8 @@ Tally (pr378-ci-3522b2f-failure): 2 rows of the table above with `result` = `fai
     which started a worker at once and installed`, the report `deaths=1 crashes=0 busy=false
     held=false pending=0 stopped=false tree=true unit=pid_38960 death=killed, " +  …⋯1 parse
     rust  parse:killed !1  L1:C1 Top"`, and `test result: FAILED. 10 passed; 1 failed; 0 ignored`
-    (26.62 s): every fragment as written, **#316's eighteenth** (the seventeenth is E9 review 1's
-    local sample, below), commented there (issuecomment-6286363461). 205 paired, 203 `ok`.
+    (26.62 s): every fragment as written, **#316's sixteenth**, commented there
+    (issuecomment-6286363461). 205 paired, 203 `ok`.
 - The four other test legs pair each `running` line with a `test result: ok`: 205 on `Test
   (crdt)`, 206 on the two other Ubuntu legs, 207 on `Test (macos-latest / luajit)`. Each red
   leg's doc-test and protocol steps were skipped after its test step failed.
@@ -6973,7 +6975,7 @@ Tally (main-ci-1ff2603-success): 18 rows of the table above with `result` = `suc
 16:59:21Z, `success`, fuzzing nothing on either arm (`run=false`): `ubsan` 118764210026,
 `asan-strict` 118764210661.
 
-#### The samples before the ruling: the stale counts
+#### The local samples before the 2026-10-18 ruling: listed, not counted
 
 The gates of E8d, E8e and E9's first three passes, read from their logs: every one five of six
 (the default plan) or six of eight (`--protocol`) unless said, `fmt`, the lints, `doc`, `build`
@@ -6987,10 +6989,10 @@ failed`). The other samples:
   `e8b_switch_buffer_acceptance::e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four`,
   with all four of its fragments (`left: "\"switch-buffer: showing
   *dired:/home/jeans/build/pmacs-gate-targets/tmp/ZtCHzp/.tmpuEqaZn/nightowls/proj*\""`,
-  `right: "\"no buffer: zzz\""`, `9 passed; 1 failed`), **#361's second**, commented there;
+  `right: "\"no buffer: zzz\""`, `9 passed; 1 failed`), commented there;
   `20261014T105531Z-4623` on E8d.4's tree (`e4c846d`), the outside-kill row on kill 3 with
   `deaths=3 … busy=false … tree=true`, `" +* …`, `parse:killed !3` and `10 passed; 1 failed`
-  (13.97 s), **#316's fifteenth, under the template reading**; `20261014T112755Z-283384` at
+  (13.97 s), #316's template reading; `20261014T112755Z-283384` at
   `e4a0cb8`, #361's mechanism on its second row (`switch_buffer_says_which_buffer_ret_reached`,
   the gate's root `pZykT4` and the fixture's `.tmpzpU3ZF` spelling `zzz`), commented, no count; and
   `20261014T171638Z-1006348`, the owner's pass gate at `22de659`, R7. `20261014T101154Z-3894530`
@@ -7009,31 +7011,32 @@ failed`). The other samples:
   `stty -a output was: ""`, the lib's `2288 passed; 2 failed; 13 ignored`) and #291's fragments
   in `07-sweep-luajit` (`store []`, the trace never reaching `processi`, 126.72 s); review 1's
   `20261018T131101Z-2048560` at `e7c8fd5`, the outside-kill row on kill 3 in `06-sweep`
-  (`busy=false`, `" +* …`, `parse:killed !3`, 14.20 s), **#316's seventeenth, under the template
-  reading**; fix round 1's `20261018T143623Z-2650551` at `e04aa9a`, #291's fragments in
-  `07-sweep-luajit` (128.20 s). The
+  (`busy=false`, `" +* …`, `parse:killed !3`, 14.20 s), #316's template reading; fix round 1's
+  `20261018T143623Z-2650551` at `e04aa9a`, #291's fragments in `07-sweep-luajit` (128.20 s). The
   handoff's table names R7 in `20261016T100845Z-734980`'s `sweep` alone; its `07-sweep-luajit`
   log carries it too, the third of that sweep's three failures (5,046 / 3 / 51).
 
-So the lists elsewhere in this file gain them, each item marked as recorded here: #264's three,
-#291's two and #311's twenty-two, above, and R7's held list six, below. #316's are listed here,
-with its two CI samples beside them in date order, under its total.
+None of them is counted. R7's six, #264's three, #291's two and #311's twenty-two are listed in
+their rows' untallied blocks too, R7's below and the others above. #316 moves by its two CI
+samples since E8c alone:
 
-Tally (316-since-e8c): 4 items in the list below.
+Tally (316-ci-since-e8c): 2 items in the list below.
 
-- local, `20261014T105531Z-4623`, E8d.4's gate, `05-sweep`, kill 3, the template reading;
-- CI, 39054498392 at `e7c8fd5`, `Test (crdt)` 117459636346, kill 3, the template reading;
-- local, `20261018T131101Z-2048560`, E9 review 1's gate, `06-sweep`, kill 3, the template reading;
-- CI, 39322015547 at `3522b2f`, `Test (macos-latest / lua54)` 118298256135, kill 1, every fragment.
+- 39054498392 at `e7c8fd5`, `Test (crdt)` 117459636346, kill 3, the template reading;
+- 39322015547 at `3522b2f`, `Test (macos-latest / lua54)` 118298256135, kill 1, every fragment.
 
-Tally (316): 18 = 14 + 4.
+Tally (316): 16 = 14 + 2.
 
-#361's first selector moves to two by E8d's local sample (its first, in CI at `752811c`, is
-recorded at E8c's fix round 1, above). #377 is filed at one, a local first sample; its issue
-names it a recurrence of U21, closed 2026-09-05, which reopens the question, and reopening the row
-is the owner's.
+Its local samples in the same span, listed and not counted: `20261014T105531Z-4623` (E8d.4's gate,
+`05-sweep`, kill 3) and `20261018T131101Z-2048560` (E9 review 1's gate, `06-sweep`, kill 3), both
+under the template reading, and the three after the ruling in the block below.
 
-#### The samples after the ruling: listed, not tallied
+#361 stays at one: E8d's local sample on its own selector is listed, not counted (its first, in CI
+at `752811c`, is recorded at E8c's fix round 1, above). #377 is filed on a local first sample and
+stands at no CI occurrence; its issue names it a recurrence of U21, closed 2026-09-05, which reopens
+the question, and reopening the row is the owner's.
+
+#### The local samples after the 2026-10-18 ruling: listed, not counted
 
 Every gate below is `scripts/gate --protocol`, six of eight, `fmt`, both lints, `doc`, `build` and
 `diff-check` ok, each sweep's `running` lines paired with as many result lines; each sample is on
@@ -7067,12 +7070,12 @@ its issue already. None moves a count.
 R7 is in none of them, nor in the four of E9's gates before the ruling that carry `d86d135`;
 see R7's row.
 
-So, at E9's close: `main` is green at `1ff2603`; #306 moves to three and #363 to two; #373, #374, #375, #381 and #382 are filed
-at one each, all first seen in CI; #316 moves to eighteen; and of the counts before the ruling, R7
-moves to forty-two, #264 to five, #291 to nineteen, #361 to two and #311's list of runs to
-seventy-two, with #377 filed at one. #380 is filed on a local sample after the ruling and stands
-at no CI occurrence. #288, #289, #304 and #305 met local samples after the ruling, listed above,
-and do not move. Every other count above stands.
+So, at E9's close: `main` is green at `1ff2603`; by CI alone #306 moves to three, #363 to two and
+#316 to sixteen, and #373, #374, #375, #381 and #382 are filed at one each, all first seen in CI.
+R7 stays at thirty-six, #264 at two, #291 at seventeen, #361 at one and #311's list of runs at
+fifty. #377 and #380 are filed on local samples and stand at no CI occurrence. Every local sample
+above is listed and not counted, under the owner's ruling of 2026-10-20, and #288, #289, #304 and
+#305, which met only local samples, do not move. Every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
@@ -8712,13 +8715,13 @@ resemblance.
 | selector | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | job | local (Linux), inside a workspace sweep; never seen in isolation or in CI |
 | required fragments | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| occurrences | at least forty-two, 2026-08-07 to 2026-10-16, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. The first twelve are enumerated in this file's history before 2026-09-05; the thirty since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
+| occurrences | at least thirty-six, 2026-08-07 to 2026-10-12, all local, all under sweep load; the panic line moves with `attach.rs` and is not part of the signature. Six later local samples, 2026-10-14 to 2026-10-16, are listed after the held list and not counted, under the owner's ruling of 2026-10-20. The first twelve are enumerated in this file's history before 2026-09-05; the twenty-four since are the list below this table, with the tallies (added at fix round 1, review 1's Low 3). The count is a floor: nobody has counted runs, so an occurrence is only ever recorded when someone reads the log |
 | candidate mechanism | the test drives a scripted transient-then-success sequence over a real socket pair; unknown whether the broken pipe is the fixture's writer closing early or a retry-path defect. Unresolved |
 | retirement | hardening that removes the named mechanism plus a discriminating witness, or a diagnosis showing the fixture, not the code, closes the pipe |
 
-Tally (R7): 42 = 12 + 30.
+Tally (R7): 36 = 12 + 24.
 
-Tally (R7-held): 30 items in the list below.
+Tally (R7-held): 24 items in the list below.
 
 - thirteenth: gate log `20260905T202734Z-1751532`, step `07-sweep`, load average 14.2, `attach.rs:1889`, all three fragments
 - fourteenth: gate log `20260905T205642Z-2051072`, step `05-sweep` of the six-stage gate, `attach.rs:1889`, all three fragments
@@ -8744,12 +8747,15 @@ Tally (R7-held): 30 items in the list below.
 - thirty-fourth: gate log `20261010T130620Z-3845623`, step `05-sweep` of the six-stage gate, E8c review 1's third gate on `e8c/quit-must-exit` at `a35b76b` (#357), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch, and the row passed in the review's two other gates and the fix round's (recorded with E8c's fix round 1, above)
 - thirty-fifth: gate log `20261010T192148Z-332172`, step `05-sweep` of the six-stage gate, #360's pull request's gate on `fix/places-no-fsync` at `c33b55c` (#362), `attach.rs:1971`, `test result: FAILED. 373 passed; 2 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`), the other failure in the binary being #304's sibling; `pmacs-gpu` has no diff on the branch (recorded with that pull request, above)
 - thirty-sixth: not a gate but the wall-clock classification pass's first measurement sweep at `824ca82`, each test binary run directly in the gate's environment with libtest's `--report-time`, the load 53.78 at its start (other sessions' fuzzing and builds), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); the pass changes no code, and the row passed in its three later sweeps and in its gate (recorded with that pass, above)
-- thirty-seventh: gate log `20261014T171638Z-1006348`, step `05-sweep` of the six-stage gate, the owner's pass gate over E8d on `e8d/drift-fixes` at `22de659` (#372), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch (recorded at E9's close, above)
-- thirty-eighth: gate log `20261015T112921Z-1698319`, step `05-sweep`, E8e.1's gate on `e8e/common-editor` at `a7f915b` (#376), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments; the branch changes tests alone (recorded at E9's close, above)
-- thirty-ninth: gate log `20261015T122545Z-1811476`, step `05-sweep`, E8e.2's gate at `7ae872a`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (recorded at E9's close, above)
-- fortieth: gate log `20261016T100845Z-734980`, step `06-sweep`, E9.2's gate on `e9/session-identity` at `772b039` (#378), `attach.rs:2009` (the line moved with E9's own change to `attach.rs`), `test result: FAILED. 374 passed; 1 failed`, all three fragments (recorded at E9's close, above)
-- forty-first: the same gate's `07-sweep-luajit`, `attach.rs:2009`, `test result: FAILED. 374 passed; 1 failed`, all three fragments, the sweep's third failure beside #311's and #264's; E9's handoff names R7 in that gate's `sweep` alone (recorded at E9's close, above)
-- forty-second: gate log `20261016T154436Z-987086`, step `06-sweep`, E9's gate at `fd32170`, `attach.rs:2009`, `test result: FAILED. 374 passed; 1 failed`, all three fragments; the row passed in the same gate's `07-sweep-luajit` (recorded at E9's close, above)
+
+The local samples since, listed and not counted under the owner's ruling of 2026-10-20:
+
+- gate log `20261014T171638Z-1006348`, step `05-sweep` of the six-stage gate, the owner's pass gate over E8d on `e8d/drift-fixes` at `22de659` (#372), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (`transient sequence must attach`, `Handshake(Io(Os { code: 32, kind: BrokenPipe`); `pmacs-gpu` has no diff on the branch (recorded at E9's close, above)
+- gate log `20261015T112921Z-1698319`, step `05-sweep`, E8e.1's gate on `e8e/common-editor` at `a7f915b` (#376), `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments; the branch changes tests alone (recorded at E9's close, above)
+- gate log `20261015T122545Z-1811476`, step `05-sweep`, E8e.2's gate at `7ae872a`, `attach.rs:1971`, `test result: FAILED. 374 passed; 1 failed`, all three fragments (recorded at E9's close, above)
+- gate log `20261016T100845Z-734980`, step `06-sweep`, E9.2's gate on `e9/session-identity` at `772b039` (#378), `attach.rs:2009` (the line moved with E9's own change to `attach.rs`), `test result: FAILED. 374 passed; 1 failed`, all three fragments (recorded at E9's close, above)
+- the same gate's `07-sweep-luajit`, `attach.rs:2009`, `test result: FAILED. 374 passed; 1 failed`, all three fragments, the sweep's third failure beside #311's and #264's; E9's handoff names R7 in that gate's `sweep` alone (recorded at E9's close, above)
+- gate log `20261016T154436Z-987086`, step `06-sweep`, E9's gate at `fd32170`, `attach.rs:2009`, `test result: FAILED. 374 passed; 1 failed`, all three fragments; the row passed in the same gate's `07-sweep-luajit` (recorded at E9's close, above)
 
 E9 diagnosed a mechanism and changed the fixture, not this row: `d86d135`
 (2026-10-16) makes the two `attach.rs` fixtures' server halves read the
