@@ -80,7 +80,7 @@ concurrency:
 #
 # This is also the gate that has to exist before the basedpyright-class
 # hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
-# never set, in the test job below. 35 still beats the 360-minute
+# never set, in the test job below. 45 still beats the 360-minute
 # default by an order of magnitude.
 #
 # CACHES ARE WRITTEN BY `main` ALONE. Every `Swatinem/rust-cache` step
@@ -618,15 +618,34 @@ jobs:
   # would cost minutes to change nothing. The tool-gated code in
   # src/process.rs needs no install on this runner and is armed below.
   #
-  # The ceiling is 35, matching the `test` job: a hosted runner is slower
-  # per-core than a development machine and renders the GPU suites
-  # through lavapipe, and a cold cache adds a full debug workspace build.
+  # The ceiling is 45, the `test` matrix's. Like every ceiling here it is
+  # a reading of OBSERVED EXECUTION (the note above `jobs:`), not a
+  # constant, so re-measure before trusting it. Read on 2026-10-21 from
+  # the jobs endpoint's start and completion times:
+  #
+  #   * `main`, its last ten runs that ran the matrix (2026-10-09 to
+  #     2026-10-21, `8b144da` to `828248f`): 29.4 to 34.5 min, the max
+  #     34 min 31 s at `53d116c`, the latest 32.9 min;
+  #   * pull requests over the same days, the 23 runs whose job ran to
+  #     its end: 28.5 to 34.5 min;
+  #   * PR #392 at `985ace1`: cancelled by the old ceiling of 35 at
+  #     35 min 06 s, after every test and the doc test had passed
+  #     (#393). Its workspace build took 70 s and its test step
+  #     1,955 s, where `main`'s run at `1ff2603` took 21 s and 1,977 s;
+  #   * for scale, `main`'s runs of 2026-09-26 to 2026-09-28: 14.7 to
+  #     15.6 min.
+  #
+  # Five jobs in that window finished within a minute of 35, and one
+  # crossed it. 45 sits about ten minutes over the observed max. A
+  # hosted runner is slower per core than a development machine and
+  # renders the GPU suites through lavapipe, and a cold cache adds a
+  # full debug workspace build, a case these readings do not separate.
   crdt-test:
     name: Test (crdt)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    timeout-minutes: 35
+    timeout-minutes: 45
     # In the job's `env`, for the arming report's sake, as in `test`.
     env:
       PMACS_REQUIRE_GPU: "1"
