@@ -400,8 +400,9 @@ struct Pending {
 /// sweep is [`stage`], which leaves the syncs to an installing thread
 /// (#368).
 ///
-/// Unlike desktop-save this is **not** daemon-gated — autosave is
-/// per-buffer, not per-frontend, and a daemon holds the unsaved work.
+/// Not daemon-gated — autosave is per-buffer, not per-frontend, and a
+/// daemon holds the unsaved work. (Desktop-save, per-frontend, never
+/// saves a daemon's own view, and saves its windows' by kind: E10.)
 ///
 /// Returns `(written, blocked, conflicted)`:
 ///

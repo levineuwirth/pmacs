@@ -17,7 +17,7 @@ use pmacs_protocol::message::{
 use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
-use common::daemon::{TestDaemon, build_default_caps};
+use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
 
 /// One attached semantic session: its writer, a channel of everything
 /// the daemon wrote to it, its id and the token it was minted.
@@ -322,7 +322,7 @@ fn assert_discarded(daemon: &TestDaemon, token: SessionToken, scratch: BufferId)
 
 #[test]
 fn e9_review5_explicit_detach_during_drain_discards_the_token() {
-    let daemon = daemon_with_note("pmacs.lsp.config = {}\n");
+    let daemon = daemon_with_note(&format!("{NO_REOPEN}pmacs.lsp.config = {{}}\n"));
     let (mut first, token, scratch) = draining_note(&daemon);
     write_message(&mut first.stream, &FrontendEvent::Detach(first.fid)).expect("Detach");
     first
@@ -342,7 +342,7 @@ fn e9_review5_explicit_detach_during_drain_discards_the_token() {
 
 #[test]
 fn e9_review5_a_draining_quit_with_a_served_peer_is_a_departure() {
-    let mut daemon = daemon_with_note("pmacs.lsp.config = {}\n");
+    let mut daemon = daemon_with_note(&format!("{NO_REOPEN}pmacs.lsp.config = {{}}\n"));
     let mut other = Session::attach(&daemon, PROTOCOL_VERSION, None);
     other.where_am_i();
     let (mut first, token, scratch) = draining_note(&daemon);

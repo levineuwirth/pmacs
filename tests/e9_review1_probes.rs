@@ -27,7 +27,7 @@ use pmacs_protocol::{
     BufferId, FrontendId, SESSION_MIN_VERSION, SESSION_TOKEN_BYTES, SessionToken,
 };
 
-use common::daemon::{TestDaemon, build_default_caps};
+use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
 
 struct Session {
     stream: UnixStream,
@@ -517,7 +517,7 @@ fn e9_review1_shutdown_from_a_v26_session_is_refused() {
 /// socket does, and the token resumes the note.
 #[test]
 fn e9_review1_a_deliberate_detach_retains_no_view() {
-    let daemon = daemon_with_note("");
+    let daemon = daemon_with_note(NO_REOPEN);
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();

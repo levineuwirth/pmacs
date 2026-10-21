@@ -529,9 +529,9 @@ pub fn run_daemon(socket_path: PathBuf, instance_name: Option<String>) -> Result
     let mut editor = EditorState::new();
     // Real session: wire up on-disk persistence (history + pmacs.state).
     editor.install_state_dirs();
-    // Mark this process a daemon so `pmacs.session.desktop_mode` keeps
-    // desktop save/restore local-only in v1 (Q#DS9): the daemon has a
-    // layout per attached frontend and none at construction.
+    // Mark this process a daemon so its own `LOCAL` view is never a
+    // desktop (Q#DS9: it has a layout per attached frontend and none at
+    // construction), and an attached window's is, by its kind (E10).
     editor
         .lua_host
         .lua()
@@ -2137,6 +2137,9 @@ fn dispatcher_loop(
         let core_wants_quit = editor.core.borrow().quit;
         let shutting_down = shutdown.load(Ordering::SeqCst) || core_wants_quit;
         if shutting_down {
+            // E10.1 --- every attached window's desktop, before any
+            // window is told.
+            save_attached_desktops(editor, &session_registry);
             // E9 (fix round 2, Medium 4, the owner's ruling) --- the
             // frontend whose own quit stopped the daemon (the last
             // frontend's `y`) is told `Goodbye(Detached)` first, as its
@@ -2588,7 +2591,23 @@ fn handle_session_established(
     // registry does not hold is a fresh view, as `None` is.
     let fold_projection = !session_state.negotiated_capabilities.semantic_render;
     let panel_capable = peer_declared_panel_support(session_state);
+    // E10.2 (D16) --- a fresh view of a semantic window that named no
+    // target is built from the desktop the daemon keeps for its kind,
+    // if it keeps one: what the last such window had when it detached.
+    // A target wins over the desktop, and a retained view over both.
+    // A grid session is built as it always was, since the daemon cannot
+    // tell an attached TUI from `--stop`'s own session at the attach
+    // (both are grid sessions; `docs/divergences.md`). Off with
+    // `session.reopen-desktop`, which leaves the desktop written.
+    let kind = crate::desktop::FrontendKind::of_session(
+        session_state.negotiated_capabilities.semantic_render,
+    );
+    let restore = (initial_target.is_none()
+        && kind == crate::desktop::FrontendKind::Semantic
+        && reopens_desktop(editor))
+    .then_some(kind);
     let mut resumed = false;
+    let mut restored = None;
     let fresh_view = match presented {
         Presented::Retained(mut retained) => {
             daemon_debug(format!("{frontend_id:?} resumes a retained view"));
@@ -2609,14 +2628,29 @@ fn handle_session_established(
             // a daemon that restarted, starts fresh; said on the
             // status line its first frame carries, as E9.5's
             // refusals are, so the buffer it lands on is explained.
+            // Since E10.2 a fresh view is its kind's desktop when the
+            // daemon keeps one, which is what the line then says.
+            let (view, from_desktop) =
+                build_fresh_frontend_view(editor, fold_projection, panel_capable, restore);
             let kept = view_retention(editor).as_secs();
+            let then = if from_desktop.is_some() {
+                "reopening what the last window of its kind had"
+            } else {
+                "starting fresh"
+            };
             editor.core.borrow_mut().status = format!(
                 "this window's earlier view is gone (a lost socket's view is kept {kept} s, \
-                 session.view-retention-secs; a restarted daemon holds none); starting fresh"
+                 session.view-retention-secs; a restarted daemon holds none); {then}"
             );
-            build_fresh_frontend_view(editor, fold_projection, panel_capable)
+            restored = from_desktop;
+            view
         }
-        Presented::Nothing => build_fresh_frontend_view(editor, fold_projection, panel_capable),
+        Presented::Nothing => {
+            let (view, from_desktop) =
+                build_fresh_frontend_view(editor, fold_projection, panel_capable, restore);
+            restored = from_desktop;
+            view
+        }
     };
     {
         let mut core = editor.core.borrow_mut();
@@ -2625,7 +2659,32 @@ fn handle_session_established(
         // the producer's popup flag, so a v25 GPU is told on its status
         // line what a v26 one is shown.
         core.set_frontend_shows_popup(frontend_id, peer_shows_popup(session_state));
+        // E10 --- its kind, from the bit that picks its render state
+        // below; half the key its desktop is kept under (D16), dropped
+        // with the view.
+        core.frontend_kinds.insert(
+            frontend_id,
+            crate::desktop::FrontendKind::of_session(
+                session_state.negotiated_capabilities.semantic_render,
+            ),
+        );
         core.active_frontend = frontend_id;
+    }
+    // E10.2 --- the restored view is registered, so `buffer.after-load`
+    // runs with each of its leaves active in it, as the in-process
+    // editor's restore runs it, and then the desktop's cursors.
+    if let Some(restored) = restored.as_ref() {
+        crate::desktop::settle_restored(&editor.core, frontend_id, restored, || {
+            editor
+                .lua_host
+                .run_hook("buffer.after-load", mlua::MultiValue::new());
+        });
+        editor.reconcile_panel_layout(frontend_id);
+        let modified = restored.modified();
+        if modified > 0 {
+            editor.core.borrow_mut().status =
+                format!("desktop restored; {modified} buffer(s) had unsaved changes when saved");
+        }
     }
 
     let opened_target = match initial_target {
@@ -2653,8 +2712,9 @@ fn handle_session_established(
     // snapshot with a `Viewport` that moves its window to that buffer,
     // so a sweep would leave the resumed window wherever the sweep's
     // last snapshot landed, which is the wrong-buffer return E9 exists
-    // to remove.
-    let mut resumed_buffer = if resumed && opened_target.is_none() {
+    // to remove. A window restored from its kind's desktop (E10.2) is
+    // bootstrapped the same way, for the same reason.
+    let mut resumed_buffer = if (resumed || restored.is_some()) && opened_target.is_none() {
         editor.core.borrow().primary_document_buffer(frontend_id)
     } else {
         None
@@ -2886,6 +2946,23 @@ fn mint_session_token() -> SessionToken {
     SessionToken(bytes)
 }
 
+/// E10.2 --- `session.reopen-desktop` as the daemon reads it at an
+/// attach: whether a fresh GPU window reopens its kind's desktop. `true`
+/// (the knob's default) when the registry is unreachable, as nothing is
+/// then known to have turned it off.
+fn reopens_desktop(editor: &EditorState) -> bool {
+    editor
+        .lua_host
+        .lua()
+        .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+        .is_none_or(|registry| {
+            !matches!(
+                registry.borrow().get("session.reopen-desktop", None),
+                Ok(crate::config_registry::ConfigValue::Bool(false))
+            )
+        })
+}
+
 /// E9 --- `session.view-retention-secs` as the daemon reads it on a
 /// tick and at a detach; zero when the registry is unreachable, so a
 /// view is never retained by a daemon that cannot say for how long.
@@ -3025,7 +3102,13 @@ fn handle_dispatcher_event(
                     if version >= SESSION_MIN_VERSION {
                         eprintln!("pmacs: stop requested by {source:?}");
                         run_before_quit_hooks(editor, "--stop");
-                        editor.core.borrow_mut().quit = true;
+                        let mut core = editor.core.borrow_mut();
+                        // E10 --- `--stop`'s own session is no window, so
+                        // it keeps no desktop: the shutdown that follows
+                        // writes the windows' and not its view of the
+                        // scratch, which would clear its kind's.
+                        core.frontend_kinds.remove(&source);
+                        core.quit = true;
                     } else {
                         eprintln!(
                             "pmacs: refusing Shutdown from {source:?}: its session is v{version}"
@@ -3640,6 +3723,12 @@ fn detach_frontend(
         session_registry.semantic_mut(frontend_id),
         frontend_id,
     );
+    // E10.1 --- what the window had is written for the next window of
+    // its kind, departure and loss alike (D16, last detached wins),
+    // from the view as it leaves it and before anything below drops
+    // it. A loss's view is also retained for its token below, and a
+    // resume takes that view, never this.
+    save_frontend_desktop(editor, frontend_id);
     editor.detach_frontend_input(frontend_id);
     // The session goes whole (E9b): its projection, its stream, its
     // sizes, the follow's and the bell's baselines and its departure
@@ -3681,6 +3770,34 @@ fn detach_frontend(
         i64::try_from(frontend_id.0).unwrap_or(i64::MAX),
     ));
     editor.lua_host.run_hook("frontend.detached", args);
+}
+
+/// E10.1 --- write attached window `frontend_id`'s desktop under its
+/// kind ([`crate::desktop::save_frontend`]); a failure is reported here
+/// and holds nothing up, as the before-quit save's does (Q#DS8).
+fn save_frontend_desktop(editor: &EditorState, frontend_id: FrontendId) {
+    if let Err(error) = crate::desktop::save_frontend(editor.lua_host.lua(), frontend_id) {
+        eprintln!("pmacs: the desktop of {frontend_id:?} was not saved: {error}");
+    }
+}
+
+/// E10.1 --- at shutdown every attached window is detached at once, so
+/// each one's desktop is written here, before any is told: in attach
+/// order, and the window that last gave input last, so that is the one
+/// the next fresh window of its kind reopens (D16, last detached wins).
+/// Under `--stop` the last input is the stop's own, from a session that
+/// keeps no desktop, so the windows go in attach order. A draining
+/// window (E9 fix round 4) is attached until its teardown and is written
+/// too; a view retained for a lost socket was written at the loss and is
+/// not written again, or it would win over a window that detached after
+/// it.
+fn save_attached_desktops(editor: &EditorState, session_registry: &SessionRegistry) {
+    let last = editor.core.borrow().active_frontend;
+    let mut attached = session_registry.projected_ids();
+    attached.sort_by_key(|fid| (*fid == last, fid.0));
+    for fid in attached {
+        save_frontend_desktop(editor, fid);
+    }
 }
 
 /// T M10.10: send one `InstanceMessage::BufferSnapshot` per buffer
@@ -4814,9 +4931,46 @@ fn build_fresh_frontend_view(
     // window. Same explicit-at-the-call-site discipline as
     // `fold_projection`; never inferred from a `FrontendId` here.
     panel_capable: bool,
-) -> crate::window::FrontendView {
+    // E10.2 (D16): the kind whose desktop the view is built from, when
+    // the daemon keeps one; `None` (a target was supplied, or a session
+    // the restore does not apply to) builds it on LOCAL's document.
+    restore: Option<crate::desktop::FrontendKind>,
+) -> (
+    crate::window::FrontendView,
+    Option<crate::desktop::Restored>,
+) {
     use crate::text_view::TextView;
     use crate::window::{FrontendView, Layout, Window, WindowId};
+    // E10.2 --- the desktop's tree, its windows already made, its
+    // buffers open; the caller registers the view and then runs
+    // `buffer.after-load` for its leaves (`desktop::settle_restored`).
+    // No desktop, or none of its files left, is the fresh view below; a
+    // desktop that cannot be read is too, and said.
+    if let Some(kind) = restore {
+        match crate::desktop::restore_for_attach(editor.lua_host.lua(), kind) {
+            Ok(Some(restored)) => {
+                let view = FrontendView {
+                    layout: restored.layout(),
+                    active: restored.active(),
+                    fold_projection,
+                    panel_capable,
+                    // As below: the session declares its geometry afresh.
+                    frame_geometry: None,
+                    panel_hidden: false,
+                    document_viewport: None,
+                };
+                return (view, Some(restored));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!(
+                    "pmacs: the {} desktop was not restored: {error}",
+                    kind.key_part()
+                );
+                editor.core.borrow_mut().status = format!("desktop-restore: {error}");
+            }
+        }
+    }
     let mut core = editor.core.borrow_mut();
     // T M10.9 — share LOCAL's buffer (don't create a fresh
     // scratch). M10.8's fresh-scratch behavior made overlays
@@ -4838,7 +4992,7 @@ fn build_fresh_frontend_view(
     let id = WindowId::next();
     let window = Window::new(id, buffer_id, text_view);
     core.windows.insert(id, window);
-    FrontendView {
+    let view = FrontendView {
         layout: Layout::single(id),
         active: id,
         fold_projection,
@@ -4850,7 +5004,8 @@ fn build_fresh_frontend_view(
         frame_geometry: None,
         panel_hidden: false,
         document_viewport: None,
-    }
+    };
+    (view, None)
 }
 
 /// Snapshot one frontend's presence (cursor + selection +
@@ -5221,7 +5376,7 @@ mod tests {
         let semantic_peer = FrontendId(20);
         let live_grid_peer = FrontendId(21);
         let dead_grid_peer = FrontendId(22);
-        let semantic_view = build_fresh_frontend_view(&mut editor, false, false);
+        let semantic_view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor
             .core
             .borrow_mut()
@@ -6721,7 +6876,7 @@ mod tests {
         let fid = FrontendId(99);
         // Both these fixtures model a SEMANTIC session (Q#FD21: no fold
         // projection until Stage 3).
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         let before = editor
@@ -6798,7 +6953,7 @@ mod tests {
         let first = wide("first");
         let second = wide("second");
         let fid = FrontendId(99);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         // The window starts on LOCAL's narrow scratch buffer, where
@@ -6876,7 +7031,7 @@ mod tests {
         let fid = FrontendId(99);
         // Both these fixtures model a SEMANTIC session (Q#FD21: no fold
         // projection until Stage 3).
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
         assert_eq!(
             editor
@@ -6954,7 +7109,7 @@ mod tests {
         );
 
         let fid = FrontendId(123);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         assert_eq!(
@@ -7012,7 +7167,7 @@ mod tests {
         // panel and move focus out on its own, and the assertions below
         // would pass without exercising the reassert at all.
         let fid = FrontendId(124);
-        let view = build_fresh_frontend_view(&mut editor, true, true);
+        let view = build_fresh_frontend_view(&mut editor, true, true, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
         editor.sync_frame_geometry(fid, CellSize::new(24, 80));
 
@@ -7197,7 +7352,7 @@ mod tests {
             .exec()
             .expect("wipe lsp config");
         let fid = FrontendId(131);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         let opened = open_initial_target(
@@ -7254,7 +7409,7 @@ mod tests {
             .expect("LOCAL always has a document window");
 
         let fid = FrontendId(132);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         let opened = open_initial_target(
@@ -7309,7 +7464,7 @@ mod tests {
             .expect("install a synchronous handler");
 
         let fid = FrontendId(133);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         let opened = open_initial_target(
@@ -7831,7 +7986,7 @@ mod tests {
     fn frontend_cell_geometry_from_a_non_panel_capable_view_is_dropped() {
         let mut editor = crate::editor::EditorState::new();
         let fid = FrontendId(704);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
@@ -9868,7 +10023,7 @@ mod tests {
         let mut editor = crate::editor::EditorState::new();
         let before = editor.core.borrow().windows.len();
         let fid = FrontendId(40);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
         assert_eq!(
             editor.core.borrow().windows.len(),
@@ -11464,7 +11619,7 @@ mod tests {
         // The discriminating half: a GRID frontend's resize still is its
         // declaration, so the gate is not simply switched off.
         let grid = FrontendId(711);
-        let view = build_fresh_frontend_view(&mut editor, true, true);
+        let view = build_fresh_frontend_view(&mut editor, true, true, None).0;
         editor.core.borrow_mut().register_frontend_view(grid, view);
         let mut render_states = HashMap::new();
         render_states.insert(grid, RenderState::new(CellSize::new(24, 80)));
@@ -11931,7 +12086,7 @@ mod tests {
             .exec()
             .expect("install the counting hook");
         let fid = FrontendId(812);
-        let view = build_fresh_frontend_view(&mut editor, false, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false, None).0;
         editor.core.borrow_mut().register_frontend_view(fid, view);
         editor
             .core

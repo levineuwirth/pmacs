@@ -236,3 +236,37 @@ whole. Under one cap a growing register squeezes the rules.
   has, and never presents a token, since a grid session is minted none.
   Removed when the local attach reconnects on the same schedule and the
   token family reaches grid sessions.
+- **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon
+  keeps one desktop for each kind of window that attaches to it, under
+  its own identity and the kind: `desktop::frontend_session_key`, the
+  daemon's `session_key` (its `--socket NAME`, or else its working
+  directory) with `.semantic` or `.grid` after it, in the state store's
+  `desktop/`. It is written when a window of that kind detaches, by
+  leaving or by losing its socket; for every attached window at
+  shutdown, in attach order with the window that last gave input last;
+  and by `desktop-save` in a window. The last written wins, and a window
+  that leaves no file window clears its kind's. A GPU window that
+  attaches naming no file, with no view retained for its token, opens on
+  the semantic desktop (E10.2, `session.reopen-desktop`, on by default):
+  a target wins over it, and a view retained for the window's token
+  wins over both. The daemon's own `LOCAL` view is never a desktop, and
+  the in-process editor's stays opt-in (`pmacs.session.desktop_mode`)
+  under the bare key, which a kind's never meets. Two things diverge.
+  The attached TUI's desktop (the grid kind) is written as the GPU's is
+  and comes back with `desktop-restore` in the window, but not at the
+  attach: `pmacs --daemon --stop` attaches a grid session of its own
+  before it asks the daemon to stop, and nothing in an attach tells that
+  session from a TUI, so a restore there would open files and run
+  `buffer.after-load` (starting language servers) on the way to a stop;
+  the stop's own session keeps no desktop. And a restored split comes
+  back whole in the daemon while the GPU shows its focused window alone,
+  as it shows any split until the window tree reaches the wire (E11).
+  The key is a daemon identity plus a kind, not a project: two daemons
+  under different names in one directory keep two desktops, and one
+  daemon serving two projects keeps one. The workspace object
+  (COHERENCE P2) re-cuts the key to the workspace when it lands (D16),
+  and the grid kind reopens at the attach once a control session is told
+  apart there; the entry goes when both have happened. Q#GA5's gate on
+  the project sidebar is still in force: a sidebar root is a new root
+  convention and waits on the workspace object, and only restore was
+  released from that gate (D16).
