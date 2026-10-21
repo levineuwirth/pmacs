@@ -26,7 +26,8 @@ use pmacs_protocol::message::{
 use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
-use common::daemon::{TestDaemon, build_default_caps};
+use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
+use common::gpu_probe::{fact, gpu_probe_binary, probe_facts};
 
 #[path = "common/editor.rs"]
 mod editor;
@@ -383,7 +384,7 @@ fn e9_1_a_v27_session_is_minted_a_token_and_a_v26_one_is_not() {
 /// and review 3's GPU rows hold.
 #[test]
 fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
-    let daemon = daemon_with_note("");
+    let daemon = daemon_with_note(NO_REOPEN);
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("the first session's token");
     let (scratch, _) = first.where_am_i();
@@ -435,7 +436,9 @@ fn e9_1_the_view_is_retained_across_detach_and_taken_back_by_its_token() {
 /// seconds after its session left starts on a fresh view.
 #[test]
 fn e9_1_a_retained_view_expires_after_the_retention_window() {
-    let daemon = daemon_with_note("pmacs.config.set('session.view-retention-secs', 1)\n");
+    let daemon = daemon_with_note(&format!(
+        "{NO_REOPEN}pmacs.config.set('session.view-retention-secs', 1)\n"
+    ));
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();
@@ -460,7 +463,9 @@ fn e9_1_a_retained_view_expires_after_the_retention_window() {
 /// frame carries: until this round it landed somewhere else in silence.
 #[test]
 fn e9_1_a_window_whose_view_expired_is_told_it_starts_fresh() {
-    let daemon = daemon_with_note("pmacs.config.set('session.view-retention-secs', 1)\n");
+    let daemon = daemon_with_note(&format!(
+        "{NO_REOPEN}pmacs.config.set('session.view-retention-secs', 1)\n"
+    ));
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();
@@ -496,7 +501,9 @@ fn e9_1_a_window_whose_view_expired_is_told_it_starts_fresh() {
 /// the row waits for the loss: `Session::lose`.)
 #[test]
 fn e9_1_zero_retention_keeps_no_view() {
-    let daemon = daemon_with_note("pmacs.config.set('session.view-retention-secs', 0)\n");
+    let daemon = daemon_with_note(&format!(
+        "{NO_REOPEN}pmacs.config.set('session.view-retention-secs', 0)\n"
+    ));
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();
@@ -545,7 +552,7 @@ fn e9_1_a_v27_session_that_skips_its_resume_step_is_refused() {
 /// still served afterwards.
 #[test]
 fn e9_1_a_resume_after_the_handshake_is_dropped_and_the_session_served() {
-    let daemon = daemon_with_note("");
+    let daemon = daemon_with_note(NO_REOPEN);
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();
@@ -666,57 +673,6 @@ impl Proxy {
     }
 }
 
-/// The `pmacs-gpu` binary beside this build's `pmacs`, or `None` when
-/// it is not built, which panics under `PMACS_REQUIRE_GPU` so the gate's
-/// GPU leg never passes vacuously.
-fn gpu_probe_binary() -> Option<std::path::PathBuf> {
-    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
-        .parent()
-        .expect("test binary directory")
-        .join("pmacs-gpu");
-    if binary.exists() {
-        return Some(binary);
-    }
-    assert!(
-        std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
-        "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
-        binary.display()
-    );
-    eprintln!("skipping the GPU probe: {} is not built", binary.display());
-    None
-}
-
-/// A finished headless probe's report as `key=value` facts, or `None`
-/// when it had no wgpu adapter (status 3), which panics under
-/// `PMACS_REQUIRE_GPU`; any other failure panics with the probe's
-/// stderr and `context`.
-fn probe_facts(
-    output: &std::process::Output,
-    report: &Path,
-    context: &str,
-) -> Option<std::collections::HashMap<String, String>> {
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let no_adapter = output.status.code() == Some(3);
-        assert!(
-            no_adapter && std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
-            "headless GPU probe failed (status {:?}, {context}):\n{stderr}",
-            output.status.code()
-        );
-        eprintln!("skipping the GPU probe: no wgpu adapter available");
-        return None;
-    }
-    // The probe's own log, shown by libtest when the row fails.
-    eprintln!("probe stderr:\n{}", String::from_utf8_lossy(&output.stderr));
-    let text = std::fs::read_to_string(report).expect("read the probe report");
-    Some(
-        text.lines()
-            .filter_map(|l| l.split_once('='))
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect(),
-    )
-}
-
 /// Run `pmacs-gpu --headless-probe` under the reconnect action against
 /// `socket`, cutting `proxy` once the probe says it has typed, and
 /// return the report's facts. `None` when skipped (no `pmacs-gpu`
@@ -776,13 +732,6 @@ fn run_reconnect_probe(
     Some(facts)
 }
 
-fn fact<'a>(facts: &'a std::collections::HashMap<String, String>, key: &str) -> &'a str {
-    facts.get(key).map_or_else(
-        || panic!("the report has no {key}; facts: {facts:?}"),
-        String::as_str,
-    )
-}
-
 /// The window loses its socket and gets its view back: the document
 /// stays on screen with the band saying it is reconnecting, the chrome
 /// is gone and keys are dropped meanwhile; the reconnect on the shared
@@ -791,7 +740,7 @@ fn fact<'a>(facts: &'a std::collections::HashMap<String, String>, key: &str) -> 
 /// the daemon through the close's drain.
 #[test]
 fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
-    let daemon = daemon_with_note("");
+    let daemon = daemon_with_note(NO_REOPEN);
     let dir = tempfile::TempDir::new().expect("tempdir");
     std::fs::set_permissions(
         dir.path(),
@@ -1676,7 +1625,7 @@ impl Session {
 /// detach's", the state the review found no one could resume).
 #[test]
 fn e9_3_quit_from_an_attached_frontend_detaches_it_and_nothing_else() {
-    let mut daemon = daemon_with_note("");
+    let mut daemon = daemon_with_note(NO_REOPEN);
     let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = first.token.expect("token");
     let (scratch, _) = first.where_am_i();

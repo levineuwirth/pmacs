@@ -1,7 +1,10 @@
 //! E10 --- restore: the daemon keeps a desktop per daemon and frontend
 //! kind (D16), written when a window detaches, for every attached window
 //! at shutdown, and by `desktop-save` in a window, the last written
-//! winning (E10.1).
+//! winning (E10.1); a GPU window that attaches naming no file, with no
+//! view retained for it, opens on its kind's desktop, and
+//! `desktop-restore` in a window of either kind restores its kind's
+//! (E10.2).
 //!
 //! Every row drives a real daemon over its socket through
 //! `common::wire::WireSession` and reads what the daemon wrote where it
@@ -22,6 +25,7 @@ use pmacs_protocol::cell::CellSize;
 use pmacs_protocol::message::{InstanceMessage, Key, Modifiers, PROTOCOL_VERSION};
 
 use common::daemon::TestDaemon;
+use common::gpu_probe::{fact, gpu_probe_binary, probe_facts};
 use common::wire::WireSession;
 
 /// The daemon's init: no language servers, a teardown log, two files in
@@ -393,4 +397,498 @@ fn e10_1_desktop_save_in_a_window_writes_that_window_under_its_kind() {
         only_leaf(&desktop),
         (state.join("note.txt").display().to_string(), 4)
     );
+}
+
+// ---------------------------------------------------------------------
+// E10.2 --- a fresh semantic window that names no target is built from
+// its kind's desktop; a target wins, a retained view wins, a grid window
+// is built as before, and `desktop-restore` in a window restores it.
+// ---------------------------------------------------------------------
+
+/// The init with `extra` after it.
+fn daemon_with(extra: &str) -> TestDaemon {
+    TestDaemon::spawn_with_env_and_init(&[("PMACS_ATTACH_DEBUG", "1")], &format!("{INIT}{extra}"))
+}
+
+/// A window on the note a line down (byte 4) that visited the other
+/// file after it, so the registry lists the note before the other file
+/// and an all-buffer sweep's last snapshot is not the note's. Returns
+/// `(window, scratch, note, other)`.
+fn on_the_note_after_the_other(daemon: &TestDaemon) -> (WireSession, BufferId, BufferId, BufferId) {
+    let (mut window, scratch) = semantic(daemon);
+    let note = open(&mut window, scratch, "e10.note");
+    let other = open(&mut window, note, "e10.other");
+    window.run_command("e10.note");
+    window.cursor_at(note, 0);
+    window.declare_viewport(note);
+    next_line(&mut window);
+    window.cursor_at(note, 4);
+    (window, scratch, note, other)
+}
+
+/// Answer every snapshot of the bootstrap with a viewport on its buffer,
+/// in order, as `pmacs-gpu` does: a viewport moves the window to the
+/// buffer it names, so after this the window is where the last snapshot
+/// put it.
+fn answer_the_bootstrap(window: &mut WireSession) {
+    for buffer in window.bootstrap_snapshots() {
+        window.declare_viewport(buffer);
+    }
+}
+
+#[test]
+fn e10_2_a_fresh_semantic_window_reopens_what_the_last_one_had() {
+    let daemon = daemon();
+    let (mut a, _scratch, note, _other) = on_the_note_after_the_other(&daemon);
+    a.depart();
+    wait_for_detach(&daemon, &a);
+
+    let mut b = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    // Bootstrapped on the one buffer its window shows, as a resumed
+    // window is (E9): an all-buffer sweep would leave it on the other
+    // file, the sweep's last.
+    assert_eq!(
+        b.bootstrap_snapshots(),
+        vec![note],
+        "one snapshot, the note's"
+    );
+    answer_the_bootstrap(&mut b);
+    assert_eq!(b.where_am_i(), (note, 4), "the note, a line down");
+    b.type_str("x");
+    b.cursor_at(note, 5);
+}
+
+#[test]
+fn e10_2_a_restarted_daemon_reopens_what_the_last_window_had() {
+    let shared = tempfile::TempDir::new().expect("a shared state root");
+    let root = shared.path().to_str().expect("utf-8 path");
+    let env = [("PMACS_ATTACH_DEBUG", "1"), ("PMACS_STATE_HOME", root)];
+    let mut first = TestDaemon::spawn_with_env_and_init(&env, INIT);
+    let (mut a, scratch) = semantic(&first);
+    let note = open(&mut a, scratch, "e10.note");
+    next_line(&mut a);
+    a.cursor_at(note, 4);
+    stop(&mut first);
+
+    // The same identity (this working directory) and state root, a new
+    // process: nothing of the first daemon's is in it but the desktop.
+    let second = TestDaemon::spawn_with_env_and_init(&env, INIT);
+    let mut b = WireSession::semantic(&second, PROTOCOL_VERSION, None, None);
+    let snapshots = b.bootstrap_snapshots();
+    assert_eq!(snapshots.len(), 1, "one snapshot: {snapshots:?}");
+    let reopened = snapshots[0];
+    b.declare_viewport(reopened);
+    let name = b.wait("the reopened buffer's facts", |m| match m {
+        InstanceMessage::StatusFacts {
+            buffer_id, name, ..
+        } if *buffer_id == reopened => Some(name.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        name,
+        home(&first).join("note.txt").display().to_string(),
+        "the first daemon's note"
+    );
+    b.cursor_at(reopened, 4);
+    b.type_str("x");
+    b.cursor_at(reopened, 5);
+}
+
+#[test]
+fn e10_2_a_target_wins_over_the_desktop() {
+    use std::os::unix::ffi::OsStrExt;
+    let daemon = daemon_with(LAYOUT);
+    let (note, other) = split_desktop(&daemon);
+
+    let target = pmacs_protocol::message::InitialTarget {
+        cwd: home(&daemon).as_os_str().as_bytes().to_vec(),
+        path: b"other.txt".to_vec(),
+    };
+    let mut b = WireSession::semantic(&daemon, PROTOCOL_VERSION, Some(target), None);
+    let opened = b
+        .bootstrap
+        .iter()
+        .find_map(|m| match m {
+            InstanceMessage::InitialTargetResult(
+                pmacs_protocol::message::InitialTargetResult::Opened { buffer_id },
+            ) => Some(*buffer_id),
+            _ => None,
+        })
+        .expect("the target opened");
+    assert_eq!(opened, other);
+    assert_eq!(b.bootstrap_snapshots(), vec![other]);
+    answer_the_bootstrap(&mut b);
+    b.type_str("x");
+    b.cursor_at(other, 1);
+    // One window on the target: none of the desktop's split, whose
+    // focused window holds the target's file too, so only the layout
+    // tells a restored view from a fresh one.
+    b.run_command("e10.layout");
+    let other_path = home(&daemon).join("other.txt").display().to_string();
+    common::ready::expect_true(
+        "the target's own layout",
+        Duration::from_secs(10),
+        || lines(&daemon, "layout.log") == vec![other_path.clone()],
+        || format!("{:?} (the note is {note:?})", lines(&daemon, "layout.log")),
+    );
+}
+
+#[test]
+fn e10_2_a_retained_view_wins_over_the_desktop() {
+    let daemon = daemon();
+    let (mut a, _scratch, note, other) = on_the_note_after_the_other(&daemon);
+    let token = a.token.expect("a token");
+    a.lose();
+    wait_for_detach(&daemon, &a);
+
+    // A later window leaves the other file, a line down, as the
+    // desktop: the retained view is the note's, the desktop is not.
+    let mut b = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    answer_the_bootstrap(&mut b);
+    b.cursor_at(note, 4);
+    b.run_command("e10.other");
+    b.cursor_at(other, 0);
+    b.declare_viewport(other);
+    next_line(&mut b);
+    b.cursor_at(other, 6);
+    b.depart();
+    wait_for_detach(&daemon, &b);
+
+    let mut resumed = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, Some(token));
+    assert_eq!(resumed.bootstrap_snapshots(), vec![note]);
+    answer_the_bootstrap(&mut resumed);
+    assert_eq!(
+        resumed.where_am_i(),
+        (note, 4),
+        "its own view, not the desktop"
+    );
+}
+
+#[test]
+fn e10_2_a_window_whose_view_is_gone_reopens_the_desktop_and_says_so() {
+    let daemon = daemon_with("pmacs.config.set('session.view-retention-secs', 0)\n");
+    let (mut a, _scratch, note, _other) = on_the_note_after_the_other(&daemon);
+    let token = a.token.expect("a token");
+    a.lose();
+    wait_for_detach(&daemon, &a);
+
+    // Nothing is retained at zero, so the token names nothing: a fresh
+    // view, which is the kind's desktop, the one this window left.
+    let mut back = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, Some(token));
+    assert_eq!(back.bootstrap_snapshots(), vec![note]);
+    answer_the_bootstrap(&mut back);
+    let said = back.wait("the status saying the view is gone", |m| match m {
+        InstanceMessage::StatusFacts {
+            message: Some(message),
+            ..
+        } if message.contains("earlier view is gone") => Some(message.clone()),
+        _ => None,
+    });
+    assert!(
+        said.contains("reopening what the last window of its kind had"),
+        "{said:?}"
+    );
+    assert_eq!(back.where_am_i(), (note, 4));
+}
+
+#[test]
+fn e10_2_a_grid_window_is_built_as_before_and_no_kind_reads_the_others() {
+    let daemon = daemon();
+    let mut grid = WireSession::grid(&daemon, CellSize::new(24, 80));
+    let (scratch, _) = grid.where_am_i();
+    grid.run_command("e10.other");
+    next_line(&mut grid);
+    grid.wait("the grid window a line into the other file", |m| {
+        matches!(m, InstanceMessage::CursorByte { byte_pos: 6, .. }).then_some(())
+    });
+    grid.depart();
+    wait_for_detach(&daemon, &grid);
+    assert!(saved(&home(&daemon), FrontendKind::Grid).is_some());
+
+    // The grid kind's desktop is no semantic window's to reopen.
+    let (_semantic, on) = semantic(&daemon);
+    assert_eq!(on, scratch, "a semantic window does not reopen the grid's");
+    // And a grid window is built on LOCAL's document as before E10
+    // (`docs/divergences.md`).
+    let mut again = WireSession::grid(&daemon, CellSize::new(24, 80));
+    assert_eq!(again.where_am_i(), (scratch, 0));
+}
+
+#[test]
+fn e10_2_desktop_restore_in_a_window_brings_its_kinds_desktop_back() {
+    let daemon = daemon();
+    let (mut window, scratch) = semantic(&daemon);
+    let note = open(&mut window, scratch, "e10.note");
+    next_line(&mut window);
+    window.cursor_at(note, 4);
+    window.run_command("desktop-save");
+    window.wait("desktop saved", |m| match m {
+        InstanceMessage::StatusFacts {
+            message: Some(message),
+            ..
+        } if message == "desktop saved" => Some(()),
+        _ => None,
+    });
+    let other = open(&mut window, note, "e10.other");
+    window.cursor_at(other, 0);
+
+    window.run_command("desktop-restore");
+    window.cursor_at(note, 4);
+    window.declare_viewport(note);
+    window.type_str("x");
+    window.cursor_at(note, 5);
+}
+
+/// The restored windows' buffers, read from the daemon by a command in
+/// the window (its layout is not on the semantic wire before E11).
+const LAYOUT: &str = "\
+pmacs.command.define { name = 'e10.layout', description = 'log the layout',
+  fn = function()
+    local f = assert(io.open(home .. '/layout.log', 'w'))
+    for _, id in ipairs(pmacs.window.list()) do
+      f:write(pmacs.window.buffer(id):name(), '\\n')
+    end
+    f:close()
+  end }
+pmacs.hook.add('buffer.after-load', function()
+  local f = assert(io.open(home .. '/after-load.log', 'a'))
+  f:write(pmacs.window.buffer():name(), '\\n')
+  f:close()
+end)
+";
+
+fn lines(daemon: &TestDaemon, file: &str) -> Vec<String> {
+    std::fs::read_to_string(home(daemon).join(file))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Under [`LAYOUT`]'s init: a window splits beside itself (`C-x 3`),
+/// keeping the note on the left, takes the other file into the right
+/// window (`C-x o`), reads its layout as `[note, other]`, and departs,
+/// so the semantic desktop is that split with the right window focused.
+/// Returns `(note, other)`.
+fn split_desktop(daemon: &TestDaemon) -> (BufferId, BufferId) {
+    let note_path = home(daemon).join("note.txt").display().to_string();
+    let other_path = home(daemon).join("other.txt").display().to_string();
+    let (mut a, scratch) = semantic(daemon);
+    let note = open(&mut a, scratch, "e10.note");
+    a.key(Key::Char('x'), Modifiers::CTRL);
+    a.key(Key::Char('3'), Modifiers::NONE);
+    a.key(Key::Char('x'), Modifiers::CTRL);
+    a.key(Key::Char('o'), Modifiers::NONE);
+    let other = open(&mut a, note, "e10.other");
+    a.cursor_at(other, 0);
+    a.run_command("e10.layout");
+    common::ready::expect_true(
+        "the window's own layout",
+        Duration::from_secs(10),
+        || lines(daemon, "layout.log") == vec![note_path.clone(), other_path.clone()],
+        || format!("{:?}", lines(daemon, "layout.log")),
+    );
+    a.depart();
+    wait_for_detach(daemon, &a);
+    std::fs::remove_file(home(daemon).join("layout.log")).expect("the layout read");
+    (note, other)
+}
+
+#[test]
+fn e10_2_a_split_desktop_comes_back_whole_each_window_loaded_in_turn() {
+    let daemon = daemon_with(LAYOUT);
+    let (_note, other) = split_desktop(&daemon);
+    let note_path = home(&daemon).join("note.txt").display().to_string();
+    let other_path = home(&daemon).join("other.txt").display().to_string();
+    let before = lines(&daemon, "after-load.log").len();
+
+    let mut b = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    assert_eq!(
+        b.bootstrap_snapshots(),
+        vec![other],
+        "the focused window's buffer"
+    );
+    answer_the_bootstrap(&mut b);
+    assert_eq!(b.where_am_i(), (other, 0));
+    // `buffer.after-load` ran once a leaf, each with its leaf active.
+    let after = lines(&daemon, "after-load.log");
+    assert_eq!(
+        after[before..].to_vec(),
+        vec![note_path.clone(), other_path.clone()],
+        "{after:?}"
+    );
+    b.run_command("e10.layout");
+    common::ready::expect_true(
+        "the restored layout",
+        Duration::from_secs(10),
+        || lines(&daemon, "layout.log") == vec![note_path.clone(), other_path.clone()],
+        || format!("{:?}", lines(&daemon, "layout.log")),
+    );
+}
+
+#[test]
+fn e10_2_with_reopen_desktop_off_a_fresh_window_starts_where_it_did_before() {
+    let daemon = daemon_with("pmacs.config.set('session.reopen-desktop', false)\n");
+    let state = home(&daemon);
+    let (mut a, scratch, _note, _other) = on_the_note_after_the_other(&daemon);
+    a.depart();
+    wait_for_detach(&daemon, &a);
+    assert!(
+        saved(&state, FrontendKind::Semantic).is_some(),
+        "the desktop is written whatever the knob says"
+    );
+
+    let (mut b, on) = semantic(&daemon);
+    assert_eq!(on, scratch, "LOCAL's document, as before E10");
+    // And by hand it comes back.
+    b.run_command("desktop-restore");
+    b.wait("the desktop restored by hand", |m| {
+        matches!(m, InstanceMessage::CursorByte { byte_pos: 4, buffer_id } if *buffer_id != scratch)
+            .then_some(())
+    });
+}
+
+#[test]
+fn e10_2_desktop_restore_in_a_grid_window_brings_the_grid_desktop_back() {
+    let daemon = daemon();
+    let mut grid = WireSession::grid(&daemon, CellSize::new(24, 80));
+    let (scratch, _) = grid.where_am_i();
+    grid.run_command("e10.other");
+    next_line(&mut grid);
+    let other = grid.wait("the grid window a line into the other file", |m| match m {
+        InstanceMessage::CursorByte {
+            buffer_id,
+            byte_pos: 6,
+        } => Some(*buffer_id),
+        _ => None,
+    });
+    grid.depart();
+    wait_for_detach(&daemon, &grid);
+
+    let mut again = WireSession::grid(&daemon, CellSize::new(24, 80));
+    assert_eq!(again.where_am_i(), (scratch, 0), "not at the attach");
+    again.run_command("desktop-restore");
+    again.cursor_at(other, 6);
+}
+
+/// The status a fresh window's first facts carry for `buffer`, once it
+/// declares a viewport there.
+fn first_status(window: &mut WireSession, buffer: BufferId) -> Option<String> {
+    window.declare_viewport(buffer);
+    window.wait("the buffer's facts", |m| match m {
+        InstanceMessage::StatusFacts {
+            buffer_id, message, ..
+        } if *buffer_id == buffer => Some(message.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn e10_2_unsaved_changes_are_told_only_where_the_reopened_file_lost_them() {
+    let shared = tempfile::TempDir::new().expect("a shared state root");
+    let root = shared.path().to_str().expect("utf-8 path");
+    let env = [("PMACS_ATTACH_DEBUG", "1"), ("PMACS_STATE_HOME", root)];
+    // No recovery copy: the stop's last sweep would write one, and the
+    // restarted daemon then says so instead (autosave's own report,
+    // which comes after the restore's).
+    let init = format!("{INIT}pmacs.autosave.enable(false)\n");
+    let mut first = TestDaemon::spawn_with_env_and_init(&env, &init);
+    let (mut a, scratch) = semantic(&first);
+    let note = open(&mut a, scratch, "e10.note");
+    a.type_str("z");
+    a.cursor_at(note, 1);
+    a.depart();
+    wait_for_detach(&first, &a);
+
+    // The same daemon still holds the note with its edit: reopening it
+    // loses nothing, and says nothing of it.
+    let mut b = WireSession::semantic(&first, PROTOCOL_VERSION, None, None);
+    assert_eq!(b.bootstrap_snapshots(), vec![note]);
+    let said = first_status(&mut b, note);
+    assert!(
+        !said.as_deref().unwrap_or("").contains("unsaved changes"),
+        "{said:?}"
+    );
+    b.depart();
+    wait_for_detach(&first, &b);
+    stop(&mut first);
+
+    // A restarted daemon opens the file from disk, without the edit.
+    let second = TestDaemon::spawn_with_env_and_init(&env, &init);
+    let mut c = WireSession::semantic(&second, PROTOCOL_VERSION, None, None);
+    let reopened = c.bootstrap_snapshots();
+    assert_eq!(reopened.len(), 1, "{reopened:?}");
+    let said = first_status(&mut c, reopened[0]);
+    assert_eq!(
+        said.as_deref(),
+        Some("desktop restored; 1 buffer(s) had unsaved changes when saved")
+    );
+}
+
+/// `pmacs-gpu --headless-probe` against `daemon` with its reconnect
+/// action and no cut: the production `App` attaches with no file,
+/// answers its bootstrap as a window does, types `x` once its caret is
+/// the daemon's, and reports its own mirror (`buffer.before`,
+/// `cursor.before`, `text.before`) before the deadline ends it. `None`
+/// when skipped (no binary or adapter), which panics under
+/// `PMACS_REQUIRE_GPU`.
+fn gpu_window_types_x(daemon: &TestDaemon) -> Option<std::collections::HashMap<String, String>> {
+    let binary = gpu_probe_binary()?;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let report = dir.path().join("restore.report");
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", "x")
+        .env("PMACS_GPU_PROBE_ACTION", "reconnect")
+        .env("PMACS_GPU_PROBE_COMMAND", "")
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "6000")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the headless GPU probe");
+    probe_facts(&output, &report, "no cut")
+}
+
+/// The GUI itself, not a client standing in for it: `pmacs-gpu`'s
+/// production `App` attaches with no file to a daemon whose semantic
+/// desktop is the note a line down, and its own mirror holds the note
+/// with its `x` typed at byte 4, the caret after it. The control, with
+/// the reopening off, is the window as it was before E10: bootstrapped
+/// by the all-buffer sweep, which its viewport answers follow, it does
+/// not come back to the note's caret (seen ending on the note at byte 0
+/// with its `x` typed elsewhere, so the control asserts only that).
+#[test]
+fn e10_2_the_gpu_window_itself_reopens_the_note_where_it_was_left() {
+    for reopen in [true, false] {
+        let daemon = if reopen {
+            daemon()
+        } else {
+            daemon_with("pmacs.config.set('session.reopen-desktop', false)\n")
+        };
+        let (mut a, _scratch, note, _other) = on_the_note_after_the_other(&daemon);
+        a.depart();
+        wait_for_detach(&daemon, &a);
+
+        let Some(facts) = gpu_window_types_x(&daemon) else {
+            return;
+        };
+        if reopen {
+            assert_eq!(
+                fact(&facts, "buffer.before"),
+                note.raw().to_string(),
+                "{facts:?}"
+            );
+            assert_eq!(fact(&facts, "text.before"), r#""one\nxtwo\nthree\n""#);
+            assert_eq!(fact(&facts, "cursor.before"), "5");
+        } else {
+            assert_ne!(
+                fact(&facts, "text.before"),
+                r#""one\nxtwo\nthree\n""#,
+                "{facts:?}"
+            );
+            assert_ne!(fact(&facts, "cursor.before"), "5", "{facts:?}");
+        }
+    }
 }

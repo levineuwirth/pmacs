@@ -437,3 +437,66 @@ fn startup_gate_respects_file_arg_and_arming() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+
+/// E10.2 --- a restore replaces the document tree and keeps an open
+/// panel: a side window is display policy, never desktop state (Q#BP10),
+/// and what it shows is still running. One installer serves this and
+/// `desktop-restore` in a daemon's window (`tests/e10_restore_acceptance.rs`).
+#[test]
+fn restore_replaces_the_documents_and_keeps_an_open_panel() {
+    let dir = fresh_state_dir();
+    let mut s = editor(&dir);
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::cell::CellSize::new(24, 60));
+    let a = write_file(&dir, "a.txt", "aaaa\nbbbb\n");
+    let b = write_file(&dir, "b.txt", "bbbb\n");
+    exec(&s, &format!("pmacs.buffer.find_or_open({a:?})"));
+    assert!(save(&s));
+    exec(&s, &format!("pmacs.buffer.find_or_open({b:?})"));
+    exec(
+        &s,
+        "PANEL_BUF = pmacs.buffer.create('*panel*')
+         pmacs.window.display(PANEL_BUF, { side = 'bottom', height = 6 })",
+    );
+    let panel = s
+        .core
+        .borrow()
+        .side_window_for(FrontendId::LOCAL)
+        .expect("a panel is open");
+
+    restore(&mut s);
+
+    let core = s.core.borrow();
+    assert_eq!(
+        core.side_window_for(FrontendId::LOCAL),
+        Some(panel),
+        "the panel is kept, the same window"
+    );
+    let view = &core.views[&FrontendId::LOCAL];
+    let documents: Vec<WindowId> = view
+        .layout
+        .iter_ids()
+        .into_iter()
+        .filter(|id| *id != panel)
+        .collect();
+    assert_eq!(documents.len(), 1, "the desktop's one window");
+    let reg = core.registry.borrow();
+    let shown = reg
+        .get(core.windows[&documents[0]].buffer_id)
+        .unwrap()
+        .file_path()
+        .map(|p| p.display().to_string());
+    assert_eq!(
+        shown,
+        Some(a),
+        "the desktop's file, not the one open before"
+    );
+    assert_eq!(view.active, documents[0], "focus on the restored window");
+    assert_eq!(
+        core.windows.len(),
+        2,
+        "the document window the restore replaced is gone"
+    );
+    drop(reg);
+    drop(core);
+    std::fs::remove_dir_all(&dir).ok();
+}

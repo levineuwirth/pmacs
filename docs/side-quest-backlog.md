@@ -186,7 +186,8 @@ drain (kill the ~600 ms teardown stall).
 
 ## Persistence & files
 
-Desktop daemon/GPU-attach restore, save unsaved *content* in the desktop,
+Desktop restore at the attached TUI's attach (E10 restores the GPU's at
+attach and either kind's on command), save unsaved *content* in the desktop,
 multiple named desktops, window-local minor state, remote/cross-machine
 desktops, non-file buffers in the desktop, saveplace for non-file
 buffers, recentf as a `listview` panel, per-project `init.lua` desktop

@@ -28,6 +28,10 @@
 //!   each (E8e). Included per file the way `iso` is and NOT declared
 //!   here: ten suites pull both `mod common;` and the include, and
 //!   `clippy::duplicate_mod` refuses a file loaded as a module twice.
+//! - [`gpu_probe`]: the headless GPU probe (`pmacs-gpu
+//!   --headless-probe`) as a row drives it: the binary beside this
+//!   build's `pmacs`, and a finished probe's report as facts. Extracted
+//!   at E10 (D37) from `tests/e9_session_acceptance.rs`.
 //! - [`wire`]: a frontend session over a real daemon socket (the
 //!   semantic handshake as `pmacs-gpu` performs it, or a grid attach),
 //!   a reader thread, and the keys and waits a row drives it with.
@@ -37,6 +41,7 @@
 #![allow(dead_code)] // not every integration-test file uses every helper
 
 pub mod daemon;
+pub mod gpu_probe;
 pub mod iso;
 pub mod pty;
 pub mod ready;

@@ -3128,7 +3128,8 @@ fn install_session_module(lua: &Lua) -> mlua::Result<Table> {
     )?;
 
     // restore_desktop(): rebuild the saved session (manual command;
-    // the startup path goes through EditorState::restore_desktop_if_armed).
+    // under a daemon the acting window's kind's, E10; the startup path
+    // goes through EditorState::restore_desktop_if_armed).
     m.set(
         "restore_desktop",
         lua.create_function(|lua, ()| {

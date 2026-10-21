@@ -24,7 +24,7 @@ use pmacs_protocol::message::{
 use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
-use common::daemon::{TestDaemon, build_default_caps};
+use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
 
 struct Session {
     stream: UnixStream,
@@ -467,7 +467,7 @@ fn e9_review2_a_before_quit_veto_is_said_and_does_not_hold_the_stop() {
 /// daemon's life, not what the token resumes.
 #[test]
 fn e9_review2_the_last_frontend_s_n_retains_no_view() {
-    let mut daemon = daemon_with_note("");
+    let mut daemon = daemon_with_note(NO_REOPEN);
     let mut only = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let token = only.token.expect("token");
     let (scratch, _) = only.where_am_i();

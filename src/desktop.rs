@@ -19,7 +19,10 @@
 //! [`FrontendKind`], keyed by [`frontend_session_key`], written by the
 //! daemon whenever a window of that kind detaches, for every attached
 //! window at shutdown, and by `desktop-save` in a window, the last
-//! written winning ([`save_frontend`]).
+//! written winning ([`save_frontend`]). A GPU window that attaches
+//! naming no file, with no view retained for it, is built from the
+//! semantic kind's desktop ([`restore_for_attach`], E10.2), and
+//! `desktop-restore` in any window restores its kind's into it.
 //!
 //! Framing: docs/archive/framings/desktop-save-framing.md.
 
@@ -479,40 +482,85 @@ fn write_snapshot(base: &Path, snap: &SavedDesktop) -> Result<(), String> {
     crate::state::write(base, &state_key, json.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// Rebuild the LOCAL session from the desktop state file (Q#DS3). A
-/// no-op when no desktop is saved for this key / version / session
-/// mismatches. Fires `buffer.after-load` via `lua` with each restored
-/// leaf active.
+/// Rebuild the current session from the desktop state file (Q#DS3):
+/// `LOCAL`'s in local mode, and under a daemon the acting window's, from
+/// its kind's desktop (E10.2, `desktop-restore` in a window). A no-op
+/// when no desktop is saved for this key / version / session
+/// mismatches, or under a daemon the acting frontend is its own `LOCAL`.
+/// Fires `buffer.after-load` via `lua` with each restored leaf active.
 ///
 /// # Errors
 /// Parse / state-read failures; a missing individual file collapses its
 /// leaf rather than failing the whole restore.
 pub fn restore_session(lua: &Lua) -> Result<(), String> {
-    if is_daemon(lua) {
-        return Ok(()); // local-only in v1 (Q#DS9)
-    }
-    let key = session_key_from_lua(lua);
     let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
         return Ok(());
     };
-    let state_key = desktop_state_key(&key);
-    let Some(json) = crate::state::read(&base, &state_key).map_err(|e| e.to_string())? else {
-        return Ok(()); // no desktop saved
-    };
-    let saved: SavedDesktop = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    if saved.version != DESKTOP_VERSION || saved.session_key != key {
-        return Ok(()); // unrecognized / wrong session
-    }
     let core = lua
         .app_data_ref::<SharedCore>()
         .ok_or("no editor core")?
         .clone();
-    let modified = restore_into(&core, &saved, || fire_after_load_hook(lua));
+    let target = acting_target(lua, &core.borrow());
+    let Some((fid, key)) = target else {
+        return Ok(());
+    };
+    let Some(saved) = read_snapshot(&base, &key)? else {
+        return Ok(());
+    };
+    let Some(restored) = build_restored(&core, &saved) else {
+        return Ok(()); // nothing survived → keep the current session
+    };
+    install_restored(&mut core.borrow_mut(), fid, &restored);
+    settle_restored(&core, fid, &restored, || fire_after_load_hook(lua));
+    warn_modified(&core, restored.modified);
+    Ok(())
+}
+
+/// E10.2 --- the layout a fresh view of a window of `kind` is built
+/// from (`build_fresh_frontend_view`, an attach that named no target):
+/// the daemon's desktop for the kind, its buffers opened and its
+/// windows made, not yet in any view. `Ok(None)` when the daemon keeps
+/// no desktop for the kind, or none of its files opens.
+///
+/// # Errors
+/// A state-read or parse failure; the daemon builds the view as if
+/// there were no desktop, and says why.
+pub fn restore_for_attach(lua: &Lua, kind: FrontendKind) -> Result<Option<Restored>, String> {
+    let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
+        return Ok(None);
+    };
+    let core = lua
+        .app_data_ref::<SharedCore>()
+        .ok_or("no editor core")?
+        .clone();
+    let key = frontend_session_key(&session_key_from_lua(lua), kind);
+    let Some(saved) = read_snapshot(&base, &key)? else {
+        return Ok(None);
+    };
+    Ok(build_restored(&core, &saved))
+}
+
+/// The desktop saved under `key`, if one is, in a version this build
+/// reads, and saved under that key.
+fn read_snapshot(base: &Path, key: &str) -> Result<Option<SavedDesktop>, String> {
+    let state_key = desktop_state_key(key);
+    let Some(json) = crate::state::read(base, &state_key).map_err(|e| e.to_string())? else {
+        return Ok(None); // no desktop saved
+    };
+    let saved: SavedDesktop = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    if saved.version != DESKTOP_VERSION || saved.session_key != key {
+        return Ok(None); // unrecognized / wrong session
+    }
+    Ok(Some(saved))
+}
+
+/// The Q#DS6 warning, when a restore brought back a file that had
+/// unsaved changes at save time.
+fn warn_modified(core: &SharedCore, modified: usize) {
     if modified > 0 {
         core.borrow_mut().status =
             format!("desktop restored; {modified} buffer(s) had unsaved changes when saved");
     }
-    Ok(())
 }
 
 /// One restored leaf window, carried from the tree build to the
@@ -524,92 +572,187 @@ struct RestoreLeaf {
     view_left: u32,
 }
 
-/// Do the structural rebuild: open buffers, prune the old LOCAL layout,
-/// build the new tree + windows, install the view, then fire
-/// `buffer.after-load` (via `fire_after_load`) with each newly-loaded
-/// leaf active and apply the exact per-leaf `cursor`/`view_top` afterward
-/// (desktop wins over saveplace, Q#DS3). Returns the count of buffers
-/// that were modified at save time (for the Q#DS6 warning).
+/// A desktop rebuilt into the core: its buffers open and its windows in
+/// `core.windows`, but in no view yet. [`install_restored`] puts it in
+/// place of a frontend's existing view (the commands, and the in-process
+/// editor's startup); the daemon's `build_fresh_frontend_view` makes a
+/// new view of it (E10.2). Either way [`settle_restored`] then runs
+/// `buffer.after-load` for each leaf.
+pub struct Restored {
+    root: LayoutNode,
+    active: WindowId,
+    leaves: Vec<RestoreLeaf>,
+    modified: usize,
+}
+
+impl Restored {
+    /// The restored window tree.
+    #[must_use]
+    pub fn layout(&self) -> Layout {
+        Layout {
+            root: self.root.clone(),
+        }
+    }
+
+    /// The restored focus (Q#DS10's fallback applied).
+    #[must_use]
+    pub fn active(&self) -> WindowId {
+        self.active
+    }
+
+    /// How many files this restore brought back that had unsaved
+    /// changes at save time (Q#DS6). A buffer already open is not
+    /// counted: its unsaved text is still in the editor, which under a
+    /// daemon is the usual case (E10.2).
+    #[must_use]
+    pub fn modified(&self) -> usize {
+        self.modified
+    }
+}
+
+/// Open every buffer `saved` names (hidden ones survive) and build its
+/// window tree in `core.windows`. `None` when no leaf's file opens,
+/// having made no window.
 ///
-/// Takes `&SharedCore` (not a borrow) so it can release the core borrow
-/// around each hook fire — `buffer.after-load` re-enters `pmacs.editor.*`
-/// which re-borrows the core.
-pub fn restore_into(
-    core: &SharedCore,
-    saved: &SavedDesktop,
-    mut fire_after_load: impl FnMut(),
-) -> usize {
-    // (2) Open every buffer up front (hidden ones survive), keyed by the
-    // raw saved path. A missing file is absent → its leaves collapse.
-    let mut modified_count = 0usize;
+/// Takes `&SharedCore` (not a borrow) so each load borrows and releases.
+fn build_restored(core: &SharedCore, saved: &SavedDesktop) -> Option<Restored> {
+    // (2) Open every buffer up front, keyed by the raw saved path. A
+    // missing file is absent → its leaves collapse.
+    let mut modified = 0usize;
     let mut opened: HashMap<String, (BufferId, bool)> = HashMap::new();
     for sb in &saved.buffers {
-        if sb.modified {
-            modified_count += 1;
+        let loaded = core.borrow_mut().get_or_load_buffer(Path::new(&sb.path));
+        let already_open = matches!(loaded, Ok((_, false)));
+        if sb.modified && !already_open {
+            modified += 1;
         }
-        if let Ok(res) = core.borrow_mut().get_or_load_buffer(Path::new(&sb.path)) {
+        if let Ok(res) = loaded {
             opened.insert(sb.path.clone(), res);
         }
     }
 
-    // (3-5) Build + prune + install the new LOCAL view.
+    // (3-4) Build the tree and its windows.
     let mut leaves: Vec<RestoreLeaf> = Vec::new();
     let mut save_slots: Vec<Option<WindowId>> = Vec::new();
-    let active_wid = {
-        let mut c = core.borrow_mut();
-        let old_ids = c.views.get(&FrontendId::LOCAL).map(|v| v.layout.iter_ids());
-        let Some(root) =
-            build_restore_node(&mut c, &saved.root, &opened, &mut leaves, &mut save_slots)
-        else {
-            return modified_count; // nothing survived → keep current session
-        };
-        // Prune every window of the old LOCAL layout (not just scratch)
-        // so none linger orphaned in `core.windows`.
-        if let Some(old_ids) = old_ids {
-            for id in old_ids {
-                c.windows.remove(&id);
+    let root = build_restore_node(
+        &mut core.borrow_mut(),
+        &saved.root,
+        &opened,
+        &mut leaves,
+        &mut save_slots,
+    )?;
+    let active = pick_active_window(&save_slots, saved.active_leaf)
+        .or_else(|| leaves.first().map(|l| l.window))?;
+    Some(Restored {
+        root,
+        active,
+        leaves,
+        modified,
+    })
+}
+
+/// (5) Put `restored` in place of frontend `fid`'s view. Its document
+/// windows go (E6d.5's rule: a window another view still shows is
+/// kept); a side window stays, with the panel wrapper it sat in around
+/// the restored tree, since a panel is transient display policy and no
+/// part of a desktop (Q#BP10), and its terminal or listing is still
+/// running. The view keeps its projection, panel capability and frame
+/// geometry, which are the frontend's and not the desktop's; its
+/// document viewport goes with its document. A no-op for a frontend with
+/// no view.
+fn install_restored(core: &mut EditorCore, fid: FrontendId, restored: &Restored) {
+    let Some(old) = core.views.get(&fid).cloned() else {
+        return;
+    };
+    let side = old
+        .layout
+        .side_leaf(|id| core.windows.get(&id).is_some_and(Window::is_side));
+    let still_shown: std::collections::HashSet<WindowId> = core
+        .views
+        .iter()
+        .filter(|(other, _)| **other != fid)
+        .flat_map(|(_, view)| view.layout.iter_ids())
+        .collect();
+    for id in old.layout.iter_ids() {
+        if Some(id) != side && !still_shown.contains(&id) {
+            core.windows.remove(&id);
+        }
+    }
+    let root = match (side, &old.layout.root) {
+        (
+            Some(side),
+            LayoutNode::Split {
+                orientation: Orientation::Horizontal,
+                weights,
+                children,
+            },
+        ) if children.len() == 2 && matches!(children[1], LayoutNode::Leaf(id) if id == side) => {
+            LayoutNode::Split {
+                orientation: Orientation::Horizontal,
+                weights: weights.clone(),
+                children: vec![restored.root.clone(), LayoutNode::Leaf(side)],
             }
         }
-        let active = pick_active_window(&save_slots, saved.active_leaf)
-            .or_else(|| leaves.first().map(|l| l.window));
-        let Some(active) = active else {
-            return modified_count;
-        };
-        c.active_frontend = FrontendId::LOCAL;
-        c.views.insert(
-            FrontendId::LOCAL,
-            FrontendView {
-                layout: Layout { root },
-                active,
-                // Desktop restore rebuilds LOCAL's grid view (Q#FD21).
-                fold_projection: true,
-                // …which renders side windows natively (Q#BP13). Every
-                // field is spelled explicitly, preserving folding's
-                // non-`Default` discipline.
-                panel_capable: true,
-                frame_geometry: None,
-                panel_hidden: false,
-                document_viewport: None,
-            },
-        );
-        active
+        (Some(side), _) => {
+            let mut layout = restored.layout();
+            layout.install_side_leaf(side);
+            layout.root
+        }
+        (None, _) => restored.root.clone(),
     };
+    core.views.insert(
+        fid,
+        FrontendView {
+            layout: Layout { root },
+            active: restored.active,
+            fold_projection: old.fold_projection,
+            panel_capable: old.panel_capable,
+            frame_geometry: old.frame_geometry,
+            panel_hidden: side.is_some() && old.panel_hidden,
+            document_viewport: None,
+        },
+    );
+}
 
-    // (5) activate-then-fire, once **per leaf** (per window). after-load
-    // must observe the restored leaf as active (saveplace/recentf/syntax/
-    // LSP read active state). Firing per leaf — not per buffer — gives
-    // each pane its own per-window overlay (syntax attaches to the active
-    // window), while LSP's `attach_buffer` is idempotent, so the same
-    // file in two panes still attaches LSP once but syntax to both.
-    // Writing the exact per-leaf cursor/view_top *after* the hook lets
-    // desktop win over saveplace.
-    //
-    // NOTE (Q#DS3, hidden buffers): a restored buffer with NO leaf (open
-    // but hidden) is loaded into the registry but does not fire
-    // after-load here — it attaches syntax on first visit (after-switch)
-    // and LSP when it is next shown/opened. Registry-only in v1.
-    for leaf in &leaves {
-        core.borrow_mut().set_active_window_id(leaf.window);
+/// (5) activate-then-fire, once **per leaf** (per window), with `fid`
+/// the acting frontend and its view holding `restored`. after-load
+/// must observe the restored leaf as active (saveplace/recentf/syntax/
+/// LSP read active state). Firing per leaf — not per buffer — gives
+/// each pane its own per-window overlay (syntax attaches to the active
+/// window), while LSP's `attach_buffer` is idempotent, so the same
+/// file in two panes still attaches LSP once but syntax to both.
+/// Writing the exact per-leaf `cursor` and `view_top` *after* the hook lets
+/// desktop win over saveplace.
+///
+/// NOTE (Q#DS3, hidden buffers): a restored buffer with NO leaf (open
+/// but hidden) is loaded into the registry but does not fire
+/// after-load here — it attaches syntax on first visit (after-switch)
+/// and LSP when it is next shown/opened. Registry-only in v1.
+///
+/// Takes `&SharedCore` (not a borrow) so it can release the core borrow
+/// around each hook fire — `buffer.after-load` re-enters `pmacs.editor.*`
+/// which re-borrows the core. A leaf a hook has taken out of the view is
+/// skipped, so the view's focus is always one of its own windows.
+pub fn settle_restored(
+    core: &SharedCore,
+    fid: FrontendId,
+    restored: &Restored,
+    mut fire_after_load: impl FnMut(),
+) {
+    let shows = |core: &EditorCore, id: WindowId| {
+        core.views
+            .get(&fid)
+            .is_some_and(|view| view.layout.iter_ids().contains(&id))
+    };
+    for leaf in &restored.leaves {
+        {
+            let mut c = core.borrow_mut();
+            c.active_frontend = fid;
+            if !shows(&c, leaf.window) {
+                continue;
+            }
+            c.set_active_window_id(leaf.window);
+        }
         fire_after_load();
         let mut c = core.borrow_mut();
         if let Some(win) = c.windows.get_mut(&leaf.window) {
@@ -622,8 +765,11 @@ pub fn restore_into(
             win.view_left = leaf.view_left;
         }
     }
-    core.borrow_mut().set_active_window_id(active_wid);
-    modified_count
+    let mut c = core.borrow_mut();
+    c.active_frontend = fid;
+    if shows(&c, restored.active) {
+        c.set_active_window_id(restored.active);
+    }
 }
 
 /// Recursively rebuild a [`LayoutNode`] from a [`SavedNode`], creating a

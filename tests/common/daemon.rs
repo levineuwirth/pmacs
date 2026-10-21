@@ -242,6 +242,15 @@ fn read_daemon_stderr(socket: &Path) -> String {
     }
 }
 
+/// E10.2 --- an `init.lua` line turning off the daemon's reopening of
+/// its kind's desktop in a fresh GPU window, for a row that tells
+/// "nothing was resumed" by where a fresh window lands: since E10 that
+/// is what the last window left (the row's note, typically), which such
+/// a row would read as a resumed view. Retention is the same with it on
+/// or off; `tests/e10_restore_acceptance.rs` pins the reopening and its
+/// order against a retained view.
+pub const NO_REOPEN: &str = "pmacs.config.set('session.reopen-desktop', false)\n";
+
 // ---------------------------------------------------------------------------
 // Frontend-attach helpers (shared across daemon-driven tests)
 // ---------------------------------------------------------------------------

@@ -61,6 +61,21 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E10.2: whether a GPU window that attaches with no file to open, and no
+-- view kept for its token, reopens the desktop the daemon keeps for GPU
+-- windows --- what the last one had when it detached: its files, its
+-- windows and their cursors. The desktop is written whatever this says
+-- (at each window's detach, at the daemon's stop, by desktop-save), so
+-- desktop-restore in a window brings it back by hand when this is off.
+-- Read at each attach.
+pmacs.config.define {
+  name = "session.reopen-desktop",
+  description = "Whether a GPU window that attaches with no file to open, and no view kept for it, reopens what the last GPU window had when it detached (its files, windows and cursors); desktop-restore brings that back by hand either way.",
+  type = "boolean",
+  default = true,
+  mutability = "live",
+}
+
 -- E9.4: a daemon with no frontend attached for this long stops, as
 -- `pmacs --daemon --stop` would stop it. Opt-in: the default never
 -- stops, since a daemon the user started by hand is theirs to stop. The

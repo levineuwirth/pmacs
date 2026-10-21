@@ -65,10 +65,7 @@ pmacs.command.define {
   name = "desktop-restore",
   description = "Restore the saved session (buffers + layout) from disk.",
   fn = function()
-    if pmacs.session.is_daemon() then
-      pmacs.editor.set_status("desktop-restore: local-only in v1")
-      return
-    end
+    -- Under a daemon, this window's kind's desktop, into this window (E10).
     local ok, err = pcall(pmacs.session.restore_desktop)
     if not ok then
       pmacs.editor.set_status("desktop-restore: " .. tostring(err))
