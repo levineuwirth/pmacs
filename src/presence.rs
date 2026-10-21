@@ -60,8 +60,11 @@ use std::time::{Duration, Instant};
 use pmacs_protocol::SessionToken;
 
 use crate::buffer::BufferId;
+use crate::cell::CellSize;
+use crate::instance_render::RenderState;
 use crate::protocol::{FrontendId, InstanceMessage, NegotiatedCapabilities, SelectionSnapshot};
 use crate::rope::Position;
+use crate::semantic_render::SemanticRenderState;
 
 /// T M10.7 — per-session daemon-internal state.
 ///
@@ -129,6 +132,85 @@ impl SessionState {
     }
 }
 
+/// E9b --- everything the daemon holds for one attached frontend, in one
+/// place: its negotiated state and, beside it, what the dispatcher
+/// thread used to keep in seven parallel maps keyed by the same id, plus
+/// E9's departure flag. A session is registered whole and unregistered
+/// whole ([`SessionRegistry::register_session`],
+/// [`SessionRegistry::unregister_session`]), so no field outlives it.
+///
+/// Every field but `state` is `None` until the dispatcher fills it, and
+/// `None` means what absence from its map meant: no projection yet, no
+/// stream (none installed, or taken out of the write path when a write
+/// failed, E9 fix round 4), nothing sent yet.
+pub struct Session {
+    /// The negotiated version, capabilities, color slot and token.
+    pub state: SessionState,
+    /// A grid session's projection (T M5.3): its cell buffers and the
+    /// paint-and-diff cycle. A session has this or `semantic`, never
+    /// both.
+    pub render: Option<RenderState>,
+    /// A `semantic_render` session's projection (T M11.2): its declared
+    /// viewport and the per-buffer emission baselines.
+    pub semantic: Option<SemanticRenderState>,
+    /// The write half of the session's socket. Taken out when a write
+    /// to it fails (E9 fix round 4), so nothing is written to it again
+    /// while its input drains ([`SessionRegistry::begin_drain`]).
+    pub stream: Option<UnixStream>,
+    /// The cell size the session last declared, at attach or by
+    /// `Resize`.
+    pub term_size: Option<CellSize>,
+    /// T M11.6 --- the last `DispatchIdle` value sent to a `crdt_replica`
+    /// session; `None` until the first tick sends one.
+    pub last_dispatch_idle_sent: Option<bool>,
+    /// Arc 1b --- the buffer this replica was last sent a
+    /// `BufferSnapshot` for by the active-buffer follow; `None` until
+    /// the first one.
+    pub last_active_buffer_sent: Option<BufferId>,
+    /// The active terminal's BEL delivery baseline: the terminal and the
+    /// bells already delivered from it. Forgotten when the session's
+    /// window leaves the terminal, so old bells are never replayed.
+    pub bell_baseline: Option<(BufferId, u64)>,
+    /// E9 (fix round 1) --- the flag the session's reader thread sets on
+    /// the frontend's `Detach` and the dispatcher on its quit's request,
+    /// read at the teardown, whichever path runs it first. `None` for a
+    /// session registered without one (the tests' sessions).
+    pub departing: Option<Arc<AtomicBool>>,
+}
+
+impl Session {
+    /// A session with its negotiated state and nothing else yet.
+    fn new(state: SessionState) -> Self {
+        Self {
+            state,
+            render: None,
+            semantic: None,
+            stream: None,
+            term_size: None,
+            last_dispatch_idle_sent: None,
+            last_active_buffer_sent: None,
+            bell_baseline: None,
+            departing: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("state", &self.state)
+            .field("render", &self.render.is_some())
+            .field("semantic", &self.semantic.is_some())
+            .field("stream", &self.stream)
+            .field("term_size", &self.term_size)
+            .field("last_dispatch_idle_sent", &self.last_dispatch_idle_sent)
+            .field("last_active_buffer_sent", &self.last_active_buffer_sent)
+            .field("bell_baseline", &self.bell_baseline)
+            .field("departing", &self.departing)
+            .finish()
+    }
+}
+
 /// A detached session's view, kept for the token its session held (E9).
 ///
 /// The windows the view lays out stay in `EditorCore::windows` while the
@@ -193,24 +275,21 @@ pub struct SessionRegistry {
     /// broadcast for it. `None` (absent) means "no prior state" —
     /// the first sweep observes a change.
     last_broadcast: HashMap<FrontendId, PresenceSnapshot>,
-    /// Per-session daemon-internal state — negotiated protocol
-    /// version + negotiated capability bits. M10.7 widened this from
-    /// a bare `u32` version to the richer `SessionState` once
-    /// capability negotiation became load-bearing. Recipients are
-    /// filtered on `negotiated_capabilities.multi_frontend` (M10.7);
-    /// v0.1 sessions naturally fail the filter because their
-    /// declared bit defaults to `false` and the AND with any
-    /// instance bit is `false`.
-    sessions: HashMap<FrontendId, SessionState>,
+    /// Per-session daemon-internal state: the negotiated protocol
+    /// version and capability bits (M10.7 widened this from a bare
+    /// `u32` version to the richer `SessionState` once capability
+    /// negotiation became load-bearing), and since E9b everything else
+    /// the dispatcher keeps per frontend, folded into one [`Session`].
+    /// Recipients are filtered on `negotiated_capabilities.multi_frontend`
+    /// (M10.7); v0.1 sessions naturally fail the filter because their
+    /// declared bit defaults to `false` and the AND with any instance
+    /// bit is `false`.
+    sessions: HashMap<FrontendId, Session>,
     /// E9 --- views of detached sessions, by the token each held,
     /// until resumed or expired. Keyed by token rather than frontend
     /// id because the resuming session has a new id; the token is what
     /// survives the socket.
     retained: HashMap<SessionToken, RetainedView>,
-    /// E9 (fix round 1) --- per session, the flag its reader thread
-    /// sets on the frontend's `Detach` and the dispatcher on its quit's
-    /// request; read at the teardown, whichever path runs it first.
-    departures: HashMap<FrontendId, Arc<AtomicBool>>,
     /// E9 fix round 4 --- per session whose write failed, its drain:
     /// the session stays registered, its input dispatched and its token
     /// live, until its reader's EOF or the drain's deadline.
@@ -231,22 +310,25 @@ impl SessionRegistry {
     /// negotiation (`negotiate_capabilities`) have accepted the
     /// request. The `SessionState` carries the negotiated version
     /// AND the negotiated capability bits — M10.7 widened this from
-    /// the M10.6 bare-`u32` shape.
+    /// the M10.6 bare-`u32` shape. Registering an id already registered
+    /// replaces its state and keeps the rest of its [`Session`].
     pub fn register_session(&mut self, frontend_id: FrontendId, state: SessionState) {
-        self.sessions.insert(frontend_id, state);
+        self.sessions
+            .entry(frontend_id)
+            .and_modify(|session| session.state = state)
+            .or_insert_with(|| Session::new(state));
     }
 
-    /// Unregister a session on detach. Drops both the session entry
-    /// and any last-broadcast state for that frontend so a future
-    /// re-attach starts with no prior state. A session draining after a
-    /// failed write has its socket shut both ways here (E9 fix round
-    /// 4): its reader, still in `read` when the drain ends at its
-    /// deadline, reads EOF and ends, and whatever the peer sends later
-    /// reaches no one.
+    /// Unregister a session on detach. Drops the session, with every
+    /// per-frontend field it holds (E9b), and any last-broadcast state
+    /// for that frontend so a future re-attach starts with no prior
+    /// state. A session draining after a failed write has its socket
+    /// shut both ways here (E9 fix round 4): its reader, still in
+    /// `read` when the drain ends at its deadline, reads EOF and ends,
+    /// and whatever the peer sends later reaches no one.
     pub fn unregister_session(&mut self, frontend_id: FrontendId) {
         self.sessions.remove(&frontend_id);
         self.last_broadcast.remove(&frontend_id);
-        self.departures.remove(&frontend_id);
         if let Some(drain) = self.drains.remove(&frontend_id) {
             let _ = drain.socket.shutdown(Shutdown::Both);
         }
@@ -302,8 +384,8 @@ impl SessionRegistry {
     /// Low 2: set before the bootstrap, it outlived every attach whose
     /// bootstrap failed, one entry each for the daemon's life).
     pub fn set_departure_flag(&mut self, frontend_id: FrontendId, flag: Arc<AtomicBool>) {
-        if self.sessions.contains_key(&frontend_id) {
-            self.departures.insert(frontend_id, flag);
+        if let Some(session) = self.sessions.get_mut(&frontend_id) {
+            session.departing = Some(flag);
         }
     }
 
@@ -311,14 +393,17 @@ impl SessionRegistry {
     /// Useful for tests + diagnostics, as [`Self::session_count`] is.
     #[must_use]
     pub fn departure_flag_count(&self) -> usize {
-        self.departures.len()
+        self.sessions
+            .values()
+            .filter(|session| session.departing.is_some())
+            .count()
     }
 
     /// E9 (fix round 1) --- the frontend said it was leaving (its quit
     /// asked to be detached); its view is dropped at its teardown, not
     /// retained. A no-op for a frontend with no flag.
     pub fn mark_departing(&self, frontend_id: FrontendId) {
-        if let Some(flag) = self.departures.get(&frontend_id) {
+        if let Some(flag) = self.departure_flag(frontend_id) {
             flag.store(true, Ordering::SeqCst);
         }
     }
@@ -329,16 +414,82 @@ impl SessionRegistry {
     /// a reader thread).
     #[must_use]
     pub fn is_departing(&self, frontend_id: FrontendId) -> bool {
-        self.departures
-            .get(&frontend_id)
+        self.departure_flag(frontend_id)
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    /// The departure flag a registered session holds, if any.
+    fn departure_flag(&self, frontend_id: FrontendId) -> Option<&Arc<AtomicBool>> {
+        self.sessions
+            .get(&frontend_id)
+            .and_then(|session| session.departing.as_ref())
     }
 
     /// The negotiated state for `frontend_id`, or `None` if no
     /// session is registered for it.
     #[must_use]
     pub fn session_state(&self, frontend_id: FrontendId) -> Option<SessionState> {
-        self.sessions.get(&frontend_id).copied()
+        self.sessions.get(&frontend_id).map(|session| session.state)
+    }
+
+    /// E9b --- the registered session for `frontend_id`, whole.
+    #[must_use]
+    pub fn session(&self, frontend_id: FrontendId) -> Option<&Session> {
+        self.sessions.get(&frontend_id)
+    }
+
+    /// E9b --- the registered session for `frontend_id`, to change one
+    /// of its fields.
+    pub fn session_mut(&mut self, frontend_id: FrontendId) -> Option<&mut Session> {
+        self.sessions.get_mut(&frontend_id)
+    }
+
+    /// E9b --- every registered session, with its id, in no particular
+    /// order (the maps they replaced had none either).
+    pub fn sessions_mut(&mut self) -> impl Iterator<Item = (FrontendId, &mut Session)> {
+        self.sessions.iter_mut().map(|(id, session)| (*id, session))
+    }
+
+    /// E9b --- `frontend_id`'s semantic projection, if it is a
+    /// registered `semantic_render` session.
+    #[must_use]
+    pub fn semantic(&self, frontend_id: FrontendId) -> Option<&SemanticRenderState> {
+        self.sessions
+            .get(&frontend_id)
+            .and_then(|session| session.semantic.as_ref())
+    }
+
+    /// E9b --- [`Self::semantic`], to change it.
+    pub fn semantic_mut(&mut self, frontend_id: FrontendId) -> Option<&mut SemanticRenderState> {
+        self.sessions
+            .get_mut(&frontend_id)
+            .and_then(|session| session.semantic.as_mut())
+    }
+
+    /// E9b --- the stream the dispatcher writes `frontend_id`'s output
+    /// to; `None` before one is installed and once a write to it has
+    /// failed (E9 fix round 4).
+    pub fn stream_mut(&mut self, frontend_id: FrontendId) -> Option<&mut UnixStream> {
+        self.sessions
+            .get_mut(&frontend_id)
+            .and_then(|session| session.stream.as_mut())
+    }
+
+    /// E9b --- the sessions the tick loop renders, the grid ones first
+    /// and then the semantic ones, the order it visited them in when
+    /// each projection had its own map. Draining sessions are among
+    /// them; the loop leaves those out itself.
+    #[must_use]
+    pub fn projected_ids(&self) -> Vec<FrontendId> {
+        let grid = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.render.is_some());
+        let semantic = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.semantic.is_some());
+        grid.chain(semantic).map(|(id, _)| *id).collect()
     }
 
     /// Number of registered sessions. Useful for tests + diagnostics.
@@ -368,7 +519,7 @@ impl SessionRegistry {
     pub fn session_holding(&self, token: SessionToken) -> Option<FrontendId> {
         self.sessions
             .iter()
-            .find(|(_, state)| state.token == Some(token))
+            .find(|(_, session)| session.state.token == Some(token))
             .map(|(id, _)| *id)
     }
 
@@ -427,18 +578,18 @@ impl SessionRegistry {
         recipient: FrontendId,
     ) -> Vec<crate::overlay_paint::OtherPresence> {
         let mut out = Vec::new();
-        for (&source, state) in &self.sessions {
+        for (&source, session) in &self.sessions {
             if source == recipient {
                 continue;
             }
-            if !state.negotiated_capabilities.multi_frontend {
+            if !session.state.negotiated_capabilities.multi_frontend {
                 continue;
             }
             if let Some(&snapshot) = self.last_broadcast.get(&source) {
                 out.push(crate::overlay_paint::OtherPresence {
                     frontend_id: source,
                     snapshot,
-                    color_slot: state.color_slot,
+                    color_slot: session.state.color_slot,
                 });
             }
         }
@@ -489,7 +640,7 @@ impl SessionRegistry {
                 cursor: snapshot.cursor,
                 selection: snapshot.selection,
             };
-            for (&recipient, state) in &self.sessions {
+            for (&recipient, session) in &self.sessions {
                 if recipient == *source {
                     continue;
                 }
@@ -500,7 +651,7 @@ impl SessionRegistry {
                 // false → AND with instance is false). v1.0 sessions
                 // that declined `multi_frontend` during negotiation
                 // also fail — they opted into single-frontend mode.
-                if !state.negotiated_capabilities.multi_frontend {
+                if !session.state.negotiated_capabilities.multi_frontend {
                     continue;
                 }
                 out.push(BroadcastEntry {
@@ -539,11 +690,11 @@ impl SessionRegistry {
     ) -> Vec<BroadcastEntry> {
         let mut out = Vec::new();
         let message = InstanceMessage::CrdtOp { buffer_id, op };
-        for (&recipient, state) in &self.sessions {
+        for (&recipient, session) in &self.sessions {
             if Some(recipient) == exclude {
                 continue;
             }
-            if !state.negotiated_capabilities.crdt_replica {
+            if !session.state.negotiated_capabilities.crdt_replica {
                 continue;
             }
             out.push(BroadcastEntry {
