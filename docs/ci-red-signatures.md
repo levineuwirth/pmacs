@@ -7111,8 +7111,9 @@ arms deciding `run=false`: `ubsan` 118786656599 and 118817941682, `asan-strict` 
 
 #### PR #392's `CI` 39473773462 at `985ace1`: two reds, and no test among them
 
-`CI` 39473773462, attempt 1 of 1, `pull_request`, testing the merge into `5a0998b`, created
-18:19:48Z and completed 18:55:11Z: `failure`.
+`CI` 39473773462, attempt 1 of 1 when read here, `pull_request`, testing the merge into
+`5a0998b`, created 18:19:48Z and completed 18:55:11Z: `failure`. Its attempt 2, the non-crdt job
+rerun alone on the owner's ruling, is recorded at E9b's merge, below.
 
 Tally (pr392-ci-985ace1): 19 = 16 + 1 + 1 + 1.
 
@@ -7191,6 +7192,144 @@ So, at E9b's close: `main` is green at `5a0998b` and `3c313e0`; by CI alone #393
 whose fragments name another module, does not move. #391 is filed on a local sample and stands at
 no CI occurrence. #286, #288, #311 and #316 met only local samples here and do not move. Every
 other count above stands.
+
+### E9b's merge: PR #392's attempt 2 green, `main` green at `926d25a` and `828248f`, and review 1's gate listed
+
+Recorded 2026-10-21 for E9b's close under D38, on `main` at `828248f`. Every run was read from the
+jobs endpoint by conclusion, and every test leg of the code-bearing runs through its own log,
+fetched with escape sequences allowed and stripped, each `running` line paired with its own result
+line. Review 1's gate was read from its log directory under
+`~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/`. Every run id, job id and gate log
+below was searched for in this file before it was written, and none was here. This record reran
+nothing.
+
+#### PR #392's `CI` 39473773462, attempt 2: the non-crdt job rerun alone, green
+
+After the section above recorded attempt 1, the owner ruled on 2026-10-20 that the non-crdt job
+alone be rerun for its coverage. Attempt 2 re-executed it alone as job 118904948075, 21:46:13Z to
+22:15:07Z, `success`; `Docs consistency` was evaluated again and skipped; the other seventeen rows
+of attempt 2 carry attempt 1's results and timestamps under new ids. The run's conclusion now
+reads `cancelled`, and its one `cancelled` row is `Test (crdt)`'s, carried from attempt 1.
+
+Tally (pr392-ci-985ace1-attempt2): 19 = 17 + 1 + 1.
+
+Tally (pr392-ci-985ace1-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 118904947634 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 118904948075 | success |
+| Format | 118904948342 | success |
+| Docs consistency | 118904948930 | skipped |
+| Lint (lua54) | 118904948990 | success |
+| Test (ubuntu-latest / luajit) | 118904949026 | success |
+| Perf budgets (debug) | 118904949186 | success |
+| M5 Perf Gates | 118904949402 | success |
+| M1 Acceptance Gates | 118904949525 | success |
+| M10 Perf Gates (crdt) | 118904949548 | success |
+| Test (ubuntu-latest / lua54) | 118904949590 | success |
+| Test (crdt) | 118904949613 | cancelled |
+| M6 Perf Gates | 118904949628 | success |
+| GPU Render (headless) | 118904949726 | success |
+| M4 Perf Gates | 118904950158 | success |
+| Test (macos-latest / luajit) | 118904950418 | success |
+| Test (macos-latest / lua54) | 118904950529 | success |
+| Commit attribution (D9) | 118905004003 | success |
+| Changed paths | 118905009526 | success |
+
+Tally (pr392-ci-985ace1-attempt2-success): 17 rows of the table above with `result` = `success`.
+
+- The rerun job's tool step installed `gopls` this time, downloading `mvdan.cc/gofumpt v0.6.0` at
+  21:47:10Z with no error, and the gate's arming line names `gopls` present. It paired 208
+  `running` lines with 208 `test result: ok`: 206 in its test step, `cargo test --doc`'s one doc
+  test, and `pmacs-protocol`'s `crdt` step; 4,689 passed, 0 failed, 51 ignored; `WouldBlock`
+  absent.
+- **Attempt 2 is non-reproduction and nothing more.** Attempt 1's job 118804426656 stays as
+  recorded above, commented on #249, which does not move. `Test (crdt)` was not rerun, and #393
+  stays at its one occurrence.
+
+#### `main` at `926d25a`, E9b's registry commit: green
+
+`CI` 39479807992 at `926d25a`, attempt 1 of 1, `push`, created 19:01:05Z and completed 19:03:15Z:
+`success`, every test leg skipped, `Docs consistency` 118825204934 among the six.
+
+Tally (main-ci-926d25a): 15 = 6 + 9.
+
+`Grammar fuzz` 39479807989 at `926d25a`, `success`, both arms deciding `run=false`: `ubsan`
+118825087204, `asan-strict` 118825087776.
+
+#### `main` at `828248f`, E9b's squash: green
+
+`828248f` is the owner's squash of #392 at its head `985ace1`, merged 08:42:43Z past `Test
+(crdt)`'s attempt-1 cancellation under the owner's ruling of 2026-10-20; signature `E`, trailers
+empty. Its diff from `985ace1` is this file alone, the two registry commits `main` gained after
+the branch's base, and its diff from `926d25a` is exactly `src/daemon.rs`, `src/presence.rs` and
+`tests/e9_review5_probes.rs`, so the squash is faithful.
+
+`CI` 39571345565 at `828248f`, attempt 1 of 1, `push`, created 08:42:45Z and completed 09:16:15Z
+(the API's `updated_at`): `success`.
+
+Tally (main-ci-828248f): 19 = 18 + 1.
+
+Tally (main-ci-828248f-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 119126015855 | success |
+| Lint (lua54) | 119126016091 | success |
+| Lint (luajit) | 119126016101 | success |
+| Commit attribution (D9) | 119126016208 | success |
+| Changed paths | 119126016245 | success |
+| M5 Perf Gates | 119126103021 | success |
+| Test (ubuntu-latest / luajit) | 119126103074 | success |
+| M4 Perf Gates | 119126103098 | success |
+| M10 Perf Gates (crdt) | 119126103104 | success |
+| GPU Render (headless) | 119126103108 | success |
+| M1 Acceptance Gates | 119126103115 | success |
+| Test (macos-latest / lua54) | 119126103117 | success |
+| Test (crdt) | 119126103125 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 119126103171 | success |
+| Perf budgets (debug) | 119126103227 | success |
+| Test (ubuntu-latest / lua54) | 119126103259 | success |
+| Test (macos-latest / luajit) | 119126103263 | success |
+| M6 Perf Gates | 119126103479 | success |
+| Docs consistency | 119126106595 | skipped |
+
+Tally (main-ci-828248f-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: 207 on `Test (crdt)` (206 in
+  its test step and the doc test), 208 on each Ubuntu leg (206, the doc test and
+  `pmacs-protocol`'s `crdt` step), 209 on each macOS leg (those and the GPU adapter probe);
+  `WouldBlock` appears in none. #286's row passed on the five legs built with `crdt`, and E9 review
+  5's probes ran eight tests on `Test (crdt)` and on each Ubuntu `crdt` leg, and `running 0
+  tests` on the macOS legs and the no-crdt leg.
+- `Test (crdt)` ran 08:43:02Z to 09:15:57Z, 32m55s, under its 35-minute ceiling: its workspace
+  build 21.1 s and its test step 1,902.9 s by the log's step timestamps. That is not an
+  occurrence of #393's shape, and it is non-reproduction and nothing more.
+
+`Grammar fuzz` 39571345616 at `828248f`, attempt 1 of 1, `push`, created 08:42:45Z and completed
+08:43:00Z, `success`, fuzzing nothing on either arm (`run=false`): `ubsan` 119126016537,
+`asan-strict` 119126016036.
+
+#### E9b review 1's gate: listed, not tallied
+
+`scripts/gate --protocol` `20261020T194026Z-2442131` at `985ace1`, E9b review 1's independent
+gate: six of eight, `fmt`, both lints, `doc`, `build` and `diff-check` ok, each sweep pairing 216
+`running` lines with as many result lines. Both samples are on their issues. Neither moves a
+count.
+
+- `06-sweep`: #291's fragments on
+  `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error`
+  (`tests/e7e_haskell_acceptance.rs:637:5`, `HLS reports the type error; store []`, the trace
+  reaching `LSP:ready·setting` and never `processi`, `4 passed; 1 failed; 0 ignored` in 132.81 s
+  at result line 3531); commented on #291 (issuecomment-6302206756).
+- `07-sweep-luajit`: #311's fragments on the same selector and line (`Could not find module
+  ‘Prelude’` in the store, the trace reaching `LSP:ready·processi`, `4 passed; 1 failed; 0
+  ignored` in 127.30 s at result line 3265); commented on #311 (issuecomment-6302203294).
+
+So, at E9b's merge: `main` is green at `926d25a` and `828248f`, and PR #392's attempt 2 is green
+on the one job it reran. By CI alone no count moves: #393 stays at one, and #249 does not move.
+#291 and #311 met only local samples here and do not move. Every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
