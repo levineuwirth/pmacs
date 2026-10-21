@@ -2,7 +2,8 @@
 
 //! Serialize the open file buffers + window layout + per-window
 //! positions so a session survives a restart. Emacs `desktop.el`,
-//! opt-in via `pmacs.session.desktop_mode(true)`.
+//! opt-in via `pmacs.session.desktop_mode(true)` for the in-process
+//! editor.
 //!
 //! This module owns the whole feature: the serde mirror types (the core
 //! window enums are not serde and stay that way), the SHA-256 session
@@ -12,6 +13,13 @@
 //! the editor's `SharedCore` / `StateDir` / `LocalInstanceInfo`
 //! app-data, so they run identically from a `pmacs.session.*` binding
 //! and from the `RunLocal` startup trigger.
+//!
+//! Under a daemon (E10, D16) the desktop is an attached window's, not
+//! the daemon's own `LOCAL` view's: one snapshot per daemon and
+//! [`FrontendKind`], keyed by [`frontend_session_key`], written by the
+//! daemon whenever a window of that kind detaches, for every attached
+//! window at shutdown, and by `desktop-save` in a window, the last
+//! written winning ([`save_frontend`]).
 //!
 //! Framing: docs/archive/framings/desktop-save-framing.md.
 
@@ -155,6 +163,57 @@ pub fn desktop_state_key(session_key: &str) -> String {
     format!("desktop/{session_key}")
 }
 
+/// The kind of window attached to a daemon, the second half of the key
+/// a daemon keeps a desktop under (E10, D16): the daemon's identity
+/// ([`session_key`]) and this. A window of one kind never reopens what a
+/// window of the other left, since the two show a desktop differently
+/// (the GPU frontend shows its active window alone until the window tree
+/// reaches the wire).
+///
+/// Decided from the negotiated projection that picks a session's render
+/// state, `semantic_render`, which is the only frontend fact the attach
+/// carries: the wire names no frontend kind, and E10 adds none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FrontendKind {
+    /// A grid session, which the daemon paints cell by cell (the
+    /// attached TUI).
+    Grid,
+    /// A semantic session, which lays its text out itself (the GPU
+    /// frontend).
+    Semantic,
+}
+
+impl FrontendKind {
+    /// The kind of a session that negotiated `semantic_render`.
+    #[must_use]
+    pub fn of_session(semantic_render: bool) -> Self {
+        if semantic_render {
+            Self::Semantic
+        } else {
+            Self::Grid
+        }
+    }
+
+    /// The kind's part of a snapshot's key; also how it is named to the
+    /// user.
+    #[must_use]
+    pub fn key_part(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Semantic => "semantic",
+        }
+    }
+}
+
+/// The session key a daemon keeps `kind`'s desktop under: the daemon's
+/// own [`session_key`] with the kind after a dot, so it never meets the
+/// in-process editor's desktop for the same directory or name, which is
+/// the bare key, and passes the `pmacs.state` charset.
+#[must_use]
+pub fn frontend_session_key(daemon_key: &str, kind: FrontendKind) -> String {
+    format!("{daemon_key}.{}", kind.key_part())
+}
+
 /// Build the serializable layout tree from a core [`LayoutNode`],
 /// resolving each leaf window to a [`SavedLeaf`] (returning `None` for a
 /// non-file leaf, which is dropped and its split collapsed).
@@ -245,19 +304,24 @@ pub fn resolve_active_leaf(
 // SharedCore / StateDir / LocalInstanceInfo app-data).
 // ---------------------------------------------------------------------------
 
-/// True when this process is a daemon (multi-frontend). Desktop
-/// save/restore is local-only in v1 (Q#DS9); this is the **reliable**
-/// enforcement — the `DaemonMode` marker is set right after the daemon's
-/// `EditorState::new()`, so it is present for every save/restore that
-/// can run after startup (the before-quit hook, manual commands, direct
-/// binding calls), even though `init.lua` runs before it is set. Both
-/// `save_session` and `restore_session` no-op when it holds.
+/// True when this process is a daemon (multi-frontend). The daemon's own
+/// `LOCAL` view is never saved or restored (Q#DS9: it has a layout per
+/// attached frontend and none of its own); since E10 an attached
+/// window's desktop is, under its [`FrontendKind`]. This is the
+/// **reliable** test — the `DaemonMode` marker is set right after the
+/// daemon's `EditorState::new()`, so it is present for every
+/// save/restore that can run after startup (the before-quit hook, manual
+/// commands, direct binding calls), even though `init.lua` runs before
+/// it is set.
 fn is_daemon(lua: &Lua) -> bool {
     lua.app_data_ref::<crate::lua_bindings::DaemonMode>()
         .is_some()
 }
 
-/// The desktop session key for this process (`cwd.<hash>` in local mode).
+/// The desktop session key for this process: `cwd.<hash>` in local mode,
+/// and under a daemon the daemon's own identity (its `--socket NAME`, or
+/// its working directory), which [`frontend_session_key`] extends with a
+/// kind (D16).
 fn session_key_from_lua(lua: &Lua) -> String {
     match lua
         .app_data_ref::<LocalInstanceInfo>()
@@ -268,11 +332,28 @@ fn session_key_from_lua(lua: &Lua) -> String {
     }
 }
 
-/// Snapshot the LOCAL frontend as a [`SavedDesktop`] (Q#DS2). `None`
-/// when no file window survives (nothing worth saving).
+/// Whose desktop a `pmacs.session` call saves or restores, and the
+/// session key it lives under: `LOCAL`'s under the session key in local
+/// mode; under a daemon, the acting frontend's under its kind (E10), and
+/// nobody's when the acting frontend has no kind, which is the daemon's
+/// own `LOCAL`.
+fn acting_target(lua: &Lua, core: &EditorCore) -> Option<(FrontendId, String)> {
+    let key = session_key_from_lua(lua);
+    if !is_daemon(lua) {
+        return Some((FrontendId::LOCAL, key));
+    }
+    let fid = core.active_frontend;
+    let kind = core.frontend_kinds.get(&fid)?;
+    Some((fid, frontend_session_key(&key, *kind)))
+}
+
+/// Snapshot frontend `fid`'s view as a [`SavedDesktop`] (Q#DS2; E10.1
+/// for an attached window, `LOCAL` in the in-process editor). `None`
+/// when `fid` has no view, or no file window survives (nothing worth
+/// saving).
 #[must_use]
-pub fn snapshot(core: &EditorCore, session_key: String) -> Option<SavedDesktop> {
-    let view = core.views.get(&FrontendId::LOCAL)?;
+pub fn snapshot(core: &EditorCore, fid: FrontendId, session_key: String) -> Option<SavedDesktop> {
+    let view = core.views.get(&fid)?;
     let focused = view.active;
     let reg = core.registry.borrow();
 
@@ -328,17 +409,17 @@ pub fn snapshot(core: &EditorCore, session_key: String) -> Option<SavedDesktop> 
     })
 }
 
-/// Serialize the current session to the desktop state file (Q#DS1).
-/// `Ok(false)` when the state dir is unconfigured or nothing is worth
-/// saving. Never fails hard for the before-quit path (Q#DS8) — the
-/// caller may ignore the error.
+/// Serialize the current session to the desktop state file (Q#DS1):
+/// `LOCAL`'s in local mode, and under a daemon the acting window's,
+/// under its kind (E10.1, `desktop-save` in a window). `Ok(false)` when
+/// the state dir is unconfigured, nothing is worth saving, or under a
+/// daemon the acting frontend is its own `LOCAL`; a desktop already
+/// saved is left as it was. Never fails hard for the before-quit path
+/// (Q#DS8) — the caller may ignore the error.
 ///
 /// # Errors
 /// A state-write / serialization failure (surfaced for manual save).
 pub fn save_session(lua: &Lua) -> Result<bool, String> {
-    if is_daemon(lua) {
-        return Ok(false); // local-only in v1 (Q#DS9)
-    }
     let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
         return Ok(false);
     };
@@ -346,15 +427,56 @@ pub fn save_session(lua: &Lua) -> Result<bool, String> {
         .app_data_ref::<SharedCore>()
         .ok_or("no editor core")?
         .clone();
-    let key = session_key_from_lua(lua);
-    let snap = snapshot(&core.borrow(), key);
+    let snap = {
+        let core = core.borrow();
+        acting_target(lua, &core).and_then(|(fid, key)| snapshot(&core, fid, key))
+    };
     let Some(snap) = snap else {
         return Ok(false);
     };
-    let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
-    let state_key = desktop_state_key(&snap.session_key);
-    crate::state::write(&base, &state_key, json.as_bytes()).map_err(|e| e.to_string())?;
+    write_snapshot(&base, &snap)?;
     Ok(true)
+}
+
+/// E10.1 --- the daemon's own write of attached window `fid`'s desktop,
+/// at its detach and at shutdown: its view under its kind's key, so the
+/// next fresh window of that kind reopens it, whichever window of the
+/// kind was written last winning (D16's last-detached-wins). A window
+/// that leaves nothing worth saving (no file window) removes its kind's
+/// desktop instead, for the same reason: it is the last one written, and
+/// what it had is a fresh window. `Ok(true)` when a desktop was written;
+/// `Ok(false)` when one was removed or there is nothing to do (no state
+/// dir, or `fid` has no kind, being no attached window).
+///
+/// # Errors
+/// A state-write, removal or serialization failure; the daemon reports
+/// it and carries on, as the before-quit save does (Q#DS8).
+pub fn save_frontend(lua: &Lua, fid: FrontendId) -> Result<bool, String> {
+    let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
+        return Ok(false);
+    };
+    let core = lua
+        .app_data_ref::<SharedCore>()
+        .ok_or("no editor core")?
+        .clone();
+    let core = core.borrow();
+    let Some(kind) = core.frontend_kinds.get(&fid).copied() else {
+        return Ok(false);
+    };
+    let key = frontend_session_key(&session_key_from_lua(lua), kind);
+    if let Some(snap) = snapshot(&core, fid, key.clone()) {
+        write_snapshot(&base, &snap)?;
+        return Ok(true);
+    }
+    crate::state::remove(&base, &desktop_state_key(&key)).map_err(|e| e.to_string())?;
+    Ok(false)
+}
+
+/// Write `snap` to its key's state file.
+fn write_snapshot(base: &Path, snap: &SavedDesktop) -> Result<(), String> {
+    let json = serde_json::to_string(snap).map_err(|e| e.to_string())?;
+    let state_key = desktop_state_key(&snap.session_key);
+    crate::state::write(base, &state_key, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Rebuild the LOCAL session from the desktop state file (Q#DS3). A
@@ -608,6 +730,25 @@ mod tests {
         assert_eq!(by_name, session_key(Some("work"), "/elsewhere"));
         assert!(crate::state::validate_name(&desktop_state_key(&by_name)).is_ok());
         assert!(crate::state::validate_name(&desktop_state_key(&by_cwd)).is_ok());
+    }
+
+    /// E10 --- a daemon keeps one desktop per kind, apart from each other
+    /// and from the in-process editor's for the same directory or name,
+    /// under keys the state store accepts.
+    #[test]
+    fn a_kinds_key_is_its_own_and_valid() {
+        for daemon_key in [session_key(Some("work"), "/x"), session_key(None, "/x")] {
+            let grid = frontend_session_key(&daemon_key, FrontendKind::Grid);
+            let semantic = frontend_session_key(&daemon_key, FrontendKind::Semantic);
+            assert_ne!(grid, semantic);
+            assert_ne!(grid, daemon_key);
+            assert_ne!(semantic, daemon_key);
+            assert!(semantic.starts_with(&daemon_key));
+            assert!(crate::state::validate_name(&desktop_state_key(&grid)).is_ok());
+            assert!(crate::state::validate_name(&desktop_state_key(&semantic)).is_ok());
+        }
+        assert_eq!(FrontendKind::of_session(true), FrontendKind::Semantic);
+        assert_eq!(FrontendKind::of_session(false), FrontendKind::Grid);
     }
 
     #[test]

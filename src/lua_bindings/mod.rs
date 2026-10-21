@@ -3074,10 +3074,12 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
 /// a desktop restore; `desktop_mode(true)` in init.lua arms it.
 pub struct DesktopRestoreArmed;
 
-/// Marker app-data set by `run_daemon` (Arc 3 phase 2, Q#DS9). Desktop
-/// save/restore is local-only in v1 (the daemon has a layout per
-/// attached frontend and no frontend at construction), so `desktop.lua`
-/// checks `pmacs.session.is_daemon()` and no-ops there.
+/// Marker app-data set by `run_daemon` (Arc 3 phase 2, Q#DS9). The
+/// daemon's own `LOCAL` view is never a desktop (it has a layout per
+/// attached frontend and none of its own); since E10 an attached
+/// window's is, kept by the daemon under the window's kind, so
+/// `desktop.lua` checks `pmacs.session.is_daemon()` to leave
+/// `desktop_mode` and its before-quit save to the in-process editor.
 pub struct DaemonMode;
 
 /// Fire `buffer.after-load` from Rust with the current active buffer —
@@ -3108,14 +3110,16 @@ fn install_session_module(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // is_daemon(): keep desktop save/restore local-only in v1 (Q#DS9).
+    // is_daemon(): `desktop_mode` and its before-quit save are the
+    // in-process editor's; a daemon keeps its windows' desktops (E10).
     m.set(
         "is_daemon",
         lua.create_function(|lua, ()| Ok(lua.app_data_ref::<DaemonMode>().is_some()))?,
     )?;
 
-    // save_desktop(): serialize the current session. Returns true when
-    // a desktop was written (false = nothing to save / no state dir).
+    // save_desktop(): serialize the current session (under a daemon,
+    // the acting window's, under its kind: E10). Returns true when a
+    // desktop was written (false = nothing to save / no state dir).
     m.set(
         "save_desktop",
         lua.create_function(|lua, ()| {

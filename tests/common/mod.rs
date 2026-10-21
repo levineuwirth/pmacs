@@ -28,6 +28,11 @@
 //!   each (E8e). Included per file the way `iso` is and NOT declared
 //!   here: ten suites pull both `mod common;` and the include, and
 //!   `clippy::duplicate_mod` refuses a file loaded as a module twice.
+//! - [`wire`]: a frontend session over a real daemon socket (the
+//!   semantic handshake as `pmacs-gpu` performs it, or a grid attach),
+//!   a reader thread, and the keys and waits a row drives it with.
+//!   Extracted at E10 (D37) from the copy the E9 suites carry; `crdt`
+//!   only, as a semantic session is.
 
 #![allow(dead_code)] // not every integration-test file uses every helper
 
@@ -37,3 +42,5 @@ pub mod pty;
 pub mod ready;
 pub mod reap;
 pub mod sigint_conformance;
+#[cfg(feature = "crdt")]
+pub mod wire;

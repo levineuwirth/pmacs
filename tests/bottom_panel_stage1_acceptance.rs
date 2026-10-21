@@ -2669,8 +2669,8 @@ fn acc35_desktop_round_trip_omits_the_side_leaf_and_its_wrapper() {
     );
     assert!(side_window(&s).is_some());
 
-    let snapshot =
-        pmacs::desktop::snapshot(&s.core.borrow(), "test".into()).expect("a file window survives");
+    let snapshot = pmacs::desktop::snapshot(&s.core.borrow(), FrontendId::LOCAL, "test".into())
+        .expect("a file window survives");
     assert_eq!(
         snapshot.version,
         pmacs::desktop::DESKTOP_VERSION,

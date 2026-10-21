@@ -2137,6 +2137,9 @@ fn dispatcher_loop(
         let core_wants_quit = editor.core.borrow().quit;
         let shutting_down = shutdown.load(Ordering::SeqCst) || core_wants_quit;
         if shutting_down {
+            // E10.1 --- every attached window's desktop, before any
+            // window is told.
+            save_attached_desktops(editor, &session_registry);
             // E9 (fix round 2, Medium 4, the owner's ruling) --- the
             // frontend whose own quit stopped the daemon (the last
             // frontend's `y`) is told `Goodbye(Detached)` first, as its
@@ -2625,6 +2628,15 @@ fn handle_session_established(
         // the producer's popup flag, so a v25 GPU is told on its status
         // line what a v26 one is shown.
         core.set_frontend_shows_popup(frontend_id, peer_shows_popup(session_state));
+        // E10 --- its kind, from the bit that picks its render state
+        // below; half the key its desktop is kept under (D16), dropped
+        // with the view.
+        core.frontend_kinds.insert(
+            frontend_id,
+            crate::desktop::FrontendKind::of_session(
+                session_state.negotiated_capabilities.semantic_render,
+            ),
+        );
         core.active_frontend = frontend_id;
     }
 
@@ -3025,7 +3037,13 @@ fn handle_dispatcher_event(
                     if version >= SESSION_MIN_VERSION {
                         eprintln!("pmacs: stop requested by {source:?}");
                         run_before_quit_hooks(editor, "--stop");
-                        editor.core.borrow_mut().quit = true;
+                        let mut core = editor.core.borrow_mut();
+                        // E10 --- `--stop`'s own session is no window, so
+                        // it keeps no desktop: the shutdown that follows
+                        // writes the windows' and not its view of the
+                        // scratch, which would clear its kind's.
+                        core.frontend_kinds.remove(&source);
+                        core.quit = true;
                     } else {
                         eprintln!(
                             "pmacs: refusing Shutdown from {source:?}: its session is v{version}"
@@ -3640,6 +3658,12 @@ fn detach_frontend(
         session_registry.semantic_mut(frontend_id),
         frontend_id,
     );
+    // E10.1 --- what the window had is written for the next window of
+    // its kind, departure and loss alike (D16, last detached wins),
+    // from the view as it leaves it and before anything below drops
+    // it. A loss's view is also retained for its token below, and a
+    // resume takes that view, never this.
+    save_frontend_desktop(editor, frontend_id);
     editor.detach_frontend_input(frontend_id);
     // The session goes whole (E9b): its projection, its stream, its
     // sizes, the follow's and the bell's baselines and its departure
@@ -3681,6 +3705,34 @@ fn detach_frontend(
         i64::try_from(frontend_id.0).unwrap_or(i64::MAX),
     ));
     editor.lua_host.run_hook("frontend.detached", args);
+}
+
+/// E10.1 --- write attached window `frontend_id`'s desktop under its
+/// kind ([`crate::desktop::save_frontend`]); a failure is reported here
+/// and holds nothing up, as the before-quit save's does (Q#DS8).
+fn save_frontend_desktop(editor: &EditorState, frontend_id: FrontendId) {
+    if let Err(error) = crate::desktop::save_frontend(editor.lua_host.lua(), frontend_id) {
+        eprintln!("pmacs: the desktop of {frontend_id:?} was not saved: {error}");
+    }
+}
+
+/// E10.1 --- at shutdown every attached window is detached at once, so
+/// each one's desktop is written here, before any is told: in attach
+/// order, and the window that last gave input last, so that is the one
+/// the next fresh window of its kind reopens (D16, last detached wins).
+/// Under `--stop` the last input is the stop's own, from a session that
+/// keeps no desktop, so the windows go in attach order. A draining
+/// window (E9 fix round 4) is attached until its teardown and is written
+/// too; a view retained for a lost socket was written at the loss and is
+/// not written again, or it would win over a window that detached after
+/// it.
+fn save_attached_desktops(editor: &EditorState, session_registry: &SessionRegistry) {
+    let last = editor.core.borrow().active_frontend;
+    let mut attached = session_registry.projected_ids();
+    attached.sort_by_key(|fid| (*fid == last, fid.0));
+    for fid in attached {
+        save_frontend_desktop(editor, fid);
+    }
 }
 
 /// T M10.10: send one `InstanceMessage::BufferSnapshot` per buffer

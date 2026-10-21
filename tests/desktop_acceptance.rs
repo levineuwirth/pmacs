@@ -257,7 +257,7 @@ fn same_file_in_two_panes_keeps_distinct_positions_and_fires_per_pane() {
 }
 
 #[test]
-fn daemon_mode_disables_save_and_restore() {
+fn daemon_mode_saves_and_restores_no_local_desktop() {
     let dir = fresh_state_dir();
     // Seed a desktop from a normal (non-daemon) editor.
     let src = editor(&dir);
@@ -265,8 +265,10 @@ fn daemon_mode_disables_save_and_restore() {
     exec(&src, &format!("pmacs.buffer.find_or_open({a:?})"));
     assert!(save(&src));
 
-    // A daemon editor must not save or restore (local-only, Q#DS9) —
-    // the Rust gate holds regardless of what init did.
+    // A daemon editor's own LOCAL view is neither saved nor restored
+    // (Q#DS9) --- the Rust gate holds regardless of what init did. Since
+    // E10 an attached window's desktop is, under its kind
+    // (`tests/e10_restore_acceptance.rs`); LOCAL has no kind.
     let mut daemon = editor(&dir);
     daemon
         .lua_host

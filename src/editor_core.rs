@@ -786,6 +786,15 @@ pub struct EditorCore {
     /// status line ([`PopupOutcome::Told`]); a grid frontend, of any
     /// version, paints the popup itself and is never here.
     pub frontends_without_popup: HashSet<FrontendId>,
+    /// E10 --- the kind of each attached frontend, which is half of the
+    /// key its desktop is kept under (`crate::desktop::FrontendKind`,
+    /// D16). Set by the daemon in the attach transaction, from the same
+    /// negotiated projection that picks its render state, and dropped
+    /// with the view, or when the session asks the daemon to stop
+    /// (`--stop`'s own session is no window). `LOCAL` is never here:
+    /// under a daemon it is the daemon's own view, whose desktop is
+    /// neither saved nor restored.
+    pub frontend_kinds: HashMap<FrontendId, crate::desktop::FrontendKind>,
     /// E9 fix round 4 --- attached frontends whose socket failed a
     /// write and whose input the daemon is still draining (until its
     /// reader's EOF or the drain's deadline, then the one teardown).
@@ -907,6 +916,7 @@ impl EditorCore {
             completion_popup: crate::completion::make_shared_popup(),
             lsp_popup: crate::lsp_popup::make_shared_popup(),
             frontends_without_popup: HashSet::new(),
+            frontend_kinds: HashMap::new(),
             draining_frontends: HashSet::new(),
             round_trip_buffers: std::collections::HashSet::new(),
             query_replace: None,
@@ -1169,8 +1179,8 @@ impl EditorCore {
     /// the same window, buffer, cursor and scroll. Everything else a
     /// detach drops goes here as in [`Self::unregister_frontend_view`]:
     /// the navigation trail (Q#BP11c, its `WindowId`s are not this
-    /// frontend's to pop any more), the popup mark, the drain mark (E9
-    /// fix round 4) and the active frontend. The caller owns the
+    /// frontend's to pop any more), the popup mark, the kind (E10), the
+    /// drain mark (E9 fix round 4) and the active frontend. The caller owns the
     /// windows from here: it registers
     /// the view again or passes it to [`Self::discard_view_windows`].
     pub fn take_frontend_view(&mut self, fid: FrontendId) -> Option<FrontendView> {
@@ -1180,6 +1190,7 @@ impl EditorCore {
         // other frontend may pop or destroy those entries.
         self.jump_ring.remove(&fid);
         self.frontends_without_popup.remove(&fid);
+        self.frontend_kinds.remove(&fid);
         self.draining_frontends.remove(&fid);
         if self.active_frontend == fid {
             self.active_frontend = FrontendId::LOCAL;

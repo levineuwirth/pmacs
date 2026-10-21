@@ -60,9 +60,9 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
                      the socket; every attached frontend is told. Asks
                      nothing about unsaved buffers: the quit's hooks run
                      first (the autosave's last sweep of unsaved text,
-                     saveplace; a daemon saves no desktop session, which
-                     is local-only), and a veto from them does not hold
-                     the stop.
+                     saveplace), each attached window's desktop is kept
+                     for the next window of its kind to reopen, and a
+                     veto from the hooks does not hold the stop.
   --attach           connect to a running daemon as a frontend; F12
                      detaches without killing the daemon. With a
                      positional <target>, attach over the named
@@ -733,12 +733,14 @@ mod tests {
 
     /// E9 fix round 2 (review 2's Low 3) --- `--stop`'s text promises
     /// what the quit's hooks do under a daemon and nothing more: the
-    /// autosave's last sweep and saveplace run, while `desktop.lua`
-    /// refuses to enable itself whenever `pmacs.session.is_daemon()`, so
-    /// its `editor.before-quit` subscriber saves nothing there. The text
-    /// once listed "the desktop session" among what the hooks run.
+    /// autosave's last sweep and saveplace run, while `desktop.lua`'s
+    /// `editor.before-quit` subscriber saves nothing under a daemon. The
+    /// text once listed "the desktop session" among what the hooks run.
+    /// Since E10 the daemon itself writes each attached window's desktop
+    /// at shutdown, by kind, and the text says that apart from the hooks;
+    /// until E10 it said "a daemon saves no desktop session".
     #[test]
-    fn stop_usage_promises_no_desktop_save() {
+    fn stop_usage_promises_each_windows_desktop_apart_from_the_hooks() {
         let stop = USAGE
             .split("  --stop")
             .nth(1)
@@ -751,8 +753,14 @@ mod tests {
         );
         assert!(stop.contains("saveplace"), "{stop}");
         assert!(
-            stop.contains("a daemon saves no desktop session, which is local-only"),
+            stop.contains(
+                "each attached window's desktop is kept for the next window of its kind to reopen"
+            ),
             "{stop}"
+        );
+        assert!(
+            !stop.contains("saves no desktop"),
+            "a daemon's stop writes its windows' desktops (E10): {stop}"
         );
         assert!(
             !stop.contains("the desktop session, saveplace"),
