@@ -7714,6 +7714,109 @@ at one each; #393 is closed by #398, whose `Test (crdt)` then ran 36m26s on the 
 35m18s on `main`, both inside the new ceiling. #304, #311 and #361 met only local samples here and
 do not move. Every other count above stands.
 
+### E10b's close: PR #403 green at `0e67309`, `main` green at `31001df`, the gates' samples listed, #401 and #402 filed
+
+Recorded 2026-10-22 at E10b's checkpoint, PR #403 (three signed commits on `31001df`: E10 review 1's
+probes, #395's `open_note` keeping the note's snapshot, and #394's byte-ceiling row waiting for its
+first chunk). Every run was read from the jobs endpoint by conclusion, and every test leg of the
+code-bearing run through its own log, fetched with escape sequences allowed and stripped, each
+`running` line paired with its own result line. The gates were read from their log directories under
+`~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/` (copied to `~/build/e10b/gate-logs/`).
+Every run id, job id and gate log below was searched for in this file before it was written, and none
+was here. Nothing was rerun.
+
+#### `main` at `31001df`, the record of E10's and #398's merges: green
+
+`31001df` is the registry commit above; it changes this file alone. PR #403's branch starts from it.
+
+`CI` 39757854769 at `31001df`, attempt 1 of 1, `push`, created 09:45:17Z and completed 09:47:41Z
+(the API's `updated_at`): `success`, every test leg skipped, `Docs consistency` 119754407730 among
+the six.
+
+Tally (main-ci-31001df): 15 = 6 + 9.
+
+`Grammar fuzz` 39757854612 at `31001df`, `success`, both arms deciding `run=false`: `ubsan`
+119754318676, `asan-strict` 119754319128.
+
+#### PR #403's `CI` 39780182014 at `0e67309`: green
+
+`CI` 39780182014, attempt 1 of 1, `pull_request`, testing the merge `7e70c07` into `31001df`,
+created 12:39:44Z and completed 13:16:36Z (the API's `updated_at`): `success`.
+
+Tally (pr403-ci-0e67309): 19 = 18 + 1.
+
+Tally (pr403-ci-0e67309-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 119829144835 | success |
+| Format | 119829145181 | success |
+| Lint (luajit) | 119829145270 | success |
+| Lint (lua54) | 119829145307 | success |
+| Commit attribution (D9) | 119829145375 | success |
+| GPU Render (headless) | 119829231615 | success |
+| Test (crdt) | 119829231626 | success |
+| M6 Perf Gates | 119829231631 | success |
+| M1 Acceptance Gates | 119829231644 | success |
+| Test (macos-latest / luajit) | 119829231710 | success |
+| Perf budgets (debug) | 119829231720 | success |
+| M4 Perf Gates | 119829231756 | success |
+| Test (macos-latest / lua54) | 119829231847 | success |
+| M10 Perf Gates (crdt) | 119829231855 | success |
+| Test (ubuntu-latest / lua54) | 119829231870 | success |
+| Test (ubuntu-latest / luajit) | 119829231992 | success |
+| M5 Perf Gates | 119829232171 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 119829232553 | success |
+| Docs consistency | 119829233784 | skipped |
+
+Tally (pr403-ci-0e67309-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` ran 12:39:59Z to 13:14:05Z, 34m06s, inside its 45-minute ceiling: 210 `running`
+  lines paired with 210 `test result: ok`, 5,202 passed, 65 ignored, seven more than at `0ff624e`
+  (the probe file's two probes and five shared readiness tests).
+- The five other test legs pair each `running` line with a `test result: ok`: 211 on each Ubuntu
+  leg with `crdt` (5,255 passed, 65 ignored), 211 on the no-crdt leg (4,691 passed, 51 ignored)
+  and 212 on each macOS leg (5,225 passed, 63 ignored). `WouldBlock` appears in no test leg's log.
+  #394's byte-ceiling row passed on all six legs and #395's E9.2 row on the five built with `crdt`;
+  #401's and #402's rows passed on all six.
+
+`Grammar fuzz` 39780181453 at `0e67309`, `success`, both arms deciding `run=false`: `ubsan`
+119829143500, `asan-strict` 119829143299.
+
+#### E10b's gates: listed, not tallied
+
+Four default-plan gates (`nice -n 19 scripts/gate`) on `e10b/test-only-fixes`, each five of six,
+`fmt`, `clippy`, `doc`, `build` and `diff-check` ok and no daemon surviving, each sweep pairing 219
+`running` lines with as many result lines, `WouldBlock` in none. Each sample is on its issue. None
+moves a count.
+
+- `20261022T095653Z-2300135` at `3d3c257`, `05-sweep` 5,632 / 2 / 65: #311's fragments on
+  `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (`4 passed; 1 failed; 0
+  ignored` in 126.60 s at result line 3577), commented on #311 (issuecomment-6338337107); and
+  `m8_7_acceptance::magit_push_gesture_pushes_to_configured_remote` (`async pump deadline exceeded
+  after 5s` at `tests/m8_7_acceptance.rs:52:9`, then `git push exited, but another process still
+  holds its output; waited 2.0 s, then left 1 reader thread blocked on it`, `15 passed; 1 failed; 0
+  ignored` in 7.42 s at line 6141): no row or issue named it, filed as **#401**, its first
+  occurrence.
+- `20261022T102250Z-2625500` at `6ebc022`, 5,633 / 1 / 65: #311 (128.39 s, line 3577), commented
+  (issuecomment-6338738008).
+- `20261022T104356Z-2855967` at `0e67309`, 5,631 / 3 / 65, a sweep the laptop suspended in, from
+  10:46:25Z to 12:20:52Z by the journal: #311 (127.07 s, line 3577), commented
+  (issuecomment-6340930207); and two rows of `e7h_grammar_gate_acceptance` together,
+  `e7h_a_planted_crash_is_found_and_fails_the_run` and
+  `e7h_a_crash_only_a_sequence_brings_back_is_found_and_fails_the_run`, each report reading
+  `"crashes=0"`, `"in_sequence=0"`, `"unconfirmed=1"` and ``**lua** crash `signal 6`, reproduced:
+  no``, `21 passed; 2 failed; 2 ignored` in 102.17 s at line 3705, a suite that ran after the thaw:
+  filed together as **#402**, its first occurrence. The second selector is #339's, whose fragment is
+  a hang over 1000 ms not reproduced, so it is not #339's by fragments; cross-referenced there
+  (issuecomment-6340929720).
+- `20261022T123831Z-3032334` at `0e67309`, the tip, 5,633 / 1 / 65: #311 (128.31 s, line 3577),
+  commented (issuecomment-6341747741).
+
+So, at E10b's close: `main` is green at `31001df` and PR #403 green at its head, and nothing moves by
+CI. #401 and #402 are filed on local first samples and stand at no CI occurrence; #311 met only local
+samples here and does not move. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
