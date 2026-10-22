@@ -41,6 +41,10 @@ struct Session {
     rx: mpsc::Receiver<InstanceMessage>,
     fid: FrontendId,
     token: Option<SessionToken>,
+    /// The snapshot of the buffer [`Session::open_note`] reached, when it
+    /// drained one before the cursor it returns at (#395); taken by
+    /// [`Session::note_snapshot`].
+    opened_snapshot: Option<(BufferId, Vec<u8>)>,
 }
 
 fn semantic_caps() -> FrontendCapabilities {
@@ -117,6 +121,7 @@ impl Session {
             rx,
             fid,
             token: None,
+            opened_snapshot: None,
         };
         if offer >= SESSION_MIN_VERSION {
             let token = session.wait("the SessionToken", |m| match m {
@@ -249,16 +254,51 @@ impl Session {
     /// Open the daemon's note through `e9.open` (the init's command over
     /// `pmacs.buffer.find_or_open`) in this session's window, and wait
     /// until the daemon's cursor says the window left `current`.
+    ///
+    /// The note's snapshot can come before that cursor (#395). The tick
+    /// that follows the window to the note writes the snapshot before the
+    /// tick's own `CursorByte`; a cursor comes first only when
+    /// `confirm_cursor_early` sends one at the `RET`, which it does only
+    /// if the last `DispatchIdle` this session was sent is `true`, and a
+    /// tick between `M-x` and `RET` sends `false`. So the note's snapshot,
+    /// when drained here, is kept for [`Session::note_snapshot`].
     fn open_note(&mut self, current: BufferId) -> BufferId {
         self.run_command("e9.open");
+        let mut drained = Vec::new();
         let note = self.wait("the window to reach the note", |m| match m {
             InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id != current => {
                 Some(*buffer_id)
             }
+            InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot,
+            } => {
+                drained.push((*buffer_id, crdt_snapshot.clone()));
+                None
+            }
             _ => None,
         });
+        self.opened_snapshot = drained.into_iter().rfind(|(id, _)| *id == note);
         self.declare_viewport(note);
         note
+    }
+
+    /// The snapshot of `note`, the buffer [`Session::open_note`] reached:
+    /// the one it drained before its cursor, or else the next the daemon
+    /// writes.
+    fn note_snapshot(&mut self, note: BufferId) -> Vec<u8> {
+        if let Some((id, kept)) = self.opened_snapshot.take()
+            && id == note
+        {
+            return kept;
+        }
+        self.wait("the note's snapshot", |m| match m {
+            InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot,
+            } if *buffer_id == note => Some(crdt_snapshot.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -811,13 +851,7 @@ fn e9_2_the_gpu_reconnects_with_a_banner_and_resumes_its_view() {
     let mut reader = Session::attach(&daemon, PROTOCOL_VERSION, None);
     let (scratch, _) = reader.where_am_i();
     reader.open_note(scratch);
-    let snapshot = reader.wait("the note's snapshot", |m| match m {
-        InstanceMessage::BufferSnapshot {
-            buffer_id,
-            crdt_snapshot,
-        } if buffer_id.raw() == note => Some(crdt_snapshot.clone()),
-        _ => None,
-    });
+    let snapshot = reader.note_snapshot(BufferId::from_raw(note));
     let mirror = pmacs::crdt::CrdtState::new(reader.fid.0).expect("CrdtState::new");
     mirror.import_snapshot(&snapshot).expect("import");
     let text = mirror.materialize_string();
