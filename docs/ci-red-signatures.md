@@ -7810,12 +7810,16 @@ moves a count.
   filed together as **#402**, its first occurrence. The second selector is #339's, whose fragment is
   a hang over 1000 ms not reproduced, so it is not #339's by fragments; cross-referenced there
   (issuecomment-6340929720).
-- `20261022T123831Z-3032334` at `0e67309`, the tip, 5,633 / 1 / 65: #311 (128.31 s, line 3577),
-  commented (issuecomment-6341747741).
+- `20261022T123831Z-3032334` at `0e67309`, the tip, 5,633 / 1 / 65: **#291's** fragments on the same
+  row (`HLS reports the type error; store []`, the trace reaching `LSP:ready·setting` and never
+  `LSP:ready·processi`, 128.31 s, line 3577), commented on #291 (issuecomment-6341998630). This line
+  first read "#311", and the comment on #311 (issuecomment-6341747741) quoted a `Could not find
+  module ‘Prelude’` store the log does not contain; corrected in place on 2026-10-22, the comment
+  with it.
 
 So, at E10b's close: `main` is green at `31001df` and PR #403 green at its head, and nothing moves by
-CI. #401 and #402 are filed on local first samples and stand at no CI occurrence; #311 met only local
-samples here and does not move. Every other count above stands.
+CI. #401 and #402 are filed on local first samples and stand at no CI occurrence; #291 and #311 met
+only local samples here and do not move. Every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
