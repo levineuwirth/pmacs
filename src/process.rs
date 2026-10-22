@@ -4222,6 +4222,26 @@ mod tests {
             })
     }
 
+    /// Poll [`byte_channel_len`] every 10 ms until `done` accepts the
+    /// length or `within` has passed, and return the last length read.
+    /// It never ticks: a tick drains the channel, which is what the M6.2
+    /// rows watch the supervisor not do.
+    fn byte_channel_len_when(
+        sup: &ProcessSupervisor,
+        id: ProcessId,
+        within: Duration,
+        done: impl Fn(usize) -> bool,
+    ) -> usize {
+        let deadline = Instant::now() + within;
+        loop {
+            let len = byte_channel_len(sup, id);
+            if done(len) || Instant::now() >= deadline {
+                return len;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// T M6.2 acceptance bullet 1: the per-generation byte channel
     /// caps in-flight bytes at the spec's 1 MiB ceiling, so a
     /// saturating producer stalls in `write` rather than ballooning
@@ -4239,6 +4259,9 @@ mod tests {
         // rather than fitting the entire payload in the un-drained
         // buffers.
         const TOTAL: usize = 10 * 1024 * 1024;
+        // How long the producer may take to put its first chunk in the
+        // channel: a deadline for its start, never a measure of it.
+        const FIRST_CHUNK_WITHIN: Duration = Duration::from_secs(10);
         let mut sup = ProcessSupervisor::new();
         let mut spec = ProcessSpec::new("byte-flood", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), format!("head -c {TOTAL} /dev/zero")];
@@ -4257,7 +4280,18 @@ mod tests {
 
         // Pause draining: no `tick()` calls. The reader thread
         // saturates the bounded channel, the kernel pipe fills, the
-        // producer stalls in `write`.
+        // producer stalls in `write`. The 200 ms window opens once the
+        // producer is known to be writing, at its first chunk in the
+        // channel, waited for without ticking (#394): a producer the
+        // scheduler has not yet run (the shell, then `head`) is not an
+        // empty channel, and (b) still reads a producer that had the
+        // whole window to write its payload had nothing held it back.
+        let first = byte_channel_len_when(&sup, id, FIRST_CHUNK_WITHIN, |len| len > 0);
+        assert!(
+            first > 0,
+            "producing {TOTAL} bytes without draining, no chunk reached the \
+             byte channel within {FIRST_CHUNK_WITHIN:?}; its length is {first}"
+        );
         std::thread::sleep(Duration::from_millis(200));
 
         // (a) bounded channel never exceeds the slot cap.
@@ -4266,11 +4300,6 @@ mod tests {
             in_flight <= BYTE_CHUNK_CHANNEL_CAP,
             "byte channel must be bounded by {BYTE_CHUNK_CHANNEL_CAP} \
              slots; observed {in_flight}"
-        );
-        assert!(
-            in_flight > 0,
-            "after 200 ms producing {TOTAL} bytes without draining, \
-             the channel should have data; got {in_flight}"
         );
 
         // (b) the producer is still alive --- having NOT delivered
@@ -4455,12 +4484,9 @@ mod tests {
             // Wait for the bounded channel to saturate. We are NOT
             // ticking, so once the channel is full the reader
             // thread is blocked in `send_timeout`.
-            let saturate_deadline = Instant::now() + Duration::from_secs(3);
-            while Instant::now() < saturate_deadline
-                && byte_channel_len(&sup, id) < BYTE_CHUNK_CHANNEL_CAP
-            {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            byte_channel_len_when(&sup, id, Duration::from_secs(3), |len| {
+                len >= BYTE_CHUNK_CHANNEL_CAP
+            });
             assert_eq!(
                 byte_channel_len(&sup, id),
                 BYTE_CHUNK_CHANNEL_CAP,
