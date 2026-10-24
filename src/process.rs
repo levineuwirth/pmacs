@@ -4246,14 +4246,12 @@ mod tests {
     /// caps in-flight bytes at the spec's 1 MiB ceiling, so a
     /// saturating producer stalls in `write` rather than ballooning
     /// supervisor memory. Asserts (a) the bounded channel never
-    /// exceeds its slot cap, (b) the producer is still alive after a
-    /// pause-drain window (was actually backpressured, not just very
-    /// slow), and (c) every byte is delivered once draining resumes.
+    /// exceeds its slot cap, (b) the producer has not finished its
+    /// write after a pause-drain window (was actually backpressured,
+    /// not just very slow), read from a marker its shell touches after
+    /// `head`, and (c) every byte is delivered once draining resumes.
     #[test]
     fn m6_2_pty_streaming_respects_byte_ceiling() {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-
         // 10 MiB target: comfortably more than (1 MiB channel + 64
         // KiB kernel pipe), so the producer must stall in write
         // rather than fitting the entire payload in the un-drained
@@ -4262,9 +4260,16 @@ mod tests {
         // How long the producer may take to put its first chunk in the
         // channel: a deadline for its start, never a measure of it.
         const FIRST_CHUNK_WITHIN: Duration = Duration::from_secs(10);
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The producer's own word that its write returned: its shell
+        // touches this once `head` has written every byte.
+        let finished = dir.path().join("finished");
         let mut sup = ProcessSupervisor::new();
         let mut spec = ProcessSpec::new("byte-flood", "/bin/sh", "test process");
-        spec.args = vec!["-c".into(), format!("head -c {TOTAL} /dev/zero")];
+        spec.args = vec![
+            "-c".into(),
+            format!("head -c {TOTAL} /dev/zero; touch {}", finished.display()),
+        ];
         let id = sup.spawn(spec).expect("spawn");
 
         // Read pid synchronously --- spawn → start_generation
@@ -4284,8 +4289,9 @@ mod tests {
         // producer is known to be writing, at its first chunk in the
         // channel, waited for without ticking (#394): a producer the
         // scheduler has not yet run (the shell, then `head`) is not an
-        // empty channel, and (b) still reads a producer that had the
-        // whole window to write its payload had nothing held it back.
+        // empty channel. Opened there, a producer nothing held back has
+        // the whole window to write its payload and touch `finished`,
+        // which is what (b) reads.
         let first = byte_channel_len_when(&sup, id, FIRST_CHUNK_WITHIN, |len| len > 0);
         assert!(
             first > 0,
@@ -4302,21 +4308,19 @@ mod tests {
              slots; observed {in_flight}"
         );
 
-        // (b) the producer is still alive --- having NOT delivered
-        // 10 MiB through a ~1 MiB ceiling means it is stalled in
-        // write. We use an OS-level liveness check (kill(0)) rather
-        // than the supervisor's cached state, since the cached
-        // state is only updated by `tick()` and ticking would drain
-        // the channel.
-        let live = kill(
-            Pid::from_raw(i32::try_from(pid).expect("pid fits i32")),
-            None,
-        )
-        .is_ok();
+        // (b) the producer has not finished its write --- having NOT
+        // delivered 10 MiB through a ~1 MiB ceiling means it is stalled
+        // in write. Read from the producer, not from its pid: nothing
+        // reaps it until a tick does (`poll_one`'s `try_wait`), and the
+        // kernel answers `kill(pid, 0)` for an exited, unreaped child,
+        // so a pid reading passed a producer that had already finished
+        // (E10b review 1). Ticking would drain the channel.
         assert!(
-            live,
-            "producer (pid {pid}) should still be alive (stalled in write); \
-             without backpressure, head would have written 10 MiB and exited"
+            !finished.exists(),
+            "producer (pid {pid}) should still be stalled in write; without \
+             backpressure, head would have written 10 MiB and its shell \
+             touched {}",
+            finished.display()
         );
 
         // (c) drain to completion; verify exact byte count is
@@ -4335,6 +4339,19 @@ mod tests {
         assert_eq!(
             total, TOTAL,
             "expected {TOTAL} bytes after backpressure releases; got {total}"
+        );
+
+        // (b)'s control: drained, the write returns and the shell says
+        // so, so the marker (b) found absent is one this producer writes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !finished.exists() && Instant::now() < deadline {
+            sup.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            finished.exists(),
+            "every byte delivered, yet the producer's shell never touched {}",
+            finished.display()
         );
     }
 
