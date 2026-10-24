@@ -264,6 +264,14 @@ impl Session {
     /// when drained here, is kept for [`Session::note_snapshot`].
     fn open_note(&mut self, current: BufferId) -> BufferId {
         self.run_command("e9.open");
+        self.reach_note(current)
+    }
+
+    /// The half of [`Session::open_note`] after its keys: wait until the
+    /// daemon's cursor says the window left `current`, keeping the note's
+    /// snapshot drained on the way. A row that sends the keys itself, in
+    /// an order it holds, calls this (E10b review 1).
+    fn reach_note(&mut self, current: BufferId) -> BufferId {
         let mut drained = Vec::new();
         let note = self.wait("the window to reach the note", |m| match m {
             InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id != current => {
@@ -300,6 +308,31 @@ impl Session {
             _ => None,
         })
     }
+}
+
+/// E10b review 1 --- #395's order, held: a fresh session's `RET` goes only
+/// after the daemon has said the `M-x` dispatch is not idle, so
+/// `confirm_cursor_early` sends no cursor at it and the tick writes the
+/// note's snapshot before its own cursor, the snapshot
+/// [`Session::reach_note`]'s wait drains. `note_snapshot` still hands the
+/// note over: E9.2's tail without the GPU, in the order that lost it at
+/// `3d3c257`.
+#[test]
+fn e10b_review1_the_note_snapshot_survives_the_order_its_wait_drains() {
+    let daemon = daemon_with_note(NO_REOPEN);
+    let mut reader = Session::attach(&daemon, PROTOCOL_VERSION, None);
+    let (scratch, _) = reader.where_am_i();
+    reader.key(Key::Char('x'), Modifiers::ALT);
+    reader.wait("the daemon to say the M-x dispatch is not idle", |m| {
+        matches!(m, InstanceMessage::DispatchIdle { idle: false }).then_some(())
+    });
+    reader.type_str("e9.open");
+    reader.key(Key::Enter, Modifiers::NONE);
+    let note = reader.reach_note(scratch);
+    let snapshot = reader.note_snapshot(note);
+    let mirror = pmacs::crdt::CrdtState::new(reader.fid.0).expect("CrdtState::new");
+    mirror.import_snapshot(&snapshot).expect("import");
+    assert_eq!(mirror.materialize_string(), "one\ntwo\n");
 }
 
 /// A daemon whose init defines `e9.open`, opening the note written
