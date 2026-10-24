@@ -7821,6 +7821,128 @@ So, at E10b's close: `main` is green at `31001df` and PR #403 green at its head,
 CI. #401 and #402 are filed on local first samples and stand at no CI occurrence; #291 and #311 met
 only local samples here and do not move. Every other count above stands.
 
+### E10b fix round 1: PR #403 green at `c45ae5a`, `main` green at `5e5cdb5` and `d2f2238`, the gates' samples listed, #404 filed
+
+Recorded 2026-10-24 at E10b's fix round 1, PR #403 (three more signed commits on `0e67309`: E10b
+review 1's byte-ceiling probes, the byte-ceiling row's liveness reading taken from a marker its
+producer writes, and the review's E9 patch, a committed row holding #395's order). Every run was
+read from the jobs endpoint by conclusion, and every test leg of the code-bearing run through its
+own log, fetched with escape sequences allowed and stripped, each `running` line paired with its
+own result line. The gates were read from their log directories under
+`~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/`. Every run id, job id and gate log below
+was searched for in this file before it was written, and none was here. Nothing was rerun.
+
+#### `main` at `5e5cdb5` and `d2f2238`, E10b's close and its correction: green
+
+`5e5cdb5` is the section above as first written and `d2f2238` its correction (the tip gate's HLS
+sample #291's, not #311's); each changes this file alone.
+
+`CI` 39786466006 at `5e5cdb5`, attempt 1 of 1, `push`, created 2026-10-22T13:23:54Z and completed
+13:26:15Z (the API's `updated_at`): `success`, every test leg skipped, `Docs consistency`
+119850975152 among the six.
+
+Tally (main-ci-5e5cdb5): 15 = 6 + 9.
+
+`Grammar fuzz` 39786465813 at `5e5cdb5`, `success`, both arms deciding `run=false`: `ubsan`
+119850884517, `asan-strict` 119850883796.
+
+`CI` 39788485825 at `d2f2238`, attempt 1 of 1, `push`, created 2026-10-22T13:37:32Z and completed
+13:39:25Z: `success`, every test leg skipped, `Docs consistency` 119857961474 among the six.
+
+Tally (main-ci-d2f2238): 15 = 6 + 9.
+
+`Grammar fuzz` 39788485817 at `d2f2238`, `success`, both arms deciding `run=false`: `ubsan`
+119857866537, `asan-strict` 119857866794.
+
+#### PR #403's `CI` 40107778782 at `c45ae5a`: green
+
+`CI` 40107778782, attempt 1 of 1, `pull_request`, testing the merge `31f213a` into `d2f2238`,
+created 2026-10-24T15:36:53Z and completed 16:11:14Z (the API's `updated_at`): `success`.
+
+Tally (pr403-ci-c45ae5a): 19 = 18 + 1.
+
+Tally (pr403-ci-c45ae5a-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 120912941988 | success |
+| Commit attribution (D9) | 120912942050 | success |
+| Lint (lua54) | 120912942079 | success |
+| Changed paths | 120912942126 | success |
+| Lint (luajit) | 120912942216 | success |
+| M4 Perf Gates | 120912986699 | success |
+| Test (crdt) | 120912986727 | success |
+| M1 Acceptance Gates | 120912986737 | success |
+| Test (macos-latest / luajit) | 120912986745 | success |
+| GPU Render (headless) | 120912986751 | success |
+| Perf budgets (debug) | 120912986754 | success |
+| Test (ubuntu-latest / luajit) | 120912986766 | success |
+| Test (macos-latest / lua54) | 120912986782 | success |
+| M6 Perf Gates | 120912986814 | success |
+| M5 Perf Gates | 120912986826 | success |
+| M10 Perf Gates (crdt) | 120912986829 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 120912986856 | success |
+| Test (ubuntu-latest / lua54) | 120912986907 | success |
+| Docs consistency | 120912988088 | skipped |
+
+Tally (pr403-ci-c45ae5a-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` ran 15:37:09Z to 16:11:13Z, 34m04s, inside its 45-minute ceiling: 211 `running`
+  lines paired with 211 `test result: ok`, 5,210 passed, 65 ignored, eight more than at `0e67309`
+  (the new probe file's two probes and five shared readiness tests, and the E9 forced-order row).
+- The five other test legs pair each `running` line with a `test result: ok`: 212 on each Ubuntu
+  leg with `crdt` (5,263 passed, 65 ignored), 212 on the no-crdt leg (4,698 passed, 51 ignored,
+  seven more, the E9 suite compiling to nothing there) and 213 on each macOS leg (5,233 passed, 63
+  ignored). `WouldBlock` appears in no test leg's log. The byte-ceiling row and both new probes
+  passed on all six legs; the E9 forced-order row and E9.2's on the five built with `crdt`; #404's
+  row on the four Linux legs built with `crdt` (compiled for Linux alone).
+
+`Grammar fuzz` 40107778778 at `c45ae5a`, `success`, both arms deciding `run=false`: `ubsan`
+120912942068, `asan-strict` 120912941973.
+
+#### E10b review 1's gate, and a gate found in the target: listed, not tallied
+
+Two default-plan gates at `0e67309`, each five of six on the sweep alone, `fmt`, `clippy`, `doc`,
+`build` and `diff-check` ending clean in their logs, each sweep pairing 219 `running` lines with
+as many result lines, `WouldBlock` in none. Each sample is on its issue. None moves a count.
+
+- `20261023T213213Z-24836`, E10b review 1's own, no daemon surviving (the review's record),
+  `05-sweep` 5,633 / 1 / 65: #311's fragments on
+  `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (`4 passed; 1 failed; 0
+  ignored` in 126.30 s at result line 3577), commented on #311 (issuecomment-6386175435).
+- `20261023T172159Z-2471370`, found in the target by review 1 and named in no record before it,
+  at `0e67309` by the worktree's reflog; its survivor check's verdict went to an output nobody
+  kept. `05-sweep` 5,632 / 2 / 65: #311 on the same row (129.74 s, line 3610), on the same
+  comment; and #316's under the template reading on
+  `e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer` (`kill 2:
+  nothing held the switch's follow-up parse`, `busy=false`, `tree=true`, `unit=pid_…`,
+  `parse:killed`, `10 passed; 1 failed; 0 ignored` in 14.62 s at line 3950), commented on #316
+  (issuecomment-6386175803).
+
+#### E10b fix round 1's gate and hand runs: listed, not tallied, #404 filed
+
+- `20261024T153639Z-103802` at `c45ae5a`, the default plan: five of six, `fmt`, `clippy`, `doc`,
+  `build` and `diff-check` ok, no daemon survived (identified by environ); `05-sweep` 5,639 / 3 /
+  65, 220 `running` lines paired with 220 result lines, `WouldBlock` in none. #311 on the HLS row
+  (145.11 s, line 3590), commented (issuecomment-6386290929); #316's under the template reading
+  (`kill 2`, `busy=true`, 17.38 s, line 3930), commented (issuecomment-6386291359); and
+  `e9_session_acceptance::write_failure_drain::e9_fr4_a_failed_write_drains_input_until_the_deadline_and_no_later`
+  (`nothing was written to the frontend after its failed write`, `left: 2`, `right: 1`, the daemon
+  logging `BufferSnapshot publish for BufferId(3) to FrontendId(3) failed` before `write failed
+  for FrontendId(3) in dispatcher`, `27 passed; 1 failed; 0 ignored` in 9.30 s at line 4352):
+  **#404**'s second occurrence, commented (issuecomment-6386338656).
+- Hand runs in the gate's environment. #404's first occurrence, a direct run of the E9 suite at
+  `c45ae5a`'s tree, `27 passed; 1 failed` in 10.15 s, no row or issue naming the selector: filed
+  as **#404**. Then an A/B on #404 (issuecomment-6386338656): two builds of the suite started six at
+  a time, fifteen batches; the row failed in 6 of 45 copies at `0e67309`'s suite and 10 of 45 at
+  `c45ae5a`'s, every one on #404's fragments, beside
+  `e9_5_an_oversize_snapshot_is_refused_with_a_visible_status_not_skipped` timing out at its 10 s
+  wait in 86 of the 90 under that load, the instrument's and not filed.
+
+So, at E10b's fix round 1: `main` is green at `5e5cdb5` and `d2f2238` and PR #403 green at its new
+head, and nothing moves by CI. #404 is filed on local samples and stands at no CI occurrence; #311
+and #316 met only local samples here and do not move. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
