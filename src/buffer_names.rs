@@ -12,81 +12,214 @@
 //! a terminal's) is never rewritten here: it is *reserved*, and a derived
 //! name that would equal it takes more of its path instead. Only a name
 //! no amount of path can tell apart (one path held twice, or an explicit
-//! name equal to a whole path) takes a `<N>` suffix, the registry's
-//! order deciding which.
+//! name equal to a whole path) takes a `<N>` suffix, the holders' order
+//! deciding which.
 //!
-//! The registry calls [`derive_names`] whenever the set of names can
-//! have changed ([`crate::buffer_registry::BufferRegistry::refresh_names`]).
+//! The rule is two functions, [`name_depth`] (which of a path's names it
+//! is shown by) and [`name_holders`] (the names of the buffers holding
+//! one path), which [`derive_names`] applies to a set at once and the
+//! registry ([`crate::buffer_registry::BufferRegistry`]) applies one path
+//! at a time: a path's name depends only on which of its names other
+//! paths share and which are reserved, so an event renames the paths
+//! whose names it shares and leaves the rest of the session alone (E10c
+//! review 1's Medium 1).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::hash::BuildHasher;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
-/// One buffer to name: the path its name derives from, and whether that
-/// path is the directory it lists (named with a trailing `/`) rather
-/// than the file it holds.
-#[derive(Clone, Copy, Debug)]
-pub struct NameRequest<'a> {
-    /// The buffer's normalized path.
-    pub path: &'a Path,
+/// A path split once into every name it can be shown by: its basename,
+/// then each longer run of trailing components written forward with `/`
+/// between, then the whole path from the root; a directory's each end in
+/// `/`. The registry builds one when a buffer is named by a path and
+/// keeps it until the path changes, so naming renders nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamePath {
+    /// The path the names are of.
+    path: PathBuf,
     /// True for a directory listing (dired), false for a file.
-    pub directory: bool,
+    directory: bool,
+    /// `names[0]` the basename, `names[k]` the last `k + 1` components,
+    /// the last of them the whole path.
+    names: Vec<String>,
 }
 
-/// The names of `requests`, in order: each the fewest trailing
-/// components of its path that no other request's name and no
-/// `reserved` name shares, written forward with `/` between, a
-/// directory's ending in `/`.
-///
-/// A name grows one component at a time while it collides, which ends
-/// at the smallest suffix telling it apart: two names with one basename
-/// share every shorter suffix once they share a longer one, so growing
-/// both never passes the first suffix that differs. A path that runs out
-/// of components is named by the whole of it, leading `/` included.
-#[must_use]
-pub fn derive_names<S: BuildHasher>(
-    requests: &[NameRequest<'_>],
-    reserved: &HashSet<&str, S>,
-) -> Vec<String> {
-    // One key per distinct path: a path held twice is one name and a
-    // suffix, never a reason to grow.
-    let mut keys: Vec<(Vec<String>, bool)> = Vec::new();
-    let mut index: HashMap<(Vec<String>, bool), usize> = HashMap::new();
-    let key_of: Vec<usize> = requests
-        .iter()
-        .map(|request| {
-            let key = (components(request.path), request.directory);
-            *index.entry(key.clone()).or_insert_with(|| {
-                keys.push(key);
-                keys.len() - 1
-            })
-        })
-        .collect();
-    let mut depth = vec![1usize; keys.len()];
-    let names = loop {
-        let names: Vec<String> = keys
-            .iter()
-            .zip(&depth)
-            .map(|((parts, directory), &depth)| render(parts, depth, *directory))
+impl NamePath {
+    /// Split `path`, a normalized buffer path, into its names; a
+    /// `directory` is the one a listing shows (named `proj/`).
+    #[must_use]
+    pub fn new(path: &Path, directory: bool) -> Self {
+        let parts = components(path);
+        let names = (1..=parts.len() + 1)
+            .map(|depth| render(&parts, depth, directory))
             .collect();
-        let mut count: HashMap<&str, usize> = HashMap::new();
-        for name in &names {
-            *count.entry(name.as_str()).or_default() += 1;
+        Self {
+            path: path.to_path_buf(),
+            directory,
+            names,
         }
-        let mut grew = false;
-        for (i, name) in names.iter().enumerate() {
-            let collides = count[name.as_str()] > 1 || reserved.contains(name.as_str());
-            if collides && depth[i] <= keys[i].0.len() {
-                depth[i] += 1;
-                grew = true;
+    }
+
+    /// True iff this is the split of `path` as a directory or a file.
+    #[must_use]
+    pub fn is_of(&self, path: &Path, directory: bool) -> bool {
+        self.directory == directory && self.path == path
+    }
+
+    /// Every name this path can be shown by, shortest first.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The group this path's names fall in, its basename (`a.rs`,
+    /// `proj/`): no name of a path outside the group can equal one of
+    /// its own but by a `<N>` suffix ([`groups_of_name`]).
+    #[must_use]
+    pub fn group(&self) -> &str {
+        &self.names[0]
+    }
+
+    /// The whole path as a name, which tells this path from every other.
+    #[must_use]
+    pub fn whole(&self) -> &str {
+        self.names.last().expect("a path has at least one name")
+    }
+}
+
+/// Which of `path`'s names it is shown by, as an index into
+/// [`NamePath::names`]: the first that no other path has among its own
+/// (`shared` false) and no reserved name holds (`reserved` false), or
+/// the whole path when every one is shared or reserved.
+///
+/// This is where growing every colliding name a component at a time
+/// arrives: two paths that share a name share every shorter one, so they
+/// grow in step and part at the first name that tells them apart, and a
+/// reserved name lengthens only the name equal to it. Computed this way
+/// a path's name reads only its own names, so it changes only when one
+/// of them becomes shared, unshared, reserved or free.
+#[must_use]
+pub fn name_depth(
+    path: &NamePath,
+    shared: impl Fn(&str) -> bool,
+    reserved: impl Fn(&str) -> bool,
+) -> usize {
+    path.names
+        .iter()
+        .position(|name| !shared(name) && !reserved(name))
+        .unwrap_or(path.names.len() - 1)
+}
+
+/// The names of the `count` buffers holding one path whose name is
+/// `base`, in their order: the first takes `base` unless a reserved name
+/// holds it (`base_free` false), and every other takes the lowest `<N>`,
+/// from 2, that `taken` does not refuse. `taken` answers for a name some
+/// buffer other than these holds. A path's name is never another path's
+/// ([`name_depth`] gives each a name of its own), so `base` needs no
+/// such check and a `<N>` meets only reserved names and names of paths
+/// that end in a `<N>` of their own.
+pub fn name_holders<'a>(
+    base: &'a str,
+    count: usize,
+    base_free: bool,
+    taken: impl Fn(&str) -> bool,
+) -> Vec<Cow<'a, str>> {
+    let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(count);
+    let mut n = 2usize;
+    for i in 0..count {
+        if i == 0 && base_free {
+            out.push(Cow::Borrowed(base));
+            continue;
+        }
+        loop {
+            let candidate = format!("{base}<{n}>");
+            n += 1;
+            if !taken(&candidate) {
+                out.push(Cow::Owned(candidate));
+                break;
             }
         }
-        if !grew {
-            break names;
+    }
+    out
+}
+
+/// One buffer to name: the path its name derives from.
+#[derive(Clone, Copy, Debug)]
+pub struct NameRequest<'a> {
+    /// The buffer's path, split ([`NamePath::new`]).
+    pub path: &'a NamePath,
+}
+
+/// The names of `requests` at once, in order: each the fewest trailing
+/// components of its path that no other request's path shares and no
+/// `reserved` name holds, written forward with `/` between, a
+/// directory's ending in `/` ([`name_depth`]), and the buffers sharing
+/// one path told apart by `<N>` ([`name_holders`]). A path that runs out
+/// of components is named by the whole of it, leading `/` included.
+#[must_use]
+pub fn derive_names<'a>(
+    requests: &[NameRequest<'a>],
+    reserved: impl Fn(&str) -> bool,
+) -> Vec<Cow<'a, str>> {
+    // One key per distinct path: a path held twice is one name and a
+    // suffix, never a reason to grow.
+    let mut keys: Vec<&'a NamePath> = Vec::new();
+    let mut index: HashMap<&'a str, usize> = HashMap::new();
+    let mut holders: Vec<Vec<usize>> = Vec::new();
+    for (i, request) in requests.iter().enumerate() {
+        let k = *index.entry(request.path.whole()).or_insert_with(|| {
+            keys.push(request.path);
+            holders.push(Vec::new());
+            keys.len() - 1
+        });
+        holders[k].push(i);
+    }
+    let mut shared: HashMap<&str, usize> = HashMap::new();
+    for path in &keys {
+        for name in &path.names {
+            *shared.entry(name).or_default() += 1;
         }
-    };
-    let per_request: Vec<String> = key_of.iter().map(|&k| names[k].clone()).collect();
-    suffix_total_collisions(&per_request, reserved)
+    }
+    let bases: Vec<&'a str> = keys
+        .iter()
+        .map(|path| path.names[name_depth(path, |n| shared[n] > 1, &reserved)].as_str())
+        .collect();
+    let all_bases: HashSet<&str> = bases.iter().copied().collect();
+    let mut out: Vec<Option<Cow<'a, str>>> = vec![None; requests.len()];
+    for (k, members) in holders.iter().enumerate() {
+        let names = name_holders(bases[k], members.len(), !reserved(bases[k]), |n| {
+            reserved(n) || all_bases.contains(n)
+        });
+        for (&i, name) in members.iter().zip(names) {
+            out[i] = Some(name);
+        }
+    }
+    out.into_iter()
+        .map(|name| name.expect("every request is named"))
+        .collect()
+}
+
+/// The groups `name` can meet: the group of its last component, and,
+/// for a name ending in a `<N>` suffix, the group of the name before it
+/// (`a.rs<2>` is a file of that name or a second `a.rs`).
+pub fn groups_of_name(name: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(group_of(name)).chain(without_suffix(name).map(group_of))
+}
+
+/// The basename a name ends with, as a [`NamePath::group`] writes it.
+fn group_of(name: &str) -> &str {
+    let body = name.strip_suffix('/').unwrap_or(name);
+    body.rfind('/').map_or(name, |slash| &name[slash + 1..])
+}
+
+/// `name` without its `<N>` suffix, if it ends with one: the name whose
+/// `<N>` it may be.
+#[must_use]
+pub fn without_suffix(name: &str) -> Option<&str> {
+    let body = name.strip_suffix('>')?;
+    let open = body.rfind('<')?;
+    let digits = &body[open + 1..];
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(&name[..open])
 }
 
 /// The normal components of `path`, each as text.
@@ -113,63 +246,28 @@ fn render(parts: &[String], depth: usize, directory: bool) -> String {
     name
 }
 
-/// Give a `<N>` suffix to every name still shared after growing, or
-/// still reserved: the first holder of an unreserved name keeps it, and
-/// the rest take the lowest free `<N>`, from 2, in order.
-fn suffix_total_collisions<S: BuildHasher>(
-    names: &[String],
-    reserved: &HashSet<&str, S>,
-) -> Vec<String> {
-    let mut taken: HashSet<String> = reserved.iter().map(|&s| s.to_owned()).collect();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    for name in names {
-        *seen.entry(name.clone()).or_default() += 1;
-    }
-    let mut out = vec![String::new(); names.len()];
-    let mut pending = Vec::new();
-    for (i, name) in names.iter().enumerate() {
-        if seen[name] == 1 && !taken.contains(name) {
-            taken.insert(name.clone());
-            out[i].clone_from(name);
-        } else {
-            pending.push(i);
-        }
-    }
-    for i in pending {
-        let base = &names[i];
-        if !taken.contains(base) {
-            taken.insert(base.clone());
-            out[i].clone_from(base);
-            continue;
-        }
-        let mut n = 2usize;
-        loop {
-            let candidate = format!("{base}<{n}>");
-            if taken.insert(candidate.clone()) {
-                out[i] = candidate;
-                break;
-            }
-            n += 1;
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    fn split(paths: &[&str], directory: bool) -> Vec<NamePath> {
+        paths
+            .iter()
+            .map(|p| NamePath::new(Path::new(p), directory))
+            .collect()
+    }
+
+    fn name_all(paths: &[NamePath], reserved: &HashSet<&str>) -> Vec<String> {
+        let requests: Vec<NameRequest<'_>> =
+            paths.iter().map(|path| NameRequest { path }).collect();
+        derive_names(&requests, |name| reserved.contains(name))
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect()
+    }
 
     fn files(paths: &[&str]) -> Vec<String> {
-        let owned: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        let requests: Vec<NameRequest<'_>> = owned
-            .iter()
-            .map(|p| NameRequest {
-                path: p,
-                directory: false,
-            })
-            .collect();
-        derive_names(&requests, &HashSet::new())
+        name_all(&split(paths, false), &HashSet::new())
     }
 
     #[test]
@@ -205,47 +303,55 @@ mod tests {
 
     #[test]
     fn a_directory_ends_in_a_slash_and_never_meets_a_file() {
-        let proj_a = PathBuf::from("/x/a/proj");
-        let proj_b = PathBuf::from("/x/b/proj");
-        let file = PathBuf::from("/x/a/proj.d/proj");
-        let root = PathBuf::from("/");
-        let requests = [
-            NameRequest {
-                path: &proj_a,
-                directory: true,
-            },
-            NameRequest {
-                path: &proj_b,
-                directory: true,
-            },
-            NameRequest {
-                path: &file,
-                directory: false,
-            },
-            NameRequest {
-                path: &root,
-                directory: true,
-            },
-        ];
+        let mut paths = split(&["/x/a/proj", "/x/b/proj"], true);
+        paths.extend(split(&["/x/a/proj.d/proj"], false));
+        paths.extend(split(&["/"], true));
         assert_eq!(
-            derive_names(&requests, &HashSet::new()),
+            name_all(&paths, &HashSet::new()),
             ["a/proj/", "b/proj/", "proj", "/"]
         );
     }
 
     #[test]
     fn a_reserved_name_moves_the_derived_one_and_keeps_its_own() {
-        let a = PathBuf::from("/p/src/a.rs");
-        let requests = [NameRequest {
-            path: &a,
-            directory: false,
-        }];
+        let paths = split(&["/p/src/a.rs"], false);
         let reserved: HashSet<&str> = ["a.rs", "*scratch*"].into_iter().collect();
-        assert_eq!(derive_names(&requests, &reserved), ["src/a.rs"]);
+        assert_eq!(name_all(&paths, &reserved), ["src/a.rs"]);
         let whole: HashSet<&str> = ["a.rs", "src/a.rs", "p/src/a.rs", "/p/src/a.rs"]
             .into_iter()
             .collect();
-        assert_eq!(derive_names(&requests, &whole), ["/p/src/a.rs<2>"]);
+        assert_eq!(name_all(&paths, &whole), ["/p/src/a.rs<2>"]);
+    }
+
+    /// A path's group is its basename, and a name can meet only the
+    /// group of its last component and, through a `<N>` suffix, the
+    /// group of the name before it: what lets the registry rename within
+    /// a group and look across one only for a `<N>`.
+    #[test]
+    fn a_name_meets_only_the_groups_of_its_basename() {
+        let [file, listing, root] = [
+            NamePath::new(Path::new("/p/src/a.rs"), false),
+            NamePath::new(Path::new("/p/proj"), true),
+            NamePath::new(Path::new("/"), true),
+        ];
+        assert_eq!(
+            [file.group(), listing.group(), root.group()],
+            ["a.rs", "proj/", "/"]
+        );
+        for (name, groups) in [
+            ("a.rs", vec!["a.rs"]),
+            ("src/a.rs", vec!["a.rs"]),
+            ("/p/src/a.rs", vec!["a.rs"]),
+            ("a/proj/", vec!["proj/"]),
+            ("/", vec!["/"]),
+            ("a.rs<2>", vec!["a.rs<2>", "a.rs"]),
+            ("src/a.rs<12>", vec!["a.rs<12>", "a.rs"]),
+            ("proj/<2>", vec!["<2>", "proj/"]),
+            ("*scratch*", vec!["*scratch*"]),
+            ("a.rs<x>", vec!["a.rs<x>"]),
+        ] {
+            assert_eq!(groups_of_name(name).collect::<Vec<_>>(), groups, "{name}");
+        }
     }
 
     /// The definition, checked against every subset of a crowded set of
@@ -293,5 +399,97 @@ mod tests {
             subsets += 1;
         }
         assert_eq!(subsets, 255);
+    }
+
+    /// The names as `0adb83e` grew them, every colliding name one
+    /// component at a time until none collides or each has run out:
+    /// kept as the reference [`name_depth`] must agree with.
+    fn grown(paths: &[NamePath], reserved: &HashSet<&str>) -> Vec<String> {
+        let mut depth = vec![0usize; paths.len()];
+        loop {
+            let mut count: HashMap<&str, usize> = HashMap::new();
+            for (path, &d) in paths.iter().zip(&depth) {
+                *count.entry(path.names[d].as_str()).or_default() += 1;
+            }
+            let mut grew = false;
+            for (path, d) in paths.iter().zip(depth.iter_mut()) {
+                let name = path.names[*d].as_str();
+                if (count[name] > 1 || reserved.contains(name)) && *d + 1 < path.names.len() {
+                    *d += 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                return paths
+                    .iter()
+                    .zip(&depth)
+                    .map(|(p, &d)| p.names[d].clone())
+                    .collect();
+            }
+        }
+    }
+
+    /// The first name no other path shares and nothing reserves is the
+    /// name growing reaches, over seeded sets of crowded distinct paths,
+    /// files and listings, with reserved names among their names.
+    #[test]
+    fn the_first_free_name_is_the_name_growing_reaches() {
+        const POOL: [&str; 10] = [
+            "/w/src/a.rs",
+            "/w/tests/a.rs",
+            "/w/x/src/a.rs",
+            "/v/x/src/a.rs",
+            "/a.rs",
+            "/x/a.rs",
+            "/w/a.rs",
+            "/w/proj",
+            "/v/proj",
+            "/proj",
+        ];
+        const RESERVED: [&str; 8] = [
+            "a.rs",
+            "src/a.rs",
+            "x/src/a.rs",
+            "/a.rs",
+            "proj/",
+            "w/a.rs",
+            "proj",
+            "x/a.rs",
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let mask = next();
+            let mut paths: Vec<NamePath> = Vec::new();
+            for (i, p) in POOL.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    paths.push(NamePath::new(Path::new(p), mask & (1 << (i + 10)) != 0));
+                }
+            }
+            let reserved: HashSet<&str> = RESERVED
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << (i + 20)) != 0)
+                .map(|(_, r)| *r)
+                .collect();
+            let reference = grown(&paths, &reserved);
+            let shared = |n: &str| {
+                paths
+                    .iter()
+                    .filter(|p| p.names.iter().any(|m| m == n))
+                    .count()
+                    > 1
+            };
+            let firsts: Vec<String> = paths
+                .iter()
+                .map(|path| path.names[name_depth(path, shared, |n| reserved.contains(n))].clone())
+                .collect();
+            assert_eq!(firsts, reference, "{paths:?} reserved {reserved:?}");
+        }
     }
 }

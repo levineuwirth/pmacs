@@ -522,5 +522,75 @@ fn the_buffer_list_shows_the_path_of_a_buffer_named_by_its_basename() {
     );
 }
 
+/// Open `paths` in one fresh session through `pmacs.buffer.find_or_open`
+/// in one Lua loop, as E10c review 1's measurement did, and say how long
+/// the loop took.
+fn time_opening(paths: &[std::path::PathBuf]) -> Duration {
+    let s = fresh();
+    let before: usize = eval(&s, "return #pmacs.buffer.list()");
+    let list = paths
+        .iter()
+        .map(|p| format!("{:?}", p.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    exec(&s, &format!("_G.E10C_PATHS = {{ {list} }}"));
+    let t0 = Instant::now();
+    exec(
+        &s,
+        "for _, p in ipairs(_G.E10C_PATHS) do pmacs.buffer.find_or_open(p) end",
+    );
+    let elapsed = t0.elapsed();
+    let after: usize = eval(&s, "return #pmacs.buffer.list()");
+    assert_eq!(after - before, paths.len(), "fixture: every file opened");
+    elapsed
+}
+
+/// The budget for opening 2,000 files in one session (D12), by profile:
+/// see [`opening_two_thousand_files_stays_within_budget`].
+const OPEN_2000_BUDGET: Duration = if cfg!(debug_assertions) {
+    Duration::from_secs(10)
+} else {
+    Duration::from_millis(2500)
+};
+
+/// E10c review 1's Medium 1, as a wall-clock budget (D12): 2,000 files
+/// opened in one session, once with 2,000 basenames and once with one
+/// (`d<i>/mod.txt`, each name growing one directory), no grammar and no
+/// language server, as the review's measurement opened them. At
+/// `0adb83e` every open renamed every buffer three times, so the opens
+/// were quadratic in the session: the review measured 22 to 29 s in
+/// release and 118 to 132 s in debug, against 0.4 to 0.5 s and 2.1 s at
+/// `1eea479`. Now an open names its buffer once, and an event renames
+/// only the paths whose names it shares. The bound is `1eea479`'s figure
+/// on the laptop five times over, rounded up, for a run on a loaded or
+/// slower machine: about 2 s a shape in debug (1,845 and 1,930 ms again at
+/// fix round 1), so 10 s, and about 0.5 s in release (386 and 493 ms), so
+/// 2.5 s. At fix round 1, on a quieter machine than the review's,
+/// `0adb83e` took 7.2 to 11.3 s in release and 42 to 47 s in debug.
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn opening_two_thousand_files_stays_within_budget() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let make = |rel: String| {
+        let path = td.path().join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, b"x\n").expect("write");
+        path
+    };
+    let unique: Vec<_> = (0..2000).map(|i| make(format!("f{i}.txt"))).collect();
+    let alike: Vec<_> = (0..2000).map(|i| make(format!("d{i}/mod.txt"))).collect();
+    let unique_took = time_opening(&unique);
+    let alike_took = time_opening(&alike);
+    eprintln!(
+        "e10c: opening 2,000 files took {unique_took:?} with 2,000 basenames \
+         and {alike_took:?} with one (budget {OPEN_2000_BUDGET:?} each)"
+    );
+    assert!(
+        unique_took < OPEN_2000_BUDGET && alike_took < OPEN_2000_BUDGET,
+        "opening 2,000 files must stay within {OPEN_2000_BUDGET:?}; \
+         took {unique_took:?} and {alike_took:?}"
+    );
+}
+
 #[path = "common/iso.rs"]
 mod iso;

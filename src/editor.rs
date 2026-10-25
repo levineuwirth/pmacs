@@ -13074,9 +13074,8 @@ mod tests {
             let registry = core.registry.clone();
             registry
                 .borrow_mut()
-                .get_mut(core.active_buffer_id())
-                .unwrap()
-                .set_name("na\r\n\u{1b}me");
+                .set_name(core.active_buffer_id(), "na\r\n\u{1b}me")
+                .unwrap();
         }
         s.lua_host
             .lua()

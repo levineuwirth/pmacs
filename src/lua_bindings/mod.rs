@@ -3690,19 +3690,19 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         format!("failed to load {path}: {source}"),
                     ))
                 })?;
-                let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                // Path-backed creation site (Q#DR30): bound to the
+                // normalized path and named from it as it goes in, once,
+                // beside every other name (D40).
+                let id = reg.borrow_mut().insert_for_path(
+                    crate::buffer::Buffer::from_bytes(BufferId::next(), path.clone(), &bytes),
+                    crate::editor_core::normalize_buffer_path(path_buf),
+                );
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
                         .map_err(mlua::Error::external)?;
-                    core.set_buffer_path(id, Some(path_buf));
                     core.set_buffer_meta(id, Some(meta));
                 }
-                // Path-backed creation site (Q#DR30): named from the path
-                // just bound, beside every other name (D40).
-                reg.borrow_mut()
-                    .name_by_path(id)
-                    .map_err(mlua::Error::external)?;
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
                 Ok(BufferIdLua(id))
             })?,
@@ -3758,18 +3758,17 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         format!("failed to load {path}: {source}"),
                     ))
                 })?;
-                let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                // Path-backed creation site (Q#DR30), as in `from_file`.
+                let id = reg.borrow_mut().insert_for_path(
+                    crate::buffer::Buffer::from_bytes(BufferId::next(), path.clone(), &bytes),
+                    crate::editor_core::normalize_buffer_path(path_buf),
+                );
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
                         .map_err(mlua::Error::external)?;
-                    core.set_buffer_path(id, Some(path_buf));
                     core.set_buffer_meta(id, Some(meta));
                 }
-                // Path-backed creation site (Q#DR30), as in `from_file`.
-                reg.borrow_mut()
-                    .name_by_path(id)
-                    .map_err(mlua::Error::external)?;
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
                 Ok(BufferIdLua(id))
             })?,

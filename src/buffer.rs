@@ -456,8 +456,8 @@ impl Buffer {
             rope,
             name: name.into(),
             // Construction names a buffer explicitly. A path-backed
-            // creation site binds the path and then asks the registry to
-            // name it from it (`BufferRegistry::name_by_path`).
+            // creation site binds the path and the registry names the
+            // buffer from it as it goes in (`BufferRegistry::insert_for_path`).
             name_origin: BufferNameOrigin::Explicit,
             named_directory: None,
             major_mode: None,
@@ -681,8 +681,9 @@ impl Buffer {
     }
 
     /// Record that this buffer's name derives from its path
-    /// ([`BufferNameOrigin::PathDerived`]); the registry then names it
-    /// ([`crate::buffer_registry::BufferRegistry::name_by_path`]).
+    /// ([`BufferNameOrigin::PathDerived`]); the registry names it
+    /// ([`crate::buffer_registry::BufferRegistry::insert_for_path`],
+    /// [`crate::buffer_registry::BufferRegistry::name_by_path`]).
     pub(crate) fn name_from_path(&mut self) {
         self.name_origin = BufferNameOrigin::PathDerived;
     }

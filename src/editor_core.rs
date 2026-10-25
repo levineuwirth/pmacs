@@ -1296,15 +1296,15 @@ impl EditorCore {
     /// clangd rejected with `-32602 unresolvable URI`) and which
     /// cross-file navigation relies on for buffer-identity matching.
     ///
-    /// A buffer named by its path follows it (D40), so the registry's
-    /// names are refreshed here rather than at each caller.
+    /// A buffer named by its path follows it (D40), so the names the
+    /// move can change are refreshed here rather than at each caller.
     pub fn set_buffer_path(&mut self, id: BufferId, path: Option<PathBuf>) {
         let path = path.map(normalize_buffer_path);
         let mut reg = self.registry.borrow_mut();
         if let Ok(b) = reg.get_mut(id) {
             b.set_file_path(path);
         }
-        reg.refresh_names();
+        reg.refresh_names(&[id]);
     }
 
     /// Record filesystem metadata on a specific buffer.
@@ -1330,15 +1330,14 @@ impl EditorCore {
         }
         let normalized = normalize_buffer_path(path.to_path_buf());
         let (bytes, meta) = crate::file_io::load_file(path)?;
-        let id = self
-            .registry
-            .borrow_mut()
-            .create_from_bytes(path.display().to_string(), &bytes);
-        self.set_buffer_path(id, Some(normalized));
-        // Path-backed creation site (Q#DR30): named from the normalized
-        // path, by the registry, beside every other name (D40), so a
-        // relative open and an absolute one name the file alike.
-        let _ = self.registry.borrow_mut().name_by_path(id);
+        // Path-backed creation site (Q#DR30): bound to the normalized
+        // path and named from it by the registry as it goes in, once,
+        // beside every other name (D40), so a relative open and an
+        // absolute one name the file alike.
+        let id = self.registry.borrow_mut().insert_for_path(
+            Buffer::from_bytes(BufferId::next(), path.display().to_string(), &bytes),
+            normalized,
+        );
         self.set_buffer_meta(id, Some(meta));
         Ok((id, true))
     }
@@ -1395,14 +1394,12 @@ impl EditorCore {
                 fire: HookKind::AfterSwitch,
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let buffer_id = self
-                    .registry
-                    .borrow_mut()
-                    .create(path.display().to_string());
-                self.set_buffer_path(buffer_id, Some(path.to_path_buf()));
                 // Path-backed creation site (Q#DR30): named from the
-                // path, which a later rename moves.
-                let _ = self.registry.borrow_mut().name_by_path(buffer_id);
+                // path as it goes in, which a later rename moves.
+                let buffer_id = self.registry.borrow_mut().insert_for_path(
+                    Buffer::new(BufferId::next(), path.display().to_string()),
+                    normalize_buffer_path(path.to_path_buf()),
+                );
                 "[new file]".clone_into(&mut self.status);
                 Ok(ResolvedTarget::Buffer {
                     id: buffer_id,
@@ -2838,11 +2835,13 @@ impl EditorCore {
         };
         let meta = save_atomic(path, &content)
             .map_err(|e| WriteFileRefusal::Failed(format!("write failed: {e}")))?;
-        if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
-            buf.mark_clean();
+        {
+            let mut reg = self.registry.borrow_mut();
+            if let Ok(buf) = reg.get_mut(id) {
+                buf.mark_clean();
+            }
+            let _ = reg.name_by_path(id, normalize_buffer_path(path.to_path_buf()));
         }
-        self.set_buffer_path(id, Some(path.to_path_buf()));
-        let _ = self.registry.borrow_mut().name_by_path(id);
         self.set_buffer_meta(id, Some(meta));
         self.status = format!("wrote {}", path.display());
         Ok(())
@@ -6308,7 +6307,8 @@ impl EditorCore {
                 name_followed,
             });
         }
-        self.registry.borrow_mut().refresh_names();
+        let moved: Vec<BufferId> = rebinds.iter().map(|r| r.buffer_id).collect();
+        self.registry.borrow_mut().refresh_names(&moved);
         rebinds
     }
 
