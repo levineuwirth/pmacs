@@ -11,6 +11,8 @@
 //! The names are recomputed on open, kill, rename and save-as. A dired
 //! listing is named by its directory and a `/` through the same function
 //! (`proj/`, `a/proj/`), and never shares a name with a file.
+//! Where the name no longer shows a path, `*buffer-list*` shows it
+//! beside the name.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -459,6 +461,64 @@ fn a_listing_of_a_directory_named_like_a_file_attaches_no_grammar() {
     assert!(
         !eval::<bool>(&s, "return pmacs.parse._has_view(pmacs.window.buffer())"),
         "and no parse"
+    );
+}
+
+/// The text of the buffer named `name`.
+fn text_of(s: &EditorState, name: &str) -> String {
+    eval(
+        s,
+        &format!(
+            "for _, id in ipairs(pmacs.buffer.list()) do\n\
+               if pmacs.describe.buffer(id).name == {name:?} then return id:slice(0, id:len()) end\n\
+             end\n\
+             error('no buffer ' .. {name:?})"
+        ),
+    )
+}
+
+/// E10c.5's witness: a name no longer shows the path, so `C-x C-b`'s
+/// `*buffer-list*` shows it beside the name: the path of a file buffer
+/// named by its basename, the directory of a listing, and none for a
+/// buffer that holds neither.
+#[test]
+fn the_buffer_list_shows_the_path_of_a_buffer_named_by_its_basename() {
+    let td = project();
+    let mut s = fresh();
+    find_file(&mut s, &td.path().join("src/b.rs"));
+    assert_eq!(mode_line_name(&s), "b.rs");
+    open_dired(&mut s, &td.path().join("tests"));
+    assert_eq!(mode_line_name(&s), "tests/");
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'b');
+    let listing = text_of(&s, "*buffer-list*");
+    let row = |name: &str| {
+        listing
+            .lines()
+            .find(|l| {
+                l.get(3..)
+                    .is_some_and(|rest| rest.starts_with(&format!("{name} ")))
+            })
+            .unwrap_or_else(|| panic!("no row for {name} in {listing}"))
+            .to_owned()
+    };
+    let b = td.path().join("src/b.rs").display().to_string();
+    assert!(
+        row("b.rs").trim_end().ends_with(&b),
+        "b.rs's row shows its path: {listing}"
+    );
+    let tests = td.path().join("tests").display().to_string();
+    assert!(
+        row("tests/").trim_end().ends_with(&tests),
+        "the listing's row shows its directory: {listing}"
+    );
+    assert!(
+        row("*scratch*").trim_end().ends_with("bytes"),
+        "*scratch* holds no path, and its row ends at its size: {listing}"
+    );
+    assert!(
+        listing.lines().next().is_some_and(|h| h.contains("File")),
+        "the header names the column: {listing}"
     );
 }
 

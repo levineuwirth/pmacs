@@ -578,7 +578,7 @@ cmd { name = "editor.previous-buffer",
 -- which redirects any window showing the doomed buffer first.
 
 local LIST_NAME = "*buffer-list*"
-local LIST_HEADER = "  Buffer                          Size   RET visit  d/u mark  x kill marked  k kill  g refresh  q quit"
+local LIST_HEADER = "  Buffer                          Size         File   RET visit  d/u mark  x kill marked  k kill  g refresh  q quit"
 
 local list_marks = {} -- { [tostring(id)] = BufferIdLua }
 
@@ -592,9 +592,13 @@ local function buffer_list_rows()
       local key = tostring(id)
       local marked = list_marks[key] ~= nil
       if marked then live[key] = id end
+      -- E10c.5: a buffer's name is no longer its path (D40), so the
+      -- list shows the path the name was taken from, where there is one.
+      local text = string.format("%s%s %-30s %-12s %s",
+        marked and "D" or " ", d.modified and "*" or " ", d.name,
+        d.length .. " bytes", d.path or "")
       rows[#rows + 1] = {
-        text = string.format("%s%s %-30s %d bytes",
-          marked and "D" or " ", d.modified and "*" or " ", d.name, d.length),
+        text = (text:gsub("%s+$", "")),
         item = id,
       }
     end

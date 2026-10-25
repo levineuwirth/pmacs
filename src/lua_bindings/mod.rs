@@ -7026,6 +7026,12 @@ fn command_info_table(lua: &Lua, cmd: &Command, keymaps: &KeymapStack) -> mlua::
 fn buffer_info_table(lua: &Lua, buf: &crate::buffer::Buffer) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("name", buf.name().to_owned())?;
+    // E10c.5: the path a buffer is named by, now that its name is not
+    // that path (D40): a file buffer's file, or the directory a listing
+    // shows; absent for a buffer holding neither.
+    if let Some(path) = buf.file_path().or_else(|| buf.named_directory()) {
+        t.set("path", path.display().to_string())?;
+    }
     t.set(
         "length",
         i64::try_from(buf.len()).map_err(mlua::Error::external)?,
