@@ -636,13 +636,16 @@ pmacs.config.define {
 
 -- Fresh language inference for a buffer, in precedence order: explicit
 -- modeline → grammar extension → LSP filetype map → filename → shebang.
--- Path components intentionally come from `buf:name()` to preserve syntax's
--- historical grammar-by-name behavior for pathless buffers.
+-- The extension and the file name come from the buffer's path, and from
+-- `buf:name()` only for a pathless buffer, which keeps syntax's historical
+-- grammar-by-name behavior there. A name ending in `/` is a listing's
+-- (`proj/`, D40) and names no file: `Path::extension` reads `x.rs/` as
+-- `rs`, which would attach Rust to a directory named like a file.
 local function detect_buffer_language(buf)
   local modeline = pmacs.parse.language_from_modeline(buf)
   if modeline then return modeline end
-  local name = buf:name()
-  if name then
+  local name = buf:path() or buf:name()
+  if name and name:sub(-1) ~= "/" then
     local grammar = pmacs.parse.language_for_path(name)
     if grammar then return grammar end
     local ext = name:match("%.([%w_]+)$")

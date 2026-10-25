@@ -312,9 +312,10 @@ fn find_file_accepting_a_directory_opens_it_in_dired() {
         "the prompt must have closed"
     );
     let name = active_name(&s);
-    assert!(
-        name.starts_with("*dired:") && name.contains("sub"),
-        "a directory must open in dired; the active buffer is {name:?}, status {:?}",
+    assert_eq!(
+        name,
+        "sub/",
+        "a directory must open in dired, its listing named by it (D40); status {:?}",
         status(&s)
     );
 }
@@ -358,15 +359,21 @@ fn find_file_ret_on_the_prefilled_directory_opens_dired() {
     );
     let name = active_name(&s);
     assert!(
-        name.starts_with("*dired:"),
+        name.ends_with('/'),
         "RET on the prefilled directory must open it in dired; the active buffer is {name:?}, status {:?}",
         status(&s)
     );
-    // One buffer per directory, named `*dired:<canonical path>*`.
+    // One buffer per directory, named by its last component and a `/`.
     let canonical = std::fs::canonicalize(&cwd).expect("canonicalize cwd");
     assert_eq!(
         name,
-        format!("*dired:{}*", canonical.display()),
+        format!(
+            "{}/",
+            canonical
+                .file_name()
+                .expect("a named cwd")
+                .to_string_lossy()
+        ),
         "the dired buffer must be the cwd's"
     );
 }

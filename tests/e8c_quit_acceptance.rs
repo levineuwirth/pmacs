@@ -690,11 +690,11 @@ fn e8c_quit_is_not_held_by_a_dired_listing() {
     press(&mut s, KeyCode::Enter);
     // The listing is read off the main thread (`open_async`).
     pump_until(&mut s, Duration::from_secs(20), |s| {
-        active_name(s).starts_with("*dired:")
+        active_name(s).ends_with('/')
     });
     let name = active_name(&s);
     assert!(
-        name.starts_with("*dired:"),
+        name.ends_with('/'),
         "precondition: C-x d RET lists; active is {name:?}"
     );
     require_quit_without_a_question(&mut s, &name);

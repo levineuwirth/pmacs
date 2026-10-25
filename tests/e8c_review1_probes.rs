@@ -214,10 +214,10 @@ fn r1_scratch_text_outlives_every_generated_write() {
         &format!("pmacs.async(function() pmacs.dired.open({root:?}) end)"),
     );
     pump_until(&mut s, Duration::from_secs(20), |s| {
-        active_name(s).starts_with("*dired:")
+        active_name(s).ends_with('/')
     });
     assert!(
-        active_name(&s).starts_with("*dired:"),
+        active_name(&s).ends_with('/'),
         "precondition: dired lists; active is {:?}",
         active_name(&s)
     );

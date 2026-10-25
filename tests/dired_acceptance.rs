@@ -162,6 +162,15 @@ fn canon(path: &Path) -> String {
         .into_owned()
 }
 
+/// The name a listing of `dir` takes when no other name meets it: its
+/// directory's last component and a `/`, the root's `/` (D40, E10c.3).
+fn dired_name(dir: &Path) -> String {
+    let canonical = normalize_buffer_path(dir.to_path_buf());
+    canonical
+        .file_name()
+        .map_or_else(|| "/".to_owned(), |n| format!("{}/", n.to_string_lossy()))
+}
+
 fn active_text(s: &EditorState) -> String {
     eval(
         s,
@@ -209,7 +218,7 @@ fn buffer_names(s: &EditorState) -> Vec<String> {
 fn dired_buffer_names(s: &EditorState) -> Vec<String> {
     let mut names: Vec<String> = buffer_names(s)
         .into_iter()
-        .filter(|n| n.starts_with("*dired:"))
+        .filter(|n| n.ends_with('/'))
         .collect();
     names.sort();
     names
@@ -564,7 +573,7 @@ fn dired_visit_dispatches_on_entry_kind() {
     pump(&mut s);
     assert_eq!(
         active_name(&s),
-        format!("*dired:{}*", canon(&td.path().join("subdir"))),
+        dired_name(&td.path().join("subdir")),
         "RET on a directory opens that directory's dired buffer"
     );
     assert_eq!(
@@ -613,7 +622,7 @@ fn dired_visit_follows_a_symlink_to_the_kind_of_its_target() {
     pump(&mut s);
     assert_eq!(
         active_name(&s),
-        format!("*dired:{}*", canon(&td.path().join("linkdir"))),
+        dired_name(&td.path().join("linkdir")),
         "a symlinked directory descends under the path we walked"
     );
     assert_eq!(
@@ -656,7 +665,7 @@ fn dired_visit_from_a_panel_keeps_the_panel_and_uses_the_document_window() {
     assert_eq!(active_window(&s), panel, "the panel is selected");
     assert_eq!(
         window_buffer_name(&s, panel),
-        format!("*dired:{}*", canon(td.path())),
+        dired_name(td.path()),
         "the panel shows dired"
     );
 
@@ -668,7 +677,7 @@ fn dired_visit_from_a_panel_keeps_the_panel_and_uses_the_document_window() {
     assert_eq!(panel_after, panel, "the same side window, not a new one");
     assert_eq!(
         window_buffer_name(&s, panel_after),
-        format!("*dired:{}*", canon(td.path())),
+        dired_name(td.path()),
         "the panel still shows dired"
     );
     assert_eq!(
@@ -715,7 +724,7 @@ fn dired_navigation_reuses_one_buffer_per_directory() {
     exec(&s, "_G.TWO = pmacs.window.buffer()");
     assert_eq!(
         active_name(&s),
-        format!("*dired:{}*", canon(&deep)),
+        dired_name(&deep),
         "each buffer's name describes the directory it displays"
     );
 
@@ -777,7 +786,7 @@ fn dired_canonicalizes_before_naming_and_lookup() {
 
     assert_eq!(
         dired_buffer_names(&s),
-        vec![format!("*dired:{}*", canon(td.path()))],
+        vec![dired_name(td.path())],
         "three spellings, one buffer"
     );
 }
@@ -798,7 +807,7 @@ fn dired_kill_when_opening_kills_the_departed_buffer() {
 
     assert_eq!(
         dired_buffer_names(&s),
-        vec![format!("*dired:{}*", canon(&td.path().join("subdir")))],
+        vec![dired_name(&td.path().join("subdir"))],
         "descending killed the buffer it left"
     );
     // And the setting is what did it: the default keeps both.
@@ -855,7 +864,7 @@ fn dired_canonicalization_is_the_cores_own_normalizer() {
     let td = fixture_dir();
     let mut s = s;
     open_ok(&mut s, td.path(), "nil");
-    assert_eq!(active_name(&s), format!("*dired:{}*", canon(td.path())));
+    assert_eq!(active_name(&s), dired_name(td.path()));
 }
 
 // ---------------------------------------------------------------------------
@@ -893,7 +902,7 @@ fn dired_directory_descent_stays_in_its_side_window() {
     );
     assert_eq!(
         window_buffer_name(&s, panel),
-        format!("*dired:{}*", canon(&td.path().join("subdir"))),
+        dired_name(&td.path().join("subdir")),
         "showing the new directory"
     );
     assert_eq!(
@@ -938,7 +947,7 @@ fn dired_descent_from_a_dedicated_panel_leaves_the_pin_alone() {
     );
     assert_eq!(
         window_buffer_name(&s, panel),
-        format!("*dired:{}*", canon(td.path())),
+        dired_name(td.path()),
         "the dedicated slot keeps the buffer it was pinned to"
     );
     assert!(
@@ -950,7 +959,7 @@ fn dired_descent_from_a_dedicated_panel_leaves_the_pin_alone() {
     );
     assert_eq!(
         window_buffer_name(&s, document),
-        format!("*dired:{}*", canon(&td.path().join("subdir"))),
+        dired_name(&td.path().join("subdir")),
         "the new directory falls back to the document window"
     );
 }
@@ -967,7 +976,7 @@ fn dired_descent_from_a_dedicated_panel_leaves_the_pin_alone() {
 fn dired_does_not_adopt_a_foreign_buffer_with_its_name() {
     let td = fixture_dir();
     let mut s = editor();
-    let name = format!("*dired:{}*", canon(td.path()));
+    let name = dired_name(td.path());
     exec(
         &s,
         &format!(
@@ -991,10 +1000,25 @@ fn dired_does_not_adopt_a_foreign_buffer_with_its_name() {
         !eval::<bool>(&s, "return pmacs.window.buffer() == _G.FOREIGN"),
         "dired must not display the foreign buffer"
     );
+    // The foreign name is explicit, so it is reserved and kept, and the
+    // listing's own name takes the directory above that tells it apart
+    // (D40), where dired once appended `<2>`.
+    let parent = td
+        .path()
+        .parent()
+        .and_then(Path::file_name)
+        .expect("the tempdir has a parent")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         active_name(&s),
-        format!("{name}<2>"),
-        "dired opens under a disambiguated name instead"
+        format!("{parent}/{name}"),
+        "dired opens under a name that tells it from the foreign one"
+    );
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.describe.buffer(_G.FOREIGN).name"),
+        name,
+        "and the foreign buffer keeps its own"
     );
     assert!(
         active_lines(&s)[0].ends_with(':'),
@@ -1151,7 +1175,7 @@ fn dired_keys_resolve_through_the_mode_keymap() {
     pump(&mut s);
     assert_eq!(
         active_name(&s),
-        format!("*dired:{}*", canon(td.path())),
+        dired_name(td.path()),
         "`^` ascends from the second buffer too"
     );
 
@@ -1594,7 +1618,7 @@ fn dired_jump_seats_the_cursor_on_the_visited_file() {
 
     assert_eq!(
         active_name(&s),
-        format!("*dired:{}*", canon(td.path())),
+        dired_name(td.path()),
         "dired opens on the file's directory"
     );
     assert_eq!(

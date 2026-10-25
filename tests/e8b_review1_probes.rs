@@ -152,18 +152,16 @@ fn dired_by_keys(s: &mut EditorState, dir: &Path) -> String {
     press(s, KeyCode::Enter);
     pump(s);
     let name = active_name(s);
-    assert!(
-        name.starts_with(LISTING_PREFIX) && name.ends_with(LISTING_SUFFIX),
-        "fixture: C-x d opened a listing of proj; showing {name}"
+    assert_eq!(
+        name, "proj/",
+        "fixture: C-x d opened a listing of proj, named by its directory"
     );
     name
 }
 
-/// What the listing's name begins with and ends with, and the query that
-/// reaches it by its own letters, which no other name here holds.
-const LISTING_PREFIX: &str = "*dired:";
-const LISTING_SUFFIX: &str = "proj*";
-const LISTING_QUERY: &str = "*dired";
+/// The query that reaches the listing, `proj/`, by its own letters,
+/// which no other name here holds.
+const LISTING_QUERY: &str = "proj";
 
 /// Empty the minibuffer's prefilled field as a user does, by holding
 /// backspace (the minibuffer has no line kill; `dispatch_minibuffer_key`

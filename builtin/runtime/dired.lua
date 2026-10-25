@@ -31,12 +31,15 @@
 --
 -- Three structural decisions worth knowing before editing this file:
 --
--- 1. ONE BUFFER PER DIRECTORY, named `*dired:<canonical path>*`
---    (Q#DR2). Navigation *opens the target's buffer*; it never mutates
---    the current one. That is Emacs behavior, and it is also the only
---    way to keep the name honest --- there is no
---    `pmacs.buffer.set_name`, so the M8.2 fixture's in-place repaint
---    leaves a buffer named after a directory it no longer shows.
+-- 1. ONE BUFFER PER DIRECTORY (Q#DR2), named by its directory's last
+--    component and a `/`, `proj/` (D40), through the naming function a
+--    file buffer's name comes from (`pmacs.buffer.name_by_directory`), so
+--    two `proj` directories are `a/proj/` and `b/proj/` and a listing
+--    never shares a name with a file. Navigation *opens the target's
+--    buffer*; it never mutates the current one. That is Emacs behavior,
+--    and it is also what keeps the name honest: the M8.2 fixture's
+--    in-place repaint leaves a buffer named after a directory it no
+--    longer shows.
 --
 -- 2. THE CANONICAL FORM IS THE CORE'S, not a copy of it
 --    (`pmacs.path.canonicalize` is `normalize_buffer_path` itself).
@@ -185,10 +188,6 @@ local function dirname(path)
   if dir == nil then return nil end
   if dir == "" then return "/" end
   return dir
-end
-
-local function buffer_name(path)
-  return "*dired:" .. path .. "*"
 end
 
 local function buffer_named(name)
@@ -482,14 +481,12 @@ end
 -- Buffer ownership
 -- ---------------------------------------------------------------------------
 
--- How far the `<2>`, `<3>`, ... disambiguation walks before giving up.
-local NAME_VARIANT_LIMIT = 99
-
 -- `pmacs.buffer.create` takes any caller-chosen name, so a foreign
--- buffer may already be called `*dired:/tmp*`. Painting into it through
+-- buffer may already be called `proj/`. Painting into it through
 -- `bypass_intercept` would clobber a user's data, so found-by-name is
 -- NOT adoption: ownership means "this buffer is in dired's own handle
--- table" (F7).
+-- table" (F7). The foreign name is the user's and is reserved, so the
+-- listing's own name takes as much of its path as tells it apart.
 --
 -- That is deliberately narrower than the framing's "in the handle table
 -- OR major_mode == dired": a foreign buffer that also carries the mode
@@ -499,27 +496,16 @@ local function claim_handle(path)
   local existing = handle_for_path(path)
   if existing then return existing end
 
-  local name = buffer_name(path)
-  if buffer_named(name) then
-    local unique = nil
-    for i = 2, NAME_VARIANT_LIMIT do
-      local candidate = string.format("%s<%d>", name, i)
-      if buffer_named(candidate) == nil then
-        unique = candidate
-        break
-      end
-    end
-    if unique == nil then
-      error(string.format("dired: %s is taken and no free variant remains", name))
-    end
-    name = unique
-  end
-
-  local buf = pmacs.buffer.create(name)
+  local buf = pmacs.buffer.create(path)
+  pmacs.buffer.name_by_directory(buf, path)
   -- Read-only by the listview idiom (Q#DR3): every non-bypass edit is
-  -- rejected, and the intercept lives as long as the buffer.
+  -- rejected, and the intercept lives as long as the buffer. The name is
+  -- read when it refuses, since another listing of a `proj` can lengthen
+  -- it later; `pcall`, because an intercept may run with the registry
+  -- held.
   pmacs.buffer.add_intercept(buf, function()
-    error(name .. " is read-only")
+    local ok, described = pcall(pmacs.describe.buffer, buf)
+    error(((ok and described and described.name) or path) .. " is read-only")
   end)
   -- Q#DR3/Q#P6: while this buffer is active a semantic frontend must
   -- round-trip keys, or optimistic apply would swallow the single-key

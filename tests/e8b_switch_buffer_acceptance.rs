@@ -664,9 +664,9 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
     );
 }
 
-/// The query that reaches the session's listing by its own name, which
-/// no other name in the session holds.
-const LISTING_QUERY: &str = "*dired";
+/// The query that reaches the session's listing, `proj/`, by its own
+/// name, which no other name in the session holds.
+const LISTING_QUERY: &str = "proj";
 
 /// The listing's name from `C-c z`'s band after `C-x d RET`, checked to
 /// be a listing of `proj`.
@@ -674,7 +674,7 @@ fn listing_name(opened: &str) -> String {
     opened
         .trim_matches('"')
         .strip_prefix("WHERE ")
-        .filter(|n| n.starts_with("*dired:") && n.ends_with("/proj*"))
+        .filter(|n| *n == "proj/")
         .unwrap_or_else(|| panic!("fixture: C-x d RET opened a listing of proj; {opened}"))
         .to_owned()
 }

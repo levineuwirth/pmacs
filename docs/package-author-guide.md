@@ -578,7 +578,8 @@ state.
 |----------|-------|-------|
 | `create(name)` | buffer handle | Empty clean buffer. |
 | `from_bytes(name, bytes)` | buffer handle | Byte-preserving buffer seeded from a Lua string. |
-| `from_file(path)` | buffer handle | Loads the file using pmacs's normal file loader, creates a clean buffer named by `path`, switches the editor core to it when an editor core is present, and runs `buffer.after-load` if that hook is defined. |
+| `from_file(path)` | buffer handle | Loads the file using pmacs's normal file loader, creates a clean buffer named by the file's basename (two buffers whose basenames collide each take the fewest trailing directories that tell them apart, `src/a.rs` and `tests/a.rs`), switches the editor core to it when an editor core is present, and runs `buffer.after-load` if that hook is defined. The path is `buf:path()`, never the name. |
+| `name_by_directory(buf, path)` | nil | Names a listing buffer by the directory it shows, `proj/`, through the same naming as a file's; the buffer holds no file path. |
 | `remove(buf)` | nil on success | Removes a buffer and fires removal cleanup. |
 | `on_removed(buf, callback)` | handle | Calls `callback(buf)` after `buf` is removed by `remove` or `kill`. The returned handle has `:remove()` for idempotent unsubscription. |
 

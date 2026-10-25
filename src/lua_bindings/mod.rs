@@ -3648,6 +3648,26 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        // E10c.3: a listing is named by the directory it shows, `proj/`,
+        // through the one naming function files use (D40, D37), so dired
+        // records its directory and never names a buffer itself; a
+        // collision lengthens both names (`a/proj/`, `b/proj/`), and a
+        // foreign buffer already holding the name keeps it. The directory
+        // is normalized as a file path is (`pmacs.path.canonicalize`).
+        let reg = registry.clone();
+        buffer.set(
+            "name_by_directory",
+            lua.create_function(move |_, (id, path): (BufferIdLua, String)| {
+                let directory =
+                    crate::editor_core::normalize_buffer_path(std::path::PathBuf::from(path));
+                reg.borrow_mut()
+                    .name_by_directory(id.0, directory)
+                    .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+
+    {
         let reg = registry.clone();
         buffer.set(
             "from_bytes",

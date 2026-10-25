@@ -178,6 +178,23 @@ impl BufferRegistry {
         Ok(())
     }
 
+    /// Name the buffer behind `id` by the directory it lists, `proj/`,
+    /// through the same function as a file's name (E10c.3, D37): a
+    /// dired listing records its directory here and is never given a
+    /// name of its own.
+    ///
+    /// # Errors
+    /// [`RegistryError::Missing`] for a stale handle.
+    pub fn name_by_directory(
+        &mut self,
+        id: BufferId,
+        directory: std::path::PathBuf,
+    ) -> Result<(), RegistryError> {
+        self.get_mut(id)?.name_from_directory(directory);
+        self.refresh_names();
+        Ok(())
+    }
+
     /// Give the buffer behind `id` the explicit name `name`, which
     /// nothing rewrites, moving any derived name it equals (D40). The
     /// door for `pmacs.buffer.set_name`.

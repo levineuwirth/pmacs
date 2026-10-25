@@ -249,9 +249,9 @@ fn session(td: &Path) -> Session {
         names.push(visit(&s, &path));
     }
     let dired = open_dired(&mut s, &proj);
-    assert!(
-        dired.starts_with("*dired:") && dired.ends_with("/proj*"),
-        "fixture: C-x d opened a dired buffer; showing {dired}"
+    assert_eq!(
+        dired, "proj/",
+        "fixture: C-x d opened a listing of proj, named by its directory"
     );
     let [a, b, notes, lua, lsp_rs, editor] = names.try_into().expect("six visits");
     show(&s, &editor);
@@ -381,9 +381,9 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     assert_eq!(active_name(&s), scratch, "nothing switched");
 }
 
-/// The query that reaches the session's listing by its own name, which
-/// no other name in the session holds.
-const LISTING_QUERY: &str = "*dired";
+/// The query that reaches the session's listing, `proj/`, by its own
+/// name, which no other name in the session holds.
+const LISTING_QUERY: &str = "proj";
 
 /// The name as typed in another case comes first (E8b fix round 1's
 /// place 2, kept under D40 as the folded name): `AB` reaches `ab` beside

@@ -8,7 +8,9 @@
 //! that tell them apart, written forward (`src/a.rs`, `tests/a.rs`), and
 //! a survivor returns to its basename; an explicitly named buffer keeps
 //! its name through a collision, and the derived name moves around it.
-//! The names are recomputed on open, kill, rename and save-as.
+//! The names are recomputed on open, kill, rename and save-as. A dired
+//! listing is named by its directory and a `/` through the same function
+//! (`proj/`, `a/proj/`), and never shares a name with a file.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -319,6 +321,144 @@ fn save_as_and_rename_recompute_every_name() {
     assert!(
         after_rename.contains(&"src/c.rs".to_owned()) && after_rename.contains(&"a.rs".to_owned()),
         "the renamed buffer followed its file: {after_rename:?}"
+    );
+}
+
+/// Drive the async runtime until nothing is parked or pending: a dired
+/// listing is read on a worker and lands on a later tick.
+fn pump(s: &mut EditorState) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut spins = 0u32;
+    loop {
+        let idle: bool = eval(
+            s,
+            "return pmacs._async.parked_count() == 0 and pmacs._async.pending_count() == 0",
+        );
+        if idle {
+            return;
+        }
+        assert!(Instant::now() < deadline, "async pump deadline exceeded");
+        s.tick_async();
+        spins += 1;
+        if spins > 64 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// `C-x d`, the prefill replaced by `dir`, RET: dired as a user opens it.
+fn open_dired(s: &mut EditorState, dir: &Path) {
+    ctrl(s, 'x');
+    press(s, KeyCode::Char('d'));
+    assert!(active(s), "C-x d opens the prompt");
+    clear_field(s);
+    type_str(s, &dir.display().to_string());
+    press(s, KeyCode::Enter);
+    pump(s);
+    assert_eq!(
+        eval::<String>(
+            s,
+            "return pmacs.buffer.major_mode(pmacs.window.buffer()) or ''"
+        ),
+        "dired",
+        "fixture: C-x d opened a listing"
+    );
+}
+
+/// E10c.3's witness: a listing is named by its directory and a `/`; two
+/// `proj` directories show as `a/proj/` and `b/proj/`, through the
+/// function file names use, and a kill returns the survivor to `proj/`.
+/// Dired still finds each by its path: `C-x d` on a directory already
+/// listed returns to its buffer.
+#[test]
+fn two_proj_directories_show_as_names_that_tell_them_apart() {
+    let td = tempfile::tempdir().expect("tempdir");
+    for dir in ["a/proj", "b/proj"] {
+        std::fs::create_dir_all(td.path().join(dir)).expect("mkdir");
+        std::fs::write(td.path().join(dir).join("f.txt"), b"x\n").expect("write");
+    }
+    let mut s = fresh();
+    open_dired(&mut s, &td.path().join("a/proj"));
+    assert_eq!(
+        mode_line_name(&s),
+        "proj/",
+        "alone, a listing is its directory"
+    );
+    exec(&s, "_G.A = pmacs.window.buffer()");
+    open_dired(&mut s, &td.path().join("b/proj"));
+    assert_eq!(mode_line_name(&s), "b/proj/");
+    assert!(
+        names(&s).contains(&"a/proj/".to_owned()),
+        "the first listing lengthened too: {:?}",
+        names(&s)
+    );
+    open_dired(&mut s, &td.path().join("a/proj"));
+    assert!(
+        eval::<bool>(&s, "return pmacs.window.buffer() == _G.A"),
+        "dired finds its buffer by its path, not by a name"
+    );
+    assert_eq!(mode_line_name(&s), "a/proj/");
+    kill_this(&mut s);
+    assert_eq!(status(&s), "kill-buffer: killed a/proj/");
+    assert!(
+        names(&s).contains(&"proj/".to_owned()),
+        "the survivor returned to proj/: {:?}",
+        names(&s)
+    );
+}
+
+/// E10c.3's second witness: a listing of `proj` and a file named `proj`
+/// never share a name, and each is reached by its own: `C-x b proj/ RET`
+/// the listing, `C-x b proj RET` the file.
+#[test]
+fn a_dired_buffer_and_a_file_named_proj_never_share_a_name() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(td.path().join("x/proj")).expect("mkdir");
+    std::fs::create_dir_all(td.path().join("y")).expect("mkdir");
+    std::fs::write(td.path().join("y/proj"), b"a file\n").expect("write");
+    let mut s = fresh();
+    find_file(&mut s, &td.path().join("y/proj"));
+    assert_eq!(mode_line_name(&s), "proj");
+    open_dired(&mut s, &td.path().join("x/proj"));
+    assert_eq!(mode_line_name(&s), "proj/");
+    switch_to(&mut s, "proj");
+    assert_eq!(
+        mode_line_name(&s),
+        "proj",
+        "C-x b proj RET reaches the file"
+    );
+    switch_to(&mut s, "proj/");
+    assert_eq!(
+        mode_line_name(&s),
+        "proj/",
+        "C-x b proj/ RET reaches the listing"
+    );
+}
+
+/// The census's syntax decision: a listing of a directory named like a
+/// file (`x.rs`) is named `x.rs/`, which `Path::extension` reads as `rs`;
+/// language detection reads the buffer's path, and a name ending in `/`
+/// names no file, so the listing takes no grammar and no parse.
+#[test]
+fn a_listing_of_a_directory_named_like_a_file_attaches_no_grammar() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(td.path().join("x.rs")).expect("mkdir");
+    std::fs::write(td.path().join("x.rs/main.rs"), b"fn main() {}\n").expect("write");
+    let mut s = fresh();
+    open_dired(&mut s, &td.path().join("x.rs"));
+    assert_eq!(mode_line_name(&s), "x.rs/");
+    exec(&s, "pmacs.window.switch_buffer(pmacs.window.buffer())");
+    assert_eq!(
+        eval::<Option<String>>(
+            &s,
+            "return pmacs.parse.buffer_language(pmacs.window.buffer())"
+        ),
+        None,
+        "a listing has no language"
+    );
+    assert!(
+        !eval::<bool>(&s, "return pmacs.parse._has_view(pmacs.window.buffer())"),
+        "and no parse"
     );
 }
 

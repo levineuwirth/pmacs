@@ -335,6 +335,10 @@ pub struct Buffer {
     /// as tell it apart. Naming asks this bit, never the string
     /// (dired Stage 2a, Q#DR30).
     name_origin: BufferNameOrigin,
+    /// The directory a listing (dired) shows, which names it `proj/` the
+    /// way a file names its buffer (E10c.3). Never a `file_path`: nothing
+    /// is saved to it and nothing that reads a file reads it.
+    named_directory: Option<PathBuf>,
     /// The buffer's single active major mode, if one has been selected.
     major_mode: Option<String>,
     is_modified: bool,
@@ -455,6 +459,7 @@ impl Buffer {
             // creation site binds the path and then asks the registry to
             // name it from it (`BufferRegistry::name_by_path`).
             name_origin: BufferNameOrigin::Explicit,
+            named_directory: None,
             major_mode: None,
             is_modified: false,
             read_only: false,
@@ -682,6 +687,20 @@ impl Buffer {
         self.name_origin = BufferNameOrigin::PathDerived;
     }
 
+    /// Record that this buffer lists `directory` and takes its name from
+    /// it, `proj/` (E10c.3); the registry then names it
+    /// ([`crate::buffer_registry::BufferRegistry::name_by_directory`]).
+    pub(crate) fn name_from_directory(&mut self, directory: PathBuf) {
+        self.named_directory = Some(directory);
+        self.name_origin = BufferNameOrigin::PathDerived;
+    }
+
+    /// The directory this buffer lists and is named by (dired), if any.
+    #[must_use]
+    pub fn named_directory(&self) -> Option<&Path> {
+        self.named_directory.as_deref()
+    }
+
     /// Write the name the registry derived for this buffer, keeping
     /// its provenance ([`crate::buffer_registry::BufferRegistry::refresh_names`]).
     pub(crate) fn set_derived_name(&mut self, name: String) {
@@ -702,6 +721,9 @@ impl Buffer {
     pub fn name_path(&self) -> Option<(&Path, bool)> {
         if self.name_origin != BufferNameOrigin::PathDerived {
             return None;
+        }
+        if let Some(directory) = self.named_directory.as_deref() {
+            return Some((directory, true));
         }
         self.file_path.as_deref().map(|path| (path, false))
     }
