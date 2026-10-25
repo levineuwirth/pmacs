@@ -7943,6 +7943,159 @@ So, at E10b's fix round 1: `main` is green at `5e5cdb5` and `d2f2238` and PR #40
 head, and nothing moves by CI. #404 is filed on local samples and stands at no CI occurrence; #311
 and #316 met only local samples here and do not move. Every other count above stands.
 
+### E10c's close: PR #407 green at `0adb83e`, `main` green at `1eea479`, the gates' samples listed, #405 and #406 filed
+
+Recorded 2026-10-25 at E10c's checkpoint, PR #407 (six signed commits on `1eea479`: buffer names
+by basename through one function, dired's listings named `proj/` through it, the theme rows'
+fixture path without an extension, `C-x b` and `C-x k` ranked on names alone, `*buffer-list*`'s
+`File` column, the headless probe's `frame:` step). Every run was read from the jobs endpoint by
+conclusion, and every test leg of the code-bearing runs through its own log, fetched with escape
+sequences allowed and stripped, each `running` line paired with its own result line. The gates
+were read from their log directories under `~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/`.
+Every run id, job id and gate log below was searched for in this file before it was written, and
+none was here. Nothing was rerun.
+
+#### `main` at `1eea479`, E10b's squash: green
+
+`1eea479` is PR #403 squashed by the owner from `c45ae5a`, its tree `c45ae5a`'s but for this file.
+
+`CI` 40194991518, attempt 1 of 1, `push`, created 2026-10-25T12:51:40Z and completed 13:25:28Z
+(the API's `updated_at`): `success`.
+
+Tally (main-ci-1eea479): 19 = 18 + 1.
+
+Tally (main-ci-1eea479-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 121173800117 | success |
+| Format | 121173800283 | success |
+| Lint (lua54) | 121173800305 | success |
+| Commit attribution (D9) | 121173800319 | success |
+| Lint (luajit) | 121173800409 | success |
+| M1 Acceptance Gates | 121173844377 | success |
+| Test (macos-latest / luajit) | 121173844397 | success |
+| M5 Perf Gates | 121173844398 | success |
+| Test (ubuntu-latest / luajit) | 121173844401 | success |
+| Perf budgets (debug) | 121173844403 | success |
+| M6 Perf Gates | 121173844407 | success |
+| GPU Render (headless) | 121173844418 | success |
+| Test (macos-latest / lua54) | 121173844420 | success |
+| M10 Perf Gates (crdt) | 121173844422 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121173844424 | success |
+| M4 Perf Gates | 121173844441 | success |
+| Test (crdt) | 121173844443 | success |
+| Test (ubuntu-latest / lua54) | 121173844459 | success |
+| Docs consistency | 121173845539 | skipped |
+
+Tally (main-ci-1eea479-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` ran 12:51:56Z to 13:25:27Z, 33m31s, inside its 45-minute ceiling: 211 `running`
+  lines paired with 211 `test result: ok`, 5,210 passed, 65 ignored, as at `c45ae5a`.
+- The five other test legs pair each `running` line with a `test result: ok`: 212 on each Ubuntu
+  leg with `crdt` (5,263 passed, 65 ignored), 212 on the no-crdt leg (4,698 passed, 51 ignored)
+  and 213 on each macOS leg (5,233 passed, 63 ignored), each as at `c45ae5a`. `WouldBlock` appears
+  in no test leg's log.
+
+`Grammar fuzz` 40194991538 at `1eea479`, `success`, both arms deciding `run=false`: `ubsan`
+121173800338, `asan-strict` 121173800422.
+
+#### PR #407's `CI` 40226556303 at `0adb83e`: green
+
+`CI` 40226556303, attempt 1 of 1, `pull_request`, testing the merge `dd4541b` into `1eea479`,
+created 2026-10-25T19:33:00Z and completed 20:07:09Z (the API's `updated_at`): `success`.
+
+Tally (pr407-ci-0adb83e): 19 = 18 + 1.
+
+Tally (pr407-ci-0adb83e-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 121269042236 | success |
+| Commit attribution (D9) | 121269042325 | success |
+| Format | 121269042419 | success |
+| Lint (lua54) | 121269042492 | success |
+| Lint (luajit) | 121269042503 | success |
+| GPU Render (headless) | 121269077893 | success |
+| M6 Perf Gates | 121269077895 | success |
+| Test (crdt) | 121269077905 | success |
+| M5 Perf Gates | 121269077909 | success |
+| M1 Acceptance Gates | 121269077942 | success |
+| Test (ubuntu-latest / lua54) | 121269077961 | success |
+| Perf budgets (debug) | 121269077967 | success |
+| M4 Perf Gates | 121269077975 | success |
+| Test (macos-latest / lua54) | 121269077978 | success |
+| Test (macos-latest / luajit) | 121269077988 | success |
+| M10 Perf Gates (crdt) | 121269077993 | success |
+| Test (ubuntu-latest / luajit) | 121269078017 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121269078045 | success |
+| Docs consistency | 121269079519 | skipped |
+
+Tally (pr407-ci-0adb83e-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` ran 19:33:12Z to 20:07:08Z, 33m56s, inside its 45-minute ceiling: 212 `running`
+  lines paired with 212 `test result: ok`, 5,223 passed, 65 ignored, one pair and thirteen more
+  than at `1eea479` (the new suite's seven rows, the naming function's eight unit rows, the
+  ranker's five unit rows replaced by three).
+- The five other test legs pair each `running` line with a `test result: ok`, each one pair and
+  thirteen tests more than at `1eea479`: 213 on each Ubuntu leg with `crdt` (5,276 passed, 65
+  ignored), 213 on the no-crdt leg (4,711 passed, 51 ignored) and 214 on each macOS leg (5,246
+  passed, 63 ignored). `WouldBlock` appears in no test leg's log. The new suite and the naming
+  oracle passed on all six legs; the six refused-query rows on all six, but for the GPU row on the
+  no-crdt leg, where its suite compiles to nothing.
+
+`Grammar fuzz` 40226556311 at `0adb83e`, `success`, both arms deciding `run=false`: `ubsan`
+121269042574, `asan-strict` 121269042298.
+
+#### E10c's gates: listed, not tallied, #405 and #406 filed
+
+Eight default-plan gates, one at a time, each on the sweep alone where it finished: `fmt`,
+`clippy`, `doc`, `build` and `diff-check` ending clean in their logs, each finished sweep pairing
+its `running` lines with as many result lines, `WouldBlock` in none, no daemon surviving
+(identified by environ). Each sample is on its issue. None moves a count.
+
+- `20261025T141536Z-1015372` at the base `1eea479`: `05-sweep` 5,641 / 1 / 65 at 220 pairs; #311's
+  fragments on `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (the `Prelude`
+  store, the trace reaching `processi`; 133.33 s at result line 3590).
+- `20261025T151421Z-1425604` at `b7fb796`: 5,651 / 2 / 65 at 221; #311 on the HLS row (134.73 s,
+  line 3622); and `process::tests::a_reaped_pty_child_s_output_holds_only_what_it_wrote`, which no
+  row or issue named: filed as **#405**.
+- `20261025T153800Z-1569834` at `c2594d1`: cut by a reboot of the laptop, the sweep's exit 143 at 101
+  `running` lines and 100 results; no evidence.
+- `20261025T165242Z-17612` at `c2594d1`: 5,652 / 4 / 65 at 221; #311 (134.41 s, line 3610); #316's
+  under the template reading on
+  `e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer` (`kill 2`,
+  `busy=true`, `tree=true`, `unit=pid_…`, `parse:killed`, 16.74 s at line 3973); the release
+  replay's stand-in worker on `Broken pipe` (line 3887), which no row or issue named: filed as
+  **#406**; and `theme_faces_acceptance::snapshot_round_trip_restores_the_themed_summary_at_one_generation`
+  (line 6684), the branch's own, fixed by its `0f9eb76`.
+- `20261025T171517Z-189362` at `0f9eb76`: 5,654 / 2 / 65 at 221; the HLS row on #291's fragments
+  (`store []`, the trace to `LSP:ready·setting` and no `processi`; 134.77 s); and
+  `e9_session_acceptance::write_failure_drain::e9_fr4_a_failed_write_drains_input_until_the_deadline_and_no_later`
+  (`left: 2`, `right: 1`, the `BufferSnapshot` publish failing before the dispatcher's write; line
+  4359): #404's third local sample.
+- `20261025T175110Z-377854` at `ab6086f`: 5,652 / 2 / 65 at 221; #311 (127.63 s, line 3608); and
+  `e8d_drift_acceptance::e8d_1_a_respawn_whose_executable_is_gone_is_told_as_a_crash_and_re_armed`
+  (`spawn the server: "spawn: Text file busy (os error 26)"`, `13 passed; 1 failed` at line 4178):
+  #250's mechanism on another selector, not #250's first signature by its fragments.
+- `20261025T181821Z-532283` at `619d68f`: 5,654 / 1 / 65 at 221; #311 (125.83 s, line 3609).
+- `20261025T184818Z-649277` at the tip `0adb83e`: 5,653 / 2 / 65 at 221; #311 (126.16 s, line
+  3609); #316's under the template reading (`kill 3`, `busy=false`, `tree=true`, `unit=pid_…`,
+  `parse:killed`, line 3949).
+
+Hand runs in the gate's environment, listed: #316's row in an A/B, 7 of 24 failing alone at the
+tip and 5 of 24 with whole-path names planted back, every red on #316's assertion with
+`parse:killed` on the line; and the row in E10c.2's first sweep by hand (`kill 3`) and in its
+rerun (`kill 2`), both under the template reading.
+
+Comments: #311 issuecomment-6402199493 (the six gates' samples), #291 issuecomment-6402205765,
+#316 issuecomment-6402209314 (with the A/B), #404 issuecomment-6402212126, #250
+issuecomment-6402215869.
+
+So, at E10c's close: `main` is green at `1eea479` and PR #407 green at its head, and nothing moves by CI.
+#405 and #406 are filed on local first samples and stand at no CI occurrence; #250, #291, #311,
+#316 and #404 met only local samples here and do not move. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
