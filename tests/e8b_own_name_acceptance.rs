@@ -2,28 +2,27 @@
 // by its own name, through `C-x b` and `C-x k`.
 
 //! E8b review 1's Medium 1 and Medium 2, through the keys a user presses
-//! (`EditorState::dispatch_key`, the TUI's path). The `buffers` source
-//! ranks a match within a buffer's own name above one spelled through
-//! the directories it sits in, and a buffer's own name is the basename
-//! of one that holds a file path and the whole name of any other. A
-//! dired buffer is named `*dired:<path>*` and holds no file, so its own
-//! name is all of it: `C-x b dired RET` reaches it again, where the
-//! first form of the rule read its `/` as directories and reached
-//! `dired.lua`.
+//! (`EditorState::dispatch_key`, the TUI's path), read again under D40
+//! (E10c): a buffer's name is not its path. E8b ranked a match within a
+//! buffer's own name above one spelled through the directories it sat
+//! in, because a file buffer was named by its path; a file buffer is now
+//! named by its basename, so its name holds no directory to spell
+//! through and `C-x b` and `C-x k` match names alone. A name that begins
+//! with the query takes the scorer's start bonus: `dired` reaches
+//! `dired.lua` and `lsp` reaches `lsp.rs`, while `*lsp*` and the listing
+//! are reached by their own first letters.
 //!
 //! `C-x k` reads its target from the same source, so the same rule
-//! decides what it kills, and a kill now says which buffer went, in the
+//! decides what it kills, and a kill says which buffer went, in the
 //! `kill-buffer: …` idiom `builtin/commands/default.lua` already uses.
 //!
 //! One session layout serves every row: `bin-tests` holds `a.rs`, `b.rs`
-//! and `notes.txt`, so `b.rs` is a subsequence of `a.rs`'s path through
-//! the `b` of `bin`; `proj` holds `dired.lua`, `editor.rs` and
-//! `src/lsp.rs`, and a dired buffer lists it; `*scratch*` is kept. Both
-//! directories sit in `nightowls`, which spells `nts` loosely, so that
-//! every name in the session holds D18's `nts` through its directories
-//! on every machine, the dired buffer's included: the letters a dired
-//! buffer's own name holds are its whole name's, and here they are
-//! spelled worse than `notes.txt` spells them.
+//! and `notes.txt`, so `b.rs` was a subsequence of `a.rs`'s path through
+//! the `b` of `bin`, and is not of its name; `proj` holds `dired.lua`,
+//! `editor.rs` and `src/lsp.rs`, and a dired buffer lists it; `*scratch*`
+//! is kept. Both directories sit in `nightowls`, which spells `nts`
+//! loosely, so that every path in the session holds D18's `nts`, and no
+//! file's name does but `notes.txt`'s.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -131,8 +130,8 @@ fn show(s: &EditorState, name: &str) {
     assert_eq!(active_name(s), name, "fixture: showing {name}");
 }
 
-/// Visit `path`; return the buffer's name as pmacs stores it (macOS's
-/// temporary root is a symlink, and pmacs keeps the path as given).
+/// Visit `path`; return the buffer's name as pmacs gives it (its
+/// basename, D40).
 fn visit(s: &EditorState, path: &Path) -> String {
     exec(
         s,
@@ -210,6 +209,7 @@ struct Session {
     dired: String,
     scratch: String,
     proj: std::path::PathBuf,
+    bins: std::path::PathBuf,
 }
 
 /// `C-x d`, the prefill replaced by `dir`, RET: dired as a user opens
@@ -266,29 +266,23 @@ fn session(td: &Path) -> Session {
         dired,
         scratch,
         proj,
+        bins,
     }
 }
 
-/// Review 1's Medium 1 and the owner's rule, in one session with the
-/// bare name and D18's four (as `tests/minibuffer_accept_acceptance.rs`
-/// pins them).
+/// Review 1's Medium 1 and the owner's rule, read under D40 (E10c), in
+/// one session with the bare name and D18's four (as
+/// `tests/minibuffer_accept_acceptance.rs` pins them).
 ///
-/// `C-x b dired RET` and `C-x b dir RET` reach the dired buffer. Its name
-/// holds no file, so its own name is all of it, and `dired.lua`, whose
-/// own name holds the same letters, ties it on place and score; the
-/// lexical order has always put a `*` name before a `/` one. At
-/// `0001946` the place rule read the path inside `*dired:<path>*` as
-/// directories, put the dired buffer below every file holding the
-/// letters, and both reached `dired.lua`.
-///
-/// `C-x b nts RET` still reaches `notes.txt`: the dired buffer's name
-/// holds `nts` too (through `nightowls`), so both are placed alike, and
-/// each is scored within its own name. Scored on the whole name, as the
-/// rule was first written for this round, both names spell `nts`
-/// through the same directories alike, and the lexical order took the
-/// dired buffer. `C-x b lsp RET` reaches `*lsp*` beside `src/lsp.rs`,
-/// whose own name holds `lsp` as tightly: their scores tie, since
-/// neither begins its name, and the lexical order decides.
+/// `C-x b b.rs RET` reaches `b.rs`, whose name alone holds it: `a.rs`'s
+/// held it through `bin-tests` while a file was named by its path
+/// (#318). A file's full path is refused as typed, no name holding a
+/// directory, and its name reaches it. `C-x b dired RET` and `C-x b dir
+/// RET` reach `dired.lua`, whose name begins with them, where E8b put the
+/// listing first; the listing is reached by its own first letters.
+/// `C-x b nts RET` reaches `notes.txt`, whose name alone holds `nts`.
+/// `C-x b lsp RET` reaches `lsp.rs`, whose name begins with it, and
+/// `C-x b *lsp RET` reaches `*lsp*`; `zzz` is refused.
 #[test]
 fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -302,50 +296,50 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
         lsp_rs,
         dired,
         scratch,
+        bins,
         ..
     } = session(td.path());
-    assert!(
-        fuzzy_score("nts", &dired).is_some_and(|d| d < fuzzy_score("nts", "/notes.txt").unwrap()),
-        "premise: the dired buffer's name holds `nts`, and more loosely than notes.txt's own \
-         name; {dired}"
-    );
 
-    // The bare name, from `a.rs`, and each full path.
+    // The bare name, from `a.rs`; a full path; the name.
     show(&s, &a);
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('b'));
     type_str(&mut s, "b.rs");
     let offered = candidates(&s);
     assert!(
-        offered.contains(&a) && offered.contains(&b),
-        "premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+        offered.first() == Some(&b) && !offered.contains(&a),
+        "`b.rs` selects b.rs, and a.rs's name holds no `b`; got {offered:?}"
     );
     press(&mut s, KeyCode::Enter);
     assert_eq!(active_name(&s), b, "C-x b b.rs RET reaches b.rs");
     assert_eq!(status(&s), format!("switch-buffer: showing {b}"));
+    let a_path = bins.join("a.rs").display().to_string();
+    switch_by_typing(&mut s, &a_path);
+    assert_eq!(
+        (active_name(&s), status(&s)),
+        (b.clone(), format!("no buffer: {a_path}")),
+        "a full path names no buffer"
+    );
     switch_by_typing(&mut s, &a);
-    assert_eq!(active_name(&s), a, "a.rs's full path reaches it");
-    switch_by_typing(&mut s, &b);
-    assert_eq!(active_name(&s), b, "b.rs's full path reaches it");
+    assert_eq!(active_name(&s), a, "a.rs's name reaches it");
 
-    // The dired buffer by its own word, from `editor.rs`.
+    // `dired` names a file; the listing by its own letters.
     for typed in ["dired", "dir"] {
         show(&s, &editor);
-        ctrl(&mut s, 'x');
-        press(&mut s, KeyCode::Char('b'));
-        type_str(&mut s, typed);
-        let offered = candidates(&s);
-        assert!(
-            offered.contains(&dired) && offered.contains(&lua),
-            "premise: `{typed}` is held by the dired buffer and by dired.lua; got {offered:?}"
-        );
-        press(&mut s, KeyCode::Enter);
+        switch_by_typing(&mut s, typed);
         assert_eq!(
             (active_name(&s), status(&s)),
-            (dired.clone(), format!("switch-buffer: showing {dired}")),
-            "C-x b {typed} RET reaches the dired buffer; offered {offered:?}"
+            (lua.clone(), format!("switch-buffer: showing {lua}")),
+            "C-x b {typed} RET reaches dired.lua, whose name begins with it"
         );
     }
+    show(&s, &editor);
+    switch_by_typing(&mut s, LISTING_QUERY);
+    assert_eq!(
+        (active_name(&s), status(&s)),
+        (dired.clone(), format!("switch-buffer: showing {dired}")),
+        "C-x b {LISTING_QUERY} RET reaches the listing"
+    );
 
     // D18's four, in this session.
     ctrl(&mut s, 'x');
@@ -353,15 +347,12 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     type_str(&mut s, "nts");
     let offered = candidates(&s);
     assert!(
-        [&a, &b, &notes, &dired].iter().all(|n| offered.contains(n)),
-        "premise: `nts` is spelled through the directories of every name; got {offered:?}"
+        offered.first() == Some(&notes) && !offered.contains(&a) && !offered.contains(&b),
+        "`nts` selects notes.txt, the names that spelled it through `nightowls` gone; \
+         got {offered:?}"
     );
     press(&mut s, KeyCode::Enter);
-    assert_eq!(
-        active_name(&s),
-        notes,
-        "C-x b nts RET reaches notes.txt; offered {offered:?}"
-    );
+    assert_eq!(active_name(&s), notes, "C-x b nts RET reaches notes.txt");
     switch_by_typing(&mut s, "scr");
     assert_eq!(active_name(&s), scratch, "C-x b scr RET reaches *scratch*");
     ctrl(&mut s, 'c');
@@ -373,15 +364,13 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     type_str(&mut s, "lsp");
     let offered = candidates(&s);
     assert!(
-        offered.contains(&lsp_rs),
-        "premise: src/lsp.rs holds `lsp` in its own name; got {offered:?}"
+        offered.first() == Some(&lsp_rs) && offered.contains(&"*lsp*".to_owned()),
+        "`lsp` selects lsp.rs, whose name begins with it, before *lsp*; got {offered:?}"
     );
     press(&mut s, KeyCode::Enter);
-    assert_eq!(
-        active_name(&s),
-        "*lsp*",
-        "C-x b lsp RET reaches *lsp*; offered {offered:?}"
-    );
+    assert_eq!(active_name(&s), lsp_rs, "C-x b lsp RET reaches lsp.rs");
+    switch_by_typing(&mut s, "*lsp");
+    assert_eq!(active_name(&s), "*lsp*", "C-x b *lsp RET reaches *lsp*");
     show(&s, &scratch);
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('b'));
@@ -392,50 +381,34 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     assert_eq!(active_name(&s), scratch, "nothing switched");
 }
 
-/// The folded half of "ends with it at a path component" (place 2), which
-/// no other row through the keys noticed when it was removed (E8b fix
-/// round 1's survey of the rule): a basename typed whole in another case
-/// outranks a neighbor whose own name ends with it. `Q.RS` beside `aq.rs`
-/// and `q.rs`: both own names hold it, the scorer folds case and ties
-/// them, and the lexical order would take `aq.rs`. The tie needs the
-/// letter to be absent from the directories (else the scorer starts
-/// there and the shorter basename wins by its gap), so the row picks one
-/// its own temporary root does not hold, as review 1's `q.rs` probe does
-/// (`tests/e8b_review1_probes.rs`).
+/// The query that reaches the session's listing by its own name, which
+/// no other name in the session holds.
+const LISTING_QUERY: &str = "*dired";
+
+/// The name as typed in another case comes first (E8b fix round 1's
+/// place 2, kept under D40 as the folded name): `AB` reaches `ab` beside
+/// `a.b`, where the scorer alone prefers `a.b`, its `b` following a `.`.
+/// The pair replaces E8b's `Q.RS` beside `aq.rs`, whose scores tied only
+/// while both were read inside their paths.
 #[test]
 fn a_basename_typed_in_another_case_beats_a_name_ending_with_it() {
     let td = tempfile::tempdir().expect("tempdir");
     let dir = td.path().join("zz");
     std::fs::create_dir_all(&dir).expect("dir");
-    let root = dir.display().to_string().to_lowercase();
-    let letter = ['q', 'x', 'z', 'w', 'y', 'k', 'f', 'v']
-        .into_iter()
-        .find(|c| !root.contains(*c))
-        .expect("fixture: some letter is absent from the temporary root");
-    let typed = format!("{}.RS", letter.to_ascii_uppercase());
     let mut s = fresh();
     let mut names = Vec::new();
-    for file in [
-        format!("a{letter}.rs"),
-        format!("{letter}.rs"),
-        "c.txt".to_owned(),
-    ] {
-        std::fs::write(dir.join(&file), b"x\n").expect("write");
-        names.push(visit(&s, &dir.join(&file)));
+    for file in ["a.b", "ab", "c.txt"] {
+        std::fs::write(dir.join(file), b"x\n").expect("write");
+        names.push(visit(&s, &dir.join(file)));
     }
-    let [neighbor, own, c] = names.try_into().expect("three visits");
-    assert_eq!(
-        fuzzy_score(&typed, &neighbor),
-        fuzzy_score(&typed, &own),
-        "premise: the scorer cannot tell them apart"
+    let [near, own, c] = names.try_into().expect("three visits");
+    assert!(
+        fuzzy_score("AB", &near) > fuzzy_score("AB", &own),
+        "premise: the scorer alone ranks {near} above {own}"
     );
     show(&s, &c);
-    switch_by_typing(&mut s, &typed);
-    assert_eq!(
-        active_name(&s),
-        own,
-        "C-x b {typed} RET reaches {letter}.rs, not a{letter}.rs"
-    );
+    switch_by_typing(&mut s, "AB");
+    assert_eq!(active_name(&s), own, "C-x b AB RET reaches ab, not a.b");
     assert_eq!(status(&s), format!("switch-buffer: showing {own}"));
 }
 
@@ -457,10 +430,11 @@ fn modified(s: &EditorState, name: &str) -> bool {
 /// Review 1's Medium 2, the first of its two wrong kills, in the review's
 /// own crowded fixture: `a.rs`, `b.rs` and `c.txt` under `bin-tests`,
 /// `c.txt` shown. `C-x k b.rs RET` kills `b.rs`. Before `b374cd8` the same
-/// keys killed `a.rs`, whose path also holds `b.rs` through the `b` of
+/// keys killed `a.rs`, whose path also held `b.rs` through the `b` of
 /// `bin` and which the lexical order put first, with no question (it is
-/// unmodified) and nothing said. Now the band names what went, and a
-/// full path kills its own buffer.
+/// unmodified) and nothing said. The band names what went; under D40
+/// `b.rs` is held by `b.rs`'s name alone, a full path names no buffer,
+/// and a name kills its own.
 #[test]
 fn c_x_k_b_rs_kills_b_rs_and_says_so() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -479,9 +453,10 @@ fn c_x_k_b_rs_kills_b_rs_and_says_so() {
         "premise: both files are unmodified, so neither kill asks"
     );
     let offered = kill_by_typing(&mut s, "b.rs");
-    assert!(
-        offered.contains(&a) && offered.contains(&b),
-        "premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+    assert_eq!(
+        offered,
+        vec![b.clone()],
+        "`b.rs` is held by b.rs's name alone"
     );
     assert!(!active(&s), "an unmodified buffer goes without a question");
     let left = buffer_names(&s);
@@ -492,23 +467,26 @@ fn c_x_k_b_rs_kills_b_rs_and_says_so() {
     );
     assert_eq!(status(&s), format!("kill-buffer: killed {b}"));
 
+    let a_path = dir.join("a.rs").display().to_string();
+    kill_by_typing(&mut s, &a_path);
+    assert_eq!(status(&s), format!("kill-buffer: no buffer named {a_path}"));
+    assert!(buffer_names(&s).contains(&a), "a full path kills nothing");
     kill_by_typing(&mut s, &a);
     let left = buffer_names(&s);
-    assert!(
-        !left.contains(&a),
-        "a.rs's full path kills it; left {left:?}"
-    );
+    assert!(!left.contains(&a), "a.rs's name kills it; left {left:?}");
     assert_eq!(status(&s), format!("kill-buffer: killed {a}"));
 }
 
-/// Review 1's Medium 2, the second: `C-x k dired RET` acts on the dired
-/// buffer, not `dired.lua`. At `0001946` it killed `dired.lua`, an
-/// unmodified file buffer, silently, and kept the dired buffer. Until
-/// E8c the dired buffer's generated text read as modified (review 1's
-/// aside), so this row answered "kill anyway?" first; E8c leaves a
-/// buffer the editor writes clean (#299), and the kill now goes without
-/// a question, as for any unmodified buffer, and names it on the band.
-/// `dir` selects it as `dired` does, the listing opened again between.
+/// Review 1's Medium 2, the second, read under D40: `C-x k` on the
+/// listing's own letters acts on the listing, not on a file. At
+/// `0001946` `C-x k dired RET` killed `dired.lua`, silently, and kept
+/// the listing; E8b made `dired` select the listing, whose name then
+/// held the word; under D40 the listing is named by its directory and
+/// `dired` names `dired.lua` (the first row). Until E8c the listing's
+/// generated text read as modified (review 1's aside); E8c leaves a
+/// buffer the editor writes clean (#299), so the kill goes without a
+/// question and names it on the band. Twice, the listing opened again
+/// between.
 #[test]
 fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -524,8 +502,9 @@ fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
         !modified(&s, &dired) && !modified(&s, &lua),
         "premise: neither the dired buffer nor dired.lua reads as modified"
     );
-    for typed in ["dir", "dired"] {
-        if typed == "dired" {
+    for round in 0..2 {
+        let typed = LISTING_QUERY;
+        if round == 1 {
             assert_eq!(
                 open_dired(&mut s, &proj),
                 dired,
@@ -534,9 +513,10 @@ fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
             show(&s, &editor);
         }
         let offered = kill_by_typing(&mut s, typed);
-        assert!(
-            offered.contains(&dired) && offered.contains(&lua),
-            "premise: `{typed}` is held by the dired buffer and by dired.lua; got {offered:?}"
+        assert_eq!(
+            offered.first(),
+            Some(&dired),
+            "`{typed}` selects the listing; got {offered:?}"
         );
         assert!(
             !active(&s),
@@ -554,11 +534,12 @@ fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
 
 /// D18's four through `C-x k`, which shares `C-x b`'s source and its
 /// `candidate` policy: `nts` kills `notes.txt` and `scr` `*scratch*`,
-/// both unmodified and so without a question; `lsp` selects `*lsp*`
-/// beside `src/lsp.rs` and kills it, without a question since E8c left
-/// the editor's own text clean (before it, `*lsp*` read as modified and
-/// this row answered `y`); each is named on the band. `zzz` matches
-/// nothing, is looked up as typed and refused, and nothing goes.
+/// both unmodified and so without a question; `*lsp` selects `*lsp*`
+/// beside `lsp.rs` (whose name `lsp` selects under D40, the first row)
+/// and kills it, without a question since E8c left the editor's own text
+/// clean (before it, `*lsp*` read as modified and this row answered
+/// `y`); each is named on the band. `zzz` matches nothing, is looked up
+/// as typed and refused, and nothing goes.
 #[test]
 fn c_x_k_keeps_d18_s_four() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -575,9 +556,10 @@ fn c_x_k_keeps_d18_s_four() {
         "premise: notes.txt and *scratch* are unmodified"
     );
     let offered = kill_by_typing(&mut s, "nts");
-    assert!(
-        offered.contains(&notes) && offered.len() > 1,
-        "premise: `nts` matches notes.txt among others; got {offered:?}"
+    assert_eq!(
+        offered.first(),
+        Some(&notes),
+        "`nts` selects notes.txt; got {offered:?}"
     );
     assert!(!active(&s), "notes.txt goes without a question");
     assert!(!buffer_names(&s).contains(&notes), "nts kills notes.txt");
@@ -600,10 +582,11 @@ fn c_x_k_keeps_d18_s_four() {
         !modified(&s, "*lsp*"),
         "premise: *lsp* is the editor's text and reads as unmodified"
     );
-    let offered = kill_by_typing(&mut s, "lsp");
-    assert!(
-        offered.contains(&lsp_rs),
-        "premise: src/lsp.rs holds `lsp` in its own name; got {offered:?}"
+    let offered = kill_by_typing(&mut s, "*lsp");
+    assert_eq!(
+        offered.first().map(String::as_str),
+        Some("*lsp*"),
+        "`*lsp` selects *lsp*; got {offered:?}"
     );
     assert!(
         !active(&s),
@@ -613,7 +596,7 @@ fn c_x_k_keeps_d18_s_four() {
     let left = buffer_names(&s);
     assert!(
         !left.contains(&"*lsp*".to_owned()) && left.contains(&lsp_rs),
-        "lsp kills *lsp* and keeps src/lsp.rs; left {left:?}"
+        "*lsp kills *lsp* and keeps lsp.rs; left {left:?}"
     );
     assert_eq!(status(&s), "kill-buffer: killed *lsp*");
 

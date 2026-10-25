@@ -72,8 +72,10 @@ fn project() -> TempDir {
     td
 }
 
-fn active_name(s: &EditorState) -> String {
-    eval(s, "return pmacs.window.buffer():name()")
+/// The path of the file the active window shows: which file a window
+/// shows is its path, a name being no longer one (D40).
+fn active_path(s: &EditorState) -> Option<String> {
+    eval(s, "return pmacs.window.buffer():path()")
 }
 
 fn buffer_in(s: &EditorState, window: WindowId) -> Option<BufferId> {
@@ -303,8 +305,8 @@ fn a_captured_destination_survives_a_frontend_switch() {
         );
         s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
         assert_eq!(
-            active_name(&s),
-            alpha,
+            active_path(&s),
+            Some(alpha),
             "{profile:?}: the commit must land in the capturing frontend's window"
         );
         assert_eq!(

@@ -484,11 +484,7 @@ fn e10_2_a_restarted_daemon_reopens_what_the_last_window_had() {
         } if *buffer_id == reopened => Some(name.clone()),
         _ => None,
     });
-    assert_eq!(
-        name,
-        home(&first).join("note.txt").display().to_string(),
-        "the first daemon's note"
-    );
+    assert_eq!(name, "note.txt", "the first daemon's note, by its name");
     b.cursor_at(reopened, 4);
     b.type_str("x");
     b.cursor_at(reopened, 5);
@@ -639,20 +635,23 @@ fn e10_2_desktop_restore_in_a_window_brings_its_kinds_desktop_back() {
     window.cursor_at(note, 5);
 }
 
-/// The restored windows' buffers, read from the daemon by a command in
-/// the window (its layout is not on the semantic wire before E11).
+/// The restored windows' files, read from the daemon by a command in
+/// the window (its layout is not on the semantic wire before E11): each
+/// buffer's path, a name being no longer one (D40).
 const LAYOUT: &str = "\
 pmacs.command.define { name = 'e10.layout', description = 'log the layout',
   fn = function()
     local f = assert(io.open(home .. '/layout.log', 'w'))
     for _, id in ipairs(pmacs.window.list()) do
-      f:write(pmacs.window.buffer(id):name(), '\\n')
+      local b = pmacs.window.buffer(id)
+      f:write(b:path() or b:name(), '\\n')
     end
     f:close()
   end }
 pmacs.hook.add('buffer.after-load', function()
   local f = assert(io.open(home .. '/after-load.log', 'a'))
-  f:write(pmacs.window.buffer():name(), '\\n')
+  local b = pmacs.window.buffer()
+  f:write(b:path() or b:name(), '\\n')
   f:close()
 end)
 ";

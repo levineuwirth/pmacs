@@ -118,6 +118,13 @@ fn active_name(s: &EditorState) -> String {
     eval(s, "return pmacs.window.buffer():name()")
 }
 
+/// The path of the file the active window shows, `None` for a buffer
+/// holding none. A row asking which file a window shows reads this: a
+/// buffer's name is no longer its path (D40).
+fn active_path(s: &EditorState) -> Option<String> {
+    eval(s, "return pmacs.window.buffer():path()")
+}
+
 fn active_text(s: &EditorState) -> String {
     eval(
         s,
@@ -591,8 +598,8 @@ fn commit_to_delivers_to_the_requesting_frontend_not_the_ambient_one() {
     );
     s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
     assert_eq!(
-        active_name(&s),
-        alpha,
+        active_path(&s),
+        Some(alpha),
         "the commit must land in the requesting frontend's captured window"
     );
     assert_eq!(
@@ -668,8 +675,8 @@ fn commit_to_outranks_an_interactive_origin() {
     );
     s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
     assert_eq!(
-        active_name(&s),
-        alpha,
+        active_path(&s),
+        Some(alpha),
         "the commit must land in the captured destination, not the \
          interactive origin's window"
     );
@@ -1266,8 +1273,8 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
     pump(&mut s);
 
     assert_eq!(
-        active_name(&s),
-        td.path().join("alpha.txt").display().to_string(),
+        active_path(&s),
+        Some(td.path().join("alpha.txt").display().to_string()),
         "RET on a listed file must visit it"
     );
 
@@ -1507,12 +1514,11 @@ fn preservation_opening_a_file_shows_it_in_the_active_window() {
     let target = td.path().join("alpha.txt");
     let s = EditorState::open(target.clone()).expect("open");
 
-    // The displayed name is the argument as given (`path.display()`),
-    // which both implementations have always produced -- the *stored*
-    // path is what gets normalized, inside `set_buffer_path`.
+    // The window's file, read from its path: the name is the basename
+    // (D40), and the stored path is normalized inside `set_buffer_path`.
     assert_eq!(
-        active_name(&s),
-        target.display().to_string(),
+        active_path(&s),
+        Some(target.display().to_string()),
         "the file must be in the active window, not merely loaded"
     );
     let scratch_displayed: bool = eval(
@@ -1771,8 +1777,8 @@ fn walk_to_open_file(dir: &Path, name: &str) -> EditorState {
     press(&mut s, KeyCode::Enter);
     pump(&mut s);
     assert_eq!(
-        active_name(&s),
-        dir.join(name).display().to_string(),
+        active_path(&s),
+        Some(dir.join(name).display().to_string()),
         "precondition: the walk must actually open the file, or every pin \
          below is really testing the dired buffer"
     );
@@ -2338,7 +2344,7 @@ fn journey_step4_preservation_a_file_target_does_not_greet() {
         pmacs::editor::Startup::Local(state) => *state,
         pmacs::editor::Startup::HandOff(_) => panic!("no attach request"),
     };
-    assert_eq!(active_name(&s), path.display().to_string());
+    assert_eq!(active_name(&s), "alpha.txt", "named by its basename (D40)");
     assert_eq!(
         scratch_text(&s),
         "",
@@ -2514,8 +2520,8 @@ fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
     press(&mut s, KeyCode::Enter);
     pump(&mut s);
     assert_eq!(
-        active_name(&s),
-        td.path().join("main.rs").display().to_string(),
+        active_path(&s),
+        Some(td.path().join("main.rs").display().to_string()),
         "precondition: the walk must actually open the source file"
     );
 

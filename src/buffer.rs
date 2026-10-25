@@ -304,12 +304,17 @@ struct EditDescription {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferNameOrigin {
     /// A caller named this buffer: `Buffer::new`/`from_bytes`, an
-    /// ordinary [`Buffer::set_name`], or the `pmacs.buffer.set_name`
-    /// binding. A rename leaves the name alone.
+    /// ordinary [`crate::buffer_registry::BufferRegistry::set_name`], or
+    /// the `pmacs.buffer.set_name` binding. Nothing rewrites it, and a
+    /// derived name that would equal it takes more of its own path
+    /// instead (D40).
     Explicit,
-    /// The name was derived from the buffer's backing path by a
-    /// path-backed creation site, through
-    /// [`Buffer::set_path_derived_name`]. A rename rewrites it.
+    /// The name derives from the buffer's path ([`Buffer::name_path`]):
+    /// its file's basename, or a listing's directory and a `/`, with
+    /// the fewest trailing directories that tell it apart from every
+    /// other name (D40, `crate::buffer_names`). The registry rewrites
+    /// it whenever the set of names can have changed: an open, a kill,
+    /// a rename, a save-as.
     PathDerived,
 }
 
@@ -325,11 +330,9 @@ pub struct Buffer {
     rope: Rope,
     name: String,
     /// Where [`Self::name`] came from. Recorded rather than inferred,
-    /// because a path-backed buffer's name is **not** reliably its
-    /// path: `get_or_load_buffer` takes the name from the path *as
-    /// given* and normalizes only the stored `file_path`, so a
-    /// relative open is named `foo.rs` while its path is absolute.
-    /// Rename reconciliation asks this bit, never the string
+    /// because a path-backed buffer's name is **not** its path (D40):
+    /// it is the path's last component, or as many trailing components
+    /// as tell it apart. Naming asks this bit, never the string
     /// (dired Stage 2a, Q#DR30).
     name_origin: BufferNameOrigin,
     /// The buffer's single active major mode, if one has been selected.
@@ -449,8 +452,8 @@ impl Buffer {
             rope,
             name: name.into(),
             // Construction names a buffer explicitly. A path-backed
-            // creation site re-records provenance through
-            // `set_path_derived_name` right after binding the path.
+            // creation site binds the path and then asks the registry to
+            // name it from it (`BufferRegistry::name_by_path`).
             name_origin: BufferNameOrigin::Explicit,
             major_mode: None,
             is_modified: false,
@@ -648,8 +651,11 @@ impl Buffer {
         self.id
     }
 
-    /// This buffer's name. Typically a file path or a synthetic label
-    /// like `*scratch*`.
+    /// This buffer's name: a file buffer's basename, or as many trailing
+    /// directories with it as tell it apart (`src/a.rs`, D40), or a
+    /// label like `*scratch*`. Never the path itself but by the last
+    /// resort of a name no directory tells apart; the path is
+    /// [`Self::file_path`].
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -658,32 +664,46 @@ impl Buffer {
     /// Set the buffer's name, recording it as **explicitly chosen**
     /// ([`BufferNameOrigin::Explicit`]).
     ///
-    /// This is the user-facing door — `pmacs.buffer.set_name` and
-    /// save-as go through it — and it is deliberately explicit even
-    /// when the string happens to denote the file: naming a buffer
-    /// `notes` for `${cwd}/notes` is still a naming operation, and a
-    /// later rename must not overwrite it. Path-backed creation sites
-    /// use [`Self::set_path_derived_name`] instead.
-    pub fn set_name(&mut self, name: impl Into<String>) {
+    /// Crate-private: the door is
+    /// [`crate::buffer_registry::BufferRegistry::set_name`], which also
+    /// moves any derived name the new one would equal. It is explicit
+    /// even when the string happens to denote the file: naming a buffer
+    /// `notes` for `${cwd}/notes` is still a naming operation, and
+    /// nothing rewrites it.
+    pub(crate) fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
         self.name_origin = BufferNameOrigin::Explicit;
     }
 
-    /// Set the buffer's name **and** record that it was derived from
-    /// the buffer's backing path ([`BufferNameOrigin::PathDerived`]).
-    ///
-    /// Every site that creates or re-binds a path-backed buffer uses
-    /// this door, including rename reconciliation itself — so a second
-    /// rename still follows the path.
-    pub fn set_path_derived_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
+    /// Record that this buffer's name derives from its path
+    /// ([`BufferNameOrigin::PathDerived`]); the registry then names it
+    /// ([`crate::buffer_registry::BufferRegistry::name_by_path`]).
+    pub(crate) fn name_from_path(&mut self) {
         self.name_origin = BufferNameOrigin::PathDerived;
+    }
+
+    /// Write the name the registry derived for this buffer, keeping
+    /// its provenance ([`crate::buffer_registry::BufferRegistry::refresh_names`]).
+    pub(crate) fn set_derived_name(&mut self, name: String) {
+        debug_assert_eq!(self.name_origin, BufferNameOrigin::PathDerived);
+        self.name = name;
     }
 
     /// Where this buffer's name came from (dired Stage 2a, Q#DR30).
     #[must_use]
     pub fn name_origin(&self) -> BufferNameOrigin {
         self.name_origin
+    }
+
+    /// The path this buffer's name derives from, and whether it is a
+    /// directory, or `None` for a name that does not derive from one
+    /// (an explicit name, or a derived one whose path is gone).
+    #[must_use]
+    pub fn name_path(&self) -> Option<(&Path, bool)> {
+        if self.name_origin != BufferNameOrigin::PathDerived {
+            return None;
+        }
+        self.file_path.as_deref().map(|path| (path, false))
     }
 
     /// This buffer's active major mode, if any.

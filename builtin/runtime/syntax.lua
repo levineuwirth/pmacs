@@ -828,9 +828,11 @@ end
 -- worker, ordered so that what a narrow echo line keeps is what matters:
 -- the grammar, the signal and what follows (parsed again when, or parsing
 -- stopped), under the file's short name, before the full path and the
--- worker's own words. `*errors*` keeps the whole.
+-- worker's own words. `*errors*` keeps the whole. The whole is the
+-- buffer's path, since a name is no longer one (D40): its name only for a
+-- buffer that holds none.
 local function crash_notice(key, buf, report, detail)
-  local name = buf and buf:name() or key
+  local name = buf and (buf:path() or buf:name()) or key
   local short = name:match("[^/]+$") or name
   local grammar = tostring(parse_lang_by_buffer[key])
   -- A crash inside an injected layer is the layer's grammar's (review 2's
@@ -877,10 +879,11 @@ local function mark_stop(key, state)
 end
 
 -- A stopped buffer's names for its notice: the file's short name first,
--- which a narrow echo line keeps, and the whole path for the end.
+-- which a narrow echo line keeps, and the whole path for the end, read
+-- from the path, not the name (D40).
 local function stop_names(key)
   local b = parse_buffer_by_key[key]
-  local name = b and b:name() or key
+  local name = b and (b:path() or b:name()) or key
   return name:match("[^/]+$") or name, name
 end
 

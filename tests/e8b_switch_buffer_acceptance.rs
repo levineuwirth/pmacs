@@ -359,7 +359,7 @@ fn init_for(files: &[&Path]) -> String {
 /// E8 review 1's fixture: a daemon visiting `b.rs` then `a.rs`, both
 /// holding [`SOURCE`], in a cargo project in the directory `sub` of a
 /// fresh temporary one, semantic and multi-frontend. Returns the two
-/// paths as the daemon was handed them.
+/// buffers' names, their basenames (D40).
 fn daemon_with(sub: &str) -> (TestDaemon, tempfile::TempDir, String, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join(sub);
@@ -376,20 +376,16 @@ fn daemon_with(sub: &str) -> (TestDaemon, tempfile::TempDir, String, String) {
         ],
         &init_for(&[&b, &a]),
     );
-    (
-        daemon,
-        dir,
-        a.display().to_string(),
-        b.display().to_string(),
-    )
+    (daemon, dir, "a.rs".to_owned(), "b.rs".to_owned())
 }
 
 /// E8b.3, E8 review 1's session as it was: its harness declares the
 /// first snapshot's buffer, `b.rs`, so the window shows `b.rs` before
 /// any key, though the init left `a.rs` shown; the hover opens there;
-/// and `C-x b <b.rs's full path> RET` selects the buffer already shown.
-/// The window stays, as review 1's daemon session saw, and the band now
-/// says so (E8b.2) where it said nothing.
+/// and `C-x b b.rs RET` selects the buffer already shown. The window
+/// stays, as review 1's daemon session saw, and the band now says so
+/// (E8b.2) where it said nothing. Review 1 typed `b.rs`'s full path,
+/// which under D40 names no buffer; its name is what selects it.
 #[test]
 fn e8b_3_review1_s_session_already_showed_the_file_whose_path_it_typed() {
     let (daemon, _dir, a, b) = daemon_with("");
@@ -414,7 +410,7 @@ fn e8b_3_review1_s_session_already_showed_the_file_whose_path_it_typed() {
 
 /// E8b.3's control: the same keys under the open popup, where the
 /// session declares the buffer its window shows. `a.rs` is shown, and
-/// `C-x b <b.rs's full path> RET` puts `b.rs` in the window and says so.
+/// `C-x b b.rs RET` puts `b.rs` in the window and says so.
 #[test]
 fn e8b_3_the_full_path_switches_a_daemon_window_under_an_open_popup() {
     let (daemon, _dir, a, b) = daemon_with("");
@@ -428,8 +424,8 @@ fn e8b_3_the_full_path_switches_a_daemon_window_under_an_open_popup() {
 }
 
 /// E8b.1 through the daemon: under a directory called `bin-tests`,
-/// `b.rs` is also a subsequence of `a.rs`'s path, and `C-x b b.rs RET`
-/// from `a.rs` reaches `b.rs`.
+/// `b.rs` was also a subsequence of `a.rs`'s path while a file was named
+/// by it; `C-x b b.rs RET` from `a.rs` reaches `b.rs`.
 #[test]
 fn e8b_1_a_bare_name_reaches_its_file_in_a_daemon_window() {
     let (daemon, _dir, a, b) = daemon_with("bin-tests");
@@ -580,17 +576,19 @@ fn band(facts: &HashMap<String, String>, label: &str) -> String {
         .clone()
 }
 
-/// E8b fix round 1's GPU row: review 1's Medium 1 on the GPU frontend,
-/// in one session with the bare name and D18's four, every key through
-/// `App::apply_keyboard`. `C-x b dired RET` and `C-x b dir RET` reach the
-/// dired buffer, `b.rs` reaches `b.rs` beside `a.rs`, `nts` reaches
-/// `notes.txt` with the dired buffer's name holding `nts` too, `scr`
-/// `*scratch*`, `lsp` `*lsp*` beside `src/lsp.rs`, and `zzz` is refused
-/// with the window unchanged. Each switch is read twice: the band E8b.2
-/// writes, and `C-c z`'s oracle for the window.
+/// E8b fix round 1's GPU row, read under D40 (E10c): review 1's Medium 1
+/// on the GPU frontend, in one session with the bare name and D18's
+/// four, every key through `App::apply_keyboard`, and the names alone
+/// matched. `b.rs` reaches `b.rs` beside `a.rs`; `dired` and `dir` reach
+/// `dired.lua`, whose name begins with them, and the listing is reached
+/// by its own letters; `nts` reaches `notes.txt`, `scr` `*scratch*`,
+/// `lsp` `lsp.rs` (named by its basename, it begins with the query) and
+/// `*lsp` `*lsp*`; and `zzz` is refused with the window unchanged. Each
+/// switch is read twice: the band E8b.2 writes, and `C-c z`'s oracle for
+/// the window.
 #[test]
 fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four() {
-    let (daemon, _dir, paths) = own_name_daemon();
+    let (daemon, _dir, _paths) = own_name_daemon();
     // The probe is ready once one snapshot has landed, and the GPU
     // declares a viewport on each bootstrap snapshot as it applies it,
     // which moves its window; where it settles varies from run to run,
@@ -605,6 +603,7 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
         ("dired", "dired"),
         ("editor.rs", "editor-2"),
         ("dir", "dir"),
+        (LISTING_QUERY, "listing"),
         ("a.rs", "a"),
         ("b.rs", "bare"),
         ("nts", "nts"),
@@ -616,6 +615,7 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
     where_steps(&mut steps, "lsp-open");
     switch_steps(&mut steps, "scr", "switch-buffer:", "scr-2");
     switch_steps(&mut steps, "lsp", "switch-buffer:", "lsp");
+    switch_steps(&mut steps, "*lsp", "switch-buffer:", "lsp-panel");
     switch_steps(&mut steps, "zzz", "no", "zzz");
     let Some(facts) = run_gpu_probe(&daemon, &steps) else {
         return;
@@ -624,29 +624,25 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
     assert_eq!(fact_or(&facts, "disconnect"), "", "{facts:?}");
     let where_ = |name: &str| format!("{:?}", format!("WHERE {name}"));
     let showing = |name: &str| format!("{:?}", format!("switch-buffer: showing {name}"));
-    assert_eq!(band(&facts, "start-where"), where_(&paths["editor"]));
+    assert_eq!(band(&facts, "start-where"), where_("editor.rs"));
     assert!(
-        band(&facts, "start").ends_with(&format!("showing {}\"", paths["editor"])),
+        band(&facts, "start").ends_with("showing editor.rs\""),
         "{facts:?}"
     );
-    let opened = band(&facts, "dired-open-where");
-    let dired = opened
-        .trim_matches('"')
-        .strip_prefix("WHERE ")
-        .filter(|n| n.starts_with("*dired:") && n.ends_with("/proj*"))
-        .unwrap_or_else(|| panic!("fixture: C-x d RET opened a dired buffer; {opened}"))
-        .to_owned();
+    let dired = listing_name(&band(&facts, "dired-open-where"));
     let expect = [
-        ("editor", paths["editor"].clone()),
-        ("dired", dired.clone()),
-        ("editor-2", paths["editor"].clone()),
-        ("dir", dired.clone()),
-        ("a", paths["a"].clone()),
-        ("bare", paths["b"].clone()),
-        ("nts", paths["notes"].clone()),
-        ("scr", "*scratch*".to_owned()),
-        ("scr-2", "*scratch*".to_owned()),
-        ("lsp", "*lsp*".to_owned()),
+        ("editor", "editor.rs"),
+        ("dired", "dired.lua"),
+        ("editor-2", "editor.rs"),
+        ("dir", "dired.lua"),
+        ("listing", dired.as_str()),
+        ("a", "a.rs"),
+        ("bare", "b.rs"),
+        ("nts", "notes.txt"),
+        ("scr", "*scratch*"),
+        ("scr-2", "*scratch*"),
+        ("lsp", "lsp.rs"),
+        ("lsp-panel", "*lsp*"),
     ];
     for (label, name) in &expect {
         assert_eq!(
@@ -668,6 +664,21 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
     );
 }
 
+/// The query that reaches the session's listing by its own name, which
+/// no other name in the session holds.
+const LISTING_QUERY: &str = "*dired";
+
+/// The listing's name from `C-c z`'s band after `C-x d RET`, checked to
+/// be a listing of `proj`.
+fn listing_name(opened: &str) -> String {
+    opened
+        .trim_matches('"')
+        .strip_prefix("WHERE ")
+        .filter(|n| n.starts_with("*dired:") && n.ends_with("/proj*"))
+        .unwrap_or_else(|| panic!("fixture: C-x d RET opened a listing of proj; {opened}"))
+        .to_owned()
+}
+
 /// A report's top-level fact, `""` when absent.
 fn fact_or<'a>(facts: &'a HashMap<String, String>, key: &str) -> &'a str {
     facts.get(key).map_or("", String::as_str)
@@ -682,23 +693,23 @@ fn kill_steps(steps: &mut Vec<String>, text: &str) {
     steps.push("key:ret".to_owned());
 }
 
-/// E8b fix round 1's GPU row for review 1's Medium 2: `C-x k` by name
-/// through `App::apply_keyboard`. `C-x k dired RET` kills the dired
-/// buffer and the band names it; `dired.lua` is still there to switch
-/// to. Until E8c the listing's generated text read as modified and this
-/// row answered `y` to "kill anyway?"; E8c leaves the editor's own text
-/// clean (#299), so it goes without a question. `C-x k b.rs RET` kills
-/// `b.rs` beside `a.rs`, unmodified, without a question, and names it;
-/// `a.rs` is still there.
+/// E8b fix round 1's GPU row for review 1's Medium 2, read under D40:
+/// `C-x k` by name through `App::apply_keyboard`. `C-x k` on the
+/// listing's own letters kills the listing and the band names it;
+/// `dired.lua` is still there to switch to. Until E8c the listing's
+/// generated text read as modified and this row answered `y` to "kill
+/// anyway?"; E8c leaves the editor's own text clean (#299), so it goes
+/// without a question. `C-x k b.rs RET` kills `b.rs` beside `a.rs`,
+/// unmodified, without a question, and names it; `a.rs` is still there.
 #[test]
 fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
-    let (daemon, _dir, paths) = own_name_daemon();
+    let (daemon, _dir, _paths) = own_name_daemon();
     let mut steps = vec!["quiet:2000".to_owned()];
     switch_steps(&mut steps, "editor.rs", "switch-buffer:", "editor");
     steps.extend(["key:C-x", "key:d", "key:ret", "quiet:1500"].map(str::to_owned));
     where_steps(&mut steps, "dired-open");
     switch_steps(&mut steps, "scr", "switch-buffer:", "scr");
-    kill_steps(&mut steps, "dired");
+    kill_steps(&mut steps, LISTING_QUERY);
     report_steps(&mut steps, "kill-buffer:", "kill-dired");
     where_steps(&mut steps, "kill-dired");
     switch_steps(&mut steps, "dired.lua", "switch-buffer:", "lua");
@@ -713,17 +724,11 @@ fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
     assert_eq!(fact_or(&facts, "ready"), "true", "{facts:?}");
     assert_eq!(fact_or(&facts, "disconnect"), "", "{facts:?}");
     let quoted = |text: String| format!("{text:?}");
-    let opened = band(&facts, "dired-open-where");
-    let dired = opened
-        .trim_matches('"')
-        .strip_prefix("WHERE ")
-        .filter(|n| n.starts_with("*dired:") && n.ends_with("/proj*"))
-        .unwrap_or_else(|| panic!("fixture: C-x d RET opened a dired buffer; {opened}"))
-        .to_owned();
+    let dired = listing_name(&band(&facts, "dired-open-where"));
     assert_eq!(
         band(&facts, "kill-dired"),
         quoted(format!("kill-buffer: killed {dired}")),
-        "C-x k dired RET kills the dired buffer; {facts:?}"
+        "C-x k {LISTING_QUERY} RET kills the listing; {facts:?}"
     );
     assert_eq!(
         band(&facts, "kill-dired-where"),
@@ -731,17 +736,17 @@ fn e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so() {
     );
     assert_eq!(
         band(&facts, "lua"),
-        quoted(format!("switch-buffer: showing {}", paths["lua"])),
+        quoted("switch-buffer: showing dired.lua".to_owned()),
         "dired.lua was kept; {facts:?}"
     );
     assert_eq!(
         band(&facts, "kill-b"),
-        quoted(format!("kill-buffer: killed {}", paths["b"])),
+        quoted("kill-buffer: killed b.rs".to_owned()),
         "C-x k b.rs RET kills b.rs; {facts:?}"
     );
     assert_eq!(
         band(&facts, "a"),
-        quoted(format!("switch-buffer: showing {}", paths["a"])),
+        quoted("switch-buffer: showing a.rs".to_owned()),
         "a.rs was kept; {facts:?}"
     );
     assert!(

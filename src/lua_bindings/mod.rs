@@ -3629,8 +3629,9 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
         // intercept, round-trip input and the major mode, each of which
         // would have to be re-established in the right order.
         //
-        // Uniqueness stays the CALLER's job, matching the Rust setter;
-        // dired reuses its existing `<2>`-variant uniquifier.
+        // Uniqueness among explicit names stays the CALLER's job; a
+        // name derived from a path that this one equals takes more of
+        // its path instead (D40), through the registry's door.
         //
         // This records `BufferNameOrigin::Explicit` (Q#DR30): it is a
         // naming operation even when the string happens to denote the
@@ -3640,10 +3641,8 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             "set_name",
             lua.create_function(move |_, (id, name): (BufferIdLua, String)| {
                 reg.borrow_mut()
-                    .get_mut(id.0)
-                    .map_err(mlua::Error::external)?
-                    .set_name(name);
-                Ok(())
+                    .set_name(id.0, name)
+                    .map_err(mlua::Error::external)
             })?,
         )?;
     }
@@ -3672,11 +3671,6 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     ))
                 })?;
                 let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
-                // Path-backed creation site (Q#DR30): this name is the
-                // path as given, so rename reconciliation may move it.
-                if let Ok(b) = reg.borrow_mut().get_mut(id) {
-                    b.set_path_derived_name(path.clone());
-                }
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
@@ -3684,6 +3678,11 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     core.set_buffer_path(id, Some(path_buf));
                     core.set_buffer_meta(id, Some(meta));
                 }
+                // Path-backed creation site (Q#DR30): named from the path
+                // just bound, beside every other name (D40).
+                reg.borrow_mut()
+                    .name_by_path(id)
+                    .map_err(mlua::Error::external)?;
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
                 Ok(BufferIdLua(id))
             })?,
@@ -3740,10 +3739,6 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     ))
                 })?;
                 let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
-                // Path-backed creation site (Q#DR30), as in `from_file`.
-                if let Ok(b) = reg.borrow_mut().get_mut(id) {
-                    b.set_path_derived_name(path.clone());
-                }
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
@@ -3751,6 +3746,10 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     core.set_buffer_path(id, Some(path_buf));
                     core.set_buffer_meta(id, Some(meta));
                 }
+                // Path-backed creation site (Q#DR30), as in `from_file`.
+                reg.borrow_mut()
+                    .name_by_path(id)
+                    .map_err(mlua::Error::external)?;
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
                 Ok(BufferIdLua(id))
             })?,

@@ -309,6 +309,25 @@ fn window_buffer_name(s: &EditorState, window: WindowId) -> String {
         .to_owned()
 }
 
+/// The path of the file `window` shows, `None` for a buffer holding
+/// none: which file a window shows is its path, a name being no longer
+/// one (D40).
+fn window_buffer_path(s: &EditorState, window: WindowId) -> Option<String> {
+    let buffer_id = s
+        .core
+        .borrow()
+        .windows
+        .get(&window)
+        .map(|w| w.buffer_id)
+        .expect("window is live");
+    let registry = s.lua_host.registry().borrow();
+    registry
+        .get(buffer_id)
+        .expect("buffer is live")
+        .file_path()
+        .map(|p| p.display().to_string())
+}
+
 fn active_window(s: &EditorState) -> WindowId {
     s.core.borrow().active_window_id()
 }
@@ -653,8 +672,8 @@ fn dired_visit_from_a_panel_keeps_the_panel_and_uses_the_document_window() {
         "the panel still shows dired"
     );
     assert_eq!(
-        window_buffer_name(&s, document),
-        canon(&td.path().join("a.txt")),
+        window_buffer_path(&s, document),
+        Some(canon(&td.path().join("a.txt"))),
         "the visited file lands in the document window"
     );
     assert_eq!(
@@ -878,8 +897,8 @@ fn dired_directory_descent_stays_in_its_side_window() {
         "showing the new directory"
     );
     assert_eq!(
-        window_buffer_name(&s, document),
-        canon(&anchor),
+        window_buffer_path(&s, document),
+        Some(canon(&anchor)),
         "the document window is untouched"
     );
     assert_eq!(active_window(&s), panel, "and dired keeps the focus");
@@ -1621,8 +1640,8 @@ fn dired_quit_restores_the_previous_buffer_and_closes_a_panel() {
     open_ok(&mut s, td.path(), "nil");
     type_char(&mut s, 'q');
     assert_eq!(
-        active_name(&s),
-        canon(&anchor),
+        active_path(&s),
+        Some(canon(&anchor)),
         "`q` returns to the buffer dired was opened from"
     );
 
@@ -1637,8 +1656,8 @@ fn dired_quit_restores_the_previous_buffer_and_closes_a_panel() {
         "`q` in a side window routes through window.quit"
     );
     assert_eq!(
-        active_name(&s),
-        canon(&anchor),
+        active_path(&s),
+        Some(canon(&anchor)),
         "and focus lands back in the document window"
     );
 }
@@ -1679,8 +1698,8 @@ fn dired_open_failure_leaves_the_editor_unchanged() {
     );
     assert_eq!(active_window(&s), before_window, "no window changed");
     assert_eq!(
-        active_name(&s),
-        canon(&anchor),
+        active_path(&s),
+        Some(canon(&anchor)),
         "the active buffer is intact"
     );
 }

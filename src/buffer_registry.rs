@@ -17,11 +17,12 @@
 //! [`crate::lua::LuaHost`] on the main thread; workers (M3) communicate
 //! via typed messages and snapshots, never by sharing the registry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use thiserror::Error;
 
 use crate::buffer::{Buffer, BufferId};
+use crate::buffer_names::{NameRequest, derive_names};
 use crate::rope::Edit;
 
 /// Errors raised by the registry.
@@ -103,6 +104,9 @@ impl BufferRegistry {
             self.order.retain(|x| *x != id);
         }
         self.order.push(id);
+        // A new name, explicit or not, can be the one a derived name
+        // held (D40).
+        self.refresh_names();
         id
     }
 
@@ -153,7 +157,78 @@ impl BufferRegistry {
             .remove(&id)
             .ok_or(RegistryError::Missing { id })?;
         self.order.retain(|x| *x != id);
+        // A survivor returns to the shorter name it no longer shares.
+        self.refresh_names();
         Ok(buf)
+    }
+
+    /// Name the buffer behind `id` from its path from now on
+    /// ([`crate::buffer::BufferNameOrigin::PathDerived`]), and rename
+    /// every derived name the set of names now decides (D40). The six
+    /// path-backed creation and re-binding sites call this after binding
+    /// the path: an open (`EditorCore::get_or_load_buffer`, a new file's
+    /// `resolve_target_buffer`, `pmacs.buffer.from_file` and
+    /// `find_or_open`), and a save-as (`write_active_buffer_to`).
+    ///
+    /// # Errors
+    /// [`RegistryError::Missing`] for a stale handle.
+    pub fn name_by_path(&mut self, id: BufferId) -> Result<(), RegistryError> {
+        self.get_mut(id)?.name_from_path();
+        self.refresh_names();
+        Ok(())
+    }
+
+    /// Give the buffer behind `id` the explicit name `name`, which
+    /// nothing rewrites, moving any derived name it equals (D40). The
+    /// door for `pmacs.buffer.set_name`.
+    ///
+    /// # Errors
+    /// [`RegistryError::Missing`] for a stale handle.
+    pub fn set_name(&mut self, id: BufferId, name: impl Into<String>) -> Result<(), RegistryError> {
+        self.get_mut(id)?.set_name(name);
+        self.refresh_names();
+        Ok(())
+    }
+
+    /// Rename every buffer whose name derives from a path through the one
+    /// naming function, [`crate::buffer_names::derive_names`] (D40,
+    /// D37), in registry order, every other buffer's name reserved.
+    ///
+    /// Called on every insert and removal and by every site that binds,
+    /// moves or re-binds a path ([`Self::name_by_path`],
+    /// `EditorCore::set_buffer_path`, rename reconciliation), so a name
+    /// is always the one the whole set decides: an open beside an alike
+    /// basename lengthens both, and a kill shortens the survivor.
+    pub fn refresh_names(&mut self) {
+        let named: Vec<(BufferId, String)> = {
+            let mut ids = Vec::new();
+            let mut requests = Vec::new();
+            let mut reserved = HashSet::new();
+            for id in &self.order {
+                let Some(buf) = self.buffers.get(id) else {
+                    continue;
+                };
+                match buf.name_path() {
+                    Some((path, directory)) => {
+                        ids.push(*id);
+                        requests.push(NameRequest { path, directory });
+                    }
+                    None => {
+                        reserved.insert(buf.name());
+                    }
+                }
+            }
+            ids.into_iter()
+                .zip(derive_names(&requests, &reserved))
+                .collect()
+        };
+        for (id, name) in named {
+            if let Some(buf) = self.buffers.get_mut(&id)
+                && buf.name() != name
+            {
+                buf.set_derived_name(name);
+            }
+        }
     }
 
     /// Replace the contents of the generated buffer named `name`

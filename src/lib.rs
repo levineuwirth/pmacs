@@ -56,6 +56,7 @@ pub mod audit;
 pub mod autosave;
 pub mod bootstrap;
 pub mod buffer;
+pub mod buffer_names;
 pub mod buffer_registry;
 pub mod builtin_packages;
 pub mod cell;

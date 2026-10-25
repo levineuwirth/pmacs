@@ -428,13 +428,15 @@ fn acc28_delete_a_false_string_prefix_does_not_widen_the_kill_list() {
 // 29 — name provenance, both directions
 // ---------------------------------------------------------------------------
 
-/// Acceptance 29(a). A buffer opened by a **relative** path is named
-/// `foo.rs` while its stored path is absolute, and its name follows the
-/// rename because its load site recorded `PathDerived`.
+/// Acceptance 29(a), read under D40 (E10c). A buffer opened by a path
+/// spelled otherwise than its stored one is named by its basename, as
+/// every file buffer is, and its name follows the rename because its
+/// load site recorded `PathDerived`.
 ///
-/// Bite: rev 7's string-equality rule fails this — the name never
-/// equalled the normalized path, so it would have been left stale while
-/// insisting it was user-chosen.
+/// Bite: rev 7's string-equality rule fails this --- a name was never
+/// its normalized path, and under D40 is never a path at all, so a test
+/// on the string would leave it stale while insisting it was
+/// user-chosen.
 #[test]
 fn acc29a_a_relative_opens_name_follows_the_rename() {
     let fx = Fixture::new();
@@ -449,8 +451,8 @@ fn acc29a_a_relative_opens_name_follows_the_rename() {
     open_as(&state, "B", &as_given);
     assert_eq!(
         buffer_name(&state, "B").as_deref(),
-        Some(as_given.to_str().unwrap()),
-        "precondition: the name is the path AS GIVEN, not the stored path"
+        Some("relative.txt"),
+        "precondition: the name is the basename, whatever the spelling"
     );
     assert_eq!(
         buffer_path(&state, "B").as_deref(),
@@ -466,7 +468,7 @@ fn acc29a_a_relative_opens_name_follows_the_rename() {
     );
     assert_eq!(
         buffer_name(&state, "B").as_deref(),
-        Some(new.to_str().unwrap()),
+        Some("moved.txt"),
         "the name follows because the load site recorded path provenance, \
          not because the old name happened to match the old path"
     );
@@ -989,13 +991,13 @@ fn acc53_the_last_buffer_refusal_keeps_the_buffer_and_the_rest_proceeds() {
         said.contains("could not be closed"),
         "the refusal must reach the status channel; status was {said:?}"
     );
-    // Asserted as the buffer's OWN name, not as the basename. The
-    // message opens with `deleted only.txt:` — the *path* — so a
-    // `contains("only.txt")` check passes with the attribution stripped,
-    // which is exactly how this assertion was vacuous when first
-    // written. A path-backed buffer's name is the full path, and only
-    // the `buffer "…"` prefix can produce it.
-    let expect_named = format!("buffer {:?}", only.display().to_string());
+    // Asserted as the buffer's OWN name inside the refusal's quoting. The
+    // message opens with `deleted only.txt:`, so a `contains("only.txt")`
+    // check passes with the attribution stripped, which is exactly how
+    // this assertion was vacuous when first written. A file buffer's
+    // name is its basename (D40), and only the `buffer "…"` prefix can
+    // produce it quoted.
+    let expect_named = format!("buffer {:?}", "only.txt");
     assert!(
         said.contains(&expect_named),
         "the refusal must name the buffer, because `cannot kill the last \
@@ -1048,12 +1050,14 @@ fn acc53_the_last_buffer_refusal_keeps_the_buffer_and_the_rest_proceeds() {
         "and the report must state the consequence — saving it puts the \
          deleted file back; status was {said2:?}"
     );
-    // Same discipline: the full path is the buffer's name, while the
-    // message's `deleted b.txt:` prefix is only the basename.
+    // Same discipline: the buffer's name is its basename (D40), which the
+    // message's `deleted b.txt:` prefix also holds, so the name is read
+    // where only the kept-buffers clause writes it, inside its parentheses.
     assert!(
-        said2.contains(&b.display().to_string()),
-        "the kept buffer must be named, and by its own name rather than \
-         the deleted path's basename; status was {said2:?}"
+        said2.contains("(b.txt)"),
+        "the kept buffer must be named by its own name, in the clause that \
+         lists what was kept, not only in the deleted path's prefix; status \
+         was {said2:?}"
     );
 }
 
