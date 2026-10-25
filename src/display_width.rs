@@ -59,9 +59,63 @@ pub fn byte_range_to_columns(bytes: &[u8], start: usize, end: usize) -> (u32, u3
     (byte_to_column(bytes, start), byte_to_column(bytes, end))
 }
 
+/// `text` in exactly `columns` display columns: padded with spaces when
+/// it is narrower, and when it is wider cut where the rest would not fit
+/// beside a closing `…`, which takes the last column (a wide character
+/// that would straddle the cut goes, and a space fills its column). For
+/// a table's column of names, which a byte count pads short wherever a
+/// character takes more than one byte (`*buffer-list*`, E10c review 1's
+/// Low 1).
+#[must_use]
+pub fn fit_columns(text: &str, columns: u32) -> String {
+    let mut out = String::with_capacity(text.len() + columns as usize);
+    let width = text.chars().fold(0, advance_char);
+    let mut used = if width <= columns {
+        out.push_str(text);
+        width
+    } else if columns == 0 {
+        0
+    } else {
+        let mut used = 0;
+        for ch in text.chars() {
+            let next = advance_char(used, ch);
+            if next >= columns {
+                break;
+            }
+            out.push(ch);
+            used = next;
+        }
+        out.push('…');
+        used + 1
+    };
+    while used < columns {
+        out.push(' ');
+        used += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fitted_text_takes_its_columns_however_wide_its_characters() {
+        assert_eq!(fit_columns("a.rs", 6), "a.rs  ");
+        assert_eq!(fit_columns("résumé.md", 11), "résumé.md  ");
+        assert_eq!(fit_columns("中文.md", 8), "中文.md ");
+        assert_eq!(fit_columns("a.rs", 4), "a.rs");
+        assert_eq!(fit_columns("abcdefgh", 5), "abcd…");
+        assert_eq!(fit_columns("中文中文", 4), "中… ");
+        assert_eq!(fit_columns("abc", 0), "");
+        for (text, columns) in [("résumé.md", 4), ("中文中文", 5), ("a.rs", 9)] {
+            assert_eq!(
+                widest_line_columns(&fit_columns(text, columns)),
+                columns,
+                "{text} in {columns}"
+            );
+        }
+    }
 
     #[test]
     fn tabs_advance_at_zero_before_stop_and_on_stop() {

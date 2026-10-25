@@ -480,11 +480,13 @@ fn text_of(s: &EditorState, name: &str) -> String {
 /// E10c.5's witness: a name no longer shows the path, so `C-x C-b`'s
 /// `*buffer-list*` shows it beside the name: the path of a file buffer
 /// named by its basename, the directory of a listing, and none for a
-/// buffer that holds neither.
+/// buffer that holds neither, whose row ends at its size. HOME is set
+/// where no temporary directory sits, so the paths show whole.
 #[test]
 fn the_buffer_list_shows_the_path_of_a_buffer_named_by_its_basename() {
     let td = project();
     let mut s = fresh();
+    pin_home(&s, "/nonexistent-home");
     find_file(&mut s, &td.path().join("src/b.rs"));
     assert_eq!(mode_line_name(&s), "b.rs");
     open_dired(&mut s, &td.path().join("tests"));
@@ -513,12 +515,63 @@ fn the_buffer_list_shows_the_path_of_a_buffer_named_by_its_basename() {
         "the listing's row shows its directory: {listing}"
     );
     assert!(
-        row("*scratch*").trim_end().ends_with("bytes"),
+        row("*scratch*").trim_end().ends_with(" 0"),
         "*scratch* holds no path, and its row ends at its size: {listing}"
     );
     assert!(
         listing.lines().next().is_some_and(|h| h.contains("File")),
         "the header names the column: {listing}"
+    );
+}
+
+/// E10c.5 as the owner amended it (2026-10-25, on review 1's Low 1):
+/// `*buffer-list*` writes a path under `$HOME` in `~` form; its name
+/// column is as wide as the longest name up to forty columns, a longer
+/// name cut with `…`; and its size is a bare number right-aligned in a
+/// column as wide as the largest, the header's `Size` above it. Each row
+/// is read whole, so a column out of line fails it.
+#[test]
+fn the_buffer_list_writes_tilde_paths_cuts_a_long_name_and_aligns_its_sizes() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let small = td.path().join("src/small.rs");
+    let big = td.path().join("big.txt");
+    let long_name = format!("{}.md", "n".repeat(50));
+    let long = td.path().join(&long_name);
+    for (path, bytes) in [
+        (&small, b"x".to_vec()),
+        (&big, vec![b'y'; 1_048_576]),
+        (&long, b"z\n".to_vec()),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, bytes).expect("write");
+    }
+    let mut s = fresh();
+    pin_home(&s, &td.path().display().to_string());
+    for path in [&small, &big, &long] {
+        find_file(&mut s, path);
+    }
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'b');
+    let listing = text_of(&s, "*buffer-list*");
+    let cut = format!("{}…", "n".repeat(39));
+    for expected in [
+        format!(
+            "   {:<40} {:>7} File   RET visit  d/u mark  x kill marked  k kill  g refresh  q quit",
+            "Buffer", "Size"
+        ),
+        format!("   {:<40} {:>7}", "*scratch*", 0),
+        format!("   {:<40} {:>7} ~/src/small.rs", "small.rs", 1),
+        format!("   {:<40} {:>7} ~/big.txt", "big.txt", 1_048_576),
+        format!("   {cut} {:>7} ~/{long_name}", 2),
+    ] {
+        assert!(
+            listing.lines().any(|l| l == expected),
+            "no row {expected:?} in:\n{listing}"
+        );
+    }
+    assert!(
+        !listing.contains(&td.path().display().to_string()),
+        "every path in ~ form:\n{listing}"
     );
 }
 
@@ -591,6 +644,10 @@ fn opening_two_thousand_files_stays_within_budget() {
          took {unique_took:?} and {alike_took:?}"
     );
 }
+
+#[path = "common/home.rs"]
+mod home;
+use home::pin_home;
 
 #[path = "common/iso.rs"]
 mod iso;

@@ -13,6 +13,8 @@
 //! - `C-x C-w` onto a file another buffer already holds, the one state
 //!   that reaches the `<N>` suffix by the keys: which buffer keeps the
 //!   plain name.
+//! - `*buffer-list*`'s `File` column for a buffer of a megabyte and for
+//!   a name holding a multi-byte character.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -350,6 +352,90 @@ fn r1_save_as_onto_an_open_file_leaves_the_open_buffer_its_name() {
         "the newcomer on the same file takes the suffix"
     );
 }
+
+/// The display column at which `needle` begins in `line`.
+fn column_of(line: &str, needle: &str) -> Option<usize> {
+    line.find(needle).map(|i| line[..i].chars().count())
+}
+
+/// `C-x C-b`, and the listing's text.
+fn buffer_list(s: &mut EditorState) -> String {
+    ctrl(s, 'x');
+    ctrl(s, 'b');
+    eval(
+        s,
+        "for _, id in ipairs(pmacs.buffer.list()) do\n\
+           if pmacs.describe.buffer(id).name == '*buffer-list*' then\n\
+             return id:slice(0, id:len())\n\
+           end\n\
+         end\n\
+         error('no *buffer-list*')",
+    )
+}
+
+/// Every row that shows one of `paths` begins it in the column the
+/// header's `File` begins in.
+fn assert_file_column_in_line(listing: &str, paths: &[&Path]) {
+    let header = listing.lines().next().expect("a header");
+    let file_col = column_of(header, "File").expect("the header names File");
+    for path in paths {
+        let shown = path.display().to_string();
+        let row = listing
+            .lines()
+            .find(|l| l.trim_end().ends_with(&shown))
+            .unwrap_or_else(|| panic!("no row shows {shown}:\n{listing}"));
+        assert_eq!(
+            column_of(row, &shown),
+            Some(file_col),
+            "the path begins under File:\n{listing}"
+        );
+    }
+}
+
+/// P4. E10c.5's `File` column for a buffer of a megabyte: its size,
+/// `1048576 bytes`, is thirteen characters in a twelve-wide field.
+#[test]
+fn r1_the_buffer_list_keeps_a_megabyte_buffer_s_path_under_file() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let small = td.path().join("small.txt");
+    let big = td.path().join("big.txt");
+    write(&small, b"x\n");
+    let line = format!("{}\n", "x".repeat(1023));
+    write(&big, line.repeat(1024).as_bytes());
+    assert_eq!(
+        std::fs::metadata(&big).expect("stat").len(),
+        1_048_576,
+        "fixture: a megabyte"
+    );
+    let mut s = fresh();
+    pin_home(&s, "/nonexistent-home");
+    find_file(&mut s, &small);
+    find_file(&mut s, &big);
+    let listing = buffer_list(&mut s);
+    assert_file_column_in_line(&listing, &[&small, &big]);
+}
+
+/// P4b. The `File` column for a name holding a multi-byte character:
+/// `%-30s` pads by bytes, so `résumé.md` (nine characters, eleven bytes)
+/// ends two columns short and its size and path with it.
+#[test]
+fn r1_the_buffer_list_keeps_a_non_ascii_name_s_path_under_file() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let plain = td.path().join("plain.md");
+    let accented = td.path().join("résumé.md");
+    write(&plain, b"x\n");
+    write(&accented, b"y\n");
+    let mut s = fresh();
+    pin_home(&s, "/nonexistent-home");
+    find_file(&mut s, &plain);
+    find_file(&mut s, &accented);
+    let listing = buffer_list(&mut s);
+    assert_file_column_in_line(&listing, &[&plain, &accented]);
+}
+
+#[path = "common/home.rs"]
+mod home;
+use home::pin_home;
 
 #[path = "common/iso.rs"]
 mod iso;

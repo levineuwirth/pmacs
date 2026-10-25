@@ -2911,6 +2911,7 @@ pub fn install(
     pmacs.set("instance", install_instance_module(lua, registry)?)?;
     pmacs.set("ansi", install_ansi_module(lua)?)?;
     pmacs.set("path", install_path_module(lua)?)?;
+    pmacs.set("text", install_text_module(lua)?)?;
     pmacs.set("packages", install_packages_module(lua)?)?;
     pmacs.set("state", install_state_module(lua)?)?;
     pmacs.set("session", install_session_module(lua)?)?;
@@ -4398,6 +4399,35 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
     Ok(path)
+}
+
+/// Build the `pmacs.text.*` table: text measured in display columns, the
+/// unit both frontends lay a row out in (`pmacs_protocol::columns`), for
+/// Lua that lines text up in columns. `width(s)` is `s`'s width; `fit(s,
+/// n)` is `s` in exactly `n` columns, padded with spaces or cut with `…`
+/// ([`crate::display_width::fit_columns`]). `*buffer-list*`'s columns
+/// pad by them (E10c review 1's Low 1: `%-30s` pads by bytes, so a name
+/// holding `é` ended its row two columns short).
+fn install_text_module(lua: &Lua) -> mlua::Result<Table> {
+    let text = lua.create_table()?;
+    text.set(
+        "width",
+        lua.create_function(|_, s: mlua::String| {
+            Ok(crate::display_width::widest_line_columns(
+                &s.to_string_lossy(),
+            ))
+        })?,
+    )?;
+    text.set(
+        "fit",
+        lua.create_function(|_, (s, columns): (mlua::String, u32)| {
+            Ok(crate::display_width::fit_columns(
+                &s.to_string_lossy(),
+                columns,
+            ))
+        })?,
+    )?;
+    Ok(text)
 }
 
 /// Lua handle for a captured view destination (Q#JR14d).

@@ -24,7 +24,9 @@
 --     header = "12 references   RET visit  n/p move  g refresh  q quit",
 --     rows = { { text = "src/foo.rs:12:4", item = <any> }, ... },
 --     on_visit = function(item) ... end,      -- RET/SPC (optional)
---     on_refresh = function() return rows end, -- g (optional)
+--     on_refresh = function() return rows end, -- g (optional); may return
+--                                               -- a second value, the header
+--                                               -- to show from then on
 --     keys = { d = "git.diff-file" },          -- extra buffer-local keys
 --   }
 
@@ -628,8 +630,10 @@ function pmacs.listview.rerender(name)
   end
   local saved_row = saved_line and p.line_to_row[saved_line]
   local saved_id = saved_row and saved_row.id
-  local rows = check_ids(p.on_refresh() or {})
+  local rows, header = p.on_refresh()
+  rows = check_ids(rows or {})
   p.rows = rows
+  if header ~= nil then p.header = header end
   render(p, rows)
   local target = (saved_id ~= nil and line_of_id(p, saved_id)) or saved_line
   if target == nil then return true end
@@ -689,8 +693,12 @@ pmacs.command.define {
     -- the row set moves every line; the id survives it.
     local saved_row = p.line_to_row[saved]
     local saved_id = saved_row and saved_row.id
-    local rows = check_ids(p.on_refresh() or {})
+    local rows, header = p.on_refresh()
+    rows = check_ids(rows or {})
     p.rows = rows
+    -- A consumer whose columns follow its rows (`*buffer-list*`) hands
+    -- back the header that lines up with them.
+    if header ~= nil then p.header = header end
     render(p, rows)
     -- `set_generated_contents` has already refreshed this window's
     -- TextView. Re-seat through the editor primitives instead of
