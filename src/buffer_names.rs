@@ -110,44 +110,72 @@ pub fn name_depth(
         .unwrap_or(path.names.len() - 1)
 }
 
-/// The names of the `count` buffers holding one path whose name is
-/// `base`, in their order: the first takes `base` unless a reserved name
-/// holds it (`base_free` false), and every other takes the lowest `<N>`,
-/// from 2, that `taken` does not refuse. `taken` answers for a name some
-/// buffer other than these holds. A path's name is never another path's
-/// ([`name_depth`] gives each a name of its own), so `base` needs no
-/// such check and a `<N>` meets only reserved names and names of paths
-/// that end in a `<N>` of their own.
+/// The names of the buffers holding one path whose name is `base`, in
+/// their order, each holding the name in `holds` now. A buffer keeps the
+/// name it holds while that is still one of the path's: the buffer
+/// already holding `base` keeps it (or else the first takes it), unless a
+/// reserved name holds it (`base_free` false), and a buffer holding one
+/// of the path's `<N>` keeps that; every other takes the lowest `<N>`,
+/// from 2, that `taken` does not refuse. So a save-as or a rename onto an
+/// open file's path leaves every buffer showing that file its name and
+/// gives the newcomer the next `<N>`, as Emacs's `write-file` does (E10c
+/// review 1's Low 2, the owner's ruling of 2026-10-25). `taken` answers
+/// for a name some buffer other than these holds. A path's name is never
+/// another path's ([`name_depth`] gives each a name of its own), so
+/// `base` needs no such check and a `<N>` meets only reserved names and
+/// names of paths that end in a `<N>` of their own.
 pub fn name_holders<'a>(
     base: &'a str,
-    count: usize,
+    holds: &[&str],
     base_free: bool,
     taken: impl Fn(&str) -> bool,
 ) -> Vec<Cow<'a, str>> {
-    let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(count);
-    let mut n = 2usize;
-    for i in 0..count {
-        if i == 0 && base_free {
-            out.push(Cow::Borrowed(base));
-            continue;
+    let mut out: Vec<Option<Cow<'a, str>>> = vec![None; holds.len()];
+    if base_free && !holds.is_empty() {
+        let keeper = holds.iter().position(|&h| h == base).unwrap_or(0);
+        out[keeper] = Some(Cow::Borrowed(base));
+    }
+    let mut used: HashSet<String> = HashSet::new();
+    for (slot, &held) in out.iter_mut().zip(holds) {
+        if slot.is_none() && is_suffixed(base, held) && !taken(held) && used.insert(held.to_owned())
+        {
+            *slot = Some(Cow::Owned(held.to_owned()));
         }
-        loop {
+    }
+    let mut n = 2usize;
+    for slot in &mut out {
+        while slot.is_none() {
             let candidate = format!("{base}<{n}>");
             n += 1;
-            if !taken(&candidate) {
-                out.push(Cow::Owned(candidate));
-                break;
+            if !taken(&candidate) && used.insert(candidate.clone()) {
+                *slot = Some(Cow::Owned(candidate));
             }
         }
     }
-    out
+    out.into_iter()
+        .map(|name| name.expect("every holder is named"))
+        .collect()
 }
 
-/// One buffer to name: the path its name derives from.
+/// True iff `name` is `base` with a `<N>` of the kind [`name_holders`]
+/// gives, `N` from 2.
+fn is_suffixed(base: &str, name: &str) -> bool {
+    name.strip_prefix(base)
+        .and_then(|rest| rest.strip_prefix('<'))
+        .and_then(|rest| rest.strip_suffix('>'))
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .is_some_and(|n| n >= 2 && name.len() == base.len() + n.to_string().len() + 2)
+}
+
+/// One buffer to name: the path its name derives from, and the name it
+/// holds now.
 #[derive(Clone, Copy, Debug)]
 pub struct NameRequest<'a> {
     /// The buffer's path, split ([`NamePath::new`]).
     pub path: &'a NamePath,
+    /// The name the buffer holds now, which it keeps where it shares its
+    /// path with another ([`name_holders`]).
+    pub holds: &'a str,
 }
 
 /// The names of `requests` at once, in order: each the fewest trailing
@@ -187,7 +215,8 @@ pub fn derive_names<'a>(
     let all_bases: HashSet<&str> = bases.iter().copied().collect();
     let mut out: Vec<Option<Cow<'a, str>>> = vec![None; requests.len()];
     for (k, members) in holders.iter().enumerate() {
-        let names = name_holders(bases[k], members.len(), !reserved(bases[k]), |n| {
+        let holds: Vec<&str> = members.iter().map(|&i| requests[i].holds).collect();
+        let names = name_holders(bases[k], &holds, !reserved(bases[k]), |n| {
             reserved(n) || all_bases.contains(n)
         });
         for (&i, name) in members.iter().zip(names) {
@@ -258,8 +287,10 @@ mod tests {
     }
 
     fn name_all(paths: &[NamePath], reserved: &HashSet<&str>) -> Vec<String> {
-        let requests: Vec<NameRequest<'_>> =
-            paths.iter().map(|path| NameRequest { path }).collect();
+        let requests: Vec<NameRequest<'_>> = paths
+            .iter()
+            .map(|path| NameRequest { path, holds: "" })
+            .collect();
         derive_names(&requests, |name| reserved.contains(name))
             .into_iter()
             .map(Cow::into_owned)
@@ -299,6 +330,40 @@ mod tests {
     #[test]
     fn one_path_held_twice_takes_a_suffix_not_its_whole_path() {
         assert_eq!(files(&["/p/a.rs", "/p/a.rs"]), ["a.rs", "a.rs<2>"]);
+    }
+
+    /// E10c review 1's Low 2: where buffers share one path, the one
+    /// already holding the plain name keeps it, wherever it stands in
+    /// the order, and one holding a `<N>` keeps that; the rest take the
+    /// lowest free `<N>` in order, and where none holds the plain name,
+    /// the first takes it.
+    #[test]
+    fn the_buffer_already_holding_the_plain_name_keeps_it() {
+        let a = NamePath::new(Path::new("/p/a.rs"), false);
+        let named = |holds: &[&str]| -> Vec<String> {
+            let requests: Vec<NameRequest<'_>> = holds
+                .iter()
+                .map(|&holds| NameRequest { path: &a, holds })
+                .collect();
+            derive_names(&requests, |_| false)
+                .into_iter()
+                .map(Cow::into_owned)
+                .collect()
+        };
+        assert_eq!(named(&["*scratch*", "a.rs"]), ["a.rs<2>", "a.rs"]);
+        assert_eq!(
+            named(&["a.rs<3>", "a.rs<2>", "a.rs"]),
+            ["a.rs<3>", "a.rs<2>", "a.rs"]
+        );
+        assert_eq!(
+            named(&["x", "a.rs<3>", "a.rs"]),
+            ["a.rs<2>", "a.rs<3>", "a.rs"]
+        );
+        assert_eq!(
+            named(&["a.rs<03>", "a.rs<1>", "y"]),
+            ["a.rs", "a.rs<2>", "a.rs<3>"]
+        );
+        assert_eq!(named(&["x", "y"]), ["a.rs", "a.rs<2>"]);
     }
 
     #[test]

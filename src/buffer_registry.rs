@@ -357,6 +357,9 @@ impl BufferRegistry {
     /// `resolve_target_buffer`, `pmacs.buffer.from_file` and
     /// `find_or_open`.
     pub fn insert_for_path(&mut self, mut buffer: Buffer, path: PathBuf) -> BufferId {
+        // Not yet named, it holds no name, so where it shares its path
+        // the buffer already showing that path keeps the plain name.
+        buffer.set_name(String::new());
         buffer.set_file_path(Some(path));
         buffer.name_from_path();
         self.insert(buffer)
@@ -539,19 +542,23 @@ impl BufferRegistry {
     /// changed can move in turn, until none changes. A path's name reads
     /// only reserved names and which of its names other paths share, so
     /// the names settle in one round; a `<N>` that meets another group's
-    /// name takes a second.
+    /// name takes a second. Each buffer keeps, or gives up, the name it
+    /// held when the event began (`prior`), never one a round gave it
+    /// while a buffer that was leaving its path still held a lower `<N>`,
+    /// so the order the paths are named in decides nothing.
     fn settle(&mut self, mut dirty: Dirty) {
         #[cfg(test)]
         {
             self.names.last_named = 0;
         }
+        let mut prior: HashMap<BufferId, String> = HashMap::new();
         let mut rounds = 0;
         while !dirty.is_empty() {
             rounds += 1;
             debug_assert!(rounds <= 8, "the names settle");
             let mut next = Dirty::new();
             for (group, whole) in dirty {
-                for (old, new) in self.name_path(&group, &whole) {
+                for (old, new) in self.name_path(&group, &whole, &mut prior) {
                     self.names.derived_changed(&old, &mut next);
                     self.names.derived_changed(&new, &mut next);
                 }
@@ -560,9 +567,15 @@ impl BufferRegistry {
         }
     }
 
-    /// Name the buffers holding the path `whole` of `group`, returning
-    /// each name that changed, old and new.
-    fn name_path(&mut self, group: &str, whole: &str) -> Vec<(String, String)> {
+    /// Name the buffers holding the path `whole` of `group`, each by the
+    /// name it held before the event (`prior`, else its name now),
+    /// returning each name that changed, old and new.
+    fn name_path(
+        &mut self,
+        group: &str,
+        whole: &str,
+        prior: &mut HashMap<BufferId, String>,
+    ) -> Vec<(String, String)> {
         let (depth, holders, changes) = {
             let index = &self.names;
             let Some(entry) = index.groups.get(group).and_then(|g| g.paths.get(whole)) else {
@@ -575,24 +588,30 @@ impl BufferRegistry {
                 |n| index.reserved.contains_key(n),
             );
             let base = entry.path.names()[depth].as_str();
-            let holds: Vec<&str> = entry
+            let now: Vec<&str> = entry
                 .holders
                 .iter()
                 .map(|(_, id)| self.buffers[id].name())
                 .collect();
+            let holds: Vec<&str> = entry
+                .holders
+                .iter()
+                .zip(&now)
+                .map(|((_, id), &name)| prior.get(id).map_or(name, String::as_str))
+                .collect();
             let taken = |n: &str| {
-                index.held.get(n).copied().unwrap_or(0) > holds.iter().filter(|&&h| h == n).count()
+                index.held.get(n).copied().unwrap_or(0) > now.iter().filter(|&&h| h == n).count()
             };
-            let names = name_holders(base, holds.len(), !index.reserved.contains_key(base), taken);
+            let names = name_holders(base, &holds, !index.reserved.contains_key(base), taken);
             let changes: Vec<(BufferId, String)> = entry
                 .holders
                 .iter()
-                .zip(&holds)
+                .zip(&now)
                 .zip(names)
                 .filter(|((_, held), name)| **held != name.as_ref())
                 .map(|(((_, id), _), name)| (*id, name.into_owned()))
                 .collect();
-            (depth, holds.len(), changes)
+            (depth, now.len(), changes)
         };
         #[cfg(test)]
         {
@@ -618,6 +637,7 @@ impl BufferRegistry {
         for (id, name) in changes {
             let buf = self.buffers.get_mut(&id).expect("a holder is registered");
             let old = buf.name().to_owned();
+            prior.entry(id).or_insert_with(|| old.clone());
             self.names.release(&old);
             self.names.hold(&name);
             buf.set_derived_name(name.clone());
@@ -846,9 +866,37 @@ mod tests {
         assert_eq!(r.names.last_named, 0);
     }
 
+    /// E10c review 1's Low 2, as the owner ruled it: where two buffers
+    /// come to hold one path, the one already holding the plain name
+    /// keeps it and the other takes `<N>`, whichever came first and
+    /// whether a rename or a save-as brought it there (Emacs's
+    /// `write-file`); when the holder goes, the first in order takes it.
+    #[test]
+    fn the_buffer_holding_the_plain_name_keeps_it_when_another_takes_its_path() {
+        let mut r = BufferRegistry::new();
+        let scratch = r.create("*scratch*");
+        let moved = open(&mut r, "/p/b.rs");
+        let shown = open(&mut r, "/p/a.rs");
+        r.get_mut(moved)
+            .unwrap()
+            .set_file_path(Some(PathBuf::from("/p/a.rs")));
+        r.refresh_names(&[moved]);
+        assert_eq!([name(&r, moved), name(&r, shown)], ["a.rs<2>", "a.rs"]);
+        r.name_by_path(scratch, PathBuf::from("/p/a.rs")).unwrap();
+        assert_eq!(
+            [name(&r, scratch), name(&r, moved), name(&r, shown)],
+            ["a.rs<3>", "a.rs<2>", "a.rs"]
+        );
+        r.remove(shown).unwrap();
+        assert_eq!([name(&r, scratch), name(&r, moved)], ["a.rs", "a.rs<2>"]);
+    }
+
     /// Every derived name, decided at once over the whole session: the
     /// definition the per-group naming must agree with.
-    fn from_scratch(r: &BufferRegistry) -> Vec<(BufferId, String)> {
+    fn from_scratch(
+        r: &BufferRegistry,
+        before: &HashMap<BufferId, String>,
+    ) -> Vec<(BufferId, String)> {
         let derived: Vec<(BufferId, NamePath)> = r
             .ids()
             .iter()
@@ -866,7 +914,10 @@ mod tests {
             .collect();
         let requests: Vec<NameRequest<'_>> = derived
             .iter()
-            .map(|(_, path)| NameRequest { path })
+            .map(|(id, path)| NameRequest {
+                path,
+                holds: before.get(id).map_or("", String::as_str),
+            })
             .collect();
         let names = derive_names(&requests, |name| explicit.contains(name));
         derived
@@ -876,10 +927,10 @@ mod tests {
             .collect()
     }
 
-    /// The names now are [`from_scratch`]'s, and no derived name equals
-    /// another name.
-    fn agrees_with_scratch(r: &BufferRegistry, at: &str) {
-        let expected = from_scratch(r);
+    /// The names now are [`from_scratch`]'s, by the names held before
+    /// the event, and no derived name equals another name.
+    fn agrees_with_scratch(r: &BufferRegistry, before: &HashMap<BufferId, String>, at: &str) {
+        let expected = from_scratch(r, before);
         let actual: Vec<(BufferId, String)> = expected
             .iter()
             .map(|(id, _)| (*id, name(r, *id).to_owned()))
@@ -947,6 +998,10 @@ mod tests {
             let mut r = BufferRegistry::new();
             for step in 0..3000 {
                 let ids = r.ids().to_vec();
+                let before: HashMap<BufferId, String> = ids
+                    .iter()
+                    .map(|&id| (id, name(&r, id).to_owned()))
+                    .collect();
                 let pick = |k: usize| ids[k % ids.len().max(1)];
                 // Crowded, never large: past two dozen buffers, kill.
                 let event = if ids.len() > 24 { 4 } else { next(8) };
@@ -987,7 +1042,7 @@ mod tests {
                     }
                     _ => {}
                 }
-                agrees_with_scratch(&r, &format!("seed {start:#x} step {step}"));
+                agrees_with_scratch(&r, &before, &format!("seed {start:#x} step {step}"));
             }
         }
     }

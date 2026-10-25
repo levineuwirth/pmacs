@@ -10,6 +10,9 @@
 //!   rename row renames one file).
 //! - An explicit name equal to the middle of a file's suffix chain
 //!   (`src/a.rs`), which the handoff names as unwitnessed.
+//! - `C-x C-w` onto a file another buffer already holds, the one state
+//!   that reaches the `<N>` suffix by the keys: which buffer keeps the
+//!   plain name.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -295,6 +298,56 @@ fn r1_an_explicit_name_equal_to_a_middle_suffix_moves_only_the_file_it_equals() 
         Some("src/a.rs".to_owned()),
         "with the explicit name gone the file returns to src/a.rs: {:?}",
         names(&s)
+    );
+}
+
+/// P3. `C-x C-w` onto a file another buffer already holds, answered
+/// `yes`: two buffers then hold one path, the one state the keys reach
+/// in which no directory tells two names apart, so one takes `<2>`.
+/// Emacs leaves the buffer that already shows `a.rs` its name and gives
+/// the newcomer `a.rs<2>` (D40 follows Emacs); a name the user is
+/// reading should not move because another buffer was saved. The kill
+/// of the newcomer returns nothing to anyone, the survivor having kept
+/// its name throughout.
+#[test]
+fn r1_save_as_onto_an_open_file_leaves_the_open_buffer_its_name() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let file = td.path().join("a.rs");
+    write(&file, b"on disk\n");
+    let mut s = fresh();
+    find_file(&mut s, &file);
+    exec(&s, "_G.OPEN = pmacs.window.buffer()");
+    assert_eq!(mode_line_name(&s), "a.rs", "fixture: the file's buffer");
+
+    switch_to(&mut s, "*scratch*");
+    assert_eq!(mode_line_name(&s), "*scratch*", "fixture: in *scratch*");
+    type_str(&mut s, "from scratch");
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'w');
+    assert!(active(&s), "C-x C-w opens the prompt");
+    clear_field(&mut s);
+    type_str(&mut s, &file.display().to_string());
+    press(&mut s, KeyCode::Enter);
+    assert!(active(&s), "the existing file is a question");
+    type_str(&mut s, "yes");
+    press(&mut s, KeyCode::Enter);
+    assert!(!active(&s), "answered");
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.window.buffer():path()"),
+        file.display().to_string(),
+        "fixture: *scratch* now holds the file"
+    );
+
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.describe.buffer(_G.OPEN).name"),
+        "a.rs",
+        "the buffer that already showed a.rs keeps its name: {:?}",
+        names(&s)
+    );
+    assert_eq!(
+        mode_line_name(&s),
+        "a.rs<2>",
+        "the newcomer on the same file takes the suffix"
     );
 }
 
