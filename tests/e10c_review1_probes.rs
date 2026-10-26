@@ -15,6 +15,8 @@
 //!   plain name.
 //! - `*buffer-list*`'s `File` column for a buffer of a megabyte and for
 //!   a name holding a multi-byte character.
+//! - `describe-buffer`, which has read a `path` field since 2026-07-31
+//!   that `pmacs.describe.buffer` first carries at E10c.5.
 //! - `C-x b` on a collision's directory beside a name whose own letters
 //!   spell it: the one row here that fails with E8b's directory places
 //!   restored, which no committed row does.
@@ -49,6 +51,10 @@ fn ctrl(s: &mut EditorState, c: char) {
         FrontendId::LOCAL,
         key(KeyCode::Char(c), KeyModifiers::CONTROL),
     );
+}
+
+fn meta(s: &mut EditorState, c: char) {
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Char(c), KeyModifiers::ALT));
 }
 
 fn press(s: &mut EditorState, code: KeyCode) {
@@ -174,6 +180,14 @@ fn kill_this(s: &mut EditorState) {
     ctrl(s, 'x');
     press(s, KeyCode::Char('k'));
     assert!(active(s), "C-x k opens the prompt");
+    press(s, KeyCode::Enter);
+}
+
+/// `M-x command RET`.
+fn m_x(s: &mut EditorState, command: &str) {
+    meta(s, 'x');
+    assert!(active(s), "M-x opens the palette");
+    type_str(s, command);
     press(s, KeyCode::Enter);
 }
 
@@ -459,6 +473,38 @@ fn r1_the_buffer_list_keeps_a_non_ascii_name_s_path_under_file() {
     find_file(&mut s, &accented);
     let listing = buffer_list(&mut s);
     assert_file_column_in_line(&listing, &[&plain, &accented]);
+}
+
+/// P5. `describe-buffer` (`pmacs.help.render_buffer`) has listed a
+/// `path` key since the help family landed (2026-07-31), and
+/// `pmacs.describe.buffer` carried none until E10c.5, so `*help*` now
+/// shows a file buffer's path beside its name: a second surface the
+/// phase changed, which the handoff says it did not.
+#[test]
+fn r1_describe_buffer_shows_the_path_of_a_buffer_named_by_its_basename() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let file = td.path().join("src/b.rs");
+    write(&file, b"fn b() {}\n");
+    let mut s = fresh();
+    find_file(&mut s, &file);
+    assert_eq!(mode_line_name(&s), "b.rs");
+    m_x(&mut s, "help.describe-buffer");
+    let help: String = eval(
+        &s,
+        "for _, id in ipairs(pmacs.buffer.list()) do\n\
+           if pmacs.describe.buffer(id).name == '*help*' then\n\
+             return id:slice(0, id:len())\n\
+           end\n\
+         end\n\
+         error('no *help*')",
+    );
+    assert!(help.starts_with("Buffer: b.rs\n"), "{help}");
+    let shown = file.display().to_string();
+    assert!(
+        help.lines()
+            .any(|l| l.trim_start().starts_with("path:") && l.trim_end().ends_with(&shown)),
+        "describe-buffer shows the path: {help}"
+    );
 }
 
 #[path = "common/home.rs"]
