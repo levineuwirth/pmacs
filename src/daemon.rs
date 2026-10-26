@@ -5608,6 +5608,13 @@ mod tests {
     /// and for `pmacs.frontend.attached_count` alike; a second write
     /// through the path writes nothing and reports no failure, because
     /// there is no stream left to write to.
+    ///
+    /// Linux alone, as E9's drain rows are: macOS lets a write to a peer
+    /// that shut its read side succeed (E8d.4's finding), so the
+    /// precondition cannot be made there, and this row failed both macOS
+    /// legs of PR #408's first run at "a write to a peer that stopped
+    /// reading fails".
+    #[cfg(target_os = "linux")]
     #[test]
     fn e10d_2_the_path_ends_a_session_s_output_at_its_first_failed_write() {
         let editor = EditorState::new();
