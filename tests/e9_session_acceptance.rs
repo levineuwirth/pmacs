@@ -1705,7 +1705,6 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
     /// row: the publish logged its failure and went on, the frame write
     /// failed after it, and the drain began there.
     #[test]
-    #[ignore = "E10d.1's control: fails at 73bc1e6 with #404's fragments until E10d.2's one path"]
     fn e10d_1_a_snapshot_publish_failing_first_is_the_last_write() {
         let daemon = daemon_with_note(HOLD);
         let home = daemon
@@ -1776,6 +1775,78 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
                 .is_some_and(|line| line.contains(&announced)),
             "the drain begins at the publish's failed write, on the line after it: {log}"
         );
+    }
+
+    /// E10d.2 --- the bootstrap's sweep ends at its first failed write. A
+    /// v26 replica (no token, so nothing after the sweep writes to it
+    /// before the tick) stops reading after `Hello` and before its last
+    /// handshake message, so every snapshot the sweep sends it fails;
+    /// the daemon holds two buffers, the note its init opens and the
+    /// scratch. The sweep logs the first failure and fails the
+    /// bootstrap: no second snapshot is written, no session is
+    /// installed, so no drain is ever announced for it. At `73bc1e6` the
+    /// sweep logged a failure per buffer and went on, the session was
+    /// installed with the dead stream, and the tick's write failed again
+    /// and began a drain.
+    #[test]
+    fn e10d_2_a_bootstrap_sweep_ends_at_its_first_failed_write() {
+        let daemon = daemon_with_note("pmacs.lsp.config = {}\npmacs.command.invoke('e9.open')\n");
+        let mut stream = daemon.connect();
+        let hello: Hello = read_message(&mut stream).expect("read Hello");
+        let fid = hello.assigned_frontend_id;
+        stream
+            .shutdown(std::net::Shutdown::Read)
+            .expect("stop reading before the bootstrap");
+        write_message(
+            &mut stream,
+            &AttachRequest {
+                protocol_version: SESSION_MIN_VERSION - 1,
+                frontend_capabilities: semantic_caps(),
+                initial_size: CellSize::new(24, 80),
+            },
+        )
+        .expect("AttachRequest");
+        write_message(
+            &mut stream,
+            &SessionBootstrapRequest {
+                initial_target: None,
+            },
+        )
+        .expect("bootstrap");
+        // The sweep's own lines: the follow's send names its frontend
+        // (`… to FrontendId(n) failed`), and the sweep's does not.
+        let sweep_failures = || {
+            daemon_log(&daemon)
+                .lines()
+                .filter(|line| {
+                    line.starts_with("pmacs: send BufferSnapshot for ")
+                        && !line.contains(" to FrontendId(")
+                        && line.contains("Broken pipe")
+                })
+                .count()
+        };
+        common::ready::expect_true(
+            "the sweep's failed write",
+            Duration::from_secs(10),
+            || sweep_failures() > 0,
+            || daemon_log(&daemon),
+        );
+        // A window before a negative assertion, named with its length:
+        // half a second, many ticks, for a session installed with the
+        // dead stream to be written to and announce its drain.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            sweep_failures(),
+            1,
+            "the sweep wrote nothing after its failed write: {}",
+            daemon_log(&daemon)
+        );
+        assert!(
+            !daemon_log(&daemon).contains(&format!("{fid:?}'s write failed")),
+            "the bootstrap failed, so no session was installed to drain: {}",
+            daemon_log(&daemon)
+        );
+        drop(stream);
     }
 }
 

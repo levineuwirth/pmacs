@@ -335,9 +335,10 @@ impl SessionRegistry {
     }
 
     /// E9 fix round 4 (review 4's Medium 1, the owner's ruling of
-    /// 2026-10-20) --- `frontend_id`'s write failed at `now`. The caller
-    /// has taken its stream out of the dispatcher's write map, so
-    /// nothing more is written to it, and hands the socket here; the
+    /// 2026-10-20) --- `frontend_id`'s write failed at `now`. The caller,
+    /// the daemon's one write path since E10d, has taken its stream out
+    /// of its session, so nothing more is written to it, and hands the
+    /// socket here; the
     /// session stays registered, so what its reader still reads is
     /// dispatched to its view and its token stays live (a reconnect
     /// presenting it is refused), until the one teardown runs at the
