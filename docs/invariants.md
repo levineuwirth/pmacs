@@ -151,7 +151,7 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   `VersionMismatch`. `Resume`, a step after the bootstrap, is read by the
   per-attach thread before the session exists, only from a session whose
   version and `semantic_render` admit it, else a `ProtocolError`. A live
-  token's socket is shut unanswered; the first failed write on any route stops
+  token's socket is shut unanswered; the first socket error on any route stops
   only the output, and the session lives until EOF or `WRITE_FAILURE_DRAIN`.
 - A new wire message is an appended variant, bumping `PROTOCOL_VERSION`
   and extending `SUPPORTED_PROTOCOL_VERSIONS`, guarded by a byte pin on

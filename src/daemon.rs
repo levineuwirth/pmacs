@@ -46,11 +46,13 @@
 //! - Shutdown flag set → send `Goodbye(ShuttingDown)`, return.
 //! - Editor `quit` flag set → send `Goodbye(ShuttingDown)`, propagate
 //!   shutdown to the outer accept loop.
-//! - Write fails (broken pipe), the first on any route, since every
-//!   write to an attached frontend takes one path (E10d) → nothing more
-//!   is written to that frontend; its input is still dispatched until
-//!   its reader's EOF or [`WRITE_FAILURE_DRAIN`] from that first
-//!   failure, then it is torn down (E9 fix round 4).
+//! - Write fails on the socket (broken pipe), the first on any route,
+//!   since every write to an attached frontend takes one path (E10d) →
+//!   nothing more is written to that frontend; its input is still
+//!   dispatched until its reader's EOF or [`WRITE_FAILURE_DRAIN`] from
+//!   that first failure, then it is torn down (E9 fix round 4). A
+//!   message the transport refuses before writing a byte (past the
+//!   frame) ends nothing.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -1475,14 +1477,21 @@ fn peer_may_send_panel_events(
 /// CRDT ops, the follow's and the publish's snapshots and the early
 /// `CursorByte`. Returns whether `message` was written; `false` when
 /// the session has no stream (none installed, or taken out at a failed
-/// write) or the write failed.
+/// write), the write failed, or the transport refused the message.
 ///
-/// A failed write ends the session's output here, whichever route it
-/// came by (the owner's ruling of 2026-10-20, a bounded drain): `what`
-/// names the write in the log line, the stream is taken out of its
+/// A write that fails on the socket (`TransportError::Io`) ends the
+/// session's output here, whichever route it came by (the owner's
+/// ruling of 2026-10-20, a bounded drain): `what` names the write in
+/// the log line, the stream is taken out of its
 /// session, so no frame, presence, bell, op, snapshot or `Goodbye`
 /// reaches it again, and the drain begins with
-/// [`WRITE_FAILURE_DRAIN`] counted from this write. The session stays
+/// [`WRITE_FAILURE_DRAIN`] counted from this write. A message the
+/// transport refuses before writing a byte (`FrameTooLarge`, `Encode`:
+/// a clipboard, an op or a status message past the frame) leaves the
+/// socket whole, so it is logged by the same line and the session keeps
+/// its stream (the owner's ruling of 2026-10-26, on E10d review 1's
+/// Medium 1, which found a copy past the frame disconnecting the
+/// attached TUI that made it). The session stays
 /// registered, so what its reader still reads is dispatched to its view
 /// and its token is live (a reconnect presenting it is refused and
 /// retried). E8d.4 tore the frontend down at a failed write, the whole
@@ -1510,8 +1519,13 @@ fn write_to_session(
     let Some(stream) = session_registry.stream_mut(frontend_id) else {
         return false;
     };
-    let Err(error) = write_message(stream, message) else {
-        return true;
+    let error = match write_message(stream, message) {
+        Ok(()) => return true,
+        Err(error @ crate::transport::TransportError::Io(_)) => error,
+        Err(refused) => {
+            eprintln!("pmacs: {}: {refused}", what());
+            return false;
+        }
     };
     eprintln!("pmacs: {}: {error}", what());
     if let Some(stream) = session_registry
@@ -1882,8 +1896,9 @@ fn dispatcher_loop(
             // wakes mid-tick sees the gate flip first. Diff-suppressed
             // — initial-after-attach (`last_dispatch_idle_sent` `None`)
             // and value-change emissions only. Every write below goes
-            // through `write_to_session`, so the first that fails ends
-            // this session's output and the rest find no stream (E10d).
+            // through `write_to_session`, so the first that fails on the
+            // socket ends this session's output and the rest find no
+            // stream (E10d).
             let bell = session_registry.session_mut(*fid).is_some_and(|session| {
                 take_pending_terminal_bell(editor, *fid, &mut session.bell_baseline)
             });
@@ -2107,9 +2122,17 @@ fn dispatcher_loop(
                             thread::sleep(Duration::from_millis(injected_render_latency_ms));
                         }
                     }
+                    // A message the transport refused is left out and the
+                    // rest of the frame written, the session kept; until
+                    // E10d's fix round 1 a refusal here drained the
+                    // session as a failed socket does. The frame ends
+                    // where the stream went.
                     if !write_to_session(editor, &mut session_registry, *fid, msg, || {
                         format!("write failed for {fid:?} in dispatcher")
-                    }) {
+                    }) && session_registry
+                        .session(*fid)
+                        .is_none_or(|session| session.stream.is_none())
+                    {
                         break;
                     }
                 }
@@ -4835,6 +4858,9 @@ fn broadcast_pending_crdt_ops(
                     // `m10_11_q8_convergence_under_jitter`
                     // genuinely test CRDT-under-jitter.
                     maybe_jitter_sleep(latency.jitter_ms, latency.fixed_ms, latency.rng);
+                    // An op past the frame is refused unwritten and
+                    // logged, and the replica keeps its session without
+                    // it; its mirror falls behind (#410, for E11).
                     write_to_session(
                         editor,
                         session_registry,
