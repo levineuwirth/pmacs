@@ -1943,6 +1943,126 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
         std::mem::forget(dir);
     }
 
+    /// E10d review 1's Low 3 (fix round 1) --- the mid-loop skip's
+    /// witness. A drain begun after a dispatcher loop read its sessions,
+    /// here at the loop's top by the clipboard's write failing on the
+    /// socket, takes that session's pass away in the same loop, as a drain
+    /// begun on an earlier loop does: its caret, moved by the input the
+    /// loop before handled, is not swept to its peers. A command holds the
+    /// dispatcher while the first window shuts its read side, then copies
+    /// and moves the window's caret to the buffer's start; its `RET` goes
+    /// once the daemon has said the `M-x` is not idle, so no early
+    /// `CursorByte` fails first, and the clipboard is the first write to
+    /// fail. The second window, a peer reading the first's presence (the
+    /// control: it reads the caret after `abc`), reads no presence update
+    /// for the first at the buffer's start until the drain's teardown.
+    /// With `if session_registry.is_draining(*fid) { continue; }` removed
+    /// from the pass loop, the first window's pass sweeps that caret to
+    /// it.
+    #[test]
+    fn e10d_2_a_session_drained_before_its_pass_sweeps_no_caret_to_its_peers() {
+        let daemon = daemon_with_note(
+            "pmacs.lsp.config = {}\n\
+             pmacs.command.define { name = 'f1.hold-copy-and-move',\n\
+               description = 'hold the dispatcher, then copy and move the caret',\n\
+               fn = function()\n\
+                 local home = os.getenv('HOME')\n\
+                 assert(io.open(home .. '/held', 'w')):close()\n\
+                 local deadline = os.time() + 10\n\
+                 while os.time() < deadline do\n\
+                   local go = io.open(home .. '/go', 'r')\n\
+                   if go then go:close() break end\n\
+                 end\n\
+                 pmacs.editor.clipboard_set('f1')\n\
+                 pmacs.command.invoke('cursor.buffer-start')\n\
+               end }\n",
+        );
+        let home = daemon
+            .socket_path()
+            .parent()
+            .expect("the socket's directory")
+            .to_path_buf();
+        let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
+        let (document, at) = first.where_am_i();
+        first.declare_viewport(document);
+        let fid = first.fid;
+        let id = fid.0.to_string();
+        let mut peer = Session::attach(&daemon, PROTOCOL_VERSION, None);
+        peer.where_am_i();
+
+        first.type_str("abc");
+        first.wait("abc applied", |m| {
+            matches!(m,
+                InstanceMessage::CursorByte { buffer_id, byte_pos }
+                    if *buffer_id == document && *byte_pos == at + 3
+            )
+            .then_some(())
+        });
+        peer.wait("the first window's caret after abc, at its peer", |m| {
+            matches!(m,
+                InstanceMessage::PresenceUpdate { frontend_id, buffer_id, cursor, .. }
+                    if *frontend_id == fid && *buffer_id == document && *cursor == at + 3
+            )
+            .then_some(())
+        });
+
+        first.key(Key::Char('x'), Modifiers::ALT);
+        first.wait("the daemon to say the M-x dispatch is not idle", |m| {
+            matches!(m, InstanceMessage::DispatchIdle { idle: false }).then_some(())
+        });
+        first.type_str("f1.hold-copy-and-move");
+        first.key(Key::Enter, Modifiers::NONE);
+        common::ready::expect_true(
+            "the command holding the dispatcher",
+            Duration::from_secs(10),
+            || home.join("held").exists(),
+            || daemon_log(&daemon),
+        );
+        first
+            .stream
+            .shutdown(std::net::Shutdown::Read)
+            .expect("shut the receiving half");
+        // What the peer read before the release says nothing of the pass.
+        while peer.rx.try_recv().is_ok() {}
+        std::fs::write(home.join("go"), b"").expect("release the hold");
+
+        common::ready::expect_true(
+            "the drain's teardown",
+            Duration::from_secs(10),
+            || detached(&daemon).contains(&id),
+            || daemon_log(&daemon),
+        );
+        let log = daemon_log(&daemon);
+        let first_failure = failure_lines(&daemon, fid).remove(0);
+        assert!(
+            first_failure.starts_with(&format!("pmacs: write Clipboard for {fid:?} failed:")),
+            "premise: the clipboard, at the loop's top, is the first write to fail: {log}"
+        );
+        // A window after the teardown, named with its length, for a
+        // presence update written before it to arrive.
+        let mut swept = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while let Ok(msg) = peer
+            .rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            if let InstanceMessage::PresenceUpdate {
+                frontend_id,
+                cursor,
+                ..
+            } = msg
+                && frontend_id == fid
+            {
+                swept.push(cursor);
+            }
+        }
+        assert!(
+            !swept.contains(&0),
+            "a session drained before its pass swept its moved caret to its peer \
+             ({swept:?}): {log}"
+        );
+    }
+
     /// E10d.2 --- the bootstrap's sweep ends at its first failed write. A
     /// v26 replica (no token, so nothing after the sweep writes to it
     /// before the tick) stops reading after `Hello` and before its last
