@@ -46,9 +46,11 @@
 //! - Shutdown flag set → send `Goodbye(ShuttingDown)`, return.
 //! - Editor `quit` flag set → send `Goodbye(ShuttingDown)`, propagate
 //!   shutdown to the outer accept loop.
-//! - Write fails (broken pipe) → nothing more is written to that
-//!   frontend; its input is still dispatched until its reader's EOF or
-//!   [`WRITE_FAILURE_DRAIN`], then it is torn down (E9 fix round 4).
+//! - Write fails (broken pipe), the first on any route, since every
+//!   write to an attached frontend takes one path (E10d) → nothing more
+//!   is written to that frontend; its input is still dispatched until
+//!   its reader's EOF or [`WRITE_FAILURE_DRAIN`] from that first
+//!   failure, then it is torn down (E9 fix round 4).
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -1496,7 +1498,8 @@ fn peer_may_send_panel_events(
 /// The writes left out write to a stream no attached session owns yet
 /// or any more: the handshake's, the bootstrap's to a provisional
 /// session (which a failed write unregisters), and a teardown's
-/// `Goodbye`.
+/// `Goodbye`. `tests/daemon_write_consistency.rs` holds this file to
+/// that list, by function and count.
 fn write_to_session(
     editor: &EditorState,
     session_registry: &mut SessionRegistry,
