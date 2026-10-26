@@ -305,9 +305,10 @@ struct EditDescription {
 pub enum BufferNameOrigin {
     /// A caller named this buffer: `Buffer::new`/`from_bytes`, an
     /// ordinary [`crate::buffer_registry::BufferRegistry::set_name`], or
-    /// the `pmacs.buffer.set_name` binding. Nothing rewrites it, and a
-    /// derived name that would equal it takes more of its own path
-    /// instead (D40).
+    /// the `pmacs.buffer.set_name` binding. No collision rewrites it, and
+    /// a derived name that would equal it takes more of its own path
+    /// instead (D40); a save-as names the buffer by its new file, as
+    /// Emacs's `write-file` does.
     Explicit,
     /// The name derives from the buffer's path ([`Buffer::name_path`]):
     /// its file's basename, or a listing's directory and a `/`, with
@@ -673,8 +674,8 @@ impl Buffer {
     /// [`crate::buffer_registry::BufferRegistry::set_name`], which also
     /// moves any derived name the new one would equal. It is explicit
     /// even when the string happens to denote the file: naming a buffer
-    /// `notes` for `${cwd}/notes` is still a naming operation, and
-    /// nothing rewrites it.
+    /// `notes` for `${cwd}/notes` is still a naming operation, and no
+    /// collision rewrites it.
     pub(crate) fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
         self.name_origin = BufferNameOrigin::Explicit;

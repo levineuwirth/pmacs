@@ -459,9 +459,10 @@ impl BufferRegistry {
         Ok(())
     }
 
-    /// Give the buffer behind `id` the explicit name `name`, which
-    /// nothing rewrites, moving any derived name it equals (D40). The
-    /// door for `pmacs.buffer.set_name`.
+    /// Give the buffer behind `id` the explicit name `name`, which no
+    /// collision rewrites (a save-as names the buffer by its new file),
+    /// moving any derived name it equals (D40). The door for
+    /// `pmacs.buffer.set_name`.
     ///
     /// # Errors
     /// [`RegistryError::Missing`] for a stale handle.
