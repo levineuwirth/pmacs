@@ -114,8 +114,24 @@ fn canon(path: &Path) -> String {
         .into_owned()
 }
 
+/// The name a listing of `dir` takes when no other name meets it: its
+/// directory's last component and a `/` (D40, E10c.3).
+fn dired_name(dir: &Path) -> String {
+    let canonical = normalize_buffer_path(dir.to_path_buf());
+    canonical
+        .file_name()
+        .map_or_else(|| "/".to_owned(), |n| format!("{}/", n.to_string_lossy()))
+}
+
 fn active_name(s: &EditorState) -> String {
     eval(s, "return pmacs.window.buffer():name()")
+}
+
+/// The path of the file the active window shows, `None` for a buffer
+/// holding none. A row asking which file a window shows reads this: a
+/// buffer's name is no longer its path (D40).
+fn active_path(s: &EditorState) -> Option<String> {
+    eval(s, "return pmacs.window.buffer():path()")
 }
 
 fn active_text(s: &EditorState) -> String {
@@ -324,7 +340,7 @@ fn journey_step3_opening_a_directory_lists_it() {
     let name = active_name(&s);
     assert_eq!(
         name,
-        format!("*dired:{}*", canon(td.path())),
+        dired_name(td.path()),
         "the active buffer must be the directory's dired buffer"
     );
     let text = active_text(&s);
@@ -375,7 +391,7 @@ fn journey_step3_unreadable_directory_reports_without_failing_startup() {
         "a failed listing must report through the status line"
     );
     assert!(
-        !active_name(&s).starts_with("*dired:"),
+        !active_name(&s).ends_with('/'),
         "a failed listing must leave no dired buffer behind"
     );
 
@@ -591,8 +607,8 @@ fn commit_to_delivers_to_the_requesting_frontend_not_the_ambient_one() {
     );
     s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
     assert_eq!(
-        active_name(&s),
-        alpha,
+        active_path(&s),
+        Some(alpha),
         "the commit must land in the requesting frontend's captured window"
     );
     assert_eq!(
@@ -668,8 +684,8 @@ fn commit_to_outranks_an_interactive_origin() {
     );
     s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
     assert_eq!(
-        active_name(&s),
-        alpha,
+        active_path(&s),
+        Some(alpha),
         "the commit must land in the captured destination, not the \
          interactive origin's window"
     );
@@ -740,7 +756,7 @@ fn a_background_open_uses_the_captured_window_not_the_selected_one() {
         "the commit must select the captured window"
     );
     assert!(
-        active_name(&s).starts_with("*dired:"),
+        active_name(&s).ends_with('/'),
         "and the listing must be in it; got {:?}",
         active_name(&s)
     );
@@ -997,7 +1013,7 @@ fn a_declining_listener_cannot_redirect_the_destination() {
     // And the fallback commits THERE, not to whatever the first listener
     // wanted -- the observable the attack was aiming at.
     assert!(
-        active_name(&s).starts_with("*dired:"),
+        active_name(&s).ends_with('/'),
         "the declined chain must still fall back to dired"
     );
     assert_eq!(
@@ -1220,7 +1236,7 @@ fn preservation_dired_captures_prev_from_the_destination_not_the_ambient_fronten
     pump(&mut s);
     s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
     assert!(
-        active_name(&s).starts_with("*dired:"),
+        active_name(&s).ends_with('/'),
         "the listing must have committed"
     );
 
@@ -1257,7 +1273,7 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
     }
     let td = project();
     let mut s = launch(td.path());
-    assert!(active_name(&s).starts_with("*dired:"));
+    assert!(active_name(&s).ends_with('/'));
 
     // Seat on the entry, then VISIT it with the real key.
     let line = line_of(&s, "alpha.txt");
@@ -1266,8 +1282,8 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
     pump(&mut s);
 
     assert_eq!(
-        active_name(&s),
-        td.path().join("alpha.txt").display().to_string(),
+        active_path(&s),
+        Some(td.path().join("alpha.txt").display().to_string()),
         "RET on a listed file must visit it"
     );
 
@@ -1507,12 +1523,11 @@ fn preservation_opening_a_file_shows_it_in_the_active_window() {
     let target = td.path().join("alpha.txt");
     let s = EditorState::open(target.clone()).expect("open");
 
-    // The displayed name is the argument as given (`path.display()`),
-    // which both implementations have always produced -- the *stored*
-    // path is what gets normalized, inside `set_buffer_path`.
+    // The window's file, read from its path: the name is the basename
+    // (D40), and the stored path is normalized inside `set_buffer_path`.
     assert_eq!(
-        active_name(&s),
-        target.display().to_string(),
+        active_path(&s),
+        Some(target.display().to_string()),
         "the file must be in the active window, not merely loaded"
     );
     let scratch_displayed: bool = eval(
@@ -1771,8 +1786,8 @@ fn walk_to_open_file(dir: &Path, name: &str) -> EditorState {
     press(&mut s, KeyCode::Enter);
     pump(&mut s);
     assert_eq!(
-        active_name(&s),
-        dir.join(name).display().to_string(),
+        active_path(&s),
+        Some(dir.join(name).display().to_string()),
         "precondition: the walk must actually open the file, or every pin \
          below is really testing the dired buffer"
     );
@@ -1976,7 +1991,7 @@ fn journey_step9_the_compile_context_is_total_even_with_no_file_open() {
     let td = cargo_project();
     let s = launch(td.path());
     assert!(
-        active_name(&s).starts_with("*dired:"),
+        active_name(&s).ends_with('/'),
         "precondition: the pathless dired buffer is active"
     );
     assert!(
@@ -2338,7 +2353,7 @@ fn journey_step4_preservation_a_file_target_does_not_greet() {
         pmacs::editor::Startup::Local(state) => *state,
         pmacs::editor::Startup::HandOff(_) => panic!("no attach request"),
     };
-    assert_eq!(active_name(&s), path.display().to_string());
+    assert_eq!(active_name(&s), "alpha.txt", "named by its basename (D40)");
     assert_eq!(
         scratch_text(&s),
         "",
@@ -2365,7 +2380,7 @@ fn journey_step4_preservation_a_directory_target_does_not_greet() {
             pmacs::editor::Startup::HandOff(_) => panic!("no attach request"),
         };
     pump(&mut s);
-    assert!(active_name(&s).starts_with("*dired:"));
+    assert!(active_name(&s).ends_with('/'));
     assert_eq!(scratch_text(&s), "", "the dired listing is the greeting");
 }
 
@@ -2514,8 +2529,8 @@ fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
     press(&mut s, KeyCode::Enter);
     pump(&mut s);
     assert_eq!(
-        active_name(&s),
-        td.path().join("main.rs").display().to_string(),
+        active_path(&s),
+        Some(td.path().join("main.rs").display().to_string()),
         "precondition: the walk must actually open the source file"
     );
 

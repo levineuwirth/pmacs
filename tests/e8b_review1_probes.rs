@@ -152,12 +152,16 @@ fn dired_by_keys(s: &mut EditorState, dir: &Path) -> String {
     press(s, KeyCode::Enter);
     pump(s);
     let name = active_name(s);
-    assert!(
-        name.starts_with("*dired:") && name.ends_with("proj*"),
-        "fixture: C-x d opened a dired buffer; showing {name}"
+    assert_eq!(
+        name, "proj/",
+        "fixture: C-x d opened a listing of proj, named by its directory"
     );
     name
 }
+
+/// The query that reaches the listing, `proj/`, by its own letters,
+/// which no other name here holds.
+const LISTING_QUERY: &str = "proj";
 
 /// Empty the minibuffer's prefilled field as a user does, by holding
 /// backspace (the minibuffer has no line kill; `dispatch_minibuffer_key`
@@ -195,53 +199,50 @@ fn dired_session(td: &Path) -> (EditorState, String, String, String) {
     (s, dired, lua, rs)
 }
 
-/// FAILS at `0001946`: a dired buffer is no longer reached by the word
-/// its name begins with. Its name is `*dired:<path>*`
-/// (`builtin/runtime/dired.lua`'s `buffer_name`), so `name_tier` reads
-/// the path inside it as directories: the last component is `proj*`,
-/// and `dired` typed is "a match that needs the directories", place 4.
-/// Any file whose own name holds the letters is place 3 and outranks it:
-/// `C-x b dired RET` reaches `dired.lua`, and `C-x b dir RET` reaches a
-/// file (here `dired.lua`; `editor.rs` too holds `dir`). The shared
-/// ranker the prompt used before `b374cd8` puts the dired buffer first
-/// for both, asserted below as the premise, so this is a reversal the
-/// change made, in D18's own class: a special buffer reached by a
-/// subsequence of its name, as `*lsp*` by `lsp`. The band says where
-/// the switch went, which is how a user would find out.
+/// FAILED at `0001946`, where a dired buffer named `*dired:<path>*` was
+/// no longer reached by the word its name began with: `name_tier` read
+/// the path inside it as directories and `C-x b dired RET` reached
+/// `dired.lua`. Read again under D40 (E10c): `C-x b` matches names alone
+/// and the listing's own letters reach it, while `dired`, which
+/// `dired.lua`'s name begins with and the listing's does not hold first,
+/// reaches the file, as the shared ranker puts it, asserted as the
+/// premise. The band says where each switch went.
 #[test]
 fn review1_c_x_b_dired_reaches_the_dired_buffer_not_a_file_its_letters_spell() {
     let td = tempfile::tempdir().expect("tempdir");
     let (mut s, dired, lua, rs) = dired_session(td.path());
     let pool = buffer_names(&s);
-    for typed in ["dired", "dir"] {
+    for (typed, first) in [(LISTING_QUERY, &dired), ("dired", &lua), ("dir", &lua)] {
         assert_eq!(
             rank_candidates(typed, &pool, None).first(),
-            Some(&dired),
-            "premise: before b374cd8 the prompt ranked the dired buffer first for `{typed}`; \
-             pool {pool:?}"
+            Some(first),
+            "premise: the shared ranker puts {first} first for `{typed}`; pool {pool:?}"
         );
     }
     let mut reached = Vec::new();
-    for typed in ["dired", "dir"] {
+    for typed in [LISTING_QUERY, "dired", "dir"] {
         show(&s, &rs);
         switch_by_typing(&mut s, typed);
         reached.push((typed, active_name(&s), status(&s)));
     }
-    assert!(
-        reached.iter().all(|(_, name, _)| *name == dired),
-        "C-x b <a subsequence of the dired buffer's own name> RET reaches the dired buffer \
-         {dired}; reached {reached:?} (dired.lua is {lua})"
+    assert_eq!(
+        reached
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        [dired.clone(), lua.clone(), lua.clone()],
+        "C-x b reaches the listing by its own letters and dired.lua by the word its name \
+         begins with; reached {reached:?}"
     );
 }
 
-/// FAILS at `0001946`: `C-x k` shares the `buffers` source and the
+/// FAILED at `0001946`: `C-x k` shares the `buffers` source and the
 /// default `candidate` policy (`builtin/commands/default.lua`'s
-/// `buffer.kill`), so E8b.1's places decide what it kills too, and
+/// `buffer.kill`), so E8b.1's places decided what it killed too, and
 /// `kill_buffer_with_prompt` kills an unmodified buffer without asking
-/// or saying anything. `C-x k dired RET` kills `dired.lua`, the file,
-/// and leaves the dired buffer; before `b374cd8` it killed the dired
-/// buffer (the premise in the row above). The handoff names `C-x b`
-/// alone and says every other source is unchanged.
+/// or saying anything: `C-x k dired RET` killed `dired.lua` and left
+/// the listing. Under D40 the listing's own letters select it, so
+/// `C-x k` on them acts on the listing and keeps `dired.lua`.
 #[test]
 fn review1_c_x_k_dired_kills_the_dired_buffer_not_a_file() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -252,7 +253,7 @@ fn review1_c_x_k_dired_kills_the_dired_buffer_not_a_file() {
     assert!(active(&s), "C-x k opens the prompt");
     assert_eq!(contents(&s), rs, "fixture: C-x k prefills the shown buffer");
     clear_field(&mut s);
-    type_str(&mut s, "dired");
+    type_str(&mut s, LISTING_QUERY);
     let offered = candidates(&s);
     press(&mut s, KeyCode::Enter);
     let left = buffer_names(&s);
@@ -272,7 +273,7 @@ fn review1_c_x_k_dired_kills_the_dired_buffer_not_a_file() {
     );
     assert!(
         left.contains(&lua) && (!left.contains(&dired) || asking.contains(&dired)),
-        "C-x k dired RET acts on the dired buffer {dired} (kills it, or asks first); \
+        "C-x k {LISTING_QUERY} RET acts on the listing {dired} (kills it, or asks first); \
          offered {offered:?}, left {left:?}, asking {asking:?}, dired modified {modified}, \
          band {:?}",
         status(&s)
@@ -283,9 +284,9 @@ fn review1_c_x_k_dired_kills_the_dired_buffer_not_a_file() {
 /// side of the row above: in the handoff's crowded fixture (`a.rs` and
 /// `b.rs` under `bin-tests`, whose `b` both paths share), `C-x k b.rs
 /// RET` kills `b.rs`. Before `b374cd8` the same keys killed `a.rs`, an
-/// unmodified buffer, with no question and nothing on the band: E8b.1
-/// fixed a silent wrong kill that no pass records, and no row of the
-/// phase witnesses `C-x k` at all.
+/// unmodified buffer, with no question and nothing on the band. Under
+/// D40 a name holds no directory, so `b.rs` is held by `b.rs`'s name
+/// alone.
 #[test]
 fn review1_c_x_k_b_rs_kills_b_rs_in_a_crowded_directory() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -304,9 +305,10 @@ fn review1_c_x_k_b_rs_kills_b_rs_in_a_crowded_directory() {
     clear_field(&mut s);
     type_str(&mut s, "b.rs");
     let offered = candidates(&s);
-    assert!(
-        offered.contains(&a) && offered.contains(&b),
-        "fixture premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+    assert_eq!(
+        offered,
+        vec![b.clone()],
+        "`b.rs` is held by b.rs's name alone"
     );
     press(&mut s, KeyCode::Enter);
     let left = buffer_names(&s);
@@ -328,10 +330,12 @@ fn review1_c_x_k_b_rs_kills_b_rs_in_a_crowded_directory() {
 /// lexical tie-break picks `aq.rs` unless the exact basename is placed
 /// first.
 ///
-/// The tie needs the typed name's first letter to be absent from the
-/// directories (else the scorer starts there and the shorter basename
-/// wins by its gap), so the row picks a letter its own temporary root
-/// does not hold: `q.rs` beside `aq.rs` where the root has no `q`.
+/// The tie needed the typed name's first letter to be absent from the
+/// directories (else the scorer started there and the shorter basename
+/// won by its gap), so the row picks a letter its own temporary root
+/// does not hold: `q.rs` beside `aq.rs` where the root has no `q`. Under
+/// D40 the names hold no directory, and the scorer alone gives the exact
+/// basename its start bonus; the row keeps the outcome.
 #[test]
 fn review1_an_exact_basename_beats_a_name_ending_with_it() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -350,15 +354,9 @@ fn review1_an_exact_basename_beats_a_name_ending_with_it() {
         names.push(visit(&s, &dir.join(&file)));
     }
     let (ab, b, c) = (names[0].clone(), names[1].clone(), names[2].clone());
-    assert_eq!(
-        fuzzy_score(&typed, &ab),
-        fuzzy_score(&typed, &b),
-        "premise: the scorer cannot tell them apart"
-    );
-    assert_eq!(
-        rank_candidates(&typed, &[b.clone(), ab.clone()], None)[0],
-        ab,
-        "premise: the shared ranker puts a{letter}.rs first"
+    assert!(
+        fuzzy_score(&typed, &b) > fuzzy_score(&typed, &ab),
+        "premise: on names the scorer itself puts {typed} above a{letter}.rs"
     );
     show(&s, &c);
     switch_by_typing(&mut s, &typed);

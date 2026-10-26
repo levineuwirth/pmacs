@@ -467,7 +467,7 @@ fn review1_switching_the_windows_buffer_closes_the_popup() {
     let (daemon, _dir) = daemon_with(SOURCE, "hover", &[], "");
     let mut s = Session::attach(&daemon, PROTOCOL_VERSION);
     assert!(
-        s.window.ends_with("/a.rs"),
+        s.window == "a.rs",
         "the window starts where the fixture leaves it, on a.rs (#324): {}",
         s.window
     );
@@ -528,7 +528,7 @@ fn review1_killing_the_buffer_closes_the_popup() {
     let (daemon, _dir) = daemon_with(SOURCE, "hover", &[], "");
     let mut s = Session::attach(&daemon, PROTOCOL_VERSION);
     assert!(
-        s.window.ends_with("/a.rs"),
+        s.window == "a.rs",
         "the window starts where the fixture leaves it, on a.rs (#324): {}",
         s.window
     );

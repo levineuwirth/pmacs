@@ -105,6 +105,16 @@ fn visit(s: &EditorState, dir: &std::path::Path, name: &str, text: &str) -> Stri
     display
 }
 
+/// The name pmacs gives the buffer of the file at `path`: its basename,
+/// a name being no longer a path (D40).
+fn named(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .expect("a file path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// `C-x k` RET on a modified buffer (the name prefilled): the question
 /// is standing, the buffer is still there.
 fn ask_to_kill(s: &mut EditorState, path: &str) {
@@ -114,7 +124,7 @@ fn ask_to_kill(s: &mut EditorState, path: &str) {
     press(s, KeyCode::Enter);
     assert!(asking(s), "a modified buffer makes the kill ask");
     assert!(
-        buffer_names(s).contains(&path.to_owned()),
+        buffer_names(s).contains(&named(path)),
         "and nothing is killed yet"
     );
 }
@@ -140,13 +150,16 @@ fn kill_buffer_with_unsaved_changes_as_a_user_meets_it() {
     );
     press(&mut s, KeyCode::Char('n'));
     assert!(!asking(&s), "n alone answers");
-    assert!(buffer_names(&s).contains(&path));
+    assert!(buffer_names(&s).contains(&named(&path)));
     assert_eq!(status(&s), "kill-buffer cancelled");
 
     ask_to_kill(&mut s, &path);
     ctrl(&mut s, 'g');
     assert!(!asking(&s), "C-g answers");
-    assert!(buffer_names(&s).contains(&path), "and keeps the buffer");
+    assert!(
+        buffer_names(&s).contains(&named(&path)),
+        "and keeps the buffer"
+    );
 
     ask_to_kill(&mut s, &path);
     for (name, code) in [
@@ -164,14 +177,14 @@ fn kill_buffer_with_unsaved_changes_as_a_user_meets_it() {
             "and says so after {name}"
         );
         assert!(
-            buffer_names(&s).contains(&path),
+            buffer_names(&s).contains(&named(&path)),
             "and keeps the buffer after {name}"
         );
     }
     press(&mut s, KeyCode::Char('y'));
     assert!(!asking(&s), "y alone answers");
     assert!(
-        !buffer_names(&s).contains(&path),
+        !buffer_names(&s).contains(&named(&path)),
         "and the buffer is gone with its X: {:?}",
         buffer_names(&s)
     );

@@ -636,13 +636,16 @@ pmacs.config.define {
 
 -- Fresh language inference for a buffer, in precedence order: explicit
 -- modeline → grammar extension → LSP filetype map → filename → shebang.
--- Path components intentionally come from `buf:name()` to preserve syntax's
--- historical grammar-by-name behavior for pathless buffers.
+-- The extension and the file name come from the buffer's path, and from
+-- `buf:name()` only for a pathless buffer, which keeps syntax's historical
+-- grammar-by-name behavior there. A name ending in `/` is a listing's
+-- (`proj/`, D40) and names no file: `Path::extension` reads `x.rs/` as
+-- `rs`, which would attach Rust to a directory named like a file.
 local function detect_buffer_language(buf)
   local modeline = pmacs.parse.language_from_modeline(buf)
   if modeline then return modeline end
-  local name = buf:name()
-  if name then
+  local name = buf:path() or buf:name()
+  if name and name:sub(-1) ~= "/" then
     local grammar = pmacs.parse.language_for_path(name)
     if grammar then return grammar end
     local ext = name:match("%.([%w_]+)$")
@@ -828,9 +831,11 @@ end
 -- worker, ordered so that what a narrow echo line keeps is what matters:
 -- the grammar, the signal and what follows (parsed again when, or parsing
 -- stopped), under the file's short name, before the full path and the
--- worker's own words. `*errors*` keeps the whole.
+-- worker's own words. `*errors*` keeps the whole. The whole is the
+-- buffer's path, since a name is no longer one (D40): its name only for a
+-- buffer that holds none.
 local function crash_notice(key, buf, report, detail)
-  local name = buf and buf:name() or key
+  local name = buf and (buf:path() or buf:name()) or key
   local short = name:match("[^/]+$") or name
   local grammar = tostring(parse_lang_by_buffer[key])
   -- A crash inside an injected layer is the layer's grammar's (review 2's
@@ -877,10 +882,11 @@ local function mark_stop(key, state)
 end
 
 -- A stopped buffer's names for its notice: the file's short name first,
--- which a narrow echo line keeps, and the whole path for the end.
+-- which a narrow echo line keeps, and the whole path for the end, read
+-- from the path, not the name (D40).
 local function stop_names(key)
   local b = parse_buffer_by_key[key]
-  local name = b and b:name() or key
+  local name = b and (b:path() or b:name()) or key
   return name:match("[^/]+$") or name, name
 end
 

@@ -137,12 +137,11 @@ end)
     }
 
     /// The question quit asks about `notes.txt`, as the minibuffer holds
-    /// it: the buffer is named by the path the editor was given.
+    /// it: the buffer is named by its file's basename (D40).
     fn question(&self) -> String {
-        format!(
-            "Modified buffers exist ({})",
-            self.path("notes.txt").display()
-        )
+        let notes = self.path("notes.txt");
+        let name = notes.file_name().expect("a file name").to_string_lossy();
+        format!("Modified buffers exist ({name})")
     }
 
     /// The directory autosave keeps its copies in, canonical.

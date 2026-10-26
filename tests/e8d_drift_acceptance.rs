@@ -855,8 +855,8 @@ fn e8d_6_q_in_search_results_quits_a_side_window_and_restores_a_full_one() {
     let root = std::fs::canonicalize(dir.path()).expect("canonical");
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "a needle here\n").expect("notes");
-    // A file buffer's name is its absolute path.
-    let notes_name = notes.display().to_string();
+    // A file buffer's name is its basename (D40).
+    let notes_name = "notes.txt".to_owned();
     let mut s = editor();
     exec(
         &s,

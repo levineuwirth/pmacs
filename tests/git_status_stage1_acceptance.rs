@@ -61,6 +61,13 @@ fn active_name(s: &EditorState) -> String {
     )
 }
 
+/// The path of the file the active window shows, `None` for a buffer
+/// holding none: a row about which file RET opened reads its path, a
+/// name being no longer one (D40).
+fn active_path(s: &EditorState) -> Option<String> {
+    eval(s, "return pmacs.window.buffer():path()")
+}
+
 /// Text of the buffer named `name`, or `""` when absent.
 fn named_text(s: &EditorState, name: &str) -> String {
     let b: mlua::String = eval(
@@ -754,8 +761,8 @@ fn g6_2b_a_non_utf8_row_refuses_both_gestures_with_a_message() {
     seat_on(&mut s, "ok.txt");
     press(&mut s, KeyCode::Enter);
     assert_eq!(
-        active_name(&s),
-        root.join("ok.txt").display().to_string(),
+        active_path(&s),
+        Some(root.join("ok.txt").display().to_string()),
         "RET really does navigate when the path is representable; \
          status was {:?}",
         status(&s)
@@ -2138,10 +2145,10 @@ fn g6_14_the_root_rule_works_where_project_kind_is_not_git() {
     // was merely "some ancestor" would open nothing.
     seat_on(&mut s, "unstaged.txt");
     press(&mut s, KeyCode::Enter);
-    let visited = active_name(&s);
+    let visited = active_path(&s);
     assert_eq!(
         visited,
-        root.join("unstaged.txt").display().to_string(),
+        Some(root.join("unstaged.txt").display().to_string()),
         "RET opens the file the row names, resolved against the git root; \
          status was {:?}",
         status(&s)
@@ -2196,8 +2203,8 @@ fn assert_root_resolves_whole(leaf: &str) {
     seat_on(&mut s, "unstaged.txt");
     press(&mut s, KeyCode::Enter);
     assert_eq!(
-        active_name(&s),
-        root.join("unstaged.txt").display().to_string(),
+        active_path(&s),
+        Some(root.join("unstaged.txt").display().to_string()),
         "RET resolves against the untruncated root; status was {:?}",
         status(&s)
     );

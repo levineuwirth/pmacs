@@ -578,29 +578,72 @@ cmd { name = "editor.previous-buffer",
 -- which redirects any window showing the doomed buffer first.
 
 local LIST_NAME = "*buffer-list*"
-local LIST_HEADER = "  Buffer                          Size   RET visit  d/u mark  x kill marked  k kill  g refresh  q quit"
+local LIST_KEYS = "RET visit  d/u mark  x kill marked  k kill  g refresh  q quit"
+-- The name column is as wide as the longest name, up to this many
+-- columns; a longer name is cut with `…` (E10c review 1's Low 1).
+local LIST_NAME_COLUMNS_MAX = 40
 
 local list_marks = {} -- { [tostring(id)] = BufferIdLua }
 
+-- `$HOME` without a trailing `/`, or nil when it is unset or empty: the
+-- one reading of it the list's `~` form and find-file's expansion share.
+local function home_dir()
+  local home = os.getenv("HOME")
+  if home == nil or home == "" then return nil end
+  if home:sub(-1) == "/" then home = home:sub(1, -2) end
+  return home
+end
+
+-- `path` with a leading `$HOME` written `~`, as the list shows it.
+local function home_form(path)
+  local home = home_dir()
+  if home == nil or home == "" then return path end
+  if path == home then return "~" end
+  if path:sub(1, #home + 1) == home .. "/" then return "~" .. path:sub(#home + 1) end
+  return path
+end
+
+-- The rows and the header that matches them: the name column as wide as
+-- the longest name (by display width, never bytes, so `résumé.md` and a
+-- wide character line up) up to `LIST_NAME_COLUMNS_MAX`, the size a bare
+-- number right-aligned in a column as wide as the largest, and the path
+-- in `~` form after it (E10c review 1's Low 1 and the owner's look).
 local function buffer_list_rows()
   -- Drop marks whose buffer is gone, then render.
   local live = {}
-  local rows = {}
+  local listed = {}
+  local name_columns = pmacs.text.width("Buffer")
+  local size_columns = #"Size"
   for _, id in ipairs(pmacs.buffer.list()) do
     local d = pmacs.describe.buffer(id)
     if d ~= nil then
-      local key = tostring(id)
-      local marked = list_marks[key] ~= nil
-      if marked then live[key] = id end
-      rows[#rows + 1] = {
-        text = string.format("%s%s %-30s %d bytes",
-          marked and "D" or " ", d.modified and "*" or " ", d.name, d.length),
-        item = id,
-      }
+      listed[#listed + 1] = { id = id, d = d }
+      name_columns = math.max(name_columns, pmacs.text.width(d.name))
+      size_columns = math.max(size_columns, #tostring(d.length))
     end
   end
+  name_columns = math.min(name_columns, LIST_NAME_COLUMNS_MAX)
+  local rows = {}
+  for _, entry in ipairs(listed) do
+    local id, d = entry.id, entry.d
+    local key = tostring(id)
+    local marked = list_marks[key] ~= nil
+    if marked then live[key] = id end
+    -- E10c.5: a buffer's name is no longer its path (D40), so the
+    -- list shows the path the name was taken from, where there is one.
+    local text = string.format("%s%s %s %" .. size_columns .. "s %s",
+      marked and "D" or " ", d.modified and "*" or " ",
+      pmacs.text.fit(d.name, name_columns), tostring(d.length),
+      d.path and home_form(d.path) or "")
+    rows[#rows + 1] = {
+      text = (text:gsub("%s+$", "")),
+      item = id,
+    }
+  end
   list_marks = live
-  return rows
+  local header = string.format("   %s %" .. size_columns .. "s File   %s",
+    pmacs.text.fit("Buffer", name_columns), "Size", LIST_KEYS)
+  return rows, header
 end
 
 -- The panel's own buffer, if the listing is open (by ownership, never
@@ -618,10 +661,11 @@ end
 cmd { name = "editor.list-buffers",
       description = "Show the buffer list with buffer-menu-mode-style bindings.",
       fn = function()
+        local rows, header = buffer_list_rows()
         pmacs.listview.open {
           name = LIST_NAME,
-          header = LIST_HEADER,
-          rows = buffer_list_rows(),
+          header = header,
+          rows = rows,
           on_visit = function(id) pmacs.window.switch_buffer(id) end,
           on_refresh = buffer_list_rows,
           keys = {
@@ -788,9 +832,8 @@ end
 -- buffer yet fails to load when the file is not open yet. Expanding up
 -- front makes both halves agree.
 local function find_file_expand_tilde(path)
-  local home = os.getenv("HOME")
-  if home == nil or home == "" then return path end
-  if home:sub(-1) == "/" then home = home:sub(1, -2) end
+  local home = home_dir()
+  if home == nil then return path end
   if path == "~" then return home end
   local rest = path:match("^~/(.*)$")
   if rest == nil then return path end

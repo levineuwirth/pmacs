@@ -1295,11 +1295,16 @@ impl EditorCore {
     /// relative or `~`-prefixed path produced `file://ipc.cpp`, which
     /// clangd rejected with `-32602 unresolvable URI`) and which
     /// cross-file navigation relies on for buffer-identity matching.
+    ///
+    /// A buffer named by its path follows it (D40), so the names the
+    /// move can change are refreshed here rather than at each caller.
     pub fn set_buffer_path(&mut self, id: BufferId, path: Option<PathBuf>) {
         let path = path.map(normalize_buffer_path);
-        if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
+        let mut reg = self.registry.borrow_mut();
+        if let Ok(b) = reg.get_mut(id) {
             b.set_file_path(path);
         }
+        reg.refresh_names(&[id]);
     }
 
     /// Record filesystem metadata on a specific buffer.
@@ -1325,19 +1330,14 @@ impl EditorCore {
         }
         let normalized = normalize_buffer_path(path.to_path_buf());
         let (bytes, meta) = crate::file_io::load_file(path)?;
-        // The name is the path **as given** — a relative open is named
-        // `foo.rs` while `file_path` below is absolute. Recording the
-        // provenance (Q#DR30) is what lets rename reconciliation move
-        // this name without having to guess from the string.
-        let display_name = path.display().to_string();
-        let id = self
-            .registry
-            .borrow_mut()
-            .create_from_bytes(display_name.clone(), &bytes);
-        if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
-            b.set_path_derived_name(display_name);
-        }
-        self.set_buffer_path(id, Some(normalized));
+        // Path-backed creation site (Q#DR30): bound to the normalized
+        // path and named from it by the registry as it goes in, once,
+        // beside every other name (D40), so a relative open and an
+        // absolute one name the file alike.
+        let id = self.registry.borrow_mut().insert_for_path(
+            Buffer::from_bytes(BufferId::next(), path.display().to_string(), &bytes),
+            normalized,
+        );
         self.set_buffer_meta(id, Some(meta));
         Ok((id, true))
     }
@@ -1394,14 +1394,12 @@ impl EditorCore {
                 fire: HookKind::AfterSwitch,
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let display_path = path.display().to_string();
-                let buffer_id = self.registry.borrow_mut().create(display_path.clone());
-                // Path-backed creation site (Q#DR30): the name is the
-                // path, so a later rename may move it.
-                if let Ok(b) = self.registry.borrow_mut().get_mut(buffer_id) {
-                    b.set_path_derived_name(display_path);
-                }
-                self.set_buffer_path(buffer_id, Some(path.to_path_buf()));
+                // Path-backed creation site (Q#DR30): named from the
+                // path as it goes in, which a later rename moves.
+                let buffer_id = self.registry.borrow_mut().insert_for_path(
+                    Buffer::new(BufferId::next(), path.display().to_string()),
+                    normalize_buffer_path(path.to_path_buf()),
+                );
                 "[new file]".clone_into(&mut self.status);
                 Ok(ResolvedTarget::Buffer {
                     id: buffer_id,
@@ -2799,8 +2797,9 @@ impl EditorCore {
     /// Adoption is the whole point: after this the buffer *is* the new
     /// file, so `C-x C-s` saves there, the recorded [`FileMeta`] is the
     /// one just written (a later save compares against the right file),
-    /// and the name follows the path the way [`Buffer::set_path_derived_name`]
-    /// makes it follow one at open.
+    /// and the name is the new path's, as an open names a buffer
+    /// ([`crate::buffer_registry::BufferRegistry::name_by_path`], D40),
+    /// whatever named it before.
     ///
     /// Refuses an existing file unless `force`, because the caller's
     /// path came from a prompt and the user cannot see what is already
@@ -2836,14 +2835,15 @@ impl EditorCore {
         };
         let meta = save_atomic(path, &content)
             .map_err(|e| WriteFileRefusal::Failed(format!("write failed: {e}")))?;
-        let display = path.display().to_string();
-        if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
-            buf.set_path_derived_name(display.clone());
-            buf.mark_clean();
+        {
+            let mut reg = self.registry.borrow_mut();
+            if let Ok(buf) = reg.get_mut(id) {
+                buf.mark_clean();
+            }
+            let _ = reg.name_by_path(id, normalize_buffer_path(path.to_path_buf()));
         }
-        self.set_buffer_path(id, Some(path.to_path_buf()));
         self.set_buffer_meta(id, Some(meta));
-        self.status = format!("wrote {display}");
+        self.status = format!("wrote {}", path.display());
         Ok(())
     }
 
@@ -6255,17 +6255,15 @@ impl EditorCore {
     ///
     /// # The name
     ///
-    /// The name is rewritten only for a buffer whose name is
+    /// The name follows only for a buffer whose name is
     /// [`crate::buffer::BufferNameOrigin::PathDerived`]. String
-    /// inspection cannot substitute for that bit in either direction: a
-    /// relative open is named `foo.rs` (so an equality test leaves it
-    /// stale), and a user may name a buffer with a string that
-    /// normalizes to its own path (so a path-equivalence test
-    /// overwrites a chosen name). When it does fire, the new name is
-    /// the **normalized** new path — a buffer opened relatively
-    /// therefore acquires an absolute name, because no buffer records
-    /// which base its name was relative to. Reconciliation re-records
-    /// `PathDerived`, so a second rename still follows.
+    /// inspection cannot substitute for that bit: a user may name a
+    /// buffer with a string that is its own basename, and a rename must
+    /// not overwrite a chosen name. When it follows, the registry names
+    /// it from the new path beside every other name (D40), after every
+    /// affected buffer has moved, so a directory rename that parts two
+    /// alike basenames or brings two together names them once, as the
+    /// whole set decides.
     pub fn reconcile_rename(&mut self, old: &Path, new: &Path) -> Vec<RenameRebind> {
         let old_n = normalize_buffer_path(old.to_path_buf());
         let new_n = normalize_buffer_path(new.to_path_buf());
@@ -6300,12 +6298,7 @@ impl EditorCore {
                 // external-change detection compare against a stat of
                 // a path that is gone.
                 buf.set_file_meta(None);
-                if buf.name_origin() == crate::buffer::BufferNameOrigin::PathDerived {
-                    buf.set_path_derived_name(target.display().to_string());
-                    true
-                } else {
-                    false
-                }
+                buf.name_origin() == crate::buffer::BufferNameOrigin::PathDerived
             };
             rebinds.push(RenameRebind {
                 buffer_id: id,
@@ -6314,6 +6307,8 @@ impl EditorCore {
                 name_followed,
             });
         }
+        let moved: Vec<BufferId> = rebinds.iter().map(|r| r.buffer_id).collect();
+        self.registry.borrow_mut().refresh_names(&moved);
         rebinds
     }
 

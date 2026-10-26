@@ -109,6 +109,16 @@ fn visit(s: &EditorState, dir: &std::path::Path, name: &str, text: &str) -> Stri
     display
 }
 
+/// The name pmacs gives the buffer of the file at `path`: its basename,
+/// a name being no longer a path (D40).
+fn named(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .expect("a file path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 // ---------------------------------------------------------------------------
 // E1.1 --- unsaved-buffer prompts
 // ---------------------------------------------------------------------------
@@ -137,7 +147,7 @@ fn killing_a_modified_buffer_asks_and_a_refusal_keeps_it() {
     );
     let asked = prompt(&s);
     assert!(
-        asked.contains(&path),
+        asked.contains(&named(&path)),
         "the question must name the buffer at stake; got {asked:?}"
     );
 
@@ -148,7 +158,7 @@ fn killing_a_modified_buffer_asks_and_a_refusal_keeps_it() {
         "`n` alone must answer the question"
     );
     assert!(
-        buffer_names(&s).contains(&path),
+        buffer_names(&s).contains(&named(&path)),
         "`n` must keep the buffer; buffers are {:?}",
         buffer_names(&s)
     );
@@ -166,7 +176,7 @@ fn killing_a_modified_buffer_proceeds_on_yes() {
     m_x(&mut s, "buffer.kill-this");
     type_str(&mut s, "y");
     assert!(
-        !buffer_names(&s).contains(&path),
+        !buffer_names(&s).contains(&named(&path)),
         "`y` alone must kill the buffer; buffers are {:?}",
         buffer_names(&s)
     );
@@ -186,7 +196,7 @@ fn killing_an_unmodified_buffer_asks_nothing() {
         "an unmodified kill must not prompt"
     );
     assert!(
-        !buffer_names(&s).contains(&path),
+        !buffer_names(&s).contains(&named(&path)),
         "and it must have happened; buffers are {:?}",
         buffer_names(&s)
     );
@@ -213,7 +223,7 @@ fn an_unrecognized_answer_re_asks() {
         "an unrecognized answer must leave the question standing"
     );
     assert!(
-        buffer_names(&s).contains(&path),
+        buffer_names(&s).contains(&named(&path)),
         "and must not have killed anything"
     );
     assert_eq!(status(&s), "please answer y or n");
@@ -234,7 +244,7 @@ fn cancelling_the_question_is_a_refusal() {
         "C-g must close the question"
     );
     assert!(
-        buffer_names(&s).contains(&path),
+        buffer_names(&s).contains(&named(&path)),
         "and must not kill; buffers are {:?}",
         buffer_names(&s)
     );
@@ -255,7 +265,7 @@ fn the_quit_question_names_the_modified_buffers() {
     ctrl(&mut s, 'c');
     let asked = prompt(&s);
     assert!(
-        asked.contains(&alpha) && asked.contains(&beta),
+        asked.contains(&named(&alpha)) && asked.contains(&named(&beta)),
         "the question must name both modified buffers; got {asked:?}"
     );
     assert!(!s.core.borrow().quit, "and must not have quit");
@@ -621,13 +631,13 @@ fn c_x_k_prefills_the_current_buffer_and_kills_it_on_return() {
     );
     assert_eq!(
         eval::<String>(&s, "return pmacs.minibuffer.contents()"),
-        beta,
+        named(&beta),
         "the prompt must be prefilled with the buffer in the window"
     );
 
     press(&mut s, KeyCode::Enter);
     assert!(
-        !buffer_names(&s).contains(&beta),
+        !buffer_names(&s).contains(&named(&beta)),
         "RET on the prefill must kill it; buffers are {:?}",
         buffer_names(&s)
     );
@@ -647,10 +657,13 @@ fn c_x_k_asks_when_the_named_buffer_is_modified() {
     press(&mut s, KeyCode::Enter);
     let asked = prompt(&s);
     assert!(
-        asked.contains(&beta) && asked.contains("kill anyway"),
+        asked.contains(&named(&beta)) && asked.contains("kill anyway"),
         "the kill must ask about unsaved work; got {asked:?}"
     );
-    assert!(buffer_names(&s).contains(&beta), "and must not have killed");
+    assert!(
+        buffer_names(&s).contains(&named(&beta)),
+        "and must not have killed"
+    );
 }
 
 /// `C-x C-w` writes to a new path and the buffer ADOPTS it: the bytes

@@ -247,8 +247,11 @@ function M._collect_project_files()
     local d = pmacs.describe.buffer(id)
     if d ~= nil and type(d.name) == "string" and not d.name:match("^%*") then
       local content = id:slice(0, id:len())
-      total = total + #content + #d.name
-      out[#out + 1] = { path = d.name, content = content }
+      -- A buffer's name is not its path (D40): the path is `id:path()`,
+      -- and only a buffer that holds no file is sent under its name.
+      local path = id:path() or d.name
+      total = total + #content + #path
+      out[#out + 1] = { path = path, content = content }
     end
   end
   if total > M._PROJECT_PAYLOAD_WARN_BYTES then
@@ -324,7 +327,7 @@ local function ask_about_function_body()
     return
   end
   local source = node:text()
-  local file_path = (pmacs.describe.buffer(buf) or {}).name or "<unnamed>"
+  local file_path = buf:path() or (pmacs.describe.buffer(buf) or {}).name or "<unnamed>"
   dispatch(server, _config.server_label, prompt_name, {
     language = language or "text",
     file_path = file_path,

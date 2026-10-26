@@ -289,10 +289,8 @@ fn switch_buffer_ret_takes_the_selected_buffer_so_a_subsequence_switches() {
     exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[1])");
     assert_eq!(active_name(&s), scratch);
 
-    // A file buffer is named by its path as pmacs stores it, so that
-    // name is the candidate. Read it back rather than canonicalizing:
-    // on macOS the temp root is a symlink (`/var` -> `/private/var`) and
-    // pmacs keeps the path as given.
+    // A file buffer is named by its basename (D40), so that name is the
+    // candidate. Read it back rather than spelling it.
     exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[2])");
     let notes_name = active_name(&s);
     assert!(notes_name.ends_with("notes.txt"), "fixture: {notes_name}");
@@ -378,22 +376,20 @@ fn switch_by_typing(s: &mut EditorState, text: &str) {
     assert!(!active(s), "RET closed the prompt");
 }
 
-/// E8b.1 (#318): a file buffer is named by its absolute path, so a bare
-/// name is also a subsequence of paths it does not name. Under a
-/// directory called `bin-tests`, `b.rs` matches `…/bin-tests/a.rs`
-/// through the `b` of `bin` and the `.rs`, the scorer gives both paths
-/// one score, and `C-x b b.rs RET` stayed on `a.rs`.
+/// E8b.1 (#318), under D40: a file buffer was named by its absolute path,
+/// so under a directory called `bin-tests` `b.rs` matched `…/bin-tests/a.rs`
+/// through the `b` of `bin` and the `.rs`, and `C-x b b.rs RET` stayed on
+/// `a.rs`. A file buffer is now named by its basename, so `b.rs` matches
+/// `b.rs`'s name alone, and a name is all `C-x b` matches: a file's full
+/// path, whose `/` no name here holds, is refused as typed.
 ///
 /// Beside it, in the same session, D18's four witnesses as
 /// `switch_buffer_ret_takes_the_selected_buffer_so_a_subsequence_switches`
 /// pins them: `nts` reaches `notes.txt`, `scr` `*scratch*`, `lsp`
-/// `*lsp*`, and `zzz` is refused as typed; and each file's full path
-/// still reaches it. `bin-tests` also spells `nts`, so the abbreviation
-/// matches all three files alike and reached `a.rs` until a match inside
-/// a name's last component outranked one through its directories. The
-/// directory is the fixture's so that both hold on every machine: the
-/// temporary root under this laptop's gate spells both, and CI's
-/// `/tmp/.tmpXXXXXX` neither.
+/// `*lsp*`, and `zzz` is refused as typed. `bin-tests` spells `nts` and
+/// once took it for every file; a name holds no directory, so only
+/// `notes.txt` does. The directory stays the fixture's so that the rows
+/// read the same on every machine.
 #[test]
 fn switch_buffer_reaches_a_file_by_its_bare_name_and_d18_still_holds() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -419,7 +415,7 @@ fn switch_buffer_reaches_a_file_by_its_bare_name_and_d18_still_holds() {
         names.push(active_name(&s));
     }
     let (a, b, notes) = (names[0].clone(), names[1].clone(), names[2].clone());
-    assert!(b.ends_with("/bin-tests/b.rs"), "fixture: {b}");
+    assert_eq!(b, "b.rs", "fixture: a file is named by its basename");
 
     // The bare name, from `a.rs`.
     exec(&s, "pmacs.window.switch_buffer(pmacs.buffer.list()[2])");
@@ -428,27 +424,35 @@ fn switch_buffer_reaches_a_file_by_its_bare_name_and_d18_still_holds() {
     press(&mut s, KeyCode::Char('b'));
     type_str(&mut s, "b.rs");
     let offered = candidates(&s);
-    assert!(
-        offered.contains(&a) && offered.contains(&b),
-        "fixture premise: `b.rs` is a subsequence of both paths; got {offered:?}"
+    assert_eq!(
+        offered,
+        vec![b.clone()],
+        "`b.rs` is held by b.rs's name alone, a.rs's holding no `b`"
     );
     press(&mut s, KeyCode::Enter);
     assert_eq!(active_name(&s), b, "C-x b b.rs RET reaches b.rs");
 
-    // The full path reaches each file still.
+    // A full path names no buffer: names hold no directory (D40).
+    let a_path = dir.join("a.rs").display().to_string();
+    switch_by_typing(&mut s, &a_path);
+    assert_eq!(
+        status(&s),
+        format!("no buffer: {a_path}"),
+        "refused as typed"
+    );
+    assert_eq!(active_name(&s), b, "nothing switched");
     switch_by_typing(&mut s, &a);
-    assert_eq!(active_name(&s), a, "a.rs's full path reaches it");
-    switch_by_typing(&mut s, &b);
-    assert_eq!(active_name(&s), b, "b.rs's full path reaches it");
+    assert_eq!(active_name(&s), a, "a.rs's name reaches it");
 
     // D18's four, in this session.
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('b'));
     type_str(&mut s, "nts");
     let offered = candidates(&s);
-    assert!(
-        [&a, &b, &notes].iter().all(|n| offered.contains(n)),
-        "fixture premise: the directory spells `nts` for every file; got {offered:?}"
+    assert_eq!(
+        offered,
+        vec![notes.clone()],
+        "`nts` is held by notes.txt's name alone, no name holding the directory that spells it"
     );
     press(&mut s, KeyCode::Enter);
     assert_eq!(active_name(&s), notes, "C-x b nts RET reaches notes.txt");

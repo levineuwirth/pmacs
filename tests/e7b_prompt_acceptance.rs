@@ -96,6 +96,16 @@ fn visit(s: &EditorState, dir: &std::path::Path, name: &str, text: &str) -> Stri
     display
 }
 
+/// The name pmacs gives the buffer of the file at `path`: its basename,
+/// a name being no longer a path (D40).
+fn named(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .expect("a file path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// `C-x C-c` on a modified buffer: the question is standing, nothing
 /// has quit.
 fn ask_to_quit(s: &mut EditorState) {
@@ -174,7 +184,10 @@ fn e7b_2_kill_buffer_answers_on_one_key() {
     assert!(asking(&s));
     press(&mut s, KeyCode::Char('n'));
     assert!(!asking(&s), "n alone answers");
-    assert!(buffer_names(&s).contains(&path), "and keeps the buffer");
+    assert!(
+        buffer_names(&s).contains(&named(&path)),
+        "and keeps the buffer"
+    );
     assert_eq!(status(&s), "kill-buffer cancelled");
 }
 

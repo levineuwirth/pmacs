@@ -472,7 +472,8 @@ fn p6_q_in_search_results_restores_the_side_window_s_previous_presentation() {
     let root = std::fs::canonicalize(dir.path()).expect("canonical");
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "a needle here\n").expect("notes");
-    let notes_name = notes.display().to_string();
+    // A file buffer's name is its basename (D40).
+    let notes_name = "notes.txt".to_owned();
     let mut s = editor();
     exec(
         &s,

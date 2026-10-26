@@ -1924,8 +1924,10 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// `band:<prefix>` waits up to five seconds for the status band to begin
 /// with `prefix` (a switch's or a kill's message lands a frame or more
 /// after its key, later under load); `report:<label>` writes the popup's
-/// facts under `label`. A step that times out is reported as
-/// `step.<i>=timeout` and the script goes on.
+/// facts under `label`; `frame:<label>` writes the composited frame,
+/// through the window's own render path, beside the report as
+/// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
+/// times out is reported as `step.<i>=timeout` and the script goes on.
 #[allow(
     clippy::too_many_lines,
     reason = "one linear attach-script-report session, step by step"
@@ -2056,6 +2058,27 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                     popup_probe_facts(state, arg, &mut out);
                 }
                 Ok(true)
+            }
+            "frame" => {
+                // E10c.6: the composited frame as the window would show
+                // it, through the production render path, for a person
+                // to look at; the probe asserts nothing about it.
+                let written = app.state.as_mut().map(|state| {
+                    state.refresh_popup_buffer();
+                    let pixels = state.render_offscreen();
+                    let (width, height) = (state.config.width, state.config.height);
+                    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                    for rgba in pixels.chunks_exact(4) {
+                        ppm.extend_from_slice(&rgba[..3]);
+                    }
+                    let mut path = report.as_os_str().to_owned();
+                    path.push(format!(".{arg}.ppm"));
+                    // The name is the window's title on the GPU, which no
+                    // frame shows, so the report carries it beside the frame.
+                    let _ = writeln!(out, "{arg}.title={}", state.window_title());
+                    std::fs::write(&path, ppm).is_ok()
+                });
+                Ok(written.unwrap_or(false))
             }
             _ => Ok(false),
         };

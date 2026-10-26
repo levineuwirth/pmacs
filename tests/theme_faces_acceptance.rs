@@ -226,7 +226,7 @@ fn attach_diags(state: &EditorState, diags: Vec<pmacs::diag::Diagnostic>) -> Str
         state,
         r#"
         local buf = pmacs.window.buffer()
-        local uri = "file:///tmp/theme_faces_diag.rs"
+        local uri = "file:///tmp/theme_faces_diag"
         assert(pmacs.diag._attach_view(buf, uri))
         return uri
         "#,
@@ -236,7 +236,9 @@ fn attach_diags(state: &EditorState, diags: Vec<pmacs::diag::Diagnostic>) -> Str
         let registry = core.registry.clone();
         let mut reg = registry.borrow_mut();
         let buf = reg.get_mut(core.active_buffer_id()).unwrap();
-        buf.set_file_path(Some(std::path::PathBuf::from("/tmp/theme_faces_diag.rs")));
+        // No extension: the buffer's language comes from its path (E10c),
+        // and these rows are about the summary and the faces, not a parse.
+        buf.set_file_path(Some(std::path::PathBuf::from("/tmp/theme_faces_diag")));
     }
     let store = state.lsp_manager.borrow().diag_store();
     store

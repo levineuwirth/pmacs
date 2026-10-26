@@ -2911,6 +2911,7 @@ pub fn install(
     pmacs.set("instance", install_instance_module(lua, registry)?)?;
     pmacs.set("ansi", install_ansi_module(lua)?)?;
     pmacs.set("path", install_path_module(lua)?)?;
+    pmacs.set("text", install_text_module(lua)?)?;
     pmacs.set("packages", install_packages_module(lua)?)?;
     pmacs.set("state", install_state_module(lua)?)?;
     pmacs.set("session", install_session_module(lua)?)?;
@@ -3618,19 +3619,21 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
-        // dired Stage 2a Q#DR21 — expose the existing Rust setter,
-        // which already documents itself as for "save-as and rename
-        // operations". Dired needs it because its listing buffers are
-        // **pathless**: no buffer-keyed rebind can find them, so the
-        // only way a `*dired:<path>*` buffer can follow a renamed
-        // directory is for dired's own `resource.renamed` subscriber to
-        // rename it. The alternative — kill and recreate under the new
-        // name — loses window placement, the cursor, the read-only
-        // intercept, round-trip input and the major mode, each of which
-        // would have to be re-established in the right order.
+        // The explicit-name door (`BufferRegistry::set_name`), exposed
+        // at dired Stage 2a (Q#DR21) and since D40 for a caller's own
+        // name alone: a name given here is a choice, not a path's, so no
+        // collision rewrites it and neither does a rename of the file it
+        // holds; a save-as names the buffer by its new file, as Emacs's
+        // `write-file` does. Dired does not come here: a listing is
+        // named by the directory it shows (`pmacs.buffer.name_by_directory`,
+        // E10c.3), which a `set_name` would make explicit and stop; and
+        // dired subscribes to no rename, so a listing whose directory is
+        // renamed keeps its old directory and name (a known gap, older
+        // than D40).
         //
-        // Uniqueness stays the CALLER's job, matching the Rust setter;
-        // dired reuses its existing `<2>`-variant uniquifier.
+        // Uniqueness among explicit names stays the CALLER's job; a
+        // name derived from a path that this one equals takes more of
+        // its path instead (D40), through the registry's door.
         //
         // This records `BufferNameOrigin::Explicit` (Q#DR30): it is a
         // naming operation even when the string happens to denote the
@@ -3640,10 +3643,28 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             "set_name",
             lua.create_function(move |_, (id, name): (BufferIdLua, String)| {
                 reg.borrow_mut()
-                    .get_mut(id.0)
-                    .map_err(mlua::Error::external)?
-                    .set_name(name);
-                Ok(())
+                    .set_name(id.0, name)
+                    .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+
+    {
+        // E10c.3: a listing is named by the directory it shows, `proj/`,
+        // through the one naming function files use (D40, D37), so dired
+        // records its directory and never names a buffer itself; a
+        // collision lengthens both names (`a/proj/`, `b/proj/`), and a
+        // foreign buffer already holding the name keeps it. The directory
+        // is normalized as a file path is (`pmacs.path.canonicalize`).
+        let reg = registry.clone();
+        buffer.set(
+            "name_by_directory",
+            lua.create_function(move |_, (id, path): (BufferIdLua, String)| {
+                let directory =
+                    crate::editor_core::normalize_buffer_path(std::path::PathBuf::from(path));
+                reg.borrow_mut()
+                    .name_by_directory(id.0, directory)
+                    .map_err(mlua::Error::external)
             })?,
         )?;
     }
@@ -3671,17 +3692,17 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         format!("failed to load {path}: {source}"),
                     ))
                 })?;
-                let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
-                // Path-backed creation site (Q#DR30): this name is the
-                // path as given, so rename reconciliation may move it.
-                if let Ok(b) = reg.borrow_mut().get_mut(id) {
-                    b.set_path_derived_name(path.clone());
-                }
+                // Path-backed creation site (Q#DR30): bound to the
+                // normalized path and named from it as it goes in, once,
+                // beside every other name (D40).
+                let id = reg.borrow_mut().insert_for_path(
+                    crate::buffer::Buffer::from_bytes(BufferId::next(), path.clone(), &bytes),
+                    crate::editor_core::normalize_buffer_path(path_buf),
+                );
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
                         .map_err(mlua::Error::external)?;
-                    core.set_buffer_path(id, Some(path_buf));
                     core.set_buffer_meta(id, Some(meta));
                 }
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
@@ -3739,16 +3760,15 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         format!("failed to load {path}: {source}"),
                     ))
                 })?;
-                let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
                 // Path-backed creation site (Q#DR30), as in `from_file`.
-                if let Ok(b) = reg.borrow_mut().get_mut(id) {
-                    b.set_path_derived_name(path.clone());
-                }
+                let id = reg.borrow_mut().insert_for_path(
+                    crate::buffer::Buffer::from_bytes(BufferId::next(), path.clone(), &bytes),
+                    crate::editor_core::normalize_buffer_path(path_buf),
+                );
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
                         .map_err(mlua::Error::external)?;
-                    core.set_buffer_path(id, Some(path_buf));
                     core.set_buffer_meta(id, Some(meta));
                 }
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
@@ -4380,6 +4400,35 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
     Ok(path)
+}
+
+/// Build the `pmacs.text.*` table: text measured in display columns, the
+/// unit both frontends lay a row out in (`pmacs_protocol::columns`), for
+/// Lua that lines text up in columns. `width(s)` is `s`'s width; `fit(s,
+/// n)` is `s` in exactly `n` columns, padded with spaces or cut with `…`
+/// ([`crate::display_width::fit_columns`]). `*buffer-list*`'s columns
+/// pad by them (E10c review 1's Low 1: `%-30s` pads by bytes, so a name
+/// holding `é` ended its row two columns short).
+fn install_text_module(lua: &Lua) -> mlua::Result<Table> {
+    let text = lua.create_table()?;
+    text.set(
+        "width",
+        lua.create_function(|_, s: mlua::String| {
+            Ok(crate::display_width::widest_line_columns(
+                &s.to_string_lossy(),
+            ))
+        })?,
+    )?;
+    text.set(
+        "fit",
+        lua.create_function(|_, (s, columns): (mlua::String, u32)| {
+            Ok(crate::display_width::fit_columns(
+                &s.to_string_lossy(),
+                columns,
+            ))
+        })?,
+    )?;
+    Ok(text)
 }
 
 /// Lua handle for a captured view destination (Q#JR14d).
@@ -7007,6 +7056,12 @@ fn command_info_table(lua: &Lua, cmd: &Command, keymaps: &KeymapStack) -> mlua::
 fn buffer_info_table(lua: &Lua, buf: &crate::buffer::Buffer) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("name", buf.name().to_owned())?;
+    // E10c.5: the path a buffer is named by, now that its name is not
+    // that path (D40): a file buffer's file, or the directory a listing
+    // shows; absent for a buffer holding neither.
+    if let Some(path) = buf.file_path().or_else(|| buf.named_directory()) {
+        t.set("path", path.display().to_string())?;
+    }
     t.set(
         "length",
         i64::try_from(buf.len()).map_err(mlua::Error::external)?,
