@@ -70,7 +70,7 @@ use crate::cell::CellSize;
 use crate::editor::EditorState;
 use crate::instance_render::RenderState;
 use crate::lockfile::{self, LockError, LockHandle};
-use crate::presence::{PresenceSnapshot, SessionRegistry};
+use crate::presence::{PresenceSnapshot, SessionRegistry, SessionWrite};
 use crate::protocol::crossterm_translate::{key_to_crossterm, mouse_to_crossterm};
 use crate::protocol::{
     ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello,
@@ -1505,10 +1505,14 @@ fn peer_may_send_panel_events(
 /// and went on, so the tick wrote once more and failed again (#404).
 ///
 /// The writes left out write to a stream no attached session owns yet
-/// or any more: the handshake's, the bootstrap's to a provisional
-/// session (which a failed write unregisters), and a teardown's
-/// `Goodbye`. `tests/daemon_write_consistency.rs` holds this file to
-/// that list, by function and count.
+/// or any more: the handshake's, the bootstrap's to its own socket
+/// before the session takes it (a failed one unregisters the
+/// provisional session), and a teardown's `Goodbye`. Since E10d review
+/// 1's Low 2 a session's stream is private to the registry, whose
+/// `SessionRegistry::write_output` this path calls, so a write past it
+/// does not compile; `tests/daemon_write_consistency.rs` holds the rest
+/// by function and count: who touches the stream in `src/presence.rs`,
+/// who calls its writers here, and the direct writes left out.
 fn write_to_session(
     editor: &EditorState,
     session_registry: &mut SessionRegistry,
@@ -1516,35 +1520,28 @@ fn write_to_session(
     message: &InstanceMessage,
     what: impl FnOnce() -> String,
 ) -> bool {
-    let Some(stream) = session_registry.stream_mut(frontend_id) else {
-        return false;
-    };
-    let error = match write_message(stream, message) {
-        Ok(()) => return true,
-        Err(error @ crate::transport::TransportError::Io(_)) => error,
-        Err(refused) => {
+    match session_registry.write_output(frontend_id, message) {
+        SessionWrite::Written => true,
+        SessionWrite::NoStream => false,
+        SessionWrite::Refused(refused) => {
             eprintln!("pmacs: {}: {refused}", what());
-            return false;
+            false
         }
-    };
-    eprintln!("pmacs: {}: {error}", what());
-    if let Some(stream) = session_registry
-        .session_mut(frontend_id)
-        .and_then(|session| session.stream.take())
-    {
-        eprintln!(
-            "pmacs: {frontend_id:?}'s write failed; nothing more is written to it, and its \
-             input is read until its EOF or {} ms",
-            WRITE_FAILURE_DRAIN.as_millis()
-        );
-        session_registry.begin_drain(frontend_id, stream, Instant::now());
-        editor
-            .core
-            .borrow_mut()
-            .draining_frontends
-            .insert(frontend_id);
+        SessionWrite::Failed(error) => {
+            eprintln!("pmacs: {}: {error}", what());
+            eprintln!(
+                "pmacs: {frontend_id:?}'s write failed; nothing more is written to it, and its \
+                 input is read until its EOF or {} ms",
+                WRITE_FAILURE_DRAIN.as_millis()
+            );
+            editor
+                .core
+                .borrow_mut()
+                .draining_frontends
+                .insert(frontend_id);
+            false
+        }
     }
-    false
 }
 
 /// T M10.8 — dispatcher loop. The single thread that owns the editor.
@@ -1940,7 +1937,7 @@ fn dispatcher_loop(
             let state = session_registry.session_state(*fid);
             if session_registry
                 .session(*fid)
-                .is_some_and(|session| session.stream.is_some())
+                .is_some_and(crate::presence::Session::has_stream)
             {
                 // Q#S1 — `StatusFacts` is a v8 variant; an older peer
                 // would hard-error decoding it. Same per-session gate
@@ -2129,9 +2126,9 @@ fn dispatcher_loop(
                     // where the stream went.
                     if !write_to_session(editor, &mut session_registry, *fid, msg, || {
                         format!("write failed for {fid:?} in dispatcher")
-                    }) && session_registry
+                    }) && !session_registry
                         .session(*fid)
-                        .is_none_or(|session| session.stream.is_none())
+                        .is_some_and(crate::presence::Session::has_stream)
                     {
                         break;
                     }
@@ -2236,22 +2233,16 @@ fn dispatcher_loop(
                         .session_state(*fid)
                         .is_some_and(|s| s.negotiated_protocol_version >= SESSION_MIN_VERSION)
                 });
-            if let Some(fid) = quitter
-                && let Some(stream) = session_registry.stream_mut(fid)
-            {
-                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            if let Some(fid) = quitter {
+                session_registry.write_goodbye(fid, GoodbyeReason::Detached);
             }
-            for (fid, session) in session_registry.sessions_mut() {
-                if Some(fid) == quitter {
-                    continue;
-                }
-                let Some(stream) = session.stream.as_mut() else {
-                    continue;
-                };
-                let _ = write_message(
-                    stream,
-                    &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
-                );
+            let others: Vec<FrontendId> = session_registry
+                .sessions_mut()
+                .map(|(fid, _)| fid)
+                .filter(|fid| Some(*fid) != quitter)
+                .collect();
+            for fid in others {
+                session_registry.write_goodbye(fid, GoodbyeReason::ShuttingDown);
             }
             if core_wants_quit {
                 shutdown.store(true, Ordering::SeqCst);
@@ -2576,12 +2567,7 @@ fn cleanup_provisional_session(
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
-    if let Some(stream) = session_registry
-        .session_mut(frontend_id)
-        .and_then(|session| session.stream.take())
-    {
-        let _ = stream.shutdown(Shutdown::Both);
-    }
+    session_registry.shut_stream(frontend_id);
     session_registry.unregister_session(frontend_id);
     editor
         .core
@@ -2956,7 +2942,6 @@ fn handle_session_established(
         render_state.force_full_grid_resync();
         session.render = Some(render_state);
     }
-    session.stream = Some(write_stream);
     session.term_size = Some(initial_size);
     // Bottom-panel arc (Q#BP2b): a grid session's real attach size IS its
     // authoritative geometry declaration, cached BEFORE any input can
@@ -2986,13 +2971,8 @@ fn handle_session_established(
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
             buffer_id: opened.buffer_id,
         });
-        let write_result = {
-            let stream = session_registry
-                .stream_mut(frontend_id)
-                .expect("new session stream installed");
-            write_message(stream, &result)
-        };
-        if write_result.is_err() {
+        if write_message(&mut write_stream, &result).is_err() {
+            let _ = write_stream.shutdown(Shutdown::Both);
             cleanup_provisional_session(editor, session_registry, frontend_id);
             return;
         }
@@ -3001,17 +2981,18 @@ fn handle_session_established(
     // E9 --- the token goes after the bootstrap, so a frontend reading
     // its target's snapshot and result synchronously is not handed a
     // message it did not ask for, and before the first frame.
-    if let Some(token) = token {
-        let write_result = {
-            let stream = session_registry
-                .stream_mut(frontend_id)
-                .expect("new session stream installed");
-            write_message(stream, &InstanceMessage::SessionToken(token))
-        };
-        if write_result.is_err() {
-            cleanup_provisional_session(editor, session_registry, frontend_id);
-        }
+    if let Some(token) = token
+        && write_message(&mut write_stream, &InstanceMessage::SessionToken(token)).is_err()
+    {
+        let _ = write_stream.shutdown(Shutdown::Both);
+        cleanup_provisional_session(editor, session_registry, frontend_id);
+        return;
     }
+    // The bootstrap's last write is done, to its own socket; the session
+    // takes the stream from here, and every later write to it is the one
+    // path's (E10d review 1's Low 2: no write to an attached session's
+    // stream reaches it but through the registry).
+    session_registry.install_stream(frontend_id, write_stream);
 }
 
 /// E9 --- sixteen random bytes for a session token, from the system's
@@ -3750,12 +3731,10 @@ fn handle_dispatcher_event(
             return;
         };
         session_registry.mark_departing(frontend_id);
-        if let Some(stream) = session_registry.stream_mut(frontend_id) {
-            if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
-                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
-            }
-            let _ = stream.shutdown(Shutdown::Both);
+        if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
+            session_registry.write_goodbye(frontend_id, GoodbyeReason::Detached);
         }
+        session_registry.shut_stream(frontend_id);
         detach_frontend(editor, session_registry, frontend_id);
     }
 }
@@ -4288,7 +4267,7 @@ fn publish_buffer_snapshot_to_replicas(
         .sessions_mut()
         .filter(|(peer_id, peer)| {
             let caps = peer.state.negotiated_capabilities;
-            peer.stream.is_some()
+            peer.has_stream()
                 && caps.crdt_replica
                 && (!caps.semantic_render
                     || peer_displays_buffer_as_document(editor, *peer_id, buffer_id))
@@ -4845,7 +4824,10 @@ fn broadcast_pending_crdt_ops(
             };
             let entries = session_registry.broadcast_crdt_op(exclude, buffer_id, op);
             for entry in entries {
-                if session_registry.stream_mut(entry.recipient).is_some() {
+                if session_registry
+                    .session(entry.recipient)
+                    .is_some_and(crate::presence::Session::has_stream)
+                {
                     // T M10.11 F2 — THE criterion-3 jitter site.
                     // CRDT convergence is driven by these
                     // `broadcast_crdt_op` writes, NOT by render
@@ -5529,7 +5511,7 @@ mod tests {
             (live_grid_peer, live_grid_server),
             (dead_grid_peer, dead_grid_server),
         ] {
-            registry.session_mut(peer).expect("registered peer").stream = Some(stream);
+            registry.install_stream(peer, stream);
         }
         let published_buffer = crate::buffer::BufferId::from_raw(900);
         let message = InstanceMessage::BufferSnapshot {
@@ -5592,7 +5574,7 @@ mod tests {
             client
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .expect("delivery timeout");
-            registry.session_mut(fid).expect("registered").stream = Some(server);
+            registry.install_stream(fid, server);
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: doc_buf,
                 crdt_snapshot: vec![1, 2, 3],
@@ -5610,7 +5592,7 @@ mod tests {
         // The PANEL-only buffer's snapshot must NOT be delivered.
         {
             let (server, mut client) = UnixStream::pair().expect("socketpair");
-            registry.session_mut(fid).expect("registered").stream = Some(server);
+            registry.install_stream(fid, server);
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: panel_buf,
                 crdt_snapshot: vec![4, 5, 6],
@@ -5663,8 +5645,8 @@ mod tests {
         dead_client
             .shutdown(Shutdown::Read)
             .expect("the peer stops reading");
-        registry.session_mut(live).expect("registered").stream = Some(live_server);
-        registry.session_mut(dead).expect("registered").stream = Some(dead_server);
+        registry.install_stream(live, live_server);
+        registry.install_stream(dead, dead_server);
         let message = InstanceMessage::Signal(InstanceSignal::Bell);
 
         let mut reported = Vec::new();
@@ -5692,7 +5674,7 @@ mod tests {
         );
         assert_eq!(reported, vec![dead], "its failure is reported once");
         assert!(
-            registry.session(dead).is_some_and(|s| s.stream.is_none()),
+            registry.session(dead).is_some_and(|s| !s.has_stream()),
             "the stream left its session"
         );
         assert!(registry.is_draining(dead), "the drain has begun");
@@ -5719,7 +5701,9 @@ mod tests {
         );
         assert!(
             !registry.is_draining(live)
-                && registry.session(live).is_some_and(|s| s.stream.is_some()),
+                && registry
+                    .session(live)
+                    .is_some_and(crate::presence::Session::has_stream),
             "the live session is untouched"
         );
         editor.process_supervisor.borrow_mut().shutdown();
@@ -6186,7 +6170,7 @@ mod tests {
         assert!(
             session_registry
                 .session(second)
-                .is_none_or(|session| session.stream.is_none()),
+                .is_none_or(|session| !session.has_stream()),
             "no stream"
         );
         assert!(
@@ -12324,9 +12308,9 @@ mod tests {
                 0,
             ),
         );
+        session_registry.install_stream(fid, server);
         {
             let session = session_registry.session_mut(fid).expect("registered");
-            session.stream = Some(server);
             session.term_size = Some(CellSize::new(24, 80));
             session.last_dispatch_idle_sent = Some(true);
         }

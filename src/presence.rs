@@ -62,9 +62,12 @@ use pmacs_protocol::SessionToken;
 use crate::buffer::BufferId;
 use crate::cell::CellSize;
 use crate::instance_render::RenderState;
-use crate::protocol::{FrontendId, InstanceMessage, NegotiatedCapabilities, SelectionSnapshot};
+use crate::protocol::{
+    FrontendId, GoodbyeReason, InstanceMessage, NegotiatedCapabilities, SelectionSnapshot,
+};
 use crate::rope::Position;
 use crate::semantic_render::SemanticRenderState;
+use crate::transport::{TransportError, write_message};
 
 /// T M10.7 — per-session daemon-internal state.
 ///
@@ -154,9 +157,15 @@ pub struct Session {
     /// viewport and the per-buffer emission baselines.
     pub semantic: Option<SemanticRenderState>,
     /// The write half of the session's socket. Taken out when a write
-    /// to it fails (E9 fix round 4), so nothing is written to it again
-    /// while its input drains ([`SessionRegistry::begin_drain`]).
-    pub stream: Option<UnixStream>,
+    /// to it fails on the socket (E9 fix round 4), so nothing is written
+    /// to it again while its input drains. Private to this module (E10d
+    /// review 1's Low 2): the daemon reaches it only through
+    /// [`SessionRegistry::write_output`], its one write path, a
+    /// teardown's [`SessionRegistry::write_goodbye`], and
+    /// [`SessionRegistry::install_stream`] and
+    /// [`SessionRegistry::shut_stream`], none of which hands it out, so
+    /// a write to an attached session past the path does not compile.
+    stream: Option<UnixStream>,
     /// The cell size the session last declared, at attach or by
     /// `Resize`.
     pub term_size: Option<CellSize>,
@@ -193,6 +202,31 @@ impl Session {
             departing: None,
         }
     }
+
+    /// Whether the session has a stream to write: one is installed and
+    /// no write to it has failed on the socket.
+    #[must_use]
+    pub fn has_stream(&self) -> bool {
+        self.stream.is_some()
+    }
+}
+
+/// What [`SessionRegistry::write_output`] did with a message (E10d).
+#[derive(Debug)]
+pub enum SessionWrite {
+    /// The message was written whole.
+    Written,
+    /// The session has no stream: none installed, or taken out at an
+    /// earlier failed write. Nothing was written.
+    NoStream,
+    /// The transport refused the message before writing a byte
+    /// (`FrameTooLarge`, `Encode`): the socket is whole and the session
+    /// keeps its stream (the owner's ruling of 2026-10-26, on E10d
+    /// review 1's Medium 1).
+    Refused(TransportError),
+    /// The write failed on the socket (`TransportError::Io`): the stream
+    /// has been taken out of the session and its drain begun.
+    Failed(TransportError),
 }
 
 impl std::fmt::Debug for Session {
@@ -336,8 +370,8 @@ impl SessionRegistry {
 
     /// E9 fix round 4 (review 4's Medium 1, the owner's ruling of
     /// 2026-10-20) --- `frontend_id`'s write failed at `now`. The caller,
-    /// the daemon's one write path since E10d, has taken its stream out
-    /// of its session, so nothing more is written to it, and hands the
+    /// [`Self::write_output`] since E10d, has taken its stream out of
+    /// its session, so nothing more is written to it, and hands the
     /// socket here; the
     /// session stays registered, so what its reader still reads is
     /// dispatched to its view and its token stays live (a reconnect
@@ -345,7 +379,7 @@ impl SessionRegistry {
     /// reader's EOF or once [`Self::drains_past`] names it. Held only
     /// for a registered session, as the departure flag is; anything
     /// else has its socket shut at once.
-    pub fn begin_drain(&mut self, frontend_id: FrontendId, socket: UnixStream, now: Instant) {
+    fn begin_drain(&mut self, frontend_id: FrontendId, socket: UnixStream, now: Instant) {
         if self.sessions.contains_key(&frontend_id) {
             self.drains
                 .insert(frontend_id, Drain { since: now, socket });
@@ -467,13 +501,81 @@ impl SessionRegistry {
             .and_then(|session| session.semantic.as_mut())
     }
 
-    /// E9b --- the stream the dispatcher writes `frontend_id`'s output
-    /// to; `None` before one is installed and once a write to it has
-    /// failed (E9 fix round 4).
-    pub fn stream_mut(&mut self, frontend_id: FrontendId) -> Option<&mut UnixStream> {
-        self.sessions
+    /// E10d --- write `message` to `frontend_id`'s stream, the one path's
+    /// write. A write that fails on the socket (`TransportError::Io`)
+    /// takes the stream out of the session and begins its drain as it
+    /// fails, so nothing is written to it again and
+    /// `WRITE_FAILURE_DRAIN` counts from this write; a message the
+    /// transport refuses before writing a byte leaves the stream in
+    /// place. The daemon's `write_to_session` is its one caller, which
+    /// logs the route's line and tells the editor the frontend drains
+    /// (`tests/daemon_write_consistency.rs` holds it to that).
+    pub fn write_output(
+        &mut self,
+        frontend_id: FrontendId,
+        message: &InstanceMessage,
+    ) -> SessionWrite {
+        let Some(stream) = self
+            .sessions
             .get_mut(&frontend_id)
             .and_then(|session| session.stream.as_mut())
+        else {
+            return SessionWrite::NoStream;
+        };
+        match write_message(stream, message) {
+            Ok(()) => SessionWrite::Written,
+            Err(error @ TransportError::Io(_)) => {
+                if let Some(stream) = self
+                    .sessions
+                    .get_mut(&frontend_id)
+                    .and_then(|session| session.stream.take())
+                {
+                    self.begin_drain(frontend_id, stream, Instant::now());
+                }
+                SessionWrite::Failed(error)
+            }
+            Err(refused) => SessionWrite::Refused(refused),
+        }
+    }
+
+    /// The `Goodbye` a teardown writes to a session as it ends (the
+    /// detach its quit asked for, E9.3, and the shutdown's), its failure
+    /// ignored, since nothing is written after it: the one write to an
+    /// attached session's stream besides [`Self::write_output`].
+    pub fn write_goodbye(&mut self, frontend_id: FrontendId, reason: GoodbyeReason) {
+        if let Some(stream) = self
+            .sessions
+            .get_mut(&frontend_id)
+            .and_then(|session| session.stream.as_mut())
+        {
+            let _ = write_message(stream, &InstanceMessage::Goodbye(reason));
+        }
+    }
+
+    /// Install the write half of `frontend_id`'s socket once its
+    /// bootstrap has written all it writes; for an id with no registered
+    /// session the socket is shut both ways at once.
+    pub fn install_stream(&mut self, frontend_id: FrontendId, stream: UnixStream) {
+        match self.sessions.get_mut(&frontend_id) {
+            Some(session) => session.stream = Some(stream),
+            None => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    /// Take `frontend_id`'s stream out of its session and shut the socket
+    /// both ways, so its reader, still in `read`, ends: a bootstrap that
+    /// failed, and a departure its quit asked for (E9.3). A no-op for a
+    /// session with no stream.
+    pub fn shut_stream(&mut self, frontend_id: FrontendId) {
+        if let Some(stream) = self
+            .sessions
+            .get_mut(&frontend_id)
+            .and_then(|session| session.stream.take())
+        {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
     }
 
     /// E9b --- the sessions the tick loop renders, the grid ones first
