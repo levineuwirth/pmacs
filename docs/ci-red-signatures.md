@@ -8209,6 +8209,203 @@ So, at E10c's fix round 1: `main` is green at `460fded`, and PR #407 is red at i
 second occurrence, which takes #373 to two, both on `Test (ubuntu-latest / luajit)`. #311 and #316 met
 only local samples here and do not move. Every other count above stands.
 
+### E10d's close: `main` green at `73bc1e6`, PR #408 red then green, the gates' samples listed, #409 filed
+
+Recorded 2026-10-26 at E10d's checkpoint, PR #408 (four signed commits on `73bc1e6`: E10d.1's control
+holding #404's order, the one write path, its guard, and the path's unit row put on Linux alone after
+the head's first run). Every run was read from the jobs endpoint by conclusion, and every test leg of
+the code-bearing runs through its own log, fetched with escape sequences allowed and stripped, each
+`running` line paired with its own result line. The gates were read from their log directories
+under `~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/` (copied to
+`~/build/e10d/gate-logs/`). Every run id, job id and gate log below was searched for in this file
+before it was written, and none was here but E10's gate `20261021T115903Z-3334903`, cited as a
+precedent. Nothing was rerun.
+
+#### `main` at `73bc1e6`, E10c's squash merge of PR #407: green
+
+`73bc1e6` is the owner's squash of PR #407 at `4a13368`, on `2272d16`; its tree is the head's but
+for this file.
+
+`CI` 40312792505 at `73bc1e6`, attempt 1 of 1, `push`, created 2026-10-26T11:08:24Z and completed
+11:44:06Z (the API's `updated_at`): `success`.
+
+Tally (main-ci-73bc1e6): 19 = 18 + 1.
+
+Tally (main-ci-73bc1e6-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 121537859696 | success |
+| Changed paths | 121537859773 | success |
+| Commit attribution (D9) | 121537859793 | success |
+| Lint (luajit) | 121537860009 | success |
+| Lint (lua54) | 121537860038 | success |
+| M6 Perf Gates | 121537939104 | success |
+| Test (crdt) | 121537939171 | success |
+| Perf budgets (debug) | 121537939197 | success |
+| M4 Perf Gates | 121537939235 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121537939253 | success |
+| M1 Acceptance Gates | 121537939266 | success |
+| Test (ubuntu-latest / lua54) | 121537939348 | success |
+| GPU Render (headless) | 121537939365 | success |
+| Test (ubuntu-latest / luajit) | 121537939377 | success |
+| Test (macos-latest / luajit) | 121537939391 | success |
+| M10 Perf Gates (crdt) | 121537939413 | success |
+| M5 Perf Gates | 121537939499 | success |
+| Test (macos-latest / lua54) | 121537939508 | success |
+| Docs consistency | 121537941420 | skipped |
+
+Tally (main-ci-73bc1e6-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs, each through its own log: `Test (crdt)` 121537939171 ran 11:08:38Z to
+  11:43:06Z, 34m28s, inside its 45-minute ceiling, pairing 214 `running` lines with 214 `test
+  result: ok`, 5,239 passed, 67 ignored; `Test (ubuntu-latest / luajit, no crdt)` 121537939253, 215
+  pairs, 4,727 passed, 53 ignored; `Test (ubuntu-latest / lua54)` 121537939348 and `Test
+  (ubuntu-latest / luajit)` 121537939377, 215 pairs each, 5,292 passed, 67 ignored; `Test
+  (macos-latest / luajit)` 121537939391 and `Test (macos-latest / lua54)` 121537939508, 216 pairs
+  each, 5,262 passed, 65 ignored. `test result: FAILED` and `WouldBlock` appear in no test leg's log.
+  #373's row passed on every leg.
+- `Perf budgets (debug)` 121537939197: `every budget ran and held`,
+  `opening_two_thousand_files_stays_within_budget ... ok`.
+
+`Grammar fuzz` 40312792483 at `73bc1e6`, `success`, both arms deciding `run=false` (`no changed path
+can change the grammar set`): `ubsan` 121537859946, `asan-strict` 121537860317.
+
+#### PR #408's `CI` 40337444679 at `f5e79dd`: red on the branch's own row and on #409's first occurrence
+
+`CI` 40337444679, attempt 1 of 1, `pull_request`, testing the merge `6210f9b` into `73bc1e6`,
+created 2026-10-26T14:12:14Z and completed 14:57:54Z (the API's `updated_at`): `failure`.
+
+Tally (pr408-ci-f5e79dd): 19 = 15 + 2 + 1 + 1.
+
+Tally (pr408-ci-f5e79dd-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 121622707266 | success |
+| Commit attribution (D9) | 121622707599 | success |
+| Format | 121622707926 | success |
+| Lint (luajit) | 121622707954 | success |
+| Lint (lua54) | 121622707963 | success |
+| GPU Render (headless) | 121622818182 | success |
+| M5 Perf Gates | 121622818197 | success |
+| M4 Perf Gates | 121622818315 | success |
+| Test (crdt) | 121622818330 | success |
+| Test (ubuntu-latest / lua54) | 121622818340 | cancelled |
+| M1 Acceptance Gates | 121622818359 | success |
+| Test (ubuntu-latest / luajit) | 121622818383 | success |
+| M6 Perf Gates | 121622818399 | success |
+| Perf budgets (debug) | 121622818456 | success |
+| M10 Perf Gates (crdt) | 121622818468 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121622818498 | success |
+| Test (macos-latest / lua54) | 121622818529 | failure |
+| Test (macos-latest / luajit) | 121622818649 | failure |
+| Docs consistency | 121622819978 | skipped |
+
+Tally (pr408-ci-f5e79dd-success): 15 rows of the table above with `result` = `success`.
+
+- `Test (macos-latest / lua54)` 121622818529 and `Test (macos-latest / luajit)` 121622818649 fail
+  `daemon::tests::e10d_2_the_path_ends_a_session_s_output_at_its_first_failed_write` alone, at
+  `src/daemon.rs:5653:9`, `a write to a peer that stopped reading fails`, the lib's `test result:
+  FAILED. 2304 passed; 1 failed; 13 ignored`: the branch's own new row, which needs a write to a peer
+  that shut its read side to fail, and macOS lets it succeed (E8d.4's finding). No row or issue; fixed
+  by the branch's next head, `fd38a8a`, which compiles the row on Linux alone. Each leg paired 215
+  `running` lines with 215 results, 5,210 passed, 1 failed, 65 ignored, its doc-test and
+  `pmacs-protocol` steps skipped after the lib's failure.
+- `Test (ubuntu-latest / lua54)` 121622818340 is cancelled at its 45-minute ceiling (14:12:31Z to
+  14:57:53Z) with no test failed: its tool step's `apt-get install` fetched `15.1 MB in 10min 35s
+  (23.7 kB/s)` from the Azure mirror, `Ign:` on four packages refetched later, and took 11m29s
+  against 1m49s on `Test (ubuntu-latest / luajit)`; its test step then ran 32m33s to the cancel against
+  that leg's 32m32s, pairing 214 `running` lines with 214 results, 5,243 passed, 67 ignored, in its
+  last suite. Not #330 by its fragments (#330's `apt-get update` stalls after its last index; here the
+  update finished in a second): filed as **#409**, a first occurrence. Not rerun.
+- The three other test legs pair each `running` line with a `test result: ok`: `Test (crdt)`
+  121622818330 (14:12:30Z to 14:46:40Z, 34m10s) 215 pairs, 5,244 passed, 67 ignored; `Test
+  (ubuntu-latest / luajit)` 121622818383, 216, 5,297 / 67; `Test (ubuntu-latest / luajit, no crdt)`
+  121622818498, 216, 4,730 / 53; each `main`'s figures at `73bc1e6` plus the branch's new suite and
+  rows. `WouldBlock` appears in no test leg's log.
+
+`Grammar fuzz` 40337444755 at `f5e79dd`, `success`, both arms deciding `run=false`: `ubsan`
+121622708137, `asan-strict` 121622708599.
+
+#### PR #408's `CI` 40356132391 at `fd38a8a`: green
+
+`CI` 40356132391, attempt 1 of 1, `pull_request`, testing the merge `1619eea` into `73bc1e6`,
+created 2026-10-26T16:08:01Z and completed 16:50:19Z (the API's `updated_at`): `success`.
+
+Tally (pr408-ci-fd38a8a): 19 = 18 + 1.
+
+Tally (pr408-ci-fd38a8a-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 121688977284 | success |
+| Lint (luajit) | 121688977648 | success |
+| Commit attribution (D9) | 121688977728 | success |
+| Lint (lua54) | 121688977774 | success |
+| Format | 121688977781 | success |
+| M1 Acceptance Gates | 121689086248 | success |
+| Test (crdt) | 121689086365 | success |
+| GPU Render (headless) | 121689086389 | success |
+| Test (ubuntu-latest / lua54) | 121689086458 | success |
+| M4 Perf Gates | 121689086518 | success |
+| Test (ubuntu-latest / luajit) | 121689086521 | success |
+| M10 Perf Gates (crdt) | 121689086522 | success |
+| Test (macos-latest / lua54) | 121689086529 | success |
+| Test (macos-latest / luajit) | 121689086576 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121689086596 | success |
+| Perf budgets (debug) | 121689086626 | success |
+| M6 Perf Gates | 121689086661 | success |
+| M5 Perf Gates | 121689086846 | success |
+| Docs consistency | 121689088631 | skipped |
+
+Tally (pr408-ci-fd38a8a-success): 18 rows of the table above with `result` = `success`.
+
+- Every test leg pairs each `running` line with a `test result: ok`: `Test (crdt)` 121689086365
+  (16:08:16Z to 16:42:54Z, 34m38s) 215 pairs, 5,244 passed, 67 ignored; `Test (ubuntu-latest /
+  luajit)` 121689086521 and `Test (ubuntu-latest / lua54)` 121689086458, 216 each, 5,297 / 67; `Test
+  (ubuntu-latest / luajit, no crdt)` 121689086596, 216, 4,730 / 53; `Test (macos-latest / luajit)`
+  121689086576 and `Test (macos-latest / lua54)` 121689086529, 217 each, 5,264 / 65. `WouldBlock`
+  appears in none. E10d.1's row, the sweep row and E9's drain-deadline row passed on the four Linux
+  legs built with `crdt`, the unit row on every Linux leg, the guard on all six. `Perf budgets
+  (debug)` 121689086626: `every budget ran and held`.
+
+`Grammar fuzz` 40356132410 at `fd38a8a`, `success`, both arms deciding `run=false`: `ubsan`
+121688976372, `asan-strict` 121688977141.
+
+#### E10d's gates and hand runs: listed, not tallied
+
+All four are the default plan in the worktree `pmacs-e8d` on `e10d/write-failure-path`, one per row
+and one at the last head, each with `fmt`, `clippy`, `doc`, `build` and `diff-check` ok, no daemon
+surviving (identified by environ), every `running` line paired with a result line and `WouldBlock`
+in none.
+
+- `20261026T131025Z-2595949` at `f80f6da`: five of six, `05-sweep` 5,669 / 2 / 68 at 223 pairs.
+  #311's fragments on `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (a store
+  holding `Could not find module ‘Prelude’`, the trace reaching `LSP:ready·processi`; 127.03 s at
+  result line 3652); and #256's expression, `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
+  panicking at `src/process.rs:5430:53` with `live runtime probe`, the lib's `2309 passed; 1 failed;
+  13 ignored` in 14.07 s (line 2343), commented (issuecomment-6418174214).
+- `20261026T133722Z-2820910` at `6d98870`: five of six, `05-sweep` 5,672 / 2 / 67 at 223 pairs.
+  #311's fragments on the HLS row (126.59 s, line 3640); and
+  `e7i_review3_probes::e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans` on `the
+  warm parse installed` at `tests/e7i_review3_probes.rs:665:9`, `10 passed; 1 failed; 0 ignored` in
+  15.40 s (line 3978), #340's selector and message with its required attempt trace absent from the
+  log, so not #340's by its fragments, as at `20261021T115903Z-3334903`; commented there
+  (issuecomment-6418174652).
+- `20261026T135553Z-3018929` at `f5e79dd`: five of six, `05-sweep` 5,675 / 1 / 67 at 224 pairs;
+  #311's fragments on the HLS row (127.07 s, line 3648). These three #311 samples are on one comment
+  (issuecomment-6418173482).
+- `20261026T160813Z-3365621` at the head `fd38a8a`: five of six, `05-sweep` 5,675 / 1 / 67 at 224
+  pairs; #311's fragments on the HLS row (128.11 s, line 3648), commented (issuecomment-6421344645).
+- Hand runs in the gate's environment: E10d.1's control at `73bc1e6`'s daemon, 10 of 10 failing
+  with #404's fragments, and 10 of 10 passing with the fix; the bites and plants in the handoff, each
+  failing what it was planted to fail.
+
+So, at E10d's close: `main` is green at `73bc1e6`, and PR #408 is green at its head `fd38a8a` after a
+first head red on the branch's own row on both macOS legs and on #409's first occurrence. #311, #256
+and #340's selector met only local samples here and do not move; no count moves.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
