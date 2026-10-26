@@ -524,6 +524,30 @@ fn the_buffer_list_shows_the_path_of_a_buffer_named_by_its_basename() {
     );
 }
 
+/// E10c.4 as the owner amended it (2026-10-25, on C10c's question): a
+/// `*name*` is scored inside its stars, so `C-x b lsp RET` beside a file
+/// named `lsp.rs` reaches `*lsp*`, where at `0adb83e` it reached the
+/// file; the file's own name still reaches the file.
+#[test]
+fn c_x_b_lsp_reaches_the_lsp_buffer_beside_a_file_named_lsp_rs() {
+    let td = tempfile::tempdir().expect("tempdir");
+    for name in ["lsp.rs", "other.rs"] {
+        std::fs::write(td.path().join(name), b"x\n").expect("write");
+    }
+    let mut s = fresh();
+    exec(&s, "_G.PANEL = pmacs.buffer.create('*lsp*')");
+    find_file(&mut s, &td.path().join("lsp.rs"));
+    find_file(&mut s, &td.path().join("other.rs"));
+    switch_to(&mut s, "lsp");
+    assert_eq!(status(&s), "switch-buffer: showing *lsp*");
+    assert!(
+        eval::<bool>(&s, "return pmacs.window.buffer() == _G.PANEL"),
+        "C-x b lsp RET reaches *lsp*"
+    );
+    switch_to(&mut s, "lsp.rs");
+    assert_eq!(status(&s), "switch-buffer: showing lsp.rs");
+}
+
 /// E10c.5 as the owner amended it (2026-10-25, on review 1's Low 1):
 /// `*buffer-list*` writes a path under `$HOME` in `~` form; its name
 /// column is as wide as the longest name up to forty columns, a longer

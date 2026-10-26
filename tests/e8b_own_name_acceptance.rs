@@ -9,8 +9,10 @@
 //! named by its basename, so its name holds no directory to spell
 //! through and `C-x b` and `C-x k` match names alone. A name that begins
 //! with the query takes the scorer's start bonus: `dired` reaches
-//! `dired.lua` and `lsp` reaches `lsp.rs`, while `*lsp*` and the listing
-//! are reached by their own first letters.
+//! `dired.lua`, and the listing is reached by its own first letters. A
+//! `*name*` is scored inside its stars (the owner's ruling of
+//! 2026-10-25), so `lsp` reaches `*lsp*` beside `lsp.rs`, whose own
+//! name reaches it.
 //!
 //! `C-x k` reads its target from the same source, so the same rule
 //! decides what it kills, and a kill says which buffer went, in the
@@ -281,8 +283,8 @@ fn session(td: &Path) -> Session {
 /// RET` reach `dired.lua`, whose name begins with them, where E8b put the
 /// listing first; the listing is reached by its own first letters.
 /// `C-x b nts RET` reaches `notes.txt`, whose name alone holds `nts`.
-/// `C-x b lsp RET` reaches `lsp.rs`, whose name begins with it, and
-/// `C-x b *lsp RET` reaches `*lsp*`; `zzz` is refused.
+/// `C-x b lsp RET` reaches `*lsp*`, scored inside its stars, and
+/// `C-x b lsp.rs RET` reaches `lsp.rs`; `zzz` is refused.
 #[test]
 fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -364,13 +366,13 @@ fn c_x_b_reaches_a_dired_buffer_by_its_own_name_beside_files_and_d18_s_four() {
     type_str(&mut s, "lsp");
     let offered = candidates(&s);
     assert!(
-        offered.first() == Some(&lsp_rs) && offered.contains(&"*lsp*".to_owned()),
-        "`lsp` selects lsp.rs, whose name begins with it, before *lsp*; got {offered:?}"
+        offered.first() == Some(&"*lsp*".to_owned()) && offered.contains(&lsp_rs),
+        "`lsp` selects *lsp*, scored inside its stars, before lsp.rs; got {offered:?}"
     );
     press(&mut s, KeyCode::Enter);
-    assert_eq!(active_name(&s), lsp_rs, "C-x b lsp RET reaches lsp.rs");
-    switch_by_typing(&mut s, "*lsp");
-    assert_eq!(active_name(&s), "*lsp*", "C-x b *lsp RET reaches *lsp*");
+    assert_eq!(active_name(&s), "*lsp*", "C-x b lsp RET reaches *lsp*");
+    switch_by_typing(&mut s, "lsp.rs");
+    assert_eq!(active_name(&s), lsp_rs, "C-x b lsp.rs RET reaches lsp.rs");
     show(&s, &scratch);
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('b'));
@@ -535,8 +537,8 @@ fn c_x_k_dired_kills_the_dired_buffer_and_says_so() {
 /// D18's four through `C-x k`, which shares `C-x b`'s source and its
 /// `candidate` policy: `nts` kills `notes.txt` and `scr` `*scratch*`,
 /// both unmodified and so without a question; `*lsp` selects `*lsp*`
-/// beside `lsp.rs` (whose name `lsp` selects under D40, the first row)
-/// and kills it, without a question since E8c left the editor's own text
+/// beside `lsp.rs` (`lsp` selects it too, scored inside its stars, the
+/// first row) and kills it, without a question since E8c left the editor's own text
 /// clean (before it, `*lsp*` read as modified and this row answered
 /// `y`); each is named on the band. `zzz` matches nothing, is looked up
 /// as typed and refused, and nothing goes.

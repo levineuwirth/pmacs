@@ -942,14 +942,20 @@ pub fn rank_candidates(needle: &str, pool: &[String], limit: Option<usize>) -> V
 /// [`fuzzy_score`] folds it, then every other match. The scorer alone
 /// can put a near miss above the exact name, since a letter after a `.`
 /// earns more than it loses to the gap (`ab` scores 13 in `ab` and 14 in
-/// `a.b`). Ties are lexical.
+/// `a.b`). A `*name*` scores as well as what its stars hold does
+/// ([`inside_stars`]). Ties are lexical, and a `*` sorts before a letter
+/// or a digit, so `C-x b lsp RET` beside `lsp.rs` reaches `*lsp*`.
 fn rank_buffer_names(needle: &str, pool: &[String]) -> Vec<String> {
     let fold = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<String>();
     let folded = fold(needle);
     let mut scored: Vec<(u8, i32, &str)> = pool
         .iter()
         .filter_map(|name| {
-            let score = fuzzy_score(needle, name)?;
+            let score = [Some(name.as_str()), inside_stars(name)]
+                .into_iter()
+                .flatten()
+                .filter_map(|text| fuzzy_score(needle, text))
+                .max()?;
             let place = if needle.is_empty() {
                 2
             } else if name == needle {
@@ -972,6 +978,17 @@ fn rank_buffer_names(needle: &str, pool: &[String]) -> Vec<String> {
         .take(CANDIDATE_LIMIT)
         .map(|(_, _, s)| s.to_owned())
         .collect()
+}
+
+/// What a `*name*`'s stars hold, which the `buffers` source scores it by
+/// beside the name itself (E10c.4 as the owner amended it, 2026-10-25):
+/// a panel's or a generated buffer's name is its word, and the stars
+/// only mark it, so `lsp` reaches `*lsp*` as readily as a file whose
+/// name begins with it.
+fn inside_stars(name: &str) -> Option<&str> {
+    name.strip_prefix('*')?
+        .strip_suffix('*')
+        .filter(|inside| !inside.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,9 +1351,10 @@ mod tests {
     }
 
     /// D18's four on names: `nts` reaches `notes.txt`, `scr` `*scratch*`,
-    /// `lsp` `*lsp*` where no other name holds it, and `zzz` matches
-    /// nothing. Beside a file named `lsp.rs` the file comes first, its
-    /// name beginning with the query.
+    /// `lsp` `*lsp*`, and `zzz` matches nothing. Beside a file named
+    /// `lsp.rs`, `*lsp*` still comes first, scored inside its stars as the
+    /// owner ruled (2026-10-25); the file's whole name reaches the file,
+    /// and `*l` the panel alone.
     #[test]
     fn d18_s_four_hold_on_names_alone() {
         let names = pool(&[
@@ -1352,8 +1370,11 @@ mod tests {
         assert_eq!(rank_buffer_names("lsp", &names), ["*lsp*"]);
         assert!(rank_buffer_names("zzz", &names).is_empty());
         let with_file = pool(&["*lsp*", "lsp.rs"]);
-        assert_eq!(rank_buffer_names("lsp", &with_file), ["lsp.rs", "*lsp*"]);
+        assert_eq!(rank_buffer_names("lsp", &with_file), ["*lsp*", "lsp.rs"]);
+        assert_eq!(rank_buffer_names("lsp.rs", &with_file), ["lsp.rs"]);
         assert_eq!(rank_buffer_names("*l", &with_file), ["*lsp*"]);
+        assert_eq!(inside_stars("**"), None);
+        assert_eq!(inside_stars("*a"), None);
     }
 
     #[test]

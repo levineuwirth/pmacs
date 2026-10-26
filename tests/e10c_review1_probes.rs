@@ -15,6 +15,9 @@
 //!   plain name.
 //! - `*buffer-list*`'s `File` column for a buffer of a megabyte and for
 //!   a name holding a multi-byte character.
+//! - `C-x b` on a collision's directory beside a name whose own letters
+//!   spell it: the one row here that fails with E8b's directory places
+//!   restored, which no committed row does.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -351,6 +354,31 @@ fn r1_save_as_onto_an_open_file_leaves_the_open_buffer_its_name() {
         "a.rs<2>",
         "the newcomer on the same file takes the suffix"
     );
+}
+
+/// P6. E10c.4's own change, the directory places gone: a collision's
+/// name holds a `/` and its buffer holds a file, so E8b's places read
+/// its own name as the basename alone and place a query spelling the
+/// directory (`tests`) after any name whose own letters hold it
+/// (`test_utils.rs`). Matched on names alone, `tests` is the start of
+/// `tests/lib.rs` and reaches it. No committed row ranks a collision's
+/// directory against another name, so restoring E8b's places passes
+/// the suite.
+#[test]
+fn r1_c_x_b_reaches_a_collision_by_its_directory_before_a_name_spelling_it() {
+    let td = tempfile::tempdir().expect("tempdir");
+    for rel in ["src/lib.rs", "tests/lib.rs", "src/test_utils.rs"] {
+        write(&td.path().join(rel), b"x\n");
+    }
+    let mut s = fresh();
+    for rel in ["src/lib.rs", "src/test_utils.rs", "tests/lib.rs"] {
+        find_file(&mut s, &td.path().join(rel));
+    }
+    switch_to(&mut s, "test_utils.rs");
+    assert_eq!(mode_line_name(&s), "test_utils.rs", "fixture: elsewhere");
+    switch_to(&mut s, "tests");
+    assert_eq!(status(&s), "switch-buffer: showing tests/lib.rs");
+    assert_eq!(mode_line_name(&s), "tests/lib.rs");
 }
 
 /// The display column at which `needle` begins in `line`.

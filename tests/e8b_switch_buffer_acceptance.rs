@@ -582,8 +582,9 @@ fn band(facts: &HashMap<String, String>, label: &str) -> String {
 /// matched. `b.rs` reaches `b.rs` beside `a.rs`; `dired` and `dir` reach
 /// `dired.lua`, whose name begins with them, and the listing is reached
 /// by its own letters; `nts` reaches `notes.txt`, `scr` `*scratch*`,
-/// `lsp` `lsp.rs` (named by its basename, it begins with the query) and
-/// `*lsp` `*lsp*`; and `zzz` is refused with the window unchanged. Each
+/// `lsp.rs` `lsp.rs` and `lsp` `*lsp*` (scored inside its stars, the
+/// owner's ruling of 2026-10-25); and `zzz` is refused with the window
+/// unchanged. Each
 /// switch is read twice: the band E8b.2 writes, and `C-c z`'s oracle for
 /// the window.
 #[test]
@@ -614,8 +615,8 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
     steps.extend(["key:C-c", "key:l", "quiet:500"].map(str::to_owned));
     where_steps(&mut steps, "lsp-open");
     switch_steps(&mut steps, "scr", "switch-buffer:", "scr-2");
+    switch_steps(&mut steps, "lsp.rs", "switch-buffer:", "lsp-file");
     switch_steps(&mut steps, "lsp", "switch-buffer:", "lsp");
-    switch_steps(&mut steps, "*lsp", "switch-buffer:", "lsp-panel");
     switch_steps(&mut steps, "zzz", "no", "zzz");
     let Some(facts) = run_gpu_probe(&daemon, &steps) else {
         return;
@@ -641,8 +642,8 @@ fn e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four()
         ("nts", "notes.txt"),
         ("scr", "*scratch*"),
         ("scr-2", "*scratch*"),
-        ("lsp", "lsp.rs"),
-        ("lsp-panel", "*lsp*"),
+        ("lsp-file", "lsp.rs"),
+        ("lsp", "*lsp*"),
     ];
     for (label, name) in &expect {
         assert_eq!(
