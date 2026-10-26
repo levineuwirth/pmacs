@@ -8406,6 +8406,114 @@ So, at E10d's close: `main` is green at `73bc1e6`, and PR #408 is green at its h
 first head red on the branch's own row on both macOS legs and on #409's first occurrence. #311, #256
 and #340's selector met only local samples here and do not move; no count moves.
 
+### E10d fix round 1: PR #408 red on #282's eighth at `50005da`, `main` green at `658051f`, the gates' samples listed
+
+Recorded 2026-10-26 at E10d's fix round 1, PR #408 (four signed commits on `fd38a8a` answering
+review 1: a drain only on a socket error, a session's stream private to the registry, review 1's
+P1, P1a and P2 committed, and a witness of the mid-loop skip). Every run was read from the jobs
+endpoint by conclusion, and every test leg of the code-bearing run through its own log, fetched
+with escape sequences allowed and stripped, each `running` line paired with its own result line.
+The gates were read from their log directories (review 1's copied to
+`~/build/e10d-r1/gate-20261026T180609Z-3811177/`, this round's to
+`~/build/e10d/fix1/gate-20261026T200159Z-144875/`). Every run id, job id, gate log and comment
+below was searched for in this file before it was written, and none was here. Nothing was rerun.
+
+#### `main` at `658051f`, E10d's close: green
+
+`658051f` is the section above, E10d's D38 record; it changes this file alone.
+
+`CI` 40364393025 at `658051f`, attempt 1 of 1, `push`, created 2026-10-26T16:59:33Z and completed
+17:02:03Z (the API's `updated_at`): `success`, every test leg skipped, `Docs consistency`
+121718158974 among the six.
+
+Tally (main-ci-658051f): 15 = 6 + 9.
+
+`Grammar fuzz` 40364395528 at `658051f`, `success`, both arms deciding `run=false`: `ubsan`
+121718057689, `asan-strict` 121718057966.
+
+#### PR #408's `CI` 40392704632 at `50005da`: red on #282's eighth occurrence
+
+`CI` 40392704632, attempt 1 of 1, `pull_request`, testing the merge `a18f1a0` into `658051f`,
+created 2026-10-26T20:06:40Z and completed 20:46:15Z (the API's `updated_at`): `failure`.
+
+Tally (pr408-ci-50005da): 19 = 17 + 1 + 1.
+
+Tally (pr408-ci-50005da-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 121817565698 | success |
+| Lint (lua54) | 121817566084 | success |
+| Changed paths | 121817566134 | success |
+| Commit attribution (D9) | 121817566313 | success |
+| Format | 121817566561 | success |
+| GPU Render (headless) | 121817676586 | success |
+| Test (crdt) | 121817676645 | success |
+| M1 Acceptance Gates | 121817676735 | success |
+| M4 Perf Gates | 121817676747 | success |
+| M10 Perf Gates (crdt) | 121817676800 | success |
+| M5 Perf Gates | 121817676849 | success |
+| Test (macos-latest / luajit) | 121817676917 | success |
+| Perf budgets (debug) | 121817676918 | success |
+| M6 Perf Gates | 121817677054 | success |
+| Test (ubuntu-latest / lua54) | 121817677062 | success |
+| Test (macos-latest / lua54) | 121817677108 | success |
+| Test (ubuntu-latest / luajit) | 121817677142 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 121817677378 | success |
+| Docs consistency | 121817680567 | skipped |
+
+Tally (pr408-ci-50005da-success): 17 rows of the table above with `result` = `success`.
+
+Tally (pr408-ci-50005da-failure): 1 row of the table above with `result` = `failure`.
+
+- `Test (ubuntu-latest / luajit)` 121817677142, `failure`, a required check:
+  `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`,
+  **#282's eighth occurrence**, all three fragments read against the job's own log: `*lsp* names the request and the code: []` at
+  `tests/e7b_review_wire_acceptance.rs:1214:5`; `WIRE *errors* gained ["[lsp] LSP: default-rust
+  refused textDocument/prepareRename as a client error, -32602 InvalidParams: No references found
+  at position"]` and `WIRE label "ready", last_error None, *lsp* errors []`; and `test result:
+  FAILED. 4 passed; 1 failed; 2 ignored` (`running 7 tests`, `finished in 44.83s`). Between the
+  row's stdout header and its panic the trace holds 111 `$/progress` frames, 91 of them
+  `rustAnalyzer/cachePriming` reports, against `*lsp*`'s 64-entry ring. It was the job's only
+  failure: its test step paired 215 `running` lines with 215 results, 5,254 passed, 1 failed, 67
+  ignored, and its doc-test and `pmacs-protocol` steps were skipped after it. Not the branch's: an
+  in-process editor against rust-analyzer, which the branch's daemon write path does not reach (read,
+  not demonstrated). Commented on #282 (issuecomment-6427081579); not rerun, the rerun or the bypass
+  the owner's.
+- The other five test legs pair every `running` line with `test result: ok`: `Test (crdt)`
+  121817676645 (20:06:57Z to 20:42:56Z, 35m59s) 216 pairs, 5,256 passed, 67 ignored; `Test
+  (ubuntu-latest / lua54)` 121817677062, 217, 5,309 / 67; `Test (ubuntu-latest / luajit, no crdt)`
+  121817677378, 217, 4,731 / 53; `Test (macos-latest / luajit)` 121817676917 and `Test
+  (macos-latest / lua54)` 121817677108, 218 each, 5,265 / 65; each `fd38a8a`'s figures plus the
+  round's rows that leg compiles. `WouldBlock` appears in no test leg's log. `Perf budgets (debug)`
+  121817676918: `every budget ran and held`.
+
+`Grammar fuzz` 40392713420 at `50005da`, `success`, both arms deciding `run=false`: `ubsan`
+121817598081, `asan-strict` 121817597497.
+
+#### E10d review 1's gate and fix round 1's: listed, not tallied
+
+Both are the default plan, each with `fmt`, `clippy`, `doc`, `build` and `diff-check` ok, no daemon
+surviving (identified by environ), every `running` line paired with a result line and `WouldBlock`
+in none.
+
+- `20261026T180609Z-3811177`, review 1's, at `fd38a8a` in the review's detached worktree
+  `pmacs-e10d-r1`: five of six, `05-sweep` 5,675 / 1 / 67 at 224 pairs, recounted from its own log;
+  #311's fragments on `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (a store
+  holding `Could not find module ‘Prelude’`, the trace reaching `LSP:ready·processi`, `E7E
+  with-compiler Some("ghc-9.6.7")`; 127.94 s at result line 3681), commented
+  (issuecomment-6424395558).
+- `20261026T200159Z-144875`, fix round 1's, at the head `50005da` in `pmacs-e8d`, at a load near 19
+  from other work: five of six, `05-sweep` 5,687 / 1 / 67 at 225 pairs; #311's fragments on the HLS
+  row (130.81 s at result line 3664), commented (issuecomment-6427012931).
+- Hand runs in the gate's environment: the refusal rows failing at `fd38a8a`'s daemon and passing 6
+  of 6 with the fix, P2 failing at `73bc1e6`'s with `left: 3`, the mid-loop skip's row failing 3 of
+  3 with the skip removed, and the guard's plants, each failing what it was planted to fail.
+
+So, at E10d's fix round 1: `main` is green at `658051f`, and PR #408 is red at its head `50005da` on
+#282's eighth occurrence, which takes #282 to eight, on `Test (ubuntu-latest / luajit)`. #311 met
+only local samples here and does not move. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
