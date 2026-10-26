@@ -8096,6 +8096,119 @@ So, at E10c's close: `main` is green at `1eea479` and PR #407 green at its head,
 #405 and #406 are filed on local first samples and stand at no CI occurrence; #250, #291, #311,
 #316 and #404 met only local samples here and do not move. Every other count above stands.
 
+### E10c fix round 1: PR #407 red on #373 at `4a13368`, `main` green at `460fded`, the gates' samples listed
+
+Recorded 2026-10-26 at E10c's fix round 1, PR #407 (eight more signed commits on `0adb83e`: buffer
+names recomputed only for the paths an event can move, with a budget opening 2,000 files and review
+1's measurement; review 1's probes P1 and P2; a held name kept where buffers share a path, P3;
+`*buffer-list*`'s columns by display width with paths in `~` form, P4 and P4b; a `*name*` scored
+inside its stars, P6; P5; and two comment corrections). Every run was read from the jobs endpoint by
+conclusion, and every test leg of the code-bearing run through its own log, fetched with escape
+sequences allowed and stripped, each `running` line paired with its own result line. The gates were
+read from their log directories under `~/build/pmacs-gate-targets/pmacs-e8d-831ce4db/gate-logs/`.
+Every run id, job id and gate log below was searched for in this file before it was written, and
+none was here. Nothing was rerun.
+
+#### `main` at `460fded`, E10c's close: green
+
+`460fded` is the section above, E10c's D38 record; it changes this file alone.
+
+`CI` 40229805152 at `460fded`, attempt 1 of 1, `push`, created 2026-10-25T20:14:13Z and completed
+20:16:22Z (the API's `updated_at`): `success`, every test leg skipped, `Docs consistency`
+121278945417 among the six.
+
+Tally (main-ci-460fded): 15 = 6 + 9.
+
+`Grammar fuzz` 40229805193 at `460fded`, `success`, both arms deciding `run=false`: `ubsan`
+121278896087, `asan-strict` 121278895887.
+
+#### PR #407's `CI` 40249159520 at `4a13368`: red on #373's second occurrence
+
+`CI` 40249159520, attempt 1 of 1, `pull_request`, testing the merge `277c111` into `460fded`,
+created 2026-10-26T00:23:51Z and completed 00:58:06Z (the API's `updated_at`): `failure`.
+
+Tally (pr407-ci-4a13368): 19 = 17 + 1 + 1.
+
+Tally (pr407-ci-4a13368-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 121337045645 | success |
+| Lint (lua54) | 121337045739 | success |
+| Format | 121337045792 | success |
+| Commit attribution (D9) | 121337045841 | success |
+| Lint (luajit) | 121337045847 | success |
+| M1 Acceptance Gates | 121337091182 | success |
+| Test (crdt) | 121337091207 | success |
+| M6 Perf Gates | 121337091211 | success |
+| M5 Perf Gates | 121337091213 | success |
+| Test (ubuntu-latest / lua54) | 121337091232 | success |
+| Perf budgets (debug) | 121337091265 | success |
+| GPU Render (headless) | 121337091271 | success |
+| M4 Perf Gates | 121337091303 | success |
+| Test (macos-latest / luajit) | 121337091304 | success |
+| Test (macos-latest / lua54) | 121337091314 | success |
+| M10 Perf Gates (crdt) | 121337091321 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121337091341 | success |
+| Test (ubuntu-latest / luajit) | 121337091382 | failure |
+| Docs consistency | 121337092535 | skipped |
+
+Tally (pr407-ci-4a13368-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit)` 121337091382, a required check, fails
+  `process::tests::release_joins_every_polling_reader_whatever_the_deadline` at
+  `src/process.rs:5525:9`, `only the blocking reader on the master is left; the parser is joined`,
+  `left: 0`, `right: 1`, the lib's `test result: FAILED. 2309 passed; 1 failed; 13 ignored` (67.53 s):
+  **#373's second occurrence**, every required fragment, on the leg of its first, commented there
+  (issuecomment-6405908178). Its test step paired 213 `running` lines with 213 results, this its only
+  failure; its two later steps (`cargo test --doc`, `cargo test -p pmacs-protocol`) were skipped after
+  it. The branch has no diff in `src/process.rs`, and the row passed on the five other test legs and
+  on this leg at `0adb83e`; that is an argument from untouched code, not a measurement. Not rerun.
+- `Test (crdt)` ran 00:24:07Z to 00:58:05Z, 33m58s, inside its 45-minute ceiling: 214 `running`
+  lines paired with 214 `test result: ok`, 5,239 passed, 67 ignored, two pairs, sixteen tests and
+  two ignored more than at `0adb83e` (review 1's probe file and its measurement; the naming, registry
+  and width unit rows' seven; the E10c suite's two rows and its budget, ignored).
+- The four other test legs pair each `running` line with a `test result: ok`, each by the same two
+  pairs and sixteen tests more: 215 on `Test (ubuntu-latest / lua54)` (5,292 passed, 67 ignored), 215
+  on the no-crdt leg (4,727 passed, 53 ignored), 216 on each macOS leg (5,262 passed, 65 ignored).
+  `WouldBlock` appears in no test leg's log. `Perf budgets (debug)` 121337091265 ran the new budget,
+  `opening_two_thousand_files_stays_within_budget ... ok`.
+
+`Grammar fuzz` 40249159522 at `4a13368`, `success`, both arms deciding `run=false`: `ubsan`
+121337045898, `asan-strict` 121337045442.
+
+#### E10c review 1's gate: listed, not tallied
+
+- `20261025T203113Z-1366491` at `0adb83e`, the default plan in the worktree `pmacs-e8d`: five of six,
+  `fmt`, `clippy`, `doc`, `build` and `diff-check` ok, no daemon surviving (identified by environ);
+  `05-sweep` 5,653 / 2 / 65, 221 `running` lines paired with 221 result lines, `WouldBlock` in none.
+  #311's fragments on `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (a store
+  holding `Could not find module ‘Prelude’`, the trace reaching `LSP:ready·processi`; 133.14 s at
+  result line 3609), commented (issuecomment-6403415074); and #316's under the template reading on
+  `e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer` (`kill 3`,
+  `busy=true`, `tree=true`, `unit=pid_…`, `parse:killed`; 17.10 s at line 3949), commented
+  (issuecomment-6403415459).
+
+#### E10c fix round 1's gates and hand runs: listed, not tallied
+
+- `20261026T000642Z-1910312` at `2c5abe7`, a first series of the round's commits never pushed (its
+  code the head's but for comments), the default plan: five of six, `fmt`, `clippy`, `doc`, `build`
+  and `diff-check` ok, no daemon surviving; `05-sweep` 5,670 / 1 / 67, 223 `running` lines paired with
+  223 result lines, `WouldBlock` in none; #311's fragments on the HLS row (126.05 s, line 3639).
+- `20261026T002212Z-2057387` at the head `4a13368`, the default plan: five of six, the same stages
+  ok, no daemon surviving (identified by environ); `05-sweep` 5,670 / 1 / 67 at 223 pairs,
+  `WouldBlock` in none; #311's fragments on the HLS row (125.75 s, line 3639). Both #311 samples are
+  on one comment (issuecomment-6405681120).
+- Hand runs in the gate's environment, every red explained and none filed: the touched suites under
+  `lua54,crdt` in a side target without the parse worker, four `m9_8` rows failing on `parse unit
+  unavailable: no pmacs-parse-unit beside pmacs`, the instrument's, and 17 of 17 with the worker
+  built; the round's controls and plants (in the fixes pass), which failed what they were planted to
+  fail.
+
+So, at E10c's fix round 1: `main` is green at `460fded`, and PR #407 is red at its new head on #373's
+second occurrence, which takes #373 to two, both on `Test (ubuntu-latest / luajit)`. #311 and #316 met
+only local samples here and do not move. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
