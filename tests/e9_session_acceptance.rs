@@ -1647,6 +1647,136 @@ mod write_failure_drain {
             "the input in flight, then the EOF: {timeline:?}"
         );
     }
+
+    /// `e10d.hold`: a command whose coroutine waits three async ticks,
+    /// opens the note through `e9.open` in the window of the frontend
+    /// dispatched last, sets a status message, marks `held` in the
+    /// daemon's home and then holds the dispatcher until `go` appears
+    /// there (ten seconds at most). The coroutine resumes in
+    /// `tick_async`, the last thing a dispatcher pass does, so the note is
+    /// in the window and not yet CRDT-backed when the hold ends, and the
+    /// next thing the dispatcher does is the tick pass whose upgrade
+    /// publishes the note's snapshot. Three yields put at least one tick
+    /// pass between the command's `RET` and the open, so the
+    /// `DispatchIdle` the `RET` changed is already sent; the message
+    /// gives that pass a frame to write after the publish (the session's
+    /// viewport is on the buffer it left, which did not change), as #404's
+    /// row had one.
+    const HOLD: &str = "\
+pmacs.lsp.config = {}
+pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold the loop',
+  fn = function()
+    pmacs.async(function()
+      for _ = 1, 3 do pmacs.async.yield_to_next_tick() end
+      pmacs.command.invoke('e9.open')
+      pmacs.editor.set_status('e10d: the note is open')
+      local home = os.getenv('HOME')
+      assert(io.open(home .. '/held', 'w')):close()
+      local deadline = os.time() + 10
+      while os.time() < deadline do
+        local go = io.open(home .. '/go', 'r')
+        if go then go:close() break end
+      end
+    end)
+  end }
+";
+
+    /// The daemon's log lines naming `fid` with `Broken pipe`, in order:
+    /// the lines [`write_failures`] counts.
+    fn failure_lines(daemon: &TestDaemon, fid: FrontendId) -> Vec<String> {
+        let who = format!("{fid:?} ");
+        daemon_log(daemon)
+            .lines()
+            .filter(|line| line.contains(&who) && line.contains("Broken pipe"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// E10d.1 --- #404's order, held. A session's window reaches a buffer
+    /// that is not yet CRDT-backed (the note, opened from a coroutine
+    /// that then holds the dispatcher), and the session stops reading
+    /// while the dispatcher is held, so the first write to it after that
+    /// is the next tick's upgrade publishing the note's snapshot to the
+    /// replicas showing it (`publish_buffer_snapshot_to_replicas`), not
+    /// one of the tick's own writes. Read as the drain-deadline row reads
+    /// it: one failed write in the daemon's log for that session, the
+    /// drain announced on the line after it, and nothing more by the
+    /// deadline's teardown. #404 is this order arriving by chance in that
+    /// row: the publish logged its failure and went on, the frame write
+    /// failed after it, and the drain began there.
+    #[test]
+    #[ignore = "E10d.1's control: fails at 73bc1e6 with #404's fragments until E10d.2's one path"]
+    fn e10d_1_a_snapshot_publish_failing_first_is_the_last_write() {
+        let daemon = daemon_with_note(HOLD);
+        let home = daemon
+            .socket_path()
+            .parent()
+            .expect("the socket's directory")
+            .to_path_buf();
+        let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
+        let fid = first.fid;
+        let id = fid.0.to_string();
+        first.where_am_i();
+        first.run_command("e10d.hold");
+        common::ready::expect_true(
+            "the coroutine holding the dispatcher with the note open",
+            Duration::from_secs(10),
+            || home.join("held").exists(),
+            || daemon_log(&daemon),
+        );
+        first
+            .stream
+            .shutdown(std::net::Shutdown::Read)
+            .expect("shut the receiving half");
+        std::fs::write(home.join("go"), b"").expect("release the hold");
+        common::ready::expect_true(
+            &format!("the daemon's failed write to {fid:?}"),
+            Duration::from_secs(10),
+            || write_failures(&daemon, fid) > 0,
+            || daemon_log(&daemon),
+        );
+        // The control's premise: the first write to fail is the publish,
+        // which reaches this session only because its window shows the
+        // note.
+        let first_failure = failure_lines(&daemon, fid).remove(0);
+        assert!(
+            first_failure.contains("BufferSnapshot publish for")
+                && first_failure.contains(&format!("to {fid:?} failed")),
+            "premise: the snapshot publish is the first write to fail, not the tick's: {}",
+            daemon_log(&daemon)
+        );
+        // No EOF is sent: the teardown is the deadline's, so the daemon
+        // has the whole drain to write again.
+        common::ready::expect_true(
+            "the drain's teardown",
+            Duration::from_secs(10),
+            || detached(&daemon).contains(&id),
+            || daemon_log(&daemon),
+        );
+        assert_eq!(
+            write_failures(&daemon, fid),
+            1,
+            "nothing was written to the frontend after its failed write: {}",
+            daemon_log(&daemon)
+        );
+        let announced = format!(
+            "{fid:?}'s write failed; nothing more is written to it, and its input is read until \
+             its EOF or {} ms",
+            DRAIN.as_millis()
+        );
+        let log = daemon_log(&daemon);
+        let lines: Vec<&str> = log.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| *line == first_failure)
+            .expect("the publish's line");
+        assert!(
+            lines
+                .get(at + 1)
+                .is_some_and(|line| line.contains(&announced)),
+            "the drain begins at the publish's failed write, on the line after it: {log}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
