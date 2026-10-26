@@ -3619,16 +3619,17 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
-        // dired Stage 2a Q#DR21 — expose the existing Rust setter,
-        // which already documents itself as for "save-as and rename
-        // operations". Dired needs it because its listing buffers are
-        // **pathless**: no buffer-keyed rebind can find them, so the
-        // only way a `*dired:<path>*` buffer can follow a renamed
-        // directory is for dired's own `resource.renamed` subscriber to
-        // rename it. The alternative — kill and recreate under the new
-        // name — loses window placement, the cursor, the read-only
-        // intercept, round-trip input and the major mode, each of which
-        // would have to be re-established in the right order.
+        // The explicit-name door (`BufferRegistry::set_name`), exposed
+        // at dired Stage 2a (Q#DR21) and since D40 for a caller's own
+        // name alone: a name given here is a choice, not a path's, so no
+        // collision rewrites it and neither does a rename of the file it
+        // holds; a save-as names the buffer by its new file, as Emacs's
+        // `write-file` does. Dired does not come here: a listing is
+        // named by the directory it shows (`pmacs.buffer.name_by_directory`,
+        // E10c.3), which a `set_name` would make explicit and stop; and
+        // dired subscribes to no rename, so a listing whose directory is
+        // renamed keeps its old directory and name (a known gap, older
+        // than D40).
         //
         // Uniqueness among explicit names stays the CALLER's job; a
         // name derived from a path that this one equals takes more of
