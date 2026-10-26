@@ -1777,6 +1777,172 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
         );
     }
 
+    /// The handshake `pmacs-gpu` performs for a window opening `path`, up
+    /// to its `Resume` step, reading only the `Hello`: the per-attach
+    /// thread then queues the session for the dispatcher, which is held.
+    fn attach_with_target(daemon: &TestDaemon, path: &Path) -> (UnixStream, FrontendId) {
+        use pmacs_protocol::message::InitialTarget;
+        use std::os::unix::ffi::OsStrExt as _;
+        let mut stream = daemon.connect();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        let hello: Hello = read_message(&mut stream).expect("read Hello");
+        let fid = hello.assigned_frontend_id;
+        write_message(
+            &mut stream,
+            &AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                frontend_capabilities: semantic_caps(),
+                initial_size: CellSize::new(24, 80),
+            },
+        )
+        .expect("AttachRequest");
+        let dir = path.parent().expect("the target's directory");
+        write_message(
+            &mut stream,
+            &SessionBootstrapRequest {
+                initial_target: Some(InitialTarget {
+                    cwd: dir.as_os_str().as_bytes().to_vec(),
+                    path: path.as_os_str().as_bytes().to_vec(),
+                }),
+            },
+        )
+        .expect("bootstrap");
+        write_message(
+            &mut stream,
+            &FrontendEvent::Resume {
+                frontend_id: fid,
+                token: None,
+            },
+        )
+        .expect("Resume");
+        (stream, fid)
+    }
+
+    /// E10d review 1's P2 (Low 1), committed beside E10d.1's control at
+    /// fix round 1 (the owner's ruling of 2026-10-26: neither replaces
+    /// the other). The row's own mechanism: a window runs a command that
+    /// holds the dispatcher and then opens the note in its window; while
+    /// it is held the window shuts its read side and a second window
+    /// attaches with the note as its target, so its session waits in the
+    /// dispatcher's queue behind the command (`RET` is sent once the
+    /// daemon has said the `M-x` is not idle, so no early `CursorByte` is
+    /// written at it). When the hold ends the note is in the first window
+    /// and not CRDT-backed, and the dispatcher drains its queue before its
+    /// next pass: the second window's bootstrap upgrades the note and
+    /// publishes its snapshot to the replicas showing it
+    /// (`handle_session_established` → `publish_buffer_snapshot_to_replicas`),
+    /// the first write to the first window to fail; its
+    /// `buffer.after-switch` (the target's dedup) logs the second window's
+    /// id before it, which no pass of the first window's does. The control
+    /// above holds in `tick_async`, after which the pass comes first, and
+    /// reaches the publish from the tick's upgrade; this one holds in a
+    /// command, after which the queued events come first. With the one
+    /// path that is the first window's one failed write and the drain
+    /// begins on the line after it; at `73bc1e6` the publish logged and
+    /// went on, and the first window's next pass failed again (its
+    /// follow's snapshot, then `DispatchIdle`), `left: 3`.
+    #[test]
+    fn e10d_review1_p2_a_second_window_s_attach_target_is_the_first_write_to_fail() {
+        let dir = tempfile::TempDir::new().expect("tempdir for the note");
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "one\ntwo\n").expect("write the note");
+        let init = format!(
+            "{NO_REOPEN}pmacs.lsp.config = {{}}\n{DETACH_LOG}\
+             pmacs.hook.add('buffer.after-switch', function()\n\
+               io.stderr:write('r1: after-switch in FrontendId(' .. pmacs.frontend.id() .. ')\\n')\n\
+             end)\n\
+             pmacs.command.define {{ name = 'r1.hold-then-open',\n\
+               description = 'hold the dispatcher, then open the note',\n\
+               fn = function()\n\
+                 local home = os.getenv('HOME')\n\
+                 assert(io.open(home .. '/held', 'w')):close()\n\
+                 local deadline = os.time() + 10\n\
+                 while os.time() < deadline do\n\
+                   local go = io.open(home .. '/go', 'r')\n\
+                   if go then go:close() break end\n\
+                 end\n\
+                 pmacs.buffer.find_or_open({note:?})\n\
+               end }}\n",
+            note = note.to_str().expect("utf-8 path"),
+        );
+        let daemon = TestDaemon::spawn_with_env_and_init(&[("PMACS_ATTACH_DEBUG", "1")], &init);
+        let home = daemon
+            .socket_path()
+            .parent()
+            .expect("the socket's directory")
+            .to_path_buf();
+        let mut first = Session::attach(&daemon, PROTOCOL_VERSION, None);
+        let (document, _) = first.where_am_i();
+        first.declare_viewport(document);
+        let fid = first.fid;
+        let id = fid.0.to_string();
+        first.key(Key::Char('x'), Modifiers::ALT);
+        first.wait("the daemon to say the M-x dispatch is not idle", |m| {
+            matches!(m, InstanceMessage::DispatchIdle { idle: false }).then_some(())
+        });
+        first.type_str("r1.hold-then-open");
+        first.key(Key::Enter, Modifiers::NONE);
+        common::ready::expect_true(
+            "the command holding the dispatcher",
+            Duration::from_secs(10),
+            || home.join("held").exists(),
+            || daemon_log(&daemon),
+        );
+        first
+            .stream
+            .shutdown(std::net::Shutdown::Read)
+            .expect("shut the receiving half");
+        let (_second, second_fid) = attach_with_target(&daemon, &note);
+        // A window before the release, named with its length: the
+        // per-attach thread queues the second session the moment it has
+        // read the `Resume` step, microseconds after it arrives.
+        std::thread::sleep(Duration::from_secs(1));
+        std::fs::write(home.join("go"), b"").expect("release the hold");
+
+        common::ready::expect_true(
+            &format!("the daemon's failed write to {fid:?}"),
+            Duration::from_secs(10),
+            || !failure_lines(&daemon, fid).is_empty(),
+            || daemon_log(&daemon),
+        );
+        common::ready::expect_true(
+            "the drain's teardown",
+            Duration::from_secs(10),
+            || detached(&daemon).contains(&id),
+            || daemon_log(&daemon),
+        );
+        let first_failure = failure_lines(&daemon, fid).remove(0);
+        let marker = format!("r1: after-switch in {second_fid:?}");
+        let log = daemon_log(&daemon);
+        let lines: Vec<&str> = log.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| *line == first_failure)
+            .expect("the first failure's line");
+        assert!(
+            first_failure.contains("BufferSnapshot publish for")
+                && first_failure.contains(&format!("to {fid:?} failed"))
+                && lines[..at].contains(&marker.as_str()),
+            "premise: the second window's attach target publishes first: {log}"
+        );
+        assert_eq!(
+            failure_lines(&daemon, fid).len(),
+            1,
+            "nothing was written to the first window after its failed write: {log}"
+        );
+        assert!(
+            lines.get(at + 1).is_some_and(|line| line.contains(&format!(
+                "{fid:?}'s write failed; nothing more is written to it, and its input is read \
+                 until its EOF or {} ms",
+                DRAIN.as_millis()
+            ))),
+            "the drain begins at the attach's publish, on the line after it: {log}"
+        );
+        std::mem::forget(dir);
+    }
+
     /// E10d.2 --- the bootstrap's sweep ends at its first failed write. A
     /// v26 replica (no token, so nothing after the sweep writes to it
     /// before the tick) stops reading after `Hello` and before its last
