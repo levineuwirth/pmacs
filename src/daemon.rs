@@ -46,9 +46,13 @@
 //! - Shutdown flag set → send `Goodbye(ShuttingDown)`, return.
 //! - Editor `quit` flag set → send `Goodbye(ShuttingDown)`, propagate
 //!   shutdown to the outer accept loop.
-//! - Write fails (broken pipe) → nothing more is written to that
-//!   frontend; its input is still dispatched until its reader's EOF or
-//!   [`WRITE_FAILURE_DRAIN`], then it is torn down (E9 fix round 4).
+//! - Write fails on the socket (broken pipe), the first on any route,
+//!   since every write to an attached frontend takes one path (E10d) →
+//!   nothing more is written to that frontend; its input is still
+//!   dispatched until its reader's EOF or [`WRITE_FAILURE_DRAIN`] from
+//!   that first failure, then it is torn down (E9 fix round 4). A
+//!   message the transport refuses before writing a byte (past the
+//!   frame) ends nothing.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -66,7 +70,7 @@ use crate::cell::CellSize;
 use crate::editor::EditorState;
 use crate::instance_render::RenderState;
 use crate::lockfile::{self, LockError, LockHandle};
-use crate::presence::{PresenceSnapshot, SessionRegistry};
+use crate::presence::{PresenceSnapshot, SessionRegistry, SessionWrite};
 use crate::protocol::crossterm_translate::{key_to_crossterm, mouse_to_crossterm};
 use crate::protocol::{
     ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello,
@@ -1467,6 +1471,79 @@ fn peer_may_send_panel_events(
         && editor.core.borrow().panel_capable_for(source)
 }
 
+/// E10d --- the one path a write to an attached session's stream takes
+/// once its bootstrap is over: the tick's bell, `DispatchIdle`, frame
+/// and `CursorByte`, the presence broadcasts, the clipboard signal, the
+/// CRDT ops, the follow's and the publish's snapshots and the early
+/// `CursorByte`. Returns whether `message` was written; `false` when
+/// the session has no stream (none installed, or taken out at a failed
+/// write), the write failed, or the transport refused the message.
+///
+/// A write that fails on the socket (`TransportError::Io`) ends the
+/// session's output here, whichever route it came by (the owner's
+/// ruling of 2026-10-20, a bounded drain): `what` names the write in
+/// the log line, the stream is taken out of its
+/// session, so no frame, presence, bell, op, snapshot or `Goodbye`
+/// reaches it again, and the drain begins with
+/// [`WRITE_FAILURE_DRAIN`] counted from this write. A message the
+/// transport refuses before writing a byte (`FrameTooLarge`, `Encode`:
+/// a clipboard, an op or a status message past the frame) leaves the
+/// socket whole, so it is logged by the same line and the session keeps
+/// its stream (the owner's ruling of 2026-10-26, on E10d review 1's
+/// Medium 1, which found a copy past the frame disconnecting the
+/// attached TUI that made it). The session stays
+/// registered, so what its reader still reads is dispatched to its view
+/// and its token is live (a reconnect presenting it is refused and
+/// retried). E8d.4 tore the frontend down at a failed write, the whole
+/// way and at once; since E9's fix round 4 the one teardown runs only
+/// at the reader's EOF (`SessionDetached`) or at the drain's deadline
+/// (the top of [`dispatcher_loop`]), because the refusal-and-retry
+/// ruling needs the old socket read to its end before its view is
+/// retained for the token, and the deadline keeps E8d.4's bound on a
+/// reader that never ends; input after it is lost. Until E10d only the
+/// tick began the drain: the other routes logged or discarded the error
+/// and went on, so the tick wrote once more and failed again (#404).
+///
+/// The writes left out write to a stream no attached session owns yet
+/// or any more: the handshake's, the bootstrap's to its own socket
+/// before the session takes it (a failed one unregisters the
+/// provisional session), and a teardown's `Goodbye`. Since E10d review
+/// 1's Low 2 a session's stream is private to the registry, whose
+/// `SessionRegistry::write_output` this path calls, so a write past it
+/// does not compile; `tests/daemon_write_consistency.rs` holds the rest
+/// by function and count: who touches the stream in `src/presence.rs`,
+/// who calls its writers here, and the direct writes left out.
+fn write_to_session(
+    editor: &EditorState,
+    session_registry: &mut SessionRegistry,
+    frontend_id: FrontendId,
+    message: &InstanceMessage,
+    what: impl FnOnce() -> String,
+) -> bool {
+    match session_registry.write_output(frontend_id, message) {
+        SessionWrite::Written => true,
+        SessionWrite::NoStream => false,
+        SessionWrite::Refused(refused) => {
+            eprintln!("pmacs: {}: {refused}", what());
+            false
+        }
+        SessionWrite::Failed(error) => {
+            eprintln!("pmacs: {}: {error}", what());
+            eprintln!(
+                "pmacs: {frontend_id:?}'s write failed; nothing more is written to it, and its \
+                 input is read until its EOF or {} ms",
+                WRITE_FAILURE_DRAIN.as_millis()
+            );
+            editor
+                .core
+                .borrow_mut()
+                .draining_frontends
+                .insert(frontend_id);
+            false
+        }
+    }
+}
+
 /// T M10.8 — dispatcher loop. The single thread that owns the editor.
 ///
 /// All attached frontends' inputs arrive via the `dispatcher_rx`
@@ -1614,16 +1691,27 @@ fn dispatcher_loop(
         // understands, so no version gate) and let the frontend write
         // the OS clipboard (OSC 52 / arboard). One-shot, like the CRDT
         // drain above.
-        if let Some((fid, bytes)) = editor.core.borrow_mut().take_pending_clipboard()
-            && let Some(stream) = session_registry.stream_mut(fid)
-        {
-            let _ = write_message(
-                stream,
+        let pending_clipboard = editor.core.borrow_mut().take_pending_clipboard();
+        if let Some((fid, bytes)) = pending_clipboard {
+            write_to_session(
+                editor,
+                &mut session_registry,
+                fid,
                 &InstanceMessage::Signal(InstanceSignal::Clipboard(bytes)),
+                || format!("write Clipboard for {fid:?} failed"),
             );
         }
 
         for fid in &attached_fids {
+            // E10d --- a drain begun since `attached_fids` was read, by
+            // a write on another route earlier in this loop (a presence
+            // broadcast from a pass before this one, the clipboard, an
+            // op), takes this session's pass away as a drain begun on an
+            // earlier loop does: nothing is rendered, followed, swept or
+            // written for it again.
+            if session_registry.is_draining(*fid) {
+                continue;
+            }
             editor.core.borrow_mut().active_frontend = *fid;
 
             // T M10.10 Day 3 — lazy CRDT upgrade on active-buffer
@@ -1804,44 +1892,52 @@ fn dispatcher_loop(
             // before the frame's other messages so a frontend that
             // wakes mid-tick sees the gate flip first. Diff-suppressed
             // — initial-after-attach (`last_dispatch_idle_sent` `None`)
-            // and value-change emissions only.
-            let mut write_failed = false;
-            if let Some(session) = session_registry.session_mut(*fid)
-                && take_pending_terminal_bell(editor, *fid, &mut session.bell_baseline)
-                && let Some(stream) = session.stream.as_mut()
-                && let Err(error) =
-                    write_message(stream, &InstanceMessage::Signal(InstanceSignal::Bell))
-            {
-                eprintln!("pmacs: write terminal Bell for {fid:?} failed: {error}");
-                write_failed = true;
+            // and value-change emissions only. Every write below goes
+            // through `write_to_session`, so the first that fails on the
+            // socket ends this session's output and the rest find no
+            // stream (E10d).
+            let bell = session_registry.session_mut(*fid).is_some_and(|session| {
+                take_pending_terminal_bell(editor, *fid, &mut session.bell_baseline)
+            });
+            if bell {
+                write_to_session(
+                    editor,
+                    &mut session_registry,
+                    *fid,
+                    &InstanceMessage::Signal(InstanceSignal::Bell),
+                    || format!("write terminal Bell for {fid:?} failed"),
+                );
             }
             if session_registry.session_state(*fid).is_some_and(|s| {
                 // Filter on both the `crdt_replica` capability (only
                 // optimistic-apply frontends care) and the negotiated
                 // wire version (>= 4 means peer knows the variant).
                 s.negotiated_capabilities.crdt_replica && s.negotiated_protocol_version >= 4
-            }) && let Some(session) = session_registry.session_mut(*fid)
-                && let Some(stream) = session.stream.as_mut()
-            {
+            }) {
                 let idle_now = editor.dispatch_idle_for(*fid);
-                if session.last_dispatch_idle_sent != Some(idle_now) {
-                    if let Err(e) =
-                        write_message(stream, &InstanceMessage::DispatchIdle { idle: idle_now })
-                    {
-                        eprintln!("pmacs: write DispatchIdle for {fid:?} failed: {e}");
-                        write_failed = true;
-                    } else {
-                        session.last_dispatch_idle_sent = Some(idle_now);
-                    }
+                let last_sent = session_registry
+                    .session(*fid)
+                    .and_then(|session| session.last_dispatch_idle_sent);
+                if last_sent != Some(idle_now)
+                    && write_to_session(
+                        editor,
+                        &mut session_registry,
+                        *fid,
+                        &InstanceMessage::DispatchIdle { idle: idle_now },
+                        || format!("write DispatchIdle for {fid:?} failed"),
+                    )
+                    && let Some(session) = session_registry.session_mut(*fid)
+                {
+                    session.last_dispatch_idle_sent = Some(idle_now);
                 }
             }
 
-            // Write frame messages to this frontend's stream. The
-            // session's state is read first, since the stream borrows the
-            // session for the rest of the block.
+            // Write frame messages to this frontend's stream, if it still
+            // has one.
             let state = session_registry.session_state(*fid);
-            if let Some(stream) = session_registry.stream_mut(*fid)
-                && !write_failed
+            if session_registry
+                .session(*fid)
+                .is_some_and(crate::presence::Session::has_stream)
             {
                 // Q#S1 — `StatusFacts` is a v8 variant; an older peer
                 // would hard-error decoding it. Same per-session gate
@@ -2023,9 +2119,17 @@ fn dispatcher_loop(
                             thread::sleep(Duration::from_millis(injected_render_latency_ms));
                         }
                     }
-                    if let Err(e) = write_message(stream, msg) {
-                        eprintln!("pmacs: write failed for {fid:?} in dispatcher: {e}");
-                        write_failed = true;
+                    // A message the transport refused is left out and the
+                    // rest of the frame written, the session kept; until
+                    // E10d's fix round 1 a refusal here drained the
+                    // session as a failed socket does. The frame ends
+                    // where the stream went.
+                    if !write_to_session(editor, &mut session_registry, *fid, msg, || {
+                        format!("write failed for {fid:?} in dispatcher")
+                    }) && !session_registry
+                        .session(*fid)
+                        .is_some_and(crate::presence::Session::has_stream)
+                    {
                         break;
                     }
                 }
@@ -2036,63 +2140,37 @@ fn dispatcher_loop(
                 // the two derivations), so they describe the cursor
                 // in the same instant in two reference frames. The
                 // optimistic-apply path consumes byte_pos; the legacy
-                // paint path consumes the grid coord.
-                if !write_failed
-                    && !terminal_mode
+                // paint path consumes the grid coord. After a failed
+                // frame write the session has no stream, and the path
+                // writes nothing.
+                if !terminal_mode
                     && state.is_some_and(|s| s.negotiated_capabilities.crdt_replica)
                     && let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, *fid)
                 {
-                    let cursor_byte_msg = InstanceMessage::CursorByte {
-                        buffer_id,
-                        byte_pos,
-                    };
-                    if let Err(e) = write_message(stream, &cursor_byte_msg) {
-                        eprintln!("pmacs: write CursorByte for {fid:?} failed: {e}");
-                        write_failed = true;
-                    }
+                    write_to_session(
+                        editor,
+                        &mut session_registry,
+                        *fid,
+                        &InstanceMessage::CursorByte {
+                            buffer_id,
+                            byte_pos,
+                        },
+                        || format!("write CursorByte for {fid:?} failed"),
+                    );
                 }
             }
 
             // Route presence broadcasts to their recipient streams
-            // (recipients != fid per sender-exclusion).
+            // (recipients != fid per sender-exclusion). A recipient whose
+            // write fails drains from here, as on any route (E10d).
             for entry in &broadcasts {
-                if let Some(stream) = session_registry.stream_mut(entry.recipient) {
-                    let _ = write_message(stream, &entry.message);
-                }
-            }
-
-            if write_failed
-                && let Some(stream) = session_registry
-                    .session_mut(*fid)
-                    .and_then(|session| session.stream.take())
-            {
-                // E9 fix round 4 (review 4's Medium 1; the owner's ruling
-                // of 2026-10-20, a bounded drain) --- output stops here
-                // and input does not. E8d.4 tore the frontend down at
-                // this line, the whole way and at once, because its
-                // reader may block in `read` for as long as the peer
-                // holds the socket open, so its `SessionDetached` can come
-                // late or never; the refusal-and-retry ruling (fix round
-                // 3) needs the old socket read to its end before its
-                // view is retained for the token. A failed write stops
-                // the output and nothing else: the stream is taken out of
-                // its session, so no frame, presence, bell, op, snapshot
-                // or `Goodbye` reaches it again, and its session stays
-                // registered, so what its reader still reads is
-                // dispatched to its view and its token is live (a
-                // reconnect presenting it is refused and retried). The
-                // one teardown E8d.4 made still runs once, and only
-                // once: at the reader's EOF (`SessionDetached`), or at
-                // `WRITE_FAILURE_DRAIN` without it (the top of this
-                // loop), which keeps E8d.4's bound on a reader that
-                // never ends; input after the deadline is lost.
-                eprintln!(
-                    "pmacs: {fid:?}'s write failed; nothing more is written to it, and its \
-                     input is read until its EOF or {} ms",
-                    WRITE_FAILURE_DRAIN.as_millis()
+                write_to_session(
+                    editor,
+                    &mut session_registry,
+                    entry.recipient,
+                    &entry.message,
+                    || format!("write PresenceUpdate for {:?} failed", entry.recipient),
                 );
-                session_registry.begin_drain(*fid, stream, Instant::now());
-                editor.core.borrow_mut().draining_frontends.insert(*fid);
             }
         }
 
@@ -2155,22 +2233,16 @@ fn dispatcher_loop(
                         .session_state(*fid)
                         .is_some_and(|s| s.negotiated_protocol_version >= SESSION_MIN_VERSION)
                 });
-            if let Some(fid) = quitter
-                && let Some(stream) = session_registry.stream_mut(fid)
-            {
-                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
+            if let Some(fid) = quitter {
+                session_registry.write_goodbye(fid, GoodbyeReason::Detached);
             }
-            for (fid, session) in session_registry.sessions_mut() {
-                if Some(fid) == quitter {
-                    continue;
-                }
-                let Some(stream) = session.stream.as_mut() else {
-                    continue;
-                };
-                let _ = write_message(
-                    stream,
-                    &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
-                );
+            let others: Vec<FrontendId> = session_registry
+                .sessions_mut()
+                .map(|(fid, _)| fid)
+                .filter(|fid| Some(*fid) != quitter)
+                .collect();
+            for fid in others {
+                session_registry.write_goodbye(fid, GoodbyeReason::ShuttingDown);
             }
             if core_wants_quit {
                 shutdown.store(true, Ordering::SeqCst);
@@ -2495,12 +2567,7 @@ fn cleanup_provisional_session(
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
 ) {
-    if let Some(stream) = session_registry
-        .session_mut(frontend_id)
-        .and_then(|session| session.stream.take())
-    {
-        let _ = stream.shutdown(Shutdown::Both);
-    }
+    session_registry.shut_stream(frontend_id);
     session_registry.unregister_session(frontend_id);
     editor
         .core
@@ -2790,7 +2857,14 @@ fn handle_session_established(
                 // oversize buffer itself.)
                 let frame_len = snapshot_frame_len(&message);
                 if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
-                    let left_out = send_buffer_snapshots(editor, &mut write_stream);
+                    let Ok(left_out) = send_buffer_snapshots(editor, &mut write_stream) else {
+                        let _ = write_stream.shutdown(Shutdown::Both);
+                        editor
+                            .core
+                            .borrow_mut()
+                            .unregister_frontend_view(frontend_id);
+                        return;
+                    };
                     let back_to = fallback_among_delivered(editor, buffer_id, &left_out);
                     refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
                     resumed_buffer = None;
@@ -2825,7 +2899,14 @@ fn handle_session_established(
         }
     } else if crdt_replica {
         // Legacy no-target attach remains an all-buffer replica bootstrap.
-        let left_out = send_buffer_snapshots(editor, &mut write_stream);
+        let Ok(left_out) = send_buffer_snapshots(editor, &mut write_stream) else {
+            let _ = write_stream.shutdown(Shutdown::Both);
+            editor
+                .core
+                .borrow_mut()
+                .unregister_frontend_view(frontend_id);
+            return;
+        };
         // E9.5 (fix round 1, review 1's Medium 3) — the fresh view is on
         // LOCAL's document; when the sweep left that buffer out, the
         // session would start on a buffer no snapshot reached, with a
@@ -2861,7 +2942,6 @@ fn handle_session_established(
         render_state.force_full_grid_resync();
         session.render = Some(render_state);
     }
-    session.stream = Some(write_stream);
     session.term_size = Some(initial_size);
     // Bottom-panel arc (Q#BP2b): a grid session's real attach size IS its
     // authoritative geometry declaration, cached BEFORE any input can
@@ -2891,13 +2971,8 @@ fn handle_session_established(
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
             buffer_id: opened.buffer_id,
         });
-        let write_result = {
-            let stream = session_registry
-                .stream_mut(frontend_id)
-                .expect("new session stream installed");
-            write_message(stream, &result)
-        };
-        if write_result.is_err() {
+        if write_message(&mut write_stream, &result).is_err() {
+            let _ = write_stream.shutdown(Shutdown::Both);
             cleanup_provisional_session(editor, session_registry, frontend_id);
             return;
         }
@@ -2906,17 +2981,18 @@ fn handle_session_established(
     // E9 --- the token goes after the bootstrap, so a frontend reading
     // its target's snapshot and result synchronously is not handed a
     // message it did not ask for, and before the first frame.
-    if let Some(token) = token {
-        let write_result = {
-            let stream = session_registry
-                .stream_mut(frontend_id)
-                .expect("new session stream installed");
-            write_message(stream, &InstanceMessage::SessionToken(token))
-        };
-        if write_result.is_err() {
-            cleanup_provisional_session(editor, session_registry, frontend_id);
-        }
+    if let Some(token) = token
+        && write_message(&mut write_stream, &InstanceMessage::SessionToken(token)).is_err()
+    {
+        let _ = write_stream.shutdown(Shutdown::Both);
+        cleanup_provisional_session(editor, session_registry, frontend_id);
+        return;
     }
+    // The bootstrap's last write is done, to its own socket; the session
+    // takes the stream from here, and every later write to it is the one
+    // path's (E10d review 1's Low 2: no write to an attached session's
+    // stream reaches it but through the registry).
+    session_registry.install_stream(frontend_id, write_stream);
 }
 
 /// E9 --- sixteen random bytes for a session token, from the system's
@@ -3085,10 +3161,10 @@ fn handle_dispatcher_event(
                     // closing): its reader thread set the session's
                     // shared flag as it read this, so the teardown ---
                     // the reader's `SessionDetached` after its loop
-                    // exits, or the tick loop's on the write that fails
-                    // first once the window has closed its socket ---
-                    // drops its view instead of retaining it (E9, fix
-                    // round 1). Nothing happens here.
+                    // exits, or a drain's deadline after a write to it
+                    // fails on any route (E10d) --- drops its view
+                    // instead of retaining it (E9, fix round 1). Nothing
+                    // happens here.
                 }
                 // E9.4 — `pmacs --daemon --stop`. Refused from a session
                 // below the family's version (a peer compiled from this
@@ -3655,12 +3731,10 @@ fn handle_dispatcher_event(
             return;
         };
         session_registry.mark_departing(frontend_id);
-        if let Some(stream) = session_registry.stream_mut(frontend_id) {
-            if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
-                let _ = write_message(stream, &InstanceMessage::Goodbye(GoodbyeReason::Detached));
-            }
-            let _ = stream.shutdown(Shutdown::Both);
+        if session.negotiated_protocol_version >= SESSION_MIN_VERSION {
+            session_registry.write_goodbye(frontend_id, GoodbyeReason::Detached);
         }
+        session_registry.shut_stream(frontend_id);
         detach_frontend(editor, session_registry, frontend_id);
     }
 }
@@ -3823,9 +3897,14 @@ fn save_attached_desktops(editor: &EditorState, session_registry: &SessionRegist
 /// upgraded, subsequent attaches see the buffer as already CRDT-
 /// backed and skip the upgrade.
 ///
-/// Errors on individual buffers (upgrade failure, snapshot export
-/// failure, write failure) are logged and skipped; one failed buffer
-/// doesn't abort the others.
+/// A buffer that cannot be upgraded or exported is logged and skipped;
+/// one failed buffer doesn't keep the others from the frontend. A write
+/// that fails ends the sweep (E10d): the stream is a provisional
+/// session's, which no write reaches after its first failure, so the
+/// error is returned and the caller fails the bootstrap as its other
+/// writes fail it. Until E10d the sweep logged the failure and wrote the
+/// next buffer to the same stream, and the bootstrap went on to install
+/// it, so the tick's first write failed again.
 ///
 /// Returns the buffers left out because their snapshot is past the
 /// frame cap (E9.5), each with its frame length, so the caller can
@@ -3834,7 +3913,7 @@ fn save_attached_desktops(editor: &EditorState, session_registry: &SessionRegist
 fn send_buffer_snapshots(
     editor: &EditorState,
     write_stream: &mut UnixStream,
-) -> Vec<(crate::buffer::BufferId, usize)> {
+) -> Result<Vec<(crate::buffer::BufferId, usize)>, crate::transport::TransportError> {
     let core = editor.core.borrow();
     let mut registry = core.registry.borrow_mut();
     let buffer_ids: Vec<_> = registry.ids().to_vec();
@@ -3884,12 +3963,10 @@ fn send_buffer_snapshots(
         }
         if let Err(e) = write_message(write_stream, &msg) {
             eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} failed: {e:?}");
-            // Continue trying other buffers — the stream may
-            // recover, or the next per-tick error handling will
-            // stop writing to the session and drain it.
+            return Err(e);
         }
     }
-    left_out
+    Ok(left_out)
 }
 
 /// No-op stub for non-CRDT builds. v0.1 frontends never advertise
@@ -3897,11 +3974,15 @@ fn send_buffer_snapshots(
 /// always false in non-CRDT builds; this stub keeps the call site
 /// compiling without conditional logic.
 #[cfg(not(feature = "crdt"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the crdt build's sweep can fail; the stub keeps its signature"
+)]
 fn send_buffer_snapshots(
     _editor: &EditorState,
     _write_stream: &mut UnixStream,
-) -> Vec<(crate::buffer::BufferId, usize)> {
-    Vec::new()
+) -> Result<Vec<(crate::buffer::BufferId, usize)>, crate::transport::TransportError> {
+    Ok(Vec::new())
 }
 
 /// T M10.10 Day 3 — ensure the active buffer for `fid`'s window is
@@ -4132,11 +4213,12 @@ fn send_buffer_snapshot_to_frontend(
     if len > pmacs_protocol::MAX_FRAME_BYTES {
         return Err(len);
     }
-    if let Some(stream) = session_registry.stream_mut(fid)
-        && let Err(e) = write_message(stream, &msg)
-    {
-        eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
-    }
+    // A failed write begins the session's drain (E10d); the caller's
+    // records of what was sent then concern a session nothing is written
+    // to again.
+    write_to_session(editor, session_registry, fid, &msg, || {
+        format!("send BufferSnapshot for {buffer_id:?} to {fid:?} failed")
+    });
     Ok(())
 }
 
@@ -4169,33 +4251,34 @@ fn broadcast_buffer_snapshot_to_replicas(
     true
 }
 
+/// Write `message`, `buffer_id`'s snapshot, to every replica session
+/// that mirrors it: every grid replica, and a semantic one only while
+/// its document shows the buffer. A replica whose write fails drains
+/// from that write (E10d) and the others are still written; until E10d
+/// the failure was logged and the session kept its stream, so the tick
+/// wrote to it once more (#404).
 fn publish_buffer_snapshot_to_replicas(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
     message: &InstanceMessage,
     session_registry: &mut SessionRegistry,
 ) {
-    for (peer_id, peer) in session_registry.sessions_mut() {
-        let Some(stream) = peer.stream.as_mut() else {
-            continue;
-        };
-        let session = peer.state;
-        if !session.negotiated_capabilities.crdt_replica {
-            continue;
-        }
-        if session.negotiated_capabilities.semantic_render {
-            let displays_buffer = peer_displays_buffer_as_document(editor, peer_id, buffer_id);
-            if !displays_buffer {
-                continue;
-            }
-        }
-        if let Err(error) = write_message(stream, message) {
-            eprintln!(
-                "pmacs: BufferSnapshot publish for {buffer_id:?} to {peer_id:?} failed: {error}"
-            );
-            continue;
-        }
-        if let Some(semantic) = peer.semantic.as_mut() {
+    let recipients: Vec<FrontendId> = session_registry
+        .sessions_mut()
+        .filter(|(peer_id, peer)| {
+            let caps = peer.state.negotiated_capabilities;
+            peer.has_stream()
+                && caps.crdt_replica
+                && (!caps.semantic_render
+                    || peer_displays_buffer_as_document(editor, *peer_id, buffer_id))
+        })
+        .map(|(peer_id, _)| peer_id)
+        .collect();
+    for peer_id in recipients {
+        if write_to_session(editor, session_registry, peer_id, message, || {
+            format!("BufferSnapshot publish for {buffer_id:?} to {peer_id:?} failed")
+        }) && let Some(semantic) = session_registry.semantic_mut(peer_id)
+        {
             semantic.on_buffer_snapshot_sent(buffer_id);
         }
     }
@@ -4741,7 +4824,10 @@ fn broadcast_pending_crdt_ops(
             };
             let entries = session_registry.broadcast_crdt_op(exclude, buffer_id, op);
             for entry in entries {
-                if let Some(stream) = session_registry.stream_mut(entry.recipient) {
+                if session_registry
+                    .session(entry.recipient)
+                    .is_some_and(crate::presence::Session::has_stream)
+                {
                     // T M10.11 F2 — THE criterion-3 jitter site.
                     // CRDT convergence is driven by these
                     // `broadcast_crdt_op` writes, NOT by render
@@ -4754,7 +4840,16 @@ fn broadcast_pending_crdt_ops(
                     // `m10_11_q8_convergence_under_jitter`
                     // genuinely test CRDT-under-jitter.
                     maybe_jitter_sleep(latency.jitter_ms, latency.fixed_ms, latency.rng);
-                    let _ = write_message(stream, &entry.message);
+                    // An op past the frame is refused unwritten and
+                    // logged, and the replica keeps its session without
+                    // it; its mirror falls behind (#410, for E11).
+                    write_to_session(
+                        editor,
+                        session_registry,
+                        entry.recipient,
+                        &entry.message,
+                        || format!("write CrdtOp for {:?} failed", entry.recipient),
+                    );
                 }
             }
         }
@@ -4818,19 +4913,18 @@ fn confirm_cursor_early(
     let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, source) else {
         return;
     };
-    if let Some(stream) = session_registry.stream_mut(source)
-        && let Err(e) = write_message(
-            stream,
-            &InstanceMessage::CursorByte {
-                buffer_id,
-                byte_pos,
-            },
-        )
-    {
-        // The tick's own write will fail the same way and begin the
-        // drain there (E9 fix round 4), where the cleanup lives.
-        eprintln!("pmacs: early CursorByte for {source:?} failed: {e}");
-    }
+    // A failed write begins the drain here, through the one path (E10d),
+    // so the tick writes nothing after it.
+    write_to_session(
+        editor,
+        session_registry,
+        source,
+        &InstanceMessage::CursorByte {
+            buffer_id,
+            byte_pos,
+        },
+        || format!("early CursorByte for {source:?} failed"),
+    );
 }
 
 fn document_cursor_byte(
@@ -5417,7 +5511,7 @@ mod tests {
             (live_grid_peer, live_grid_server),
             (dead_grid_peer, dead_grid_server),
         ] {
-            registry.session_mut(peer).expect("registered peer").stream = Some(stream);
+            registry.install_stream(peer, stream);
         }
         let published_buffer = crate::buffer::BufferId::from_raw(900);
         let message = InstanceMessage::BufferSnapshot {
@@ -5480,7 +5574,7 @@ mod tests {
             client
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .expect("delivery timeout");
-            registry.session_mut(fid).expect("registered").stream = Some(server);
+            registry.install_stream(fid, server);
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: doc_buf,
                 crdt_snapshot: vec![1, 2, 3],
@@ -5498,7 +5592,7 @@ mod tests {
         // The PANEL-only buffer's snapshot must NOT be delivered.
         {
             let (server, mut client) = UnixStream::pair().expect("socketpair");
-            registry.session_mut(fid).expect("registered").stream = Some(server);
+            registry.install_stream(fid, server);
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: panel_buf,
                 crdt_snapshot: vec![4, 5, 6],
@@ -5513,6 +5607,106 @@ mod tests {
                  document mirror"
             );
         }
+    }
+
+    /// E10d.2 --- the one path, at its seam. A live session's write goes
+    /// through and arrives (the control); a write to a socket whose peer
+    /// has shut its read side fails once, its error reported once, and the
+    /// stream leaves its session, which is now draining, for the dispatcher
+    /// and for `pmacs.frontend.attached_count` alike; a second write
+    /// through the path writes nothing and reports no failure, because
+    /// there is no stream left to write to.
+    ///
+    /// Linux alone, as E9's drain rows are: macOS lets a write to a peer
+    /// that shut its read side succeed (E8d.4's finding), so the
+    /// precondition cannot be made there, and this row failed both macOS
+    /// legs of PR #408's first run at "a write to a peer that stopped
+    /// reading fails".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn e10d_2_the_path_ends_a_session_s_output_at_its_first_failed_write() {
+        let editor = EditorState::new();
+        let caps = crate::protocol::NegotiatedCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        };
+        let live = FrontendId(40);
+        let dead = FrontendId(41);
+        let mut registry = SessionRegistry::new();
+        for (fid, slot) in [(live, 0), (dead, 1)] {
+            registry.register_session(
+                fid,
+                crate::presence::SessionState::new(PROTOCOL_VERSION, caps, slot),
+            );
+        }
+        let (live_server, mut live_client) = UnixStream::pair().expect("live socketpair");
+        let (dead_server, dead_client) = UnixStream::pair().expect("dead socketpair");
+        dead_client
+            .shutdown(Shutdown::Read)
+            .expect("the peer stops reading");
+        registry.install_stream(live, live_server);
+        registry.install_stream(dead, dead_server);
+        let message = InstanceMessage::Signal(InstanceSignal::Bell);
+
+        let mut reported = Vec::new();
+        assert!(
+            write_to_session(&editor, &mut registry, live, &message, || {
+                reported.push(live);
+                String::new()
+            }),
+            "a live session's write goes through"
+        );
+        live_client
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("read timeout");
+        assert_eq!(
+            read_message::<InstanceMessage>(&mut live_client).expect("the bell arrives"),
+            message
+        );
+
+        assert!(
+            !write_to_session(&editor, &mut registry, dead, &message, || {
+                reported.push(dead);
+                "the first write".to_owned()
+            }),
+            "a write to a peer that stopped reading fails"
+        );
+        assert_eq!(reported, vec![dead], "its failure is reported once");
+        assert!(
+            registry.session(dead).is_some_and(|s| !s.has_stream()),
+            "the stream left its session"
+        );
+        assert!(registry.is_draining(dead), "the drain has begun");
+        assert!(
+            editor.core.borrow().draining_frontends.contains(&dead),
+            "the editor counts it draining"
+        );
+        assert!(
+            registry.session_state(dead).is_some(),
+            "the session stays registered for its input"
+        );
+
+        assert!(
+            !write_to_session(&editor, &mut registry, dead, &message, || {
+                reported.push(dead);
+                "a second write".to_owned()
+            }),
+            "a second write through the path does not go through"
+        );
+        assert_eq!(
+            reported,
+            vec![dead],
+            "nothing was written after the failed write, so nothing failed again"
+        );
+        assert!(
+            !registry.is_draining(live)
+                && registry
+                    .session(live)
+                    .is_some_and(crate::presence::Session::has_stream),
+            "the live session is untouched"
+        );
+        editor.process_supervisor.borrow_mut().shutdown();
     }
 
     // ---- GPU terminal input: the double terminal-layout sync -------------
@@ -5976,7 +6170,7 @@ mod tests {
         assert!(
             session_registry
                 .session(second)
-                .is_none_or(|session| session.stream.is_none()),
+                .is_none_or(|session| !session.has_stream()),
             "no stream"
         );
         assert!(
@@ -12114,9 +12308,9 @@ mod tests {
                 0,
             ),
         );
+        session_registry.install_stream(fid, server);
         {
             let session = session_registry.session_mut(fid).expect("registered");
-            session.stream = Some(server);
             session.term_size = Some(CellSize::new(24, 80));
             session.last_dispatch_idle_sent = Some(true);
         }

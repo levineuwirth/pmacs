@@ -146,13 +146,13 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   version is settled by the frontend's counter-offer in `AttachRequest`
   and `negotiated_session_version`. Moving the baseline is a deliberately
   incompatible act reserved for a change that cannot be additive.
-- `Hello` carries the baseline alone, so no client knows the daemon's
-  ceiling before its offer is answered; what the daemon lacks is learned
-  from `VersionMismatch`. `Resume`, a step after the bootstrap, is read by
-  the per-attach thread before the session exists, only from a session
-  whose version and `semantic_render` admit it, else a `ProtocolError`. A
-  live token's socket is shut unanswered; a failed write stops only the
-  output, and the session lives until EOF or `WRITE_FAILURE_DRAIN`.
+- `Hello` carries the baseline alone, so no client knows the daemon's ceiling
+  before its offer is answered; what the daemon lacks is learned from
+  `VersionMismatch`. `Resume`, a step after the bootstrap, is read by the
+  per-attach thread before the session exists, only from a session whose
+  version and `semantic_render` admit it, else a `ProtocolError`. A live
+  token's socket is shut unanswered; the first socket error on any route stops
+  only the output, and the session lives until EOF or `WRITE_FAILURE_DRAIN`.
 - A new wire message is an appended variant, bumping `PROTOCOL_VERSION`
   and extending `SUPPORTED_PROTOCOL_VERSIONS`, guarded by a byte pin on
   the previous final variant: an appended variant's own round-trip cannot
