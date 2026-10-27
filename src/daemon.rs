@@ -477,11 +477,7 @@ impl DaemonState {
     }
 
     fn build_identity(&self) -> InstanceIdentity {
-        InstanceIdentity::for_running_process(
-            env!("CARGO_PKG_VERSION"),
-            self.instance_name.clone(),
-            self.started,
-        )
+        crate::protocol::running_identity(self.instance_name.clone(), self.started)
     }
 
     /// `--socket NAME` value the daemon was launched with, or `None`
