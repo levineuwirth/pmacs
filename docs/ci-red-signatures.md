@@ -8514,6 +8514,109 @@ So, at E10d's fix round 1: `main` is green at `658051f`, and PR #408 is red at i
 #282's eighth occurrence, which takes #282 to eight, on `Test (ubuntu-latest / luajit)`. #311 met
 only local samples here and does not move. Every other count above stands.
 
+### E10d's close: PR #408 green on attempt 2 at `50005da`, merged as `4c57353`, `main` green there
+
+Recorded 2026-10-27 at E10d's close. The owner merged PR #408 at 12:39:50Z as `4c57353`, a squash of
+`50005da` on `470f5dc` whose diff is the head's against its base, byte for byte; its tree is the
+head's but for this file. Every run was read from the jobs endpoint by conclusion, and every test
+leg of each code-bearing run through its own log, fetched with escape sequences allowed and
+stripped, each `running` line paired with its own result line. Every run id and job id below was
+searched for in this file before it was written, and only attempt 1's run id was here. Nothing was
+rerun but attempt 2, which the owner ran.
+
+#### PR #408's `CI` 40392704632 at `50005da`, attempt 2: green
+
+Attempt 1 is recorded above, red on #282's eighth occurrence. The owner reran its failed jobs
+(`gh run rerun 40392704632 --failed`) on 2026-10-26: attempt 2, `pull_request`, the same merge
+`a18f1a0` into `658051f`, ran from 21:15:30Z to 21:49:02Z (the API's `run_started_at` and
+`updated_at`): `success`. Only `Test (ubuntu-latest / luajit)` ran again; every other job is
+carried from attempt 1 under a new id with attempt 1's times, and `Docs consistency` was skipped
+again.
+
+Tally (pr408-ci-50005da-attempt2): 19 = 18 + 1.
+
+Tally (pr408-ci-50005da-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 121852854580 | success |
+| Test (ubuntu-latest / luajit) | 121852854729 | success |
+| Test (ubuntu-latest / lua54) | 121852855458 | success |
+| Lint (lua54) | 121852855478 | success |
+| M1 Acceptance Gates | 121852856257 | success |
+| Docs consistency | 121852856553 | skipped |
+| M4 Perf Gates | 121852856561 | success |
+| Test (macos-latest / luajit) | 121852856612 | success |
+| Perf budgets (debug) | 121852856661 | success |
+| M10 Perf Gates (crdt) | 121852856800 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 121852857224 | success |
+| Test (macos-latest / lua54) | 121852857636 | success |
+| M6 Perf Gates | 121852857718 | success |
+| Lint (luajit) | 121852899881 | success |
+| Commit attribution (D9) | 121852905499 | success |
+| Format | 121852907121 | success |
+| GPU Render (headless) | 121852911603 | success |
+| Test (crdt) | 121852919845 | success |
+| M5 Perf Gates | 121852921857 | success |
+
+Tally (pr408-ci-50005da-attempt2-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit)` 121852854729, 21:15:36Z to 21:49:00Z: its test step paired 217
+  `running` lines with 217 `test result: ok`, 5,309 passed, 67 ignored, the rename row `ok`; its
+  doc-test and `pmacs-protocol` steps ran, the same binaries and counts as attempt 1's `Test
+  (ubuntu-latest / lua54)`; `WouldBlock` appears nowhere in its log. Under the rerun rule this
+  establishes non-reproduction and nothing more: #282 stays at eight.
+
+#### `main` at `4c57353`, E10d's squash merge of PR #408: green
+
+`CI` 40505543789 at `4c57353`, attempt 1 of 1, `push`, created 2026-10-27T12:39:55Z and completed
+13:23:36Z (the API's `updated_at`): `success`.
+
+Tally (main-ci-4c57353): 19 = 18 + 1.
+
+Tally (main-ci-4c57353-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 122193800951 | success |
+| Changed paths | 122193801305 | success |
+| Commit attribution (D9) | 122193801384 | success |
+| Lint (lua54) | 122193801603 | success |
+| Lint (luajit) | 122193801645 | success |
+| Perf budgets (debug) | 122193934899 | success |
+| M4 Perf Gates | 122193934930 | success |
+| M5 Perf Gates | 122193934944 | success |
+| M1 Acceptance Gates | 122193934946 | success |
+| Test (macos-latest / luajit) | 122193934973 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 122193935000 | success |
+| Test (crdt) | 122193935045 | success |
+| M10 Perf Gates (crdt) | 122193935071 | success |
+| Test (macos-latest / lua54) | 122193935110 | success |
+| GPU Render (headless) | 122193935118 | success |
+| Test (ubuntu-latest / lua54) | 122193935122 | success |
+| Test (ubuntu-latest / luajit) | 122193935144 | success |
+| M6 Perf Gates | 122193935366 | success |
+| Docs consistency | 122193936803 | skipped |
+
+Tally (main-ci-4c57353-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs, each through its own log: `Test (crdt)` 122193935045 ran 12:40:16Z to
+  13:22:39Z, 42m23s, pairing 216 `running` lines with 216 `test result: ok`, 5,256 passed, 67
+  ignored; `Test (ubuntu-latest / luajit, no crdt)` 122193935000, 217 pairs, 4,731 passed, 53
+  ignored; `Test (ubuntu-latest / lua54)` 122193935122 and `Test (ubuntu-latest / luajit)`
+  122193935144, 217 pairs each, 5,309 passed, 67 ignored; `Test (macos-latest / luajit)`
+  122193934973 and `Test (macos-latest / lua54)` 122193935110, 218 pairs each, 5,265 passed, 65
+  ignored: PR #408's head figures on every leg. `test result: FAILED` and `WouldBlock` appear in no
+  test leg's log.
+- `Perf budgets (debug)` 122193934899: `every budget ran and held`,
+  `opening_two_thousand_files_stays_within_budget ... ok`.
+
+`Grammar fuzz` 40505543087 at `4c57353`, `success`, both arms deciding `run=false` (`no changed path
+can change the grammar set`): `ubsan` 122193798256, `asan-strict` 122193798499.
+
+So, at E10d's close: `main` is green at `4c57353`, and PR #408 merged green at `50005da` on its
+attempt 2. Nothing moves: #282 stays at eight. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
