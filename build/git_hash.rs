@@ -58,14 +58,16 @@ pub fn embed() {
 /// detached HEAD), the index, and the ref HEAD names, which a commit on the
 /// branch rewrites. A packed ref has no file of its own until the next
 /// commit writes one, which nothing declared would see, so while the ref is
-/// packed `packed-refs` stands in for it, with HEAD's reflog, which every
-/// commit appends to, or where no reflog is kept (`core.logAllRefUpdates`
-/// off) the nearest directory under `refs` above the loose file, which the
-/// commit's new file changes. A reftable repository (git 2.45 and later)
-/// has no loose ref, no `packed-refs` and no reflog file, and its HEAD is a
-/// stub no commit rewrites: every ref update rewrites the `tables.list` of
-/// the stack it lands in, the checkout's own (a worktree's HEAD) and the
-/// common one (its branches), so both stand in (E10h review 1, Low 2).
+/// packed `packed-refs`, HEAD's reflog, which every commit here appends to,
+/// and the nearest directory under `refs` above the loose file stand in for
+/// it: whatever writes that file changes the directory, a commit where no
+/// reflog is kept (`core.logAllRefUpdates` off) and an `update-ref` from
+/// another checkout of the repository alike. A reftable repository (git
+/// 2.45 and later) has no loose ref, no `packed-refs` and no reflog file,
+/// and its HEAD is a stub no commit rewrites: every ref update rewrites the
+/// `tables.list` of the stack it lands in, the checkout's own (a worktree's
+/// HEAD) and the common one (its branches), so both stand in (E10h review
+/// 1, Low 2).
 pub fn watched(root: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = ["HEAD", "index"]
         .into_iter()
@@ -82,10 +84,8 @@ pub fn watched(root: &Path) -> Vec<PathBuf> {
             Some(loose) if loose.exists() => paths.push(loose),
             loose => {
                 paths.extend(git_path(root, "packed-refs"));
-                match git_path(root, "logs/HEAD").filter(|reflog| reflog.exists()) {
-                    Some(reflog) => paths.push(reflog),
-                    None => paths.extend(loose.and_then(|loose| nearest_refs_dir(root, &loose))),
-                }
+                paths.extend(git_path(root, "logs/HEAD"));
+                paths.extend(loose.and_then(|loose| nearest_refs_dir(root, &loose)));
             }
         }
     }

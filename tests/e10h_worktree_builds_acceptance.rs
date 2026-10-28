@@ -594,6 +594,53 @@ fn e10h_review1_p3_in_a_clone_a_packed_ref_without_reflogs_moves_the_hash() {
     packed_ref_without_reflogs_follows_a_commit(Layout::Clone);
 }
 
+/// Fix round 1 (review 1, Low 2, its prescription whole): a packed branch
+/// that keeps a reflog, moved by `update-ref` from the main checkout,
+/// writes its loose file in the common `refs/heads` and appends to no
+/// reflog this worktree's script watches. At a13c861 the directory was
+/// watched only where no reflog was kept, so the build after the move was
+/// `Fresh` and embedded the commit before; the nearest directory under
+/// `refs` is now watched whenever the ref is packed.
+#[test]
+fn e10h_fixes1_in_a_worktree_a_packed_branch_moved_from_another_checkout_moves_the_hash() {
+    let lab = Lab::new();
+    let checkout = lab.worktree();
+    git(&checkout.root, &["pack-refs", "--all"]);
+    let loose = checkout.root.join(git(
+        &checkout.root,
+        &["rev-parse", "--git-path", "refs/heads/wt"],
+    ));
+    assert!(!loose.exists(), "the worktree's branch is packed");
+    let reflog = checkout.root.join(git(
+        &checkout.root,
+        &["rev-parse", "--git-path", "logs/HEAD"],
+    ));
+    assert!(reflog.exists(), "the worktree keeps a reflog");
+    checkout.build(true, None);
+    let again = checkout.build(true, None);
+    assert!(
+        again.compiled_nothing(),
+        "a second release build compiles nothing:\n{}",
+        again.stderr
+    );
+    let before = checkout.head();
+    assert_eq!(again.hash, before);
+    let origin = lab.dir.path().join("origin");
+    let moved = git(
+        &origin,
+        &["commit-tree", "wt^{tree}", "-p", "wt", "-m", "moved"],
+    );
+    git(&origin, &["update-ref", "refs/heads/wt", &moved]);
+    assert_ne!(checkout.head(), before, "the move reached the worktree");
+    let after = checkout.build(true, None);
+    assert_eq!(
+        after.hash,
+        checkout.head(),
+        "a packed branch moved from another checkout moves the hash:\n{}",
+        after.stderr
+    );
+}
+
 /// P4 (review 1, Low 3): every identity this process gives for itself
 /// (the daemon's `Hello`, `pmacs.instance.*`, `*pmacs-instance*`) is built
 /// by `protocol::running_identity`, the one place `pmacs` reads the hash
