@@ -202,11 +202,15 @@ fn quantile(values: &[Duration], q: usize) -> Duration {
 /// median and 33 at the 95th percentile, the burst within twice the
 /// 100-line one) is the record's, read from the same figures in E10k's
 /// handoff; these thresholds hold the head to what it measured.
-const BOUNDS: [(&str, (u64, u64, u64), (u64, u64, u64)); 3] = [
+const BOUNDS: [(&str, Millis, Millis); 3] = [
     ("in process", (45, 85, 95), (1400, 1550, 2850)),
     ("attached", (2, 4, 260), (11, 25, 290)),
     ("gpu", (17, 45, 17), (85, 120, 105)),
 ];
+
+/// A key's median, its 95th percentile and a burst's median, in
+/// milliseconds: one build's thresholds in [`BOUNDS`].
+type Millis = (u64, u64, u64);
 
 /// One route's thresholds in this build.
 struct Bound {
@@ -217,11 +221,9 @@ struct Bound {
 
 /// The route's thresholds in this build.
 fn bound(route: &str) -> Bound {
-    let (release, debug) = BOUNDS
-        .iter()
-        .find(|(r, _, _)| *r == route)
-        .map(|(_, release, debug)| (release, debug))
-        .unwrap_or_else(|| panic!("no bound for {route}"));
+    let Some((_, release, debug)) = BOUNDS.iter().find(|(r, _, _)| *r == route) else {
+        panic!("no bound for {route}");
+    };
     let (p50, p95, burst) = if cfg!(debug_assertions) {
         debug
     } else {
