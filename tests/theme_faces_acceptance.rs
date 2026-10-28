@@ -687,19 +687,35 @@ fn bare_ui_merge_ships_the_catch_all_without_touching_spans() {
     exec(&state, r"pmacs.theme.merge { ui = { fg = 3 } }");
     let next = sem.render_frame(&state);
     let facts = theme_facts_of(&next).expect("bare ui bumps face_epoch and emits");
-    // Seventeen: thirteen since E2.6 added `ui.caret`, E3.3 added
+    // Twenty-five: thirteen since E2.6 added `ui.caret`, E3.3 added
     // `ui.current-line`, and E8.3 the popup's three, `ui.popup`,
-    // `ui.popup.active-parameter` and `ui.popup.footer`. The count is a
-    // literal on purpose — `UI_FACES` is private to `semantic_render` —
-    // so a face added without a thought about the catch-all fails here
-    // by name.
-    assert_eq!(facts.len(), 17, "the catch-all resolves every stage-1 face");
+    // `ui.popup.active-parameter` and `ui.popup.footer`; E10g.2 the eight
+    // chrome faces of the surfaces the GPU painted from constants,
+    // `ui.divider`, the menu's three, the minimap's two and the
+    // scrollbar's two. E10g.2's `ui.default` is not among them: the
+    // buffer face is read by its exact name, since the buffer is not
+    // chrome. The count is a literal on purpose — `UI_FACES` is private
+    // to `semantic_render` — so a face added without a thought about the
+    // catch-all fails here by name.
+    assert_eq!(facts.len(), 25, "the catch-all resolves every stage-1 face");
+    assert!(
+        !facts.iter().any(|f| f.name == "ui.default"),
+        "the buffer face is not reached through the catch-all"
+    );
     for expected in [
         "ui.caret",
         "ui.current-line",
         "ui.popup",
         "ui.popup.active-parameter",
         "ui.popup.footer",
+        "ui.divider",
+        "ui.menu",
+        "ui.menu.selected",
+        "ui.menu.separator",
+        "ui.minimap",
+        "ui.minimap.thumb",
+        "ui.scrollbar",
+        "ui.scrollbar.thumb",
     ] {
         assert!(
             facts.iter().any(|f| f.name == expected),
