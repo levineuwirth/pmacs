@@ -49,6 +49,7 @@ budgets() {
 --test finder_acceptance	finder_lists_a_20k_file_tree_measured
 --test e7h_grammar_gate_acceptance	e7h_budget_cancellation_lands_within_a_millisecond
 --test e10c_buffer_names_acceptance	opening_two_thousand_files_stays_within_budget
+--test e10k_large_buffer_typing	e10k_typing_at_the_end_of_a_large_buffer_in_process e10k_typing_at_the_end_of_a_large_buffer_attached e10k_typing_at_the_end_of_a_large_buffer_gpu
 EOF
 }
 

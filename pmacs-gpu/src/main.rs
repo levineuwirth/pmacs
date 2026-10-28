@@ -1605,6 +1605,9 @@ fn run_probe(socket: &Path, report: &Path) -> i32 {
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "latency") => {
             run_latency_probe(socket, report, &text)
         }
+        Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "keypaint") => {
+            run_keypaint_probe(socket, report, &text)
+        }
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "chord") => {
             run_chord_probe(socket, report, &text)
         }
@@ -3536,6 +3539,361 @@ fn marked_covers(marked: &[(u64, u64)], start: u64, end: u64) -> bool {
         }
     }
     at >= end
+}
+
+/// The keypaint probe's session (E10k.1): the production `App`, the
+/// attach events behind it, and the offscreen target a timed frame is
+/// rendered into.
+struct KeypaintSession {
+    app: App,
+    rx: std::sync::mpsc::Receiver<AttachEvent>,
+    view: wgpu::TextureView,
+    disconnect: Option<String>,
+}
+
+impl KeypaintSession {
+    fn state(&self) -> &State {
+        self.app.state.as_ref().expect("the probe's state")
+    }
+
+    /// Apply the attach events that arrive within `wait` of each other,
+    /// the first waited on for `wait`; whether any arrived.
+    fn pump(&mut self, wait: std::time::Duration) -> bool {
+        let mut any = false;
+        while let Ok(event) =
+            self.rx
+                .recv_timeout(if any { std::time::Duration::ZERO } else { wait })
+        {
+            any = true;
+            if let AttachEvent::Disconnected(reason) = &event {
+                self.disconnect = Some(reason.clone());
+            }
+            self.app.dispatch_app_event(AppEvent::Attach(event));
+        }
+        any
+    }
+
+    /// The caret is at `byte`, confirmed by the daemon and fresh, and
+    /// the dispatcher idle: a key typed now goes the optimistic route
+    /// if any does.
+    fn settled_at(&self, byte: u64) -> bool {
+        let s = self.state();
+        s.own_cursor.map(|c| c.byte) == Some(byte)
+            && s.optimistic_cursor_floor.is_none()
+            && s.cursor_fresh
+            && s.dispatch_idle
+    }
+
+    /// Whether `typed` stands at `at`, read where it lands: the probe
+    /// never copies the text.
+    fn landed(&self, at: usize, typed: &str) -> bool {
+        self.state()
+            .current_text
+            .get(at..at + typed.len())
+            .is_some_and(|got| got == typed)
+    }
+
+    /// Render one frame and wait until the GPU has finished it.
+    fn paint(&mut self) {
+        let state = self.app.state.as_mut().expect("the probe's state");
+        state.render_to_view(&self.view);
+        let _ = state.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// Pump until `done` has held for `hold` without a break, or
+    /// `limit` passes; whether `done` held. Not silence: the daemon
+    /// sends its status facts on every tick it produces, so a semantic
+    /// session is never quiet for long.
+    fn settle(
+        &mut self,
+        hold: std::time::Duration,
+        limit: std::time::Duration,
+        done: &dyn Fn(&Self) -> bool,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        let mut held_since: Option<std::time::Instant> = None;
+        loop {
+            let now = std::time::Instant::now();
+            if done(self) {
+                let since = *held_since.get_or_insert(now);
+                if now.duration_since(since) >= hold {
+                    return true;
+                }
+            } else {
+                held_since = None;
+            }
+            if now.duration_since(start) >= limit || self.disconnect.is_some() {
+                return done(self);
+            }
+            self.pump(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn type_char(&mut self, ch: char) {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        self.app
+            .apply_keyboard(&Key::Character(s.into()), Some(s), None);
+    }
+}
+
+/// E10k.1 --- the time from a key's arrival at the GPU to the first
+/// frame painted with its character, through the production `App`
+/// dispatch against a real daemon, at the end of the buffer's last line.
+///
+/// `PMACS_GPU_PROBE_TYPE_TEXT` is a `|`-separated list of bursts
+/// (E10k's suite types `kxv|.,;`: letters, which extend the word before
+/// the caret, and punctuation, which starts no completion). The probe
+/// walks the caret to the end of the last line (`M->`, `C-b`), then for
+/// each burst, `PMACS_GPU_PROBE_SAMPLES` times (eight by default): types
+/// its keys one at a time, each once the caret has stood confirmed for
+/// `PMACS_GPU_PROBE_GAP_MS` (150 by default),
+/// timing each from the call to `apply_keyboard` to the end of the
+/// first frame rendered with its character in the text; deletes them
+/// with Backspace; types the whole burst at once and times it until a
+/// frame shows all of it; and deletes that. A frame is `render_to_view`
+/// into an offscreen target of the window's size, waited until the GPU
+/// has finished it: the windowed path without the surface's `present`.
+/// A key is optimistic when its character stood in the text the moment
+/// `apply_keyboard` returned; otherwise the probe applies the daemon's
+/// messages as they arrive until it does. The probe reads the typed
+/// bytes where they land and never copies the text, so the buffer's
+/// size costs the instrument nothing per key.
+///
+/// The report: `key.<n>=<burst>|<char>|<total_us>|<apply_us>|<paint_us>|<optimistic>`
+/// per timed key, where `apply_us` is `apply_keyboard` alone and
+/// `paint_us` the frame; `burst.<n>=<burst>|<total_us>|<optimistic>` per
+/// timed burst; `keys`, `bursts`, `text_len` and `typed_at_byte` once;
+/// and `failure` when the caret, a key or a restore did not land.
+/// Nothing is asserted here; `tests/e10k_large_buffer_typing.rs` reads
+/// the report.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-place-sample-restore session, reported line by line"
+)]
+fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::time::{Duration, Instant};
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<AttachEvent>();
+    let mut client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    let initial: Vec<AttachEvent> = client
+        .take_initial_message()
+        .map(|message| vec![AttachEvent::Message(Box::new(message))])
+        .unwrap_or_default();
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let target = state.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("pmacs-gpu keypaint target"),
+        size: wgpu::Extent3d {
+            width: state.config.width,
+            height: state.config.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: state.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut session = KeypaintSession {
+        app: App {
+            mode: Mode::Attach {
+                socket: socket.to_path_buf(),
+            },
+            proxy: None,
+            #[cfg(test)]
+            test_force_non_linux: false,
+            state: Some(state),
+            pending_events: Vec::new(),
+            attach_client: Some(client),
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            geometry: geometry::WindowGeometry::default(),
+            geometry_path: None,
+            geometry_dirty_since: None,
+            platform: Platform::current(),
+            exit_code: 0,
+            reconnect: None,
+            exit_requested: false,
+        },
+        rx,
+        view,
+        disconnect: None,
+    };
+    for event in initial {
+        session.app.dispatch_app_event(AppEvent::Attach(event));
+    }
+
+    let env_u64 = |name: &str, default: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(default)
+    };
+    let samples_wanted = env_u64("PMACS_GPU_PROBE_SAMPLES", 8).max(1);
+    let gap = Duration::from_millis(env_u64("PMACS_GPU_PROBE_GAP_MS", 150));
+    // A sample's key, its restore, or the placement may take this long
+    // before the probe calls it failed (a slow base at 18 MiB).
+    let per_step = Duration::from_millis(env_u64("PMACS_GPU_PROBE_SAMPLE_MS", 60_000));
+    let bursts: Vec<String> = text
+        .split('|')
+        .filter(|b| !b.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let mut out = String::new();
+    let mut failure: Option<String> = None;
+    let mut keys = 0usize;
+    let mut burst_count = 0usize;
+
+    // The document and a caret, then the end of its last line.
+    let placed = session.settle(gap, per_step, &|s| {
+        let st = s.state();
+        st.current_buffer_id.is_some() && st.own_cursor.is_some() && st.dispatch_idle
+    });
+    let text_len = session.state().current_text.len();
+    let at = if session.state().current_text.ends_with('\n') {
+        text_len.saturating_sub(1)
+    } else {
+        text_len
+    };
+    if placed {
+        if let Some(client) = session.app.attach_client.as_ref() {
+            let _ = client.send_key(ProtocolKey::Char('>'), Modifiers::ALT);
+            let _ = client.send_key(ProtocolKey::Char('b'), Modifiers::CTRL);
+        }
+        if !session.settle(gap, per_step, &|s| s.settled_at(at as u64)) {
+            failure = Some(format!(
+                "the caret did not reach byte {at}: caret={:?} fresh={} idle={}",
+                session.state().own_cursor.map(|c| c.byte),
+                session.state().cursor_fresh,
+                session.state().dispatch_idle
+            ));
+        }
+    } else {
+        failure = Some(String::from("no document and caret arrived"));
+    }
+    let tail_from = at.saturating_sub(16);
+    let tail: String = session
+        .state()
+        .current_text
+        .get(tail_from..)
+        .unwrap_or_default()
+        .to_owned();
+    let restored = |s: &KeypaintSession| {
+        s.state().current_text.len() == text_len
+            && s.state().current_text.get(tail_from..) == Some(tail.as_str())
+            && s.settled_at(at as u64)
+    };
+
+    'samples: for burst in &bursts {
+        let chars: Vec<char> = burst.chars().collect();
+        for _ in 0..samples_wanted {
+            if failure.is_some() {
+                break 'samples;
+            }
+            // One key at a time, each from a confirmed caret.
+            let mut typed = String::new();
+            for &ch in &chars {
+                let caret = (at + typed.len()) as u64;
+                if !session.settle(gap, per_step, &|s| s.settled_at(caret)) {
+                    failure = Some(format!("the caret did not settle at byte {caret}"));
+                    break 'samples;
+                }
+                typed.push(ch);
+                let t0 = Instant::now();
+                session.type_char(ch);
+                let applied = t0.elapsed();
+                let optimistic = session.landed(at, &typed);
+                while !session.landed(at, &typed) {
+                    if t0.elapsed() >= per_step || session.disconnect.is_some() {
+                        failure = Some(format!("{typed:?} did not land at byte {at}"));
+                        break 'samples;
+                    }
+                    session.pump(Duration::from_millis(5));
+                }
+                let before_paint = Instant::now();
+                session.paint();
+                let total = t0.elapsed();
+                let paint = before_paint.elapsed();
+                let _ = writeln!(
+                    out,
+                    "key.{keys}={burst}|{ch}|{}|{}|{}|{optimistic}",
+                    total.as_micros(),
+                    applied.as_micros(),
+                    paint.as_micros()
+                );
+                keys += 1;
+            }
+            for _ in 0..chars.len() {
+                session
+                    .app
+                    .apply_keyboard(&Key::Named(NamedKey::Backspace), None, None);
+            }
+            if !session.settle(gap, per_step, &restored) {
+                failure = Some(format!("the keys of {burst:?} were not deleted"));
+                break 'samples;
+            }
+            // The whole burst at once.
+            let t0 = Instant::now();
+            for &ch in &chars {
+                session.type_char(ch);
+            }
+            let optimistic = session.landed(at, burst);
+            while !session.landed(at, burst) {
+                if t0.elapsed() >= per_step || session.disconnect.is_some() {
+                    failure = Some(format!("the burst {burst:?} did not land at byte {at}"));
+                    break 'samples;
+                }
+                session.pump(Duration::from_millis(5));
+            }
+            session.paint();
+            let _ = writeln!(
+                out,
+                "burst.{burst_count}={burst}|{}|{optimistic}",
+                t0.elapsed().as_micros()
+            );
+            burst_count += 1;
+            for _ in 0..chars.len() {
+                session
+                    .app
+                    .apply_keyboard(&Key::Named(NamedKey::Backspace), None, None);
+            }
+            if !session.settle(gap, per_step, &restored) {
+                failure = Some(format!("the burst {burst:?} was not deleted"));
+                break 'samples;
+            }
+        }
+    }
+
+    let _ = writeln!(out, "keys={keys}");
+    let _ = writeln!(out, "bursts={burst_count}");
+    let _ = writeln!(out, "text_len={text_len}");
+    let _ = writeln!(out, "typed_at_byte={at}");
+    if let Some(reason) = &session.disconnect {
+        let _ = writeln!(out, "disconnect={reason}");
+    }
+    if let Some(reason) = &failure {
+        let _ = writeln!(out, "failure={reason}");
+    }
+    drop(target);
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!("pmacs-gpu probe: write report failed: {error}");
+        return 5;
+    }
+    0
 }
 
 /// E6b.3 --- **the instrument.** Type `text` into the attached

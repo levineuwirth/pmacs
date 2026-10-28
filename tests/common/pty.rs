@@ -113,6 +113,37 @@ pub fn spawn_pmacs_in_pty_under(
     rows: u16,
     cols: u16,
 ) -> PmacsPty {
+    spawn_tapped(wrapper, args, envs, rows, cols, None)
+}
+
+/// What pmacs wrote to its terminal, one read of the master at a time,
+/// each stamped with the instant the reader thread had it: the second
+/// half of [`spawn_pmacs_in_pty_tapped`]. A row timing what reaches the
+/// screen reads this rather than polling [`PmacsPty::output`], which
+/// copies everything written so far and says nothing of when.
+pub type OutputTap = std::sync::mpsc::Receiver<(Instant, Vec<u8>)>;
+
+/// [`spawn_pmacs_in_pty`], with every read of the master also sent,
+/// stamped, through the returned [`OutputTap`] (E10k.1's timing rows).
+/// [`PmacsPty::output`] still accumulates the whole stream.
+pub fn spawn_pmacs_in_pty_tapped(
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    rows: u16,
+    cols: u16,
+) -> (PmacsPty, OutputTap) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    (spawn_tapped(&[], args, envs, rows, cols, Some(tx)), rx)
+}
+
+fn spawn_tapped(
+    wrapper: &[&str],
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    rows: u16,
+    cols: u16,
+    tap: Option<std::sync::mpsc::Sender<(Instant, Vec<u8>)>>,
+) -> PmacsPty {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -176,10 +207,18 @@ pub fn spawn_pmacs_in_pty_under(
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => return,
-                Ok(read) => captured
-                    .lock()
-                    .expect("PTY output mutex poisoned")
-                    .extend_from_slice(&buf[..read]),
+                Ok(read) => {
+                    let at = Instant::now();
+                    captured
+                        .lock()
+                        .expect("PTY output mutex poisoned")
+                        .extend_from_slice(&buf[..read]);
+                    if let Some(tap) = &tap {
+                        // A row that stopped listening is not this
+                        // thread's failure; keep draining.
+                        let _ = tap.send((at, buf[..read].to_vec()));
+                    }
+                }
             }
         }
     });
