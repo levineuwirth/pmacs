@@ -402,3 +402,60 @@ fn e10h_a_supplied_hash_is_embedded_in_either_profile_and_watches_nothing() {
         assert_eq!(after.hash, "supplied", "release: {release}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// E10h review 1's probes (2026-10-28), committed by fix round 1 as
+// witnesses, each failing where its finding said.
+// ---------------------------------------------------------------------------
+
+/// P1 (review 1, Low 1): the root build script itself, as cargo ran it for
+/// the build this row was compiled in, declares only files that exist, and
+/// in a debug build declares none and embeds no hash. The seven rows above
+/// build a fixture whose script is `build/git_hash.rs`; nothing else reads
+/// the root `build.rs`, so a `.git/HEAD` line restored there passes them.
+/// Cargo keeps a script's stdout as `output` beside its `OUT_DIR`, a layout
+/// it does not document; a cargo that moved it fails this row on the read,
+/// never passes it. At 57cd5ac, in a worktree (the gate's layout) the
+/// script declares `.git/HEAD`, which cannot exist (#371); in a clone
+/// (CI's) it exists, and the debug assertion fails instead.
+#[test]
+fn e10h_review1_p1_the_root_build_script_declares_nothing_missing_and_nothing_in_a_debug_build() {
+    let out_dir = Path::new(env!("OUT_DIR"));
+    let output = out_dir
+        .parent()
+        .expect("OUT_DIR has a parent")
+        .join("output");
+    let text = std::fs::read_to_string(&output)
+        .unwrap_or_else(|e| panic!("the root build script's output {}: {e}", output.display()));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let declared: Vec<PathBuf> = text
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("cargo:rerun-if-changed=")
+                .or_else(|| line.strip_prefix("cargo::rerun-if-changed="))
+        })
+        .map(|path| root.join(path))
+        .collect();
+    let missing: Vec<&PathBuf> = declared.iter().filter(|path| !path.exists()).collect();
+    assert!(
+        missing.is_empty(),
+        "the root build script declares files that do not exist, so cargo reruns it \
+         and rebuilds pmacs on every invocation (#371): {missing:?}\n{text}"
+    );
+    // <target>/<profile>/build/<package>-<hash>/out
+    let profile = out_dir
+        .ancestors()
+        .nth(3)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    if profile == Some("debug") {
+        assert!(
+            declared.is_empty(),
+            "a debug build watches no file (E10h.2 as amended): {declared:?}\n{text}"
+        );
+        assert!(
+            !text.contains("rustc-env=PMACS_GIT_HASH"),
+            "a debug build embeds no hash (E10h.2 as amended):\n{text}"
+        );
+    }
+}
