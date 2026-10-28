@@ -61,6 +61,40 @@ use std::path::PathBuf;
 pub use pmacs_protocol::*;
 
 // ---------------------------------------------------------------------------
+// This process's identity
+// ---------------------------------------------------------------------------
+
+/// The short git hash this build carries: a release build's from a git
+/// checkout, which the root build script embeds (`build/git_hash.rs`), or
+/// a caller-supplied `PMACS_GIT_HASH` in any profile; `None` in a debug
+/// build, `cargo test`'s included (a `cargo test --release` is a release
+/// build).
+///
+/// Read here, in `pmacs`, because a build script's `cargo:rustc-env`
+/// reaches only its own package's crates. The `option_env!` inside
+/// [`InstanceIdentity::for_running_process`] is compiled in
+/// `pmacs-protocol`, which the root script's variable never reaches, so
+/// until E10h `build_hash` was `None` in every build whose caller did not
+/// export the variable (E10h.1 read it from a worktree's build and a
+/// plain clone's).
+pub const BUILD_HASH: Option<&str> = option_env!("PMACS_GIT_HASH");
+
+/// This process's [`InstanceIdentity`]: `pmacs`'s own version and
+/// [`BUILD_HASH`], both evaluated in this crate for the reason
+/// [`InstanceIdentity::for_running_process`] gives for the version, and
+/// the rest as that function builds it.
+#[must_use]
+pub fn running_identity(
+    instance_name: Option<String>,
+    started: std::time::Instant,
+) -> InstanceIdentity {
+    InstanceIdentity {
+        build_hash: BUILD_HASH.map(String::from),
+        ..InstanceIdentity::for_running_process(env!("CARGO_PKG_VERSION"), instance_name, started)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Attachment
 // ---------------------------------------------------------------------------
 

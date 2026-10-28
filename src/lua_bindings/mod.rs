@@ -403,11 +403,7 @@ impl LocalInstanceInfo {
     #[must_use]
     pub fn build_identity(&self) -> InstanceIdentity {
         let data = self.0.borrow();
-        InstanceIdentity::for_running_process(
-            env!("CARGO_PKG_VERSION"),
-            data.name.clone(),
-            data.started,
-        )
+        crate::protocol::running_identity(data.name.clone(), data.started)
     }
 }
 
@@ -3455,7 +3451,7 @@ fn target_to_lua_table(lua: &Lua, target: &AttachTarget) -> mlua::Result<Table> 
 /// Three functions are exposed:
 ///
 /// * `pmacs.instance.identity()` — always returns a Lua table mirroring
-///   [`InstanceIdentity::for_running_process`], built from the
+///   [`crate::protocol::running_identity`], built from the
 ///   [`LocalInstanceInfo`] app-data slot. Uptime is re-evaluated on
 ///   each call; the rest of the fields are stable across the process.
 /// * `pmacs.instance.echo_line()` — returns the single-line summary
