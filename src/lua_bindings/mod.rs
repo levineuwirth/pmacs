@@ -9236,13 +9236,24 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
         let s = syntax.clone();
         theme_mod.set(
             "define",
-            lua.create_function(move |_, (name, spec): (String, Table)| {
+            lua.create_function(move |lua, (name, spec): (String, Table)| {
                 if name.trim().is_empty() {
                     return Err(mlua::Error::external(
                         "pmacs.theme.define: a theme needs a name",
                     ));
                 }
                 let named = lua_to_named_theme(&spec)?;
+                // E10g.3: `ui.theme`'s choices are the defined names, so
+                // a theme defined after the setting (in init.lua, by a
+                // package) becomes a value it accepts.
+                if let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() {
+                    let mut registry = registry.borrow_mut();
+                    if registry.contains("ui.theme") {
+                        registry
+                            .add_choice("ui.theme", &name)
+                            .map_err(mlua::Error::external)?;
+                    }
+                }
                 s.themes().define(name, named);
                 Ok(())
             })?,

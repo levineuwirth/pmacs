@@ -458,3 +458,172 @@ fn e10g2_the_band_and_the_completion_popup_take_the_menu_faces() {
         assert_eq!(set[row + 1][label - 2].style, row_style, "{what}: kind");
     }
 }
+
+// ---------------------------------------------------------------------------
+// E10g.3 — the setting and the user's layer
+// ---------------------------------------------------------------------------
+
+/// Per-test roots: their own config dir (a real `init.lua`) and state
+/// dir (the kept choice), since both are the subject.
+fn roots_for(name: &str) -> pmacs::bootstrap::BootstrapRoots {
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("e10g")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let roots = pmacs::bootstrap::BootstrapRoots::isolated_under(&base);
+    for (_, dir) in roots.child_env() {
+        std::fs::create_dir_all(&dir).expect("create a controlled root");
+    }
+    for dir in [roots.state_dir(), roots.config_dir()] {
+        std::fs::create_dir_all(dir.expect("isolated roots name it")).expect("create");
+    }
+    roots
+}
+
+/// Two themes an `init.lua` defines, told apart by the buffer face.
+const TWO_THEMES: &str = r#"
+pmacs.theme.define("plain-a", { faces = { ["ui.default"] = { bg = {1, 1, 1} } } })
+pmacs.theme.define("plain-b", { faces = { ["ui.default"] = { bg = {2, 2, 2} } } })
+"#;
+
+/// Start an editor the way a launch does: `init` as its `init.lua`,
+/// `kept` as the choice in `pmacs.state`, then the state installed,
+/// which is when the theme is resolved.
+fn start(roots: &pmacs::bootstrap::BootstrapRoots, init: &str, kept: Option<&str>) -> EditorState {
+    let config = roots.config_dir().expect("config dir");
+    std::fs::write(config.join("init.lua"), init).expect("write init.lua");
+    let state = roots.state_dir().expect("state dir").join("theme");
+    match kept {
+        Some(name) => std::fs::write(&state, format!("{name}\n")).expect("plant"),
+        None => {
+            let _ = std::fs::remove_file(&state);
+        }
+    }
+    let s = EditorState::new_with_roots(roots);
+    s.install_state_dirs();
+    s
+}
+
+fn loaded(s: &EditorState) -> Option<String> {
+    eval(s, "return pmacs.theme.loaded()")
+}
+
+fn buffer_bg(s: &EditorState) -> Option<Color> {
+    let theme = s.syntax_registry.theme();
+    let th = theme.lock().unwrap();
+    th.buffer_face().map(|f| f.bg)
+}
+
+/// The ruled precedence, each order on its own launch: an explicit
+/// `init.lua` setting beats a kept choice, which beats the default.
+#[test]
+fn e10g3_init_lua_beats_the_kept_choice_which_beats_the_default() {
+    let roots = roots_for("precedence");
+    let set_b = format!("{TWO_THEMES}\npmacs.config.set(\"ui.theme\", \"plain-b\")\n");
+
+    let s = start(&roots, TWO_THEMES, None);
+    assert_eq!(loaded(&s).as_deref(), Some("default-dark"), "the default");
+    assert_eq!(buffer_bg(&s), None);
+    drop(s);
+
+    let s = start(&roots, TWO_THEMES, Some("plain-a"));
+    assert_eq!(loaded(&s).as_deref(), Some("plain-a"), "kept beats default");
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(1, 1, 1)));
+    let setting: String = eval(&s, "return pmacs.config.get('ui.theme')");
+    assert_eq!(setting, "plain-a", "the setting says what is showing");
+    drop(s);
+
+    let s = start(&roots, &set_b, Some("plain-a"));
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("plain-b"),
+        "init.lua beats kept"
+    );
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(2, 2, 2)));
+    drop(s);
+
+    let s = start(&roots, &set_b, None);
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("plain-b"),
+        "init.lua beats default"
+    );
+}
+
+/// `init.lua`'s own `merge` is the user layer: kept over a restored
+/// choice and over a later change of the setting, while a `set` made
+/// after a load still replaces the whole map, as documented, and is
+/// itself kept over the next load.
+#[test]
+fn e10g3_init_lua_s_own_theme_changes_are_kept_over_any_theme_loaded() {
+    let roots = roots_for("user-layer");
+    let init = format!("{TWO_THEMES}\npmacs.theme.merge {{ keyword = {{ fg = {{9, 9, 9}} }} }}\n");
+    let s = start(&roots, &init, Some("plain-a"));
+    let keyword = |s: &EditorState| -> Option<Style> {
+        let theme = s.syntax_registry.theme();
+        let th = theme.lock().unwrap();
+        th.by_capture.get("keyword").copied()
+    };
+    assert_eq!(loaded(&s).as_deref(), Some("plain-a"));
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(1, 1, 1)), "the kept theme");
+    assert_eq!(
+        keyword(&s).map(|k| k.fg),
+        Some(Color::Rgb(9, 9, 9)),
+        "and the merge"
+    );
+
+    exec(&s, r#"pmacs.config.set("ui.theme", "plain-b")"#);
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(2, 2, 2)), "the new theme");
+    assert_eq!(
+        keyword(&s).map(|k| k.fg),
+        Some(Color::Rgb(9, 9, 9)),
+        "the merge kept"
+    );
+
+    exec(&s, "pmacs.theme.set { keyword = { fg = {1, 1, 1} } }");
+    let map = |s: &EditorState| s.syntax_registry.theme().lock().unwrap().by_capture.clone();
+    assert_eq!(
+        map(&s).len(),
+        1,
+        "set replaces the whole map: {:?}",
+        map(&s)
+    );
+    exec(&s, r#"pmacs.theme.load("plain-a")"#);
+    assert_eq!(map(&s).len(), 1, "and is kept over the next load");
+    assert_eq!(keyword(&s).map(|k| k.fg), Some(Color::Rgb(1, 1, 1)));
+}
+
+/// A kept choice naming a theme that is no longer defined falls back to
+/// the default, and says so.
+#[test]
+fn e10g3_a_kept_theme_that_no_longer_exists_falls_back_with_a_message() {
+    let roots = roots_for("gone");
+    let s = start(&roots, TWO_THEMES, Some("gone"));
+    assert_eq!(loaded(&s).as_deref(), Some("default-dark"));
+    let status = s.core.borrow().status.clone();
+    assert!(
+        status.contains("the kept theme \"gone\" is not defined; using default-dark"),
+        "{status:?}"
+    );
+}
+
+/// `ui.theme`'s choices are the defined names: a name is refused until a
+/// theme is defined under it, and accepted, and loaded, after.
+#[test]
+fn e10g3_defining_a_theme_makes_it_a_choice_of_the_setting() {
+    let s = fresh();
+    let refused: String = eval(
+        &s,
+        r#"local ok, err = pcall(pmacs.config.set, "ui.theme", "later")
+           assert(not ok)
+           return tostring(err)"#,
+    );
+    assert!(refused.contains("later"), "{refused}");
+    exec(
+        &s,
+        r#"pmacs.theme.define("later", { faces = { ["ui.default"] = { bg = {3, 3, 3} } } })
+           pmacs.config.set("ui.theme", "later")"#,
+    );
+    assert_eq!(loaded(&s).as_deref(), Some("later"));
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(3, 3, 3)));
+}

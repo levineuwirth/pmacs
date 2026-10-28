@@ -1099,6 +1099,15 @@ impl EditorState {
                 include_str!("../builtin/runtime/linewrap.lua"),
             )
             .expect("load linewrap builtin chunk");
+        // E10g.3 and E10g.4: `ui.theme`, `pmacs.theme.restore` for
+        // `install_state_dirs` to call after init.lua, and the
+        // `theme-select` picker.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/theme.lua"),
+                include_str!("../builtin/runtime/theme.lua"),
+            )
+            .expect("load theme builtin chunk");
         // E7.2: the `diff` major mode (hunk motion on `n`/`p`), a mode
         // keymap like dired's. Loaded before `git.lua`, which gives
         // `*git-diff*` the mode when it creates the buffer.
@@ -1392,6 +1401,17 @@ impl EditorState {
             .exec()
         {
             eprintln!("pmacs: could not restore saved zoom: {error}");
+        }
+        // E10g.3: the theme, by the ruled precedence --- an explicit
+        // `init.lua` setting, then the picker's kept choice, then the
+        // default --- once state is readable, for the same reason.
+        if let Err(error) = self
+            .lua_host
+            .lua()
+            .load("if pmacs.theme.restore then pmacs.theme.restore() end")
+            .exec()
+        {
+            eprintln!("pmacs: could not restore the theme: {error}");
         }
     }
 
