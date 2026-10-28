@@ -115,6 +115,24 @@ pub struct CrdtState {
     _diff_subscription: loro_internal::Subscription,
 }
 
+impl Drop for CrdtState {
+    /// Dropping the document commits whatever no export has, and while
+    /// it records events (the first subscription turned that on, and
+    /// loro never turns it off) the commit clones the transaction's
+    /// whole diff for subscribers that are this state's own fields and
+    /// drop with it. An editor's edit is committed by its export, but
+    /// M10.2's bare workload commits nothing: since E10k it makes 3.6
+    /// million edits in its 30 s on CI, and that clone ran past 26 GB
+    /// and twenty minutes. So recording stops first.
+    fn drop(&mut self) {
+        self.doc
+            .inner()
+            .app_state()
+            .lock()
+            .stop_and_clear_recording();
+    }
+}
+
 impl CrdtState {
     /// Construct an empty CRDT state.
     ///
