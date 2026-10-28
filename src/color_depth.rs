@@ -384,6 +384,51 @@ impl DepthMap {
     }
 }
 
+/// E10g.6: a painted surface's two inks at 16 colors, reverse video
+/// applied: `Some(index)` for a known color, `None` for `Default` (or an
+/// RGB a 16-color frame should not hold), which is unknown.
+fn painted_inks(style: &Style) -> (Option<u8>, Option<u8>) {
+    let ink = |c: Color| match c {
+        Color::Indexed(n) => Some(n),
+        Color::Default | Color::Rgb(..) => None,
+    };
+    let (fg, bg) = (ink(style.fg), ink(style.bg));
+    if style.reverse { (bg, fg) } else { (fg, bg) }
+}
+
+/// Two inks are known to differ only when both are known and unequal:
+/// `Default` counts as unknown, never as different (E10g.6).
+fn known_to_differ(a: Option<u8>, b: Option<u8>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x != y)
+}
+
+/// E10g.6's two clauses for chrome painted at 16 colors, each surface as
+/// actually painted (`surfaces`, reverse video applied here): it differs
+/// from the `buffer` surface in foreground or background, and its
+/// foreground differs from its own background. `Default` is unknown and
+/// never different, so `Indexed(0)` against a `Default` background
+/// fails the second. One line per failure, naming the surface, the
+/// clause and the inks.
+#[must_use]
+pub fn legibility_violations(buffer: &Style, surfaces: &[(String, Style)]) -> Vec<String> {
+    let (buffer_fg, buffer_bg) = painted_inks(buffer);
+    let mut out = Vec::new();
+    for (name, style) in surfaces {
+        let (fg, bg) = painted_inks(style);
+        if !known_to_differ(fg, buffer_fg) && !known_to_differ(bg, buffer_bg) {
+            out.push(format!(
+                "{name}: does not differ from the buffer surface ({fg:?}/{bg:?} against {buffer_fg:?}/{buffer_bg:?})"
+            ));
+        }
+        if !known_to_differ(fg, bg) {
+            out.push(format!(
+                "{name}: its foreground does not differ from its background ({fg:?} on {bg:?})"
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1024,3 +1024,258 @@ fn e10g5_the_in_process_depth_follows_the_setting() {
         ColorDepth::Sixteen
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10g.6 — legible as painted
+// ---------------------------------------------------------------------------
+
+/// The two ways a terminal gets 16 colors (E10g.6): in process, each
+/// theme color its authored 16; attached, the daemon's authored 256 and
+/// then the client's fixed table.
+#[derive(Clone, Copy, Debug)]
+enum Path16 {
+    InProcess,
+    Attached,
+}
+
+fn frame_16(s: &EditorState, size: CellSize, path: Path16) -> Vec<Vec<Cell>> {
+    match path {
+        Path16::InProcess => frame_at(s, size, ColorDepth::Sixteen),
+        Path16::Attached => {
+            let mut grid = frame_at(s, size, ColorDepth::TwoFiftySix);
+            for cell in grid.iter_mut().flatten() {
+                let at16 = |c| pmacs::color_depth::reduce(c, ColorDepth::Sixteen);
+                cell.style.fg = at16(cell.style.fg);
+                cell.style.bg = at16(cell.style.bg);
+            }
+            grid
+        }
+    }
+}
+
+/// The first `(row, col)` where `text` is drawn.
+fn find_anywhere(grid: &[Vec<Cell>], text: &str) -> (usize, usize) {
+    for (row, cells) in grid.iter().enumerate() {
+        let glyphs: String = cells
+            .iter()
+            .map(|c| match c.glyph {
+                pmacs::cell::Glyph::Char(ch) => ch,
+                _ => '\0',
+            })
+            .collect();
+        if let Some(byte) = glyphs.find(text) {
+            return (row, glyphs[..byte].chars().count());
+        }
+    }
+    panic!("{text:?} is not drawn");
+}
+
+/// Every chrome surface of the grid frontend as painted at 16 colors on
+/// `path`, and the buffer surface: the modeline, the status line, the
+/// minibuffer's prompt row, its candidate band (a row and the selected
+/// one), the context menu (a row, the selected one, the rule), the
+/// completion popup (a row, the selected one) and the hover popup. A
+/// surface is sampled where its text is drawn.
+fn chrome_at_16(s: &EditorState, path: Path16) -> (Style, Vec<(String, Style)>) {
+    use pmacs::completion::{
+        CompletionEditsCarry, CompletionItemKind, CompletionPopupState, PopupCandidate,
+    };
+    let size = CellSize::new(16, 60);
+    let mut surfaces = Vec::new();
+    exec(s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+
+    let plain = frame_16(s, size, path);
+    let buffer = plain[8][30].style;
+    surfaces.push(("modeline".to_owned(), plain[14][1].style));
+    surfaces.push(("status line".to_owned(), plain[15][1].style));
+
+    let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+    let hover = pmacs::hover::Hover {
+        contents: "Hover words".into(),
+        range: None,
+    };
+    let _ = s
+        .core
+        .borrow_mut()
+        .lsp_popup_open_hover(target, Some(&hover));
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "Hover words");
+    surfaces.push(("hover popup".to_owned(), frame[row][col].style));
+    s.core.borrow_mut().lsp_popup_close();
+
+    s.core.borrow_mut().menu_open(
+        vec![
+            pmacs::menu::MenuRow::Item {
+                label: "Alpha".into(),
+                command: "editor.copy".into(),
+            },
+            pmacs::menu::MenuRow::Separator,
+            pmacs::menu::MenuRow::Item {
+                label: "Beta".into(),
+                command: "editor.paste".into(),
+            },
+        ],
+        (2, 20),
+    );
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "Alpha");
+    surfaces.push(("menu, selected row".to_owned(), frame[row][col].style));
+    surfaces.push(("menu, rule".to_owned(), frame[row + 1][col].style));
+    surfaces.push(("menu, row".to_owned(), frame[row + 2][col].style));
+    s.core.borrow_mut().menu_close();
+
+    let candidate = |label: &str| PopupCandidate {
+        carry: CompletionEditsCarry::default(),
+        label: label.to_owned(),
+        kind: CompletionItemKind::Text,
+        detail: None,
+        insert_text: label.to_owned(),
+    };
+    let popup = {
+        let core = s.core.borrow();
+        CompletionPopupState::new(
+            core.active_buffer_id(),
+            0,
+            String::new(),
+            vec![candidate("gamma"), candidate("delta")],
+            2,
+        )
+        .expect("a popup")
+    };
+    s.core.borrow_mut().completion_popup_open(popup);
+    exec(
+        s,
+        r#"pmacs.minibuffer.read {
+             prompt = "Pick: ",
+             source = function() return { "one", "two" } end,
+             on_accept = function() end,
+           }"#,
+    );
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "gamma");
+    surfaces.push((
+        "completion popup, selected row".to_owned(),
+        frame[row][col].style,
+    ));
+    surfaces.push((
+        "completion popup, row".to_owned(),
+        frame[row + 1][col].style,
+    ));
+    let (row, col) = find_anywhere(&frame, "one");
+    surfaces.push((
+        "candidate band, selected row".to_owned(),
+        frame[row][col].style,
+    ));
+    surfaces.push(("candidate band, row".to_owned(), frame[row + 1][col].style));
+    let (row, col) = find_anywhere(&frame, "Pick: ");
+    surfaces.push(("minibuffer".to_owned(), frame[row][col].style));
+    exec(s, "pmacs.minibuffer.cancel()");
+    s.core.borrow_mut().completion_popup_close();
+    (buffer, surfaces)
+}
+
+fn violations(theme: &str, path: Path16) -> Vec<String> {
+    let s = fresh();
+    exec(&s, LEGIBILITY_THEMES);
+    exec(&s, &format!("pmacs.theme.load({theme:?})"));
+    let (buffer, surfaces) = chrome_at_16(&s, path);
+    pmacs::color_depth::legibility_violations(&buffer, &surfaces)
+}
+
+/// Planted themes, one failing each clause, and one that passes. Every
+/// color is an index below 16, its own fallback on both paths.
+const LEGIBILITY_THEMES: &str = r#"
+local chrome = {
+  ["ui.default"] = { fg = 7, bg = 0 },
+  ["ui.modeline"] = { fg = 0, bg = 6 },
+  ["ui.statusline"] = { fg = 6 },
+  ["ui.minibuffer"] = { fg = 6 },
+  ["ui.menu"] = { fg = 15, bg = 4 },
+  ["ui.menu.selected"] = { fg = 0, bg = 3 },
+  ["ui.menu.separator"] = { fg = 7 },
+  ["ui.popup"] = { fg = 15, bg = 4 },
+}
+local function with(overrides)
+  local t = {}
+  for k, v in pairs(chrome) do t[k] = v end
+  for k, v in pairs(overrides) do t[k] = v end
+  return { faces = t }
+end
+pmacs.theme.define("legible", with({}))
+pmacs.theme.define("planted-same-as-buffer", with({ ["ui.modeline"] = { fg = 7, bg = 0 } }))
+-- The buffer's own pair, reversed: legible only as painted.
+pmacs.theme.define("reversed", with({ ["ui.modeline"] = { fg = 7, bg = 0, reverse = true } }))
+pmacs.theme.define("planted-fg-on-itself", with({ ["ui.modeline"] = { fg = 4, bg = 4 } }))
+-- A buffer face with no background, so a surface's Default stays the
+-- terminal's own as painted (with one, the grid fills it in).
+pmacs.theme.define("planted-black-on-default", with({
+  ["ui.default"] = { fg = 7 },
+  ["ui.modeline"] = { fg = 0 },
+}))
+"#;
+
+/// Each clause fails by name for the planted theme that breaks it, on
+/// both paths; the theme that breaks none passes, so the check can.
+#[test]
+fn e10g6_a_planted_theme_fails_each_clause_by_name() {
+    for path in [Path16::InProcess, Path16::Attached] {
+        assert_eq!(
+            violations("legible", path),
+            Vec::<String>::new(),
+            "{path:?}"
+        );
+        assert_eq!(
+            violations("reversed", path),
+            Vec::<String>::new(),
+            "{path:?}: reverse video applied"
+        );
+        let same = violations("planted-same-as-buffer", path);
+        assert_eq!(same.len(), 1, "{path:?}: {same:#?}");
+        assert!(same[0].starts_with("modeline: does not differ from the buffer surface"));
+        let itself = violations("planted-fg-on-itself", path);
+        assert_eq!(itself.len(), 1, "{path:?}: {itself:#?}");
+        assert!(itself[0].starts_with("modeline: its foreground does not differ"));
+        let black = violations("planted-black-on-default", path);
+        assert!(
+            black.contains(
+                &"modeline: its foreground does not differ from its background (Some(0) on None)"
+                    .to_owned()
+            ),
+            "{path:?}: Indexed(0) against a Default background: {black:#?}"
+        );
+    }
+}
+
+/// Every shipped theme's chrome at 16 colors, on both paths. NOT MET for
+/// `default-dark`, whose violations are pinned here as measured: it
+/// sets no buffer face (E10g.1 and E10g.2 leave every color as it was),
+/// so its buffer surface is the terminal's default pair, unknown by the
+/// row's own rule, and no surface can be shown to differ from it. The
+/// owner rules how it is judged; until then a change to what it paints
+/// shows up here.
+#[test]
+fn e10g6_every_shipped_theme_at_16_colors_default_dark_not_met() {
+    let shipped: Vec<String> = eval(&fresh(), "return pmacs.theme.names()");
+    for path in [Path16::InProcess, Path16::Attached] {
+        for theme in &shipped {
+            let s = fresh();
+            exec(&s, &format!("pmacs.theme.load({theme:?})"));
+            let (buffer, surfaces) = chrome_at_16(&s, path);
+            let found = pmacs::color_depth::legibility_violations(&buffer, &surfaces);
+            if theme == "default-dark" {
+                let clause_one = found
+                    .iter()
+                    .filter(|v| v.contains("does not differ from the buffer"))
+                    .count();
+                assert_eq!(
+                    clause_one,
+                    surfaces.len(),
+                    "{path:?}: every surface fails clause one: {found:#?}"
+                );
+                eprintln!("{path:?} default-dark: {found:#?}");
+            } else {
+                assert!(found.is_empty(), "{path:?} {theme}: {found:#?}");
+            }
+        }
+    }
+}
