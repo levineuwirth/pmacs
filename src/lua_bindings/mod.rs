@@ -740,6 +740,20 @@ pub fn config_line_wrap(lua: &Lua, buffer_id: Option<BufferId>) -> crate::view::
     }
 }
 
+/// E10g.5: `ui.color-depth` as a ceiling, `None` for `auto` or where the
+/// runtime never defined it (a bare core).
+#[must_use]
+pub fn config_color_depth(lua: &Lua) -> Option<crate::color_depth::ColorDepth> {
+    let registry = lua.app_data_ref::<config::SharedConfigRegistry>()?;
+    let borrowed = registry.borrow();
+    match borrowed.get("ui.color-depth", None) {
+        Ok(crate::config_registry::ConfigValue::Str(v)) => {
+            crate::color_depth::ColorDepth::from_setting(v)
+        }
+        _ => None,
+    }
+}
+
 /// Read a `String` setting plus the registry epoch that keys any cache
 /// built from it (Q#TC4c).
 ///

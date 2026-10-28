@@ -565,6 +565,13 @@ impl Read for KickAwareUnixReader {
 // Not part of the stable public API; reserved for internal test use.
 #[doc(hidden)]
 pub fn build_capabilities() -> FrontendCapabilities {
+    capabilities_for(crate::color_depth::ColorDepth::detect_env())
+}
+
+/// [`build_capabilities`] for a terminal detected to show `depth`
+/// (E10g.5): `true_color` says whether it shows truecolor, which is all
+/// the daemon learns of it; a client at 16 reduces what it is sent.
+fn capabilities_for(depth: crate::color_depth::ColorDepth) -> FrontendCapabilities {
     // The v0.1 TUI implements all of these; we report them honestly
     // so the daemon doesn't strip features that work fine.
     //
@@ -579,7 +586,7 @@ pub fn build_capabilities() -> FrontendCapabilities {
     FrontendCapabilities {
         synchronized_output: true,
         unicode_smp: true,
-        true_color: true,
+        true_color: depth == crate::color_depth::ColorDepth::TrueColor,
         mouse: true,
         bracketed_paste: true,
         terminal_kind: std::env::var("TERM").ok(),
@@ -2108,7 +2115,13 @@ mod tests {
         let c = build_capabilities();
         assert!(c.synchronized_output);
         assert!(c.unicode_smp);
-        assert!(c.true_color);
+        assert_eq!(
+            c.true_color,
+            crate::color_depth::ColorDepth::detect_env()
+                == crate::color_depth::ColorDepth::TrueColor
+        );
+        assert!(capabilities_for(crate::color_depth::ColorDepth::TrueColor).true_color);
+        assert!(!capabilities_for(crate::color_depth::ColorDepth::Sixteen).true_color);
         assert!(c.mouse);
         assert!(c.bracketed_paste);
         // terminal_kind depends on TERM env var; not asserted.

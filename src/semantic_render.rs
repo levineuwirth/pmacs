@@ -4449,6 +4449,34 @@ mod tests {
         );
     }
 
+    /// E10g.5 — the GPU's frames are unchanged by color depth: a
+    /// semantic session is sent a face's RGB whatever `ui.color-depth`
+    /// says, since only the grid's `RenderState` reduces.
+    #[test]
+    fn e10g5_a_semantic_session_is_sent_rgb_whatever_the_depth() {
+        let state = empty_state();
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.config.set('ui.color-depth', '16')")
+            .exec()
+            .expect("set the depth");
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        merge_face(
+            &state,
+            "ui.modeline",
+            Style {
+                bg: crate::cell::Color::Rgb(1, 2, 3),
+                ..Style::default()
+            },
+        );
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("the first table");
+        assert_eq!(facts[0].name, "ui.modeline");
+        assert_eq!(facts[0].style.bg, crate::cell::Color::Rgb(1, 2, 3));
+    }
+
     #[test]
     fn theme_facts_authoritative_empty_then_silent_then_face_change_emits() {
         // Q#TH7: the first frame after viewport declaration ships the

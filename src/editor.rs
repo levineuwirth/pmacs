@@ -1415,6 +1415,21 @@ impl EditorState {
         }
     }
 
+    /// E10g.5: the depth the in-process terminal is painted at: the
+    /// lower of `ui.color-depth` and `detected`, what the terminal
+    /// showed at launch. Every theme color then takes its authored
+    /// fallback for that depth ([`crate::instance_render::RenderState`]).
+    #[must_use]
+    pub fn local_color_depth(
+        &self,
+        detected: crate::color_depth::ColorDepth,
+    ) -> crate::color_depth::ColorDepth {
+        crate::color_depth::ColorDepth::effective(
+            crate::lua_bindings::config_color_depth(self.lua_host.lua()),
+            detected,
+        )
+    }
+
     /// Final step of a **local, no-target** launch: greet an untouched
     /// `*scratch*` (journey step 4, `COHERENCE.md` §18).
     ///
@@ -5439,9 +5454,13 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
 
     let mut frontend = Frontend::new()?;
     let mut render_state = crate::instance_render::RenderState::new(frontend.size());
+    // E10g.5: what this terminal shows, once; the setting caps it per
+    // frame, so a change of `ui.color-depth` repaints at once.
+    let detected = crate::color_depth::ColorDepth::detect_env();
 
     loop {
         let size = frontend.size();
+        render_state.set_color_depth(state.local_color_depth(detected));
         let _ = state.sync_terminal_layout(FrontendId::LOCAL, size);
         let terminal_snapshots = state.prepare_terminal_views(FrontendId::LOCAL, size);
         let mut messages =

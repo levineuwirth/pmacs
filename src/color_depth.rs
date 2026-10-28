@@ -40,6 +40,72 @@ pub enum ColorDepth {
 }
 
 impl ColorDepth {
+    /// E10g.5: what a terminal shows, from its `TERM`: sixteen only
+    /// where the name positively has no 256 colors --- `linux`, a `vt`
+    /// and a model number (`vt100`, `vt220`), a bare `xterm` or
+    /// `screen` --- and truecolor otherwise, which is what was always
+    /// sent, wherever the name says nothing for certain: `COLORTERM`
+    /// is not read, since `ssh` does not forward it by default and its
+    /// absence proves nothing. A terminal that shows 256 is named so by
+    /// `ui.color-depth`.
+    #[must_use]
+    pub fn detect(term: Option<&str>) -> Self {
+        match term {
+            Some("linux" | "xterm" | "screen") => Self::Sixteen,
+            Some(t)
+                if t.strip_prefix("vt")
+                    .is_some_and(|model| model.starts_with(|c: char| c.is_ascii_digit())) =>
+            {
+                Self::Sixteen
+            }
+            _ => Self::TrueColor,
+        }
+    }
+
+    /// [`Self::detect`] from this process's `TERM`.
+    #[must_use]
+    pub fn detect_env() -> Self {
+        Self::detect(std::env::var("TERM").ok().as_deref())
+    }
+
+    /// `ui.color-depth`'s value as a ceiling: `None` for `auto` (and
+    /// anything unknown), which leaves the detected depth alone.
+    #[must_use]
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "truecolor" => Some(Self::TrueColor),
+            "256" => Some(Self::TwoFiftySix),
+            "16" => Some(Self::Sixteen),
+            _ => None,
+        }
+    }
+
+    /// The depth a terminal is painted at: the lower of the setting and
+    /// what was detected.
+    #[must_use]
+    pub fn effective(setting: Option<Self>, detected: Self) -> Self {
+        setting.map_or(detected, |s| s.min(detected))
+    }
+
+    /// The depth the daemon paints an attached terminal at: the lower of
+    /// the setting and what its frontend detected, at the granularity
+    /// the wire carries (`FrontendCapabilities.true_color`): truecolor,
+    /// or 256 for anything lower. A client that detected 16 reduces the
+    /// 256 itself ([`reduce_spans_to_16`]); an authored 16-color
+    /// fallback on attach would need a message of its own.
+    #[must_use]
+    pub fn attached(setting: Option<Self>, true_color: bool) -> Self {
+        let detected = if true_color {
+            Self::TrueColor
+        } else {
+            Self::TwoFiftySix
+        };
+        match Self::effective(setting, detected) {
+            Self::TrueColor => Self::TrueColor,
+            _ => Self::TwoFiftySix,
+        }
+    }
+
     /// The largest index a color may carry at this depth, or `None` at
     /// truecolor, where nothing is reduced.
     #[must_use]
@@ -144,6 +210,34 @@ pub fn reduce(color: Color, depth: ColorDepth) -> Color {
         (Color::Rgb(r, g, b), ColorDepth::Sixteen) => Color::Indexed(nearest_16((r, g, b))),
         (Color::Indexed(n), ColorDepth::Sixteen) => Color::Indexed(index_to_16(n)),
     }
+}
+
+/// E10g.5: a frame's spans as a 16-color terminal is sent them by a
+/// frontend that knows no theme (the attach client): every index
+/// `16..256` through [`index_to_16`], every RGB still arriving (from a
+/// daemon that paints truecolor regardless) to the nearest of the
+/// sixteen.
+#[must_use]
+pub fn reduce_spans_to_16(spans: &[crate::cell::DiffSpan]) -> Vec<crate::cell::DiffSpan> {
+    spans
+        .iter()
+        .map(|span| crate::cell::DiffSpan {
+            start: span.start,
+            cells: span
+                .cells
+                .iter()
+                .map(|cell| crate::cell::Cell {
+                    style: Style {
+                        fg: reduce(cell.style.fg, ColorDepth::Sixteen),
+                        bg: reduce(cell.style.bg, ColorDepth::Sixteen),
+                        underline_color: reduce(cell.style.underline_color, ColorDepth::Sixteen),
+                        ..cell.style
+                    },
+                    ..cell.clone()
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// A style's three color components, named, for walking a face.
@@ -337,6 +431,108 @@ mod tests {
         assert_eq!(
             reduce(Color::Rgb(1, 2, 3), ColorDepth::TrueColor),
             Color::Rgb(1, 2, 3)
+        );
+    }
+
+    /// E10g.5's detection table: sixteen only where `TERM` positively
+    /// has no 256 colors, truecolor wherever it is unsure.
+    #[test]
+    fn e10g5_detection_is_sixteen_only_where_term_positively_says_so() {
+        for term in ["linux", "vt100", "vt220", "vt52", "xterm", "screen"] {
+            assert_eq!(
+                ColorDepth::detect(Some(term)),
+                ColorDepth::Sixteen,
+                "{term}"
+            );
+        }
+        for term in [
+            "xterm-256color",
+            "screen-256color",
+            "tmux-256color",
+            "xterm-kitty",
+            "alacritty",
+            "foot",
+            "vte-256color",
+            "vt",
+            "dumb",
+            "",
+        ] {
+            assert_eq!(
+                ColorDepth::detect(Some(term)),
+                ColorDepth::TrueColor,
+                "{term}"
+            );
+        }
+        assert_eq!(ColorDepth::detect(None), ColorDepth::TrueColor, "unset");
+    }
+
+    /// E10g.5: the effective depth is the lower of the setting and the
+    /// detection; an attached terminal's, as the daemon paints it, is
+    /// truecolor or 256, the wire's granularity.
+    #[test]
+    fn e10g5_the_setting_caps_the_detection_at_the_wire_s_granularity() {
+        use ColorDepth::{Sixteen, TrueColor, TwoFiftySix};
+        let setting = |v| ColorDepth::from_setting(v);
+        assert_eq!(setting("auto"), None);
+        assert_eq!(ColorDepth::effective(setting("auto"), TrueColor), TrueColor);
+        assert_eq!(
+            ColorDepth::effective(setting("256"), TrueColor),
+            TwoFiftySix
+        );
+        assert_eq!(ColorDepth::effective(setting("16"), TrueColor), Sixteen);
+        assert_eq!(
+            ColorDepth::effective(setting("truecolor"), Sixteen),
+            Sixteen
+        );
+        assert_eq!(ColorDepth::attached(None, true), TrueColor);
+        assert_eq!(ColorDepth::attached(None, false), TwoFiftySix);
+        assert_eq!(ColorDepth::attached(setting("256"), true), TwoFiftySix);
+        assert_eq!(
+            ColorDepth::attached(setting("16"), true),
+            TwoFiftySix,
+            "the wire carries no 16"
+        );
+        assert_eq!(
+            ColorDepth::attached(setting("truecolor"), false),
+            TwoFiftySix
+        );
+    }
+
+    /// E10g.5: the attach client's reduction at 16: an index past 15 by
+    /// the fixed table, an RGB to the nearest of the sixteen, `Default`
+    /// and the sixteen themselves untouched.
+    #[test]
+    fn e10g5_the_client_reduces_an_index_and_an_rgb_to_the_sixteen() {
+        use crate::cell::{Cell, CellCoord, DiffSpan};
+        let cell = |fg, bg| Cell {
+            style: Style {
+                fg,
+                bg,
+                ..Style::default()
+            },
+            ..Cell::default()
+        };
+        let spans = vec![DiffSpan {
+            start: CellCoord::new(0, 0),
+            cells: vec![
+                cell(Color::Indexed(252), Color::Indexed(236)),
+                cell(Color::Rgb(205, 49, 49), Color::Default),
+                cell(Color::Indexed(13), Color::Rgb(0, 0, 0)),
+            ],
+        }];
+        let reduced = reduce_spans_to_16(&spans);
+        let styles: Vec<(Color, Color)> = reduced[0]
+            .cells
+            .iter()
+            .map(|c| (c.style.fg, c.style.bg))
+            .collect();
+        assert_eq!(
+            styles,
+            vec![
+                (Color::Indexed(7), Color::Indexed(0)),
+                (Color::Indexed(1), Color::Default),
+                (Color::Indexed(13), Color::Indexed(0)),
+            ]
         );
     }
 

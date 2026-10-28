@@ -26,6 +26,19 @@ pmacs.config.define {
   mutability = "live",
 }
 
+-- E10g.5: how many colors a terminal UI paints with. `auto` is what the
+-- terminal is detected to show, from TERM alone (`ColorDepth::detect`).
+-- Lives here, in the editor (the daemon's, for an attached terminal),
+-- and the frontend's detection caps it.
+pmacs.config.define {
+  name = "ui.color-depth",
+  description = "How many colors a terminal UI paints with: auto (16 where TERM is linux, a vt model, or a bare xterm or screen; truecolor otherwise), truecolor, 256 or 16, never more than the terminal is detected to show. A theme's colors take their authored fallbacks, any other color the nearest. A terminal attached to a daemon is painted at 256 for anything below truecolor and reduces to 16 itself where it detects 16. The GPU frontend is not affected.",
+  type = "enum",
+  choices = { "auto", "truecolor", "256", "16" },
+  default = "auto",
+  mutability = "live",
+}
+
 -- Setting it loads it, from init.lua, the picker or anywhere else.
 pmacs.config.on_change("ui.theme", function(name)
   pmacs.theme.load(name)

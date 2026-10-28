@@ -19,8 +19,8 @@ use pmacs::protocol::{FrontendId, InstanceMessage};
 mod editor;
 use editor::{eval, exec};
 
-#[path = "common/iso.rs"]
-mod iso;
+mod common;
+use common::iso;
 
 fn fresh() -> EditorState {
     EditorState::new_with_roots(&iso::roots())
@@ -846,4 +846,181 @@ fn e10g4_on_select_fires_on_a_move_and_not_when_a_prompt_opens() {
     assert!(seen(&s).is_empty(), "opening called it: {:?}", seen(&s));
     down(&mut s);
     assert_eq!(seen(&s), vec!["y"], "one move, one call");
+}
+
+// ---------------------------------------------------------------------------
+// E10g.5 — color depth
+// ---------------------------------------------------------------------------
+
+/// The colors of `theme`'s faces that map to two different authored
+/// indices at one depth, as `(color, depth)`.
+fn fallback_conflicts(s: &EditorState, theme: &str) -> Vec<String> {
+    let named = s.syntax_registry.themes().get(theme).cloned().unwrap();
+    let mut seen: HashMap<(String, String), (u8, String)> = HashMap::new();
+    let mut conflicts = Vec::new();
+    for entry in &named.entries {
+        for component in Component::ALL {
+            let main = component.of(&entry.style);
+            for depth in [ColorDepth::TwoFiftySix, ColorDepth::Sixteen] {
+                let Some(index) = authored_index(main, &entry.fallbacks, component, depth) else {
+                    continue;
+                };
+                let key = (format!("{main:?}"), format!("{depth:?}"));
+                let at = format!("{} {}", entry.name, component.name());
+                match seen.get(&key) {
+                    Some((other, by)) if *other != index => {
+                        conflicts.push(format!("{key:?}: {by} -> {other}, {at} -> {index}"));
+                    }
+                    Some(_) => {}
+                    None => {
+                        seen.insert(key, (index, at));
+                    }
+                }
+            }
+        }
+    }
+    conflicts
+}
+
+/// No shipped theme gives two faces the same color with different
+/// fallbacks at one depth, so an attached terminal's map from a color
+/// back to its face's fallback is well defined. The planted theme is
+/// the control.
+#[test]
+fn e10g5_no_shipped_theme_gives_one_color_two_fallbacks() {
+    let s = fresh();
+    let shipped: Vec<String> = eval(&s, "return pmacs.theme.names()");
+    for theme in &shipped {
+        let conflicts = fallback_conflicts(&s, theme);
+        assert!(conflicts.is_empty(), "{conflicts:#?}");
+    }
+    exec(
+        &s,
+        r#"pmacs.theme.define("planted", { faces = {
+              ["ui.modeline"] = { bg = {9, 9, 9}, fallback = { [256] = { bg = 233 }, [16] = { bg = 0 } } },
+              ["ui.menu"] = { bg = {9, 9, 9}, fallback = { [256] = { bg = 234 }, [16] = { bg = 0 } } },
+           } })"#,
+    );
+    assert_eq!(fallback_conflicts(&s, "planted").len(), 1);
+}
+
+/// Attach a grid frontend declaring `true_color` to `daemon` and return
+/// its first full frame as a grid.
+fn attach_grid(
+    daemon: &common::daemon::TestDaemon,
+    size: CellSize,
+    true_color: bool,
+) -> (std::os::unix::net::UnixStream, Vec<Vec<Cell>>) {
+    use pmacs_protocol::transport::{read_message, write_message};
+    let mut stream = daemon.connect();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("read timeout");
+    let _hello: pmacs_protocol::message::Hello = read_message(&mut stream).expect("Hello");
+    let request = pmacs_protocol::message::AttachRequest {
+        protocol_version: pmacs_protocol::message::PROTOCOL_VERSION,
+        frontend_capabilities: pmacs_protocol::message::FrontendCapabilities {
+            true_color,
+            ..common::daemon::build_default_caps()
+        },
+        initial_size: size,
+    };
+    write_message(&mut stream, &request).expect("AttachRequest");
+    let mut grid = vec![vec![Cell::default(); size.cols as usize]; size.rows as usize];
+    loop {
+        let message: InstanceMessage = read_message(&mut stream).expect("a frame");
+        if let InstanceMessage::CellDelta {
+            spans,
+            full_grid: true,
+        } = message
+        {
+            for span in spans {
+                for (i, cell) in span.cells.into_iter().enumerate() {
+                    grid[span.start.row as usize][span.start.col as usize + i] = cell;
+                }
+            }
+            return (stream, grid);
+        }
+    }
+}
+
+fn frame_colors(grid: &[Vec<Cell>]) -> Vec<Color> {
+    grid.iter()
+        .flatten()
+        .flat_map(|c| colors_of(&c.style))
+        .collect()
+}
+
+const DEEP: &str = r#"
+pmacs.theme.define("deep", { faces = {
+  ["ui.modeline"] = { fg = {250, 250, 250}, bg = {0, 0, 200},
+    fallback = { [256] = { fg = 231, bg = 19 }, [16] = { fg = 15, bg = 4 } } },
+  ["ui.statusline"] = { fg = {200, 60, 60} },
+} })
+pmacs.config.set("ui.theme", "deep")
+"#;
+
+/// A daemon paints an attachment whose `true_color` is false at 256:
+/// a theme face's color as its authored 256 fallback, a color with none
+/// authored as the nearest of the 256; a truecolor attachment to the
+/// same configuration gets the RGB. `ui.color-depth` at 16 makes a truecolor attachment
+/// 256 too: the wire carries no finer depth.
+#[test]
+fn e10g5_the_daemon_paints_an_attachment_below_truecolor_at_256() {
+    let size = CellSize::new(10, 40);
+    let daemon = common::daemon::TestDaemon::spawn_with_config(DEEP);
+    let (_low_stream, low) = attach_grid(&daemon, size, false);
+    let colors = frame_colors(&low);
+    assert!(colors.contains(&Color::Indexed(231)) && colors.contains(&Color::Indexed(19)));
+    let nearest = Color::Indexed(pmacs::color_depth::nearest_256((200, 60, 60)));
+    assert!(
+        colors.contains(&nearest),
+        "the unauthored face: {nearest:?}"
+    );
+    assert!(
+        !colors.iter().any(|c| matches!(c, Color::Rgb(..))),
+        "no RGB reaches it"
+    );
+    drop(daemon);
+    // A legacy grid session is the daemon's only one, so the control
+    // attaches to a daemon of its own.
+    let daemon = common::daemon::TestDaemon::spawn_with_config(DEEP);
+    let (_high_stream, high) = attach_grid(&daemon, size, true);
+    let colors = frame_colors(&high);
+    assert!(colors.contains(&Color::Rgb(0, 0, 200)), "the control: RGB");
+    drop(daemon);
+
+    let capped = format!("{DEEP}\npmacs.config.set(\"ui.color-depth\", \"16\")\n");
+    let daemon = common::daemon::TestDaemon::spawn_with_config(&capped);
+    let (_stream, frame) = attach_grid(&daemon, size, true);
+    let colors = frame_colors(&frame);
+    assert!(colors.contains(&Color::Indexed(19)), "16 asked, 256 sent");
+    assert!(
+        !colors.contains(&Color::Indexed(4)),
+        "never the authored 16"
+    );
+}
+
+/// The in-process terminal's depth follows `ui.color-depth` live,
+/// capped by what was detected.
+#[test]
+fn e10g5_the_in_process_depth_follows_the_setting() {
+    let s = fresh();
+    assert_eq!(
+        s.local_color_depth(ColorDepth::TrueColor),
+        ColorDepth::TrueColor
+    );
+    assert_eq!(
+        s.local_color_depth(ColorDepth::Sixteen),
+        ColorDepth::Sixteen
+    );
+    exec(&s, r#"pmacs.config.set("ui.color-depth", "256")"#);
+    assert_eq!(
+        s.local_color_depth(ColorDepth::TrueColor),
+        ColorDepth::TwoFiftySix
+    );
+    assert_eq!(
+        s.local_color_depth(ColorDepth::Sixteen),
+        ColorDepth::Sixteen
+    );
 }
