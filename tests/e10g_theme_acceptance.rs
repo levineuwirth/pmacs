@@ -1174,12 +1174,25 @@ fn chrome_at_16(s: &EditorState, path: Path16) -> (Style, Vec<(String, Style)>) 
     (buffer, surfaces)
 }
 
+/// The loaded theme's chrome held to E10g.6 as ruled: the first clause
+/// only where the theme sets `ui.default`.
+fn legibility(s: &EditorState, path: Path16) -> Vec<String> {
+    let buffer_face_set = s
+        .syntax_registry
+        .theme()
+        .lock()
+        .unwrap()
+        .buffer_face()
+        .is_some();
+    let (buffer, surfaces) = chrome_at_16(s, path);
+    pmacs::color_depth::legibility_violations(&buffer, &surfaces, buffer_face_set)
+}
+
 fn violations(theme: &str, path: Path16) -> Vec<String> {
     let s = fresh();
     exec(&s, LEGIBILITY_THEMES);
     exec(&s, &format!("pmacs.theme.load({theme:?})"));
-    let (buffer, surfaces) = chrome_at_16(&s, path);
-    pmacs::color_depth::legibility_violations(&buffer, &surfaces)
+    legibility(&s, path)
 }
 
 /// Planted themes, one failing each clause, and one that passes. Every
@@ -1212,6 +1225,21 @@ pmacs.theme.define("planted-black-on-default", with({
   ["ui.default"] = { fg = 7 },
   ["ui.modeline"] = { fg = 0 },
 }))
+-- No buffer face: the menus and popups concrete, the status line and the
+-- minibuffer left to the terminal's pair, and the modeline the
+-- terminal's pair reversed, as `default-dark` paints it.
+local bare = {
+  ["ui.modeline"] = { reverse = true },
+  ["ui.menu"] = { fg = 15, bg = 4 },
+  ["ui.menu.selected"] = { fg = 0, bg = 3 },
+  ["ui.menu.separator"] = { fg = 7 },
+  ["ui.popup"] = { fg = 15, bg = 4 },
+}
+pmacs.theme.define("pair-modeline", { faces = bare })
+local itself = {}
+for k, v in pairs(bare) do itself[k] = v end
+itself["ui.modeline"] = { fg = 4, bg = 4 }
+pmacs.theme.define("planted-bare-fg-on-itself", { faces = itself })
 "#;
 
 /// Each clause fails by name for the planted theme that breaks it, on
@@ -1238,7 +1266,7 @@ fn e10g6_a_planted_theme_fails_each_clause_by_name() {
         let black = violations("planted-black-on-default", path);
         assert!(
             black.contains(
-                &"modeline: its foreground does not differ from its background (Some(0) on None)"
+                &"modeline: its foreground does not differ from its background (Index(0) on DefaultBg)"
                     .to_owned()
             ),
             "{path:?}: Indexed(0) against a Default background: {black:#?}"
@@ -1246,36 +1274,44 @@ fn e10g6_a_planted_theme_fails_each_clause_by_name() {
     }
 }
 
-/// Every shipped theme's chrome at 16 colors, on both paths. NOT MET for
-/// `default-dark`, whose violations are pinned here as measured: it
-/// sets no buffer face (E10g.1 and E10g.2 leave every color as it was),
-/// so its buffer surface is the terminal's default pair, unknown by the
-/// row's own rule, and no surface can be shown to differ from it. The
-/// owner rules how it is judged; until then a change to what it paints
-/// shows up here.
+/// Without a buffer face only the second clause judges, the terminal's
+/// pair two colors against each other: a theme whose modeline is that
+/// pair reversed passes (the first clause would fail it, the buffer
+/// surface being the same pair), and one whose modeline is 4 on 4 still
+/// fails the second clause by name, on both paths.
 #[test]
-fn e10g6_every_shipped_theme_at_16_colors_default_dark_not_met() {
+fn e10g6_without_a_buffer_face_only_the_second_clause_judges() {
+    for path in [Path16::InProcess, Path16::Attached] {
+        assert_eq!(
+            violations("pair-modeline", path),
+            Vec::<String>::new(),
+            "{path:?}: the terminal's pair, no clause one"
+        );
+        assert_eq!(
+            violations("planted-bare-fg-on-itself", path),
+            vec![
+                "modeline: its foreground does not differ from its background (Index(4) on Index(4))"
+            ],
+            "{path:?}"
+        );
+    }
+}
+
+/// Every shipped theme's chrome at 16 colors passes on both paths, as
+/// the owner ruled on 2026-10-28: `default-dark`, which sets no
+/// `ui.default`, by the second clause alone. What the first clause no
+/// longer sees for it, its menu and popups filled with color 0 at 16
+/// colors, is #424.
+#[test]
+fn e10g6_every_shipped_theme_is_legible_at_16_colors_on_both_paths() {
     let shipped: Vec<String> = eval(&fresh(), "return pmacs.theme.names()");
+    assert!(shipped.iter().any(|n| n == "default-dark"), "{shipped:?}");
     for path in [Path16::InProcess, Path16::Attached] {
         for theme in &shipped {
             let s = fresh();
             exec(&s, &format!("pmacs.theme.load({theme:?})"));
-            let (buffer, surfaces) = chrome_at_16(&s, path);
-            let found = pmacs::color_depth::legibility_violations(&buffer, &surfaces);
-            if theme == "default-dark" {
-                let clause_one = found
-                    .iter()
-                    .filter(|v| v.contains("does not differ from the buffer"))
-                    .count();
-                assert_eq!(
-                    clause_one,
-                    surfaces.len(),
-                    "{path:?}: every surface fails clause one: {found:#?}"
-                );
-                eprintln!("{path:?} default-dark: {found:#?}");
-            } else {
-                assert!(found.is_empty(), "{path:?} {theme}: {found:#?}");
-            }
+            let found = legibility(&s, path);
+            assert!(found.is_empty(), "{path:?} {theme}: {found:#?}");
         }
     }
 }

@@ -384,43 +384,78 @@ impl DepthMap {
     }
 }
 
-/// E10g.6: a painted surface's two inks at 16 colors, reverse video
-/// applied: `Some(index)` for a known color, `None` for `Default` (or an
-/// RGB a 16-color frame should not hold), which is unknown.
-fn painted_inks(style: &Style) -> (Option<u8>, Option<u8>) {
-    let ink = |c: Color| match c {
-        Color::Indexed(n) => Some(n),
-        Color::Default | Color::Rgb(..) => None,
+/// E10g.6: one ink of a surface painted at 16 colors: a palette index,
+/// or the terminal's own default foreground or background, which no
+/// frame names, or an RGB a 16-color frame should not hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    /// A palette index.
+    Index(u8),
+    /// The terminal's default foreground.
+    DefaultFg,
+    /// The terminal's default background.
+    DefaultBg,
+    /// An RGB at 16 colors: known to no rule here.
+    Unknown,
+}
+
+/// A painted surface's `(foreground, background)` inks, reverse video
+/// applied: a `Default` foreground is the terminal's default foreground
+/// wherever reverse video then puts it, and likewise its background.
+fn painted_inks(style: &Style) -> (Ink, Ink) {
+    let ink = |c: Color, default: Ink| match c {
+        Color::Indexed(n) => Ink::Index(n),
+        Color::Default => default,
+        Color::Rgb(..) => Ink::Unknown,
     };
-    let (fg, bg) = (ink(style.fg), ink(style.bg));
+    let (fg, bg) = (ink(style.fg, Ink::DefaultFg), ink(style.bg, Ink::DefaultBg));
     if style.reverse { (bg, fg) } else { (fg, bg) }
 }
 
-/// Two inks are known to differ only when both are known and unequal:
-/// `Default` counts as unknown, never as different (E10g.6).
-fn known_to_differ(a: Option<u8>, b: Option<u8>) -> bool {
-    matches!((a, b), (Some(x), Some(y)) if x != y)
+/// Whether two inks are known to differ (E10g.6 as ruled on 2026-10-28):
+/// two unequal indices do. With `pair` (the second clause and the
+/// `Indexed(0)` rule) the terminal's default foreground and background
+/// also count as two different colors against each other; a default is
+/// unknown against anything else, and without `pair` (the first clause)
+/// a default is unknown against everything.
+fn known_to_differ(a: Ink, b: Ink, pair: bool) -> bool {
+    match (a, b) {
+        (Ink::Index(x), Ink::Index(y)) => x != y,
+        (Ink::DefaultFg, Ink::DefaultBg) | (Ink::DefaultBg, Ink::DefaultFg) => pair,
+        _ => false,
+    }
 }
 
 /// E10g.6's two clauses for chrome painted at 16 colors, each surface as
-/// actually painted (`surfaces`, reverse video applied here): it differs
-/// from the `buffer` surface in foreground or background, and its
-/// foreground differs from its own background. `Default` is unknown and
-/// never different, so `Indexed(0)` against a `Default` background
-/// fails the second. One line per failure, naming the surface, the
-/// clause and the inks.
+/// actually painted (`surfaces`, reverse video applied here), as the
+/// owner ruled on 2026-10-28. The first, that a surface differs from the
+/// `buffer` surface in foreground or background, applies only where the
+/// theme sets `ui.default` (`buffer_face_set`), a default ink unknown in
+/// it. The second, that a surface's foreground differs from its own
+/// background, applies to every theme, with the terminal's default pair
+/// counted as two different colors against each other and as unknown
+/// against anything else, so `Indexed(0)` against a `Default` background
+/// fails it. One line per failure, naming the surface, the clause and
+/// the inks.
 #[must_use]
-pub fn legibility_violations(buffer: &Style, surfaces: &[(String, Style)]) -> Vec<String> {
+pub fn legibility_violations(
+    buffer: &Style,
+    surfaces: &[(String, Style)],
+    buffer_face_set: bool,
+) -> Vec<String> {
     let (buffer_fg, buffer_bg) = painted_inks(buffer);
     let mut out = Vec::new();
     for (name, style) in surfaces {
         let (fg, bg) = painted_inks(style);
-        if !known_to_differ(fg, buffer_fg) && !known_to_differ(bg, buffer_bg) {
+        if buffer_face_set
+            && !known_to_differ(fg, buffer_fg, false)
+            && !known_to_differ(bg, buffer_bg, false)
+        {
             out.push(format!(
                 "{name}: does not differ from the buffer surface ({fg:?}/{bg:?} against {buffer_fg:?}/{buffer_bg:?})"
             ));
         }
-        if !known_to_differ(fg, bg) {
+        if !known_to_differ(fg, bg, true) {
             out.push(format!(
                 "{name}: its foreground does not differ from its background ({fg:?} on {bg:?})"
             ));
