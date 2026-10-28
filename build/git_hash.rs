@@ -56,31 +56,68 @@ pub fn embed() {
 /// detached HEAD), the index, and the ref HEAD names, which a commit on the
 /// branch rewrites. A packed ref has no file of its own until the next
 /// commit writes one, which nothing declared would see, so while the ref is
-/// packed `packed-refs` and HEAD's reflog, which every commit appends to,
-/// stand in for it.
+/// packed `packed-refs` stands in for it, with HEAD's reflog, which every
+/// commit appends to, or where no reflog is kept (`core.logAllRefUpdates`
+/// off) the nearest directory under `refs` above the loose file, which the
+/// commit's new file changes. A reftable repository (git 2.45 and later)
+/// has no loose ref, no `packed-refs` and no reflog file, and its HEAD is a
+/// stub no commit rewrites: every ref update rewrites the `tables.list` of
+/// the stack it lands in, the checkout's own (a worktree's HEAD) and the
+/// common one (its branches), so both stand in (E10h review 1, Low 2).
 pub fn watched(root: &Path) -> Vec<PathBuf> {
-    let mut names = vec!["HEAD".to_owned(), "index".to_owned()];
-    if let Some(branch) = git(root, &["symbolic-ref", "-q", "HEAD"]) {
-        if git_path(root, &branch).is_some_and(|p| p.exists()) {
-            names.push(branch);
-        } else {
-            names.push("packed-refs".to_owned());
-            names.push("logs/HEAD".to_owned());
+    let mut paths: Vec<PathBuf> = ["HEAD", "index"]
+        .into_iter()
+        .filter_map(|name| git_path(root, name))
+        .collect();
+    if git(root, &["rev-parse", "--show-ref-format"]).as_deref() == Some("reftable") {
+        paths.extend(git_path(root, "reftable/tables.list"));
+        paths.extend(
+            rev_parse_path(root, &["--git-common-dir"])
+                .map(|common| common.join("reftable/tables.list")),
+        );
+    } else if let Some(branch) = git(root, &["symbolic-ref", "-q", "HEAD"]) {
+        match git_path(root, &branch) {
+            Some(loose) if loose.exists() => paths.push(loose),
+            loose => {
+                paths.extend(git_path(root, "packed-refs"));
+                match git_path(root, "logs/HEAD").filter(|reflog| reflog.exists()) {
+                    Some(reflog) => paths.push(reflog),
+                    None => paths.extend(loose.and_then(|loose| nearest_refs_dir(root, &loose))),
+                }
+            }
         }
     }
-    names
-        .iter()
-        .filter_map(|name| git_path(root, name))
-        .filter(|path| path.exists())
-        .collect()
+    paths.retain(|path| path.exists());
+    paths.dedup();
+    paths
+}
+
+/// The nearest directory above `loose` that exists and lies under the
+/// repository's `refs`: where a commit on a packed branch creates the
+/// branch's loose file.
+fn nearest_refs_dir(root: &Path, loose: &Path) -> Option<PathBuf> {
+    let refs = git_path(root, "refs")?;
+    loose
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(&refs))
+        .find(|dir| dir.is_dir())
+        .map(Path::to_path_buf)
 }
 
 /// `git rev-parse --git-path <name>`: where `name` lives for this checkout
-/// (a worktree's own HEAD and index under the main repository's
-/// `worktrees/`, its refs in the common directory), joined to `root` when
-/// git answers relative to it.
+/// (a worktree's own HEAD, index and reftable stack under the main
+/// repository's `worktrees/`, its refs in the common directory).
 fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(git(root, &["rev-parse", "--git-path", name])?);
+    rev_parse_path(root, &["--git-path", name])
+}
+
+/// `git rev-parse <args>` answering a path, joined to `root` when git
+/// answers relative to it.
+fn rev_parse_path(root: &Path, args: &[&str]) -> Option<PathBuf> {
+    let mut argv = vec!["rev-parse"];
+    argv.extend_from_slice(args);
+    let path = PathBuf::from(git(root, &argv)?);
     Some(if path.is_absolute() {
         path
     } else {

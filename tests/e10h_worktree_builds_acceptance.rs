@@ -75,6 +75,13 @@ fn git(dir: &Path, args: &[&str]) -> String {
 impl Lab {
     /// The fixture crate, committed on `main` in `<lab>/origin`.
     fn new() -> Self {
+        Self::with_repository(&[], &[])
+    }
+
+    /// The same, in a repository `git init` makes with `init` added to
+    /// its arguments (`--ref-format=reftable`), and `config` set in it
+    /// before the fixture's commit (`core.logAllRefUpdates=false`).
+    fn with_repository(init: &[&str], config: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let origin = dir.path().join("origin");
         std::fs::create_dir_all(origin.join("src")).expect("mkdir");
@@ -100,7 +107,12 @@ impl Lab {
             "fn main() {\n    print!(\"{}\", option_env!(\"PMACS_GIT_HASH\").unwrap_or(\"none\"));\n}\n",
         )
         .expect("write main.rs");
-        git(&origin, &["init", "-q", "-b", "main"]);
+        let mut args = vec!["init", "-q", "-b", "main"];
+        args.extend_from_slice(init);
+        git(&origin, &args);
+        for (key, value) in config {
+            git(&origin, &["config", key, value]);
+        }
         git(&origin, &["add", "Cargo.toml", "build.rs", "src/main.rs"]);
         git(&origin, &["commit", "-q", "-m", "fixture"]);
         Self { dir }
@@ -127,11 +139,16 @@ impl Lab {
 
     /// A plain `git clone` of the lab's repository: `.git` is a directory.
     fn plain_clone(&self) -> Checkout {
+        self.plain_clone_with(&[])
+    }
+
+    /// The same, with `extra` added to `git clone`'s arguments.
+    fn plain_clone_with(&self, extra: &[&str]) -> Checkout {
         let root = self.dir.path().join("clone");
-        git(
-            self.dir.path(),
-            &["clone", "-q", "origin", root.to_str().expect("UTF-8")],
-        );
+        let mut args = vec!["clone", "-q"];
+        args.extend_from_slice(extra);
+        args.extend(["origin", root.to_str().expect("UTF-8")]);
+        git(self.dir.path(), &args);
         assert!(root.join(".git").is_dir(), "a clone's .git is a directory");
         self.checkout(root, "target-clone")
     }
@@ -458,4 +475,121 @@ fn e10h_review1_p1_the_root_build_script_declares_nothing_missing_and_nothing_in
             "a debug build embeds no hash (E10h.2 as amended):\n{text}"
         );
     }
+}
+
+/// A commit that rewrites HEAD's commit message alone: like an empty
+/// commit it changes no file, so the index need not be written. The commit
+/// it rewrites is the empty one P2 made, which git amends only when told
+/// it may stay empty.
+fn reword(checkout: &Checkout) {
+    git(
+        &checkout.root,
+        &["commit", "-q", "--amend", "--allow-empty", "-m", "reworded"],
+    );
+}
+
+/// P2 (review 1, Low 2): in a repository with the reftable ref backend
+/// (`git init --ref-format=reftable`, git 2.45 and later; the default
+/// planned for git 3.0) there is no loose ref, no `packed-refs` and no
+/// `logs/HEAD`; `.git/HEAD` is a stub no commit rewrites. At 8ef24c6 only
+/// it and the index were declared, so a release build's hash stayed at the
+/// commit it was built from after an empty commit or a reworded one; the
+/// stacks' `tables.list` now stand in. A git older than 2.45 fails this row
+/// at its first `git init`, with git's own message (2.44.4's: `fatal:
+/// unknown ref storage format 'reftable'`); every CI runner's git read at
+/// fix round 1 was 2.55 or 2.56.
+fn reftable_follows_an_empty_and_a_reworded_commit(layout: Layout) {
+    let lab = Lab::with_repository(&["--ref-format=reftable"], &[]);
+    let checkout = match layout {
+        Layout::Worktree => lab.worktree(),
+        Layout::Clone => lab.plain_clone_with(&["--ref-format=reftable"]),
+    };
+    assert_eq!(
+        git(&checkout.root, &["rev-parse", "--show-ref-format"]),
+        "reftable",
+        "{layout:?}: the checkout's refs are a reftable stack"
+    );
+    checkout.build(true, None);
+    let again = checkout.build(true, None);
+    assert!(
+        again.compiled_nothing(),
+        "{layout:?}, reftable: a second release build compiles nothing:\n{}",
+        again.stderr
+    );
+    assert_eq!(again.hash, checkout.head(), "{layout:?}, reftable");
+    checkout.commit("on a reftable stack");
+    let moved = checkout.build(true, None);
+    assert_eq!(
+        moved.hash,
+        checkout.head(),
+        "{layout:?}, reftable: an empty commit moves the hash:\n{}",
+        moved.stderr
+    );
+    reword(&checkout);
+    let reworded = checkout.build(true, None);
+    assert_eq!(
+        reworded.hash,
+        checkout.head(),
+        "{layout:?}, reftable: a reworded commit moves the hash:\n{}",
+        reworded.stderr
+    );
+}
+
+#[test]
+fn e10h_review1_p2_in_a_reftable_worktree_a_commit_moves_the_hash() {
+    reftable_follows_an_empty_and_a_reworded_commit(Layout::Worktree);
+}
+
+#[test]
+fn e10h_review1_p2_in_a_reftable_clone_a_commit_moves_the_hash() {
+    reftable_follows_an_empty_and_a_reworded_commit(Layout::Clone);
+}
+
+/// P3 (review 1, Low 2): with `core.logAllRefUpdates` off there is no
+/// `logs/HEAD`, so at 8ef24c6, while the branch's ref was packed, only
+/// HEAD, the index and `packed-refs` were declared; the commit wrote a
+/// loose ref nothing declared named, and the hash stayed stale until
+/// something wrote the index. The nearest directory under `refs` above the
+/// loose file now stands in.
+fn packed_ref_without_reflogs_follows_a_commit(layout: Layout) {
+    let lab = Lab::with_repository(&[], &[("core.logAllRefUpdates", "false")]);
+    let checkout = match layout {
+        Layout::Worktree => lab.worktree(),
+        Layout::Clone => lab.plain_clone_with(&["-c", "core.logAllRefUpdates=false"]),
+    };
+    git(&checkout.root, &["pack-refs", "--all"]);
+    let reflog = PathBuf::from(git(
+        &checkout.root,
+        &["rev-parse", "--git-path", "logs/HEAD"],
+    ));
+    assert!(
+        !checkout.root.join(reflog).exists(),
+        "{layout:?}: no reflog is kept"
+    );
+    checkout.build(true, None);
+    let again = checkout.build(true, None);
+    assert!(
+        again.compiled_nothing(),
+        "{layout:?}, no reflog: a second release build compiles nothing:\n{}",
+        again.stderr
+    );
+    assert_eq!(again.hash, checkout.head(), "{layout:?}, no reflog");
+    checkout.commit("on a packed ref, no reflog");
+    let moved = checkout.build(true, None);
+    assert_eq!(
+        moved.hash,
+        checkout.head(),
+        "{layout:?}, no reflog: a commit on a packed ref moves the hash:\n{}",
+        moved.stderr
+    );
+}
+
+#[test]
+fn e10h_review1_p3_in_a_worktree_a_packed_ref_without_reflogs_moves_the_hash() {
+    packed_ref_without_reflogs_follows_a_commit(Layout::Worktree);
+}
+
+#[test]
+fn e10h_review1_p3_in_a_clone_a_packed_ref_without_reflogs_moves_the_hash() {
+    packed_ref_without_reflogs_follows_a_commit(Layout::Clone);
 }
