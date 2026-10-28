@@ -56,7 +56,7 @@ use crate::cell::{Color, Style, UnderlineStyle};
 use crate::command::{Command, CommandError, CommandRegistry, SourceLocation};
 use crate::editor::InteractiveCommandOrigin;
 use crate::editor_core::EditorCore;
-use crate::highlight::SyntaxHighlightView;
+use crate::highlight::{EntryMode, Fallbacks, SyntaxHighlightView, ThemeEntry};
 use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
 use crate::keymap_stack::KeymapStack;
@@ -9010,107 +9010,159 @@ fn style_to_lua(lua: &Lua, style: Style) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// Install `pmacs.theme.*`. The module reads and writes the shared
-/// [`Theme`] held by the [`crate::syntax::SyntaxRegistry`]; every
-/// attached [`SyntaxHighlightView`] sees the change on its next
-/// render. T M4.3 acceptance: "theming via Lua-defined color
-/// schemes."
-/// Themes arc Q#TH6: how [`commit_theme_entries`] applies a parsed
-/// entry set to the theme's capture map.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ThemeCommit {
-    /// `pmacs.theme.set`: the parsed entries become the whole map
-    /// (faces wiped with captures, Q#TH10); `default_style` is
-    /// untouched.
-    Replace,
-    /// `pmacs.theme.merge`: insert/overwrite the parsed entries.
-    Merge,
-}
-
 /// Themes arc Q#TH6: the transactional mutation helper behind
 /// `pmacs.theme.set` / `pmacs.theme.merge`. Collects the WHOLE entry
 /// stream before touching the theme lock, so a malformed entry
 /// anywhere in the input returns its error with the theme untouched
 /// and the mutation counters unbumped — the pre-fix `merge` inserted
 /// while iterating, letting early entries land before a later one
-/// failed. After a successful commit the counters bump from their
-/// prior values (never reset — [`crate::highlight::Theme`]'s
-/// increment-only invariant): `Replace` touches both namespaces
-/// wholesale so it bumps both; `Merge` classifies every committed
-/// key through [`crate::highlight::is_face_name`] (bare `ui`
-/// included) and bumps `syntax_epoch` iff any non-face key
-/// committed, `face_epoch` iff any face key did.
-fn commit_theme_entries(
+/// failed. The commit itself, and how it advances the counters, is
+/// [`crate::highlight::Theme::commit`]. Returns the committed entries,
+/// which the caller records as the user layer (E10g.3).
+fn commit_theme_entries<E: Into<ThemeEntry>>(
     theme: &crate::highlight::ThemeHandle,
-    mode: ThemeCommit,
-    entries: impl Iterator<Item = mlua::Result<(String, Style)>>,
-) -> mlua::Result<()> {
-    let entries: Vec<(String, Style)> = entries.collect::<mlua::Result<_>>()?;
-    let mut th = theme.lock().expect("theme mutex poisoned");
-    match mode {
-        ThemeCommit::Replace => {
-            // Replace the FIELD, never the `Theme` value: a fresh
-            // Theme's zeroed counters would let consecutive `set`
-            // calls share an epoch and stay invisible to every gate.
-            th.by_capture = entries.into_iter().collect();
-            th.syntax_epoch += 1;
-            th.face_epoch += 1;
+    mode: EntryMode,
+    entries: impl Iterator<Item = mlua::Result<E>>,
+) -> mlua::Result<Vec<ThemeEntry>> {
+    let entries: Vec<ThemeEntry> = entries
+        .map(|e| e.map(Into::into))
+        .collect::<mlua::Result<_>>()?;
+    theme
+        .lock()
+        .expect("theme mutex poisoned")
+        .commit(mode, entries.clone());
+    Ok(entries)
+}
+
+/// E10g.1: a face's authored fallbacks, from the `fallback` field of its
+/// style table: `{ [256] = { fg = n, bg = n, underline_color = n },
+/// [16] = { ... } }`, each index in its depth's range. Absent means
+/// none authored.
+fn lua_to_fallbacks(value: &Value) -> mlua::Result<Fallbacks> {
+    let table = match value {
+        Value::Nil => return Ok(Fallbacks::default()),
+        Value::Table(t) => t,
+        other => {
+            return Err(mlua::Error::external(format!(
+                "fallback must be a table keyed by 256 and 16, got {}",
+                other.type_name()
+            )));
         }
-        ThemeCommit::Merge => {
-            let any_face = entries
-                .iter()
-                .any(|(n, _)| crate::highlight::is_face_name(n));
-            let any_syntax = entries
-                .iter()
-                .any(|(n, _)| !crate::highlight::is_face_name(n));
-            for (name, style) in entries {
-                th.by_capture.insert(name, style);
+    };
+    let mut out = Fallbacks::default();
+    for pair in table.pairs::<Value, Value>() {
+        let (depth, colors) = pair?;
+        let (slot, limit) = match depth {
+            Value::Integer(256) => (&mut out.c256, 255),
+            Value::Integer(16) => (&mut out.c16, 15),
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "fallback keys are 256 and 16, got {other:?}"
+                )));
             }
-            if any_syntax {
-                th.syntax_epoch += 1;
-            }
-            if any_face {
-                th.face_epoch += 1;
+        };
+        let Value::Table(colors) = colors else {
+            return Err(mlua::Error::external(
+                "each fallback depth is a table of fg, bg and underline_color",
+            ));
+        };
+        for component in colors.pairs::<String, i64>() {
+            let (key, index) = component?;
+            let index = u8::try_from(index)
+                .ok()
+                .filter(|i| *i <= limit)
+                .ok_or_else(|| {
+                    mlua::Error::external(format!(
+                        "fallback index {index} out of range 0..={limit}"
+                    ))
+                })?;
+            match key.as_str() {
+                "fg" => slot.fg = Some(index),
+                "bg" => slot.bg = Some(index),
+                "underline_color" => slot.underline_color = Some(index),
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "a fallback names fg, bg or underline_color, got {other:?}"
+                    )));
+                }
             }
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Adapt a Lua theme table to [`commit_theme_entries`]'s ordered
 /// result stream: each raw `(name, style_table)` pair maps through
-/// [`lua_to_style`], and any iteration or conversion error rides the
-/// stream so the helper can fail before locking.
-fn lua_theme_entries(table: &Table) -> impl Iterator<Item = mlua::Result<(String, Style)>> + use<> {
+/// [`lua_to_style`] and its `fallback` through [`lua_to_fallbacks`],
+/// and any iteration or conversion error rides the stream so the
+/// helper can fail before locking.
+fn lua_theme_entries(table: &Table) -> impl Iterator<Item = mlua::Result<ThemeEntry>> + use<> {
     table
         .pairs::<String, Table>()
         .map(|pair| {
             let (name, style) = pair?;
-            Ok((name, lua_to_style(&style)?))
+            let fallback: Value = style.get("fallback")?;
+            Ok(ThemeEntry {
+                style: lua_to_style(&style)?,
+                fallbacks: lua_to_fallbacks(&fallback)?,
+                name,
+            })
         })
         .collect::<Vec<_>>()
         .into_iter()
 }
 
+/// E10g.1: `pmacs.theme.define(name, spec)`'s spec: `faces` (required,
+/// a theme table as `set` takes, `fallback` fields included) and
+/// `description` (optional). Entries come back sorted by name.
+fn lua_to_named_theme(spec: &Table) -> mlua::Result<crate::highlight::NamedTheme> {
+    for pair in spec.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let key = require_string_key(key)?;
+        if !matches!(key.as_str(), "faces" | "description") {
+            return Err(mlua::Error::external(format!(
+                "pmacs.theme.define: unknown field {key:?} (faces, description)"
+            )));
+        }
+    }
+    let faces: Table = spec.get("faces").map_err(|_| {
+        mlua::Error::external(BindingError::SpecFieldType {
+            field: "faces",
+            expected: "table",
+        })
+    })?;
+    let mut entries = lua_theme_entries(&faces).collect::<mlua::Result<Vec<_>>>()?;
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(crate::highlight::NamedTheme {
+        description: spec
+            .get::<Option<String>>("description")?
+            .unwrap_or_default(),
+        entries,
+    })
+}
+
+/// Install `pmacs.theme.*`. The module reads and writes the shared
+/// [`Theme`] held by the [`crate::syntax::SyntaxRegistry`]; every
+/// attached [`SyntaxHighlightView`] sees the change on its next
+/// render. T M4.3 acceptance: "theming via Lua-defined color
+/// schemes." E10g.1 adds the named themes (`define`, `names`, `load`,
+/// `loaded`); E10g.3 records `set`, `merge` and `clear` as the user
+/// layer every later load reapplies.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear list of raw bindings; splitting fragments a coherent surface"
+)]
 fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table> {
     let theme_mod = lua.create_table()?;
 
-    {
+    for (name, mode) in [("set", EntryMode::Replace), ("merge", EntryMode::Merge)] {
         let s = syntax.clone();
         theme_mod.set(
-            "set",
+            name,
             lua.create_function(move |_, table: Table| {
-                commit_theme_entries(&s.theme(), ThemeCommit::Replace, lua_theme_entries(&table))
-            })?,
-        )?;
-    }
-
-    {
-        let s = syntax.clone();
-        theme_mod.set(
-            "merge",
-            lua.create_function(move |_, table: Table| {
-                commit_theme_entries(&s.theme(), ThemeCommit::Merge, lua_theme_entries(&table))
+                let entries = commit_theme_entries(&s.theme(), mode, lua_theme_entries(&table))?;
+                s.themes().record_user(mode, &entries);
+                Ok(())
             })?,
         )?;
     }
@@ -9132,12 +9184,13 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
         theme_mod.set(
             "clear",
             lua.create_function(move |_, ()| {
-                let theme = s.theme();
-                let mut th = theme.lock().expect("theme mutex poisoned");
-                th.clear();
-                // Q#TH6: clear empties both namespaces — bump both.
-                th.syntax_epoch += 1;
-                th.face_epoch += 1;
+                // Q#TH6: clear empties both namespaces — bump both. It
+                // is a `set` of nothing, and recorded as one.
+                s.theme()
+                    .lock()
+                    .expect("theme mutex poisoned")
+                    .commit(EntryMode::Replace, Vec::new());
+                s.themes().record_user(EntryMode::Replace, &[]);
                 Ok(())
             })?,
         )?;
@@ -9176,6 +9229,57 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
                 out.set("_meta", dt)?;
                 Ok(out)
             })?,
+        )?;
+    }
+
+    {
+        let s = syntax.clone();
+        theme_mod.set(
+            "define",
+            lua.create_function(move |_, (name, spec): (String, Table)| {
+                if name.trim().is_empty() {
+                    return Err(mlua::Error::external(
+                        "pmacs.theme.define: a theme needs a name",
+                    ));
+                }
+                let named = lua_to_named_theme(&spec)?;
+                s.themes().define(name, named);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let s = syntax.clone();
+        theme_mod.set(
+            "names",
+            lua.create_function(move |_, ()| Ok(s.themes().names()))?,
+        )?;
+    }
+
+    {
+        let s = syntax.clone();
+        theme_mod.set(
+            "load",
+            lua.create_function(move |_, name: String| {
+                let theme = s.theme();
+                let mut th = theme.lock().expect("theme mutex poisoned");
+                if s.themes().load(&name, &mut th) {
+                    Ok(())
+                } else {
+                    Err(mlua::Error::external(format!(
+                        "pmacs.theme.load: no theme named {name:?}"
+                    )))
+                }
+            })?,
+        )?;
+    }
+
+    {
+        let s = syntax.clone();
+        theme_mod.set(
+            "loaded",
+            lua.create_function(move |_, ()| Ok(s.themes().loaded().map(str::to_owned)))?,
         )?;
     }
 
@@ -15931,7 +16035,7 @@ mod tests {
             )),
             Err(mlua::Error::RuntimeError("malformed style".into())),
         ];
-        let res = commit_theme_entries(&theme, ThemeCommit::Merge, entries.into_iter());
+        let res = commit_theme_entries(&theme, EntryMode::Merge, entries.into_iter());
         assert!(res.is_err(), "a malformed tail entry must error");
         let th = theme.lock().expect("lock");
         assert!(
@@ -15960,8 +16064,7 @@ mod tests {
         for expected in [(4, 6), (5, 7)] {
             let entries: Vec<mlua::Result<(String, Style)>> =
                 vec![Ok(("type".to_owned(), Style::default()))];
-            commit_theme_entries(&theme, ThemeCommit::Replace, entries.into_iter())
-                .expect("commit");
+            commit_theme_entries(&theme, EntryMode::Replace, entries.into_iter()).expect("commit");
             let th = theme.lock().expect("lock");
             assert_eq!((th.syntax_epoch, th.face_epoch), expected);
             assert!(!th.by_capture.contains_key("keyword"), "replaced wholesale");
@@ -15985,7 +16088,7 @@ mod tests {
 
         let face_only: Vec<mlua::Result<(String, Style)>> =
             vec![Ok(("ui.modeline".to_owned(), Style::default()))];
-        commit_theme_entries(&theme, ThemeCommit::Merge, face_only.into_iter()).expect("commit");
+        commit_theme_entries(&theme, EntryMode::Merge, face_only.into_iter()).expect("commit");
         assert_eq!(
             epochs(&theme),
             (3, 6),
@@ -15994,18 +16097,18 @@ mod tests {
 
         let bare_ui: Vec<mlua::Result<(String, Style)>> =
             vec![Ok(("ui".to_owned(), Style::default()))];
-        commit_theme_entries(&theme, ThemeCommit::Merge, bare_ui.into_iter()).expect("commit");
+        commit_theme_entries(&theme, EntryMode::Merge, bare_ui.into_iter()).expect("commit");
         assert_eq!(epochs(&theme), (3, 7), "bare ui is a face key");
 
         let mixed: Vec<mlua::Result<(String, Style)>> = vec![
             Ok(("comment".to_owned(), Style::default())),
             Ok(("ui.gutter".to_owned(), Style::default())),
         ];
-        commit_theme_entries(&theme, ThemeCommit::Merge, mixed.into_iter()).expect("commit");
+        commit_theme_entries(&theme, EntryMode::Merge, mixed.into_iter()).expect("commit");
         assert_eq!(epochs(&theme), (4, 8), "mixed merge bumps both");
 
         let empty: Vec<mlua::Result<(String, Style)>> = Vec::new();
-        commit_theme_entries(&theme, ThemeCommit::Merge, empty.into_iter()).expect("commit");
+        commit_theme_entries(&theme, EntryMode::Merge, empty.into_iter()).expect("commit");
         assert_eq!(
             epochs(&theme),
             (4, 8),

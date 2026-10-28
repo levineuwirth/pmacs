@@ -80,6 +80,81 @@ pub struct Theme {
     /// minimap summary (`ui.diag.*` feeds its marks). Same
     /// increment-only invariant as `syntax_epoch`.
     pub face_epoch: u64,
+    /// E10g.1: the authored 256- and 16-color fallbacks of the entries
+    /// in `by_capture` that carry any, by the same name. An entry
+    /// absent here has none authored; its colors are then their own
+    /// where already an index in range, else the nearest palette color
+    /// ([`crate::color_depth`]).
+    pub fallbacks: HashMap<String, Fallbacks>,
+}
+
+/// E10g.1: one depth's authored indices for a style's three color
+/// components. `None` means not authored at that depth.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DepthColors {
+    /// The foreground's index.
+    pub fg: Option<u8>,
+    /// The background's index.
+    pub bg: Option<u8>,
+    /// The underline color's index.
+    pub underline_color: Option<u8>,
+}
+
+impl DepthColors {
+    fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// E10g.1: an entry's authored fallbacks, one set per indexed depth.
+/// Every `c16` index is below 16 (the parser refuses any other).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fallbacks {
+    /// At 256 colors.
+    pub c256: DepthColors,
+    /// At 16 colors.
+    pub c16: DepthColors,
+}
+
+impl Fallbacks {
+    /// True when nothing is authored at either depth.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.c256.is_empty() && self.c16.is_empty()
+    }
+}
+
+/// E10g.1: one entry of a theme as written: a capture or face name, its
+/// style, and its authored fallbacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeEntry {
+    /// The capture or face name.
+    pub name: String,
+    /// The style at full depth.
+    pub style: Style,
+    /// What the author wrote for the indexed depths.
+    pub fallbacks: Fallbacks,
+}
+
+impl From<(String, Style)> for ThemeEntry {
+    fn from((name, style): (String, Style)) -> Self {
+        Self {
+            name,
+            style,
+            fallbacks: Fallbacks::default(),
+        }
+    }
+}
+
+/// E10g.1: how an entry set applies to a theme's map: `pmacs.theme.set`
+/// replaces it whole (faces with captures, Q#TH10), `merge` inserts and
+/// overwrites.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EntryMode {
+    /// The entries become the whole map; `default_style` is untouched.
+    Replace,
+    /// Insert or overwrite each entry.
+    Merge,
 }
 
 /// Themes arc Q#TH2: the face predicate. A theme key names a UI face
@@ -242,6 +317,7 @@ impl Theme {
             default_style: Style::default(),
             syntax_epoch: 0,
             face_epoch: 0,
+            fallbacks: HashMap::new(),
         }
     }
 
@@ -328,6 +404,152 @@ impl Theme {
     /// preserved.
     pub fn clear(&mut self) {
         self.by_capture.clear();
+        self.fallbacks.clear();
+    }
+
+    /// Apply `entries` under `mode`, without touching the counters.
+    fn apply(&mut self, mode: EntryMode, entries: impl IntoIterator<Item = ThemeEntry>) {
+        if mode == EntryMode::Replace {
+            self.clear();
+        }
+        for entry in entries {
+            if entry.fallbacks.is_empty() {
+                self.fallbacks.remove(&entry.name);
+            } else {
+                self.fallbacks.insert(entry.name.clone(), entry.fallbacks);
+            }
+            self.by_capture.insert(entry.name, entry.style);
+        }
+    }
+
+    /// Themes arc Q#TH6's commit, the shared step of `pmacs.theme.set`
+    /// and `merge`: apply `entries`, then advance the counters from
+    /// their prior values (never reset). `Replace` touches both
+    /// namespaces wholesale, so it bumps both; `Merge` classifies every
+    /// committed key through [`is_face_name`] (bare `ui` included) and
+    /// bumps `syntax_epoch` iff any non-face key committed,
+    /// `face_epoch` iff any face key did.
+    pub fn commit(&mut self, mode: EntryMode, entries: Vec<ThemeEntry>) {
+        let (any_face, any_syntax) = match mode {
+            EntryMode::Replace => (true, true),
+            EntryMode::Merge => (
+                entries.iter().any(|e| is_face_name(&e.name)),
+                entries.iter().any(|e| !is_face_name(&e.name)),
+            ),
+        };
+        self.apply(mode, entries);
+        if any_syntax {
+            self.syntax_epoch += 1;
+        }
+        if any_face {
+            self.face_epoch += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Named themes (E10g.1)
+// ---------------------------------------------------------------------------
+
+/// E10g.1: the themes the runtime ships, as `(chunk name, source)`, each
+/// a `builtin/runtime/themes/` file that calls `pmacs.theme.define`.
+/// Loaded by `EditorState` before user config; a row walks every one.
+pub const SHIPPED_THEMES: &[(&str, &str)] = &[(
+    "@pmacs/builtin/runtime/themes/default-dark.lua",
+    include_str!("../builtin/runtime/themes/default-dark.lua"),
+)];
+
+/// E10g.1: a theme defined by name (`pmacs.theme.define`): its entries,
+/// sorted by name, and a one-line description for the picker.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamedTheme {
+    /// One line saying what the theme is.
+    pub description: String,
+    /// The entries, sorted by name, one per name.
+    pub entries: Vec<ThemeEntry>,
+}
+
+/// E10g.3: what the user's own `pmacs.theme.set` and `merge` calls left,
+/// reapplied over every theme loaded after them (Emacs's `user` theme).
+/// Kept folded rather than as a call log, which is the same thing:
+/// a `set` replaces everything before it, so only the last one and the
+/// merges after it matter, and a later merge of a name overwrites an
+/// earlier one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UserLayer {
+    /// The last `set`'s entries, which replace the loaded theme's.
+    replaced: Option<Vec<ThemeEntry>>,
+    /// The merges since, by name.
+    merged: std::collections::BTreeMap<String, ThemeEntry>,
+}
+
+/// E10g.1: the themes defined by name, the one loaded last, and the
+/// user layer (E10g.3) every load reapplies. Held by the
+/// [`crate::syntax::SyntaxRegistry`] beside the active [`Theme`], which
+/// a load rewrites.
+#[derive(Debug, Default)]
+pub struct ThemeLibrary {
+    themes: std::collections::BTreeMap<String, NamedTheme>,
+    user: UserLayer,
+    loaded: Option<String>,
+}
+
+impl ThemeLibrary {
+    /// Define (or redefine) `name`. A redefinition does not reload a
+    /// theme already loaded under that name.
+    pub fn define(&mut self, name: String, theme: NamedTheme) {
+        self.themes.insert(name, theme);
+    }
+
+    /// The defined names, sorted.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.themes.keys().cloned().collect()
+    }
+
+    /// The theme defined as `name`.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&NamedTheme> {
+        self.themes.get(name)
+    }
+
+    /// The name loaded last, if any theme has been loaded.
+    #[must_use]
+    pub fn loaded(&self) -> Option<&str> {
+        self.loaded.as_deref()
+    }
+
+    /// Record a `set` or `merge` the user made, to be reapplied over
+    /// every later load.
+    pub fn record_user(&mut self, mode: EntryMode, entries: &[ThemeEntry]) {
+        match mode {
+            EntryMode::Replace => {
+                self.user.replaced = Some(entries.to_vec());
+                self.user.merged.clear();
+            }
+            EntryMode::Merge => {
+                for entry in entries {
+                    self.user.merged.insert(entry.name.clone(), entry.clone());
+                }
+            }
+        }
+    }
+
+    /// Load `name` into `theme`: its entries, then the user layer over
+    /// them, committed as one wholesale replacement. `false`, and the
+    /// theme untouched, when no theme has that name.
+    pub fn load(&mut self, name: &str, theme: &mut Theme) -> bool {
+        let Some(named) = self.themes.get(name) else {
+            return false;
+        };
+        let base = self.user.replaced.as_ref().unwrap_or(&named.entries);
+        let mut entries = base.clone();
+        entries.extend(self.user.merged.values().cloned());
+        // Replace, then the merges in order: one `apply` with the base
+        // first and the merged names after, so a merged name wins.
+        theme.commit(EntryMode::Replace, entries);
+        self.loaded = Some(name.to_owned());
+        true
     }
 }
 

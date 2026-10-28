@@ -780,6 +780,14 @@ impl EditorState {
                 include_str!("../builtin/runtime/syntax.lua"),
             )
             .expect("load syntax builtin chunk");
+        // E10g.1: the shipped named themes, defined (not loaded) before
+        // anything can ask for one by name. The active theme is already
+        // `Theme::default_dark()`, which `default-dark` equals.
+        for &(chunk, source) in crate::highlight::SHIPPED_THEMES {
+            lua_host
+                .eval(Some(chunk), source)
+                .unwrap_or_else(|e| panic!("load shipped theme {chunk}: {e}"));
+        }
         // T M4.4 process supervisor. Constructed empty; user code
         // spawns children through `pmacs.process.spawn`. Drop-time
         // shutdown enforces no-zombie cleanup at editor exit.
