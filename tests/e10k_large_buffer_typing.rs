@@ -197,11 +197,12 @@ fn quantile(values: &[Duration], q: usize) -> Duration {
 ///   F30 comment, behind the client's 50 ms wait for its terminal);
 /// - the GPU: release 3.3 / 8.2 / 3.3 ms, debug 16.9 / 23.1 / 20.5 ms.
 ///
-/// The base (`bd4fc01`) took 63 to 106 ms a key at the median in release
-/// on every route, so each row fails it. The ruled bound (16 ms at the
-/// median and 33 at the 95th percentile, the burst within twice the
-/// 100-line one) is the record's, read from the same figures in E10k's
-/// handoff; these thresholds hold the head to what it measured.
+/// The base (`bd4fc01`) took 45.7 ms a letter at the median in release on
+/// the GPU, 63.4 attached and 105.9 in process, so each row fails it. The
+/// ruled bound (16 ms at the median and 33 at the 95th percentile, the
+/// burst within twice the 100-line one where that is a frame and not
+/// noise) is the record's, read from the same figures in E10k's handoff;
+/// these thresholds hold the head to what it measured.
 const BOUNDS: [(&str, Millis, Millis); 3] = [
     ("in process", (45, 85, 95), (1400, 1550, 2850)),
     ("attached", (2, 4, 260), (11, 25, 290)),
