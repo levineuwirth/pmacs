@@ -659,9 +659,11 @@ fn ret(s: &mut EditorState) {
 }
 
 /// `M-x theme-select RET`, by keys, and the picker is open on the theme
-/// in force.
+/// in force, which opening it did not change.
 fn open_picker(s: &mut EditorState) {
     use crossterm::event::{KeyCode, KeyModifiers};
+    let in_force = loaded(s);
+    let faces = theme_state(s);
     press(s, KeyCode::Char('x'), KeyModifiers::ALT);
     for ch in "theme-select".chars() {
         press(s, KeyCode::Char(ch), KeyModifiers::NONE);
@@ -676,9 +678,12 @@ fn open_picker(s: &mut EditorState) {
     assert_eq!(session.prompt, "Theme: ");
     assert_eq!(
         core.minibuffer.selected_candidate(),
-        eval::<Option<String>>(s, "return pmacs.theme.loaded()"),
+        in_force,
         "it opens on the theme in force"
     );
+    drop(core);
+    assert_eq!(loaded(s), in_force, "opening it loads nothing");
+    assert_eq!(theme_state(s), faces, "opening it changes no face");
 }
 
 /// The theme's whole state as a load writes it: every entry, its
@@ -803,4 +808,42 @@ fn e10g4_ret_persists_across_a_restart_but_not_over_init_lua() {
         "init.lua's ui.theme over the kept plain-a"
     );
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "plain-a\n");
+}
+
+/// The preview hook fires on a move within one prompt and never at a
+/// prompt's opening: a key that accepts one prompt and opens another
+/// (`M-x theme-select RET`'s shape) has moved nothing in the new one.
+#[test]
+fn e10g4_on_select_fires_on_a_move_and_not_when_a_prompt_opens() {
+    let mut s = fresh();
+    exec(
+        &s,
+        r#"seen = {}
+           pmacs.minibuffer.read {
+             prompt = "First: ",
+             source = function() return { "go" } end,
+             on_accept = function()
+               pmacs.minibuffer.read {
+                 prompt = "Second: ",
+                 source = function() return { "x", "y" } end,
+                 on_select = function(c) seen[#seen + 1] = c end,
+                 on_accept = function() end,
+               }
+             end,
+           }"#,
+    );
+    ret(&mut s);
+    assert_eq!(
+        s.core
+            .borrow()
+            .minibuffer
+            .session
+            .as_ref()
+            .map(|m| m.prompt.clone()),
+        Some("Second: ".to_owned())
+    );
+    let seen = |s: &EditorState| -> Vec<String> { eval(s, "return seen") };
+    assert!(seen(&s).is_empty(), "opening called it: {:?}", seen(&s));
+    down(&mut s);
+    assert_eq!(seen(&s), vec!["y"], "one move, one call");
 }

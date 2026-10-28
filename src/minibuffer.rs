@@ -87,6 +87,10 @@ pub struct Minibuffer {
     /// means "do not persist" (the default for the lib's own test
     /// suite; the editor binary configures this at startup).
     pub history_dir: Option<PathBuf>,
+    /// E10g.4: how many prompts have opened, so a selection seen before
+    /// a key is compared only with the same prompt's after it: an
+    /// accept that opens another prompt is not a move.
+    pub generation: u64,
 }
 
 impl Minibuffer {
@@ -103,6 +107,7 @@ impl Minibuffer {
             session: None,
             history: HashMap::new(),
             history_dir: None,
+            generation: 0,
         }
     }
 
@@ -122,6 +127,7 @@ impl Minibuffer {
     /// the buffer contents with `initial` and seeding history from
     /// disk if a history bucket is named.
     pub fn begin(&mut self, mut session: MinibufferSession) {
+        self.generation += 1;
         self.replace_contents(&session.initial.clone());
         self.cursor = self.buffer.len();
         // Lazy-load history once per bucket.
@@ -269,15 +275,27 @@ impl Minibuffer {
         s.candidates.get(s.selected?).cloned()
     }
 
-    /// E10g.4: when the selected candidate is no longer `before`, the
-    /// session's `on_select` and the candidate now selected, for the
-    /// caller to call once it holds no borrow of the core.
+    /// E10g.4: the open prompt's generation and selected candidate, to
+    /// hand back to [`Self::select_change`] after a key.
     #[must_use]
-    pub fn select_change(&self, before: Option<&str>) -> Option<(Function, String)> {
+    pub fn selection(&self) -> (u64, Option<String>) {
+        (self.generation, self.selected_candidate())
+    }
+
+    /// E10g.4: when the same prompt as at `before` now has another
+    /// candidate selected, its `on_select` and that candidate, for the
+    /// caller to call once it holds no borrow of the core. A prompt
+    /// opened since `before` (an accept that ran a command which asked
+    /// again) has moved nothing.
+    #[must_use]
+    pub fn select_change(&self, before: &(u64, Option<String>)) -> Option<(Function, String)> {
+        if before.0 != self.generation {
+            return None;
+        }
         let s = self.session.as_ref()?;
         let on_select = s.on_select.clone()?;
         let now = s.candidates.get(s.selected?)?;
-        (Some(now.as_str()) != before).then(|| (on_select, now.clone()))
+        (Some(now) != before.1.as_ref()).then(|| (on_select, now.clone()))
     }
 
     /// Whether a completion dropdown is currently showing (the active

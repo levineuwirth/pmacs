@@ -15393,10 +15393,10 @@ fn install_minibuffer_motion(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::
             lua.create_function(move |_, delta: i64| {
                 let delta =
                     i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
-                let before = cc.borrow().minibuffer.selected_candidate();
+                let before = cc.borrow().minibuffer.selection();
                 cc.borrow_mut().minibuffer.scroll_candidate(delta);
                 // E10g.4: a scripted move previews as a key's does.
-                let change = cc.borrow().minibuffer.select_change(before.as_deref());
+                let change = cc.borrow().minibuffer.select_change(&before);
                 if let Some((on_select, candidate)) = change {
                     on_select.call::<()>(candidate)?;
                 }

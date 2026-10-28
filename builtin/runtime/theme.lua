@@ -89,7 +89,16 @@ pmacs.command.define {
     end
     pmacs.minibuffer.read {
       prompt = "Theme: ",
-      source = function() return names end,
+      -- Ranked here, by a plain substring, so the order stays this one
+      -- and the theme in force is the first, selected at open.
+      ranked = true,
+      source = function(needle)
+        local shown = {}
+        for _, n in ipairs(names) do
+          if n:find(needle, 1, true) then shown[#shown + 1] = n end
+        end
+        return shown
+      end,
       on_select = function(name)
         if defined(name) then pmacs.theme.load(name) end
       end,
