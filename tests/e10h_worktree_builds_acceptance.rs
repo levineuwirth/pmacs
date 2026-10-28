@@ -593,3 +593,56 @@ fn e10h_review1_p3_in_a_worktree_a_packed_ref_without_reflogs_moves_the_hash() {
 fn e10h_review1_p3_in_a_clone_a_packed_ref_without_reflogs_moves_the_hash() {
     packed_ref_without_reflogs_follows_a_commit(Layout::Clone);
 }
+
+/// P4 (review 1, Low 3): every identity this process gives for itself
+/// (the daemon's `Hello`, `pmacs.instance.*`, `*pmacs-instance*`) is built
+/// by `protocol::running_identity`, the one place `pmacs` reads the hash
+/// its build script embeds; a production call of
+/// `InstanceIdentity::for_running_process` anywhere else carries the hash
+/// `pmacs-protocol` was compiled with, which a release build's script
+/// never reaches. Read as `tests/daemon_write_consistency.rs` reads: a
+/// line holding the needle that is not a comment, before its file's
+/// `mod tests {`. At 57cd5ac it fails on `src/daemon.rs` and
+/// `src/lua_bindings/mod.rs`.
+#[test]
+fn e10h_review1_p4_the_running_identity_is_built_in_one_place() {
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read src") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    walk(&root.join("src"), &mut files);
+    files.sort();
+    let mut sites = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).expect("read");
+        for (number, line) in text.lines().enumerate() {
+            let code = line.trim_start();
+            if code == "mod tests {" {
+                break;
+            }
+            if code.starts_with("//") || !code.contains("for_running_process(") {
+                continue;
+            }
+            let name = file.strip_prefix(root).expect("under the root");
+            sites.push(format!("{}:{}", name.display(), number + 1));
+        }
+    }
+    assert_eq!(
+        sites.len(),
+        1,
+        "InstanceIdentity::for_running_process is called outside \
+         protocol::running_identity: {sites:?}"
+    );
+    assert!(
+        sites[0].starts_with("src/protocol.rs:"),
+        "the one call is running_identity's: {sites:?}"
+    );
+}
