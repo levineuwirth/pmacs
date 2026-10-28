@@ -20917,7 +20917,9 @@ struct TextProjectionEdit {
 /// The character index of byte `pos` of `text`, when `pos` is a
 /// character boundary within it (its end included): two lookups in
 /// loro's tree, a byte starting a character when the byte before it lies
-/// in an earlier one (E10k.3). loro's own `insert_utf8` and `delete_utf8`
+/// in an earlier one (E10k.3), each a walk to one element and a scan of
+/// it, which the daemon's seed keeps to a piece (`pmacs::crdt`'s
+/// `PIECE_BYTES`, carried here by the snapshot). loro's own `insert_utf8` and `delete_utf8`
 /// check a byte position by copying the whole text before it, which an
 /// optimistic key at the end of an 18 MiB document paid in full (#414).
 /// The same check as `pmacs::crdt::CrdtState`'s, copied because this

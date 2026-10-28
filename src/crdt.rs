@@ -239,7 +239,7 @@ impl CrdtState {
             // ill-formed-byte detail; v0.1 has the same limitation
             // for any operation that reads bytes as text.
             let text = String::from_utf8_lossy(bytes);
-            doc.get_text("body").insert(0, &text)?;
+            insert_in_pieces(&doc.get_text("body"), 0, &text)?;
         }
         // The seed insert is the buffer's starting contents and is
         // not undoable: the arbiter (E6c) records only the spans of
@@ -277,7 +277,7 @@ impl CrdtState {
     /// text inserted at that character.
     pub fn insert(&self, pos: usize, s: &str) -> LoroResult<()> {
         let unicode = self.checked_unicode(pos)?;
-        self.doc.get_text("body").insert(unicode, s)
+        insert_in_pieces(&self.doc.get_text("body"), unicode, s)
     }
 
     /// Delete `len` bytes starting at byte position `pos`. Same
@@ -467,8 +467,9 @@ impl CrdtState {
     }
 
     /// The character starting at byte `pos` of the body text: `None` at
-    /// or past its end, or off a character boundary. Two lookups in
-    /// loro's tree, whatever the text's size (E10k.3: the per-key
+    /// or past its end, or off a character boundary. Two lookups by
+    /// [`Self::unicode_at_byte`] and one by character, each a walk of
+    /// loro's tree and a scan of one element (E10k.3: the per-key
     /// questions an attached frontend asks of its mirror answered
     /// without [`Self::materialize_string`], #414).
     #[must_use]
@@ -490,9 +491,12 @@ impl CrdtState {
     }
 
     /// The Unicode index of the character holding byte `pos` (the end's
-    /// index at the end, `None` past it): one lookup in loro's tree,
-    /// which counts bytes per node. A byte inside a character answers
-    /// that character's index.
+    /// index at the end, `None` past it). loro walks its tree, which
+    /// counts bytes per node, to the element holding `pos` and then scans
+    /// that element from its start: bounded by [`PIECE_BYTES`] for text
+    /// this type wrote, and by the whole text for a file loro was handed
+    /// in one insert, which is why [`Self::from_bytes`] writes in pieces.
+    /// A byte inside a character answers that character's index.
     fn unicode_at_byte(&self, pos: usize) -> Option<usize> {
         self.doc.get_text("body").convert_pos(
             pos,
@@ -519,7 +523,7 @@ impl CrdtState {
     ///
     /// The first byte whose character is at or past `pos`, found by
     /// bisecting the bytes with [`Self::unicode_at_byte`]: about two dozen
-    /// tree lookups at 18 MiB. loro's own conversion copies the whole
+    /// lookups at 18 MiB, each a scan of one piece. loro's own conversion copies the whole
     /// text before the offset, which the daemon did once an imported key
     /// (E10k, #414).
     #[must_use]
@@ -639,6 +643,34 @@ impl CrdtState {
         drop(commit);
         Ok(())
     }
+}
+
+/// The most bytes of text one element of loro's tree holds when
+/// `CrdtState` writes it (E10k). loro merges text from contiguous ops into
+/// one element, and finds a byte position inside an element by scanning it
+/// from its start, so a file or a paste inserted in one op is one element
+/// that every byte lookup near its end scans whole: 18 MiB for #414's log,
+/// which E10k's profile found the daemon scanning on every remote key.
+/// Written back to front in pieces of at most this many bytes, no two
+/// pieces merge (each piece's ids run on from the piece after it, not the
+/// one before it), and a lookup scans at most one piece.
+const PIECE_BYTES: usize = 16 * 1024;
+
+/// Insert `s` at character `at` of `text`, back to front in pieces of at
+/// most [`PIECE_BYTES`], each cut at a character boundary: the same text
+/// as one insert, in elements no lookup has to scan whole. A typed
+/// character is one piece, one insert.
+fn insert_in_pieces(text: &loro::LoroText, at: usize, s: &str) -> LoroResult<()> {
+    let mut end = s.len();
+    while end > 0 {
+        let mut start = end.saturating_sub(PIECE_BYTES);
+        while !s.is_char_boundary(start) {
+            start -= 1;
+        }
+        text.insert(at, &s[start..end])?;
+        end = start;
+    }
+    Ok(())
 }
 
 /// T M10.3: map a [`crate::protocol::FrontendId`] to the loro `PeerID`
@@ -1697,6 +1729,27 @@ mod tests {
         let _first = typed(&late, "a");
         let second = typed(&late, "b");
         assert_eq!(daemon.validate_update_peer_ids(2, &second), Err(4));
+    }
+
+    /// E10k: a seed and an insert longer than a piece go in as pieces,
+    /// back to front, and keep their text exactly, a multi-byte character
+    /// at a cut kept whole; a byte lookup at the end reads the last one.
+    #[test]
+    fn e10k_large_text_goes_in_as_pieces_and_keeps_its_text() {
+        let unit = "a\u{1F600}b\u{4E2D}\u{E9}\n";
+        let text = unit.repeat(3 * PIECE_BYTES / unit.len() + 7);
+        assert!(text.len() > 3 * PIECE_BYTES, "four pieces at least");
+        let s = CrdtState::from_bytes(1, text.as_bytes()).expect("seed");
+        assert_eq!(s.materialize_string(), text);
+        assert_eq!(s.char_before_byte(text.len()), Some('\n'));
+        let at = text.len() / 2;
+        let at = (at..text.len())
+            .find(|&b| text.is_char_boundary(b))
+            .expect("a boundary");
+        s.insert(at, &text).expect("insert");
+        let mut want = text.clone();
+        want.insert_str(at, &text);
+        assert_eq!(s.materialize_string(), want);
     }
 
     #[test]

@@ -183,7 +183,7 @@ const CONVERT: [List; 2] = [
         allowed: &[(
             "unicode_at_byte",
             1,
-            "bytes to characters: one lookup in loro's tree",
+            "bytes to characters: a walk of loro's tree and a scan of one piece",
         )],
     },
     List {
@@ -193,7 +193,7 @@ const CONVERT: [List; 2] = [
         allowed: &[(
             "loro_char_index_on_boundary",
             1,
-            "bytes to characters: one lookup in loro's tree",
+            "bytes to characters: a walk of loro's tree and a scan of one piece",
         )],
     },
 ];
