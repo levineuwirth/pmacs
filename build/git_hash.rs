@@ -16,10 +16,12 @@
 //! it. The paths are now the ones git reports for the checkout, in either
 //! layout, and only those that exist are declared.
 //!
-//! A debug or test build (every gate's, every CI test leg's) runs no `git`
-//! and embeds no hash, so it never rebuilds because a commit was made
-//! (E10h.2 as amended, option D of four: the hash in every build, in
-//! release builds only, only when supplied, or removed).
+//! A debug build (cargo's `PROFILE` is `debug`: every gate's, every CI
+//! `Test` leg's) runs no `git` and embeds no hash, so it never rebuilds
+//! because a commit was made (E10h.2 as amended, option D of four: the hash
+//! in every build, in release builds only, only when supplied, or removed).
+//! A `cargo test --release` is a release build and runs it, as CI's M1
+//! Acceptance and M4, M5, M6 and M10 Perf Gates do.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

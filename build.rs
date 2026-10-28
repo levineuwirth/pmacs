@@ -2,9 +2,10 @@
 
 //! Exposes `PMACS_GIT_HASH` as a build-time env var so that
 //! `option_env!("PMACS_GIT_HASH")` in this package resolves to a short git
-//! hash in a release build from a git checkout, and to `None` in a debug or
-//! test build and wherever no checkout is available, unless the caller
-//! supplies the variable (`build/git_hash.rs`).
+//! hash in a release build from a git checkout (`cargo test --release`
+//! included), and to `None` in a debug build (`cargo build`, `cargo test`)
+//! and wherever no checkout is available, unless the caller supplies the
+//! variable (`build/git_hash.rs`).
 
 #[path = "build/strict_aliasing.rs"]
 mod strict_aliasing;

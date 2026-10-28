@@ -66,8 +66,9 @@ pub use pmacs_protocol::*;
 
 /// The short git hash this build carries: a release build's from a git
 /// checkout, which the root build script embeds (`build/git_hash.rs`), or
-/// a caller-supplied `PMACS_GIT_HASH` in any profile; `None` in a debug or
-/// test build.
+/// a caller-supplied `PMACS_GIT_HASH` in any profile; `None` in a debug
+/// build, `cargo test`'s included (a `cargo test --release` is a release
+/// build).
 ///
 /// Read here, in `pmacs`, because a build script's `cargo:rustc-env`
 /// reaches only its own package's crates. The `option_env!` inside
