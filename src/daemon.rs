@@ -4345,8 +4345,9 @@ fn validate_remote_crdt_op(
     // matches `source`, but the loro update bytes carry their own
     // internal peer attribution. A hostile or buggy client can
     // wrap update bytes generated under a different peer with the
-    // wrapper peer_id set correctly. Fork the buffer's CRDT state
-    // and inspect which peers' counters advance on import. Any
+    // wrapper peer_id set correctly. Read the update's header for the
+    // peers whose ops it carries past what the buffer holds (E10k.4: it
+    // imported into a fork of the whole document until then). Any
     // peer that isn't the authenticated source's peer_id is a
     // protocol violation.
     let expected_peer_id = crate::crdt::peer_id_from_frontend(source);

@@ -515,51 +515,69 @@ impl CrdtState {
     }
 
     /// Convert a Unicode scalar offset in the current text projection
-    /// to its UTF-8 byte offset.
+    /// to its UTF-8 byte offset (`None` past the end).
+    ///
+    /// The first byte whose character is at or past `pos`, found by
+    /// bisecting the bytes with [`Self::unicode_at_byte`]: about two dozen
+    /// tree lookups at 18 MiB. loro's own conversion copies the whole
+    /// text before the offset, which the daemon did once an imported key
+    /// (E10k, #414).
     #[must_use]
     pub fn unicode_to_utf8_pos(&self, pos: usize) -> Option<usize> {
-        self.doc.get_text("body").convert_pos(
-            pos,
-            loro::cursor::PosType::Unicode,
-            loro::cursor::PosType::Bytes,
-        )
+        let len = self.len_utf8();
+        if pos > self.unicode_at_byte(len)? {
+            return None;
+        }
+        let (mut lo, mut hi) = (0, len);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.unicode_at_byte(mid)? < pos {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(lo)
     }
 
     /// T M10.10 post-audit-round-4 F26 — validate that importing
     /// the wire bytes `bytes` would attribute every new op to
     /// `expected_peer_id`.
     ///
-    /// Imports into a forked clone so the live state isn't mutated.
-    /// Compares the oplog version vector before and after import:
-    /// every peer whose counter advances must be `expected_peer_id`,
-    /// or the bytes carry ops produced under a different identity
-    /// than the wire wrapper's `op.peer_id`.
+    /// Reads the update's own header (`LoroDoc::decode_import_blob_meta`):
+    /// the range of each peer's ops it carries. A peer whose ops reach
+    /// past what this document holds would advance on import, and every
+    /// such peer must be `expected_peer_id`, or the bytes carry ops
+    /// produced under a different identity than the wire wrapper's
+    /// `op.peer_id`.
     ///
     /// Returns:
-    /// - `Ok(())` — every advancing peer matches `expected_peer_id`,
-    ///   OR the loro decoder rejected the bytes (the real import
-    ///   will surface the same decode error to the caller; we don't
-    ///   reject on validation grounds here).
-    /// - `Err(actual)` — the first peer whose counter advanced and
-    ///   doesn't match `expected_peer_id`. The caller (the daemon's
-    ///   `validate_remote_crdt_op`) treats this as a protocol
-    ///   violation and drops the op.
+    /// - `Ok(())` — every peer the update would advance is
+    ///   `expected_peer_id`, OR the loro decoder rejected the bytes (the
+    ///   real import will surface the same decode error to the caller;
+    ///   we don't reject on validation grounds here).
+    /// - `Err(actual)` — the first such peer that isn't
+    ///   `expected_peer_id`. The caller (the daemon's
+    ///   `validate_remote_crdt_op`) treats this as a protocol violation
+    ///   and drops the op.
     ///
-    /// Cost: doubles the import cost. Loro's `fork()` is shallow;
-    /// the real import reapplies. Acceptable for v1.0 throughput;
-    /// v0.2+ may add a peek API to loro that avoids the second
-    /// import.
+    /// Cost: the update's size, whatever the document's (E10k.4). Until
+    /// E10k.4 this imported the bytes into `LoroDoc::fork()`, which
+    /// encodes the whole document as a snapshot and decodes it again,
+    /// once a typed key from an attached frontend (#414). One reading
+    /// differs: a foreign peer's ops the document cannot apply yet (their
+    /// dependencies missing) advanced nothing in the fork, which passed
+    /// them, to wait in the real import's pending set and apply later
+    /// under that peer; here they are refused.
     pub fn validate_update_peer_ids(&self, expected_peer_id: u64, bytes: &[u8]) -> Result<(), u64> {
-        let fork = self.doc.fork();
-        let before = fork.oplog_vv();
-        if fork.import(bytes).is_err() {
+        let Ok(meta) = LoroDoc::decode_import_blob_meta(bytes, true) else {
             // Decode error: let the real import surface it.
             return Ok(());
-        }
-        let after = fork.oplog_vv();
-        for (peer, after_counter) in after.iter() {
-            let before_counter = before.get(peer).copied().unwrap_or(0);
-            if *after_counter > before_counter && *peer != expected_peer_id {
+        };
+        let held = self.doc.oplog_vv();
+        for (peer, end) in meta.partial_end_vv.iter() {
+            let have = held.get(peer).copied().unwrap_or(0);
+            if *end > have && *peer != expected_peer_id {
                 return Err(*peer);
             }
         }
@@ -1615,6 +1633,70 @@ mod tests {
             text,
             "a refused delete changes nothing"
         );
+    }
+
+    /// E10k.4: the bisecting conversion the daemon's import uses answers
+    /// what loro's own does (which copies the text before the offset), at
+    /// every index of a text of 1- to 4-byte characters, its end and past
+    /// it.
+    #[test]
+    fn e10k_4_unicode_to_utf8_pos_agrees_with_loro_at_every_index() {
+        let s = CrdtState::new(1).expect("new");
+        s.insert(0, "a\u{1F600}b\u{4E2D}\u{E9}\nz").expect("seed");
+        let text = s.doc.get_text("body");
+        for index in 0..=text.len_unicode() + 2 {
+            assert_eq!(
+                s.unicode_to_utf8_pos(index),
+                text.convert_pos(
+                    index,
+                    loro::cursor::PosType::Unicode,
+                    loro::cursor::PosType::Bytes
+                ),
+                "index {index}"
+            );
+        }
+    }
+
+    /// E10k.4: the peer check reads the update's header instead of
+    /// importing it into a fork of the whole document. It passes the
+    /// expected peer's ops, refuses another peer's with that peer's id,
+    /// passes bytes loro cannot decode (the import says why) and ops the
+    /// document already holds; and, where the fork passed them, refuses
+    /// another peer's ops the document cannot apply yet.
+    #[test]
+    fn e10k_4_the_peer_check_reads_the_update_header() {
+        let daemon = CrdtState::new(1).expect("new");
+        daemon.insert(0, "hello").expect("seed");
+        let snapshot = daemon.export_snapshot().expect("snapshot");
+        let replica = |peer: u64| {
+            let state = CrdtState::new(peer).expect("new");
+            state.import_snapshot(&snapshot).expect("import");
+            state
+        };
+        let typed = |state: &CrdtState, text: &str| {
+            let before = state.version();
+            let at = state.len_utf8();
+            state.insert(at, text).expect("type");
+            state.export_updates_since(&before).expect("export")
+        };
+        let own = replica(2);
+        let own_key = typed(&own, "!");
+        assert_eq!(daemon.validate_update_peer_ids(2, &own_key), Ok(()));
+        let other = replica(3);
+        let other_key = typed(&other, "?");
+        assert_eq!(daemon.validate_update_peer_ids(2, &other_key), Err(3));
+        assert_eq!(daemon.validate_update_peer_ids(2, b"not an update"), Ok(()));
+        daemon.import_updates(&other_key).expect("import");
+        assert_eq!(
+            daemon.validate_update_peer_ids(2, &other_key),
+            Ok(()),
+            "ops the document holds advance nothing"
+        );
+        // Peer 4's second key, without its first: pending on import.
+        let late = replica(4);
+        let _first = typed(&late, "a");
+        let second = typed(&late, "b");
+        assert_eq!(daemon.validate_update_peer_ids(2, &second), Err(4));
     }
 
     #[test]

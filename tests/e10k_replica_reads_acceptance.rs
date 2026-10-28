@@ -30,9 +30,13 @@
 //!   daemon's edit), so an edit goes in at a character index found by
 //!   lookups;
 //! - [`CONVERT`]: `convert_pos` called only where it is that lookup,
-//!   bytes to characters, and in `CrdtState::unicode_to_utf8_pos`, the
-//!   other direction, which copies the text before the offset and is the
-//!   daemon's import's (E10k.4's);
+//!   bytes to characters; the other direction copies the text before
+//!   the offset, and the daemon's import converted that way once a key
+//!   until E10k.4 (`CrdtState::unicode_to_utf8_pos` now bisects);
+//! - [`FORK`]: no `fork()` in `CrdtState`: the daemon's check of a
+//!   remote op's peers imported it into a fork of the whole document,
+//!   which loro builds by encoding and decoding a snapshot, once a key
+//!   (E10k.4, the profile's largest share of the daemon's time);
 //! - and every function named above defined where it is looked for, so
 //!   a rename cannot leave the lists holding nothing.
 
@@ -176,19 +180,11 @@ const CONVERT: [List; 2] = [
         file: "src/crdt.rs",
         needle: "convert_pos(",
         what: "converts a position with loro",
-        allowed: &[
-            (
-                "unicode_at_byte",
-                1,
-                "bytes to characters: one lookup in loro's tree",
-            ),
-            (
-                "unicode_to_utf8_pos",
-                1,
-                "characters to bytes, which copies the text before the offset: the \
-                 daemon's import, E10k.4's",
-            ),
-        ],
+        allowed: &[(
+            "unicode_at_byte",
+            1,
+            "bytes to characters: one lookup in loro's tree",
+        )],
     },
     List {
         file: "pmacs-gpu/src/main.rs",
@@ -201,6 +197,14 @@ const CONVERT: [List; 2] = [
         )],
     },
 ];
+
+/// A fork of the document, nowhere in `CrdtState`.
+const FORK: List = List {
+    file: "src/crdt.rs",
+    needle: ".fork()",
+    what: "copies the whole document into a fork",
+    allowed: &[],
+};
 
 /// The per-key functions the roadmap names, each in its file.
 const PER_KEY: [(&str, &str); 9] = [
@@ -261,6 +265,7 @@ fn problems(read: &dyn Fn(&str) -> String) -> Vec<String> {
     for list in EDITS.iter().chain(CONVERT.iter()) {
         all.extend(problems_in(list, &read(list.file)));
     }
+    all.extend(problems_in(&FORK, &read(FORK.file)));
     for (file, name) in PER_KEY {
         let text = read(file);
         if !text.lines().any(|line| defined_fn(line) == Some(name)) {
