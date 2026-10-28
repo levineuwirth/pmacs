@@ -5642,9 +5642,10 @@ impl EditorCore {
     /// one instance suffices; it renders nothing while the menu is closed.
     fn ensure_menu_overlay(&mut self) {
         let menu = self.menu.clone();
+        let theme = self.theme.clone();
         let win = self.active_window_mut();
         if !win.overlay_kinds().contains(&"context-menu") {
-            win.push_overlay(Box::new(crate::menu::MenuView::new(menu)));
+            win.push_overlay(Box::new(crate::menu::MenuView::new(menu, theme)));
         }
     }
 
@@ -6168,9 +6169,12 @@ impl EditorCore {
     fn ensure_completion_overlay(&mut self) {
         let popup = self.completion_popup.clone();
         let wid = self.active_window_id();
+        let theme = self.theme.clone();
         let win = self.active_window_mut();
         if !win.overlay_kinds().contains(&"completion-popup") {
-            win.push_overlay(Box::new(crate::completion::CompletionView::new(popup, wid)));
+            win.push_overlay(Box::new(crate::completion::CompletionView::new(
+                popup, wid, theme,
+            )));
         }
     }
 

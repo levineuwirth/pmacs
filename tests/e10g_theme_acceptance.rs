@@ -45,6 +45,22 @@ fn frame_at(s: &EditorState, size: CellSize, depth: ColorDepth) -> Vec<Vec<Cell>
     grid
 }
 
+/// The column where `text` starts on `row`, read from the glyphs.
+fn find_text(grid: &[Vec<Cell>], row: usize, text: &str) -> usize {
+    let glyphs: Vec<char> = grid[row]
+        .iter()
+        .map(|c| match c.glyph {
+            pmacs::cell::Glyph::Char(ch) => ch,
+            _ => '\0',
+        })
+        .collect();
+    let want: Vec<char> = text.chars().collect();
+    glyphs
+        .windows(want.len())
+        .position(|w| w == want.as_slice())
+        .unwrap_or_else(|| panic!("{text:?} not on row {row}: {}", String::from_iter(&glyphs)))
+}
+
 fn colors_of(style: &Style) -> [Color; 3] {
     [style.fg, style.bg, style.underline_color]
 }
@@ -230,4 +246,215 @@ fn e10g1_loading_an_undefined_name_is_refused_and_changes_nothing() {
     );
     assert!(err.contains("no theme named \"no-such-theme\""), "{err}");
     assert_eq!(s.syntax_registry.theme().lock().unwrap().by_capture, before);
+}
+
+// ---------------------------------------------------------------------------
+// E10g.2 — the buffer and every painted surface (the grid frontend)
+// ---------------------------------------------------------------------------
+
+const FACE_FG: Color = Color::Rgb(200, 200, 190);
+const FACE_BG: Color = Color::Rgb(18, 18, 18);
+
+fn style(fg: Color, bg: Color) -> Style {
+    Style {
+        fg,
+        bg,
+        ..Style::default()
+    }
+}
+
+/// The buffer face paints every cell the frame would have left at the
+/// terminal's default: the text, past the end of a line, below the last
+/// line, and the reverse-video bands (reversed from the face's colors).
+/// Unset, those cells stay at the default, today's frame.
+#[test]
+fn e10g2_the_grid_paints_the_buffer_face_in_every_cell() {
+    let s = fresh();
+    exec(&s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+    let size = CellSize::new(10, 40);
+
+    let unset = frame_at(&s, size, ColorDepth::TrueColor);
+    let h = find_text(&unset, 0, "hello");
+    assert_eq!(unset[0][h].style.fg, Color::Default, "unset: today's text");
+    assert_eq!(
+        unset[0][30].style.bg,
+        Color::Default,
+        "unset: past the line"
+    );
+    assert_eq!(
+        unset[5][h].style.bg,
+        Color::Default,
+        "unset: below the last"
+    );
+
+    exec(
+        &s,
+        r#"pmacs.theme.merge { ["ui.default"] = { fg = {200, 200, 190}, bg = {18, 18, 18} } }"#,
+    );
+    let set = frame_at(&s, size, ColorDepth::TrueColor);
+    assert_eq!(set[0][h].style, style(FACE_FG, FACE_BG), "the text");
+    assert_eq!(set[0][30].style, style(FACE_FG, FACE_BG), "past the line");
+    assert_eq!(set[5][h].style, style(FACE_FG, FACE_BG), "below the last");
+    assert_eq!(set[0][0].style.bg, FACE_BG, "the gutter's background");
+    let modeline = &set[8][0].style;
+    assert!(modeline.reverse, "the modeline keeps its reverse video");
+    assert_eq!((modeline.fg, modeline.bg), (FACE_FG, FACE_BG));
+    for (row, cells) in set.iter().enumerate() {
+        for (col, cell) in cells.iter().enumerate() {
+            assert!(
+                cell.style.fg != Color::Default && cell.style.bg != Color::Default,
+                "({row},{col}) left at the terminal default: {:?}",
+                cell.style
+            );
+        }
+    }
+}
+
+/// The buffer face is looked up by its own name: a theme that colors
+/// every chrome surface through the bare `ui` catch-all does not paint
+/// the text area, which is not chrome.
+#[test]
+fn e10g2_the_bare_ui_catch_all_does_not_reach_the_buffer() {
+    let s = fresh();
+    exec(
+        &s,
+        "pmacs.theme.merge { ui = { fg = {250, 0, 0}, bg = {0, 0, 90} } }",
+    );
+    let frame = frame_at(&s, CellSize::new(10, 40), ColorDepth::TrueColor);
+    assert_eq!(
+        frame[5][0].style.bg,
+        Color::Default,
+        "the buffer is not chrome"
+    );
+    assert_eq!(
+        frame[8][0].style.bg,
+        Color::Rgb(0, 0, 90),
+        "the control: the catch-all does reach the modeline"
+    );
+}
+
+/// The context menu's rows, selected row and separator take `ui.menu`,
+/// `ui.menu.selected` and `ui.menu.separator`; unset, today's constants.
+#[test]
+fn e10g2_the_grid_menu_takes_the_menu_faces() {
+    use pmacs::menu::MenuRow;
+    let s = fresh();
+    s.core.borrow_mut().menu_open(
+        vec![
+            MenuRow::Item {
+                label: "Copy".into(),
+                command: "editor.copy".into(),
+            },
+            MenuRow::Separator,
+            MenuRow::Item {
+                label: "Paste".into(),
+                command: "editor.paste".into(),
+            },
+        ],
+        (1, 2),
+    );
+    let size = CellSize::new(10, 40);
+    let unset = frame_at(&s, size, ColorDepth::TrueColor);
+    let idx = Color::Indexed;
+    assert_eq!(
+        unset[1][3].style,
+        style(idx(231), idx(24)),
+        "the active row"
+    );
+    assert_eq!(unset[2][3].glyph, pmacs::cell::Glyph::Char('─'));
+    assert_eq!(unset[2][3].style, style(idx(252), idx(236)), "the rule");
+    assert_eq!(unset[3][3].style, style(idx(252), idx(236)), "a row");
+
+    exec(
+        &s,
+        r#"pmacs.theme.merge {
+             ["ui.menu"] = { fg = {1, 2, 3}, bg = {4, 5, 6} },
+             ["ui.menu.selected"] = { fg = {7, 8, 9}, bg = {10, 11, 12} },
+             ["ui.menu.separator"] = { fg = {13, 14, 15} },
+           }"#,
+    );
+    let set = frame_at(&s, size, ColorDepth::TrueColor);
+    let rgb = Color::Rgb;
+    assert_eq!(set[1][3].style, style(rgb(7, 8, 9), rgb(10, 11, 12)));
+    assert_eq!(set[2][3].style, style(rgb(13, 14, 15), rgb(4, 5, 6)));
+    assert_eq!(set[3][3].style, style(rgb(1, 2, 3), rgb(4, 5, 6)));
+}
+
+/// The minibuffer's candidate band and the completion popup paint their
+/// rows, selected row and kind column in `ui.menu` and
+/// `ui.menu.selected`; unset, the dim fill, reverse video and the dim
+/// kind glyph they always had.
+#[test]
+fn e10g2_the_band_and_the_completion_popup_take_the_menu_faces() {
+    use pmacs::completion::{
+        CompletionEditsCarry, CompletionItemKind, CompletionPopupState, PopupCandidate,
+    };
+    let s = fresh();
+    exec(&s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+    let candidate = |label: &str| PopupCandidate {
+        carry: CompletionEditsCarry::default(),
+        label: label.to_owned(),
+        kind: CompletionItemKind::Text,
+        detail: None,
+        insert_text: label.to_owned(),
+    };
+    let popup = {
+        let core = s.core.borrow();
+        CompletionPopupState::new(
+            core.active_buffer_id(),
+            0,
+            String::new(),
+            vec![candidate("alpha"), candidate("beta")],
+            2,
+        )
+        .expect("a non-empty popup")
+    };
+    s.core.borrow_mut().completion_popup_open(popup);
+    exec(
+        &s,
+        r#"pmacs.minibuffer.read {
+             prompt = "Pick: ",
+             source = function() return { "one", "two" } end,
+             on_accept = function() end,
+           }"#,
+    );
+    let size = CellSize::new(12, 40);
+    let idx = Color::Indexed;
+    let reverse = Style {
+        reverse: true,
+        ..Style::default()
+    };
+    // The popup sits under row 0 after the gutter, the band over the
+    // prompt row (11) from column 0; a label starts two columns after
+    // its row's kind glyph.
+    let unset = frame_at(&s, size, ColorDepth::TrueColor);
+    let rows = [
+        (1, find_text(&unset, 2, "beta"), "popup"),
+        (9, find_text(&unset, 10, "two"), "band"),
+    ];
+    for (row, label, what) in rows {
+        assert_eq!(unset[row][label].style, reverse, "{what}: the selected row");
+        let (next, kind) = (&unset[row + 1][label], &unset[row + 1][label - 2]);
+        assert_eq!(next.style, style(idx(252), idx(236)), "{what}: a row");
+        assert_eq!(kind.style, style(idx(8), idx(236)), "{what}: kind");
+    }
+
+    exec(
+        &s,
+        r#"pmacs.theme.merge {
+             ["ui.menu"] = { fg = {1, 2, 3}, bg = {4, 5, 6} },
+             ["ui.menu.selected"] = { fg = {7, 8, 9}, bg = {10, 11, 12} },
+           }"#,
+    );
+    let set = frame_at(&s, size, ColorDepth::TrueColor);
+    let rgb = Color::Rgb;
+    let (row_style, selected) = (
+        style(rgb(1, 2, 3), rgb(4, 5, 6)),
+        style(rgb(7, 8, 9), rgb(10, 11, 12)),
+    );
+    for (row, label, what) in rows {
+        assert_eq!(set[row][label].style, selected, "{what}: the selected row");
+        assert_eq!(set[row + 1][label].style, row_style, "{what}: a row");
+        assert_eq!(set[row + 1][label - 2].style, row_style, "{what}: kind");
+    }
 }

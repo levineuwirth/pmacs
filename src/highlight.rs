@@ -157,6 +157,9 @@ pub enum EntryMode {
     Merge,
 }
 
+/// E10g.2: the name of the buffer face, [`Theme::buffer_face`].
+pub const BUFFER_FACE: &str = "ui.default";
+
 /// Themes arc Q#TH2: the face predicate. A theme key names a UI face
 /// iff it is exactly `ui` (the deliberate inheritance catch-all —
 /// [`Theme::face`]'s walk terminal) or starts with `ui.`. Shared by
@@ -362,6 +365,15 @@ impl Theme {
                 None => return None,
             }
         }
+    }
+
+    /// The buffer face (E10g.2), when the theme sets it: the text area's
+    /// own foreground and background. By its exact name only, never
+    /// through the walk to the bare `ui` catch-all, which colors chrome:
+    /// the buffer is not chrome.
+    #[must_use]
+    pub fn buffer_face(&self) -> Option<Style> {
+        self.by_capture.get(BUFFER_FACE).copied()
     }
 
     /// Resolve a custom modeline segment face relative to the already

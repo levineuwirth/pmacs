@@ -714,6 +714,43 @@ pub(crate) fn popup_style() -> Style {
     }
 }
 
+/// E10g.2: a face's {fg, bg} as a row style, everything else plain.
+pub(crate) fn fg_bg(face: Style) -> Style {
+    Style {
+        fg: face.fg,
+        bg: face.bg,
+        ..Style::default()
+    }
+}
+
+/// E10g.2: the styles a popup row is painted in --- the completion
+/// popup's and the minibuffer band's: `ui.menu` for a row and
+/// `ui.menu.selected` for the selected one, each {fg, bg}, where the
+/// theme sets them, else today's constants. The kind glyph column takes
+/// the row's style when `ui.menu` is set and the dim constant when not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BandStyles {
+    /// A row.
+    pub(crate) row: Style,
+    /// The selected row.
+    pub(crate) selected: Style,
+    /// Column 0 of a row that is not selected.
+    pub(crate) kind: Style,
+}
+
+impl BandStyles {
+    /// The styles `theme` gives, or today's for a bare core (`None`).
+    pub(crate) fn resolve(theme: Option<&crate::highlight::Theme>) -> Self {
+        let face = |name: &str| theme.and_then(|t| t.face(name)).map(fg_bg);
+        let row = face("ui.menu");
+        Self {
+            row: row.unwrap_or_else(popup_style),
+            selected: face("ui.menu.selected").unwrap_or_else(selected_style),
+            kind: row.unwrap_or_else(kind_style),
+        }
+    }
+}
+
 /// The visible slice of `n` candidates windowed around `selected`:
 /// returns `(start, len)`. Mirrors the minibuffer dropdown's centered
 /// window so the highlight stays in view as the user cycles.
@@ -744,14 +781,25 @@ pub struct CompletionView {
     /// `window_id` paints, so same-buffer splits don't each show
     /// the popup.
     window_id: crate::window::WindowId,
+    /// The theme its `ui.menu` faces resolve through (E10g.2); `None`
+    /// in a bare core, which paints today's constants.
+    theme: Option<crate::highlight::ThemeHandle>,
 }
 
 impl CompletionView {
     /// Build a view reading `popup`, rendering only when the open
     /// session belongs to `window_id`.
     #[must_use]
-    pub fn new(popup: SharedCompletionPopup, window_id: crate::window::WindowId) -> Self {
-        Self { popup, window_id }
+    pub fn new(
+        popup: SharedCompletionPopup,
+        window_id: crate::window::WindowId,
+        theme: Option<crate::highlight::ThemeHandle>,
+    ) -> Self {
+        Self {
+            popup,
+            window_id,
+            theme,
+        }
     }
 }
 
@@ -908,6 +956,10 @@ fn resolve_popup_rect(
 
 /// Paint one popup row (background fill, kind glyph, label + detail)
 /// at absolute row `r`, columns `[abs_left .. abs_left + width)`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one row of a cell grid: the geometry is the signature"
+)]
 fn paint_popup_row(
     cells: &mut CellGrid<'_>,
     item: &PopupCandidate,
@@ -915,6 +967,7 @@ fn paint_popup_row(
     abs_left: u32,
     width: u32,
     selected: bool,
+    styles: BandStyles,
 ) {
     paint_band_row(
         cells,
@@ -925,15 +978,17 @@ fn paint_popup_row(
         abs_left,
         width,
         selected,
+        styles,
     );
 }
 
 /// The popup's row painter, shared with the minibuffer's candidate
 /// band (E6.2): a full-width background, a one-character glyph in
 /// column 0, and `label` plus an optional two-space-separated `detail`
-/// from column 2, clipped to `width`; the selected row in reverse
-/// video. The popup passes its LSP kind glyph, the band a `/` for a
-/// directory and a blank otherwise.
+/// from column 2, clipped to `width`; the selected row in `styles`'
+/// selected style (reverse video unless the theme says). The popup
+/// passes its LSP kind glyph, the band a `/` for a directory and a
+/// blank otherwise.
 #[allow(
     clippy::too_many_arguments,
     reason = "one row of a cell grid: the geometry is the signature"
@@ -947,11 +1002,12 @@ pub(crate) fn paint_band_row(
     abs_left: u32,
     width: u32,
     selected: bool,
+    styles: BandStyles,
 ) {
     let row_style = if selected {
-        selected_style()
+        styles.selected
     } else {
-        popup_style()
+        styles.row
     };
     // Columns 2..: label, optionally followed by the detail.
     let mut text = String::with_capacity(label.len() + 4);
@@ -963,7 +1019,7 @@ pub(crate) fn paint_band_row(
     paint_text_row(cells, glyph, &text, r, abs_left, width, row_style, None);
     // Column 0: the glyph, dimmed unless the row is selected.
     if !selected {
-        cells.at(CellCoord::new(r, abs_left)).style = kind_style();
+        cells.at(CellCoord::new(r, abs_left)).style = styles.kind;
     }
 }
 
@@ -1061,6 +1117,13 @@ impl View for CompletionView {
             return;
         };
         let origin = viewport.cell_origin;
+        let styles = {
+            let theme = self
+                .theme
+                .as_ref()
+                .map(|t| t.lock().expect("theme mutex poisoned"));
+            BandStyles::resolve(theme.as_deref())
+        };
         for (i, item) in rows_data.iter().take(rect.shown as usize).enumerate() {
             paint_popup_row(
                 cells,
@@ -1069,6 +1132,7 @@ impl View for CompletionView {
                 origin.col + rect.left,
                 rect.width,
                 i == selected_in_window,
+                styles,
             );
         }
     }

@@ -6388,7 +6388,7 @@ pub fn paint_frame(
         // this borrow does not contend with the one held above.
         let commands = state.lua_host.commands().borrow();
         let col = paint_minibuffer(grid, core, &commands, term_size, &theme);
-        paint_minibuffer_band(grid, core, &commands, term_size);
+        paint_minibuffer_band(grid, core, &commands, term_size, &theme);
         Some(col)
     } else {
         None
@@ -7328,8 +7328,9 @@ fn paint_minibuffer_band(
     core: &EditorCore,
     commands: &crate::command::CommandRegistry,
     term_size: crate::cell::CellSize,
+    theme: &crate::highlight::Theme,
 ) {
-    use crate::completion::{paint_band_row, popup_window};
+    use crate::completion::{BandStyles, paint_band_row, popup_window};
     use crate::minibuffer::{CompletionSource, MB_VISIBLE, listing_dir, split_dir_base};
 
     let Some(session) = core.minibuffer.session.as_ref() else {
@@ -7353,6 +7354,7 @@ fn paint_minibuffer_band(
         start
     };
     let top = term_size.rows - 1 - shown as u32;
+    let styles = BandStyles::resolve(Some(theme));
     let contents = core.minibuffer.contents();
     let files_dir = match &session.source {
         CompletionSource::Files { root } => {
@@ -7389,6 +7391,7 @@ fn paint_minibuffer_band(
             0,
             term_size.cols,
             start + i == selected,
+            styles,
         );
     }
 }
