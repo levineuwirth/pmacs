@@ -627,3 +627,180 @@ fn e10g3_defining_a_theme_makes_it_a_choice_of_the_setting() {
     assert_eq!(loaded(&s).as_deref(), Some("later"));
     assert_eq!(buffer_bg(&s), Some(Color::Rgb(3, 3, 3)));
 }
+
+// ---------------------------------------------------------------------------
+// E10g.4 — the picker
+// ---------------------------------------------------------------------------
+
+fn press(
+    s: &mut EditorState,
+    code: crossterm::event::KeyCode,
+    mods: crossterm::event::KeyModifiers,
+) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        crossterm::event::KeyEvent {
+            code,
+            modifiers: mods,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        },
+    );
+}
+
+fn down(s: &mut EditorState) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    press(s, KeyCode::Down, KeyModifiers::NONE);
+}
+
+fn ret(s: &mut EditorState) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    press(s, KeyCode::Enter, KeyModifiers::NONE);
+}
+
+/// `M-x theme-select RET`, by keys, and the picker is open on the theme
+/// in force.
+fn open_picker(s: &mut EditorState) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    press(s, KeyCode::Char('x'), KeyModifiers::ALT);
+    for ch in "theme-select".chars() {
+        press(s, KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    ret(s);
+    let core = s.core.borrow();
+    let session = core
+        .minibuffer
+        .session
+        .as_ref()
+        .expect("the picker is open");
+    assert_eq!(session.prompt, "Theme: ");
+    assert_eq!(
+        core.minibuffer.selected_candidate(),
+        eval::<Option<String>>(s, "return pmacs.theme.loaded()"),
+        "it opens on the theme in force"
+    );
+}
+
+/// The theme's whole state as a load writes it: every entry, its
+/// fallbacks and the default style.
+fn theme_state(s: &EditorState) -> (Vec<(String, Style)>, String, Style) {
+    let theme = s.syntax_registry.theme();
+    let th = theme.lock().unwrap();
+    let mut entries: Vec<(String, Style)> =
+        th.by_capture.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut fallbacks: Vec<String> = th.fallbacks.iter().map(|f| format!("{f:?}")).collect();
+    fallbacks.sort();
+    (entries, fallbacks.join(";"), th.default_style)
+}
+
+/// Relaunch over the same roots: `init.lua` and the state as they are.
+fn relaunch(roots: &pmacs::bootstrap::BootstrapRoots) -> EditorState {
+    let s = EditorState::new_with_roots(roots);
+    s.install_state_dirs();
+    s
+}
+
+/// A move loads the selected theme at once: the frame's buffer
+/// background is the selected theme's before any RET.
+#[test]
+fn e10g4_a_move_previews_the_theme_before_ret() {
+    let roots = roots_for("preview");
+    let mut s = start(&roots, TWO_THEMES, None);
+    let size = CellSize::new(10, 40);
+    open_picker(&mut s);
+    assert_eq!(
+        frame_at(&s, size, ColorDepth::TrueColor)[5][5].style.bg,
+        Color::Default
+    );
+    down(&mut s);
+    assert!(s.core.borrow().minibuffer.is_active(), "no RET yet");
+    let frame = frame_at(&s, size, ColorDepth::TrueColor);
+    assert_eq!(
+        frame[5][5].style.bg,
+        Color::Rgb(1, 1, 1),
+        "plain-a, previewed"
+    );
+    down(&mut s);
+    let frame = frame_at(&s, size, ColorDepth::TrueColor);
+    assert_eq!(
+        frame[5][5].style.bg,
+        Color::Rgb(2, 2, 2),
+        "plain-b, previewed"
+    );
+    assert_eq!(loaded(&s).as_deref(), Some("plain-b"));
+}
+
+/// `C-g` after three moves restores the theme in force when the picker
+/// opened, every face byte-identically, the user layer included.
+#[test]
+fn e10g4_c_g_after_three_moves_restores_every_face_byte_identically() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let roots = roots_for("cancel");
+    let init = format!(
+        "{TWO_THEMES}
+pmacs.theme.define(\"plain-c\", {{ faces = {{ [\"ui.default\"] = {{ bg = {{3, 3, 3}},
+  fallback = {{ [256] = {{ bg = 16 }}, [16] = {{ bg = 0 }} }} }} }} }})
+pmacs.theme.merge {{ keyword = {{ fg = {{9, 9, 9}} }} }}
+"
+    );
+    let mut s = start(&roots, &init, Some("plain-a"));
+    let before = theme_state(&s);
+    assert_eq!(loaded(&s).as_deref(), Some("plain-a"));
+    open_picker(&mut s);
+    for _ in 0..3 {
+        down(&mut s);
+    }
+    assert_eq!(loaded(&s).as_deref(), Some("plain-c"), "three moves away");
+    assert_ne!(theme_state(&s), before);
+    press(&mut s, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    assert!(!s.core.borrow().minibuffer.is_active());
+    assert_eq!(loaded(&s).as_deref(), Some("plain-a"));
+    assert_eq!(theme_state(&s), before, "every face as it was");
+}
+
+/// `RET` keeps the selected theme and writes it to `pmacs.state`, so a
+/// relaunch comes back to it; an `init.lua` that sets `ui.theme` is not
+/// overridden by that kept choice. The user layer outlasts the RET.
+#[test]
+fn e10g4_ret_persists_across_a_restart_but_not_over_init_lua() {
+    let roots = roots_for("persist");
+    let init = format!("{TWO_THEMES}\npmacs.theme.merge {{ keyword = {{ fg = {{9, 9, 9}} }} }}\n");
+    let mut s = start(&roots, &init, None);
+    open_picker(&mut s);
+    down(&mut s);
+    ret(&mut s);
+    assert_eq!(loaded(&s).as_deref(), Some("plain-a"));
+    let keyword = |s: &EditorState| {
+        let theme = s.syntax_registry.theme();
+        let th = theme.lock().unwrap();
+        th.by_capture.get("keyword").map(|k| k.fg)
+    };
+    assert_eq!(
+        keyword(&s),
+        Some(Color::Rgb(9, 9, 9)),
+        "the merge, kept over RET"
+    );
+    let kept = roots.state_dir().unwrap().join("theme");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "plain-a\n");
+    drop(s);
+
+    let s = relaunch(&roots);
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("plain-a"),
+        "RET survives a restart"
+    );
+    assert_eq!(keyword(&s), Some(Color::Rgb(9, 9, 9)));
+    drop(s);
+
+    let with_setting = format!("{init}\npmacs.config.set(\"ui.theme\", \"plain-b\")\n");
+    std::fs::write(roots.config_dir().unwrap().join("init.lua"), with_setting).unwrap();
+    let s = relaunch(&roots);
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("plain-b"),
+        "init.lua's ui.theme over the kept plain-a"
+    );
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "plain-a\n");
+}

@@ -1,4 +1,4 @@
--- The theme setting and its restore (E10g.3).
+-- The theme setting, its restore, and the picker (E10g.3, E10g.4).
 --
 -- A theme is chosen three ways, and the order between them is the
 -- owner's ruling of 2026-10-27: an explicit `init.lua` setting of
@@ -19,7 +19,7 @@ pmacs.config.define {
   -- The choices grow as themes are defined (`pmacs.theme.define` adds
   -- each name), so an `init.lua` that sets this to a theme of its own
   -- defines the theme first.
-  description = "The named theme: one of pmacs.theme.names(). Set in init.lua it beats a choice kept in pmacs.state; a theme defined in init.lua must be defined before this is set to it.",
+  description = "The named theme: one of pmacs.theme.names(). Set in init.lua it beats the one the theme picker (M-x theme-select) kept; a theme defined in init.lua must be defined before this is set to it.",
   type = "enum",
   choices = pmacs.theme.names(),
   default = "default-dark",
@@ -72,3 +72,44 @@ function pmacs.theme.restore()
   pmacs.theme.load(name)
   return name
 end
+
+-- The picker (E10g.4). The list is every defined theme, the one in
+-- force first; moving the selection loads the selected theme at once
+-- (the preview, `on_select`), RET keeps it and writes it to state, and
+-- C-g loads again the theme in force when the picker opened, the user
+-- layer with it.
+pmacs.command.define {
+  name = "theme-select",
+  description = "Choose a theme: moving the selection previews it, RET keeps it, C-g restores the one before",
+  fn = function()
+    local original = pmacs.theme.loaded() or pmacs.config.get("ui.theme")
+    local names = { original }
+    for _, n in ipairs(pmacs.theme.names()) do
+      if n ~= original then names[#names + 1] = n end
+    end
+    pmacs.minibuffer.read {
+      prompt = "Theme: ",
+      source = function() return names end,
+      on_select = function(name)
+        if defined(name) then pmacs.theme.load(name) end
+      end,
+      on_accept = function(name)
+        if not defined(name) then
+          pmacs.theme.load(original)
+          pmacs.editor.set_status(string.format("theme: no theme named %q", name))
+          return
+        end
+        pmacs.config.set("ui.theme", name)
+        -- `set` loads only on a change; the preview may already show it.
+        pmacs.theme.load(name)
+        if pmacs.state.available() then
+          pmacs.state.write(STATE_KEY, name .. "\n")
+        end
+        pmacs.editor.set_status("theme: " .. name)
+      end,
+      on_cancel = function()
+        pmacs.theme.load(original)
+      end,
+    }
+  end,
+}

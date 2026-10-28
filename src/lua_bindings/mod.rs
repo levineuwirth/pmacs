@@ -15178,6 +15178,30 @@ fn install_minibuffer_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table
     Ok(mb)
 }
 
+/// D18 (E6.1): what RET commits, from a `pmacs.minibuffer.read` spec's
+/// `accept`. `candidate` is the default so a prompt that says nothing
+/// keeps the picker semantics it always had; the open-set prompts name
+/// `typed` themselves; `key` (E7b.2) is the one-keypress answer of
+/// `y_or_n`.
+fn parse_accept_policy(spec: &Table) -> mlua::Result<crate::minibuffer::AcceptPolicy> {
+    match spec.get::<Value>("accept")? {
+        Value::Nil => Ok(crate::minibuffer::AcceptPolicy::Candidate),
+        Value::String(s) => {
+            let name = s.to_str()?;
+            crate::minibuffer::AcceptPolicy::parse(&name).ok_or_else(|| {
+                mlua::Error::runtime(format!(
+                    "pmacs.minibuffer.read: accept must be \"candidate\", \"typed\" or \"key\", got {:?}",
+                    name.as_ref()
+                ))
+            })
+        }
+        _ => Err(mlua::Error::external(BindingError::SpecFieldType {
+            field: "accept",
+            expected: "string",
+        })),
+    }
+}
+
 fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     let cc = core.clone();
     mb.set(
@@ -15196,6 +15220,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                         | "ranked"
                         | "on_accept"
                         | "on_cancel"
+                        | "on_select"
                         | "accept"
                 ) {
                     return Err(mlua::Error::external(
@@ -15213,6 +15238,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                 })
             })?;
             let on_cancel: Option<Function> = spec.get("on_cancel")?;
+            let on_select: Option<Function> = spec.get("on_select")?;
             let source = parse_completion_source(&spec)?;
             // E4.1: `ranked = true` declares that the source filters and
             // orders against the needle it is handed, so the session
@@ -15235,29 +15261,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                      the builtin sources have no order to keep",
                 ));
             }
-            // D18 (E6.1): what RET commits. `candidate` is the
-            // default so a prompt that says nothing keeps the picker
-            // semantics it always had; the open-set prompts name
-            // `typed` themselves; `key` (E7b.2) is the one-keypress
-            // answer of `y_or_n`.
-            let accept = match spec.get::<Value>("accept")? {
-                Value::Nil => crate::minibuffer::AcceptPolicy::Candidate,
-                Value::String(s) => {
-                    let name = s.to_str()?;
-                    crate::minibuffer::AcceptPolicy::parse(&name).ok_or_else(|| {
-                        mlua::Error::runtime(format!(
-                            "pmacs.minibuffer.read: accept must be \"candidate\", \"typed\" or \"key\", got {:?}",
-                            name.as_ref()
-                        ))
-                    })?
-                }
-                _ => {
-                    return Err(mlua::Error::external(BindingError::SpecFieldType {
-                        field: "accept",
-                        expected: "string",
-                    }));
-                }
-            };
+            let accept = parse_accept_policy(&spec)?;
             let session = crate::minibuffer::MinibufferSession {
                 prompt: prompt.unwrap_or_default(),
                 initial: initial.unwrap_or_default(),
@@ -15266,6 +15270,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                 ranked,
                 on_accept,
                 on_cancel,
+                on_select,
                 candidates: Vec::new(),
                 selected: None,
                 history_index: None,
@@ -15388,7 +15393,13 @@ fn install_minibuffer_motion(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::
             lua.create_function(move |_, delta: i64| {
                 let delta =
                     i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
+                let before = cc.borrow().minibuffer.selected_candidate();
                 cc.borrow_mut().minibuffer.scroll_candidate(delta);
+                // E10g.4: a scripted move previews as a key's does.
+                let change = cc.borrow().minibuffer.select_change(before.as_deref());
+                if let Some((on_select, candidate)) = change {
+                    on_select.call::<()>(candidate)?;
+                }
                 Ok(())
             })?,
         )?;

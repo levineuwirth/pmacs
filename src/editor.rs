@@ -3900,6 +3900,9 @@ impl EditorState {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let action = MinibufferAction::from_chord(chord);
+        // E10g.4: the selection before the key, so a move it makes calls
+        // the prompt's `on_select` (the theme picker's preview) once.
+        let before = self.core.borrow().minibuffer.selected_candidate();
         match action {
             MinibufferAction::Accept => self.minibuffer_accept(frontend_id, false),
             MinibufferAction::AcceptTyped => self.minibuffer_accept(frontend_id, true),
@@ -3956,6 +3959,22 @@ impl EditorState {
                 // (status-line warnings) would clobber the prompt.
                 let _ = (KeyCode::Null, KeyModifiers::NONE);
             }
+        }
+        self.fire_minibuffer_select(before.as_deref());
+    }
+
+    /// E10g.4: call the open prompt's `on_select` with the candidate now
+    /// selected, when it is not `before`. After an accept or a cancel no
+    /// prompt is open and nothing is called.
+    fn fire_minibuffer_select(&mut self, before: Option<&str>) {
+        let change = self.core.borrow().minibuffer.select_change(before);
+        if let Some((on_select, candidate)) = change
+            && let Err(e) = on_select.call::<mlua::MultiValue>(candidate)
+        {
+            self.core.borrow_mut().status = format!(
+                "minibuffer on_select failed: {}",
+                first_line(&e.to_string())
+            );
         }
     }
 
@@ -8319,6 +8338,7 @@ mod tests {
             source: CompletionSource::None,
             on_accept,
             on_cancel: None,
+            on_select: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,
@@ -9889,6 +9909,7 @@ mod tests {
                 source: CompletionSource::None,
                 on_accept: dummy.clone(),
                 on_cancel: None,
+                on_select: None,
                 candidates: Vec::new(),
                 selected: None,
                 history_index: None,
@@ -9915,6 +9936,7 @@ mod tests {
             source: CompletionSource::None,
             on_accept: dummy,
             on_cancel: None,
+            on_select: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,

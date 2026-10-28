@@ -262,6 +262,24 @@ impl Minibuffer {
         s.selected = Some(usize::try_from(next).unwrap_or(0));
     }
 
+    /// The selected candidate's text, if one is selected.
+    #[must_use]
+    pub fn selected_candidate(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        s.candidates.get(s.selected?).cloned()
+    }
+
+    /// E10g.4: when the selected candidate is no longer `before`, the
+    /// session's `on_select` and the candidate now selected, for the
+    /// caller to call once it holds no borrow of the core.
+    #[must_use]
+    pub fn select_change(&self, before: Option<&str>) -> Option<(Function, String)> {
+        let s = self.session.as_ref()?;
+        let on_select = s.on_select.clone()?;
+        let now = s.candidates.get(s.selected?)?;
+        (Some(now.as_str()) != before).then(|| (on_select, now.clone()))
+    }
+
     /// Whether a completion dropdown is currently showing (the active
     /// session has at least one candidate). Drives whether the Up/Down
     /// arrows navigate the dropdown or step through command history.
@@ -502,6 +520,11 @@ pub struct MinibufferSession {
     pub on_accept: Function,
     /// Optional Lua callback invoked on cancel (no args).
     pub on_cancel: Option<Function>,
+    /// E10g.4: optional Lua callback invoked with the selected candidate
+    /// each time the selection moves to a different one --- a preview.
+    /// Not at open, and not when a recompute leaves the same candidate
+    /// selected.
+    pub on_select: Option<Function>,
     /// Currently-rendered candidate list (recomputed on input change).
     pub candidates: Vec<String>,
     /// Index into `candidates` of the selected entry, if any.
@@ -1167,6 +1190,7 @@ mod tests {
             ranked: false,
             on_accept: dummy_accept(lua),
             on_cancel: None,
+            on_select: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,
