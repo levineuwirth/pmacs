@@ -9070,6 +9070,113 @@ So, at C10g: `main` is green at `5ae5a27`, and PR #422 is green at its head `808
 `Grammar fuzz` green with #423 filed at one. #311 and #304 met only local samples here and do not
 move. Every other count above stands.
 
+### E10h's close: PR #418 green on attempt 2 at `bca22b9`, merged as `dd6c10e`, `main` green there
+
+Recorded 2026-10-28 at E10h's close. The owner merged PR #418 at 17:39:05Z as `dd6c10e`, a squash of
+`bca22b9` on `0c311a6` whose diff is the head's against its base `57cd5ac`, byte for byte; its tree
+is the head's but for this file. Every run was read from the jobs endpoint by conclusion, and every
+test leg of each code-bearing run through its own log, fetched with escape sequences allowed and
+stripped, each `running` line paired with its own result line. Every run id and job id below was
+searched for in this file before it was written, and only attempt 1's run id was here. Nothing was
+rerun but attempt 2, which the owner ran.
+
+#### PR #418's `CI` 40701497907 at `bca22b9`, attempt 2: green
+
+Attempt 1 is recorded above, red on #373's third occurrence. The owner reran its failed jobs
+(`gh run rerun 40701497907 --failed`) on 2026-10-28: attempt 2, `pull_request`, the same merge
+`d9ecde4` into `44345b6` (its checkout's `HEAD is now at` line), ran from 14:53:45Z to 15:26:20Z
+(the API's `run_started_at` and `updated_at`): `success`. Only `Test (ubuntu-latest / lua54)` ran
+again; every other job is carried from attempt 1 under a new id with attempt 1's times, and `Docs
+consistency` was skipped again.
+
+Tally (pr418-ci-bca22b9-attempt2): 19 = 18 + 1.
+
+Tally (pr418-ci-bca22b9-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Test (ubuntu-latest / lua54) | 122894019315 | success |
+| Lint (lua54) | 122894020298 | success |
+| Changed paths | 122894020699 | success |
+| M10 Perf Gates (crdt) | 122894021248 | success |
+| Docs consistency | 122894021402 | skipped |
+| Test (crdt) | 122894021871 | success |
+| Test (ubuntu-latest / luajit) | 122894021920 | success |
+| M1 Acceptance Gates | 122894021936 | success |
+| M5 Perf Gates | 122894022028 | success |
+| GPU Render (headless) | 122894022267 | success |
+| M4 Perf Gates | 122894022587 | success |
+| Test (macos-latest / lua54) | 122894022867 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 122894023112 | success |
+| M6 Perf Gates | 122894023160 | success |
+| Lint (luajit) | 122894072872 | success |
+| Perf budgets (debug) | 122894099615 | success |
+| Commit attribution (D9) | 122894101935 | success |
+| Test (macos-latest / luajit) | 122894103724 | success |
+| Format | 122894106376 | success |
+
+Tally (pr418-ci-bca22b9-attempt2-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / lua54)` 122894019315, 14:53:50Z to 15:26:20Z: its test step paired 218
+  `running` lines with 218 `test result: ok`, 5,323 passed, 67 ignored, #373's row
+  `process::tests::release_joins_every_polling_reader_whatever_the_deadline ... ok` (log line 2571)
+  and the branch's suite 14 of 14; its doc-test and `pmacs-protocol` steps ran (`Doc-tests pmacs` at
+  log line 7745, the `pmacs-protocol` step from 7752), the same pairs and figures as attempt 1's
+  `Test (ubuntu-latest / luajit)`; `WouldBlock` appears nowhere in its log. Under the rerun rule this
+  establishes non-reproduction and nothing more: #373 stays at three.
+
+#### `main` at `dd6c10e`, E10h's squash merge of PR #418: green
+
+`CI` 40737742282 at `dd6c10e`, attempt 1 of 1, `push`, created 2026-10-28T17:39:08Z and completed
+18:17:28Z (the API's `updated_at`): `success`.
+
+Tally (main-ci-dd6c10e): 19 = 18 + 1.
+
+Tally (main-ci-dd6c10e-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 122990744176 | success |
+| Lint (luajit) | 122990744473 | success |
+| Format | 122990744482 | success |
+| Lint (lua54) | 122990744676 | success |
+| Changed paths | 122990744846 | success |
+| Test (crdt) | 122990860719 | success |
+| GPU Render (headless) | 122990860734 | success |
+| M10 Perf Gates (crdt) | 122990860759 | success |
+| Test (macos-latest / lua54) | 122990860874 | success |
+| Perf budgets (debug) | 122990860875 | success |
+| M1 Acceptance Gates | 122990860893 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 122990860895 | success |
+| Test (ubuntu-latest / luajit) | 122990860923 | success |
+| M5 Perf Gates | 122990860928 | success |
+| Test (macos-latest / luajit) | 122990860929 | success |
+| Test (ubuntu-latest / lua54) | 122990860960 | success |
+| M6 Perf Gates | 122990860993 | success |
+| M4 Perf Gates | 122990861048 | success |
+| Docs consistency | 122990863134 | skipped |
+
+Tally (main-ci-dd6c10e-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs, each through its own log: `Test (crdt)` 122990860719 ran 17:39:24Z to
+  18:15:22Z, 35m58s, pairing 217 `running` lines with 217 `test result: ok`, 5,270 passed, 67
+  ignored; `Test (ubuntu-latest / luajit, no crdt)` 122990860895, 218 pairs, 4,745 passed, 53
+  ignored; `Test (ubuntu-latest / lua54)` 122990860960 and `Test (ubuntu-latest / luajit)`
+  122990860923, 218 pairs each, 5,323 passed, 67 ignored; `Test (macos-latest / luajit)`
+  122990860929 and `Test (macos-latest / lua54)` 122990860874, 219 pairs each, 5,279 passed, 65
+  ignored: PR #418's head figures on every leg, attempt 2's on `Test (ubuntu-latest / lua54)`. The
+  branch's suite passed 14 of 14 on each; `test result: FAILED` and `WouldBlock` appear in no test
+  leg's log.
+- `Perf budgets (debug)` 122990860875: `every budget ran and held`,
+  `opening_two_thousand_files_stays_within_budget ... ok`.
+
+`Grammar fuzz` 40737742529 at `dd6c10e`, attempt 1 of 1, `success`, both arms deciding `run=false`
+(`no changed path can change the grammar set`): `Grammar fuzz` 122990745907, `Grammar fuzz
+(asan-strict)` 122990745519.
+
+So, at E10h's close: `main` is green at `dd6c10e`, and PR #418 merged green at `bca22b9` on its
+attempt 2. Nothing moves: #373 stays at three. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
