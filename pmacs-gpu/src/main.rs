@@ -24053,6 +24053,34 @@ mod tests {
         );
     }
 
+    /// E10k.3: the optimistic insert and delete find a byte's character
+    /// index by two lookups, never the replica's text, so a 4-byte
+    /// character either side of the cursor is answered and a byte inside
+    /// one is refused (loro rejects a mid-codepoint offset).
+    #[test]
+    fn e10k_3_a_byte_finds_its_character_beside_a_four_byte_one() {
+        // "a😀\n😀b": a [0,1), 😀 [1,5), \n [5,6), 😀 [6,10), b [10,11).
+        let doc = loro::LoroDoc::new();
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        text.insert(0, "a\u{1F600}\n\u{1F600}b").expect("insert");
+
+        for (byte, index) in [(0, 0), (1, 1), (5, 2), (6, 3), (10, 4), (11, 5)] {
+            assert_eq!(
+                loro_char_index_on_boundary(&text, byte),
+                Some(index),
+                "byte {byte} begins character {index}"
+            );
+        }
+        for byte in [2, 3, 4, 7, 8, 9] {
+            assert_eq!(
+                loro_char_index_on_boundary(&text, byte),
+                None,
+                "byte {byte} is inside a 😀"
+            );
+        }
+        assert_eq!(loro_char_index_on_boundary(&text, 12), None, "past the end");
+    }
+
     #[test]
     fn incoming_frames_translate_through_unconfirmed_edits() {
         // A frame computed at daemon generation G arrives while one
