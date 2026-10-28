@@ -9177,6 +9177,142 @@ Tally (main-ci-dd6c10e-success): 18 rows of the table above with `result` = `suc
 So, at E10h's close: `main` is green at `dd6c10e`, and PR #418 merged green at `bca22b9` on its
 attempt 2. Nothing moves: #373 stays at three. Every other count above stands.
 
+### E10g, the E10g.6 ruling applied: PR #422 at `c71dad7` green, `main` green at `0c311a6` and `a6521ac`, #423's second
+
+Recorded 2026-10-28 when the owner's ruling on E10g.6 was applied on PR #422 (`e10g/theme-machinery`),
+one signed commit on `808c445`, pushed at 18:22Z; the commit changes the legibility check and its
+suite rows alone. Every run was read from the jobs endpoint by conclusion, and every test leg of the
+code-bearing run through its own log, fetched with escape sequences allowed and stripped, each
+`running` line paired with its own result line. Every run id and job id below was searched for in
+this file before it was written, and none was here. Nothing was rerun.
+
+#### `main` at `0c311a6`, E10g's registry commit: green
+
+`CI` 40736814393 at `0c311a6`, attempt 1 of 1, `push`, created 2026-10-28T17:33:17Z and completed
+17:35:37Z (the API's `updated_at`): `success`, the registry-push shape: the changed-paths job found
+only this file, so every test leg and perf gate was skipped.
+
+Tally (main-ci-0c311a6): 15 = 6 + 9.
+
+Tally (main-ci-0c311a6-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 122987475165 | success |
+| Commit attribution (D9) | 122987475487 | success |
+| Lint (lua54) | 122987475637 | success |
+| Changed paths | 122987475763 | success |
+| Lint (luajit) | 122987476142 | success |
+| Docs consistency | 122987603266 | success |
+| M1 Acceptance Gates | 122987605104 | skipped |
+| M4 Perf Gates | 122987605306 | skipped |
+| Test (matrix) | 122987605635 | skipped |
+| Perf budgets (debug) | 122987605637 | skipped |
+| Test (crdt) | 122987605762 | skipped |
+| M6 Perf Gates | 122987605843 | skipped |
+| GPU Render (headless) | 122987606250 | skipped |
+| M5 Perf Gates | 122987606589 | skipped |
+| M10 Perf Gates (crdt) | 122987606648 | skipped |
+
+Tally (main-ci-0c311a6-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 122987603266: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+40736814490 at `0c311a6`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz` 122987476423 and `Grammar fuzz (asan-strict)` 122987477062.
+
+#### `main` at `a6521ac`, E10h's close registry commit: green
+
+`CI` 40744527483 at `a6521ac`, attempt 1 of 1, `push`, created 2026-10-28T18:22:36Z and completed
+18:25:05Z: `success`, the registry-push shape.
+
+Tally (main-ci-a6521ac): 15 = 6 + 9.
+
+Tally (main-ci-a6521ac-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 123014664853 | success |
+| Format | 123014665200 | success |
+| Commit attribution (D9) | 123014665251 | success |
+| Lint (luajit) | 123014665577 | success |
+| Lint (lua54) | 123014665608 | success |
+| Docs consistency | 123014831402 | success |
+| Perf budgets (debug) | 123014833090 | skipped |
+| Test (matrix) | 123014833779 | skipped |
+| GPU Render (headless) | 123014833984 | skipped |
+| M4 Perf Gates | 123014834136 | skipped |
+| Test (crdt) | 123014834208 | skipped |
+| M6 Perf Gates | 123014834367 | skipped |
+| M10 Perf Gates (crdt) | 123014834395 | skipped |
+| M5 Perf Gates | 123014834945 | skipped |
+| M1 Acceptance Gates | 123014835104 | skipped |
+
+Tally (main-ci-a6521ac-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 123014831402: `test result: ok. 18 passed`. `Grammar fuzz` 40744527537 at
+`a6521ac`, `success`, both arms deciding `run=false` (`no changed path can change the grammar set`):
+`Grammar fuzz` 123014664786 and `Grammar fuzz (asan-strict)` 123014665625.
+
+#### PR #422's `CI` 40744506422 at `c71dad7`: green
+
+`pull_request`, the merge `ba06681` into `dd6c10e` (E10h's squash), attempt 1 of 1, created
+2026-10-28T18:22:28Z and completed 19:00:32Z (the API's `updated_at`): `success`.
+
+Tally (pr422-ci-c71dad7): 19 = 18 + 1.
+
+Tally (pr422-ci-c71dad7-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 123014590704 | success |
+| Format | 123014591053 | success |
+| Lint (luajit) | 123014591054 | success |
+| Commit attribution (D9) | 123014591176 | success |
+| Lint (lua54) | 123014591282 | success |
+| M1 Acceptance Gates | 123014729459 | success |
+| Test (crdt) | 123014729491 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 123014729612 | success |
+| M5 Perf Gates | 123014729616 | success |
+| M10 Perf Gates (crdt) | 123014729618 | success |
+| Test (ubuntu-latest / luajit) | 123014729646 | success |
+| GPU Render (headless) | 123014729703 | success |
+| M4 Perf Gates | 123014729765 | success |
+| Perf budgets (debug) | 123014729835 | success |
+| Test (ubuntu-latest / lua54) | 123014729861 | success |
+| Test (macos-latest / lua54) | 123014729937 | success |
+| Test (macos-latest / luajit) | 123014729954 | success |
+| M6 Perf Gates | 123014729975 | success |
+| Docs consistency | 123014731799 | skipped |
+
+Tally (pr422-ci-c71dad7-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs pair each `running` line with a `test result: ok`: `Test (crdt)` 123014729491,
+  18:22:46Z to 18:56:37Z, 33m51s, 218 pairs, 5,309 passed, 67 ignored; `Test (ubuntu-latest /
+  luajit)` 123014729646 and `Test (ubuntu-latest / lua54)` 123014729861, 219 pairs each, 5,362
+  passed, 67 ignored; `Test (ubuntu-latest / luajit, no crdt)` 123014729612, 219, 4,784 passed, 53
+  ignored; `Test (macos-latest / luajit)` 123014729954 and `Test (macos-latest / lua54)`
+  123014729937, 220 each, 5,318 passed, 65 ignored: one pair more than at `808c445` on every leg,
+  E10h's suite in the merge. `WouldBlock` appears in no test leg's log. The branch's
+  `e10g_theme_acceptance` passed its 22 rows on all six legs.
+- `Perf budgets (debug)` 123014729835: `every budget ran and held`.
+
+`Grammar fuzz` 40744506053 at `c71dad7`, attempt 1 of 1, `success`, created 18:22:28Z and completed
+19:21:30Z: both arms decided `run=true` (`src/syntax.rs changed`) and smoked every grammar for 15 s,
+`Grammar fuzz` 123014589495 and `Grammar fuzz (asan-strict)` 123014589720. Neither found a crash;
+each replayed 22 grammars' inputs through the worker, every one answered or contained. Both found
+bash's memory finding again, `exceeded memory cap at 4 GB` (minima 63,798 and 62,886 bytes),
+contained by the worker's memory watch: **#423's second occurrence**, commented there
+(issuecomment-6478447410); the slow findings are commented on #293 (issuecomment-6478447953).
+
+No local gate ran on `c71dad7` before this record: `/home`'s unallocated space was 1.00 MiB, under
+the brief's 3 GiB, with other sessions' gates running; the handoff's addendum says whether one ran
+after.
+
+So, after E10g.6's ruling: `main` is green at `0c311a6` and at `a6521ac`, and PR #422 is green at its
+head `c71dad7`. #423 is at two, both CI occurrences on this branch's runs; no registry row counts it.
+Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
