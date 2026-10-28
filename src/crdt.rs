@@ -266,18 +266,42 @@ impl CrdtState {
 
     /// Insert `s` at byte position `pos` in the body text.
     ///
-    /// Routes to loro's byte-native `insert_utf8` per the M10.2 Day 2
-    /// morning audit (Q1 verification). Mid-codepoint positions are
-    /// rejected with a clear error from loro; callers should ensure
-    /// `pos` aligns to a UTF-8 codepoint boundary.
+    /// Byte-addressed, as the M10.2 Day 2 morning audit (Q1 verification)
+    /// settled, and refused at a position inside a character
+    /// (`UTF8InUnicodeCodePoint`) or past the end (`OutOfBound`), as
+    /// loro's `insert_utf8` refuses them. It no longer calls that: loro
+    /// checks a byte position by copying the whole text before it, so
+    /// every insert at the end of an 18 MiB document copied 18 MiB (E10k,
+    /// #414). The position is found and checked by
+    /// [`Self::byte_to_unicode_on_boundary`]'s lookups instead, and the
+    /// text inserted at that character.
     pub fn insert(&self, pos: usize, s: &str) -> LoroResult<()> {
-        self.doc.get_text("body").insert_utf8(pos, s)
+        let unicode = self.checked_unicode(pos)?;
+        self.doc.get_text("body").insert(unicode, s)
     }
 
     /// Delete `len` bytes starting at byte position `pos`. Same
-    /// codepoint-boundary requirement as [`Self::insert`].
+    /// codepoint-boundary requirement, and the same lookups, as
+    /// [`Self::insert`].
     pub fn delete(&self, pos: usize, len: usize) -> LoroResult<()> {
-        self.doc.get_text("body").delete_utf8(pos, len)
+        let start = self.checked_unicode(pos)?;
+        let end = self.checked_unicode(pos.saturating_add(len))?;
+        self.doc.get_text("body").delete(start, end - start)
+    }
+
+    /// [`Self::byte_to_unicode_on_boundary`], with loro's own errors for
+    /// a position past the end or inside a character.
+    fn checked_unicode(&self, pos: usize) -> LoroResult<usize> {
+        let len = self.len_utf8();
+        if pos > len {
+            return Err(loro::LoroError::OutOfBound {
+                pos,
+                len,
+                info: "pmacs::crdt::CrdtState byte position".into(),
+            });
+        }
+        self.byte_to_unicode_on_boundary(pos)
+            .ok_or(loro::LoroError::UTF8InUnicodeCodePoint { pos })
     }
 
     /// Length of the body text in bytes (UTF-8 length).
@@ -440,6 +464,54 @@ impl CrdtState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(std::mem::take(&mut *guard))
+    }
+
+    /// The character starting at byte `pos` of the body text: `None` at
+    /// or past its end, or off a character boundary. Two lookups in
+    /// loro's tree, whatever the text's size (E10k.3: the per-key
+    /// questions an attached frontend asks of its mirror answered
+    /// without [`Self::materialize_string`], #414).
+    #[must_use]
+    pub fn char_at_byte(&self, pos: usize) -> Option<char> {
+        let unicode = self.byte_to_unicode_on_boundary(pos)?;
+        self.doc.get_text("body").char_at(unicode).ok()
+    }
+
+    /// The character ending at byte `pos` of the body text: `None` at
+    /// its start, past its end, or off a character boundary. As cheap as
+    /// [`Self::char_at_byte`].
+    #[must_use]
+    pub fn char_before_byte(&self, pos: usize) -> Option<char> {
+        let unicode = self.byte_to_unicode_on_boundary(pos)?;
+        self.doc
+            .get_text("body")
+            .char_at(unicode.checked_sub(1)?)
+            .ok()
+    }
+
+    /// The Unicode index of the character holding byte `pos` (the end's
+    /// index at the end, `None` past it): one lookup in loro's tree,
+    /// which counts bytes per node. A byte inside a character answers
+    /// that character's index.
+    fn unicode_at_byte(&self, pos: usize) -> Option<usize> {
+        self.doc.get_text("body").convert_pos(
+            pos,
+            loro::cursor::PosType::Bytes,
+            loro::cursor::PosType::Unicode,
+        )
+    }
+
+    /// The Unicode offset of byte `pos`, when `pos` is a character
+    /// boundary within the text (its end included). Two lookups: a byte
+    /// starts a character when the byte before it lies in an earlier one.
+    /// Not loro's own check, which converts the index back to bytes by
+    /// copying the text before it.
+    fn byte_to_unicode_on_boundary(&self, pos: usize) -> Option<usize> {
+        let unicode = self.unicode_at_byte(pos)?;
+        if pos == 0 {
+            return Some(unicode);
+        }
+        (self.unicode_at_byte(pos - 1)? < unicode).then_some(unicode)
     }
 
     /// Convert a Unicode scalar offset in the current text projection
@@ -1473,6 +1545,76 @@ mod tests {
         b.import_updates(&comp_bytes).unwrap();
         assert_eq!(a.materialize_string(), "!");
         assert_eq!(b.materialize_string(), "!");
+    }
+
+    /// E10k.3: at every byte of a text of 1- to 4-byte characters, the
+    /// lookups that replaced loro's byte check (which copies the whole
+    /// text before a position) agree with the string itself: the
+    /// boundary, the characters either side, and the insert, refused
+    /// inside a character and past the end with loro's own errors.
+    #[test]
+    fn e10k_3_byte_positions_are_checked_by_lookups_alone() {
+        let text = "a\u{1F600}b\u{4E2D}\u{E9}\n";
+        for pos in 0..=text.len() + 1 {
+            let s = CrdtState::new(1).expect("new");
+            s.insert(0, text).expect("seed");
+            let boundary = pos <= text.len() && text.is_char_boundary(pos);
+            assert_eq!(
+                s.byte_to_unicode_on_boundary(pos).is_some(),
+                boundary,
+                "byte {pos}"
+            );
+            let (before, after) = if boundary {
+                (text[..pos].chars().last(), text[pos..].chars().next())
+            } else {
+                (None, None)
+            };
+            assert_eq!(s.char_before_byte(pos), before, "before byte {pos}");
+            assert_eq!(s.char_at_byte(pos), after, "at byte {pos}");
+            match s.insert(pos, "x") {
+                Ok(()) => {
+                    assert!(boundary, "inserted at byte {pos}");
+                    let mut want = text.to_owned();
+                    want.insert(pos, 'x');
+                    assert_eq!(s.materialize_string(), want);
+                }
+                Err(loro::LoroError::OutOfBound { pos: at, .. }) => {
+                    assert!(pos > text.len() && at == pos, "byte {pos}");
+                }
+                Err(loro::LoroError::UTF8InUnicodeCodePoint { pos: at }) => {
+                    assert!(!boundary && pos <= text.len() && at == pos, "byte {pos}");
+                }
+                Err(other) => panic!("byte {pos}: {other:?}"),
+            }
+        }
+        // Every delete from one boundary to another removes exactly that
+        // range; one ending inside a character is refused.
+        let bounds: Vec<usize> = (0..=text.len())
+            .filter(|&b| text.is_char_boundary(b))
+            .collect();
+        for &from in &bounds {
+            for &to in bounds.iter().filter(|&&to| to > from) {
+                let s = CrdtState::new(1).expect("new");
+                s.insert(0, text).expect("seed");
+                s.delete(from, to - from)
+                    .expect("delete between boundaries");
+                assert_eq!(
+                    s.materialize_string(),
+                    format!("{}{}", &text[..from], &text[to..])
+                );
+            }
+        }
+        let s = CrdtState::new(1).expect("new");
+        s.insert(0, text).expect("seed");
+        assert!(matches!(
+            s.delete(0, 2),
+            Err(loro::LoroError::UTF8InUnicodeCodePoint { pos: 2 })
+        ));
+        assert_eq!(
+            s.materialize_string(),
+            text,
+            "a refused delete changes nothing"
+        );
     }
 
     #[test]

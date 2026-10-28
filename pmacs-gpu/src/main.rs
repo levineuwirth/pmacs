@@ -12275,10 +12275,9 @@ impl State {
         let delta_batches = self.loro_text_delta_batches.clone()?;
         clear_loro_text_delta_batches(&delta_batches);
         let before = doc.oplog_vv();
-        if let Err(e) = doc
-            .get_text(LORO_TEXT_CONTAINER)
-            .insert_utf8(cursor, insert)
-        {
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        let at = loro_char_index_on_boundary(&text, cursor)?;
+        if let Err(e) = text.insert(at, insert) {
             eprintln!("pmacs-gpu: optimistic insert failed: {e:?}");
             return None;
         }
@@ -12312,10 +12311,10 @@ impl State {
         let delta_batches = self.loro_text_delta_batches.clone()?;
         clear_loro_text_delta_batches(&delta_batches);
         let before = doc.oplog_vv();
-        if let Err(e) = doc
-            .get_text(LORO_TEXT_CONTAINER)
-            .delete_utf8(start, end - start)
-        {
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        let from = loro_char_index_on_boundary(&text, start)?;
+        let to = loro_char_index_on_boundary(&text, end)?;
+        if let Err(e) = text.delete(from, to - from) {
             eprintln!("pmacs-gpu: optimistic delete failed: {e:?}");
             return None;
         }
@@ -12342,16 +12341,9 @@ impl State {
         bytes: Vec<u8>,
     ) -> CrdtOpSend {
         if drained.is_empty() {
-            let text = self
-                .loro_doc
-                .as_ref()
-                .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-            if let Some(text) = text {
-                self.set_text(&text);
-            }
-            // Cache rebuilt wholesale — there are no translated
-            // anchors left for frame translation to protect.
-            self.unconfirmed_edits.clear();
+            // A local edit that produced no text delta: the projection
+            // cannot be patched, so it is rebuilt from the replica.
+            self.resync_text_from_replica();
         } else {
             match self.apply_loro_text_delta_batches(drained) {
                 Ok(edits) => {
@@ -12369,14 +12361,7 @@ impl State {
                         "pmacs-gpu: optimistic text update failed ({reason}); falling back to \
                          full materialization"
                     );
-                    let text = self
-                        .loro_doc
-                        .as_ref()
-                        .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-                    if let Some(text) = text {
-                        self.set_text(&text);
-                    }
-                    self.unconfirmed_edits.clear();
+                    self.resync_text_from_replica();
                 }
             }
         }
@@ -12404,6 +12389,25 @@ impl State {
             op: CrdtOp { peer_id, bytes },
             viewport,
         }
+    }
+
+    /// Rebuild the text projection from the whole replica: the recovery
+    /// when an edit's deltas could not patch it, the one whole-text read
+    /// outside a snapshot's arrival (E10k.3). A key's and a remote op's
+    /// paths patch the projection from the deltas and reach this only
+    /// when that fails; `tests/e10k_replica_reads_acceptance.rs` holds
+    /// where it is called.
+    fn resync_text_from_replica(&mut self) {
+        let text = self
+            .loro_doc
+            .as_ref()
+            .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
+        if let Some(text) = text {
+            self.set_text(&text);
+        }
+        // Cache rebuilt wholesale — there are no translated anchors
+        // left for frame translation to protect.
+        self.unconfirmed_edits.clear();
     }
 
     fn mark_cursor_stale_after_round_trip(&mut self) {
@@ -12688,6 +12692,104 @@ impl State {
         }
     }
 
+    /// An `InstanceMessage::CrdtOp`: import the op into the replica and
+    /// patch the text from the deltas the import produced (E10k.3: moved
+    /// out of [`Self::apply_attach_message`] so that what a remote op
+    /// costs per key reads apart from the snapshot's cold path).
+    fn apply_remote_crdt_op(&mut self, buffer_id: BufferId, op: &CrdtOp) -> Option<ViewportSend> {
+        if self.current_buffer_id != Some(buffer_id) {
+            // Edit op for a different buffer than we currently
+            // render. Ignore for now (multi-buffer is a future
+            // session); when buffer-switching lands we'll
+            // index ops by buffer.
+            return None;
+        }
+        let Some(doc) = self.loro_doc.as_ref() else {
+            // Mid-attach race: ops before snapshot. The
+            // snapshot will have the ops baked in.
+            return None;
+        };
+        let delta_batches = self.loro_text_delta_batches.clone();
+        if let Some(delta_batches) = delta_batches.as_ref() {
+            clear_loro_text_delta_batches(delta_batches);
+        }
+        if let Err(e) = doc.import(&op.bytes) {
+            eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
+            return None;
+        }
+        // NOTE: `current_spans` / `current_decorations` index
+        // into the *pre-edit* byte positions. The producer's
+        // next render frame (in pmacs core, post-T M11.7
+        // generation-transition fix) ships `full=true`
+        // styling for buffers whose generation advanced, so
+        // the next message replaces the stale items
+        // wholesale via `replace_style_spans` /
+        // `replace_decorations`. The single-frame gap
+        // between CrdtOp arrival and that next frame paints
+        // styling at stale byte positions — the session-4
+        // documented "one-frame stale" artifact. A previous
+        // attempt to fix it by clearing both vectors here
+        // (`49785c4`) was reverted because the producer's
+        // *incremental* updates ship dirty-range spans only,
+        // and an emptied cache loses the non-dirty viewport
+        // styling entirely.
+        //
+        // InlineAdornments use whole-set suppression rather
+        // than dirty segments, so the same ownership rule
+        // applies here: keep the last set until the producer
+        // sends a replacement. Session 8 closed the stale
+        // inlay case producer-side: `didChange` marks the
+        // inlay store stale, and the producer sends one empty
+        // replacement to clear cached virtual text until a
+        // fresh `textDocument/inlayHint` response arrives.
+        let delta_batches = delta_batches
+            .as_ref()
+            .map(drain_loro_text_delta_batches)
+            .unwrap_or_default();
+        // No text delta from an import that applied something: the
+        // op changed no text (the text container's subscription fires
+        // for every change to it), so there is nothing to patch. Before
+        // E10k.3 this arm copied the whole text out of the replica.
+        if !delta_batches.is_empty() {
+            match self.apply_loro_text_delta_batches(&delta_batches) {
+                Ok(edits) => {
+                    // A daemon-originated edit shifts the text
+                    // under any still-unconfirmed optimistic
+                    // edits. Rebase the journal's anchors so
+                    // frames that include this edit (but not
+                    // ours) translate correctly. Entries are
+                    // inserts (start == old_end) or
+                    // single-codepoint deletes; both rebase by
+                    // position translation, clamped so a range
+                    // can't invert.
+                    for incoming in &edits {
+                        for (_, pending) in &mut self.unconfirmed_edits {
+                            pending.start = translate_byte_position(pending.start, *incoming);
+                            pending.old_end = translate_byte_position(pending.old_end, *incoming)
+                                .max(pending.start);
+                        }
+                    }
+                }
+                Err(reason) => {
+                    eprintln!(
+                        "pmacs-gpu: incremental CRDT text update failed ({reason}); \
+                         falling back to full materialization"
+                    );
+                    self.resync_text_from_replica();
+                }
+            }
+        }
+        // Local typing usually shifts only the viewport's end
+        // byte while the top visible source line stays fixed.
+        // The declared range includes overscan, and the daemon's
+        // generation bump already forces a full style resync, so
+        // re-declaring on every byte is mostly write amplification.
+        // Re-declare here only if the viewport origin moved (for
+        // example because an edit before `scroll_top` shifted the
+        // top line); scroll/resize/snapshot still send exact ranges.
+        self.viewport_send_if_origin_changed(buffer_id)
+    }
+
     #[allow(clippy::too_many_lines)] // per-variant match dispatcher; one arm per InstanceMessage.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
@@ -12805,118 +12907,7 @@ impl State {
                 }
                 self.viewport_send_if_changed(buffer_id)
             }
-            InstanceMessage::CrdtOp { buffer_id, op } => {
-                if self.current_buffer_id != Some(buffer_id) {
-                    // Edit op for a different buffer than we currently
-                    // render. Ignore for now (multi-buffer is a future
-                    // session); when buffer-switching lands we'll
-                    // index ops by buffer.
-                    return None;
-                }
-                let Some(doc) = self.loro_doc.as_ref() else {
-                    // Mid-attach race: ops before snapshot. The
-                    // snapshot will have the ops baked in.
-                    return None;
-                };
-                let delta_batches = self.loro_text_delta_batches.clone();
-                if let Some(delta_batches) = delta_batches.as_ref() {
-                    clear_loro_text_delta_batches(delta_batches);
-                }
-                let import_status = match doc.import(&op.bytes) {
-                    Ok(status) => status,
-                    Err(e) => {
-                        eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
-                        return None;
-                    }
-                };
-                // NOTE: `current_spans` / `current_decorations` index
-                // into the *pre-edit* byte positions. The producer's
-                // next render frame (in pmacs core, post-T M11.7
-                // generation-transition fix) ships `full=true`
-                // styling for buffers whose generation advanced, so
-                // the next message replaces the stale items
-                // wholesale via `replace_style_spans` /
-                // `replace_decorations`. The single-frame gap
-                // between CrdtOp arrival and that next frame paints
-                // styling at stale byte positions — the session-4
-                // documented "one-frame stale" artifact. A previous
-                // attempt to fix it by clearing both vectors here
-                // (`49785c4`) was reverted because the producer's
-                // *incremental* updates ship dirty-range spans only,
-                // and an emptied cache loses the non-dirty viewport
-                // styling entirely.
-                //
-                // InlineAdornments use whole-set suppression rather
-                // than dirty segments, so the same ownership rule
-                // applies here: keep the last set until the producer
-                // sends a replacement. Session 8 closed the stale
-                // inlay case producer-side: `didChange` marks the
-                // inlay store stale, and the producer sends one empty
-                // replacement to clear cached virtual text until a
-                // fresh `textDocument/inlayHint` response arrives.
-                let delta_batches = delta_batches
-                    .as_ref()
-                    .map(drain_loro_text_delta_batches)
-                    .unwrap_or_default();
-                if delta_batches.is_empty() {
-                    if !import_status.success.is_empty() {
-                        let text = self
-                            .loro_doc
-                            .as_ref()
-                            .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-                        if let Some(text) = text {
-                            self.set_text(&text);
-                        }
-                        self.unconfirmed_edits.clear();
-                    }
-                } else {
-                    match self.apply_loro_text_delta_batches(&delta_batches) {
-                        Ok(edits) => {
-                            // A daemon-originated edit shifts the text
-                            // under any still-unconfirmed optimistic
-                            // edits. Rebase the journal's anchors so
-                            // frames that include this edit (but not
-                            // ours) translate correctly. Entries are
-                            // inserts (start == old_end) or
-                            // single-codepoint deletes; both rebase by
-                            // position translation, clamped so a range
-                            // can't invert.
-                            for incoming in &edits {
-                                for (_, pending) in &mut self.unconfirmed_edits {
-                                    pending.start =
-                                        translate_byte_position(pending.start, *incoming);
-                                    pending.old_end =
-                                        translate_byte_position(pending.old_end, *incoming)
-                                            .max(pending.start);
-                                }
-                            }
-                        }
-                        Err(reason) => {
-                            eprintln!(
-                                "pmacs-gpu: incremental CRDT text update failed ({reason}); \
-                                 falling back to full materialization"
-                            );
-                            let text = self
-                                .loro_doc
-                                .as_ref()
-                                .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-                            if let Some(text) = text {
-                                self.set_text(&text);
-                            }
-                            self.unconfirmed_edits.clear();
-                        }
-                    }
-                }
-                // Local typing usually shifts only the viewport's end
-                // byte while the top visible source line stays fixed.
-                // The declared range includes overscan, and the daemon's
-                // generation bump already forces a full style resync, so
-                // re-declaring on every byte is mostly write amplification.
-                // Re-declare here only if the viewport origin moved (for
-                // example because an edit before `scroll_top` shifted the
-                // top line); scroll/resize/snapshot still send exact ranges.
-                self.viewport_send_if_origin_changed(buffer_id)
-            }
+            InstanceMessage::CrdtOp { buffer_id, op } => self.apply_remote_crdt_op(buffer_id, &op),
             InstanceMessage::StyleSpans {
                 buffer_id,
                 generation,
@@ -20921,6 +20912,29 @@ struct TextProjectionEdit {
     start: u64,
     old_end: u64,
     inserted_len: u64,
+}
+
+/// The character index of byte `pos` of `text`, when `pos` is a
+/// character boundary within it (its end included): two lookups in
+/// loro's tree, a byte starting a character when the byte before it lies
+/// in an earlier one (E10k.3). loro's own `insert_utf8` and `delete_utf8`
+/// check a byte position by copying the whole text before it, which an
+/// optimistic key at the end of an 18 MiB document paid in full (#414).
+/// The same check as `pmacs::crdt::CrdtState`'s, copied because this
+/// crate links `pmacs-protocol` alone.
+fn loro_char_index_on_boundary(text: &loro::LoroText, pos: usize) -> Option<usize> {
+    let at = |byte| {
+        text.convert_pos(
+            byte,
+            loro::cursor::PosType::Bytes,
+            loro::cursor::PosType::Unicode,
+        )
+    };
+    let index = at(pos)?;
+    if pos == 0 {
+        return Some(index);
+    }
+    (at(pos - 1)? < index).then_some(index)
 }
 
 fn apply_loro_text_delta_batches(
