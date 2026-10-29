@@ -761,6 +761,26 @@ fn e10g4_a_move_previews_the_theme_before_ret() {
     assert_eq!(loaded(&s).as_deref(), Some("plain-b"));
 }
 
+/// A scripted move previews as a key's does (review 1's Low 3: the
+/// claim had no row): `pmacs.minibuffer.scroll` moving the picker's
+/// selection loads the theme it reaches, each way, before any `RET`.
+#[test]
+fn e10g4_a_scripted_scroll_previews_as_a_key_does() {
+    let roots = roots_for("scroll-preview");
+    let mut s = start(&roots, TWO_THEMES, None);
+    open_picker(&mut s);
+    exec(&s, "pmacs.minibuffer.scroll(1)");
+    assert!(s.core.borrow().minibuffer.is_active(), "no RET yet");
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("plain-a"),
+        "one down, previewed"
+    );
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(1, 1, 1)));
+    exec(&s, "pmacs.minibuffer.scroll(-1)");
+    assert_eq!(loaded(&s).as_deref(), Some("default-dark"), "and back up");
+}
+
 /// `C-g` after three moves restores the theme in force when the picker
 /// opened, every face byte-identically, the user layer included.
 #[test]

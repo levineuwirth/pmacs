@@ -33634,4 +33634,212 @@ mod tests {
         }
         assert!(found.is_empty(), "{found:#?}");
     }
+
+    // -----------------------------------------------------------------
+    // E10g fix round 1 — review 1's Low 3: the GPU surfaces E10g.2's
+    // witness names and the handoff marked read. Sharing a helper with a
+    // rowed surface does not guard the name each site passes (the
+    // review's M2 and M3 survived the whole suite).
+    // -----------------------------------------------------------------
+
+    /// The completion dropdown takes `ui.menu` (its fill) and
+    /// `ui.menu.selected` (the selected row's wash and glyphs), and the
+    /// hover popup `ui.popup` (its fill) and `ui.scrollbar.thumb` (its
+    /// scroll thumb); unset, their constants.
+    #[test]
+    fn e10g_f1_the_completion_dropdown_and_the_popup_take_their_faces() {
+        let text = "line\n".repeat(200);
+        let Some(mut state) = headless_or_skip(480, 320, &text) else {
+            return;
+        };
+        open_every_other_fill(&mut state);
+        let read = |state: &mut State| {
+            (
+                quad_colors(&state.completion_dropdown_vertex_bytes()),
+                quad_colors(&state.popup_vertex_bytes()),
+            )
+        };
+        assert_eq!(
+            read(&mut state),
+            (vec![MENU_BG, MENU_SELECTED_BG], vec![MENU_BG, POPUP_THUMB]),
+            "unset"
+        );
+        let bg = |r, g, b| CellStyle {
+            bg: CellColor::Rgb(r, g, b),
+            ..CellStyle::default()
+        };
+        let mut faces = menu_faces();
+        faces.push(theme_face("ui.popup", bg(255, 255, 0)));
+        faces.push(theme_face("ui.scrollbar.thumb", bg(0, 255, 255)));
+        apply_faces(&mut state, faces);
+        state.refresh_completion_buffer();
+        assert_eq!(
+            read(&mut state),
+            (
+                vec![
+                    [0.0, 0.0, 1.0, MENU_BG[3]],
+                    [0.0, 1.0, 0.0, MENU_SELECTED_BG[3]]
+                ],
+                vec![[1.0, 1.0, 0.0, MENU_BG[3]], [0.0, 1.0, 1.0, POPUP_THUMB[3]]]
+            )
+        );
+        let selected = state.selected_row_color(Some(1));
+        assert_eq!(selected, Some((1, Color::rgb(255, 255, 0))));
+    }
+
+    /// The panel divider takes `ui.divider`'s background, which the GPU
+    /// read and the daemon never sent before E10g.2; unset, its constant.
+    #[test]
+    fn e10g_f1_the_panel_divider_takes_ui_divider() {
+        let Some(mut state) = headless_or_skip(480, 320, "alpha") else {
+            return;
+        };
+        let _ = present_panel(&mut state, 4);
+        let divider = |state: &State| -> Vec<[f32; 4]> {
+            quad_colors(&state.panel_quad_vertex_bytes())
+                .into_iter()
+                .take(1)
+                .collect()
+        };
+        assert_eq!(divider(&state), vec![DIVIDER_RGBA], "unset");
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.divider",
+                CellStyle {
+                    bg: CellColor::Rgb(0, 255, 255),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert_eq!(divider(&state), vec![[0.0, 1.0, 1.0, DIVIDER_RGBA[3]]]);
+    }
+
+    /// A terminal pane's cursor takes `ui.caret`'s foreground, as the
+    /// document's caret does; unset, its constant.
+    #[test]
+    fn e10g_f1_the_terminal_cursor_takes_ui_caret() {
+        let Some(mut state) = headless_or_skip(480, 320, "alpha") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let mut frame = plain_terminal_frame(bid, "hello", 40);
+        frame.cursor = Some(pmacs_protocol::CellCoord::new(0, 5));
+        state.apply_terminal_frame(frame);
+        let cursor = |state: &State| quad_colors(&state.terminal_cursor_vertex_bytes());
+        assert_eq!(cursor(&state), vec![TERMINAL_CURSOR_RGBA], "unset");
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.caret",
+                CellStyle {
+                    fg: CellColor::Rgb(255, 0, 0),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert_eq!(
+            cursor(&state),
+            vec![[1.0, 0.0, 0.0, TERMINAL_CURSOR_RGBA[3]]]
+        );
+    }
+
+    /// A math fraction's rule takes the plain text color, the buffer
+    /// face's foreground where the theme sets one; unset, its constant.
+    #[test]
+    fn e10g_f1_the_math_rule_takes_the_buffer_face_fg() {
+        let Some((mut state, _)) = truncating_state(320, 240, r"$\frac{ab}{cd}$") else {
+            return;
+        };
+        let rule_colors = |state: &mut State| -> Vec<[f32; 4]> {
+            state.build_math_paint().1.iter().map(|r| r.color).collect()
+        };
+        let unset = rule_colors(&mut state);
+        assert!(!unset.is_empty(), "precondition: the fraction has a rule");
+        assert!(
+            unset.iter().all(|c| color_close(*c, MATH_INK_RGBA)),
+            "unset: {unset:?}"
+        );
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.default",
+                CellStyle {
+                    fg: CellColor::Rgb(200, 120, 60),
+                    bg: CellColor::Rgb(18, 18, 18),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let want = state.face_rgba(Color::rgb(200, 120, 60), 1.0);
+        let set = rule_colors(&mut state);
+        assert!(
+            set.iter().all(|c| color_close(*c, want)),
+            "{set:?}, not {want:?}"
+        );
+    }
+
+    /// A terminal pane's default colors resolve against the buffer face
+    /// (`terminal_palette`): a default cell's text in its foreground, a
+    /// reversed default cell's background in it too; unset, the plain
+    /// text color. The frame here arrives after the face change; a
+    /// change while a terminal is open and quiet leaves its plan on the
+    /// previous palette until its next frame, which is #429.
+    #[test]
+    fn e10g_f1_a_terminal_pane_s_defaults_take_the_buffer_face() {
+        let Some(mut state) = headless_or_skip(480, 320, "alpha") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let frame = || {
+            let reversed = CellStyle {
+                reverse: true,
+                ..CellStyle::default()
+            };
+            let mut cells = vec![
+                terminal_cell(pmacs_protocol::Glyph::Char('h'), CellStyle::default()),
+                terminal_cell(pmacs_protocol::Glyph::Char('R'), reversed),
+            ];
+            cells.resize(
+                8,
+                terminal_cell(pmacs_protocol::Glyph::Char(' '), CellStyle::default()),
+            );
+            terminal_frame_of(bid, 1, 8, cells)
+        };
+        let colors = |state: &State| {
+            let plan = &state.terminal.as_ref().expect("terminal mode").plan;
+            (
+                plan.runs[0].color,
+                plan.backgrounds
+                    .iter()
+                    .find(|b| b.run.start_col == 1)
+                    .map(|b| b.color),
+            )
+        };
+        state.apply_terminal_frame(frame());
+        let plain = [PLAIN_TEXT.r(), PLAIN_TEXT.g(), PLAIN_TEXT.b()];
+        assert_eq!(colors(&state), (plain, Some(plain)), "unset");
+
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.default",
+                CellStyle {
+                    fg: CellColor::Rgb(200, 120, 60),
+                    bg: CellColor::Rgb(18, 18, 18),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let mut next = frame();
+        next.screen_generation = 2;
+        state.apply_terminal_frame(next);
+        assert_eq!(
+            colors(&state),
+            ([200, 120, 60], Some([200, 120, 60])),
+            "the buffer face's fg"
+        );
+    }
 }
