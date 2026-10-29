@@ -16,6 +16,8 @@
 //!   in the grid and in the faces the daemon ships to the GPU.
 //! - P3 (E10g.4): a prompt that opens over the picker does not leave the
 //!   picker's preview in force.
+//! - P4 (E10g.3): an `init.lua` that chooses its theme with
+//!   `pmacs.theme.load` keeps it over the restore.
 
 use std::collections::HashMap;
 
@@ -529,5 +531,40 @@ fn e10g_review1_p3_a_prompt_that_opens_over_the_picker_does_not_keep_its_preview
     assert!(
         !roots.state_dir().unwrap().join("theme").exists(),
         "nothing kept"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4 — E10g.3: an init.lua that loads its theme by name
+// ---------------------------------------------------------------------------
+
+/// E10g.3's precedence puts what `init.lua` chose first. An `init.lua`
+/// that chooses with the phase's own `pmacs.theme.load` (Emacs's
+/// `load-theme` habit) rather than by setting `ui.theme` is overridden
+/// at startup: `pmacs.theme.restore()` sees `ui.theme` unset and loads
+/// the default (or a kept choice) over it, with no message, and the
+/// picker then opens on `default-dark`.
+#[test]
+fn e10g_review1_p4_an_init_lua_that_loads_a_theme_by_name_keeps_it() {
+    let roots = roots_for("init-load");
+    let config = roots.config_dir().expect("config dir");
+    std::fs::write(
+        config.join("init.lua"),
+        r#"pmacs.theme.define("mine", { faces = { ["ui.default"] = { bg = {7, 7, 7} } } })
+           pmacs.theme.load("mine")"#,
+    )
+    .expect("write init.lua");
+    let s = EditorState::new_with_roots(&roots);
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("mine"),
+        "the control: init.lua loaded it"
+    );
+    s.install_state_dirs();
+    let setting: String = eval(&s, "return pmacs.config.get('ui.theme')");
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("mine"),
+        "init.lua's own choice after the restore (ui.theme reads {setting:?})"
     );
 }

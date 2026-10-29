@@ -560,6 +560,21 @@ fn e10g3_init_lua_beats_the_kept_choice_which_beats_the_default() {
     );
 }
 
+/// A `pmacs.theme.load` made while `init.lua` runs is `init.lua`'s
+/// choice as a setting would be (the owner's ruling of 2026-10-29 on
+/// review 1's Low 2): it beats a kept choice too, and the setting then
+/// says what is showing. Review 1's P4 holds it against the default.
+#[test]
+fn e10g3_an_init_lua_load_beats_the_kept_choice() {
+    let roots = roots_for("init-load-over-kept");
+    let load_b = format!("{TWO_THEMES}\npmacs.theme.load(\"plain-b\")\n");
+    let s = start(&roots, &load_b, Some("plain-a"));
+    assert_eq!(loaded(&s).as_deref(), Some("plain-b"), "init.lua's load");
+    assert_eq!(buffer_bg(&s), Some(Color::Rgb(2, 2, 2)));
+    let setting: String = eval(&s, "return pmacs.config.get('ui.theme')");
+    assert_eq!(setting, "plain-b", "the setting says what is showing");
+}
+
 /// `init.lua`'s own `merge` is the user layer: kept over a restored
 /// choice and over a later change of the setting, while a `set` made
 /// after a load still replaces the whole map, as documented, and is

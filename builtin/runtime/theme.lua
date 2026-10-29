@@ -3,11 +3,12 @@
 -- A theme is chosen three ways, and the order between them is the
 -- owner's ruling of 2026-10-27: an explicit `init.lua` setting of
 -- `ui.theme` beats a choice the picker kept in `pmacs.state`, which beats
--- the default. `init.lua`'s own `pmacs.theme.set` and `merge` calls are
--- a fourth thing, not a choice: they are the user layer, which every
--- load reapplies over the theme it loads (`ThemeLibrary`,
--- `src/highlight.rs`), so neither a restored choice nor the picker
--- discards them.
+-- the default. A `pmacs.theme.load` made while `init.lua` runs counts
+-- as its setting (ruled 2026-10-29). `init.lua`'s own `pmacs.theme.set`
+-- and `merge` calls are a fourth thing, not a choice: they are the user
+-- layer, which every load reapplies over the theme it loads
+-- (`ThemeLibrary`, `src/highlight.rs`), so neither a restored choice nor
+-- the picker discards them.
 --
 -- The theme is the editor's, and in a daemon the daemon's: loading one
 -- re-themes every attached frontend at once.
@@ -19,7 +20,7 @@ pmacs.config.define {
   -- The choices grow as themes are defined (`pmacs.theme.define` adds
   -- each name), so an `init.lua` that sets this to a theme of its own
   -- defines the theme first.
-  description = "The named theme: one of pmacs.theme.names(). Set in init.lua it beats the one the theme picker (M-x theme-select) kept; a theme defined in init.lua must be defined before this is set to it.",
+  description = "The named theme: one of pmacs.theme.names(). Set in init.lua, or loaded there with pmacs.theme.load, it beats the one the theme picker (M-x theme-select) kept; a theme defined in init.lua must be defined before this is set to it.",
   type = "enum",
   choices = pmacs.theme.names(),
   default = "default-dark",
@@ -68,6 +69,13 @@ function pmacs.theme.restore()
   if pmacs.config.is_set("ui.theme") then
     -- init.lua chose; its `on_change` already loaded it.
     name = pmacs.config.get("ui.theme")
+  elseif pmacs.theme.loaded() then
+    -- init.lua chose by name, Emacs's `load-theme` habit: nothing loads
+    -- a theme before init.lua runs and this does, so a theme loaded now
+    -- was init.lua's, and counts as its setting would (the owner's
+    -- ruling of 2026-10-29, E10g review 1's Low 2).
+    name = pmacs.theme.loaded()
+    pmacs.config.set("ui.theme", name)
   else
     name = kept_choice()
     if name and not defined(name) then
