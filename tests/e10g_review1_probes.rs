@@ -10,6 +10,10 @@
 //!   `default-dark`'s gutter is a known failure of that clause, #428, so
 //!   both pin it under that issue rather than require it to pass (review
 //!   1's way (a)).
+//! - P2 and P2b (E10g.2): a theme that sets `ui.menu` alone, or only the
+//!   bare `ui` catch-all, keeps the selected row of the candidate band,
+//!   the completion popup and the context menu apart from the other rows,
+//!   in the grid and in the faces the daemon ships to the GPU.
 
 use std::collections::HashMap;
 
@@ -255,4 +259,176 @@ fn e10g_review1_p1b_the_attached_path_through_a_daemon_and_the_client() {
     );
     let found = legibility_violations(&buffer, &gutter_surfaces(&grid), false);
     assert_eq!(found, GUTTER_428, "#428, pinned, through the real path");
+}
+
+// ---------------------------------------------------------------------------
+// P2, P2b — E10g.2: the selected row under a theme that sets only ui.menu
+// ---------------------------------------------------------------------------
+
+/// The selected row's style and an unselected row's style, read from one
+/// truecolor frame each, for the completion popup, the minibuffer's
+/// candidate band and the context menu.
+fn selected_and_row(s: &EditorState) -> Vec<(&'static str, Style, Style)> {
+    use pmacs::completion::{
+        CompletionEditsCarry, CompletionItemKind, CompletionPopupState, PopupCandidate,
+    };
+    let size = CellSize::new(16, 60);
+    let mut out = Vec::new();
+    let candidate = |label: &str| PopupCandidate {
+        carry: CompletionEditsCarry::default(),
+        label: label.to_owned(),
+        kind: CompletionItemKind::Text,
+        detail: None,
+        insert_text: label.to_owned(),
+    };
+    let popup = {
+        let core = s.core.borrow();
+        CompletionPopupState::new(
+            core.active_buffer_id(),
+            0,
+            String::new(),
+            vec![candidate("gamma"), candidate("delta")],
+            2,
+        )
+        .expect("a popup")
+    };
+    s.core.borrow_mut().completion_popup_open(popup);
+    exec(
+        s,
+        r#"pmacs.minibuffer.read {
+             prompt = "Pick: ",
+             source = function() return { "one", "two" } end,
+             on_accept = function() end,
+           }"#,
+    );
+    let frame = frame_at(s, size, ColorDepth::TrueColor);
+    let (row, col) = find_anywhere(&frame, "gamma");
+    out.push((
+        "completion popup",
+        frame[row][col].style,
+        frame[row + 1][col].style,
+    ));
+    let (row, col) = find_anywhere(&frame, "one");
+    out.push((
+        "candidate band",
+        frame[row][col].style,
+        frame[row + 1][col].style,
+    ));
+    exec(s, "pmacs.minibuffer.cancel()");
+    s.core.borrow_mut().completion_popup_close();
+
+    s.core.borrow_mut().menu_open(
+        vec![
+            pmacs::menu::MenuRow::Item {
+                label: "Alpha".into(),
+                command: "editor.copy".into(),
+            },
+            pmacs::menu::MenuRow::Item {
+                label: "Beta".into(),
+                command: "editor.paste".into(),
+            },
+        ],
+        (2, 20),
+    );
+    let frame = frame_at(s, size, ColorDepth::TrueColor);
+    let (row, col) = find_anywhere(&frame, "Alpha");
+    out.push((
+        "context menu",
+        frame[row][col].style,
+        frame[row + 1][col].style,
+    ));
+    s.core.borrow_mut().menu_close();
+    out
+}
+
+/// E10g.2 keeps today's constant for every surface whose face the theme
+/// does not set. A theme that sets `ui.menu` alone does not set
+/// `ui.menu.selected`, yet the theme's walk (`Theme::face`: an absent
+/// name falls back to its parent, then to bare `ui`) resolves the
+/// selected row to `ui.menu`'s own pair, and the selection disappears
+/// from the M-x band, the completion popup and the context menu. The
+/// same for a theme or `init.lua` that sets only the bare `ui`
+/// catch-all, which at `5ae5a27` reached none of these surfaces. The
+/// control is the unset theme, where each selected row is distinct.
+#[test]
+fn e10g_review1_p2_a_theme_setting_only_ui_menu_keeps_the_selection_visible() {
+    let s = fresh();
+    exec(&s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+    for (what, selected, row) in selected_and_row(&s) {
+        assert_ne!(selected, row, "the control, unset: {what}");
+    }
+
+    let mut found = Vec::new();
+    for (case, merge) in [
+        (
+            "ui.menu alone",
+            r#"pmacs.theme.merge { ["ui.menu"] = { fg = {220, 220, 220}, bg = {40, 40, 48} } }"#,
+        ),
+        (
+            "the bare ui catch-all alone",
+            "pmacs.theme.merge { ui = { fg = {220, 220, 220}, bg = {40, 40, 48} } }",
+        ),
+    ] {
+        let s = fresh();
+        exec(&s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+        exec(&s, merge);
+        for (what, selected, row) in selected_and_row(&s) {
+            if selected == row {
+                found.push(format!(
+                    "{case}: {what}: the selected row is painted as every other row ({selected:?})"
+                ));
+            }
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// P2 on the GPU's side of the wire: what the daemon ships in
+/// `ThemeFacts` for a theme that sets `ui.menu` alone (and, likewise,
+/// `ui.scrollbar` alone). The GPU paints the selected row's wash and
+/// glyphs from `ui.menu.selected` whenever that face arrives
+/// (`face_wash_or("ui.menu.selected", MENU_SELECTED_BG)`,
+/// `selected_row_color`), and the scrollbar thumb from
+/// `ui.scrollbar.thumb`; a child that arrives as its parent's copy paints
+/// the selection, and the thumb, in the row's and the track's own color.
+#[test]
+fn e10g_review1_p2b_the_daemon_does_not_ship_a_selected_face_copied_from_its_parent() {
+    use pmacs::semantic_render::SemanticRenderState;
+    let s = fresh();
+    exec(
+        &s,
+        r#"pmacs.theme.merge {
+             ["ui.menu"] = { fg = {220, 220, 220}, bg = {40, 40, 48} },
+             ["ui.scrollbar"] = { bg = {40, 40, 48} },
+           }"#,
+    );
+    let mut r = SemanticRenderState::new(FrontendId::LOCAL);
+    let buffer_id = s.core.borrow().active_window().buffer_id;
+    r.set_viewport(
+        buffer_id,
+        pmacs::protocol::ByteRange { start: 0, end: 64 },
+        0,
+    );
+    let faces = r
+        .render_frame(&s)
+        .into_iter()
+        .find_map(|m| match m {
+            InstanceMessage::ThemeFacts { faces } => Some(faces),
+            _ => None,
+        })
+        .expect("the first frame carries the face table");
+    let style_of = |name: &str| faces.iter().find(|f| f.name == name).map(|f| f.style);
+    let mut found = Vec::new();
+    for (child, parent) in [
+        ("ui.menu.selected", "ui.menu"),
+        ("ui.scrollbar.thumb", "ui.scrollbar"),
+    ] {
+        let parent_style = style_of(parent).unwrap_or_else(|| panic!("{parent} ships"));
+        if style_of(child) == Some(parent_style) {
+            found.push(format!(
+                "{child} ships as {parent}'s copy ({parent_style:?}); the GPU paints it in place of its constant"
+            ));
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
 }

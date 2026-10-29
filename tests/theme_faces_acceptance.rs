@@ -687,21 +687,31 @@ fn bare_ui_merge_ships_the_catch_all_without_touching_spans() {
     exec(&state, r"pmacs.theme.merge { ui = { fg = 3 } }");
     let next = sem.render_frame(&state);
     let facts = theme_facts_of(&next).expect("bare ui bumps face_epoch and emits");
-    // Twenty-five: thirteen since E2.6 added `ui.caret`, E3.3 added
+    // Twenty-two: thirteen since E2.6 added `ui.caret`, E3.3 added
     // `ui.current-line`, and E8.3 the popup's three, `ui.popup`,
-    // `ui.popup.active-parameter` and `ui.popup.footer`; E10g.2 the eight
+    // `ui.popup.active-parameter` and `ui.popup.footer`; E10g.2 five
     // chrome faces of the surfaces the GPU painted from constants,
-    // `ui.divider`, the menu's three, the minimap's two and the
-    // scrollbar's two. E10g.2's `ui.default` is not among them: the
+    // `ui.divider`, `ui.menu` and `ui.menu.separator`, `ui.minimap` and
+    // `ui.scrollbar`. E10g.2's `ui.default` is not among them: the
     // buffer face is read by its exact name, since the buffer is not
-    // chrome. The count is a literal on purpose — `UI_FACES` is private
-    // to `semantic_render` — so a face added without a thought about the
-    // catch-all fails here by name.
-    assert_eq!(facts.len(), 25, "the catch-all resolves every stage-1 face");
-    assert!(
-        !facts.iter().any(|f| f.name == "ui.default"),
-        "the buffer face is not reached through the catch-all"
-    );
+    // chrome. Nor are the three state faces (`STATE_FACES`: the selected
+    // row and the two thumbs), which take nothing from a parent, so that
+    // the catch-all leaves the selection and the thumbs their constants
+    // (E10g review 1's Medium 2). The count is a literal on purpose —
+    // `UI_FACES` is private to `semantic_render` — so a face added
+    // without a thought about the catch-all fails here by name.
+    assert_eq!(facts.len(), 22, "the catch-all resolves every stage-1 face");
+    for absent in [
+        "ui.default",
+        "ui.menu.selected",
+        "ui.minimap.thumb",
+        "ui.scrollbar.thumb",
+    ] {
+        assert!(
+            !facts.iter().any(|f| f.name == absent),
+            "{absent} is not reached through the catch-all"
+        );
+    }
     for expected in [
         "ui.caret",
         "ui.current-line",
@@ -710,12 +720,9 @@ fn bare_ui_merge_ships_the_catch_all_without_touching_spans() {
         "ui.popup.footer",
         "ui.divider",
         "ui.menu",
-        "ui.menu.selected",
         "ui.menu.separator",
         "ui.minimap",
-        "ui.minimap.thumb",
         "ui.scrollbar",
-        "ui.scrollbar.thumb",
     ] {
         assert!(
             facts.iter().any(|f| f.name == expected),

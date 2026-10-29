@@ -160,6 +160,14 @@ pub enum EntryMode {
 /// E10g.2: the name of the buffer face, [`Theme::buffer_face`].
 pub const BUFFER_FACE: &str = "ui.default";
 
+/// The faces whose frontend constant marks a state against their
+/// parent's (E10g review 1's Medium 2): the selected row against the
+/// menu's rows, a thumb against its track. [`Theme::face`] resolves each
+/// by its own name alone, so a theme that sets the parent, or the bare
+/// `ui` catch-all, and not the child keeps the child's constant, and the
+/// selection and the thumb stay visible on both frontends.
+pub const STATE_FACES: &[&str] = &["ui.menu.selected", "ui.minimap.thumb", "ui.scrollbar.thumb"];
+
 /// Themes arc Q#TH2: the face predicate. A theme key names a UI face
 /// iff it is exactly `ui` (the deliberate inheritance catch-all —
 /// [`Theme::face`]'s walk terminal) or starts with `ui.`. Shared by
@@ -351,10 +359,15 @@ impl Theme {
     /// `pmacs.theme.default` (a *syntax* fallback) must never bleed
     /// into chrome. An exact entry stops the walk, so an explicitly
     /// empty child (e.g. `ui.diag.error = {}`) blocks inheritance
-    /// from a themed parent. Callers pass full face names only.
+    /// from a themed parent. A state face ([`STATE_FACES`]) does not walk
+    /// at all: unset, it is `None` whatever its parent holds. Callers
+    /// pass full face names only.
     #[must_use]
     pub fn face(&self, name: &str) -> Option<Style> {
         debug_assert!(is_face_name(name), "face() takes ui/ui.* names");
+        if STATE_FACES.contains(&name) {
+            return self.by_capture.get(name).copied();
+        }
         let mut name = name;
         loop {
             if let Some(s) = self.by_capture.get(name) {
@@ -1338,6 +1351,27 @@ mod tests {
             t.face("ui.diag.warning").expect("inherits").fg,
             Color::Indexed(93)
         );
+    }
+
+    /// E10g review 1's Medium 2: a state face takes nothing from its
+    /// parent or the catch-all, and takes its own entry when set.
+    #[test]
+    fn a_state_face_resolves_by_its_own_name_alone() {
+        let wash = Style {
+            fg: Color::Indexed(3),
+            bg: Color::Indexed(4),
+            ..Style::default()
+        };
+        let mut t = Theme::empty();
+        for parent in ["ui", "ui.menu", "ui.minimap", "ui.scrollbar"] {
+            t.insert(parent, wash);
+        }
+        for name in STATE_FACES {
+            assert_eq!(t.face(name), None, "{name} unset");
+        }
+        assert_eq!(t.face("ui.menu.separator"), Some(wash), "a sibling walks");
+        t.insert("ui.menu.selected", Style::default());
+        assert_eq!(t.face("ui.menu.selected"), Some(Style::default()));
     }
 
     #[test]
