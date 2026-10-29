@@ -15733,6 +15733,7 @@ impl State {
             default_line: self.face_ink_or("ui.minimap", unset.default_line),
             thumb_fill: self.face_fill_or("ui.minimap.thumb", unset.thumb_fill),
             thumb_border: self.face_ink_or("ui.minimap.thumb", unset.thumb_border),
+            srgb_surface: self.config.format.is_srgb(),
         }
     }
 
@@ -19872,7 +19873,7 @@ fn minimap_rects(
                     x,
                     y0,
                     (y1 - y0).clamp(1.0, MINIMAP_MAX_LINE_STROKE_HEIGHT),
-                    minimap_style_color(style, palette.default_line),
+                    minimap_style_color(style, &palette),
                     shape,
                 );
             }
@@ -19893,7 +19894,7 @@ fn minimap_rects(
                     (y1 - y0).max(1.0),
                     minimap_style_color(
                         dominant_line_style(&lines[line_start..line_end]),
-                        palette.default_line,
+                        &palette,
                     ),
                     shape,
                 );
@@ -19916,22 +19917,27 @@ fn minimap_rects(
 /// E10g.2 — the minimap's four colors: `ui.minimap`'s bg for the panel
 /// and fg for a line with no color of its own, `ui.minimap.thumb`'s bg
 /// for the visible window's fill and fg for its edges
-/// ([`State::minimap_palette`]).
+/// ([`State::minimap_palette`]); and whether the surface encodes sRGB,
+/// so that a line's own color goes to linear first, as every face's
+/// color on a quad does ([`State::face_rgba`]; E10g review 1's Low 4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MinimapPalette {
     bg: [f32; 4],
     default_line: [f32; 4],
     thumb_fill: [f32; 4],
     thumb_border: [f32; 4],
+    srgb_surface: bool,
 }
 
 impl MinimapPalette {
-    /// Today's constants, what an unthemed frontend paints.
+    /// Today's constants, on a surface that encodes nothing: the
+    /// painter's own unit rows, and each unset color of a real one.
     const DEFAULT: Self = Self {
         bg: MINIMAP_BG,
         default_line: MINIMAP_DEFAULT_LINE,
         thumb_fill: MINIMAP_THUMB_FILL,
         thumb_border: MINIMAP_THUMB_BORDER,
+        srgb_surface: false,
     };
 }
 
@@ -20096,7 +20102,7 @@ fn advance_display_col(col: usize, ch: char) -> usize {
     pmacs_protocol::columns::advance_char(u32::try_from(col).unwrap_or(u32::MAX), ch) as usize
 }
 
-fn minimap_style_color(style: CellStyle, default_line: [f32; 4]) -> [f32; 4] {
+fn minimap_style_color(style: CellStyle, palette: &MinimapPalette) -> [f32; 4] {
     // A set underline_color is the producer's diagnostic mark for the
     // line (protocol v6, T M4.6 parity) — the minimap's gutter sign.
     // It outranks the syntax-dominant fg so error/warning lines read
@@ -20105,13 +20111,19 @@ fn minimap_style_color(style: CellStyle, default_line: [f32; 4]) -> [f32; 4] {
         CellColor::Default => style.fg,
         marked => marked,
     };
-    match color {
-        CellColor::Default => default_line,
+    let [r, g, b, a] = match color {
+        // Resolved already: the face's fg converted, or the constant.
+        CellColor::Default => return palette.default_line,
         CellColor::Rgb(r, g, b) => rgb_to_minimap_color(r, g, b),
         CellColor::Indexed(idx) => {
             let c = indexed_to_glyphon(idx);
             rgb_to_minimap_color(c.r(), c.g(), c.b())
         }
+    };
+    if palette.srgb_surface {
+        [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a]
+    } else {
+        [r, g, b, a]
     }
 }
 
@@ -33840,6 +33852,60 @@ mod tests {
             colors(&state),
             ([200, 120, 60], Some([200, 120, 60])),
             "the buffer face's fg"
+        );
+    }
+
+    /// E10g fix round 1 (review 1's Low 4): a minimap line's own color,
+    /// a syntax color as RGB or as a palette index or a diagnostic's
+    /// mark, goes sRGB to linear on an sRGB surface as every face's
+    /// color on a quad does, so the minimap shows it as written, as the
+    /// document's text already does; before, it was shown lighter.
+    #[test]
+    fn e10g_f1_the_minimap_s_line_colors_are_shown_as_written() {
+        let text = "fn main() {}\n".repeat(4);
+        let Some(mut state) = headless_or_skip(480, 240, &text) else {
+            return;
+        };
+        assert!(
+            state.config.format.is_srgb(),
+            "precondition: the surface encodes sRGB, or nothing converts"
+        );
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let fg = |fg| CellStyle {
+            fg,
+            ..CellStyle::default()
+        };
+        let mark = CellStyle {
+            underline_color: CellColor::Rgb(255, 128, 0),
+            ..CellStyle::default()
+        };
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 1,
+            lines: vec![
+                fg(CellColor::Rgb(188, 63, 188)),
+                fg(CellColor::Indexed(1)),
+                mark,
+                CellStyle::default(),
+            ],
+        });
+        let painted = quad_colors(&state.minimap_vertex_bytes());
+        let has = |want: [f32; 4]| painted.iter().any(|c| color_close(*c, want));
+        let index_1 = indexed_to_glyphon(1);
+        for (what, written) in [
+            ("an RGB syntax color", Color::rgb(188, 63, 188)),
+            ("a palette index", index_1),
+            ("a diagnostic's mark", Color::rgb(255, 128, 0)),
+        ] {
+            let linear = state.face_rgba(written, 0.9);
+            let raw = rgb_to_minimap_color(written.r(), written.g(), written.b());
+            assert!(has(linear), "{what}: {linear:?} not in {painted:?}");
+            assert!(!has(raw), "{what}: still unconverted, {raw:?}");
+        }
+        assert!(
+            has(MINIMAP_DEFAULT_LINE),
+            "a line with no color: the constant"
         );
     }
 }
