@@ -14,6 +14,8 @@
 //!   bare `ui` catch-all, keeps the selected row of the candidate band,
 //!   the completion popup and the context menu apart from the other rows,
 //!   in the grid and in the faces the daemon ships to the GPU.
+//! - P3 (E10g.4): a prompt that opens over the picker does not leave the
+//!   picker's preview in force.
 
 use std::collections::HashMap;
 
@@ -431,4 +433,101 @@ fn e10g_review1_p2b_the_daemon_does_not_ship_a_selected_face_copied_from_its_par
         }
     }
     assert!(found.is_empty(), "{found:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// P3 — E10g.4: a prompt that opens over the picker
+// ---------------------------------------------------------------------------
+
+fn roots_for(name: &str) -> pmacs::bootstrap::BootstrapRoots {
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("e10g-review1")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let roots = pmacs::bootstrap::BootstrapRoots::isolated_under(&base);
+    for (_, dir) in roots.child_env() {
+        std::fs::create_dir_all(&dir).expect("create a controlled root");
+    }
+    for dir in [roots.state_dir(), roots.config_dir()] {
+        std::fs::create_dir_all(dir.expect("isolated roots name it")).expect("create");
+    }
+    roots
+}
+
+fn press(
+    s: &mut EditorState,
+    code: crossterm::event::KeyCode,
+    mods: crossterm::event::KeyModifiers,
+) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        crossterm::event::KeyEvent {
+            code,
+            modifiers: mods,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        },
+    );
+}
+
+fn loaded(s: &EditorState) -> Option<String> {
+    eval(s, "return pmacs.theme.loaded()")
+}
+
+/// E10g.4: the picker's preview lasts while the picker does; `RET` keeps
+/// it and `C-g` restores the theme in force at open. A prompt that opens
+/// while the picker is up replaces it (`Minibuffer::begin` drops the
+/// open session without calling its `on_cancel`, as `finder.lua:316`
+/// records), so neither runs: `lsp.code-actions`' chooser, which opens
+/// when the server's answer arrives (`lsp.lua:4060`), reached from the
+/// context menu's "Quick Fix" by a right click, which `dispatch_mouse`
+/// takes while the minibuffer is up. Its `C-g` then leaves the previewed
+/// theme loaded, `ui.theme` naming the theme before, nothing kept.
+#[test]
+fn e10g_review1_p3_a_prompt_that_opens_over_the_picker_does_not_keep_its_preview() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let roots = roots_for("replaced");
+    let config = roots.config_dir().expect("config dir");
+    std::fs::write(
+        config.join("init.lua"),
+        r#"pmacs.theme.define("plain-a", { faces = { ["ui.default"] = { bg = {1, 1, 1} } } })
+           pmacs.theme.define("plain-b", { faces = { ["ui.default"] = { bg = {2, 2, 2} } } })"#,
+    )
+    .expect("write init.lua");
+    let mut s = EditorState::new_with_roots(&roots);
+    s.install_state_dirs();
+    assert_eq!(loaded(&s).as_deref(), Some("default-dark"));
+
+    press(&mut s, KeyCode::Char('x'), KeyModifiers::ALT);
+    for ch in "theme-select".chars() {
+        press(&mut s, KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    press(&mut s, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut s, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(loaded(&s).as_deref(), Some("plain-a"), "the preview");
+
+    exec(
+        &s,
+        r#"pmacs.minibuffer.read {
+             prompt = "Code action (2): ",
+             source = function() return { "1: first", "2: second" } end,
+             on_accept = function() end,
+           }"#,
+    );
+    press(&mut s, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    assert!(
+        !s.core.borrow().minibuffer.is_active(),
+        "every prompt closed"
+    );
+    let setting: String = eval(&s, "return pmacs.config.get('ui.theme')");
+    assert_eq!(setting, "default-dark", "nothing was accepted");
+    assert_eq!(
+        loaded(&s).as_deref(),
+        Some("default-dark"),
+        "the preview outlived the picker"
+    );
+    assert!(
+        !roots.state_dir().unwrap().join("theme").exists(),
+        "nothing kept"
+    );
 }

@@ -132,6 +132,12 @@ pmacs.command.define {
       on_cancel = function()
         pmacs.theme.load(original)
       end,
+      -- Another prompt opening over the picker (a code action's chooser
+      -- arriving from a server, say) ends it with neither RET nor C-g,
+      -- so its preview would outlive it: undo it then too.
+      on_replace = function()
+        pmacs.theme.load(original)
+      end,
     }
   end,
 }

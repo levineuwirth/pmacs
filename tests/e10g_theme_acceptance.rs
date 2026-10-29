@@ -858,6 +858,39 @@ fn e10g4_on_select_fires_on_a_move_and_not_when_a_prompt_opens() {
     assert_eq!(seen(&s), vec!["y"], "one move, one call");
 }
 
+/// E10g review 1's Low 1: a prompt that opens over another runs the
+/// replaced one's `on_replace`, once, and never its `on_cancel` (a
+/// question's `on_cancel` is its "no"); opening over nothing calls
+/// neither, and the newcomer's own cancel is its own.
+#[test]
+fn e10g4_on_replace_fires_when_another_prompt_replaces_one_and_on_cancel_does_not() {
+    let s = fresh();
+    exec(
+        &s,
+        r#"calls = {}
+           pmacs.minibuffer.read {
+             prompt = "First: ",
+             source = function() return { "a" } end,
+             on_accept = function() end,
+             on_cancel = function() calls[#calls + 1] = "cancel" end,
+             on_replace = function() calls[#calls + 1] = "replace" end,
+           }"#,
+    );
+    let calls = |s: &EditorState| -> Vec<String> { eval(s, "return calls") };
+    assert!(calls(&s).is_empty(), "opening calls neither");
+    exec(
+        &s,
+        r#"pmacs.minibuffer.read {
+             prompt = "Second: ",
+             source = function() return { "b" } end,
+             on_accept = function() end,
+           }"#,
+    );
+    assert_eq!(calls(&s), vec!["replace"], "replaced: on_replace alone");
+    exec(&s, "pmacs.minibuffer.cancel()");
+    assert_eq!(calls(&s), vec!["replace"], "the second's cancel is its own");
+}
+
 // ---------------------------------------------------------------------------
 // E10g.5 — color depth
 // ---------------------------------------------------------------------------

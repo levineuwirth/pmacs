@@ -17,7 +17,9 @@
 //!   minibuffer's buffer and recompute candidates.
 //! * Accept invokes `on_accept(contents)` with the chosen string;
 //!   cancel invokes `on_cancel()` (if provided). Either way, the
-//!   session is cleared and the buffer's contents are blanked.
+//!   session is cleared and the buffer's contents are blanked. A
+//!   session another replaces runs neither; its `on_replace()` runs, if
+//!   it asked for one.
 //!
 //! # History
 //!
@@ -125,8 +127,11 @@ impl Minibuffer {
 
     /// Open a prompt session. Replaces any existing session, replacing
     /// the buffer contents with `initial` and seeding history from
-    /// disk if a history bucket is named.
-    pub fn begin(&mut self, mut session: MinibufferSession) {
+    /// disk if a history bucket is named. Returns the replaced session's
+    /// `on_replace` for the caller to call once it holds no borrow of
+    /// the core.
+    pub fn begin(&mut self, mut session: MinibufferSession) -> Option<Function> {
+        let replaced = self.session.take().and_then(|old| old.on_replace);
         self.generation += 1;
         self.replace_contents(&session.initial.clone());
         self.cursor = self.buffer.len();
@@ -146,6 +151,7 @@ impl Minibuffer {
         session.history_index = None;
         session.typed_before_history_nav = None;
         self.session = Some(session);
+        replaced
     }
 
     /// Returns the minibuffer's contents as an owned String.
@@ -543,6 +549,13 @@ pub struct MinibufferSession {
     /// Not at open, and not when a recompute leaves the same candidate
     /// selected.
     pub on_select: Option<Function>,
+    /// Optional Lua callback invoked (no args) when another session
+    /// replaces this one before it is accepted or cancelled: what a
+    /// prompt that changed something on the way, as the theme picker's
+    /// preview does, needs to undo it (E10g review 1's Low 1). Opt-in:
+    /// a replaced session's `on_cancel` never runs, and prompts rely on
+    /// that (a question's `on_cancel` is its "no").
+    pub on_replace: Option<Function>,
     /// Currently-rendered candidate list (recomputed on input change).
     pub candidates: Vec<String>,
     /// Index into `candidates` of the selected entry, if any.
@@ -1209,6 +1222,7 @@ mod tests {
             on_accept: dummy_accept(lua),
             on_cancel: None,
             on_select: None,
+            on_replace: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,

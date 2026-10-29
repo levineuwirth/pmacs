@@ -15235,6 +15235,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                         | "on_accept"
                         | "on_cancel"
                         | "on_select"
+                        | "on_replace"
                         | "accept"
                 ) {
                     return Err(mlua::Error::external(
@@ -15253,6 +15254,7 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
             })?;
             let on_cancel: Option<Function> = spec.get("on_cancel")?;
             let on_select: Option<Function> = spec.get("on_select")?;
+            let on_replace: Option<Function> = spec.get("on_replace")?;
             let source = parse_completion_source(&spec)?;
             // E4.1: `ranked = true` declares that the source filters and
             // orders against the needle it is handed, so the session
@@ -15285,25 +15287,34 @@ fn install_minibuffer_read(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::Re
                 on_accept,
                 on_cancel,
                 on_select,
+                on_replace,
                 candidates: Vec::new(),
                 selected: None,
                 history_index: None,
                 typed_before_history_nav: None,
                 accept,
             };
-            cc.borrow_mut().minibuffer.begin(session);
+            let replaced = cc.borrow_mut().minibuffer.begin(session);
             // Compute initial candidate list against the live registries.
-            let cmds_app = lua
-                .app_data_ref::<SharedCommandRegistry>()
-                .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
-            let reg_app = lua
-                .app_data_ref::<SharedRegistry>()
-                .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
-            let cmds = cmds_app.borrow();
-            let reg = reg_app.borrow();
-            cc.borrow_mut()
-                .minibuffer
-                .recompute_candidates(&cmds, &reg)?;
+            {
+                let cmds_app = lua
+                    .app_data_ref::<SharedCommandRegistry>()
+                    .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+                let reg_app = lua
+                    .app_data_ref::<SharedRegistry>()
+                    .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+                let cmds = cmds_app.borrow();
+                let reg = reg_app.borrow();
+                cc.borrow_mut()
+                    .minibuffer
+                    .recompute_candidates(&cmds, &reg)?;
+            }
+            // The replaced prompt's undo (E10g review 1's Low 1), with no
+            // borrow of the core held: the theme picker reloads the theme
+            // its preview replaced.
+            if let Some(on_replace) = replaced {
+                on_replace.call::<()>(())?;
+            }
             Ok(())
         })?,
     )
