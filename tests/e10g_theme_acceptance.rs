@@ -30,10 +30,20 @@ fn fresh() -> EditorState {
 /// grid: the first frame diffs against a blank grid, so a cell no span
 /// names is a default cell.
 fn frame_at(s: &EditorState, size: CellSize, depth: ColorDepth) -> Vec<Vec<Cell>> {
+    frame_at_with(s, size, depth, &HashMap::new())
+}
+
+/// [`frame_at`] with the terminal panes' snapshots a frontend paints.
+fn frame_at_with(
+    s: &EditorState,
+    size: CellSize,
+    depth: ColorDepth,
+    terminals: &HashMap<pmacs::window::WindowId, pmacs::terminal::session::TerminalSnapshot>,
+) -> Vec<Vec<Cell>> {
     let mut r = RenderState::new(size);
     r.set_color_depth(depth);
     let mut grid = vec![vec![Cell::default(); size.cols as usize]; size.rows as usize];
-    for message in r.render_frame(s, FrontendId::LOCAL, &HashMap::new(), &[]) {
+    for message in r.render_frame(s, FrontendId::LOCAL, terminals, &[]) {
         if let InstanceMessage::CellDelta { spans, .. } = message {
             for span in spans {
                 for (i, cell) in span.cells.into_iter().enumerate() {
@@ -1039,10 +1049,19 @@ enum Path16 {
 }
 
 fn frame_16(s: &EditorState, size: CellSize, path: Path16) -> Vec<Vec<Cell>> {
+    frame_16_with(s, size, path, &HashMap::new())
+}
+
+fn frame_16_with(
+    s: &EditorState,
+    size: CellSize,
+    path: Path16,
+    terminals: &HashMap<pmacs::window::WindowId, pmacs::terminal::session::TerminalSnapshot>,
+) -> Vec<Vec<Cell>> {
     match path {
-        Path16::InProcess => frame_at(s, size, ColorDepth::Sixteen),
+        Path16::InProcess => frame_at_with(s, size, ColorDepth::Sixteen, terminals),
         Path16::Attached => {
-            let mut grid = frame_at(s, size, ColorDepth::TwoFiftySix);
+            let mut grid = frame_at_with(s, size, ColorDepth::TwoFiftySix, terminals);
             for cell in grid.iter_mut().flatten() {
                 let at16 = |c| pmacs::color_depth::reduce(c, ColorDepth::Sixteen);
                 cell.style.fg = at16(cell.style.fg);
@@ -1074,9 +1093,10 @@ fn find_anywhere(grid: &[Vec<Cell>], text: &str) -> (usize, usize) {
 /// `path`, and the buffer surface: the modeline, the status line, the
 /// minibuffer's prompt row, its candidate band (a row and the selected
 /// one), the context menu (a row, the selected one, the rule), the
-/// completion popup (a row, the selected one) and the hover popup. A
-/// surface is sampled where its text is drawn.
-fn chrome_at_16(s: &EditorState, path: Path16) -> (Style, Vec<(String, Style)>) {
+/// completion popup (a row, the selected one) and the hover popup, then
+/// every other surface painted from a `ui.*` face ([`more_chrome_at_16`]).
+/// A surface is sampled where its text is drawn.
+fn chrome_at_16(s: &mut EditorState, path: Path16) -> (Style, Vec<(String, Style)>) {
     use pmacs::completion::{
         CompletionEditsCarry, CompletionItemKind, CompletionPopupState, PopupCandidate,
     };
@@ -1171,12 +1191,320 @@ fn chrome_at_16(s: &EditorState, path: Path16) -> (Style, Vec<(String, Style)>) 
     surfaces.push(("minibuffer".to_owned(), frame[row][col].style));
     exec(s, "pmacs.minibuffer.cancel()");
     s.core.borrow_mut().completion_popup_close();
+    surfaces.extend(more_chrome_at_16(s, path));
     (buffer, surfaces)
+}
+
+/// The grid's other surfaces painted from a `ui.*` face (E10g.6 as
+/// amended on 2026-10-29, review 1's Medium 1): the line-number gutter
+/// (`ui.gutter`, on by default) on a numbered row and below the last
+/// line; the minibuffer's inline candidate (`ui.minibuffer.candidate`);
+/// the band's and the completion popup's kind column (`ui.menu`); the
+/// hover popup's closing row (`ui.popup.footer`) and the signature
+/// popup's active parameter (`ui.popup.active-parameter`); the search
+/// prompt (`ui.minibuffer`) and its two washes (`ui.search.match`,
+/// `ui.search.match.active`); the selection over the buffer's text and
+/// over a terminal pane's (`ui.selection`); the divider above a lower
+/// window (`ui.divider`); a mode-line segment's face (`ui.modeline.*`);
+/// and a diagnostic's sign in the gutter (`ui.diag.*`), with the
+/// column-0 mark that replaces it when line numbers are off. Each is
+/// sampled where its glyphs are drawn, a wash over the buffer's plain
+/// text. A diagnostic's underline is not a surface here: its face colors
+/// the underline alone, which neither clause reads, over the cell the
+/// text left.
+fn more_chrome_at_16(s: &mut EditorState, path: Path16) -> Vec<(String, Style)> {
+    let mut surfaces = gutter_and_band_chrome(s, path);
+    surfaces.extend(lsp_popup_chrome(s, path));
+    surfaces.extend(wash_chrome(s, path));
+    surfaces.extend(modeline_row_chrome(s, path));
+    surfaces.extend(diagnostic_chrome(s, path));
+    surfaces
+}
+
+/// [`more_chrome_at_16`]: the gutter, the inline candidate and the kind
+/// columns.
+fn gutter_and_band_chrome(s: &mut EditorState, path: Path16) -> Vec<(String, Style)> {
+    let size = CellSize::new(16, 60);
+    let mut surfaces = Vec::new();
+    let plain = frame_16(s, size, path);
+    let (row, text_col) = find_anywhere(&plain, "hello");
+    assert_eq!(row, 0, "the text is on the first row");
+    let number_col = plain[0]
+        .iter()
+        .position(|c| c.glyph == pmacs::cell::Glyph::Char('1'))
+        .expect("line 1's number is drawn");
+    assert!(number_col < text_col, "the number sits in the gutter");
+    surfaces.push(("gutter, a number".to_owned(), plain[0][number_col].style));
+    surfaces.push(("gutter, past the last line".to_owned(), plain[8][0].style));
+
+    exec(
+        s,
+        r#"pmacs.minibuffer.read {
+             prompt = "Pick: ",
+             source = function() return { "one", "two" } end,
+             on_accept = function() end,
+           }"#,
+    );
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "[one]");
+    surfaces.push((
+        "minibuffer, its inline candidate".to_owned(),
+        frame[row][col].style,
+    ));
+    let (row, col) = find_anywhere(&frame, "two");
+    surfaces.push((
+        "candidate band, kind column".to_owned(),
+        frame[row][col - 2].style,
+    ));
+    exec(s, "pmacs.minibuffer.cancel()");
+
+    let candidate = |label: &str| pmacs::completion::PopupCandidate {
+        carry: pmacs::completion::CompletionEditsCarry::default(),
+        label: label.to_owned(),
+        kind: pmacs::completion::CompletionItemKind::Text,
+        detail: None,
+        insert_text: label.to_owned(),
+    };
+    let popup = {
+        let core = s.core.borrow();
+        pmacs::completion::CompletionPopupState::new(
+            core.active_buffer_id(),
+            0,
+            String::new(),
+            vec![candidate("gamma"), candidate("delta")],
+            2,
+        )
+        .expect("a popup")
+    };
+    s.core.borrow_mut().completion_popup_open(popup);
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "delta");
+    surfaces.push((
+        "completion popup, kind column".to_owned(),
+        frame[row][col - 2].style,
+    ));
+    s.core.borrow_mut().completion_popup_close();
+    surfaces
+}
+
+/// [`more_chrome_at_16`]: the hover popup's footer and the signature
+/// popup's active parameter.
+fn lsp_popup_chrome(s: &mut EditorState, path: Path16) -> Vec<(String, Style)> {
+    let size = CellSize::new(16, 60);
+    let mut surfaces = Vec::new();
+    let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+    let long = (1..=40)
+        .map(|i| format!("Hover line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hover = pmacs::hover::Hover {
+        contents: long,
+        range: None,
+    };
+    let _ = s
+        .core
+        .borrow_mut()
+        .lsp_popup_open_hover(target, Some(&hover));
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "more line");
+    surfaces.push(("hover popup, its footer".to_owned(), frame[row][col].style));
+    s.core.borrow_mut().lsp_popup_close();
+
+    let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+    let help = pmacs::signature::SignatureHelp {
+        signatures: vec![pmacs::signature::Signature {
+            label: "echo(name, count)".into(),
+            documentation: None,
+            parameters: vec![
+                pmacs::signature::SignatureParameter {
+                    label: "name".into(),
+                    span: Some((5, 9)),
+                    documentation: None,
+                },
+                pmacs::signature::SignatureParameter {
+                    label: "count".into(),
+                    span: Some((11, 16)),
+                    documentation: None,
+                },
+            ],
+            active_parameter: Some(0),
+        }],
+        active_signature: 0,
+        active_parameter: Some(0),
+    };
+    let _ = s
+        .core
+        .borrow_mut()
+        .lsp_popup_open_signature(target, Some(&help), false);
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "echo(name");
+    surfaces.push((
+        "signature popup, its active parameter".to_owned(),
+        frame[row][col + 5].style,
+    ));
+    s.core.borrow_mut().lsp_popup_close();
+    surfaces
+}
+
+/// [`more_chrome_at_16`]: the search prompt and its washes, and the
+/// selection over the buffer and over a terminal pane.
+fn wash_chrome(s: &mut EditorState, path: Path16) -> Vec<(String, Style)> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let size = CellSize::new(16, 60);
+    let mut surfaces = Vec::new();
+    let (row, text_col) = find_anywhere(&frame_16(s, size, path), "hello");
+    assert_eq!(row, 0, "the text is on the first row");
+    exec(s, r#"pmacs.window.buffer():insert(5, " hello")"#);
+    press(s, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    for ch in "hello".chars() {
+        press(s, KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "I-search");
+    surfaces.push(("search prompt".to_owned(), frame[row][col].style));
+    let active = frame[0][text_col].style;
+    let lazy = frame[0][text_col + 6].style;
+    assert_ne!(active, lazy, "one match is active, the other lazy");
+    surfaces.push(("search, a match".to_owned(), lazy));
+    surfaces.push(("search, the active match".to_owned(), active));
+    press(s, KeyCode::Char('g'), KeyModifiers::CONTROL);
+
+    press(s, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    press(s, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    press(s, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    let frame = frame_16(s, size, path);
+    surfaces.push(("selection".to_owned(), frame[0][text_col].style));
+    press(s, KeyCode::Char('g'), KeyModifiers::CONTROL);
+
+    let window = s.core.borrow().active_window_id();
+    let buffer_id = s.core.borrow().active_buffer_id();
+    let term = pmacs::terminal::session::TerminalSnapshot {
+        buffer_id,
+        size: CellSize::new(4, 20),
+        cells: "term"
+            .chars()
+            .chain(std::iter::repeat(' '))
+            .take(80)
+            .map(|ch| Cell {
+                glyph: pmacs::cell::Glyph::Char(ch),
+                ..Cell::default()
+            })
+            .collect(),
+        cursor: None,
+        title: None,
+        screen_generation: 1,
+        selection: vec![pmacs_protocol::terminal::TerminalSelectionSpan {
+            row: 0,
+            start_col: 0,
+            end_col: 4,
+        }],
+        scroll_offset: 0,
+        at_bottom: true,
+        pid: 1,
+        process: pmacs_protocol::terminal::TerminalProcessState::Running,
+    };
+    let frame = frame_16_with(s, size, path, &HashMap::from([(window, term)]));
+    let (row, col) = find_anywhere(&frame, "term");
+    surfaces.push((
+        "a terminal pane's selection".to_owned(),
+        frame[row][col].style,
+    ));
+    surfaces
+}
+
+/// [`more_chrome_at_16`]: a segment's face and the divider, on the mode
+/// line's row.
+fn modeline_row_chrome(s: &mut EditorState, path: Path16) -> Vec<(String, Style)> {
+    let size = CellSize::new(16, 60);
+    let mut surfaces = Vec::new();
+    exec(
+        s,
+        r#"pmacs.statusline.register {
+             name = "e10g6-segment",
+             side = "left",
+             face = "ui.modeline.lsp",
+             fn = function() return "SEGMENT" end,
+           }"#,
+    );
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "SEGMENT");
+    surfaces.push((
+        "modeline, a segment's face".to_owned(),
+        frame[row][col].style,
+    ));
+
+    exec(s, "pmacs.window.split_horizontal()");
+    let frame = frame_16(s, size, path);
+    let (row, col) = find_anywhere(&frame, "⇕");
+    surfaces.push(("divider".to_owned(), frame[row][col].style));
+    exec(s, "pmacs.window.close_others()");
+    surfaces
+}
+
+/// [`more_chrome_at_16`]: a diagnostic's sign in the gutter, and its mark
+/// where line numbers are off.
+fn diagnostic_chrome(s: &mut EditorState, path: Path16) -> Vec<(String, Style)> {
+    use pmacs::diag::{Diagnostic, DiagnosticSeverity};
+    let size = CellSize::new(16, 60);
+    let mut surfaces = Vec::new();
+    exec(s, r#"pmacs.window.buffer():insert(0, "w\ni\nh\n")"#);
+    let uri: String = eval(
+        s,
+        r#"local uri = "file:///e10g6/marks"
+           assert(pmacs.diag._attach_view(pmacs.window.buffer(), uri))
+           return uri"#,
+    );
+    {
+        let core = s.core.borrow();
+        let registry = core.registry.clone();
+        let mut reg = registry.borrow_mut();
+        let buf = reg.get_mut(core.active_buffer_id()).unwrap();
+        buf.set_file_path(Some(std::path::PathBuf::from("/e10g6/marks")));
+    }
+    let severities = [
+        ("error", DiagnosticSeverity::Error),
+        ("warning", DiagnosticSeverity::Warning),
+        ("information", DiagnosticSeverity::Information),
+        ("hint", DiagnosticSeverity::Hint),
+    ];
+    let diagnostics = severities
+        .iter()
+        .enumerate()
+        .map(|(line, &(_, severity))| Diagnostic {
+            start_line: line as u32,
+            start_col: 0,
+            end_line: line as u32,
+            end_col: 1,
+            severity,
+            message: "boom".into(),
+            source: None,
+            code: None,
+            span: None,
+        })
+        .collect();
+    let store = s.lsp_manager.borrow().diag_store();
+    store.lock().unwrap().set(uri, diagnostics);
+    let frame = frame_16(s, size, path);
+    for (line, (name, _)) in severities.iter().enumerate() {
+        surfaces.push((
+            format!("gutter, a diagnostic's sign ({name})"),
+            frame[line][0].style,
+        ));
+    }
+    exec(s, "pmacs.window.set_line_numbers('off')");
+    let frame = frame_16(s, size, path);
+    for (line, (name, _)) in severities.iter().enumerate() {
+        surfaces.push((
+            format!("a diagnostic's mark without a gutter ({name})"),
+            frame[line][0].style,
+        ));
+    }
+    surfaces
 }
 
 /// The loaded theme's chrome held to E10g.6 as ruled: the first clause
 /// only where the theme sets `ui.default`.
-fn legibility(s: &EditorState, path: Path16) -> Vec<String> {
+fn legibility(s: &mut EditorState, path: Path16) -> Vec<String> {
     let buffer_face_set = s
         .syntax_registry
         .theme()
@@ -1189,10 +1517,44 @@ fn legibility(s: &EditorState, path: Path16) -> Vec<String> {
 }
 
 fn violations(theme: &str, path: Path16) -> Vec<String> {
-    let s = fresh();
+    let mut s = fresh();
     exec(&s, LEGIBILITY_THEMES);
     exec(&s, &format!("pmacs.theme.load({theme:?})"));
-    legibility(&s, path)
+    legibility(&mut s, path)
+}
+
+/// #428: what a theme without a buffer face paints that the second
+/// clause cannot judge, a constant index against one of the terminal's
+/// own defaults (the owner's rulings of 2026-10-29): the gutter, a
+/// diagnostic's sign in it, and a diagnostic's mark where line numbers
+/// are off. `default-dark` paints every one of them, on both paths; they
+/// are pinned here by name, as `2a553f0` pinned the first clause's.
+const ISSUE_428: &[&str] = &[
+    "gutter, a number: its foreground does not differ from its background (Index(8) on DefaultBg)",
+    "gutter, past the last line: its foreground does not differ from its background (Index(8) on DefaultBg)",
+    "gutter, a diagnostic's sign (error): its foreground does not differ from its background (Index(1) on DefaultBg)",
+    "gutter, a diagnostic's sign (warning): its foreground does not differ from its background (Index(3) on DefaultBg)",
+    "gutter, a diagnostic's sign (information): its foreground does not differ from its background (Index(6) on DefaultBg)",
+    "gutter, a diagnostic's sign (hint): its foreground does not differ from its background (Index(8) on DefaultBg)",
+    "a diagnostic's mark without a gutter (error): its foreground does not differ from its background (DefaultFg on Index(1))",
+    "a diagnostic's mark without a gutter (warning): its foreground does not differ from its background (DefaultFg on Index(3))",
+    "a diagnostic's mark without a gutter (information): its foreground does not differ from its background (DefaultFg on Index(6))",
+    "a diagnostic's mark without a gutter (hint): its foreground does not differ from its background (DefaultFg on Index(8))",
+];
+
+/// `found` without #428's pinned lines, after asserting it holds every
+/// one of them: a theme with no buffer face paints them all.
+fn beyond_428(found: Vec<String>, what: &str) -> Vec<String> {
+    for pinned in ISSUE_428 {
+        assert!(
+            found.iter().any(|v| v == pinned),
+            "{what}: #428's {pinned:?} is not reported: {found:#?}"
+        );
+    }
+    found
+        .into_iter()
+        .filter(|v| !ISSUE_428.contains(&v.as_str()))
+        .collect()
 }
 
 /// Planted themes, one failing each clause, and one that passes. Every
@@ -1242,8 +1604,14 @@ itself["ui.modeline"] = { fg = 4, bg = 4 }
 pmacs.theme.define("planted-bare-fg-on-itself", { faces = itself })
 "#;
 
+/// The mode line's row as each surface on it is painted: the mode line,
+/// a segment's face, and the divider handle above a lower window.
+const MODELINE_ROW: [&str; 3] = ["modeline", "modeline, a segment's face", "divider"];
+
 /// Each clause fails by name for the planted theme that breaks it, on
-/// both paths; the theme that breaks none passes, so the check can.
+/// both paths, on the mode line's row (the mode line, a segment drawn in
+/// its face and the divider handle on it) and nowhere else; the theme
+/// that breaks none passes, so the check can.
 #[test]
 fn e10g6_a_planted_theme_fails_each_clause_by_name() {
     for path in [Path16::InProcess, Path16::Attached] {
@@ -1258,11 +1626,26 @@ fn e10g6_a_planted_theme_fails_each_clause_by_name() {
             "{path:?}: reverse video applied"
         );
         let same = violations("planted-same-as-buffer", path);
-        assert_eq!(same.len(), 1, "{path:?}: {same:#?}");
-        assert!(same[0].starts_with("modeline: does not differ from the buffer surface"));
+        assert_eq!(
+            same.iter()
+                .map(|v| v.split(": ").next().unwrap())
+                .collect::<Vec<_>>(),
+            MODELINE_ROW,
+            "{path:?}: {same:#?}"
+        );
+        assert!(
+            same.iter()
+                .all(|v| v.contains(": does not differ from the buffer surface")),
+            "{path:?}: {same:#?}"
+        );
         let itself = violations("planted-fg-on-itself", path);
-        assert_eq!(itself.len(), 1, "{path:?}: {itself:#?}");
-        assert!(itself[0].starts_with("modeline: its foreground does not differ"));
+        assert_eq!(
+            itself,
+            MODELINE_ROW.map(|surface| format!(
+                "{surface}: its foreground does not differ from its background (Index(4) on Index(4))"
+            )),
+            "{path:?}"
+        );
         let black = violations("planted-black-on-default", path);
         assert!(
             black.contains(
@@ -1278,40 +1661,49 @@ fn e10g6_a_planted_theme_fails_each_clause_by_name() {
 /// pair two colors against each other: a theme whose modeline is that
 /// pair reversed passes (the first clause would fail it, the buffer
 /// surface being the same pair), and one whose modeline is 4 on 4 still
-/// fails the second clause by name, on both paths.
+/// fails the second clause by name, on both paths. Either reports
+/// #428's lines too, as every theme without a buffer face does.
 #[test]
 fn e10g6_without_a_buffer_face_only_the_second_clause_judges() {
     for path in [Path16::InProcess, Path16::Attached] {
         assert_eq!(
-            violations("pair-modeline", path),
+            beyond_428(violations("pair-modeline", path), "pair-modeline"),
             Vec::<String>::new(),
             "{path:?}: the terminal's pair, no clause one"
         );
         assert_eq!(
-            violations("planted-bare-fg-on-itself", path),
-            vec![
-                "modeline: its foreground does not differ from its background (Index(4) on Index(4))"
-            ],
+            beyond_428(
+                violations("planted-bare-fg-on-itself", path),
+                "planted-bare-fg-on-itself"
+            ),
+            MODELINE_ROW.map(|surface| format!(
+                "{surface}: its foreground does not differ from its background (Index(4) on Index(4))"
+            )),
             "{path:?}"
         );
     }
 }
 
 /// Every shipped theme's chrome at 16 colors passes on both paths, as
-/// the owner ruled on 2026-10-28: `default-dark`, which sets no
-/// `ui.default`, by the second clause alone. What the first clause no
-/// longer sees for it, its menu and popups filled with color 0 at 16
-/// colors, is #424.
+/// the owner ruled on 2026-10-28, every grid surface painted from a
+/// `ui.*` face sampled, as ruled on 2026-10-29: `default-dark`, which
+/// sets no `ui.default`, by the second clause alone, but for #428's
+/// lines, pinned. What the first clause no longer sees for it, its menu
+/// and popups filled with color 0 at 16 colors, is #424.
 #[test]
-fn e10g6_every_shipped_theme_is_legible_at_16_colors_on_both_paths() {
+fn e10g6_every_shipped_theme_is_legible_at_16_colors_but_for_428() {
     let shipped: Vec<String> = eval(&fresh(), "return pmacs.theme.names()");
     assert!(shipped.iter().any(|n| n == "default-dark"), "{shipped:?}");
     for path in [Path16::InProcess, Path16::Attached] {
         for theme in &shipped {
-            let s = fresh();
+            let mut s = fresh();
             exec(&s, &format!("pmacs.theme.load({theme:?})"));
-            let found = legibility(&s, path);
-            assert!(found.is_empty(), "{path:?} {theme}: {found:#?}");
+            let found = legibility(&mut s, path);
+            if theme == "default-dark" {
+                assert_eq!(found, ISSUE_428, "{path:?} {theme}: #428, pinned");
+            } else {
+                assert!(found.is_empty(), "{path:?} {theme}: {found:#?}");
+            }
         }
     }
 }
