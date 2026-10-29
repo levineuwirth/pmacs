@@ -13892,7 +13892,7 @@ impl State {
                 y,
                 w,
                 h,
-                color: self.face_wash_or("ui.divider", DIVIDER_RGBA),
+                color: self.face_fill_or("ui.divider", DIVIDER_RGBA),
             });
         }
         if let Some(plan) = self.panel.plan.as_ref()
@@ -15164,14 +15164,14 @@ impl State {
                 y: track.top,
                 w: SCROLLBAR_WIDTH,
                 h: track.height,
-                color: self.face_wash_or("ui.scrollbar", SCROLLBAR_TRACK_BG),
+                color: self.face_fill_or("ui.scrollbar", SCROLLBAR_TRACK_BG),
             },
             MinimapRect {
                 x: track.x,
                 y: thumb_top,
                 w: SCROLLBAR_WIDTH,
                 h: thumb_h,
-                color: self.face_wash_or("ui.scrollbar.thumb", SCROLLBAR_THUMB_FILL),
+                color: self.face_fill_or("ui.scrollbar.thumb", SCROLLBAR_THUMB_FILL),
             },
         ]
     }
@@ -15627,7 +15627,9 @@ impl State {
     // face owns its surface within its stage-1 mask, and a `Default`
     // component inside the mask maps to the frontend's PLAIN rendering
     // — the buffer-text default fg / the window-background bg — never
-    // the old chrome constant. An UNSET face keeps the site constant.
+    // the old chrome constant, but for an opaque fill's `Default` bg,
+    // which keeps the site constant (`face_fill_or`, E10g review 1's
+    // Medium 3). An UNSET face keeps the site constant.
     // -----------------------------------------------------------------
 
     /// fg resolution for an {fg}-mask site: face set → its fg
@@ -15727,17 +15729,35 @@ impl State {
     fn minimap_palette(&self) -> MinimapPalette {
         let unset = MinimapPalette::DEFAULT;
         MinimapPalette {
-            bg: self.face_wash_or("ui.minimap", unset.bg),
+            bg: self.face_fill_or("ui.minimap", unset.bg),
             default_line: self.face_ink_or("ui.minimap", unset.default_line),
-            thumb_fill: self.face_wash_or("ui.minimap.thumb", unset.thumb_fill),
+            thumb_fill: self.face_fill_or("ui.minimap.thumb", unset.thumb_fill),
             thumb_border: self.face_ink_or("ui.minimap.thumb", unset.thumb_border),
         }
+    }
+
+    /// Fill resolution for an opaque surface (E10g review 1's Medium 3):
+    /// a menu's, a dropdown's or the hover popup's fill and selected
+    /// row, the scrollbar, the minimap, the panel divider. Face set with
+    /// a background → that background carrying the site's alpha; unset,
+    /// or set with a `Default` background (a face that colors the text
+    /// alone) → `fallback`, today's constant. Never transparent, as
+    /// [`Self::face_wash_or`]'s "no wash" is: that is the off switch of
+    /// a wash over text, and a fill that paints nothing leaves its labels
+    /// drawn over the document.
+    fn face_fill_or(&self, name: &str, fallback: [f32; 4]) -> [f32; 4] {
+        self.faces
+            .get(name)
+            .and_then(|f| cell_color_to_glyphon(f.bg))
+            .map_or(fallback, |c| self.face_rgba(c, fallback[3]))
     }
 
     /// Wash resolution for a {bg}-mask face: face set → its bg RGB
     /// carrying the site's current alpha (`Default` bg ↦ no wash — a
     /// fully transparent quad); unset → `fallback` (today's wash
-    /// constant, alpha included).
+    /// constant, alpha included). For a wash over text only (the
+    /// selection, the search matches); a fill takes
+    /// [`Self::face_fill_or`].
     fn face_wash_or(&self, name: &str, fallback: [f32; 4]) -> [f32; 4] {
         match self.faces.get(name) {
             Some(f) => match cell_color_to_glyphon(f.bg) {
@@ -16183,7 +16203,7 @@ impl State {
             y: ay,
             w,
             h: menu.rows.len() as f32 * self.fm.menu_row_height(),
-            color: self.face_wash_or("ui.menu", MENU_BG),
+            color: self.face_fill_or("ui.menu", MENU_BG),
         }];
         for (i, row) in menu.rows.iter().enumerate() {
             let ry = ay + i as f32 * self.fm.menu_row_height();
@@ -16201,7 +16221,7 @@ impl State {
                     y: ry,
                     w,
                     h: self.fm.menu_row_height(),
-                    color: self.face_wash_or("ui.menu.selected", MENU_SELECTED_BG),
+                    color: self.face_fill_or("ui.menu.selected", MENU_SELECTED_BG),
                 });
             }
         }
@@ -16288,7 +16308,7 @@ impl State {
             y: top_y,
             w: width,
             h: count as f32 * self.fm.mb_drop_row_height(),
-            color: self.face_wash_or("ui.menu", MENU_BG),
+            color: self.face_fill_or("ui.menu", MENU_BG),
         }];
         // Highlight the selection at its row *within the visible window*;
         // by construction it always falls inside [first, first + count).
@@ -16301,7 +16321,7 @@ impl State {
                 y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
                 h: self.fm.mb_drop_row_height(),
-                color: self.face_wash_or("ui.menu.selected", MENU_SELECTED_BG),
+                color: self.face_fill_or("ui.menu.selected", MENU_SELECTED_BG),
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -16475,7 +16495,7 @@ impl State {
             y: top_y,
             w: width,
             h: count as f32 * self.fm.mb_drop_row_height(),
-            color: self.face_wash_or("ui.menu", MENU_BG),
+            color: self.face_fill_or("ui.menu", MENU_BG),
         }];
         if let Some(sel) = selected.map(|s| s as usize)
             && sel >= first
@@ -16486,7 +16506,7 @@ impl State {
                 y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
                 h: self.fm.mb_drop_row_height(),
-                color: self.face_wash_or("ui.menu.selected", MENU_SELECTED_BG),
+                color: self.face_fill_or("ui.menu.selected", MENU_SELECTED_BG),
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -16689,7 +16709,7 @@ impl State {
             y: b.y,
             w: b.w,
             h: b.h,
-            color: self.face_wash_or("ui.popup", MENU_BG),
+            color: self.face_fill_or("ui.popup", MENU_BG),
         }];
         if b.rows > b.shown {
             let thumb_h = (b.h * b.shown as f32 / b.rows as f32).max(4.0);
@@ -16700,7 +16720,7 @@ impl State {
                 y: b.y + travel * at,
                 w: 3.0,
                 h: thumb_h,
-                color: self.face_wash_or("ui.scrollbar.thumb", POPUP_THUMB),
+                color: self.face_fill_or("ui.scrollbar.thumb", POPUP_THUMB),
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -33437,5 +33457,181 @@ mod tests {
             state.menu_text_colors(),
             (Color::rgb(255, 0, 0), Color::rgb(255, 255, 0))
         );
+    }
+
+    /// E10g review 1's P5 (E10g.2). A face set without a background
+    /// paints a GPU wash transparent (`face_wash_or`: "`Default` bg ↦ no
+    /// wash"), which is the off switch for a selection or search wash,
+    /// and is what the menus' and dropdowns' fills now get from a theme
+    /// that sets `ui.menu` with a foreground alone, or from an `init.lua`
+    /// that sets only the bare `ui` catch-all's foreground (the daemon
+    /// ships every face the walk reaches, `ui.menu.selected` included,
+    /// each with a `Default` bg). With no fill the menu's labels are drawn
+    /// over the document text beneath them, and the selected row has no
+    /// wash. The fills stay opaque, as their constants are.
+    #[test]
+    fn e10g_review1_p5_a_menu_face_without_a_background_keeps_the_fills_opaque() {
+        let Some(mut state) = headless_or_skip(480, 320, "fn main() {}") else {
+            return;
+        };
+        open_menu_and_dropdown(&mut state);
+        let fg_only = CellStyle {
+            fg: CellColor::Rgb(220, 220, 220),
+            ..CellStyle::default()
+        };
+        apply_faces(
+            &mut state,
+            ["ui.menu", "ui.menu.selected", "ui.menu.separator"]
+                .into_iter()
+                .map(|name| theme_face(name, fg_only))
+                .collect(),
+        );
+        state.refresh_menu_buffer();
+        state.refresh_mb_buffer();
+        let mut found = Vec::new();
+        for (what, quads) in [
+            ("context menu", quad_colors(&state.menu_vertex_bytes())),
+            (
+                "minibuffer dropdown",
+                quad_colors(&state.mb_dropdown_vertex_bytes()),
+            ),
+        ] {
+            for (i, quad) in quads.iter().enumerate() {
+                if quad[3] == 0.0 {
+                    found.push(format!("{what}: quad {i} is transparent: {quad:?}"));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// The surfaces [`e10g_f1_every_fill_keeps_its_constant_under_a_face_without_a_background`]
+    /// reads, open on `state`'s document: a two-row completion dropdown
+    /// (the second selected), a hover popup long enough for its thumb, a
+    /// style summary for the minimap, and a presented panel for the
+    /// divider.
+    fn open_every_other_fill(state: &mut State) {
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.view_range = (0, state.current_text.len() as u64);
+        let row = |label: &str| CompletionPopupRow {
+            label: label.into(),
+            kind: 3,
+            detail: None,
+        };
+        state.completion = Some(CompletionLocal {
+            buffer_id: bid,
+            anchor: 0,
+            prefix_len: 0,
+            rows: vec![row("alpha"), row("beta")],
+            selected: Some(1),
+            total: 2,
+        });
+        state.refresh_completion_buffer();
+        // The panel first: presenting it sets the wire to the panel's
+        // version, below the popup's.
+        let _ = present_panel(state, 4);
+        state.set_panel_wire(POPUP_MIN_VERSION);
+        let _ =
+            state.apply_attach_message(InstanceMessage::Popup(PopupPayload::Present(PopupFrame {
+                buffer_id: bid,
+                anchor_byte: 0,
+                kind: PopupKind::Hover,
+                lines: (0..60).map(|i| format!("doc {i}")).collect(),
+                active_range: None,
+                omitted_lines: 0,
+            })));
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 1,
+            lines: vec![CellStyle::default(); 200],
+        });
+        state.refresh_popup_buffer();
+    }
+
+    /// E10g fix round 1, beside P5 (review 1's Medium 3): every other
+    /// opaque fill a face reaches keeps its constant under a face with a
+    /// foreground and no background, the shape the bare `ui` catch-all's
+    /// foreground alone ships to each face the walk reaches: the
+    /// completion dropdown's fill and selected row, the hover popup's
+    /// fill and scroll thumb, the scrollbar's track and thumb, the
+    /// minimap's panel and thumb, the panel divider. Unset, the same
+    /// constants: the control that each fill is painted at all.
+    #[test]
+    fn e10g_f1_every_fill_keeps_its_constant_under_a_face_without_a_background() {
+        let text = "line\n".repeat(200);
+        let Some(mut state) = headless_or_skip(480, 320, &text) else {
+            return;
+        };
+        open_every_other_fill(&mut state);
+
+        let fills = |state: &mut State| {
+            let minimap = quad_colors(&state.minimap_vertex_bytes());
+            vec![
+                (
+                    "completion dropdown",
+                    quad_colors(&state.completion_dropdown_vertex_bytes()),
+                    vec![MENU_BG, MENU_SELECTED_BG],
+                ),
+                (
+                    "hover popup",
+                    quad_colors(&state.popup_vertex_bytes()),
+                    vec![MENU_BG, POPUP_THUMB],
+                ),
+                (
+                    "scrollbar",
+                    state.scrollbar_rects().iter().map(|r| r.color).collect(),
+                    vec![SCROLLBAR_TRACK_BG, SCROLLBAR_THUMB_FILL],
+                ),
+                (
+                    "minimap",
+                    [MINIMAP_BG, MINIMAP_THUMB_FILL]
+                        .into_iter()
+                        .filter(|fill| minimap.iter().any(|c| color_close(*c, *fill)))
+                        .collect(),
+                    vec![MINIMAP_BG, MINIMAP_THUMB_FILL],
+                ),
+                (
+                    "divider",
+                    quad_colors(&state.panel_quad_vertex_bytes())
+                        .into_iter()
+                        .take(1)
+                        .collect(),
+                    vec![DIVIDER_RGBA],
+                ),
+            ]
+        };
+        for (what, painted, constants) in fills(&mut state) {
+            assert_eq!(painted, constants, "unset: {what}");
+        }
+
+        let fg_only = CellStyle {
+            fg: CellColor::Rgb(220, 220, 220),
+            ..CellStyle::default()
+        };
+        apply_faces(
+            &mut state,
+            [
+                "ui.divider",
+                "ui.menu",
+                "ui.menu.selected",
+                "ui.minimap",
+                "ui.minimap.thumb",
+                "ui.popup",
+                "ui.scrollbar",
+                "ui.scrollbar.thumb",
+            ]
+            .into_iter()
+            .map(|name| theme_face(name, fg_only))
+            .collect(),
+        );
+        state.refresh_completion_buffer();
+        let mut found = Vec::new();
+        for (what, painted, constants) in fills(&mut state) {
+            if painted != constants {
+                found.push(format!("{what}: {painted:?}, not {constants:?}"));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
     }
 }
