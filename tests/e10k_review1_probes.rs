@@ -16,6 +16,14 @@
 //! is `crdt::tests::e10k_an_undone_cut_and_a_redone_paste_come_back_in_pieces`
 //! in the default sweep.
 //!
+//! P5 (Low 4): dabbrev dropped every word touching an edge its window
+//! drew, so a whole word beginning at the window's first byte, a space
+//! before it, or ending at its last, a space after it, was not offered,
+//! though E10k.2's coherence statement ("none beyond the window") and the
+//! provider's own comment ("nor one the window's edge cuts") say it is.
+//! Since fix round 1 the byte beyond each drawn edge is read, and counted,
+//! and a word is dropped only when that byte is a word byte.
+//!
 //! The review's P2a and P2b (Low 2) are committed in
 //! `tests/e10k_replica_reads_acceptance.rs`, whose private guard they
 //! plant against; P3 (High 1, through the attached TUI and the GPU) as
@@ -107,4 +115,39 @@ fn p1_an_undone_whole_buffer_delete_keeps_the_per_key_reads_bounded() {
     }
     #[cfg(not(feature = "crdt"))]
     eprintln!("skipping: the replicas' reads are a crdt build's");
+}
+
+/// P5: dabbrev offers no word "the window's edge cuts" (its comment,
+/// `src/completion_framework.rs`), and skipped every word that touched an
+/// edge the window drew, so a whole word that begins exactly at the
+/// window's first byte, a space before it, was dropped though nothing cut
+/// it; the same at the window's last byte. E10k.2's coherence statement
+/// is "dabbrev offers words near the cursor first and none beyond the
+/// window": these words are inside it.
+#[test]
+fn p5_a_whole_word_at_the_window_edge_is_offered() {
+    use pmacs::completion_framework::{CompletionContext, dabbrev_provider};
+    // Before the cursor: `zqedge` starts at byte 11, a space at 10; the
+    // cursor at the end, the window reaching back exactly to byte 11.
+    let text = format!("{} zqedge{}zq", "y".repeat(10), " ".repeat(20));
+    let cursor = text.len();
+    let window = cursor - 11;
+    assert_eq!(&text[11..17], "zqedge", "fixture");
+    let f = dabbrev_provider(move |_| window);
+    let mut c = CompletionContext::new("zq", text.as_str());
+    c.cursor = Some(cursor);
+    let before: Vec<String> = f(&c).into_iter().map(|i| i.label).collect();
+    // After the cursor: `zqtail` ends at the window's last byte, a space
+    // after it.
+    let text = format!("zq {}zqtail {}", " ".repeat(20), "y".repeat(10));
+    let end = text.find("zqtail").expect("fixture") + "zqtail".len();
+    let f = dabbrev_provider(move |_| end - 2);
+    let mut c = CompletionContext::new("zq", text.as_str());
+    c.cursor = Some(2);
+    let after: Vec<String> = f(&c).into_iter().map(|i| i.label).collect();
+    assert_eq!(
+        (before, after),
+        (vec!["zqedge".to_owned()], vec!["zqtail".to_owned()]),
+        "a word wholly inside the window, touching its edge, is offered"
+    );
 }

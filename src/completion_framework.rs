@@ -701,9 +701,13 @@ const DABBREV_MAX: usize = 64;
 /// than the prefix itself, case-insensitively), the nearest the cursor
 /// first, as Emacs's dabbrev searches outward from point; a word as
 /// near before the cursor as another after it comes first. It reads at
-/// most `window(buffer)` bytes either side of the cursor and offers no
-/// word beyond them, nor one the window's edge cuts (E10k.2: before it,
-/// every key that collected read the whole buffer, #413). Empty prefix
+/// most `window(buffer)` bytes either side of the cursor, and the one byte
+/// beyond each edge the window draws, and offers no word beyond them, nor
+/// one the window's edge cuts (E10k.2: before it, every key that collected
+/// read the whole buffer, #413). A word wholly inside the window that
+/// touches its edge is offered: the byte beyond tells it from a cut one
+/// (E10k review 1's Low 4: until fix round 1 every word touching a drawn
+/// edge was dropped). Empty prefix
 /// returns nothing. Registered ranked
 /// ([`CompletionRegistry::register_ranked`]), so its order survives the
 /// registry's sort among equal scores.
@@ -719,13 +723,23 @@ pub fn dabbrev_provider(window: impl Fn(Option<BufferId>) -> usize + 'static) ->
         let lo = cursor.saturating_sub(reach);
         let hi = cursor.saturating_add(reach).min(len);
         let bytes = ctx.text.bytes(lo, hi);
+        // Whether the window's edge cuts a word: the byte beyond each edge
+        // it drew is a word byte.
+        let word_at = |at: usize| {
+            ctx.text
+                .bytes(at, at + 1)
+                .first()
+                .is_some_and(|&b| is_word_byte(b))
+        };
+        let cut_before = lo > 0 && word_at(lo - 1);
+        let cut_after = hi < len && word_at(hi);
         let needle = ctx.prefix.to_lowercase();
         // Every matching word with its distance from the cursor and
         // whether it stands after it.
         let mut found: Vec<(usize, bool, &str)> = Vec::new();
         for (start, end) in word_spans(&bytes) {
-            // A word touching an edge the window drew may go on past it.
-            if (start == 0 && lo > 0) || (end == bytes.len() && hi < len) {
+            // A word the window's edge cuts goes on past it.
+            if (start == 0 && cut_before) || (end == bytes.len() && cut_after) {
                 continue;
             }
             // Word bytes are ASCII, so the span is a `str`.
@@ -882,12 +896,17 @@ pub fn lsp_completion_provider(lsp: crate::lsp::SharedLspManager) -> ProviderFn 
 // Word tokeniser (used by dabbrev)
 // ---------------------------------------------------------------------------
 
-/// The `[start, end)` of every run of word bytes (ASCII letters,
-/// digits, `_`) in `bytes`. A byte of a multi-byte character is never a
+/// A word byte: an ASCII letter, digit or `_`.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The `[start, end)` of every run of word bytes ([`is_word_byte`]) in
+/// `bytes`. A byte of a multi-byte character is never a
 /// word byte, so these are the words splitting the text at every other
 /// character gives.
 fn word_spans(bytes: &[u8]) -> impl Iterator<Item = (usize, usize)> + '_ {
-    let is_word = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+    let is_word = |b: &u8| is_word_byte(*b);
     let mut at = 0;
     std::iter::from_fn(move || {
         let start = at + bytes[at..].iter().position(is_word)?;
@@ -1104,7 +1123,8 @@ mod tests {
         assert_eq!(&text[394..396], "zq", "fixture");
         let labels: Vec<String> = f(&c).into_iter().map(|i| i.label).collect();
         assert_eq!(labels, ["zqnear", "zqcut"], "zqfar lies beyond the window");
-        assert_eq!(c.text.read_bytes(), 2 * window);
+        // The window, and the byte beyond each edge it drew (Low 4).
+        assert_eq!(c.text.read_bytes(), 2 * window + 2);
         // The window's end at 8 falls inside `zqlongword`: its first five
         // bytes start with the prefix, and it is still not offered.
         let mut c = ctx("zq", "zq zqlongword");
