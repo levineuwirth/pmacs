@@ -466,6 +466,26 @@ pub trait View {
     /// in rendering).
     fn render(&mut self, _buf: &Buffer, _viewport: Viewport<'_>, _cells: &mut CellGrid<'_>) {}
 
+    /// Whether this view is a popup, a surface of its own floating over
+    /// the text (the context menu, the completion popup, the hover and
+    /// signature popups), rather than a mark on the text. A window paints
+    /// its popups after the local selection, so the selection never
+    /// shows through one (#435), and its other overlays before it.
+    ///
+    /// Default: `false`.
+    fn is_popup(&self) -> bool {
+        false
+    }
+
+    /// The cells a popup painted at its last [`View::render`], in the
+    /// frame's coordinates, or `None` when it painted none: the grid
+    /// hides the terminal cursor where a popup covers point (#435).
+    ///
+    /// Default: `None`.
+    fn popup_cells(&self) -> Option<crate::window::Rect> {
+        None
+    }
+
     /// Translate a buffer byte position to a display coordinate, if the
     /// view holds a meaningful mapping for that position.
     ///

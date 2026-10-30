@@ -383,13 +383,19 @@ pub struct MenuView {
     /// The theme its `ui.menu` faces resolve through (E10g.2); `None`
     /// in a bare core, which paints today's constants.
     theme: Option<crate::highlight::ThemeHandle>,
+    /// The cells its last render painted ([`View::popup_cells`]).
+    painted: Option<crate::window::Rect>,
 }
 
 impl MenuView {
     /// Build a view reading `menu`.
     #[must_use]
     pub fn new(menu: SharedMenu, theme: Option<crate::highlight::ThemeHandle>) -> Self {
-        Self { menu, theme }
+        Self {
+            menu,
+            theme,
+            painted: None,
+        }
     }
 }
 
@@ -398,7 +404,16 @@ impl View for MenuView {
         "context-menu"
     }
 
+    fn is_popup(&self) -> bool {
+        true
+    }
+
+    fn popup_cells(&self) -> Option<crate::window::Rect> {
+        self.painted
+    }
+
     fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        self.painted = None;
         let guard = self.menu.lock().expect("menu mutex poisoned");
         let Some(menu) = guard.as_ref() else {
             return;
@@ -408,6 +423,18 @@ impl View for MenuView {
         let bottom = top + viewport.cell_size.rows;
         let right = left + viewport.cell_size.cols;
         let (arow, acol) = menu.anchor;
+        // The rectangle the rows below paint, clipped to the window as
+        // they are.
+        let rows = arow.max(top)..(arow + menu.rows.len() as u32).min(bottom);
+        let cols = acol.max(left)..(acol + menu.width).min(right);
+        if !rows.is_empty() && !cols.is_empty() {
+            self.painted = Some(crate::window::Rect::new(
+                rows.start,
+                cols.start,
+                rows.end - rows.start,
+                cols.end - cols.start,
+            ));
+        }
         let (normal_style, selected_style, separator_fg) = {
             let theme = self
                 .theme

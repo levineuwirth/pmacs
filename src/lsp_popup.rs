@@ -518,7 +518,7 @@ pub fn paint_grid_popup(
 /// [`paint_grid_popup`], recording on `shared` where it painted while the
 /// popup there is still the one painted, so the grid's pointer inside it
 /// is the popup's ([`crate::editor_core::EditorCore::lsp_popup_grid_hit`],
-/// E8 fix round 1), as `pmacs-gpu`'s is.
+/// E8 fix round 1), as `pmacs-gpu`'s is. Returns the cells it painted.
 pub fn paint_grid_popup_into(
     shared: &SharedLspPopup,
     buf: &crate::buffer::Buffer,
@@ -526,7 +526,7 @@ pub fn paint_grid_popup_into(
     cells: &mut crate::cell::CellGrid<'_>,
     popup: &LspPopup,
     theme: Option<&crate::highlight::ThemeHandle>,
-) {
+) -> Option<crate::window::Rect> {
     let painted = paint_grid_popup(buf, viewport, cells, popup, theme);
     if let Some(open) = shared.lock().expect("lsp popup poisoned").as_mut()
         && open.window_id == popup.window_id
@@ -536,6 +536,7 @@ pub fn paint_grid_popup_into(
     {
         open.grid_cells = painted;
     }
+    painted
 }
 
 #[cfg(test)]

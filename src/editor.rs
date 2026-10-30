@@ -6084,7 +6084,11 @@ fn paint_window_content(
     // gutter numbers — before the overlays, so a diagnostic overlay
     // can draw its severity sign into the gutter's leading column
     // without the gutter's own blank pass erasing it — then each
-    // overlay in attach order. See [`crate::view::View`].
+    // overlay in attach order, the local selection, and the popups in
+    // attach order last (#435: a popup is a surface apart from the
+    // code, so the selection's wash never shows through one, while the
+    // text's own marks stay under the selection). See
+    // [`crate::view::View`].
     // Record the width text actually wrapped at, taken from the
     // viewport itself rather than recomputed: a second derivation could
     // disagree with the one the renderer used, and the disagreement
@@ -6097,10 +6101,13 @@ fn paint_window_content(
     if gutter_w > 0 {
         paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, folds, theme);
     }
-    for overlay in &mut window.overlays {
+    for overlay in window.overlays.iter_mut().filter(|o| !o.is_popup()) {
         overlay.render(buf, viewport, grid);
     }
     paint_local_selection(grid, buf, window, viewport, inner_rows, folds, theme);
+    for overlay in window.overlays.iter_mut().filter(|o| o.is_popup()) {
+        overlay.render(buf, viewport, grid);
+    }
     // Mode line for this window. Painted last so the line
     // itself is always visible regardless of overlay activity.
     let coord = window
@@ -6474,7 +6481,16 @@ pub fn paint_frame(
     let aw = &core.windows[&active];
     let buf = reg.get(aw.buffer_id).ok()?;
     let folds = crate::fold_view::map_for_window(&state.fold_registry, aw);
-    window_cursor_cell(aw, buf, folds.as_ref(), active_rect)
+    let cell = window_cursor_cell(aw, buf, folds.as_ref(), active_rect)?;
+    // #435: a popup over point hides the terminal cursor, which the
+    // terminal would otherwise draw over the popup's cell as a block in
+    // its own cursor color.
+    let covered = aw
+        .overlays
+        .iter()
+        .filter_map(|o| o.popup_cells())
+        .any(|cells| cells.contains(cell));
+    (!covered).then_some(cell)
 }
 
 /// Where one window's caret lands in the cell grid, or `None` when it is

@@ -815,6 +815,8 @@ pub struct CompletionView {
     /// The theme its `ui.menu` faces resolve through (E10g.2); `None`
     /// in a bare core, which paints today's constants.
     theme: Option<crate::highlight::ThemeHandle>,
+    /// The cells its last render painted ([`View::popup_cells`]).
+    painted: Option<crate::window::Rect>,
 }
 
 impl CompletionView {
@@ -830,6 +832,7 @@ impl CompletionView {
             popup,
             window_id,
             theme,
+            painted: None,
         }
     }
 }
@@ -1117,7 +1120,16 @@ impl View for CompletionView {
         "completion-popup"
     }
 
+    fn is_popup(&self) -> bool {
+        true
+    }
+
+    fn popup_cells(&self) -> Option<crate::window::Rect> {
+        self.painted
+    }
+
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        self.painted = None;
         // Snapshot under the lock, then drop it before touching the rope.
         let (anchor, rows_data, selected_in_window): (Position, Vec<PopupCandidate>, usize) = {
             let guard = self.popup.lock().expect("completion popup poisoned");
@@ -1166,6 +1178,12 @@ impl View for CompletionView {
                 styles,
             );
         }
+        self.painted = Some(crate::window::Rect::new(
+            origin.row + rect.top,
+            origin.col + rect.left,
+            rect.shown,
+            rect.width,
+        ));
     }
 }
 

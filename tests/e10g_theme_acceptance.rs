@@ -741,6 +741,291 @@ fn e10g2_the_hover_popup_keeps_its_fill_under_a_face_without_a_background() {
 }
 
 // ---------------------------------------------------------------------------
+// #435 — a popup over the selection (E10g fix round 3)
+// ---------------------------------------------------------------------------
+
+/// The frame #435's rows paint: twelve lines in sixteen rows, the window's
+/// text area the first fourteen.
+fn over_size() -> CellSize {
+    CellSize::new(16, 60)
+}
+
+/// Twelve lines of 38 columns, 39 bytes with the newline, `quick` at
+/// columns 12 to 16 of each.
+fn twelve_lines(s: &EditorState) {
+    let text = (0..12)
+        .map(|i| format!("line {i:02} the quick brown fox jumps over"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    exec(
+        s,
+        &format!("pmacs.window.buffer():insert(0, {:?})", text + "\n"),
+    );
+}
+
+/// The byte at `col` of `line` in [`twelve_lines`].
+fn at(line: u64, col: u64) -> u64 {
+    39 * line + col
+}
+
+/// The pointer's `kind` at a cell of [`over_size`]'s frame.
+fn pointer(s: &mut EditorState, kind: crossterm::event::MouseEventKind, row: usize, col: usize) {
+    let event = crossterm::event::MouseEvent {
+        kind,
+        row: u16::try_from(row).expect("a row"),
+        column: u16::try_from(col).expect("a column"),
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    s.dispatch_mouse(FrontendId::LOCAL, event, over_size());
+}
+
+/// The frame with the region `anchor..point` and the popup `open` opens
+/// over it, against the same popup with no region. A popup's cell is one
+/// of the text area's that it paints otherwise than the frame with
+/// neither: returns how many of those there are, how many the region
+/// lies under, and a line for each one the region changes.
+fn popup_over_region(
+    s: &mut EditorState,
+    (anchor, point): (u64, u64),
+    open: impl FnOnce(&mut EditorState),
+) -> (usize, usize, Vec<String>) {
+    let size = over_size();
+    let frame = |s: &EditorState| frame_at(s, size, ColorDepth::TrueColor);
+    s.core.borrow_mut().set_cursor_byte(point);
+    let neither = frame(s);
+    s.core.borrow_mut().begin_selection(anchor);
+    let region = frame(s);
+    open(s);
+    let both = frame(s);
+    s.core.borrow_mut().clear_selection();
+    let popup = frame(s);
+    let (mut cells, mut under, mut wrong) = (0, 0, Vec::new());
+    for row in 0..size.rows as usize - 2 {
+        for col in 0..size.cols as usize {
+            if popup[row][col] == neither[row][col] {
+                continue;
+            }
+            cells += 1;
+            if region[row][col] != neither[row][col] {
+                under += 1;
+            }
+            if both[row][col] != popup[row][col] {
+                wrong.push(format!(
+                    "({row},{col}): {:?}, not {:?}",
+                    both[row][col].style, popup[row][col].style
+                ));
+            }
+        }
+    }
+    (cells, under, wrong)
+}
+
+/// #435, the owner's case: a right click on a selected word opens the
+/// context menu at the click, its first row over the word's last letters
+/// and point, and the pointer then rests on its second row, which it
+/// selects. Every cell of the menu paints as with no region: the first
+/// row in a row's 252 on 236, not reversed, which made the menu look as
+/// if two of its rows were selected.
+#[test]
+fn e10g2_the_context_menu_paints_over_the_selection() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut s = fresh();
+    twelve_lines(&s);
+    let quick = find_text(
+        &frame_at(&s, over_size(), ColorDepth::TrueColor),
+        2,
+        "quick",
+    );
+    let (cells, under, wrong) = popup_over_region(&mut s, (at(2, 12), at(2, 17)), |s| {
+        pointer(s, MouseEventKind::Down(MouseButton::Right), 2, quick + 1);
+        pointer(s, MouseEventKind::Moved, 3, quick + 2);
+    });
+    assert!(s.core.borrow().menu_is_open(), "the click opened the menu");
+    assert_eq!(under, 4, "the region under the menu's first row, `uick`");
+    assert!(
+        wrong.is_empty(),
+        "the context menu, {cells} cells: {wrong:#?}"
+    );
+    s.core.borrow_mut().begin_selection(at(2, 12));
+    let frame = frame_at(&s, over_size(), ColorDepth::TrueColor);
+    let idx = Color::Indexed;
+    assert_eq!(frame[2][quick + 1].style, style(idx(252), idx(236)));
+    assert_eq!(frame[3][quick + 1].style, style(idx(231), idx(24)));
+}
+
+/// #435 for the completion popup, opened at point on line 0 with the
+/// region from there to the end of the text under its rows.
+#[test]
+fn e10g2_the_completion_popup_paints_over_the_selection() {
+    use pmacs::completion::{
+        CompletionEditsCarry, CompletionItemKind, CompletionPopupState, PopupCandidate,
+    };
+    let mut s = fresh();
+    twelve_lines(&s);
+    let (cells, under, wrong) = popup_over_region(&mut s, (at(12, 0), at(0, 12)), |s| {
+        let candidate = |label: &str| PopupCandidate {
+            carry: CompletionEditsCarry::default(),
+            label: label.to_owned(),
+            kind: CompletionItemKind::Text,
+            detail: None,
+            insert_text: label.to_owned(),
+        };
+        let popup = {
+            let core = s.core.borrow();
+            CompletionPopupState::new(
+                core.active_buffer_id(),
+                at(0, 12),
+                String::new(),
+                vec![candidate("alpha"), candidate("beta"), candidate("gamma")],
+                3,
+            )
+            .expect("a non-empty popup")
+        };
+        s.core.borrow_mut().completion_popup_open(popup);
+    });
+    assert!(under > 0, "the region under the popup, {cells} cells");
+    assert!(wrong.is_empty(), "the completion popup: {wrong:#?}");
+}
+
+/// #435 for the hover popup, opened at point on line 0 with the region
+/// from there to the end of the text under it.
+#[test]
+fn e10g2_the_hover_popup_paints_over_the_selection() {
+    let mut s = fresh();
+    twelve_lines(&s);
+    let (cells, under, wrong) = popup_over_region(&mut s, (at(12, 0), at(0, 12)), |s| {
+        let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+        let hover = pmacs::hover::Hover {
+            contents: (1..=40)
+                .map(|i| format!("Hover line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            range: None,
+        };
+        let _ = s
+            .core
+            .borrow_mut()
+            .lsp_popup_open_hover(target, Some(&hover));
+    });
+    assert!(under > 0, "the region under the popup, {cells} cells");
+    assert!(wrong.is_empty(), "the hover popup: {wrong:#?}");
+}
+
+/// #435 for signature help, opened at point on line 0 with the region
+/// from there to the end of the text under it.
+#[test]
+fn e10g2_the_signature_popup_paints_over_the_selection() {
+    let mut s = fresh();
+    twelve_lines(&s);
+    let (cells, under, wrong) = popup_over_region(&mut s, (at(12, 0), at(0, 12)), |s| {
+        let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+        let parameter = |label: &str, span| pmacs::signature::SignatureParameter {
+            label: label.into(),
+            span: Some(span),
+            documentation: None,
+        };
+        let help = pmacs::signature::SignatureHelp {
+            signatures: vec![pmacs::signature::Signature {
+                label: "echo(name, count)".into(),
+                documentation: None,
+                parameters: vec![parameter("name", (5, 9)), parameter("count", (11, 16))],
+                active_parameter: Some(0),
+            }],
+            active_signature: 0,
+            active_parameter: Some(0),
+        };
+        let _ = s
+            .core
+            .borrow_mut()
+            .lsp_popup_open_signature(target, Some(&help), false);
+    });
+    assert!(under > 0, "the region under the popup, {cells} cells");
+    assert!(wrong.is_empty(), "the signature popup: {wrong:#?}");
+}
+
+/// Where a frame of `size` puts the terminal cursor, `None` when it hides
+/// it.
+fn cursor_of(s: &EditorState, size: CellSize) -> Option<(usize, usize)> {
+    RenderState::new(size)
+        .render_frame(s, FrontendId::LOCAL, &HashMap::new(), &[])
+        .into_iter()
+        .find_map(|message| match message {
+            InstanceMessage::Cursor(cursor) => Some(cursor),
+            _ => None,
+        })
+        .expect("a cursor message")
+        .filter(|cursor| cursor.visible)
+        .map(|cursor| (cursor.coord.row as usize, cursor.coord.col as usize))
+}
+
+/// #435's cursor: where the context menu covers point the terminal cursor
+/// is hidden, not left showing through the menu as a block in the
+/// terminal's own cursor color; with the menu closed, or open where it
+/// does not cover point, the cursor is at point.
+#[test]
+fn e10g2_a_popup_over_point_hides_the_terminal_cursor() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut s = fresh();
+    twelve_lines(&s);
+    s.core.borrow_mut().set_cursor_byte(at(2, 17));
+    s.core.borrow_mut().begin_selection(at(2, 12));
+    let quick = find_text(
+        &frame_at(&s, over_size(), ColorDepth::TrueColor),
+        2,
+        "quick",
+    );
+    let point = Some((2, quick + 5));
+    assert_eq!(cursor_of(&s, over_size()), point, "no menu: at point");
+
+    pointer(
+        &mut s,
+        MouseEventKind::Down(MouseButton::Right),
+        2,
+        quick + 1,
+    );
+    assert!(s.core.borrow().menu_is_open(), "the click opened the menu");
+    assert_eq!(cursor_of(&s, over_size()), None, "the menu over point");
+
+    s.core.borrow_mut().menu_close();
+    assert_eq!(cursor_of(&s, over_size()), point, "the menu closed");
+
+    pointer(
+        &mut s,
+        MouseEventKind::Down(MouseButton::Right),
+        6,
+        quick + 1,
+    );
+    assert!(s.core.borrow().menu_is_open(), "the click opened the menu");
+    assert_eq!(cursor_of(&s, over_size()), point, "a menu below point");
+}
+
+/// #435's other half: the text's own marks stay under the selection, as
+/// they always were. A style overlay's span over `the quick` keeps its
+/// wash where no region lies, and where the region lies over it, under a
+/// `ui.selection` face, the cells take the selection's wash.
+#[test]
+fn e10g2_a_style_overlay_stays_under_the_selection() {
+    let s = fresh();
+    twelve_lines(&s);
+    exec(
+        &s,
+        r#"_G.spans = pmacs.buffer.add_style_overlay(pmacs.window.buffer())
+           _G.spans:add(8, 17, { bg = {40, 50, 60} })
+           pmacs.theme.merge { ["ui.selection"] = { bg = {70, 80, 90} } }"#,
+    );
+    s.core.borrow_mut().set_cursor_byte(at(0, 17));
+    let frame = frame_at(&s, over_size(), ColorDepth::TrueColor);
+    let (the, quick) = (find_text(&frame, 0, "the"), find_text(&frame, 0, "quick"));
+    let (span, selection) = (Color::Rgb(40, 50, 60), Color::Rgb(70, 80, 90));
+    assert_eq!(frame[0][quick].style.bg, span, "the span, no region");
+
+    s.core.borrow_mut().begin_selection(at(0, 12));
+    let frame = frame_at(&s, over_size(), ColorDepth::TrueColor);
+    assert_eq!(frame[0][the].style.bg, span, "the span outside the region");
+    assert_eq!(frame[0][quick].style.bg, selection, "the region over it");
+}
+
+// ---------------------------------------------------------------------------
 // E10g.3 — the setting and the user's layer
 // ---------------------------------------------------------------------------
 

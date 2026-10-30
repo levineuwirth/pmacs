@@ -419,6 +419,8 @@ pub struct SignatureView {
     /// The theme its `ui.popup` faces resolve through; `None` in a bare
     /// core, which paints the grid's own defaults.
     theme: Option<ThemeHandle>,
+    /// The cells its last render painted ([`View::popup_cells`]).
+    painted: Option<crate::window::Rect>,
 }
 
 impl SignatureView {
@@ -429,6 +431,7 @@ impl SignatureView {
             popup,
             window_id,
             theme,
+            painted: None,
         }
     }
 
@@ -452,8 +455,16 @@ impl View for SignatureView {
         SIGNATURE_POPUP_KIND
     }
 
+    fn is_popup(&self) -> bool {
+        true
+    }
+
+    fn popup_cells(&self) -> Option<crate::window::Rect> {
+        self.painted
+    }
+
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        if let Some(popup) = self.shown(buf) {
+        self.painted = self.shown(buf).and_then(|popup| {
             crate::lsp_popup::paint_grid_popup_into(
                 &self.popup,
                 buf,
@@ -461,8 +472,8 @@ impl View for SignatureView {
                 cells,
                 &popup,
                 self.theme.as_ref(),
-            );
-        }
+            )
+        });
     }
 }
 
