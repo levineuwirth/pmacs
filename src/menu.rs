@@ -364,8 +364,10 @@ fn menu_style() -> Style {
     }
 }
 
-/// Highlighted-row style (the active item).
-fn menu_selected_style() -> Style {
+/// Highlighted-row style (the active item); a set `ui.menu.selected`
+/// goes over it on the completion popup and the band too
+/// ([`crate::completion::BandStyles`]).
+pub(crate) fn menu_selected_style() -> Style {
     Style {
         fg: Color::Indexed(231),
         bg: Color::Indexed(24),

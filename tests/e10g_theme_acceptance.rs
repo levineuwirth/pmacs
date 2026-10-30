@@ -552,25 +552,20 @@ fn band_rows(s: &EditorState, top: usize, below: &str) -> [(&'static str, Style)
 
 /// What the completion popup and the band paint each way: the dim
 /// fill, reverse video and the dim kind glyph unset; with a foreground
-/// alone that foreground over the same fills, the selected row's text
-/// written where reverse video takes it from, over the reversed fill;
+/// alone that foreground over the same fills, the selected row's over
+/// the context menu's selected fill, 24, so the three menus agree with
+/// each other and with the GPU's `MENU_SELECTED_BG` (E10g fix round 3);
 /// with both, the faces.
 fn band_wants() -> [[Style; 3]; 3] {
     let (idx, rgb) = (Color::Indexed, Color::Rgb);
-    let reverse = |fg, bg| Style {
-        fg,
-        bg,
+    let reverse = Style {
         reverse: true,
         ..Style::default()
     };
     [
+        [reverse, style(idx(252), idx(236)), style(idx(8), idx(236))],
         [
-            reverse(Color::Default, Color::Default),
-            style(idx(252), idx(236)),
-            style(idx(8), idx(236)),
-        ],
-        [
-            reverse(Color::Default, rgb(7, 8, 9)),
+            style(rgb(7, 8, 9), idx(24)),
             style(rgb(1, 2, 3), idx(236)),
             style(rgb(1, 2, 3), idx(236)),
         ],

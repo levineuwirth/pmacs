@@ -728,20 +728,9 @@ pub(crate) fn fg_bg(face: Style) -> Style {
 /// surface apart from the code, never its text over it): each color the
 /// face sets, and the constant's where the face's is `Default`, so a
 /// face without a background keeps the constant's fill, as the GPU's
-/// `face_fill_or` does. Everything else is the face's. A reverse-video
-/// constant (the selected row's) is read as painted, the text in its
-/// `bg` and the fill in its `fg`, so a face setting one color puts it
-/// there and keeps the reversed fill; a face setting both is its own.
+/// `face_fill_or` does. Everything else is the face's.
 pub(crate) fn face_over(face: Style, constant: Style) -> Style {
-    let set = |c: Color| c != Color::Default;
-    let or = |c: Color, k: Color| if set(c) { c } else { k };
-    if constant.reverse && !face.reverse && !(set(face.fg) && set(face.bg)) {
-        return Style {
-            fg: or(face.bg, constant.fg),
-            bg: or(face.fg, constant.bg),
-            ..constant
-        };
-    }
+    let or = |c: Color, k: Color| if c == Color::Default { k } else { c };
     Style {
         fg: or(face.fg, constant.fg),
         bg: or(face.bg, constant.bg),
@@ -751,10 +740,13 @@ pub(crate) fn face_over(face: Style, constant: Style) -> Style {
 
 /// E10g.2: the styles a popup row is painted in --- the completion
 /// popup's and the minibuffer band's: `ui.menu` for a row and
-/// `ui.menu.selected` for the selected one, each {fg, bg} over today's
-/// constant ([`face_over`]), where the theme sets them, else the
-/// constants. The kind glyph column takes the row's style when
-/// `ui.menu` is set and the dim constant when not.
+/// `ui.menu.selected` for the selected one, each {fg, bg} over a
+/// constant ([`face_over`]) where the theme sets them, else today's
+/// constants. A set `ui.menu.selected` goes over the context menu's
+/// selected row, not this row's reverse video, so the three menus fill
+/// a selected row alike under a face without a background, as the
+/// GPU's do (E10g fix round 3). The kind glyph column takes the row's
+/// style when `ui.menu` is set and the dim constant when not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BandStyles {
     /// A row.
@@ -776,7 +768,8 @@ impl BandStyles {
         let row = face("ui.menu", popup_style());
         Self {
             row: row.unwrap_or_else(popup_style),
-            selected: face("ui.menu.selected", selected_style()).unwrap_or_else(selected_style),
+            selected: face("ui.menu.selected", crate::menu::menu_selected_style())
+                .unwrap_or_else(selected_style),
             kind: row.unwrap_or_else(kind_style),
         }
     }
