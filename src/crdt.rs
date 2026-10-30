@@ -512,8 +512,9 @@ impl CrdtState {
     /// index at the end, `None` past it). loro walks its tree, which
     /// counts bytes per node, to the element holding `pos` and then scans
     /// that element from its start: bounded by [`PIECE_BYTES`] for text
-    /// this type wrote, and by the whole text for a file loro was handed
-    /// in one insert, which is why [`Self::from_bytes`] writes in pieces.
+    /// this type wrote in one insert or one undo, and by the whole text
+    /// for a file loro was handed in one insert, which is why
+    /// [`Self::from_bytes`] writes in pieces.
     /// A byte inside a character answers that character's index.
     fn unicode_at_byte(&self, pos: usize) -> Option<usize> {
         self.doc.get_text("body").convert_pos(
@@ -649,7 +650,53 @@ impl CrdtState {
     /// same source's next-older span needs it to be. A span whose
     /// text is already gone produces no op; the caller reads
     /// [`Self::spans_since`] to learn whether anything happened.
+    ///
+    /// The text an undo restores is the text the span deleted, and loro's
+    /// own undo writes it back as one insert, one element of any size,
+    /// which every byte lookup near its end then scans whole (E10k review
+    /// 1's High 1: `C-x h`, `C-w`, `C-x u` on an 18 MiB file, and a redone
+    /// paste). So a span whose ops each depend on the one before it, as a
+    /// local edit's do, is undone by [`Self::undo_span_in_pieces`],
+    /// which writes the same compensation in pieces; any other by loro's
+    /// own primitive.
     pub fn undo_span_against(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
+        // What loro's undo does first: a span's ops still in the open
+        // transaction are not yet in the log its changes are read from.
+        self.doc.commit();
+        match self.deps_of_linear_span(span) {
+            Some(deps) => self.undo_span_in_pieces(span, &deps, base),
+            None => self.undo_span_by_loro(span, base),
+        }
+    }
+
+    /// The version `span`'s first op depends on, when each later op in it
+    /// depends on the op before it alone: then loro's undo takes the span
+    /// as one diff, from its last op back to that version (`loro-internal`
+    /// 1.12.0, `oplog.rs`'s `split_span_based_on_deps`, one part). `None`
+    /// when an op inside it depends on another peer's, or a change is not
+    /// in the log.
+    fn deps_of_linear_span(&self, span: IdSpan) -> Option<loro::Frontiers> {
+        let (start, end) = (span.counter.min(), span.counter.norm_end());
+        let first = self.doc.get_change(loro::ID::new(span.peer, start))?;
+        let deps = if first.id.counter == start {
+            first.deps
+        } else {
+            loro::ID::new(span.peer, start - 1).into()
+        };
+        let mut at = first.id.counter + i32::try_from(first.len).ok()?;
+        while at < end {
+            let next = self.doc.get_change(loro::ID::new(span.peer, at))?;
+            if next.deps != loro::ID::new(span.peer, at - 1).into() {
+                return None;
+            }
+            at = next.id.counter + i32::try_from(next.len).ok()?;
+        }
+        Some(deps)
+    }
+
+    /// [`Self::undo_span_against`] by loro's own primitive, which
+    /// computes the compensation and applies it here.
+    fn undo_span_by_loro(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
         let mut remap = loro_internal::FxHashMap::default();
         let against = base.0.clone();
         let commit =
@@ -659,6 +706,112 @@ impl CrdtState {
                     base.0.transform(inverse, false);
                 })?;
         drop(commit);
+        Ok(())
+    }
+
+    /// [`Self::undo_span_against`] for a span loro's undo takes as one
+    /// diff, with the compensation written in pieces. What loro's
+    /// primitive does for such a span (`undo.rs`'s `undo`, its steps for
+    /// one part): the inverse is the diff from the span's last op back to
+    /// `deps`; `base` is transformed by it; the compensation is the
+    /// inverse transformed against `base` as it came in. Here that
+    /// compensation is applied as [`insert_in_pieces`] writes, where loro
+    /// applies it as one insert. Computed on this document and not on a
+    /// fork: loro's own undo of a whole 18 MiB cut, run on a fork decoded
+    /// from its snapshot, restored the text with its pieces out of order
+    /// (fix round 1's scratch run), where on the document itself it was
+    /// right.
+    fn undo_span_in_pieces(
+        &self,
+        span: IdSpan,
+        deps: &loro::Frontiers,
+        base: &mut ChangeBase,
+    ) -> LoroResult<()> {
+        let last = loro::ID::new(span.peer, span.counter.norm_end() - 1);
+        if !self.doc.oplog_vv().includes_id(last) {
+            return Err(loro::LoroError::UndoInvalidIdSpan(last));
+        }
+        let against = base.0.clone();
+        let inverse = self.doc.inner().diff(&last.into(), deps)?;
+        base.0.transform(&inverse, false);
+        let mut compensation = inverse;
+        compensation.transform(&against, true);
+        self.apply_in_pieces(compensation)?;
+        self.doc
+            .commit_with(loro::CommitOptions::new().origin("undo"));
+        Ok(())
+    }
+
+    /// Apply a compensation as loro's `apply_diff` would, the body's
+    /// inserts written in pieces. The body carries no marks; a delta that
+    /// does, and any other container, goes through loro unchanged.
+    fn apply_in_pieces(&self, compensation: DiffBatch) -> LoroResult<()> {
+        let body = self.doc.get_text("body");
+        let body_id = body.id();
+        let DiffBatch {
+            mut cid_to_events,
+            order,
+        } = compensation;
+        let mut rest = DiffBatch::default();
+        for cid in order {
+            let Some(diff) = cid_to_events.remove(&cid) else {
+                continue;
+            };
+            let loro_internal::event::Diff::Text(delta) = &diff else {
+                rest.cid_to_events.insert(cid.clone(), diff);
+                rest.order.push(cid);
+                continue;
+            };
+            if cid != body_id {
+                rest.cid_to_events.insert(cid.clone(), diff);
+                rest.order.push(cid);
+                continue;
+            }
+            let delta = TextDelta::from_text_diff(delta.iter());
+            let marked = delta.iter().any(|d| {
+                matches!(
+                    d,
+                    TextDelta::Insert {
+                        attributes: Some(_),
+                        ..
+                    } | TextDelta::Retain {
+                        attributes: Some(_),
+                        ..
+                    }
+                )
+            });
+            if marked {
+                body.apply_delta(&delta)?;
+                continue;
+            }
+            // Each step at its position in the text before the delta, then
+            // applied back to front, as `insert_in_pieces` writes one
+            // insert: what is written later lies earlier, so no step's ids
+            // run on from the one beside it and no two pieces merge. The
+            // restored text comes as several adjacent inserts, which
+            // written front to back merged into one element again.
+            let mut at = 0;
+            let mut steps = Vec::with_capacity(delta.len());
+            for d in &delta {
+                match d {
+                    TextDelta::Retain { retain, .. } => at += retain,
+                    TextDelta::Insert { insert, .. } => steps.push((at, Ok(insert.as_str()))),
+                    TextDelta::Delete { delete } => {
+                        steps.push((at, Err(*delete)));
+                        at += delete;
+                    }
+                }
+            }
+            for (at, step) in steps.into_iter().rev() {
+                match step {
+                    Ok(insert) => insert_in_pieces(&body, at, insert)?,
+                    Err(len) => body.delete(at, len)?,
+                }
+            }
+        }
+        if !rest.order.is_empty() {
+            self.doc.inner().apply_diff(rest)?;
+        }
         Ok(())
     }
 }
@@ -671,7 +824,8 @@ impl CrdtState {
 /// which E10k's profile found the daemon scanning on every remote key.
 /// Written back to front in pieces of at most this many bytes, no two
 /// pieces merge (each piece's ids run on from the piece after it, not the
-/// one before it), and a lookup scans at most one piece.
+/// one before it), and a lookup scans at most one piece. An undo writes
+/// the text it restores the same way ([`CrdtState::undo_span_against`]).
 const PIECE_BYTES: usize = 16 * 1024;
 
 /// Insert `s` at character `at` of `text`, back to front in pieces of at
@@ -1442,10 +1596,28 @@ mod tests {
         spans[0]
     }
 
+    std::thread_local! {
+        /// Whether [`undo_against`] goes through loro's own undo
+        /// ([`by_loro`]).
+        static BY_LORO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
     /// Undo `span` against the changes `foreign` captured since it.
     fn undo_against(state: &CrdtState, span: IdSpan, foreign: &ChangeBase) {
         let mut base = foreign.clone();
-        state.undo_span_against(span, &mut base).expect("undo");
+        if BY_LORO.get() {
+            state.undo_span_by_loro(span, &mut base).expect("undo");
+        } else {
+            state.undo_span_against(span, &mut base).expect("undo");
+        }
+    }
+
+    /// Run `row` with every undo through loro's own primitive, the path a
+    /// span with another peer's op inside it takes.
+    fn by_loro(row: fn()) {
+        BY_LORO.set(true);
+        row();
+        BY_LORO.set(false);
     }
 
     #[test]
@@ -1613,6 +1785,23 @@ mod tests {
         b.import_updates(&comp_bytes).unwrap();
         assert_eq!(a.materialize_string(), "!");
         assert_eq!(b.materialize_string(), "!");
+    }
+
+    /// E10k review 1, High 1: since fix round 1 the five scenarios above
+    /// undo through [`CrdtState::undo_span_in_pieces`], the diff written
+    /// in pieces; here each runs through loro's own undo, the path a span
+    /// with another peer's op inside it still takes, and holds the same.
+    #[test]
+    fn e6c_rows_hold_through_loros_own_undo() {
+        for row in [
+            e6c_concurrent_with_sync_a_undoes_b_remains as fn(),
+            e6c_concurrent_without_sync_a_undoes_b_remains,
+            e6c_b_edits_inside_a_region_then_a_undoes,
+            e6c_redo_is_the_compensation_span_undone,
+            e6c_a_third_doc_undoes_an_imported_span,
+        ] {
+            by_loro(row);
+        }
     }
 
     /// E10k.3: at every byte of a text of 1- to 4-byte characters, the
@@ -1793,6 +1982,56 @@ mod tests {
             "after {after}: {} elements, the largest {} bytes; at least {at_least}, none over {PIECE_BYTES}",
             elements.len(),
             elements.iter().max().copied().unwrap_or(0)
+        );
+    }
+
+    /// E10k review 1, High 1: the text an undo restores goes back in
+    /// pieces, and a replica importing the undo holds the same pieces.
+    /// loro writes an undo's restored text as one insert, one element,
+    /// which every byte lookup near its end scans whole: after `C-x h`,
+    /// `C-w`, `C-x u`, and after a paste undone and redone. At `700e86f`
+    /// each came back as one element of the whole text.
+    #[test]
+    fn e10k_an_undone_cut_and_a_redone_paste_come_back_in_pieces() {
+        use loro::VersionVector;
+        let unit = "a\u{1F600}b\u{4E2D}\u{E9}\n";
+        let text = unit.repeat(3 * PIECE_BYTES / unit.len() + 7);
+        let none = ChangeBase::default();
+        let largest = |s: &CrdtState| elements(s).into_iter().max().unwrap_or(0);
+
+        let s = CrdtState::from_bytes(9, text.as_bytes()).expect("seed");
+        let cut = span_of(&s, |s| s.delete(0, s.len_utf8()).expect("cut"));
+        assert_eq!(s.len_utf8(), 0);
+        undo_against(&s, cut, &none);
+        assert_eq!(s.materialize_string(), text, "the undo restored the text");
+        assert!(
+            largest(&s) <= PIECE_BYTES,
+            "an undone cut: the largest element is {} bytes of {}",
+            largest(&s),
+            text.len()
+        );
+        let replica = CrdtState::new(2).expect("replica");
+        replica
+            .import_updates(&s.export_updates_since(&VersionVector::default()).unwrap())
+            .unwrap();
+        assert_eq!(replica.materialize_string(), text);
+        assert!(
+            largest(&replica) <= PIECE_BYTES,
+            "a replica of an undone cut: the largest element is {} bytes",
+            largest(&replica)
+        );
+
+        let s = CrdtState::from_bytes(9, b"head\n").expect("seed");
+        let paste = span_of(&s, |s| s.insert(5, &text).expect("paste"));
+        let undone = span_of(&s, |s| undo_against(s, paste, &none));
+        assert_eq!(s.materialize_string(), "head\n");
+        undo_against(&s, undone, &none);
+        assert_eq!(s.materialize_string(), format!("head\n{text}"), "redone");
+        assert!(
+            largest(&s) <= PIECE_BYTES,
+            "a redone paste: the largest element is {} bytes of {}",
+            largest(&s),
+            text.len()
         );
     }
 

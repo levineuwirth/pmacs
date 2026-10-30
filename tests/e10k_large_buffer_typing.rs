@@ -32,6 +32,14 @@
 //! does. A key is painted at the arrival of the read after which the
 //! snapshot shows its character in its cell.
 //!
+//! Two more rows (E10k review 1's P3, High 1) type through the attached
+//! TUI and the GPU into a file whose text the arbiter's undo wrote back:
+//! 179,000 lines (12.5 MB, under the 16 MiB frame the undo's op crosses
+//! at 18 MiB, #410), the whole buffer cut and the cut undone (`C-x h`,
+//! `C-w`, `C-x u`) before the caret is placed, held to their routes'
+//! thresholds there. Until fix round 1 the undo wrote the text back as
+//! one loro element, which every per-key lookup near its end scanned.
+//!
 //! The rows are wall-clock budgets (D12): `#[ignore]`, run by exact name
 //! by `scripts/perf-budgets`. Each prints its figures, per key and per
 //! burst for each kind and size, with the load average beside them, and
@@ -122,6 +130,15 @@ const SIZES: [Size; 2] = [
         lines: LARGE_LINES,
     },
 ];
+
+/// The undone-cut rows' buffer: 12,530,000 bytes, so the undo's op
+/// stays under the 16 MiB frame.
+#[cfg(feature = "crdt")]
+const UNDONE_CUT: Size = Size {
+    label: "12.5 MB after an undone cut",
+    key: "undone-cut",
+    lines: 179_000,
+};
 
 /// The sizes this run types into: `PMACS_E10K_SIZES` (`small`, `large`,
 /// or both, comma-separated), both by default.
@@ -237,11 +254,12 @@ fn bound(route: &str) -> Bound {
     }
 }
 
-/// Hold `route`'s figures at 18 MiB to its thresholds: each kind of key
-/// at the median and the 95th percentile, and each kind of burst at the
-/// median. A run that typed only the small buffer is not held.
-fn check_bound(route: &str, runs: &[(&Size, Figures)]) {
-    let Some((_, large)) = runs.iter().find(|(s, _)| s.lines == LARGE_LINES) else {
+/// Hold `route`'s figures at `held`'s size (18 MiB, or the undone cut)
+/// to its thresholds: each kind of key at the median and the 95th
+/// percentile, and each kind of burst at the median. A run that typed only
+/// the small buffer is not held.
+fn check_bound(route: &str, runs: &[(&Size, Figures)], held: &Size) {
+    let Some((_, large)) = runs.iter().find(|(s, _)| s.lines == held.lines) else {
         return;
     };
     let bound = bound(route);
@@ -251,8 +269,9 @@ fn check_bound(route: &str, runs: &[(&Size, Figures)]) {
         let burst = quantile(&Figures::of(&large.bursts, kind), 50);
         assert!(
             p50 <= bound.key_p50 && p95 <= bound.key_p95 && burst <= bound.burst_p50,
-            "{route} 18 MiB {kind}: a key took {p50:?} at the median and {p95:?} at the 95th \
+            "{route} {} {kind}: a key took {p50:?} at the median and {p95:?} at the 95th \
              percentile, a burst {burst:?} at the median; the thresholds are {:?}, {:?} and {:?}",
+            held.label,
             bound.key_p50,
             bound.key_p95,
             bound.burst_p50
@@ -471,6 +490,31 @@ impl Tui {
     }
 }
 
+/// `C-x h`, `C-w`, `C-x u`: the whole buffer cut and the cut undone, so
+/// the text the TUI then types into is the text the arbiter's undo wrote
+/// back. Each chord's prefix goes alone and the TUI shows it before its
+/// key, so an attached TUI never types the key (#415).
+fn cut_and_undo(tui: &mut Tui) {
+    tui.wait_for(STEP_LIMIT, "the document", &|t| {
+        t.screen_contains("INFO daemon")
+    });
+    tui.settle(GAP, STEP_LIMIT, "the document", &|_| true);
+    tui.write(b"\x18");
+    tui.settle(GAP, STEP_LIMIT, "C-x", &|t| t.screen_contains("C-x"));
+    tui.write(b"h");
+    tui.settle(GAP, STEP_LIMIT, "C-x h", &|t| !t.screen_contains("C-x-"));
+    tui.write(b"\x17");
+    tui.settle(GAP, STEP_LIMIT, "C-w", &|t| {
+        !t.screen_contains("INFO daemon")
+    });
+    tui.write(b"\x18");
+    tui.settle(GAP, STEP_LIMIT, "C-x", &|t| t.screen_contains("C-x"));
+    tui.write(b"u");
+    tui.settle(GAP, STEP_LIMIT, "C-x u", &|t| {
+        t.screen_contains("INFO daemon")
+    });
+}
+
 /// Walk the caret to the end of the buffer's last line (`M->`, `C-b`)
 /// and return where it stands on screen, the cell right of `zq`, with
 /// the column the modeline gives it there (the line's 69 bytes, plus
@@ -557,9 +601,17 @@ fn type_into_tui(
     }
 }
 
-fn run_tui(route: &str, size: &Size, spawn: impl FnOnce() -> (PmacsPty, OutputTap)) -> Figures {
+fn run_tui(
+    route: &str,
+    size: &Size,
+    undone_cut: bool,
+    spawn: impl FnOnce() -> (PmacsPty, OutputTap),
+) -> Figures {
     let load_before = loadavg();
     let mut tui = Tui::new(spawn());
+    if undone_cut {
+        cut_and_undo(&mut tui);
+    }
     let at = place_at_end(&mut tui);
     let mut figures = Figures::default();
     for burst in [LETTERS, PUNCTUATION] {
@@ -606,12 +658,40 @@ fn e10k_typing_at_the_end_of_a_large_buffer_in_process() {
         let file = write_fixture(dir.path(), size);
         let file_arg = file.to_str().expect("UTF-8 path").to_owned();
         let home = dir.path().to_path_buf();
-        let figures = run_tui("in process", size, || {
+        let figures = run_tui("in process", size, false, || {
             spawn_pmacs_in_pty_tapped(&[&file_arg], &[("HOME", &home)], ROWS, COLS)
         });
         runs.push((size, figures));
     }
-    check_bound("in process", &runs);
+    check_bound("in process", &runs, &SIZES[1]);
+}
+
+/// The attached TUI's figures at `size`: `pmacs --attach` in a PTY
+/// against a daemon holding the file, the cut undone first when asked.
+#[cfg(feature = "crdt")]
+fn attached_figures(size: &Size, undone_cut: bool) -> Figures {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let file = write_fixture(dir.path(), size);
+    let daemon = daemon_holding(&file);
+    let socket = daemon
+        .socket_path()
+        .to_str()
+        .expect("UTF-8 socket")
+        .to_owned();
+    let home = daemon
+        .socket_path()
+        .parent()
+        .expect("socket dir")
+        .to_path_buf();
+    eprintln!("e10k attached {}: daemon pid {}", size.label, daemon.pid());
+    run_tui("attached", size, undone_cut, || {
+        spawn_pmacs_in_pty_tapped(
+            &["--attach", "--socket", &socket],
+            &[("HOME", &home), ("XDG_CONFIG_HOME", &home)],
+            ROWS,
+            COLS,
+        )
+    })
 }
 
 /// E10k.1, the attached TUI: `pmacs --attach` in a PTY against a daemon
@@ -621,37 +701,107 @@ fn e10k_typing_at_the_end_of_a_large_buffer_in_process() {
 fn e10k_typing_at_the_end_of_a_large_buffer_attached() {
     let _serial = one_at_a_time();
     #[cfg(feature = "crdt")]
-    let mut runs = Vec::new();
-    #[cfg(feature = "crdt")]
-    for size in sizes() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let file = write_fixture(dir.path(), size);
-        let daemon = daemon_holding(&file);
-        let socket = daemon
-            .socket_path()
-            .to_str()
-            .expect("UTF-8 socket")
-            .to_owned();
-        let home = daemon
-            .socket_path()
-            .parent()
-            .expect("socket dir")
-            .to_path_buf();
-        eprintln!("e10k attached {}: daemon pid {}", size.label, daemon.pid());
-        let figures = run_tui("attached", size, || {
-            spawn_pmacs_in_pty_tapped(
-                &["--attach", "--socket", &socket],
-                &[("HOME", &home), ("XDG_CONFIG_HOME", &home)],
-                ROWS,
-                COLS,
-            )
-        });
-        runs.push((size, figures));
+    {
+        let runs: Vec<_> = sizes()
+            .into_iter()
+            .map(|size| (size, attached_figures(size, false)))
+            .collect();
+        check_bound("attached", &runs, &SIZES[1]);
     }
-    #[cfg(feature = "crdt")]
-    check_bound("attached", &runs);
     #[cfg(not(feature = "crdt"))]
     eprintln!("skipping: the attached TUI's replica is a crdt build's");
+}
+
+/// E10k review 1's P3, attached: typing at the end of 12.5 MB whose text
+/// the arbiter's undo wrote back. At `700e86f` a key's 95th percentile
+/// was 63.3 ms and a burst 186 ms (release), the daemon and the mirror
+/// scanning the undone text's one element per lookup.
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn e10k_typing_after_an_undone_cut_attached() {
+    let _serial = one_at_a_time();
+    #[cfg(feature = "crdt")]
+    {
+        let figures = attached_figures(&UNDONE_CUT, true);
+        check_bound("attached", &[(&UNDONE_CUT, figures)], &UNDONE_CUT);
+    }
+    #[cfg(not(feature = "crdt"))]
+    eprintln!("skipping: the attached TUI's replica is a crdt build's");
+}
+
+/// The GPU's figures at `size`: `pmacs-gpu --headless-probe`'s
+/// `keypaint` action against a daemon holding the file, with
+/// `PMACS_GPU_PROBE_SETUP` set to `setup` (`undo-all`: the cut undone
+/// first). `None` when the probe reports no adapter.
+#[cfg(feature = "crdt")]
+fn gpu_figures(binary: &Path, size: &Size, setup: &str) -> Option<Figures> {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let file = write_fixture(dir.path(), size);
+    let daemon = daemon_holding(&file);
+    eprintln!("e10k gpu {}: daemon pid {}", size.label, daemon.pid());
+    let report = dir.path().join("keypaint.txt");
+    let load_before = loadavg();
+    let output = std::process::Command::new(binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_ACTION", "keypaint")
+        .env(
+            "PMACS_GPU_PROBE_TYPE_TEXT",
+            format!("{LETTERS}|{PUNCTUATION}"),
+        )
+        .env("PMACS_GPU_PROBE_SETUP", setup)
+        .env("PMACS_GPU_PROBE_SAMPLES", samples().to_string())
+        .env("PMACS_GPU_PROBE_GAP_MS", GAP.as_millis().to_string())
+        .env(
+            "PMACS_GPU_PROBE_SAMPLE_MS",
+            STEP_LIMIT.as_millis().to_string(),
+        )
+        .output()
+        .expect("run the keypaint probe");
+    let load_after = loadavg();
+    let facts = common::gpu_probe::probe_facts(&output, &report, size.label)?;
+    assert!(
+        !facts.contains_key("failure"),
+        "the probe failed: {:?}",
+        facts.get("failure")
+    );
+    let text_len: usize = common::gpu_probe::fact(&facts, "text_len")
+        .parse()
+        .expect("text_len");
+    assert_eq!(
+        text_len,
+        size.lines * LINE_BYTES,
+        "the GPU holds the whole file"
+    );
+    let mut figures = Figures::default();
+    let us = |v: &str| Duration::from_micros(v.parse().expect("microseconds"));
+    let keys: usize = common::gpu_probe::fact(&facts, "keys")
+        .parse()
+        .expect("keys");
+    let mut optimistic = 0;
+    for n in 0..keys {
+        let line = common::gpu_probe::fact(&facts, &format!("key.{n}"));
+        let parts: Vec<&str> = line.split('|').collect();
+        assert_eq!(parts.len(), 6, "key.{n}: {line}");
+        figures.keys.push((kind_of(parts[0]), us(parts[2])));
+        optimistic += usize::from(parts[5] == "true");
+    }
+    let bursts: usize = common::gpu_probe::fact(&facts, "bursts")
+        .parse()
+        .expect("bursts");
+    for n in 0..bursts {
+        let line = common::gpu_probe::fact(&facts, &format!("burst.{n}"));
+        let parts: Vec<&str> = line.split('|').collect();
+        assert_eq!(parts.len(), 3, "burst.{n}: {line}");
+        figures.bursts.push((kind_of(parts[0]), us(parts[1])));
+    }
+    eprintln!(
+        "e10k gpu {}: {optimistic} of {keys} keys optimistic",
+        size.label
+    );
+    figures.report("gpu", size, &load_before, &load_after);
+    Some(figures)
 }
 
 /// E10k.1, the GPU: `pmacs-gpu --headless-probe`'s `keypaint` action
@@ -667,76 +817,34 @@ fn e10k_typing_at_the_end_of_a_large_buffer_gpu() {
         };
         let mut runs = Vec::new();
         for size in sizes() {
-            let dir = tempfile::TempDir::new().expect("tempdir");
-            let file = write_fixture(dir.path(), size);
-            let daemon = daemon_holding(&file);
-            eprintln!("e10k gpu {}: daemon pid {}", size.label, daemon.pid());
-            let report = dir.path().join("keypaint.txt");
-            let load_before = loadavg();
-            let output = std::process::Command::new(&binary)
-                .arg("--headless-probe")
-                .arg(daemon.socket_path())
-                .arg(&report)
-                .env("PMACS_GPU_PROBE_ACTION", "keypaint")
-                .env(
-                    "PMACS_GPU_PROBE_TYPE_TEXT",
-                    format!("{LETTERS}|{PUNCTUATION}"),
-                )
-                .env("PMACS_GPU_PROBE_SAMPLES", samples().to_string())
-                .env("PMACS_GPU_PROBE_GAP_MS", GAP.as_millis().to_string())
-                .env(
-                    "PMACS_GPU_PROBE_SAMPLE_MS",
-                    STEP_LIMIT.as_millis().to_string(),
-                )
-                .output()
-                .expect("run the keypaint probe");
-            let load_after = loadavg();
-            let Some(facts) = common::gpu_probe::probe_facts(&output, &report, size.label) else {
+            let Some(figures) = gpu_figures(&binary, size, "") else {
                 return;
             };
-            assert!(
-                !facts.contains_key("failure"),
-                "the probe failed: {:?}",
-                facts.get("failure")
-            );
-            let text_len: usize = common::gpu_probe::fact(&facts, "text_len")
-                .parse()
-                .expect("text_len");
-            assert_eq!(
-                text_len,
-                size.lines * LINE_BYTES,
-                "the GPU holds the whole file"
-            );
-            let mut figures = Figures::default();
-            let us = |v: &str| Duration::from_micros(v.parse().expect("microseconds"));
-            let keys: usize = common::gpu_probe::fact(&facts, "keys")
-                .parse()
-                .expect("keys");
-            let mut optimistic = 0;
-            for n in 0..keys {
-                let line = common::gpu_probe::fact(&facts, &format!("key.{n}"));
-                let parts: Vec<&str> = line.split('|').collect();
-                assert_eq!(parts.len(), 6, "key.{n}: {line}");
-                figures.keys.push((kind_of(parts[0]), us(parts[2])));
-                optimistic += usize::from(parts[5] == "true");
-            }
-            let bursts: usize = common::gpu_probe::fact(&facts, "bursts")
-                .parse()
-                .expect("bursts");
-            for n in 0..bursts {
-                let line = common::gpu_probe::fact(&facts, &format!("burst.{n}"));
-                let parts: Vec<&str> = line.split('|').collect();
-                assert_eq!(parts.len(), 3, "burst.{n}: {line}");
-                figures.bursts.push((kind_of(parts[0]), us(parts[1])));
-            }
-            eprintln!(
-                "e10k gpu {}: {optimistic} of {keys} keys optimistic",
-                size.label
-            );
-            figures.report("gpu", size, &load_before, &load_after);
             runs.push((size, figures));
         }
-        check_bound("gpu", &runs);
+        check_bound("gpu", &runs, &SIZES[1]);
+    }
+    #[cfg(not(feature = "crdt"))]
+    eprintln!("skipping: the GPU's replica is a crdt build's");
+}
+
+/// E10k review 1's P3, the GPU: typing at the end of 12.5 MB whose text
+/// the arbiter's undo wrote back (the probe's `PMACS_GPU_PROBE_SETUP=undo-all`).
+/// At `700e86f` a key's 95th percentile was 20.8 ms and a burst 12.1 ms
+/// (release), against 4.9 and 3.5 fresh.
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn e10k_typing_after_an_undone_cut_gpu() {
+    let _serial = one_at_a_time();
+    #[cfg(feature = "crdt")]
+    {
+        let Some(binary) = common::gpu_probe::gpu_probe_binary() else {
+            return;
+        };
+        let Some(figures) = gpu_figures(&binary, &UNDONE_CUT, "undo-all") else {
+            return;
+        };
+        check_bound("gpu", &[(&UNDONE_CUT, figures)], &UNDONE_CUT);
     }
     #[cfg(not(feature = "crdt"))]
     eprintln!("skipping: the GPU's replica is a crdt build's");

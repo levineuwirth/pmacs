@@ -3659,6 +3659,9 @@ impl KeypaintSession {
 /// messages as they arrive until it does. The probe reads the typed
 /// bytes where they land and never copies the text, so the buffer's
 /// size costs the instrument nothing per key.
+/// `PMACS_GPU_PROBE_SETUP=undo-all` (E10k review 1's P3) cuts the whole
+/// buffer and undoes the cut (`C-x h`, `C-w`, `C-/`) before the caret is
+/// walked, so the replica types into text the arbiter's undo wrote back.
 ///
 /// The report: `key.<n>=<burst>|<char>|<total_us>|<apply_us>|<paint_us>|<optimistic>`
 /// per timed key, where `apply_us` is `apply_keyboard` alone and
@@ -3771,6 +3774,12 @@ fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     };
     if placed {
         if let Some(client) = session.app.attach_client.as_ref() {
+            if std::env::var("PMACS_GPU_PROBE_SETUP").is_ok_and(|v| v == "undo-all") {
+                let _ = client.send_key(ProtocolKey::Char('x'), Modifiers::CTRL);
+                let _ = client.send_key(ProtocolKey::Char('h'), Modifiers::NONE);
+                let _ = client.send_key(ProtocolKey::Char('w'), Modifiers::CTRL);
+                let _ = client.send_key(ProtocolKey::Char('/'), Modifiers::CTRL);
+            }
             let _ = client.send_key(ProtocolKey::Char('>'), Modifiers::ALT);
             let _ = client.send_key(ProtocolKey::Char('b'), Modifiers::CTRL);
         }
