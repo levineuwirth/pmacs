@@ -9522,6 +9522,135 @@ at one, first seen in CI; its previous head `cd542a5` was cancelled by the branc
 at `700e86f`, which counts against no row. #311 and #316 met only local samples here and do not move.
 Every other count above stands.
 
+### E10g fix round 1: PR #422 green at `97b90ab`, `main` green at `55a5fba`, the gates' samples listed
+
+Recorded 2026-10-29 at E10g's fix round 1. PR #422 (`e10g/theme-machinery`) moved from `c71dad7`
+to `97b90ab` by seven signed commits on review 1, pushed at 21:09Z; they change the theme's face
+resolution for the selected row and the thumbs, the GPU's opaque fills and the minimap's line colors,
+the minibuffer's handling of a replaced prompt (`on_replace`), and the theme's restore, and add rows
+(`tests/e10g_review1_probes.rs`, `e10g_theme_acceptance`, `theme_faces_acceptance`, unit rows in
+`src/highlight.rs` and `pmacs-gpu`). Every run was read from the jobs endpoint by conclusion, and
+every test leg of the code-bearing run through its own log, fetched with escape sequences allowed
+and stripped, each `running` line paired with its own result line. Every run id and job id below was
+searched for in this file before it was written, and none was here. Nothing was rerun.
+
+#### `main` at `55a5fba`, E10k's registry commit: green
+
+`CI` 40785317375 at `55a5fba`, attempt 1 of 1, `push`, created 2026-10-28T23:09:28Z and completed
+23:12:02Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-55a5fba): 15 = 6 + 9.
+
+Tally (main-ci-55a5fba-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 123156930624 | success |
+| Lint (luajit) | 123156930791 | success |
+| Commit attribution (D9) | 123156930957 | success |
+| Changed paths | 123156930959 | success |
+| Lint (lua54) | 123156931001 | success |
+| Docs consistency | 123157003465 | success |
+| Test (crdt) | 123157004984 | skipped |
+| Perf budgets (debug) | 123157005115 | skipped |
+| GPU Render (headless) | 123157005204 | skipped |
+| M1 Acceptance Gates | 123157005554 | skipped |
+| M4 Perf Gates | 123157006061 | skipped |
+| Test (matrix) |  |  '') }}) |
+| M10 Perf Gates (crdt) | 123157006131 | skipped |
+| M6 Perf Gates | 123157006419 | skipped |
+| M5 Perf Gates | 123157006537 | skipped |
+
+Tally (main-ci-55a5fba-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 123157003465: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+40785317337 at `55a5fba`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz` 123156929828 and `Grammar fuzz (asan-strict)` 123156929985.
+
+#### PR #422's `CI` 40955382305 at `97b90ab`: green
+
+`pull_request`, the merge `9b55f16` into `55a5fba` (E10k's registry commit), attempt 1 of 1,
+created 2026-10-29T21:09:45Z and completed 21:45:08Z: `success`.
+
+Tally (pr422-ci-97b90ab): 19 = 18 + 1.
+
+Tally (pr422-ci-97b90ab-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 123734019843 | success |
+| Format | 123734020307 | success |
+| Lint (lua54) | 123734020357 | success |
+| Lint (luajit) | 123734020405 | success |
+| Changed paths | 123734020449 | success |
+| M4 Perf Gates | 123734117904 | success |
+| GPU Render (headless) | 123734117958 | success |
+| Test (crdt) | 123734117995 | success |
+| Test (ubuntu-latest / lua54) | 123734117996 | success |
+| M6 Perf Gates | 123734118001 | success |
+| Test (macos-latest / lua54) | 123734118009 | success |
+| Test (ubuntu-latest / luajit) | 123734118049 | success |
+| Perf budgets (debug) | 123734118064 | success |
+| Test (macos-latest / luajit) | 123734118066 | success |
+| M1 Acceptance Gates | 123734118109 | success |
+| M5 Perf Gates | 123734118133 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 123734118191 | success |
+| M10 Perf Gates (crdt) | 123734118203 | success |
+| Docs consistency | 123734120644 | skipped |
+
+Tally (pr422-ci-97b90ab-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs pair each `running` line with a `test result: ok`: `Test (crdt)` 123734117995,
+  21:10:01Z to 21:45:08Z, 35m07s, 219 pairs, 5,324 passed, 67 ignored; `Test (ubuntu-latest /
+  luajit)` 123734118049 and `Test (ubuntu-latest / lua54)` 123734117996, 220 pairs each, 5,377
+  passed, 67 ignored; `Test (ubuntu-latest / luajit, no crdt)` 123734118191, 220, 4,799 passed, 53
+  ignored; `Test (macos-latest / luajit)` 123734118066 and `Test (macos-latest / lua54)`
+  123734118009, 221 each, 5,333 passed, 65 ignored: one pair more than at `c71dad7` on every leg,
+  the review's probe file. `WouldBlock` appears in no test leg's log. `e10g_theme_acceptance` passed
+  30 of 30 and `e10g_review1_probes` 11 of 11 on all six legs.
+- `GPU Render (headless)` 123734117958: `pmacs-gpu`'s tests on lavapipe with `PMACS_REQUIRE_GPU`,
+  `running 393 tests`, `393 passed`, the branch's eight new rows among them.
+- `Perf budgets (debug)` 123734118064: `every budget ran and held`.
+
+`Grammar fuzz` 40955382464 at `97b90ab`, attempt 1 of 1, `success`, created 21:09:45Z and completed
+22:09:03Z: both arms decided `run=true` (`src/syntax.rs changed`) and smoked every grammar for 15 s,
+`Grammar fuzz` 123734019679 and `Grammar fuzz (asan-strict)` 123734020048, each ending `exit 0, its
+parse worker's replay exit 0`. Neither found a crash; each replayed 22 grammars' inputs through the
+worker, every one answered or contained (965 inputs, 22 contained; 961, 15 contained). Both found
+bash's memory finding again, `exceeded memory cap at 4 GB` (minima 63,612 and 62,758 bytes):
+**#423's third occurrence**, commented there (issuecomment-6519201206). The asan-strict replay
+contained that input by the worker's memory watch, the ubsan replay by `time: killed at the
+deadline`. The slow findings are commented on #293 (issuecomment-6519201624), among them the
+issue's first `mispredicted` one, cmake's at exponent 0.44: `returned in 647521 ms, past its budget
+of 114786 ms`.
+
+#### E10g's gates since `c62fbc1`: listed, not tallied
+
+In the worktree `pmacs-e10g` on its target, the default plan, one at a time, each with `fmt`,
+`clippy`, `doc`, `build` and `diff-check` ok, no daemon surviving (identified by environ), every
+`running` line paired with a result line and `WouldBlock` in none.
+
+- `20261028T194930Z-1717444` at `c71dad7` (the E10g.6 ruling's gate, after the record above): five
+  of six, `05-sweep` 5,730 / 1 / 67 at 226 pairs; #311's fragments on
+  `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (a store holding `Could not
+  find module ‘Prelude’`, the trace reaching `LSP:ready·processi`, `E7E with-compiler
+  Some("ghc-9.6.7")`; 128.07 s at result line 3711), commented there (issuecomment-6479331540).
+- `20261029T092916Z-453472` at `c71dad7` (E10g review 1's): five of six, 5,730 / 1 / 67 at 226
+  pairs; #311's fragments, 126.90 s at result line 3711, commented (issuecomment-6493936208).
+- `20261029T205237Z-2397161` at `97b90ab` (fix round 1's): five of six, 5,753 / 1 / 67 at 227 pairs;
+  #311's fragments, 128.95 s at result line 3730, commented (issuecomment-6508381513).
+
+Fix round 1's hand runs of `pmacs-gpu`'s whole binary met #304's recorded sibling,
+`tests::overwide_status_runs_never_wrap_and_keep_the_suffix_pinned` (`assertion failed: min_y >=
+band_top && max_y <= height`), twice under another project's load, commented on #304
+(issuecomment-6508387388); it passed in the round's gate and in CI's `GPU Render (headless)`.
+
+So, at E10g's fix round 1: `main` is green at `55a5fba`, and PR #422 is green at its head
+`97b90ab`. #311 and #304's sibling met only local samples here and do not move; #429, filed in the
+round, is a defect found by reading and a measuring row, not a CI signature. Every other count above
+stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
