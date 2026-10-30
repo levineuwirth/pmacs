@@ -9556,7 +9556,7 @@ Tally (main-ci-55a5fba-jobs): 15 rows in the table below.
 | GPU Render (headless) | 123157005204 | skipped |
 | M1 Acceptance Gates | 123157005554 | skipped |
 | M4 Perf Gates | 123157006061 | skipped |
-| Test (matrix) |  |  '') }}) |
+| Test (matrix) | 123157006084 | skipped |
 | M10 Perf Gates (crdt) | 123157006131 | skipped |
 | M6 Perf Gates | 123157006419 | skipped |
 | M5 Perf Gates | 123157006537 | skipped |
@@ -9798,6 +9798,142 @@ copied to `~/build/e10k-f1/gate-logs/`.
 So, at E10k's fix round 1: `main` is green at `33b020d` and `32c835b`, and PR #426 is green at its
 head `71747f2`. #427 met no occurrence here. #311 met only a local sample and does not move. Every
 other count above stands.
+
+### E10g fix round 2: PR #422 green at `4aea995`, `main` green at `b182121`, the gate's samples listed, #430 to #434 filed
+
+Recorded 2026-10-30 at E10g's fix round 2. PR #422 (`e10g/theme-machinery`) moved from `97b90ab`
+to `4aea995` by one signed commit on the owner's ruling of 2026-10-30 on the popups, pushed at
+10:51Z; it changes how the grid computes a popup's or menu's row style (`src/completion.rs`,
+`src/lsp_popup.rs`, `src/menu.rs`) and adds four rows to `e10g_theme_acceptance`. Every run was read
+from the jobs endpoint by conclusion, and every test leg of the code-bearing run through its own
+log, fetched with escape sequences allowed and stripped, each `running` line paired with its own
+result line. Every run id and job id below was searched for in this file before it was written,
+and none was here. Nothing was rerun. One row above is corrected: E10g fix round 1's table for
+`main`'s run at `55a5fba` read `| Test (matrix) |  |  '') }}) |`, the job's templated name split at
+its `||` into cells; the row is `| Test (matrix) | 123157006084 | skipped |`, the id read from that
+run's jobs endpoint. Its tallies stand: the table holds 15 rows, 6 of them `success`.
+
+#### `main` at `b182121`, E10k fix round 1's registry commit: green
+
+`CI` 41036821292 at `b182121`, attempt 1 of 1, `push`, created 2026-10-30T09:54:25Z and completed
+09:56:34Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-b182121): 15 = 6 + 9.
+
+Tally (main-ci-b182121-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 123999582004 | success |
+| Lint (lua54) | 123999582230 | success |
+| Lint (luajit) | 123999582356 | success |
+| Format | 123999582378 | success |
+| Commit attribution (D9) | 123999582480 | success |
+| Docs consistency | 123999657455 | success |
+| M5 Perf Gates | 123999659000 | skipped |
+| GPU Render (headless) | 123999659323 | skipped |
+| Test (matrix) | 123999659427 | skipped |
+| Test (crdt) | 123999659618 | skipped |
+| M6 Perf Gates | 123999659697 | skipped |
+| Perf budgets (debug) | 123999659945 | skipped |
+| M1 Acceptance Gates | 123999660069 | skipped |
+| M10 Perf Gates (crdt) | 123999660528 | skipped |
+| M4 Perf Gates | 123999660677 | skipped |
+
+Tally (main-ci-b182121-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 123999657455: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+41036821230 at `b182121`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz` 123999582040 and `Grammar fuzz (asan-strict)` 123999581572.
+
+#### PR #422's `CI` 41043797636 at `4aea995`: green
+
+`pull_request`, the merge `6d7904d` into `b182121` (E10k fix round 1's registry commit), attempt 1
+of 1, created 2026-10-30T10:51:22Z and completed 11:26:39Z: `success`.
+
+Tally (pr422-ci-4aea995): 19 = 18 + 1.
+
+Tally (pr422-ci-4aea995-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 124022769022 | success |
+| Format | 124022769187 | success |
+| Lint (lua54) | 124022769222 | success |
+| Lint (luajit) | 124022769380 | success |
+| Commit attribution (D9) | 124022769381 | success |
+| M1 Acceptance Gates | 124022841918 | success |
+| GPU Render (headless) | 124022841924 | success |
+| M4 Perf Gates | 124022841969 | success |
+| M10 Perf Gates (crdt) | 124022841978 | success |
+| M6 Perf Gates | 124022841992 | success |
+| Test (macos-latest / lua54) | 124022842000 | success |
+| Test (macos-latest / luajit) | 124022842006 | success |
+| Test (crdt) | 124022842015 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 124022842022 | success |
+| M5 Perf Gates | 124022842042 | success |
+| Perf budgets (debug) | 124022842063 | success |
+| Test (ubuntu-latest / lua54) | 124022842077 | success |
+| Test (ubuntu-latest / luajit) | 124022842446 | success |
+| Docs consistency | 124022844066 | skipped |
+
+Tally (pr422-ci-4aea995-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs pair each `running` line with a `test result: ok`: `Test (crdt)` 124022842015,
+  10:51:36Z to 11:26:39Z, 35m03s, 219 pairs, 5,328 passed, 67 ignored; `Test (ubuntu-latest /
+  luajit)` 124022842446 and `Test (ubuntu-latest / lua54)` 124022842077, 220 pairs each, 5,381
+  passed, 67 ignored; `Test (ubuntu-latest / luajit, no crdt)` 124022842022, 220, 4,803 passed, 53
+  ignored; `Test (macos-latest / luajit)` 124022842006 and `Test (macos-latest / lua54)`
+  124022842000, 221 each, 5,337 passed, 65 ignored: the pairs as at `97b90ab`, and four more passed
+  on every leg, the round's rows. `WouldBlock` appears in no test leg's log. By name on all six legs,
+  `e10g_theme_acceptance`'s 29 rows (the round's four among them) and `e10g_review1_probes`' six
+  passed; of the five rows filed from the round's gate, #430 to #433's passed on every leg and
+  #434's on the five that build `crdt` (its suite is `crdt`-only).
+- `GPU Render (headless)` 124022841924: `pmacs-gpu`'s tests on lavapipe with `PMACS_REQUIRE_GPU`,
+  `running 393 tests`, `393 passed`.
+- `Perf budgets (debug)` 124022842063: `every budget ran and held`.
+
+`Grammar fuzz` 41043797632 at `4aea995`, attempt 1 of 1, `success`, created 10:51:22Z and completed
+12:01:28Z: both arms decided `run=true` (`src/syntax.rs changed`) and smoked every grammar for 15 s
+on GCC 13.3.0, `Grammar fuzz` 124022769299 and `Grammar fuzz (asan-strict)` 124022769018, each ending
+`exit 0, its parse worker's replay exit 0`. Neither found a crash; each replayed 22 grammars' inputs
+through the worker, every one answered or contained (961 inputs, 15 contained; 962, 15 contained).
+Both found bash's memory finding again, `exceeded memory cap at 4 GB` (minima 63,798 and 62,758
+bytes): **#423's fourth occurrence**, commented there (issuecomment-6522294962), both replays
+containing it by the worker's memory watch. The slow findings are commented on #293
+(issuecomment-6522296165), among them the issue's second `mispredicted` one, cmake's at exponent
+1.01 in the asan-strict arm: `returned in 563721 ms, past its budget of 216595 ms`. The asan-strict
+arm's haskell hang was not reproduced alone, and the worker's replay answered its input.
+
+#### E10g fix round 2's gate: listed, not tallied
+
+In the worktree `pmacs-e10g` on its target, the default plan, alone, with `fmt`, `clippy`, `doc`,
+`build` and `diff-check` ok, no daemon surviving (identified by environ), every `running` line
+paired with a result line and `WouldBlock` in none.
+
+- `20261030T102847Z-4030597` at `4aea995`, the sweep 10:30:02Z to 10:47:31Z: five of six, 5,752 / 6
+  / 67 at 227 pairs. #311's fragments on
+  `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (130.54 s at result line
+  3734), commented there (issuecomment-6520982813). Five rows whose waits ran out while another
+  project loaded the laptop (load average 13.54 over five minutes at 10:48:01Z), none carried by a
+  row or an issue, each filed as its first occurrence: #430
+  (`e7i_a_fresh_worker_s_query_compile_is_not_under_the_deadline`, a daemon answering no connection
+  with a `Hello` for its ten-second readiness wait; not #334's signature), #431
+  (`e7i_the_fuzz_replay_drives_the_worker_and_finds_296_and_301_contained`, #296's input stopped at
+  the deadline and not by its memory limit), #432
+  (`e7i_a_process_unit_s_previous_parse_answers_after_its_discard`, no report in 30 s), #433
+  (`e7i_review1_a_long_read_through_the_unit`, no report in 180 s) and #434
+  (`e9_5_an_oversize_snapshot_is_refused_with_a_visible_status_not_skipped`, no refusal in 10 s).
+  Their targets took 30.58 s, 182.26 s and 19.35 s, against 7.78 s, 21.14 s and 6.29 s in the gate
+  at `97b90ab`; run alone after it at the same tree every row passed (8.09 s, 22.92 s, 7.34 s),
+  non-reproduction and nothing more.
+
+So, at E10g's fix round 2: `main` is green at `b182121`, and PR #422 is green at its head `4aea995`.
+#423 moves to four, all four CI occurrences on this branch's runs, each arm passing; no registry row
+counts it. #430 to #434 are filed on local samples and stand at no CI occurrence, each row passing
+on every test leg here that runs it; #311 met only a local sample and does not move. Every other
+count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
