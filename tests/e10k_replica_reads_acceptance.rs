@@ -37,6 +37,13 @@
 //!   remote op's peers imported it into a fork of the whole document,
 //!   which loro builds by encoding and decoding a snapshot, once a key
 //!   (E10k.4, the profile's largest share of the daemon's time);
+//! - [`CRDT_PER_KEY`]: no `materialize_string` and no `.to_string()` in
+//!   the `CrdtState` functions a key reaches, where the mirror's helpers,
+//!   the replicas' edits and the daemon's conversion do their reading
+//!   (E10k review 1's Low 2: until fix round 1 no list read them);
+//! - [`GPU_PER_KEY`]: no `.to_string()` at all in the GPU's per-key
+//!   functions, so a copy through a binding (`text.to_string()`) or one
+//!   rustfmt splits over two lines is seen, not only [`GPU`]'s spelling;
 //! - and every function named above defined where it is looked for, so
 //!   a rename cannot leave the lists holding nothing.
 
@@ -206,6 +213,73 @@ const FORK: List = List {
     allowed: &[],
 };
 
+/// Functions in one file that may hold no line with any of `needles`.
+struct Forbidden {
+    file: &'static str,
+    functions: &'static [&'static str],
+    needles: &'static [&'static str],
+    what: &'static str,
+}
+
+/// `CrdtState`'s per-key functions: what the mirror's four helpers call
+/// (`char_at_byte`, `char_before_byte`), the replicas' and the daemon's
+/// edits (`insert`, `delete`), the daemon's conversion of an imported
+/// key (`unicode_to_utf8_pos`), and the lookups under them.
+const CRDT_PER_KEY: Forbidden = Forbidden {
+    file: "src/crdt.rs",
+    functions: &[
+        "char_at_byte",
+        "char_before_byte",
+        "unicode_at_byte",
+        "byte_to_unicode_on_boundary",
+        "checked_unicode",
+        "insert",
+        "delete",
+        "unicode_to_utf8_pos",
+    ],
+    needles: &["materialize_string", ".to_string()"],
+    what: "copies the whole text",
+};
+
+/// The GPU's per-key functions, held to no `.to_string()` at all.
+const GPU_PER_KEY: Forbidden = Forbidden {
+    file: "pmacs-gpu/src/main.rs",
+    functions: &[
+        "optimistic_crdt_insert",
+        "optimistic_crdt_delete",
+        "finish_optimistic_edit",
+        "apply_loro_text_delta_batches",
+        "apply_remote_crdt_op",
+    ],
+    needles: &[".to_string()"],
+    what: "copies a string, the whole replica's text through a binding as like as not",
+};
+
+/// What is wrong with `text`, the source of `list.file`, against `list`.
+fn forbidden_in(list: &Forbidden, text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for needle in list.needles {
+        for (function, line) in found(text, needle) {
+            if list.functions.contains(&function.as_str()) {
+                problems.push(format!(
+                    "{}:{line} {} (`{needle}`) in `{function}`, a function a key reaches: \
+                     a key answers from bounded reads (E10k.3, review 1's Low 2)",
+                    list.file, list.what
+                ));
+            }
+        }
+    }
+    for name in list.functions {
+        if !text.lines().any(|line| defined_fn(line) == Some(name)) {
+            problems.push(format!(
+                "{} defines no `{name}`: this guard reads nothing for it",
+                list.file
+            ));
+        }
+    }
+    problems
+}
+
 /// The per-key functions the roadmap names, each in its file.
 const PER_KEY: [(&str, &str); 9] = [
     ("src/buffer_mirror.rs", "prev_char_len"),
@@ -266,6 +340,9 @@ fn problems(read: &dyn Fn(&str) -> String) -> Vec<String> {
         all.extend(problems_in(list, &read(list.file)));
     }
     all.extend(problems_in(&FORK, &read(FORK.file)));
+    for list in [&CRDT_PER_KEY, &GPU_PER_KEY] {
+        all.extend(forbidden_in(list, &read(list.file)));
+    }
     for (file, name) in PER_KEY {
         let text = read(file);
         if !text.lines().any(|line| defined_fn(line) == Some(name)) {
@@ -332,5 +409,64 @@ fn e10k_3_a_whole_text_read_planted_in_a_per_key_path_fails_the_guard() {
             .iter()
             .any(|p| p.contains("copies the whole replica in `apply_remote_crdt_op`")),
         "{found:?}"
+    );
+}
+
+// E10k review 1, P2: two whole-text reads the structural guard did not
+// see, each planted in the per-key path in the sources as they stand and
+// asserted named. At `700e86f` both failed, because the guard read only
+// the spelling `get_text(LORO_TEXT_CONTAINER).to_string()` in the GPU and
+// nothing in `CrdtState`'s per-key functions, which the mirror's four
+// helpers call. Committed at fix round 1 with the lists above.
+
+/// P2a: `CrdtState::char_at_byte` is what `cursor_at_end_of_line`,
+/// `cursor_at_end_of_line_safe_for_delete_back` and `next_char_len`
+/// call; a whole-text copy there is a copy in each of them.
+#[test]
+fn p2a_a_whole_text_read_in_the_helpers_callee_fails_the_guard() {
+    let anchor = "    pub fn char_at_byte(&self, pos: usize) -> Option<char> {";
+    let crdt = source("src/crdt.rs");
+    assert_eq!(crdt.matches(anchor).count(), 1, "the anchor");
+    let planted = crdt.replacen(
+        anchor,
+        &format!("{anchor}\n        let _whole = self.materialize_string();"),
+        1,
+    );
+    let found = problems(&|file| {
+        if file == "src/crdt.rs" {
+            planted.clone()
+        } else {
+            source(file)
+        }
+    });
+    assert!(
+        !found.is_empty(),
+        "a materialize_string planted in CrdtState::char_at_byte passes the guard"
+    );
+}
+
+/// P2b: the GPU's optimistic insert binds the text container and then
+/// reads it; a whole-text copy through that binding is spelled
+/// `text.to_string()`, not the guard's needle.
+#[test]
+fn p2b_a_whole_text_read_through_a_binding_fails_the_guard() {
+    let anchor = "        let at = loro_char_index_on_boundary(&text, cursor)?;";
+    let gpu = source("pmacs-gpu/src/main.rs");
+    assert_eq!(gpu.matches(anchor).count(), 1, "the anchor");
+    let planted = gpu.replacen(
+        anchor,
+        &format!("{anchor}\n        let _whole = text.to_string();"),
+        1,
+    );
+    let found = problems(&|file| {
+        if file == "pmacs-gpu/src/main.rs" {
+            planted.clone()
+        } else {
+            source(file)
+        }
+    });
+    assert!(
+        !found.is_empty(),
+        "a text.to_string() planted in optimistic_crdt_insert passes the guard"
     );
 }
