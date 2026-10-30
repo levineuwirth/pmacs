@@ -419,8 +419,11 @@ fn grid_rows(popup: &LspPopup, cols: u32, max_rows: u32) -> Vec<GridRow> {
     rows.into_iter().map(|(_, r)| r).collect()
 }
 
-/// A face from the theme, or the grid's own default for it (also when
-/// there is no theme, as in a bare core).
+/// A face from the theme over the grid's own default for it, each color
+/// it sets and the default's where it sets none, so a face without a
+/// background keeps the popup's fill ([`crate::completion::face_over`]);
+/// the default alone where the face is unset or there is no theme, as
+/// in a bare core.
 fn face_or(
     theme: Option<&crate::highlight::ThemeHandle>,
     name: &str,
@@ -428,7 +431,7 @@ fn face_or(
 ) -> crate::cell::Style {
     theme
         .and_then(|t| t.lock().expect("theme mutex poisoned").face(name))
-        .unwrap_or(default)
+        .map_or(default, |face| crate::completion::face_over(face, default))
 }
 
 /// Paint `popup` into a window's cells (E8.4): the completion popup's

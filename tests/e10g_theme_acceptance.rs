@@ -390,17 +390,14 @@ fn e10g2_the_grid_menu_takes_the_menu_faces() {
     assert_eq!(set[3][3].style, style(rgb(1, 2, 3), rgb(4, 5, 6)));
 }
 
-/// The minibuffer's candidate band and the completion popup paint their
-/// rows, selected row and kind column in `ui.menu` and
-/// `ui.menu.selected`; unset, the dim fill, reverse video and the dim
-/// kind glyph they always had.
-#[test]
-fn e10g2_the_band_and_the_completion_popup_take_the_menu_faces() {
+/// Open the completion popup (`alpha` selected over `beta`) and the
+/// minibuffer's candidate band (`one` selected over `two`): in a 12-row
+/// frame the popup's selected row is row 1 and the band's row 9.
+fn open_popup_and_band(s: &EditorState) {
     use pmacs::completion::{
         CompletionEditsCarry, CompletionItemKind, CompletionPopupState, PopupCandidate,
     };
-    let s = fresh();
-    exec(&s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+    exec(s, r#"pmacs.window.buffer():insert(0, "hello")"#);
     let candidate = |label: &str| PopupCandidate {
         carry: CompletionEditsCarry::default(),
         label: label.to_owned(),
@@ -421,13 +418,23 @@ fn e10g2_the_band_and_the_completion_popup_take_the_menu_faces() {
     };
     s.core.borrow_mut().completion_popup_open(popup);
     exec(
-        &s,
+        s,
         r#"pmacs.minibuffer.read {
              prompt = "Pick: ",
              source = function() return { "one", "two" } end,
              on_accept = function() end,
            }"#,
     );
+}
+
+/// The minibuffer's candidate band and the completion popup paint their
+/// rows, selected row and kind column in `ui.menu` and
+/// `ui.menu.selected`; unset, the dim fill, reverse video and the dim
+/// kind glyph they always had.
+#[test]
+fn e10g2_the_band_and_the_completion_popup_take_the_menu_faces() {
+    let s = fresh();
+    open_popup_and_band(&s);
     let size = CellSize::new(12, 40);
     let idx = Color::Indexed;
     let reverse = Style {
@@ -467,6 +474,270 @@ fn e10g2_the_band_and_the_completion_popup_take_the_menu_faces() {
         assert_eq!(set[row + 1][label].style, row_style, "{what}: a row");
         assert_eq!(set[row + 1][label - 2].style, row_style, "{what}: kind");
     }
+}
+
+/// The three ways a popup's or menu's face stands (E10g fix round 2):
+/// unset, set with a foreground alone, and set with both, each way's
+/// Lua merged in this order (`None` merges nothing).
+type Ways = [(&'static str, Option<&'static str>); 3];
+
+const MENU_WAYS: Ways = [
+    ("unset", None),
+    (
+        "a foreground alone",
+        Some(
+            r#"pmacs.theme.merge {
+                 ["ui.menu"] = { fg = {1, 2, 3} },
+                 ["ui.menu.selected"] = { fg = {7, 8, 9} },
+               }"#,
+        ),
+    ),
+    (
+        "both",
+        Some(
+            r#"pmacs.theme.merge {
+                 ["ui.menu"] = { fg = {1, 2, 3}, bg = {4, 5, 6} },
+                 ["ui.menu.selected"] = { fg = {7, 8, 9}, bg = {10, 11, 12} },
+               }"#,
+        ),
+    ),
+];
+
+const POPUP_WAYS: Ways = [
+    ("unset", None),
+    (
+        "a foreground alone",
+        Some(r#"pmacs.theme.merge { ["ui.popup"] = { fg = {1, 2, 3} } }"#),
+    ),
+    (
+        "both",
+        Some(r#"pmacs.theme.merge { ["ui.popup"] = { fg = {1, 2, 3}, bg = {4, 5, 6} } }"#),
+    ),
+];
+
+/// Each of `ways` merged in turn, `sample` reading a surface's rows
+/// against `want`'s for that way: one line per row painted otherwise.
+fn wrong_each_way<const N: usize>(
+    s: &EditorState,
+    ways: Ways,
+    sample: impl Fn(&EditorState) -> [(&'static str, Style); N],
+    want: [[Style; N]; 3],
+) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for ((way, lua), want) in ways.into_iter().zip(want) {
+        if let Some(lua) = lua {
+            exec(s, lua);
+        }
+        for ((row, got), want) in sample(s).into_iter().zip(want) {
+            if got != want {
+                wrong.push(format!("{way}: {row}: {got:?}, not {want:?}"));
+            }
+        }
+    }
+    wrong
+}
+
+/// The completion popup's or the band's rows, sampled where `beta` or
+/// `two` is drawn under its selected row (`top`): the selected row, a
+/// row, and that row's kind column.
+fn band_rows(s: &EditorState, top: usize, below: &str) -> [(&'static str, Style); 3] {
+    let frame = frame_at(s, CellSize::new(12, 40), ColorDepth::TrueColor);
+    let label = find_text(&frame, top + 1, below);
+    [
+        ("the selected row", frame[top][label].style),
+        ("a row", frame[top + 1][label].style),
+        ("its kind column", frame[top + 1][label - 2].style),
+    ]
+}
+
+/// What the completion popup and the band paint each way: the dim
+/// fill, reverse video and the dim kind glyph unset; with a foreground
+/// alone that foreground over the same fills, the selected row's text
+/// written where reverse video takes it from, over the reversed fill;
+/// with both, the faces.
+fn band_wants() -> [[Style; 3]; 3] {
+    let (idx, rgb) = (Color::Indexed, Color::Rgb);
+    let reverse = |fg, bg| Style {
+        fg,
+        bg,
+        reverse: true,
+        ..Style::default()
+    };
+    [
+        [
+            reverse(Color::Default, Color::Default),
+            style(idx(252), idx(236)),
+            style(idx(8), idx(236)),
+        ],
+        [
+            reverse(Color::Default, rgb(7, 8, 9)),
+            style(rgb(1, 2, 3), idx(236)),
+            style(rgb(1, 2, 3), idx(236)),
+        ],
+        [
+            style(rgb(7, 8, 9), rgb(10, 11, 12)),
+            style(rgb(1, 2, 3), rgb(4, 5, 6)),
+            style(rgb(1, 2, 3), rgb(4, 5, 6)),
+        ],
+    ]
+}
+
+/// A popup reads as a surface apart from the code, never its text over
+/// it (the owner's ruling of 2026-10-30): the completion popup's rows
+/// take each color `ui.menu` and `ui.menu.selected` set and keep the
+/// constant's where the face's is `Default`, so a face with a
+/// foreground alone keeps the fill, as the GPU's `face_fill_or` does.
+#[test]
+fn e10g2_the_completion_popup_keeps_its_fill_under_a_face_without_a_background() {
+    let s = fresh();
+    open_popup_and_band(&s);
+    let wrong = wrong_each_way(&s, MENU_WAYS, |s| band_rows(s, 1, "beta"), band_wants());
+    assert!(wrong.is_empty(), "the completion popup: {wrong:#?}");
+}
+
+/// [`e10g2_the_completion_popup_keeps_its_fill_under_a_face_without_a_background`]
+/// for the minibuffer's candidate band, painted by the same rows.
+#[test]
+fn e10g2_the_band_keeps_its_fill_under_a_face_without_a_background() {
+    let s = fresh();
+    open_popup_and_band(&s);
+    let wrong = wrong_each_way(&s, MENU_WAYS, |s| band_rows(s, 9, "two"), band_wants());
+    assert!(wrong.is_empty(), "the band: {wrong:#?}");
+}
+
+/// The context menu's rows, its selected row and its rule each way:
+/// a foreground alone over the constant fills.
+#[test]
+fn e10g2_the_context_menu_keeps_its_fill_under_a_face_without_a_background() {
+    use pmacs::menu::MenuRow;
+    let s = fresh();
+    s.core.borrow_mut().menu_open(
+        vec![
+            MenuRow::Item {
+                label: "Copy".into(),
+                command: "editor.copy".into(),
+            },
+            MenuRow::Separator,
+            MenuRow::Item {
+                label: "Paste".into(),
+                command: "editor.paste".into(),
+            },
+        ],
+        (1, 2),
+    );
+    let sample = |s: &EditorState| {
+        let frame = frame_at(s, CellSize::new(10, 40), ColorDepth::TrueColor);
+        [
+            ("the selected row", frame[1][3].style),
+            ("the rule", frame[2][3].style),
+            ("a row", frame[3][3].style),
+        ]
+    };
+    let (idx, rgb) = (Color::Indexed, Color::Rgb);
+    let want = [
+        [
+            style(idx(231), idx(24)),
+            style(idx(252), idx(236)),
+            style(idx(252), idx(236)),
+        ],
+        [
+            style(rgb(7, 8, 9), idx(24)),
+            style(rgb(1, 2, 3), idx(236)),
+            style(rgb(1, 2, 3), idx(236)),
+        ],
+        [
+            style(rgb(7, 8, 9), rgb(10, 11, 12)),
+            style(rgb(1, 2, 3), rgb(4, 5, 6)),
+            style(rgb(1, 2, 3), rgb(4, 5, 6)),
+        ],
+    ];
+    let wrong = wrong_each_way(&s, MENU_WAYS, sample, want);
+    assert!(wrong.is_empty(), "the context menu: {wrong:#?}");
+}
+
+/// The hover popup's rows and its closing row, and the signature
+/// popup's active parameter, painted by the same rows, each way of
+/// `ui.popup` (the other two faces reach it by the dotted-prefix walk):
+/// a foreground alone over the constant fill.
+#[test]
+fn e10g2_the_hover_popup_keeps_its_fill_under_a_face_without_a_background() {
+    let s = fresh();
+    exec(&s, r#"pmacs.window.buffer():insert(0, "hello")"#);
+    let size = CellSize::new(16, 60);
+    let sample = |s: &EditorState| {
+        let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+        let hover = pmacs::hover::Hover {
+            contents: (1..=40)
+                .map(|i| format!("Hover line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            range: None,
+        };
+        let _ = s
+            .core
+            .borrow_mut()
+            .lsp_popup_open_hover(target, Some(&hover));
+        let frame = frame_at(s, size, ColorDepth::TrueColor);
+        let (row, col) = find_anywhere(&frame, "Hover line 1");
+        let (end, end_col) = find_anywhere(&frame, "more line");
+        let (text, footer) = (frame[row][col].style, frame[end][end_col].style);
+        s.core.borrow_mut().lsp_popup_close();
+
+        let target = s.core.borrow().lsp_popup_target().expect("a popup target");
+        let parameter = |label: &str, span| pmacs::signature::SignatureParameter {
+            label: label.into(),
+            span: Some(span),
+            documentation: None,
+        };
+        let help = pmacs::signature::SignatureHelp {
+            signatures: vec![pmacs::signature::Signature {
+                label: "echo(name, count)".into(),
+                documentation: None,
+                parameters: vec![parameter("name", (5, 9)), parameter("count", (11, 16))],
+                active_parameter: Some(0),
+            }],
+            active_signature: 0,
+            active_parameter: Some(0),
+        };
+        let _ = s
+            .core
+            .borrow_mut()
+            .lsp_popup_open_signature(target, Some(&help), false);
+        let frame = frame_at(s, size, ColorDepth::TrueColor);
+        let (row, col) = find_anywhere(&frame, "echo(name");
+        let active = frame[row][col + 5].style;
+        s.core.borrow_mut().lsp_popup_close();
+        [
+            ("the hover popup, a row", text),
+            ("the hover popup, its closing row", footer),
+            ("the signature popup, its active parameter", active),
+        ]
+    };
+    let (idx, rgb) = (Color::Indexed, Color::Rgb);
+    let marked = |fg, bg| Style {
+        bold: true,
+        underline: pmacs::cell::UnderlineStyle::Single,
+        ..style(fg, bg)
+    };
+    let want = [
+        [
+            style(idx(252), idx(236)),
+            style(idx(8), idx(236)),
+            marked(idx(252), idx(236)),
+        ],
+        [
+            style(rgb(1, 2, 3), idx(236)),
+            style(rgb(1, 2, 3), idx(236)),
+            marked(rgb(1, 2, 3), idx(236)),
+        ],
+        [
+            style(rgb(1, 2, 3), rgb(4, 5, 6)),
+            style(rgb(1, 2, 3), rgb(4, 5, 6)),
+            marked(rgb(1, 2, 3), rgb(4, 5, 6)),
+        ],
+    ];
+    let wrong = wrong_each_way(&s, POPUP_WAYS, sample, want);
+    assert!(wrong.is_empty(), "the hover popup: {wrong:#?}");
 }
 
 // ---------------------------------------------------------------------------

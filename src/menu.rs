@@ -338,14 +338,18 @@ pub fn make_shared_menu() -> SharedMenu {
 }
 
 /// E10g.2: the menu's styles from `ui.menu`, `ui.menu.selected` ({fg,
-/// bg} each) and `ui.menu.separator` (its rule's {fg}) where the theme
-/// sets them, else today's constants.
+/// bg} each, over today's constant: [`crate::completion::face_over`])
+/// and `ui.menu.separator` (its rule's {fg}) where the theme sets them,
+/// else today's constants.
 fn menu_styles(theme: Option<&crate::highlight::Theme>) -> (Style, Style, Option<Color>) {
+    use crate::completion::{face_over, fg_bg};
     let face = |name: &str| theme.and_then(|t| t.face(name));
-    let fg_bg = crate::completion::fg_bg;
+    let over = |name: &str, constant: fn() -> Style| {
+        face(name).map_or_else(constant, |f| face_over(fg_bg(f), constant()))
+    };
     (
-        face("ui.menu").map_or_else(menu_style, fg_bg),
-        face("ui.menu.selected").map_or_else(menu_selected_style, fg_bg),
+        over("ui.menu", menu_style),
+        over("ui.menu.selected", menu_selected_style),
         face("ui.menu.separator").map(|f| f.fg),
     )
 }

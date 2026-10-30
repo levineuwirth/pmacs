@@ -723,11 +723,38 @@ pub(crate) fn fg_bg(face: Style) -> Style {
     }
 }
 
+/// A popup's or menu's row style from a set `face` over the row's
+/// `constant` (the owner's ruling of 2026-10-30: a popup reads as a
+/// surface apart from the code, never its text over it): each color the
+/// face sets, and the constant's where the face's is `Default`, so a
+/// face without a background keeps the constant's fill, as the GPU's
+/// `face_fill_or` does. Everything else is the face's. A reverse-video
+/// constant (the selected row's) is read as painted, the text in its
+/// `bg` and the fill in its `fg`, so a face setting one color puts it
+/// there and keeps the reversed fill; a face setting both is its own.
+pub(crate) fn face_over(face: Style, constant: Style) -> Style {
+    let set = |c: Color| c != Color::Default;
+    let or = |c: Color, k: Color| if set(c) { c } else { k };
+    if constant.reverse && !face.reverse && !(set(face.fg) && set(face.bg)) {
+        return Style {
+            fg: or(face.bg, constant.fg),
+            bg: or(face.fg, constant.bg),
+            ..constant
+        };
+    }
+    Style {
+        fg: or(face.fg, constant.fg),
+        bg: or(face.bg, constant.bg),
+        ..face
+    }
+}
+
 /// E10g.2: the styles a popup row is painted in --- the completion
 /// popup's and the minibuffer band's: `ui.menu` for a row and
-/// `ui.menu.selected` for the selected one, each {fg, bg}, where the
-/// theme sets them, else today's constants. The kind glyph column takes
-/// the row's style when `ui.menu` is set and the dim constant when not.
+/// `ui.menu.selected` for the selected one, each {fg, bg} over today's
+/// constant ([`face_over`]), where the theme sets them, else the
+/// constants. The kind glyph column takes the row's style when
+/// `ui.menu` is set and the dim constant when not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BandStyles {
     /// A row.
@@ -741,11 +768,15 @@ pub(crate) struct BandStyles {
 impl BandStyles {
     /// The styles `theme` gives, or today's for a bare core (`None`).
     pub(crate) fn resolve(theme: Option<&crate::highlight::Theme>) -> Self {
-        let face = |name: &str| theme.and_then(|t| t.face(name)).map(fg_bg);
-        let row = face("ui.menu");
+        let face = |name: &str, constant: Style| {
+            theme
+                .and_then(|t| t.face(name))
+                .map(|f| face_over(fg_bg(f), constant))
+        };
+        let row = face("ui.menu", popup_style());
         Self {
             row: row.unwrap_or_else(popup_style),
-            selected: face("ui.menu.selected").unwrap_or_else(selected_style),
+            selected: face("ui.menu.selected", selected_style()).unwrap_or_else(selected_style),
             kind: row.unwrap_or_else(kind_style),
         }
     }
