@@ -675,15 +675,15 @@ impl CrdtState {
 const PIECE_BYTES: usize = 16 * 1024;
 
 /// Insert `s` at character `at` of `text`, back to front in pieces of at
-/// most [`PIECE_BYTES`], each cut at a character boundary: the same text
-/// as one insert, in elements no lookup has to scan whole. A typed
-/// character is one piece, one insert.
+/// most [`PIECE_BYTES`], each cut at the first character boundary within
+/// that many bytes of its end: the same text as one insert, in elements no
+/// lookup has to scan whole. A typed character is one piece, one insert.
 fn insert_in_pieces(text: &loro::LoroText, at: usize, s: &str) -> LoroResult<()> {
     let mut end = s.len();
     while end > 0 {
         let mut start = end.saturating_sub(PIECE_BYTES);
         while !s.is_char_boundary(start) {
-            start -= 1;
+            start += 1;
         }
         text.insert(at, &s[start..end])?;
         end = start;
@@ -1760,6 +1760,7 @@ mod tests {
         let s = CrdtState::from_bytes(1, text.as_bytes()).expect("seed");
         assert_eq!(s.materialize_string(), text);
         assert_eq!(s.char_before_byte(text.len()), Some('\n'));
+        assert_in_pieces(&s, 4, "from_bytes");
         let at = text.len() / 2;
         let at = (at..text.len())
             .find(|&b| text.is_char_boundary(b))
@@ -1768,6 +1769,31 @@ mod tests {
         let mut want = text.clone();
         want.insert_str(at, &text);
         assert_eq!(s.materialize_string(), want);
+        assert_in_pieces(&s, 8, "a large insert");
+    }
+
+    /// The bytes of each element loro holds the body text in, in order
+    /// (`LoroText::iter` yields them): what a byte lookup scans one of.
+    fn elements(state: &CrdtState) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        state.doc.get_text("body").iter(|chunk| {
+            sizes.push(chunk.len());
+            true
+        });
+        sizes
+    }
+
+    /// E10k review 1, Low 1: the text is held in at least `at_least`
+    /// elements, none longer than [`PIECE_BYTES`], so the pieces row fails
+    /// when the pieces go, not only when the text does.
+    fn assert_in_pieces(state: &CrdtState, at_least: usize, after: &str) {
+        let elements = elements(state);
+        assert!(
+            elements.len() >= at_least && elements.iter().all(|&n| n <= PIECE_BYTES),
+            "after {after}: {} elements, the largest {} bytes; at least {at_least}, none over {PIECE_BYTES}",
+            elements.len(),
+            elements.iter().max().copied().unwrap_or(0)
+        );
     }
 
     #[test]
