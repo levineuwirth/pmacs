@@ -9647,9 +9647,10 @@ band_top && max_y <= height`), twice under another project's load, commented on 
 (issuecomment-6508387388); it passed in the round's gate and in CI's `GPU Render (headless)`.
 
 So, at E10g's fix round 1: `main` is green at `55a5fba`, and PR #422 is green at its head
-`97b90ab`. #311 and #304's sibling met only local samples here and do not move; #429, filed in the
-round, is a defect found by reading and a measuring row, not a CI signature. Every other count above
-stands.
+`97b90ab`. #423 moves to three, all three CI occurrences on this branch's runs, each arm passing;
+no registry row counts it. #311 and #304's sibling met only local samples here and do not
+move; #429, filed in the round, is a defect found by reading and a measuring row, not a CI
+signature. Every other count above stands.
 
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
