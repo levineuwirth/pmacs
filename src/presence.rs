@@ -107,6 +107,10 @@ pub struct SessionState {
     /// `FrontendView` retained at detach (`SessionRegistry::retain_view`)
     /// instead of dropped, for the retention window.
     pub token: Option<SessionToken>,
+    /// E10g.5: the frontend's `FrontendCapabilities.true_color`, which is
+    /// not negotiated: below truecolor a grid session is painted at 256
+    /// ([`crate::color_depth::ColorDepth::attached`]).
+    pub true_color: bool,
 }
 
 impl SessionState {
@@ -124,7 +128,16 @@ impl SessionState {
             negotiated_capabilities,
             color_slot,
             token: None,
+            true_color: true,
         }
+    }
+
+    /// The same state for a frontend that declared `true_color`
+    /// (E10g.5).
+    #[must_use]
+    pub fn with_true_color(mut self, true_color: bool) -> Self {
+        self.true_color = true_color;
+        self
     }
 
     /// The same state carrying a minted token (E9).

@@ -139,6 +139,12 @@ pub struct Frontend {
     /// support it ignore the CSI; we still record the push so we know
     /// to balance with a Pop on teardown.
     keyboard_enhancement: bool,
+    /// E10g.5: what the terminal shows, detected from `TERM` at
+    /// construction. At 16 every frame is reduced to the sixteen before
+    /// it is written --- the attach client's reduction; in process the
+    /// frame is already painted at most at this depth, and the
+    /// reduction changes nothing.
+    depth: crate::color_depth::ColorDepth,
 }
 
 impl Frontend {
@@ -160,6 +166,7 @@ impl Frontend {
             bracketed_paste: false,
             mouse: false,
             keyboard_enhancement: false,
+            depth: crate::color_depth::ColorDepth::detect_env(),
         };
         // Best-effort sequence of init steps. Each step that succeeds
         // is recorded so teardown can skip steps that never ran.
@@ -324,7 +331,7 @@ impl Frontend {
     pub fn apply_message(&mut self, msg: &InstanceMessage) -> io::Result<()> {
         match msg {
             InstanceMessage::CellDelta { spans, full_grid } => {
-                emit_cell_delta(&mut self.out, spans, *full_grid)?;
+                write_frame(&mut self.out, spans, *full_grid, self.depth)?;
             }
             InstanceMessage::Cursor(state) => match state {
                 Some(cs) if cs.visible => {
@@ -624,6 +631,22 @@ impl Drop for Frontend {
 ///
 /// Pure and tested below by capturing into a `Vec<u8>`, like its
 /// neighbours.
+/// E10g.5: write a frame for a terminal showing `depth` colors: at 16,
+/// reduced to the sixteen first ([`crate::color_depth::reduce_spans_to_16`]);
+/// otherwise as sent.
+fn write_frame<W: Write>(
+    w: &mut W,
+    spans: &[DiffSpan],
+    full_grid: bool,
+    depth: crate::color_depth::ColorDepth,
+) -> io::Result<()> {
+    if depth == crate::color_depth::ColorDepth::Sixteen {
+        emit_cell_delta(w, &crate::color_depth::reduce_spans_to_16(spans), full_grid)
+    } else {
+        emit_cell_delta(w, spans, full_grid)
+    }
+}
+
 fn emit_cell_delta<W: Write>(w: &mut W, spans: &[DiffSpan], full_grid: bool) -> io::Result<()> {
     if full_grid {
         queue!(
@@ -865,6 +888,7 @@ mod tests {
             bracketed_paste: false,
             mouse: false,
             keyboard_enhancement: false,
+            depth: crate::color_depth::ColorDepth::TrueColor,
         };
         fe.apply_message(&InstanceMessage::ThemeFacts {
             faces: vec![pmacs_protocol::ThemeFace {
@@ -889,6 +913,7 @@ mod tests {
             bracketed_paste: false,
             mouse: false,
             keyboard_enhancement: false,
+            depth: crate::color_depth::ColorDepth::TrueColor,
         };
         fe.apply_message(&InstanceMessage::FontFacts {
             family: Some("Iosevka".into()),
@@ -907,6 +932,7 @@ mod tests {
             bracketed_paste: false,
             mouse: false,
             keyboard_enhancement: false,
+            depth: crate::color_depth::ColorDepth::TrueColor,
         };
         fe.apply_message(&InstanceMessage::StatuslineSegments {
             buffer_id: crate::buffer::BufferId::from_raw(7),
@@ -1242,6 +1268,89 @@ mod tests {
         let mut out = Vec::new();
         emit_clear_status_overlay(&mut out, CellSize::new(5, 0)).unwrap();
         assert!(out.is_empty());
+    }
+
+    /// E10g.5: the in-process terminal's SGR for one face at each depth,
+    /// the depth taken from `ui.color-depth` over a truecolor detection:
+    /// the face's RGB, then its authored 256 fallback, then its authored
+    /// 16. Through the frame `RenderState` paints and the bytes this
+    /// writer emits for it.
+    #[test]
+    fn e10g5_the_in_process_sgr_for_one_face_at_each_depth() {
+        use crate::color_depth::ColorDepth;
+        let state = crate::editor::EditorState::new();
+        state
+            .lua_host
+            .lua()
+            .load(
+                r#"pmacs.theme.define("deep", { faces = {
+                     ["ui.modeline"] = { fg = {250, 250, 250}, bg = {0, 0, 200},
+                       fallback = { [256] = { fg = 231, bg = 19 }, [16] = { fg = 15, bg = 4 } } },
+                   } })
+                   pmacs.config.set("ui.theme", "deep")"#,
+            )
+            .exec()
+            .expect("load the theme");
+        let sgr_at = |setting: &str| -> String {
+            state
+                .lua_host
+                .lua()
+                .load(format!("pmacs.config.set('ui.color-depth', '{setting}')"))
+                .exec()
+                .expect("set the depth");
+            let mut render = crate::instance_render::RenderState::new(CellSize::new(10, 40));
+            render.set_color_depth(state.local_color_depth(ColorDepth::TrueColor));
+            let mut out = Vec::new();
+            for message in render.render_frame(
+                &state,
+                crate::protocol::FrontendId::LOCAL,
+                &std::collections::HashMap::new(),
+                &[],
+            ) {
+                if let InstanceMessage::CellDelta { spans, full_grid } = message {
+                    write_frame(&mut out, &spans, full_grid, ColorDepth::TrueColor).expect("write");
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        let truecolor = sgr_at("auto");
+        assert!(
+            truecolor.contains("\x1b[38;2;250;250;250m"),
+            "{truecolor:?}"
+        );
+        assert!(truecolor.contains("\x1b[48;2;0;0;200m"));
+        let at256 = sgr_at("256");
+        assert!(at256.contains("\x1b[38;5;231m") && at256.contains("\x1b[48;5;19m"));
+        assert!(!at256.contains("38;2;"), "no RGB at 256");
+        let at16 = sgr_at("16");
+        assert!(at16.contains("\x1b[38;5;15m") && at16.contains("\x1b[48;5;4m"));
+        assert!(!at16.contains("38;2;") && !at16.contains("38;5;231"));
+    }
+
+    /// E10g.5: the writer at 16 sends the client's reduction: an index
+    /// past 15 as its table entry, an RGB as the nearest of sixteen.
+    #[test]
+    fn e10g5_the_writer_at_16_writes_the_sixteen() {
+        use crate::color_depth::ColorDepth;
+        let mut cell = ch('x');
+        cell.style.fg = crate::cell::Color::Indexed(252);
+        cell.style.bg = crate::cell::Color::Rgb(205, 49, 49);
+        let spans = vec![DiffSpan {
+            start: CellCoord::new(0, 0),
+            cells: vec![cell],
+        }];
+        let write = |depth| {
+            let mut out = Vec::new();
+            write_frame(&mut out, &spans, false, depth).expect("write");
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        let at16 = write(ColorDepth::Sixteen);
+        assert!(
+            at16.contains("\x1b[38;5;7m") && at16.contains("\x1b[48;5;1m"),
+            "{at16:?}"
+        );
+        let truecolor = write(ColorDepth::TrueColor);
+        assert!(truecolor.contains("\x1b[38;5;252m") && truecolor.contains("\x1b[48;2;205;49;49m"));
     }
 
     #[test]

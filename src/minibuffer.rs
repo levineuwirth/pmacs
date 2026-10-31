@@ -17,7 +17,9 @@
 //!   minibuffer's buffer and recompute candidates.
 //! * Accept invokes `on_accept(contents)` with the chosen string;
 //!   cancel invokes `on_cancel()` (if provided). Either way, the
-//!   session is cleared and the buffer's contents are blanked.
+//!   session is cleared and the buffer's contents are blanked. A
+//!   session another replaces runs neither; its `on_replace()` runs, if
+//!   it asked for one.
 //!
 //! # History
 //!
@@ -87,6 +89,10 @@ pub struct Minibuffer {
     /// means "do not persist" (the default for the lib's own test
     /// suite; the editor binary configures this at startup).
     pub history_dir: Option<PathBuf>,
+    /// E10g.4: how many prompts have opened, so a selection seen before
+    /// a key is compared only with the same prompt's after it: an
+    /// accept that opens another prompt is not a move.
+    pub generation: u64,
 }
 
 impl Minibuffer {
@@ -103,6 +109,7 @@ impl Minibuffer {
             session: None,
             history: HashMap::new(),
             history_dir: None,
+            generation: 0,
         }
     }
 
@@ -120,8 +127,12 @@ impl Minibuffer {
 
     /// Open a prompt session. Replaces any existing session, replacing
     /// the buffer contents with `initial` and seeding history from
-    /// disk if a history bucket is named.
-    pub fn begin(&mut self, mut session: MinibufferSession) {
+    /// disk if a history bucket is named. Returns the replaced session's
+    /// `on_replace` for the caller to call once it holds no borrow of
+    /// the core.
+    pub fn begin(&mut self, mut session: MinibufferSession) -> Option<Function> {
+        let replaced = self.session.take().and_then(|old| old.on_replace);
+        self.generation += 1;
         self.replace_contents(&session.initial.clone());
         self.cursor = self.buffer.len();
         // Lazy-load history once per bucket.
@@ -140,6 +151,7 @@ impl Minibuffer {
         session.history_index = None;
         session.typed_before_history_nav = None;
         self.session = Some(session);
+        replaced
     }
 
     /// Returns the minibuffer's contents as an owned String.
@@ -260,6 +272,36 @@ impl Minibuffer {
             next += len;
         }
         s.selected = Some(usize::try_from(next).unwrap_or(0));
+    }
+
+    /// The selected candidate's text, if one is selected.
+    #[must_use]
+    pub fn selected_candidate(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        s.candidates.get(s.selected?).cloned()
+    }
+
+    /// E10g.4: the open prompt's generation and selected candidate, to
+    /// hand back to [`Self::select_change`] after a key.
+    #[must_use]
+    pub fn selection(&self) -> (u64, Option<String>) {
+        (self.generation, self.selected_candidate())
+    }
+
+    /// E10g.4: when the same prompt as at `before` now has another
+    /// candidate selected, its `on_select` and that candidate, for the
+    /// caller to call once it holds no borrow of the core. A prompt
+    /// opened since `before` (an accept that ran a command which asked
+    /// again) has moved nothing.
+    #[must_use]
+    pub fn select_change(&self, before: &(u64, Option<String>)) -> Option<(Function, String)> {
+        if before.0 != self.generation {
+            return None;
+        }
+        let s = self.session.as_ref()?;
+        let on_select = s.on_select.clone()?;
+        let now = s.candidates.get(s.selected?)?;
+        (Some(now) != before.1.as_ref()).then(|| (on_select, now.clone()))
     }
 
     /// Whether a completion dropdown is currently showing (the active
@@ -502,6 +544,18 @@ pub struct MinibufferSession {
     pub on_accept: Function,
     /// Optional Lua callback invoked on cancel (no args).
     pub on_cancel: Option<Function>,
+    /// E10g.4: optional Lua callback invoked with the selected candidate
+    /// each time the selection moves to a different one --- a preview.
+    /// Not at open, and not when a recompute leaves the same candidate
+    /// selected.
+    pub on_select: Option<Function>,
+    /// Optional Lua callback invoked (no args) when another session
+    /// replaces this one before it is accepted or cancelled: what a
+    /// prompt that changed something on the way, as the theme picker's
+    /// preview does, needs to undo it (E10g review 1's Low 1). Opt-in:
+    /// a replaced session's `on_cancel` never runs, and prompts rely on
+    /// that (a question's `on_cancel` is its "no").
+    pub on_replace: Option<Function>,
     /// Currently-rendered candidate list (recomputed on input change).
     pub candidates: Vec<String>,
     /// Index into `candidates` of the selected entry, if any.
@@ -1167,6 +1221,8 @@ mod tests {
             ranked: false,
             on_accept: dummy_accept(lua),
             on_cancel: None,
+            on_select: None,
+            on_replace: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,

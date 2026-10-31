@@ -419,8 +419,11 @@ fn grid_rows(popup: &LspPopup, cols: u32, max_rows: u32) -> Vec<GridRow> {
     rows.into_iter().map(|(_, r)| r).collect()
 }
 
-/// A face from the theme, or the grid's own default for it (also when
-/// there is no theme, as in a bare core).
+/// A face from the theme over the grid's own default for it, each color
+/// it sets and the default's where it sets none, so a face without a
+/// background keeps the popup's fill ([`crate::completion::face_over`]);
+/// the default alone where the face is unset or there is no theme, as
+/// in a bare core.
 fn face_or(
     theme: Option<&crate::highlight::ThemeHandle>,
     name: &str,
@@ -428,7 +431,7 @@ fn face_or(
 ) -> crate::cell::Style {
     theme
         .and_then(|t| t.lock().expect("theme mutex poisoned").face(name))
-        .unwrap_or(default)
+        .map_or(default, |face| crate::completion::face_over(face, default))
 }
 
 /// Paint `popup` into a window's cells (E8.4): the completion popup's
@@ -515,7 +518,7 @@ pub fn paint_grid_popup(
 /// [`paint_grid_popup`], recording on `shared` where it painted while the
 /// popup there is still the one painted, so the grid's pointer inside it
 /// is the popup's ([`crate::editor_core::EditorCore::lsp_popup_grid_hit`],
-/// E8 fix round 1), as `pmacs-gpu`'s is.
+/// E8 fix round 1), as `pmacs-gpu`'s is. Returns the cells it painted.
 pub fn paint_grid_popup_into(
     shared: &SharedLspPopup,
     buf: &crate::buffer::Buffer,
@@ -523,7 +526,7 @@ pub fn paint_grid_popup_into(
     cells: &mut crate::cell::CellGrid<'_>,
     popup: &LspPopup,
     theme: Option<&crate::highlight::ThemeHandle>,
-) {
+) -> Option<crate::window::Rect> {
     let painted = paint_grid_popup(buf, viewport, cells, popup, theme);
     if let Some(open) = shared.lock().expect("lsp popup poisoned").as_mut()
         && open.window_id == popup.window_id
@@ -533,6 +536,7 @@ pub fn paint_grid_popup_into(
     {
         open.grid_cells = painted;
     }
+    painted
 }
 
 #[cfg(test)]

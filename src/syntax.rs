@@ -338,6 +338,9 @@ pub struct SyntaxRegistry {
     /// this registry --- editing the theme through Lua updates all
     /// attached views in lock-step.
     theme: ThemeHandle,
+    /// E10g.1: the themes defined by name, which `pmacs.theme.load`
+    /// writes into `theme`.
+    themes: RefCell<crate::highlight::ThemeLibrary>,
 }
 
 /// Cheaply-cloneable shared handle to a [`SyntaxRegistry`]. Same
@@ -363,6 +366,7 @@ impl SyntaxRegistry {
             injection_aliases: RefCell::new(default_injection_aliases()),
             interest: RefCell::new(HashMap::new()),
             theme: Arc::new(Mutex::new(Theme::default_dark())),
+            themes: RefCell::new(crate::highlight::ThemeLibrary::default()),
         }
     }
 
@@ -400,6 +404,13 @@ impl SyntaxRegistry {
     #[must_use]
     pub fn theme(&self) -> ThemeHandle {
         self.theme.clone()
+    }
+
+    /// The named themes (E10g.1). Borrowed briefly; a caller that also
+    /// locks [`Self::theme`] takes this borrow first.
+    #[must_use]
+    pub fn themes(&self) -> std::cell::RefMut<'_, crate::highlight::ThemeLibrary> {
+        self.themes.borrow_mut()
     }
 
     /// Register a tree-sitter [`tree_sitter::Language`] under `name`.

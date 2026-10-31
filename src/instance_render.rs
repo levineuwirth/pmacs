@@ -16,7 +16,8 @@
 //! Doing the diff once, on the instance side, is what makes the SSH
 //! transport (T M5.7) cheap.
 
-use crate::cell::{Cell, CellGrid, CellSize, diff};
+use crate::cell::{Cell, CellGrid, CellSize, Color, diff};
+use crate::color_depth::{ColorDepth, DepthMap};
 use crate::editor::{EditorState, paint_frame};
 use crate::protocol::{CursorState, FrontendId, InstanceMessage};
 use crate::terminal::TerminalSnapshot;
@@ -38,6 +39,12 @@ pub struct RenderState {
     /// as a full-grid sync. Remote frontends use this flag to know they
     /// must blank their local buffer before applying the deltas.
     needs_full_grid: bool,
+    /// E10g: how many colors this frontend's terminal shows. Truecolor,
+    /// which reduces nothing, until [`Self::set_color_depth`] says less.
+    depth: ColorDepth,
+    /// The map for `depth`, with the theme's `(syntax_epoch,
+    /// face_epoch)` it was built at, so a theme edit rebuilds it.
+    depth_map: Option<((u64, u64), DepthMap)>,
 }
 
 impl RenderState {
@@ -50,6 +57,62 @@ impl RenderState {
             prev: vec![Cell::default(); cells],
             next: vec![Cell::default(); cells],
             needs_full_grid: true,
+            depth: ColorDepth::TrueColor,
+            depth_map: None,
+        }
+    }
+
+    /// E10g: paint every later frame for a terminal showing `depth`
+    /// colors. The reduction runs on the painted grid before the diff,
+    /// so a change of depth re-sends exactly the cells it recolors.
+    pub fn set_color_depth(&mut self, depth: ColorDepth) {
+        if depth != self.depth {
+            self.depth = depth;
+            self.depth_map = None;
+        }
+    }
+
+    /// The depth frames are painted at.
+    #[must_use]
+    pub fn color_depth(&self) -> ColorDepth {
+        self.depth
+    }
+
+    /// The painted `next` grid's last two steps, both from the active
+    /// theme. The buffer face (E10g.2) fills every color the frame left
+    /// at the terminal's default, past the end of a line and below the
+    /// last one included, so a theme's background is the whole screen's;
+    /// then every color is reduced to this frontend's depth through the
+    /// theme's fallbacks ([`DepthMap`]).
+    fn finish_colors(&mut self, state: &EditorState) {
+        let theme = state.syntax_registry.theme();
+        let th = theme.lock().expect("theme mutex poisoned");
+        let face = th
+            .buffer_face()
+            .filter(|f| f.fg != Color::Default || f.bg != Color::Default);
+        if self.depth != ColorDepth::TrueColor {
+            let epochs = (th.syntax_epoch, th.face_epoch);
+            if self.depth_map.as_ref().is_none_or(|(at, _)| *at != epochs) {
+                self.depth_map = Some((epochs, DepthMap::for_theme(&th, self.depth)));
+            }
+        }
+        drop(th);
+        if let Some(face) = face {
+            for cell in &mut self.next {
+                if cell.style.fg == Color::Default {
+                    cell.style.fg = face.fg;
+                }
+                if cell.style.bg == Color::Default {
+                    cell.style.bg = face.bg;
+                }
+            }
+        }
+        if self.depth == ColorDepth::TrueColor {
+            return;
+        }
+        let (_, map) = self.depth_map.as_ref().expect("built above");
+        for cell in &mut self.next {
+            cell.style = map.map_style(cell.style);
         }
     }
 
@@ -124,6 +187,7 @@ impl RenderState {
             );
             coord
         };
+        self.finish_colors(state);
 
         // Full-grid sync semantics (T M5.3): when `needs_full_grid` is
         // set, the `prev` buffer no longer represents what the consumer

@@ -618,13 +618,27 @@ const UI_FACES: &[&str] = &[
     // for this one is not painting, so the face is the on/off control
     // and the color at once.
     "ui.current-line",
+    // E10g.2 — the buffer's own face: the GPU clears to its background
+    // and draws plain text in its foreground. Resolved by its exact
+    // name (`Theme::buffer_face`), never through the walk to bare `ui`.
+    "ui.default",
     "ui.diag.error",
     "ui.diag.hint",
     "ui.diag.info",
     "ui.diag.warning",
+    // E10g.2 — read by the GPU since the panel band (its divider wash)
+    // and never sent until now.
+    "ui.divider",
     "ui.gutter",
+    // E10g.2 — the surfaces the GPU painted only from constants: the
+    // menus and dropdowns, the minimap and the scrollbar.
+    "ui.menu",
+    "ui.menu.selected",
+    "ui.menu.separator",
     "ui.minibuffer",
     "ui.minibuffer.candidate",
+    "ui.minimap",
+    "ui.minimap.thumb",
     "ui.modeline",
     // E8.3 — the hover and signature popup: its text and background,
     // the signature's active parameter, and the closing "more lines"
@@ -633,6 +647,8 @@ const UI_FACES: &[&str] = &[
     "ui.popup",
     "ui.popup.active-parameter",
     "ui.popup.footer",
+    "ui.scrollbar",
+    "ui.scrollbar.thumb",
     "ui.search.match",
     "ui.search.match.active",
     "ui.selection",
@@ -2731,7 +2747,9 @@ impl SemanticRenderState {
         let faces = names
             .into_iter()
             .filter_map(|name| {
-                let style = if UI_FACES.binary_search(&name.as_str()).is_ok() {
+                let style = if name == crate::highlight::BUFFER_FACE {
+                    th.buffer_face()
+                } else if UI_FACES.binary_search(&name.as_str()).is_ok() {
                     th.face(&name)
                 } else {
                     th.modeline_segment_face(&name)
@@ -4361,6 +4379,102 @@ mod tests {
             unchanged.is_empty(),
             "the empty invalidation became baseline"
         );
+    }
+
+    /// E10g.2 — the faces the GPU paints its constant surfaces from
+    /// reach it: the buffer face, the menus, the minimap, the scrollbar
+    /// and the divider it read and was never sent. The buffer face is
+    /// resolved by its own name: a theme setting only the bare `ui`
+    /// catch-all ships `ui.menu` (the walk) and no `ui.default`.
+    #[test]
+    fn e10g2_the_new_faces_ship_and_the_buffer_face_never_walks() {
+        let names = [
+            "ui.default",
+            "ui.divider",
+            "ui.menu",
+            "ui.menu.selected",
+            "ui.menu.separator",
+            "ui.minimap",
+            "ui.minimap.thumb",
+            "ui.scrollbar",
+            "ui.scrollbar.thumb",
+        ];
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+        for (i, name) in names.iter().enumerate() {
+            merge_face(
+                &state,
+                name,
+                Style {
+                    bg: crate::cell::Color::Indexed(u8::try_from(i).unwrap()),
+                    ..Style::default()
+                },
+            );
+        }
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("a face change emits");
+        for (i, name) in names.iter().enumerate() {
+            let face = facts
+                .iter()
+                .find(|f| f.name == *name)
+                .unwrap_or_else(|| panic!("{name} did not ship"));
+            assert_eq!(
+                face.style.bg,
+                crate::cell::Color::Indexed(u8::try_from(i).unwrap())
+            );
+        }
+
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        merge_face(
+            &state,
+            "ui",
+            Style {
+                bg: crate::cell::Color::Indexed(4),
+                ..Style::default()
+            },
+        );
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("the first table");
+        assert!(
+            facts.iter().any(|f| f.name == "ui.menu"),
+            "the walk reaches chrome"
+        );
+        assert!(
+            !facts.iter().any(|f| f.name == "ui.default"),
+            "the buffer is not chrome: {facts:?}"
+        );
+    }
+
+    /// E10g.5 — the GPU's frames are unchanged by color depth: a
+    /// semantic session is sent a face's RGB whatever `ui.color-depth`
+    /// says, since only the grid's `RenderState` reduces.
+    #[test]
+    fn e10g5_a_semantic_session_is_sent_rgb_whatever_the_depth() {
+        let state = empty_state();
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.config.set('ui.color-depth', '16')")
+            .exec()
+            .expect("set the depth");
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        merge_face(
+            &state,
+            "ui.modeline",
+            Style {
+                bg: crate::cell::Color::Rgb(1, 2, 3),
+                ..Style::default()
+            },
+        );
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("the first table");
+        assert_eq!(facts[0].name, "ui.modeline");
+        assert_eq!(facts[0].style.bg, crate::cell::Color::Rgb(1, 2, 3));
     }
 
     #[test]

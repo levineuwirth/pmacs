@@ -920,7 +920,8 @@ fn per_attach_thread(
     // ladder widening cannot silently record a version this binary is
     // unable to produce.
     let session_state =
-        crate::presence::SessionState::new(session_version, negotiated_caps, color_slot);
+        crate::presence::SessionState::new(session_version, negotiated_caps, color_slot)
+            .with_true_color(req.frontend_capabilities.true_color);
 
     // Hand the write-half to the dispatcher; keep a read-half for
     // this thread's reader loop. **Reader loop starts immediately
@@ -1835,10 +1836,19 @@ fn dispatcher_loop(
                 // the sweep below); other-frontend snapshots lag by
                 // at most one tick. Imperceptible at frame cadence.
                 let other_presences = session_registry.other_presences_for(*fid);
+                // E10g.5: an attachment below truecolor is painted at 256,
+                // each theme color its authored fallback.
+                let depth = crate::color_depth::ColorDepth::attached(
+                    crate::lua_bindings::config_color_depth(editor.lua_host.lua()),
+                    session_registry
+                        .session_state(*fid)
+                        .is_none_or(|state| state.true_color),
+                );
                 let render_state = session_registry
                     .session_mut(*fid)
                     .and_then(|session| session.render.as_mut())
                     .expect("render_state present for attached grid fid");
+                render_state.set_color_depth(depth);
                 let render_size = render_state.size();
                 let terminal_snapshots = editor.prepare_terminal_views(*fid, render_size);
                 render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
@@ -5996,6 +6006,7 @@ mod tests {
                     },
                     color_slot: 0,
                     token: None,
+                    true_color: true,
                 },
                 initial_size: CellSize::new(24, 80),
                 initial_target: Some(InitialTarget {
@@ -7482,6 +7493,7 @@ mod tests {
                 },
                 color_slot: 0,
                 token: None,
+                true_color: true,
             },
         );
         {
@@ -7875,6 +7887,7 @@ mod tests {
                 },
                 color_slot: 0,
                 token: None,
+                true_color: true,
             },
         );
         {
@@ -7964,6 +7977,7 @@ mod tests {
             },
             color_slot: 0,
             token: None,
+            true_color: true,
         }
     }
 

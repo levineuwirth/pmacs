@@ -587,14 +587,6 @@ const BELL_FLASH_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
 /// unconditionally, so this only bounds what a crash can lose.
 const GEOMETRY_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Color the surface clears to before text renders.
-const BG: wgpu::Color = wgpu::Color {
-    r: 0.05,
-    g: 0.05,
-    b: 0.07,
-    a: 1.0,
-};
-
 const TEXT_LEFT: f32 = 16.0;
 const TEXT_TOP: f32 = 16.0;
 
@@ -604,7 +596,8 @@ const TERMINAL_UNDERLINE_PX: f32 = 1.0;
 /// Fallback terminal selection wash when no `ui.selection` face is set.
 const TERMINAL_SELECTION_RGBA: [f32; 4] = [0.35, 0.45, 0.75, 0.35];
 
-/// The terminal cursor block. Translucent so the glyph beneath stays
+/// The terminal cursor block when no `ui.caret` face sets its color
+/// (E10g.2: its fg, this alpha). Translucent so the glyph beneath stays
 /// readable — a terminal cursor sits ON a character, unlike the
 /// document caret, which sits between two.
 const TERMINAL_CURSOR_RGBA: [f32; 4] = [0.85, 0.85, 0.9, 0.55];
@@ -615,9 +608,9 @@ const CARET_WIDTH: f32 = 2.0;
 const CARET_COLOR: [f32; 4] = [0.90, 0.90, 0.96, 0.90];
 
 /// Math ink (Q#MS6): the plain code text color, as glyph color for
-/// the mini-buffers and quad rgba for the fraction rule. Colour-by-
-/// context is the parent arc's deferred Q#IM2.
-const MATH_INK_COLOR: Color = Color::rgb(230, 230, 235);
+/// the mini-buffers ([`State::plain_text_color`]) and quad rgba for
+/// the fraction rule, this when no `ui.default` face sets the color.
+/// Colour-by-context is the parent arc's deferred Q#IM2.
 const MATH_INK_RGBA: [f32; 4] = [230.0 / 255.0, 230.0 / 255.0, 235.0 / 255.0, 1.0];
 
 /// Line-height factor for a math glyph's mini-buffer: roomy enough
@@ -757,6 +750,8 @@ const MENU_MAX_WIDTH: f32 = 380.0;
 const MENU_BG: [f32; 4] = [0.16, 0.16, 0.20, 0.98];
 const MENU_SELECTED_BG: [f32; 4] = [0.20, 0.40, 0.66, 1.0];
 const MENU_SEPARATOR_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
+/// The menus' and dropdowns' text when no `ui.menu` face sets it.
+const MENU_TEXT: Color = Color::rgb(232, 232, 238);
 
 // Minibuffer completion dropdown (Q#MB1). A vertical list anchored just
 // above the bottom band, best match at the top; reuses the menu popup's
@@ -13111,7 +13106,7 @@ impl State {
             // rebuild, no reshape, no redraw.
             return;
         }
-        let plan = TerminalPaintPlan::build(&frame, Self::terminal_palette());
+        let plan = TerminalPaintPlan::build(&frame, self.terminal_palette());
         let buffer_id = frame.buffer_id;
         self.terminal = Some(TerminalLocal {
             buffer_id,
@@ -13122,16 +13117,15 @@ impl State {
         self.request_redraw();
     }
 
-    /// The frontend defaults `Color::Default` resolves against.
-    fn terminal_palette() -> TerminalPalette {
-        let fg = plain_text_color();
+    /// The frontend defaults `Color::Default` resolves against: the
+    /// buffer face's colors where the theme sets them (E10g.2), else
+    /// the plain text color and the window background.
+    fn terminal_palette(&self) -> TerminalPalette {
+        let fg = self.plain_text_color();
+        let bg = self.window_bg_text_color();
         TerminalPalette {
             default_fg: [fg.r(), fg.g(), fg.b()],
-            default_bg: [
-                (WINDOW_BG_RGBA[0] * 255.0) as u8,
-                (WINDOW_BG_RGBA[1] * 255.0) as u8,
-                (WINDOW_BG_RGBA[2] * 255.0) as u8,
-            ],
+            default_bg: [bg.r(), bg.g(), bg.b()],
         }
     }
 
@@ -13143,7 +13137,7 @@ impl State {
             .get("ui.caret")
             .and_then(|face| cell_color_to_glyphon(face.fg))
         {
-            Some(color) => glyphon_to_rgba(color, CARET_COLOR[3]),
+            Some(color) => self.face_rgba(color, CARET_COLOR[3]),
             None => CARET_COLOR,
         };
         if self.focused {
@@ -13724,7 +13718,7 @@ impl State {
                     frame.size,
                     &frame.cells,
                     frame.cursor,
-                    Self::terminal_palette(),
+                    self.terminal_palette(),
                 );
                 self.panel.frame = Some(frame);
                 self.panel.mapping_generation = Some(mapping_generation);
@@ -13779,7 +13773,7 @@ impl State {
                     frame.size,
                     &frame.cells,
                     frame.cursor,
-                    Self::terminal_palette(),
+                    self.terminal_palette(),
                 );
                 self.panel.frame = Some(frame);
                 self.panel.plan = Some(plan);
@@ -13898,13 +13892,13 @@ impl State {
                 y,
                 w,
                 h,
-                color: self.face_wash_or("ui.divider", DIVIDER_RGBA),
+                color: self.face_fill_or("ui.divider", DIVIDER_RGBA),
             });
         }
         if let Some(plan) = self.panel.plan.as_ref()
             && self.panel.presented().is_some()
         {
-            let window_bg = Self::terminal_palette().default_bg;
+            let window_bg = self.terminal_palette().default_bg;
             for bg in &plan.backgrounds {
                 if bg.color == window_bg {
                     continue;
@@ -13999,7 +13993,7 @@ impl State {
                     y,
                     w,
                     h,
-                    color: TERMINAL_CURSOR_RGBA,
+                    color: self.face_ink_or("ui.caret", TERMINAL_CURSOR_RGBA),
                 });
             }
         }
@@ -14346,7 +14340,7 @@ impl State {
         let Some(terminal) = self.terminal.as_ref() else {
             return Vec::new();
         };
-        let window_bg = Self::terminal_palette().default_bg;
+        let window_bg = self.terminal_palette().default_bg;
         let mut rects = Vec::new();
         for bg in &terminal.plan.backgrounds {
             if bg.color == window_bg {
@@ -14481,7 +14475,7 @@ impl State {
                 y,
                 w,
                 h,
-                color: TERMINAL_CURSOR_RGBA,
+                color: self.face_ink_or("ui.caret", TERMINAL_CURSOR_RGBA),
             }],
             self.layout.width,
             self.layout.height,
@@ -15170,14 +15164,14 @@ impl State {
                 y: track.top,
                 w: SCROLLBAR_WIDTH,
                 h: track.height,
-                color: SCROLLBAR_TRACK_BG,
+                color: self.face_fill_or("ui.scrollbar", SCROLLBAR_TRACK_BG),
             },
             MinimapRect {
                 x: track.x,
                 y: thumb_top,
                 w: SCROLLBAR_WIDTH,
                 h: thumb_h,
-                color: SCROLLBAR_THUMB_FILL,
+                color: self.face_fill_or("ui.scrollbar.thumb", SCROLLBAR_THUMB_FILL),
             },
         ]
     }
@@ -15633,7 +15627,9 @@ impl State {
     // face owns its surface within its stage-1 mask, and a `Default`
     // component inside the mask maps to the frontend's PLAIN rendering
     // — the buffer-text default fg / the window-background bg — never
-    // the old chrome constant. An UNSET face keeps the site constant.
+    // the old chrome constant, but for an opaque fill's `Default` bg,
+    // which keeps the site constant (`face_fill_or`, E10g review 1's
+    // Medium 3). An UNSET face keeps the site constant.
     // -----------------------------------------------------------------
 
     /// fg resolution for an {fg}-mask site: face set → its fg
@@ -15641,19 +15637,132 @@ impl State {
     /// (today's site constant).
     fn face_fg_or(&self, name: &str, fallback: Color) -> Color {
         match self.faces.get(name) {
-            Some(f) => cell_color_to_glyphon(f.fg).unwrap_or_else(plain_text_color),
+            Some(f) => cell_color_to_glyphon(f.fg).unwrap_or_else(|| self.plain_text_color()),
             None => fallback,
         }
+    }
+
+    /// E10g.2 — the buffer's own face, `ui.default`, when the theme
+    /// sets it: the window's background and plain text.
+    fn buffer_face(&self) -> Option<&CellStyle> {
+        self.faces.get(BUFFER_FACE)
+    }
+
+    /// The plain text color: the buffer face's fg, else [`PLAIN_TEXT`].
+    fn plain_text_color(&self) -> Color {
+        self.buffer_face()
+            .and_then(|f| cell_color_to_glyphon(f.fg))
+            .unwrap_or(PLAIN_TEXT)
+    }
+
+    /// A face's color as a quad rgba carrying `alpha` (E10g.2). A face
+    /// is written in sRGB, and the surface is an sRGB format that
+    /// encodes what it is given, so the color goes to linear first:
+    /// written as it stands, it was shown lighter than the face says
+    /// (`#121212` as about `#4a4a4a`). The float constants are linear
+    /// already and do not come through here.
+    fn face_rgba(&self, color: Color, alpha: f32) -> [f32; 4] {
+        let rgba = glyphon_to_rgba(color, alpha);
+        if self.config.format.is_srgb() {
+            [
+                srgb_to_linear(rgba[0]),
+                srgb_to_linear(rgba[1]),
+                srgb_to_linear(rgba[2]),
+                rgba[3],
+            ]
+        } else {
+            rgba
+        }
+    }
+
+    /// The window background as a quad rgba: the buffer face's bg, else
+    /// [`WINDOW_BG_RGBA`].
+    fn window_bg_rgba(&self) -> [f32; 4] {
+        self.buffer_face()
+            .and_then(|f| cell_color_to_glyphon(f.bg))
+            .map_or(WINDOW_BG_RGBA, |c| self.face_rgba(c, 1.0))
+    }
+
+    /// The window background as a text color, for a surface that draws
+    /// glyphs in it (a reversed band, a terminal's default): the buffer
+    /// face's bg, else today's reading of [`WINDOW_BG_RGBA`].
+    fn window_bg_text_color(&self) -> Color {
+        self.buffer_face()
+            .and_then(|f| cell_color_to_glyphon(f.bg))
+            .unwrap_or_else(|| rgba_to_glyphon(WINDOW_BG_RGBA))
+    }
+
+    /// What the surface clears to: [`Self::window_bg_rgba`].
+    fn clear_color(&self) -> wgpu::Color {
+        let [r, g, b, a] = self.window_bg_rgba();
+        wgpu::Color {
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: f64::from(a),
+        }
+    }
+
+    /// E10g.2 — an {fg}-mask quad (a line, a rule, an edge): face set →
+    /// its fg carrying the site's alpha (`Default` ↦ the plain text
+    /// color); unset → `fallback`, today's constant.
+    fn face_ink_or(&self, name: &str, fallback: [f32; 4]) -> [f32; 4] {
+        match self.faces.get(name) {
+            Some(f) => {
+                let c = cell_color_to_glyphon(f.fg).unwrap_or_else(|| self.plain_text_color());
+                self.face_rgba(c, fallback[3])
+            }
+            None => fallback,
+        }
+    }
+
+    /// E10g.2 — the menus' and dropdowns' text: a row's and the
+    /// selected row's, `ui.menu`'s and `ui.menu.selected`'s fg where
+    /// set (`Default` ↦ plain), else today's one constant for both.
+    fn menu_text_colors(&self) -> (Color, Color) {
+        let row = self.face_fg_or("ui.menu", MENU_TEXT);
+        (row, self.face_fg_or("ui.menu.selected", row))
+    }
+
+    /// E10g.2 — the minimap's colors from `ui.minimap` and
+    /// `ui.minimap.thumb`, each its constant where unset.
+    fn minimap_palette(&self) -> MinimapPalette {
+        let unset = MinimapPalette::DEFAULT;
+        MinimapPalette {
+            bg: self.face_fill_or("ui.minimap", unset.bg),
+            default_line: self.face_ink_or("ui.minimap", unset.default_line),
+            thumb_fill: self.face_fill_or("ui.minimap.thumb", unset.thumb_fill),
+            thumb_border: self.face_ink_or("ui.minimap.thumb", unset.thumb_border),
+            srgb_surface: self.config.format.is_srgb(),
+        }
+    }
+
+    /// Fill resolution for an opaque surface (E10g review 1's Medium 3):
+    /// a menu's, a dropdown's or the hover popup's fill and selected
+    /// row, the scrollbar, the minimap, the panel divider. Face set with
+    /// a background → that background carrying the site's alpha; unset,
+    /// or set with a `Default` background (a face that colors the text
+    /// alone) → `fallback`, today's constant. Never transparent, as
+    /// [`Self::face_wash_or`]'s "no wash" is: that is the off switch of
+    /// a wash over text, and a fill that paints nothing leaves its labels
+    /// drawn over the document.
+    fn face_fill_or(&self, name: &str, fallback: [f32; 4]) -> [f32; 4] {
+        self.faces
+            .get(name)
+            .and_then(|f| cell_color_to_glyphon(f.bg))
+            .map_or(fallback, |c| self.face_rgba(c, fallback[3]))
     }
 
     /// Wash resolution for a {bg}-mask face: face set → its bg RGB
     /// carrying the site's current alpha (`Default` bg ↦ no wash — a
     /// fully transparent quad); unset → `fallback` (today's wash
-    /// constant, alpha included).
+    /// constant, alpha included). For a wash over text only (the
+    /// selection, the search matches); a fill takes
+    /// [`Self::face_fill_or`].
     fn face_wash_or(&self, name: &str, fallback: [f32; 4]) -> [f32; 4] {
         match self.faces.get(name) {
             Some(f) => match cell_color_to_glyphon(f.bg) {
-                Some(c) => glyphon_to_rgba(c, fallback[3]),
+                Some(c) => self.face_rgba(c, fallback[3]),
                 None => [0.0, 0.0, 0.0, 0.0],
             },
             None => fallback,
@@ -15667,15 +15776,18 @@ impl State {
     /// unset: each band site keeps its own constant.
     fn modeline_face_colors(&self) -> Option<([f32; 4], Color)> {
         let f = self.faces.get("ui.modeline")?;
-        let text = cell_color_to_glyphon(f.fg).unwrap_or_else(plain_text_color);
-        let quad = match cell_color_to_glyphon(f.bg) {
-            Some(c) => glyphon_to_rgba(c, 1.0),
-            None => WINDOW_BG_RGBA,
-        };
+        let text = cell_color_to_glyphon(f.fg).unwrap_or_else(|| self.plain_text_color());
+        let band = cell_color_to_glyphon(f.bg);
         Some(if f.reverse {
-            (glyphon_to_rgba(text, 1.0), rgba_to_glyphon(quad))
+            (
+                self.face_rgba(text, 1.0),
+                band.unwrap_or_else(|| self.window_bg_text_color()),
+            )
         } else {
-            (quad, text)
+            (
+                band.map_or_else(|| self.window_bg_rgba(), |c| self.face_rgba(c, 1.0)),
+                text,
+            )
         })
     }
 
@@ -15707,7 +15819,7 @@ impl State {
             .get(name)
             .and_then(|f| cell_color_to_glyphon(f.fg))
         {
-            Some(c) => glyphon_to_rgba(c, 1.0),
+            Some(c) => self.face_rgba(c, 1.0),
             None => fallback,
         }
     }
@@ -16050,23 +16162,33 @@ impl State {
     /// per row (separators are blank lines so rows stay aligned with the
     /// bg quads). A no-op string when the menu is closed.
     fn refresh_menu_buffer(&mut self) {
-        let text = self.menu.as_ref().map_or_else(String::new, |menu| {
+        let lines: Vec<String> = self.menu.as_ref().map_or_else(Vec::new, |menu| {
             menu.rows
                 .iter()
-                .map(|r| if r.separator { "" } else { r.label.as_str() })
-                .collect::<Vec<_>>()
-                .join("\n")
+                .map(|r| if r.separator { "" } else { r.label.as_str() }.to_owned())
+                .collect()
         });
+        let selected = self.selected_row_color(self.menu.as_ref().and_then(|m| m.active));
         let family = self.resolved_family.clone();
-        self.menu_buffer.set_text(
+        shape_rows(
+            &mut self.menu_buffer,
             &mut self.font_system,
-            &text,
-            &Attrs::new().family(Family::Name(&family)),
-            Shaping::Advanced,
-            None,
+            &family,
+            &lines,
+            selected,
         );
-        self.menu_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// E10g.2 — where the selected row of a menu or dropdown takes its
+    /// own text color: `Some((row, ui.menu.selected's fg))` when the
+    /// theme sets that face and a row is selected, else `None`, every
+    /// row in the area's one default color as before.
+    fn selected_row_color(&self, selected: Option<u32>) -> Option<(usize, Color)> {
+        if !self.faces.contains_key("ui.menu.selected") {
+            return None;
+        }
+        let (_, color) = self.menu_text_colors();
+        selected.map(|row| (row as usize, color))
     }
 
     /// Popup background, active-row highlight, and separator quads
@@ -16082,7 +16204,7 @@ impl State {
             y: ay,
             w,
             h: menu.rows.len() as f32 * self.fm.menu_row_height(),
-            color: MENU_BG,
+            color: self.face_fill_or("ui.menu", MENU_BG),
         }];
         for (i, row) in menu.rows.iter().enumerate() {
             let ry = ay + i as f32 * self.fm.menu_row_height();
@@ -16092,7 +16214,7 @@ impl State {
                     y: ry + self.fm.menu_row_height() / 2.0 - 0.5,
                     w: w - 2.0 * MENU_PAD_X,
                     h: 1.0,
-                    color: MENU_SEPARATOR_BG,
+                    color: self.face_ink_or("ui.menu.separator", MENU_SEPARATOR_BG),
                 });
             } else if menu.active == Some(i as u32) {
                 rects.push(MinimapRect {
@@ -16100,7 +16222,7 @@ impl State {
                     y: ry,
                     w,
                     h: self.fm.menu_row_height(),
-                    color: MENU_SELECTED_BG,
+                    color: self.face_fill_or("ui.menu.selected", MENU_SELECTED_BG),
                 });
             }
         }
@@ -16115,26 +16237,24 @@ impl State {
     /// row without one renders the bare label, so a file-path or
     /// buffer-name prompt looks exactly as it did before v23.
     fn refresh_mb_buffer(&mut self) {
-        let text = self.minibuffer.as_ref().map_or_else(String::new, |mb| {
+        let lines: Vec<String> = self.minibuffer.as_ref().map_or_else(Vec::new, |mb| {
             mb.rows
                 .iter()
                 .map(|row| match row.detail.as_deref() {
                     Some(detail) => format!("{}  {detail}", row.label),
                     None => row.label.clone(),
                 })
-                .collect::<Vec<_>>()
-                .join("\n")
+                .collect()
         });
+        let selected = self.selected_row_color(self.minibuffer.as_ref().and_then(|m| m.selected));
         let family = self.resolved_family.clone();
-        self.mb_buffer.set_text(
+        shape_rows(
+            &mut self.mb_buffer,
             &mut self.font_system,
-            &text,
-            &Attrs::new().family(Family::Name(&family)),
-            Shaping::Advanced,
-            None,
+            &family,
+            &lines,
+            selected,
         );
-        self.mb_buffer
-            .shape_until_scroll(&mut self.font_system, false);
     }
 
     /// The visible slice `(first, count)` of the dropdown candidates
@@ -16189,7 +16309,7 @@ impl State {
             y: top_y,
             w: width,
             h: count as f32 * self.fm.mb_drop_row_height(),
-            color: MENU_BG,
+            color: self.face_fill_or("ui.menu", MENU_BG),
         }];
         // Highlight the selection at its row *within the visible window*;
         // by construction it always falls inside [first, first + count).
@@ -16202,7 +16322,7 @@ impl State {
                 y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
                 h: self.fm.mb_drop_row_height(),
-                color: MENU_SELECTED_BG,
+                color: self.face_fill_or("ui.menu.selected", MENU_SELECTED_BG),
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -16212,7 +16332,7 @@ impl State {
     /// per candidate: kind glyph, label, then the dimmable detail.
     /// Empty when the popup is closed.
     fn refresh_completion_buffer(&mut self) {
-        let text = self.completion.as_ref().map_or_else(String::new, |comp| {
+        let lines: Vec<String> = self.completion.as_ref().map_or_else(Vec::new, |comp| {
             comp.rows
                 .iter()
                 .map(|row| {
@@ -16222,19 +16342,17 @@ impl State {
                         None => format!("{glyph} {}", row.label),
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("\n")
+                .collect()
         });
+        let selected = self.selected_row_color(self.completion.as_ref().and_then(|c| c.selected));
         let family = self.resolved_family.clone();
-        self.completion_buffer.set_text(
+        shape_rows(
+            &mut self.completion_buffer,
             &mut self.font_system,
-            &text,
-            &Attrs::new().family(Family::Name(&family)),
-            Shaping::Advanced,
-            None,
+            &family,
+            &lines,
+            selected,
         );
-        self.completion_buffer
-            .shape_until_scroll(&mut self.font_system, false);
     }
 
     /// The pixel position of the completion popup's byte anchor:
@@ -16378,7 +16496,7 @@ impl State {
             y: top_y,
             w: width,
             h: count as f32 * self.fm.mb_drop_row_height(),
-            color: MENU_BG,
+            color: self.face_fill_or("ui.menu", MENU_BG),
         }];
         if let Some(sel) = selected.map(|s| s as usize)
             && sel >= first
@@ -16389,7 +16507,7 @@ impl State {
                 y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
                 h: self.fm.mb_drop_row_height(),
-                color: MENU_SELECTED_BG,
+                color: self.face_fill_or("ui.menu.selected", MENU_SELECTED_BG),
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -16592,7 +16710,7 @@ impl State {
             y: b.y,
             w: b.w,
             h: b.h,
-            color: self.face_wash_or("ui.popup", MENU_BG),
+            color: self.face_fill_or("ui.popup", MENU_BG),
         }];
         if b.rows > b.shown {
             let thumb_h = (b.h * b.shown as f32 / b.rows as f32).max(4.0);
@@ -16603,7 +16721,7 @@ impl State {
                 y: b.y + travel * at,
                 w: 3.0,
                 h: thumb_h,
-                color: POPUP_THUMB,
+                color: self.face_fill_or("ui.scrollbar.thumb", POPUP_THUMB),
             });
         }
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
@@ -17702,6 +17820,9 @@ impl State {
             .map_or(Color::rgb(168, 168, 180), |(_, text)| text);
         let left_color = self.status_left_color();
         let gutter_color = self.face_fg_or("ui.gutter", Color::rgb(120, 120, 135));
+        // E10g.2 — the buffer face's text color, and the menus' text.
+        let plain_color = self.plain_text_color();
+        let (menu_text, _) = self.menu_text_colors();
         // Vterm Stage 3 — the document code layer is dropped entirely
         // in terminal mode; terminal glyphs draw from their own
         // per-run layer below, positioned at cell origins.
@@ -17727,7 +17848,7 @@ impl State {
                     bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
-                default_color: Color::rgb(230, 230, 235),
+                default_color: plain_color,
                 custom_glyphs: &[],
             }]
         };
@@ -17799,7 +17920,7 @@ impl State {
                     bottom: document_text_bottom(self.layout.height, self.fm, self.band_inset())
                         .round() as i32,
                 },
-                default_color: MATH_INK_COLOR,
+                default_color: plain_color,
                 custom_glyphs: &[],
             })
             .collect();
@@ -17873,7 +17994,7 @@ impl State {
                     bottom: (ay + menu.rows.len() as f32 * self.fm.menu_row_height()).round()
                         as i32,
                 },
-                default_color: Color::rgb(232, 232, 238),
+                default_color: menu_text,
                 custom_glyphs: &[],
             })
             .into_iter()
@@ -17955,7 +18076,7 @@ impl State {
                     right: (x + width).round() as i32,
                     bottom: (top_y + count as f32 * self.fm.mb_drop_row_height()).round() as i32,
                 },
-                default_color: Color::rgb(232, 232, 238),
+                default_color: menu_text,
                 custom_glyphs: &[],
             })
             .into_iter()
@@ -18045,7 +18166,7 @@ impl State {
                                 right: right.min(clip_right),
                                 bottom: (top + line).round().min(clip_bottom as f32) as i32,
                             },
-                            default_color: Color::rgb(230, 230, 235),
+                            default_color: plain_color,
                             custom_glyphs: &[],
                         }
                     })
@@ -18128,6 +18249,7 @@ impl State {
             )
             .expect("panel text_renderer prepare");
 
+        let clear = self.clear_color();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -18141,7 +18263,7 @@ impl State {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BG),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -18317,6 +18439,7 @@ impl State {
             visible_lines,
             self.fm,
             self.band_inset(),
+            self.minimap_palette(),
         );
         rects_to_vertex_bytes(&rects, self.layout.width, self.layout.height)
     }
@@ -18464,7 +18587,7 @@ impl State {
                 line_offsets,
                 lo,
                 hi,
-                glyphon_to_rgba(color, CURRENT_LINE_WASH_ALPHA),
+                self.face_rgba(color, CURRENT_LINE_WASH_ALPHA),
                 None,
             );
         }
@@ -18588,6 +18711,16 @@ impl State {
     fn build_math_paint(&mut self) -> (Vec<(Buffer, f32, f32)>, Vec<MinimapRect>) {
         let mut pending: Vec<(char, f32, f32, f32)> = Vec::new();
         let mut rules: Vec<MinimapRect> = Vec::new();
+        // E10g.2 — the fraction rule in the plain text color: the buffer
+        // face's fg where the theme sets one, else today's constant.
+        let math_rule = if self
+            .buffer_face()
+            .is_some_and(|f| f.fg != CellColor::Default)
+        {
+            self.face_rgba(self.plain_text_color(), 1.0)
+        } else {
+            MATH_INK_RGBA
+        };
         if self.line_math_cache.iter().all(|m| m.placed.is_empty()) {
             return (Vec::new(), rules);
         }
@@ -18641,7 +18774,7 @@ impl State {
                                     y: baseline_px - y - thickness / 2.0,
                                     w: sw,
                                     h: thickness,
-                                    color: MATH_INK_RGBA,
+                                    color: math_rule,
                                 });
                             }
                         }
@@ -19707,6 +19840,7 @@ fn minimap_rects(
     visible_lines: usize,
     fm: FontMetrics,
     band: PanelBandInset,
+    palette: MinimapPalette,
 ) -> Vec<MinimapRect> {
     let Some(x) = minimap_left(surface_width) else {
         return Vec::new();
@@ -19722,7 +19856,7 @@ fn minimap_rects(
         y: MINIMAP_TOP,
         w: MINIMAP_WIDTH,
         h: height,
-        color: MINIMAP_BG,
+        color: palette.bg,
     });
 
     if lines.len() <= pixel_rows {
@@ -19739,7 +19873,7 @@ fn minimap_rects(
                     x,
                     y0,
                     (y1 - y0).clamp(1.0, MINIMAP_MAX_LINE_STROKE_HEIGHT),
-                    minimap_style_color(style),
+                    minimap_style_color(style, &palette),
                     shape,
                 );
             }
@@ -19758,7 +19892,10 @@ fn minimap_rects(
                     x,
                     y0,
                     (y1 - y0).max(1.0),
-                    minimap_style_color(dominant_line_style(&lines[line_start..line_end])),
+                    minimap_style_color(
+                        dominant_line_style(&lines[line_start..line_end]),
+                        &palette,
+                    ),
                     shape,
                 );
             }
@@ -19772,8 +19909,36 @@ fn minimap_rects(
         lines.len(),
         first_visible_line,
         visible_lines,
+        palette,
     );
     rects
+}
+
+/// E10g.2 — the minimap's four colors: `ui.minimap`'s bg for the panel
+/// and fg for a line with no color of its own, `ui.minimap.thumb`'s bg
+/// for the visible window's fill and fg for its edges
+/// ([`State::minimap_palette`]); and whether the surface encodes sRGB,
+/// so that a line's own color goes to linear first, as every face's
+/// color on a quad does ([`State::face_rgba`]; E10g review 1's Low 4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MinimapPalette {
+    bg: [f32; 4],
+    default_line: [f32; 4],
+    thumb_fill: [f32; 4],
+    thumb_border: [f32; 4],
+    srgb_surface: bool,
+}
+
+impl MinimapPalette {
+    /// Today's constants, on a surface that encodes nothing: the
+    /// painter's own unit rows, and each unset color of a real one.
+    const DEFAULT: Self = Self {
+        bg: MINIMAP_BG,
+        default_line: MINIMAP_DEFAULT_LINE,
+        thumb_fill: MINIMAP_THUMB_FILL,
+        thumb_border: MINIMAP_THUMB_BORDER,
+        srgb_surface: false,
+    };
 }
 
 impl MinimapLineShape {
@@ -19816,6 +19981,7 @@ fn push_minimap_thumb(
     line_count: usize,
     first_visible_line: usize,
     visible_lines: usize,
+    palette: MinimapPalette,
 ) {
     let start_line = first_visible_line.min(line_count);
     let end_line = start_line
@@ -19835,21 +20001,21 @@ fn push_minimap_thumb(
         y: y0,
         w: MINIMAP_WIDTH,
         h,
-        color: MINIMAP_THUMB_FILL,
+        color: palette.thumb_fill,
     });
     rects.push(MinimapRect {
         x,
         y: y0,
         w: 1.0,
         h,
-        color: MINIMAP_THUMB_BORDER,
+        color: palette.thumb_border,
     });
     rects.push(MinimapRect {
         x: x + MINIMAP_WIDTH - 1.0,
         y: y0,
         w: 1.0,
         h,
-        color: MINIMAP_THUMB_BORDER,
+        color: palette.thumb_border,
     });
 }
 
@@ -19936,7 +20102,7 @@ fn advance_display_col(col: usize, ch: char) -> usize {
     pmacs_protocol::columns::advance_char(u32::try_from(col).unwrap_or(u32::MAX), ch) as usize
 }
 
-fn minimap_style_color(style: CellStyle) -> [f32; 4] {
+fn minimap_style_color(style: CellStyle, palette: &MinimapPalette) -> [f32; 4] {
     // A set underline_color is the producer's diagnostic mark for the
     // line (protocol v6, T M4.6 parity) — the minimap's gutter sign.
     // It outranks the syntax-dominant fg so error/warning lines read
@@ -19945,13 +20111,19 @@ fn minimap_style_color(style: CellStyle) -> [f32; 4] {
         CellColor::Default => style.fg,
         marked => marked,
     };
-    match color {
-        CellColor::Default => MINIMAP_DEFAULT_LINE,
+    let [r, g, b, a] = match color {
+        // Resolved already: the face's fg converted, or the constant.
+        CellColor::Default => return palette.default_line,
         CellColor::Rgb(r, g, b) => rgb_to_minimap_color(r, g, b),
         CellColor::Indexed(idx) => {
             let c = indexed_to_glyphon(idx);
             rgb_to_minimap_color(c.r(), c.g(), c.b())
         }
+    };
+    if palette.srgb_surface {
+        [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a]
+    } else {
+        [r, g, b, a]
     }
 }
 
@@ -21378,22 +21550,76 @@ fn cell_color_to_glyphon(c: CellColor) -> Option<glyphon::Color> {
     }
 }
 
-/// The GPU's "plain" text color — the buffer-text default at
-/// `main.rs`'s primary `TextArea`. The Q#TH5 mapping target for a
-/// set face's `Default` fg.
-fn plain_text_color() -> glyphon::Color {
-    glyphon::Color::rgb(230, 230, 235)
-}
+/// The GPU's "plain" text color when no `ui.default` face sets one —
+/// the buffer-text default at `main.rs`'s primary `TextArea`. The
+/// Q#TH5 mapping target for a set face's `Default` fg, through
+/// [`State::plain_text_color`].
+const PLAIN_TEXT: glyphon::Color = glyphon::Color::rgb(230, 230, 235);
 
-/// The window clear color as a quad rgba — the Q#TH5 mapping target
-/// for a set face's `Default` bg (an untinted surface). Must equal
-/// [`BG`].
+/// The window clear color when no `ui.default` face sets one, as a
+/// quad rgba — the Q#TH5 mapping target for a set face's `Default` bg
+/// (an untinted surface), through [`State::window_bg_rgba`]. Linear
+/// values, as every float constant here: the surface encodes them.
 const WINDOW_BG_RGBA: [f32; 4] = [0.05, 0.05, 0.07, 1.0];
+
+/// E10g.2 — the buffer face's name, as the daemon's `ThemeFacts`
+/// carries it (`pmacs::highlight::BUFFER_FACE`; this crate cannot name
+/// that constant, D21).
+const BUFFER_FACE: &str = "ui.default";
+
+/// One sRGB channel (`0..=1`) to linear light — what a face's color is
+/// before an sRGB surface encodes it (E10g.2). The standard transfer
+/// function.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
 
 /// Resolved terminal RGB → quad color, carrying `alpha`.
 /// A resolved wire cell color as a glyphon text color.
 fn rgb_to_glyphon(rgb: crate::terminal::Rgb) -> Color {
     Color::rgb(rgb[0], rgb[1], rgb[2])
+}
+
+/// E10g.2 — shape `lines` into `buffer`, one per line. With `selected`
+/// as `Some((row, color))` that row's glyphs take `color` and the rest
+/// the text area's default; with `None` the text is plain, every row
+/// the default, exactly as each refresh shaped it before.
+fn shape_rows(
+    buffer: &mut Buffer,
+    font_system: &mut FontSystem,
+    family: &str,
+    lines: &[String],
+    selected: Option<(usize, Color)>,
+) {
+    let attrs = Attrs::new().family(Family::Name(family));
+    match selected {
+        None => buffer.set_text(
+            font_system,
+            &lines.join("\n"),
+            &attrs,
+            Shaping::Advanced,
+            None,
+        ),
+        Some((row, color)) => {
+            let spans = lines.iter().enumerate().flat_map(|(i, line)| {
+                let colored = if i == row {
+                    attrs.clone().color(color)
+                } else {
+                    attrs.clone()
+                };
+                let newline = (i > 0).then(|| ("\n", attrs.clone()));
+                newline
+                    .into_iter()
+                    .chain(std::iter::once((line.as_str(), colored)))
+            });
+            buffer.set_rich_text(font_system, spans, &attrs, Shaping::Advanced, None);
+        }
+    }
+    buffer.shape_until_scroll(font_system, false);
 }
 
 fn rgb_to_quad(rgb: crate::terminal::Rgb, alpha: f32) -> [f32; 4] {
@@ -24448,6 +24674,7 @@ mod tests {
             2,
             FontMetrics::default(),
             PanelBandInset::ABSENT,
+            MinimapPalette::DEFAULT,
         );
 
         assert!(
@@ -24494,6 +24721,7 @@ mod tests {
             30,
             FontMetrics::default(),
             PanelBandInset::ABSENT,
+            MinimapPalette::DEFAULT,
         );
 
         let pixel_rows = (120.0 - MINIMAP_TOP - MINIMAP_BOTTOM).round() as usize;
@@ -24534,6 +24762,7 @@ mod tests {
             30,
             FontMetrics::default(),
             PanelBandInset::ABSENT,
+            MinimapPalette::DEFAULT,
         );
 
         // The strokes are all suppressed (no content to draw), but the
@@ -24589,7 +24818,8 @@ mod tests {
                 0,
                 1,
                 FontMetrics::default(),
-                PanelBandInset::ABSENT
+                PanelBandInset::ABSENT,
+                MinimapPalette::DEFAULT
             )
             .is_empty()
         );
@@ -24618,6 +24848,7 @@ mod tests {
             2,
             FontMetrics::default(),
             PanelBandInset::ABSENT,
+            MinimapPalette::DEFAULT,
         );
         let strokes: Vec<_> = rects
             .iter()
@@ -27336,17 +27567,18 @@ mod tests {
         // Exact float equality is deliberate: both sides derive from
         // the same constants through the same arithmetic.
         let has = |c: [f32; 4]| colors.contains(&c);
-        // Local rects: face RGB with each site's original alpha.
+        // Local rects: face RGB with each site's original alpha, taken
+        // to linear for the sRGB surface (E10g.2).
         assert!(
-            has(glyphon_to_rgba(glyphon::Color::rgb(9, 99, 199), 0.30)),
+            has(state.face_rgba(glyphon::Color::rgb(9, 99, 199), 0.30)),
             "local selection must use ui.selection"
         );
         assert!(
-            has(glyphon_to_rgba(glyphon::Color::rgb(10, 20, 30), 0.30)),
+            has(state.face_rgba(glyphon::Color::rgb(10, 20, 30), 0.30)),
             "search match must use ui.search.match"
         );
         assert!(
-            has(glyphon_to_rgba(glyphon::Color::rgb(40, 50, 60), 0.48)),
+            has(state.face_rgba(glyphon::Color::rgb(40, 50, 60), 0.48)),
             "active match must use ui.search.match.active"
         );
         // Peer rects: the hardcoded constants, face table ignored.
@@ -32916,5 +33148,764 @@ mod tests {
             // `follow_left(0, ..)` above.
             let _ = follow_to(&mut state, bid, 0);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // E10g.2 — the GPU's constant surfaces on faces
+    // -----------------------------------------------------------------
+
+    /// One rect's color from quad vertex bytes: each vertex is two f32
+    /// of position and four of color, six vertices to a rect.
+    fn quad_colors(bytes: &[u8]) -> Vec<[f32; 4]> {
+        let floats_per_rect = 6 * 6;
+        (0..bytes.len() / (floats_per_rect * 4))
+            .map(|rect| {
+                let at = rect * floats_per_rect + 2;
+                [
+                    f32_at(bytes, at),
+                    f32_at(bytes, at + 1),
+                    f32_at(bytes, at + 2),
+                    f32_at(bytes, at + 3),
+                ]
+            })
+            .collect()
+    }
+
+    fn rgb_px(pixels: &[u8], width: u32, x: usize, y: usize) -> [u8; 3] {
+        let at = (y * width as usize + x) * 4;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    }
+
+    fn near(a: [u8; 3], b: [u8; 3], tolerance: u8) -> bool {
+        a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= tolerance)
+    }
+
+    /// The brightest pixel of the first text row, the core of a glyph
+    /// stroke: the text color a frame draws.
+    fn brightest_text_px(pixels: &[u8], width: u32) -> [u8; 3] {
+        let mut best = [0, 0, 0];
+        for y in 16..36 {
+            for x in 16..120 {
+                let px = rgb_px(pixels, width, x, y);
+                let sum = |c: [u8; 3]| c.iter().map(|v| u32::from(*v)).sum::<u32>();
+                if sum(px) > sum(best) {
+                    best = px;
+                }
+            }
+        }
+        best
+    }
+
+    /// E10g.2 — with `ui.default` set the window clears to its bg, shown
+    /// as the face's RGB (the clear goes to linear first, for the sRGB
+    /// surface), and the document's plain text draws in its fg; unset,
+    /// the frame is today's.
+    #[test]
+    fn e10g2_the_window_clears_to_the_buffer_face_and_text_takes_its_fg() {
+        let Some(mut state) = headless_or_skip(320, 240, "mmmm mmmm") else {
+            return;
+        };
+        let before = state.render_offscreen();
+        let bg_before = rgb_px(&before, 320, 4, 120);
+        let text_before = brightest_text_px(&before, 320);
+        assert!(
+            near(text_before, [230, 230, 235], 2),
+            "unset: today's plain text, {text_before:?}"
+        );
+
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.default",
+                CellStyle {
+                    fg: CellColor::Rgb(200, 120, 60),
+                    bg: CellColor::Rgb(18, 18, 18),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let after = state.render_offscreen();
+        let bg_after = rgb_px(&after, 320, 4, 120);
+        assert!(
+            near(bg_after, [18, 18, 18], 1),
+            "the clear is the face's bg as written: {bg_after:?}"
+        );
+        assert!(!near(bg_before, [18, 18, 18], 1), "control: {bg_before:?}");
+        let text_after = brightest_text_px(&after, 320);
+        assert!(
+            near(text_after, [200, 120, 60], 3),
+            "plain text in the face's fg: {text_after:?}"
+        );
+
+        apply_faces(&mut state, Vec::new());
+        let reset = state.render_offscreen();
+        assert_eq!(
+            rgb_px(&reset, 320, 4, 120),
+            bg_before,
+            "unset again, today's clear"
+        );
+    }
+
+    /// E10g.2 — the minimap's panel, unstyled lines and thumb take
+    /// `ui.minimap` and `ui.minimap.thumb`, through the frame's own
+    /// vertex path; unset, their constants.
+    #[test]
+    fn e10g2_the_minimap_takes_its_faces() {
+        let text = "fn main() {}\n".repeat(4);
+        let Some(mut state) = headless_or_skip(480, 240, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 1,
+            lines: vec![CellStyle::default(); 4],
+        });
+        let unset = quad_colors(&state.minimap_vertex_bytes());
+        for constant in [
+            MINIMAP_BG,
+            MINIMAP_DEFAULT_LINE,
+            MINIMAP_THUMB_FILL,
+            MINIMAP_THUMB_BORDER,
+        ] {
+            assert!(
+                unset.iter().any(|c| color_close(*c, constant)),
+                "unset: {constant:?} in {unset:?}"
+            );
+        }
+
+        let red = CellColor::Rgb(255, 0, 0);
+        let blue = CellColor::Rgb(0, 0, 255);
+        apply_faces(
+            &mut state,
+            vec![
+                theme_face(
+                    "ui.minimap",
+                    CellStyle {
+                        fg: red,
+                        bg: blue,
+                        ..CellStyle::default()
+                    },
+                ),
+                theme_face(
+                    "ui.minimap.thumb",
+                    CellStyle {
+                        fg: blue,
+                        bg: red,
+                        ..CellStyle::default()
+                    },
+                ),
+            ],
+        );
+        let set = quad_colors(&state.minimap_vertex_bytes());
+        let has = |want: [f32; 4]| set.iter().any(|c| color_close(*c, want));
+        assert!(has([0.0, 0.0, 1.0, MINIMAP_BG[3]]), "the panel: {set:?}");
+        assert!(has([1.0, 0.0, 0.0, MINIMAP_DEFAULT_LINE[3]]), "a line");
+        assert!(has([1.0, 0.0, 0.0, MINIMAP_THUMB_FILL[3]]), "the thumb");
+        assert!(has([0.0, 0.0, 1.0, MINIMAP_THUMB_BORDER[3]]), "its edges");
+        assert!(!has(MINIMAP_BG), "no constant left: {set:?}");
+    }
+
+    /// E10g.2 — the scrollbar's track and thumb take `ui.scrollbar` and
+    /// `ui.scrollbar.thumb`; unset, their constants.
+    #[test]
+    fn e10g2_the_scrollbar_takes_its_faces() {
+        let text = "line\n".repeat(200);
+        let Some(mut state) = headless_or_skip(320, 240, &text) else {
+            return;
+        };
+        let unset: Vec<[f32; 4]> = state.scrollbar_rects().iter().map(|r| r.color).collect();
+        assert_eq!(unset, vec![SCROLLBAR_TRACK_BG, SCROLLBAR_THUMB_FILL]);
+        apply_faces(
+            &mut state,
+            vec![
+                theme_face(
+                    "ui.scrollbar",
+                    CellStyle {
+                        bg: CellColor::Rgb(0, 255, 0),
+                        ..CellStyle::default()
+                    },
+                ),
+                theme_face(
+                    "ui.scrollbar.thumb",
+                    CellStyle {
+                        bg: CellColor::Rgb(255, 0, 255),
+                        ..CellStyle::default()
+                    },
+                ),
+            ],
+        );
+        let set: Vec<[f32; 4]> = state.scrollbar_rects().iter().map(|r| r.color).collect();
+        assert_eq!(
+            set,
+            vec![
+                [0.0, 1.0, 0.0, SCROLLBAR_TRACK_BG[3]],
+                [1.0, 0.0, 1.0, SCROLLBAR_THUMB_FILL[3]]
+            ]
+        );
+    }
+
+    /// A context menu (an item, a rule, an item; the first active) and a
+    /// two-row minibuffer dropdown (the second selected), as the daemon
+    /// sends them.
+    fn open_menu_and_dropdown(state: &mut State) {
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: vec![
+                MenuPromptRow {
+                    label: "Copy".into(),
+                    separator: false,
+                },
+                MenuPromptRow {
+                    label: String::new(),
+                    separator: true,
+                },
+                MenuPromptRow {
+                    label: "Paste".into(),
+                    separator: false,
+                },
+            ],
+            active: Some(0),
+        });
+        let _ = state.apply_attach_message(InstanceMessage::MinibufferPromptRows {
+            prompt: Some("Pick: ".into()),
+            input: String::new(),
+            cursor: 0,
+            rows: vec![
+                MinibufferRow {
+                    label: "one".into(),
+                    detail: None,
+                },
+                MinibufferRow {
+                    label: "two".into(),
+                    detail: None,
+                },
+            ],
+            selected: Some(1),
+            total: 2,
+        });
+    }
+
+    /// `ui.menu` red on blue, `ui.menu.selected` yellow on green and
+    /// `ui.menu.separator` magenta.
+    fn menu_faces() -> Vec<pmacs_protocol::ThemeFace> {
+        let rgb = CellColor::Rgb;
+        let face = |fg, bg| CellStyle {
+            fg,
+            bg,
+            ..CellStyle::default()
+        };
+        vec![
+            theme_face("ui.menu", face(rgb(255, 0, 0), rgb(0, 0, 255))),
+            theme_face("ui.menu.selected", face(rgb(255, 255, 0), rgb(0, 255, 0))),
+            theme_face(
+                "ui.menu.separator",
+                face(rgb(255, 0, 255), CellColor::Default),
+            ),
+        ]
+    }
+
+    /// E10g.2 — the context menu and the minibuffer dropdown take
+    /// `ui.menu` (fill and text), `ui.menu.selected` (the selected row's
+    /// fill and its glyphs) and `ui.menu.separator` (the rule); unset,
+    /// their constants, every row's glyphs in the area's one color.
+    #[test]
+    fn e10g2_the_menu_and_the_dropdown_take_the_menu_faces() {
+        let Some(mut state) = headless_or_skip(480, 320, "fn main() {}") else {
+            return;
+        };
+        open_menu_and_dropdown(&mut state);
+        let colored_lines = |buffer: &Buffer| -> Vec<(usize, Option<Color>)> {
+            buffer
+                .layout_runs()
+                .filter_map(|run| run.glyphs.first().map(|g| (run.line_i, g.color_opt)))
+                .collect()
+        };
+
+        state.refresh_menu_buffer();
+        state.refresh_mb_buffer();
+        assert_eq!(
+            quad_colors(&state.menu_vertex_bytes()),
+            vec![MENU_BG, MENU_SELECTED_BG, MENU_SEPARATOR_BG]
+        );
+        assert_eq!(
+            quad_colors(&state.mb_dropdown_vertex_bytes()),
+            vec![MENU_BG, MENU_SELECTED_BG]
+        );
+        assert!(
+            colored_lines(&state.menu_buffer)
+                .iter()
+                .all(|(_, c)| c.is_none()),
+            "unset: every row in the area's default color"
+        );
+        assert_eq!(state.menu_text_colors(), (MENU_TEXT, MENU_TEXT));
+
+        apply_faces(&mut state, menu_faces());
+        state.refresh_menu_buffer();
+        state.refresh_mb_buffer();
+        let blue = [0.0, 0.0, 1.0, MENU_BG[3]];
+        let green = [0.0, 1.0, 0.0, MENU_SELECTED_BG[3]];
+        assert_eq!(
+            quad_colors(&state.menu_vertex_bytes()),
+            vec![blue, green, [1.0, 0.0, 1.0, MENU_SEPARATOR_BG[3]]]
+        );
+        assert_eq!(
+            quad_colors(&state.mb_dropdown_vertex_bytes()),
+            vec![blue, green]
+        );
+        let yellow = Some(Color::rgb(255, 255, 0));
+        assert_eq!(
+            colored_lines(&state.menu_buffer),
+            vec![(0, yellow), (2, None)],
+            "the active row's glyphs in the selected color"
+        );
+        assert_eq!(
+            colored_lines(&state.mb_buffer),
+            vec![(0, None), (1, yellow)],
+            "the selected candidate's glyphs in the selected color"
+        );
+        assert_eq!(
+            state.menu_text_colors(),
+            (Color::rgb(255, 0, 0), Color::rgb(255, 255, 0))
+        );
+    }
+
+    /// E10g review 1's P5 (E10g.2). A face set without a background
+    /// paints a GPU wash transparent (`face_wash_or`: "`Default` bg ↦ no
+    /// wash"), which is the off switch for a selection or search wash,
+    /// and is what the menus' and dropdowns' fills now get from a theme
+    /// that sets `ui.menu` with a foreground alone, or from an `init.lua`
+    /// that sets only the bare `ui` catch-all's foreground (the daemon
+    /// ships every face the walk reaches, `ui.menu.selected` included,
+    /// each with a `Default` bg). With no fill the menu's labels are drawn
+    /// over the document text beneath them, and the selected row has no
+    /// wash. The fills stay opaque, as their constants are.
+    #[test]
+    fn e10g_review1_p5_a_menu_face_without_a_background_keeps_the_fills_opaque() {
+        let Some(mut state) = headless_or_skip(480, 320, "fn main() {}") else {
+            return;
+        };
+        open_menu_and_dropdown(&mut state);
+        let fg_only = CellStyle {
+            fg: CellColor::Rgb(220, 220, 220),
+            ..CellStyle::default()
+        };
+        apply_faces(
+            &mut state,
+            ["ui.menu", "ui.menu.selected", "ui.menu.separator"]
+                .into_iter()
+                .map(|name| theme_face(name, fg_only))
+                .collect(),
+        );
+        state.refresh_menu_buffer();
+        state.refresh_mb_buffer();
+        let mut found = Vec::new();
+        for (what, quads) in [
+            ("context menu", quad_colors(&state.menu_vertex_bytes())),
+            (
+                "minibuffer dropdown",
+                quad_colors(&state.mb_dropdown_vertex_bytes()),
+            ),
+        ] {
+            for (i, quad) in quads.iter().enumerate() {
+                if quad[3] == 0.0 {
+                    found.push(format!("{what}: quad {i} is transparent: {quad:?}"));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// The surfaces [`e10g_f1_every_fill_keeps_its_constant_under_a_face_without_a_background`]
+    /// reads, open on `state`'s document: a two-row completion dropdown
+    /// (the second selected), a hover popup long enough for its thumb, a
+    /// style summary for the minimap, and a presented panel for the
+    /// divider.
+    fn open_every_other_fill(state: &mut State) {
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.view_range = (0, state.current_text.len() as u64);
+        let row = |label: &str| CompletionPopupRow {
+            label: label.into(),
+            kind: 3,
+            detail: None,
+        };
+        state.completion = Some(CompletionLocal {
+            buffer_id: bid,
+            anchor: 0,
+            prefix_len: 0,
+            rows: vec![row("alpha"), row("beta")],
+            selected: Some(1),
+            total: 2,
+        });
+        state.refresh_completion_buffer();
+        // The panel first: presenting it sets the wire to the panel's
+        // version, below the popup's.
+        let _ = present_panel(state, 4);
+        state.set_panel_wire(POPUP_MIN_VERSION);
+        let _ =
+            state.apply_attach_message(InstanceMessage::Popup(PopupPayload::Present(PopupFrame {
+                buffer_id: bid,
+                anchor_byte: 0,
+                kind: PopupKind::Hover,
+                lines: (0..60).map(|i| format!("doc {i}")).collect(),
+                active_range: None,
+                omitted_lines: 0,
+            })));
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 1,
+            lines: vec![CellStyle::default(); 200],
+        });
+        state.refresh_popup_buffer();
+    }
+
+    /// E10g fix round 1, beside P5 (review 1's Medium 3): every other
+    /// opaque fill a face reaches keeps its constant under a face with a
+    /// foreground and no background, the shape the bare `ui` catch-all's
+    /// foreground alone ships to each face the walk reaches: the
+    /// completion dropdown's fill and selected row, the hover popup's
+    /// fill and scroll thumb, the scrollbar's track and thumb, the
+    /// minimap's panel and thumb, the panel divider. Unset, the same
+    /// constants: the control that each fill is painted at all.
+    #[test]
+    fn e10g_f1_every_fill_keeps_its_constant_under_a_face_without_a_background() {
+        let text = "line\n".repeat(200);
+        let Some(mut state) = headless_or_skip(480, 320, &text) else {
+            return;
+        };
+        open_every_other_fill(&mut state);
+
+        let fills = |state: &mut State| {
+            let minimap = quad_colors(&state.minimap_vertex_bytes());
+            vec![
+                (
+                    "completion dropdown",
+                    quad_colors(&state.completion_dropdown_vertex_bytes()),
+                    vec![MENU_BG, MENU_SELECTED_BG],
+                ),
+                (
+                    "hover popup",
+                    quad_colors(&state.popup_vertex_bytes()),
+                    vec![MENU_BG, POPUP_THUMB],
+                ),
+                (
+                    "scrollbar",
+                    state.scrollbar_rects().iter().map(|r| r.color).collect(),
+                    vec![SCROLLBAR_TRACK_BG, SCROLLBAR_THUMB_FILL],
+                ),
+                (
+                    "minimap",
+                    [MINIMAP_BG, MINIMAP_THUMB_FILL]
+                        .into_iter()
+                        .filter(|fill| minimap.iter().any(|c| color_close(*c, *fill)))
+                        .collect(),
+                    vec![MINIMAP_BG, MINIMAP_THUMB_FILL],
+                ),
+                (
+                    "divider",
+                    quad_colors(&state.panel_quad_vertex_bytes())
+                        .into_iter()
+                        .take(1)
+                        .collect(),
+                    vec![DIVIDER_RGBA],
+                ),
+            ]
+        };
+        for (what, painted, constants) in fills(&mut state) {
+            assert_eq!(painted, constants, "unset: {what}");
+        }
+
+        let fg_only = CellStyle {
+            fg: CellColor::Rgb(220, 220, 220),
+            ..CellStyle::default()
+        };
+        apply_faces(
+            &mut state,
+            [
+                "ui.divider",
+                "ui.menu",
+                "ui.menu.selected",
+                "ui.minimap",
+                "ui.minimap.thumb",
+                "ui.popup",
+                "ui.scrollbar",
+                "ui.scrollbar.thumb",
+            ]
+            .into_iter()
+            .map(|name| theme_face(name, fg_only))
+            .collect(),
+        );
+        state.refresh_completion_buffer();
+        let mut found = Vec::new();
+        for (what, painted, constants) in fills(&mut state) {
+            if painted != constants {
+                found.push(format!("{what}: {painted:?}, not {constants:?}"));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    // -----------------------------------------------------------------
+    // E10g fix round 1 — review 1's Low 3: the GPU surfaces E10g.2's
+    // witness names and the handoff marked read. Sharing a helper with a
+    // rowed surface does not guard the name each site passes (the
+    // review's M2 and M3 survived the whole suite).
+    // -----------------------------------------------------------------
+
+    /// The completion dropdown takes `ui.menu` (its fill) and
+    /// `ui.menu.selected` (the selected row's wash and glyphs), and the
+    /// hover popup `ui.popup` (its fill) and `ui.scrollbar.thumb` (its
+    /// scroll thumb); unset, their constants.
+    #[test]
+    fn e10g_f1_the_completion_dropdown_and_the_popup_take_their_faces() {
+        let text = "line\n".repeat(200);
+        let Some(mut state) = headless_or_skip(480, 320, &text) else {
+            return;
+        };
+        open_every_other_fill(&mut state);
+        let read = |state: &mut State| {
+            (
+                quad_colors(&state.completion_dropdown_vertex_bytes()),
+                quad_colors(&state.popup_vertex_bytes()),
+            )
+        };
+        assert_eq!(
+            read(&mut state),
+            (vec![MENU_BG, MENU_SELECTED_BG], vec![MENU_BG, POPUP_THUMB]),
+            "unset"
+        );
+        let bg = |r, g, b| CellStyle {
+            bg: CellColor::Rgb(r, g, b),
+            ..CellStyle::default()
+        };
+        let mut faces = menu_faces();
+        faces.push(theme_face("ui.popup", bg(255, 255, 0)));
+        faces.push(theme_face("ui.scrollbar.thumb", bg(0, 255, 255)));
+        apply_faces(&mut state, faces);
+        state.refresh_completion_buffer();
+        assert_eq!(
+            read(&mut state),
+            (
+                vec![
+                    [0.0, 0.0, 1.0, MENU_BG[3]],
+                    [0.0, 1.0, 0.0, MENU_SELECTED_BG[3]]
+                ],
+                vec![[1.0, 1.0, 0.0, MENU_BG[3]], [0.0, 1.0, 1.0, POPUP_THUMB[3]]]
+            )
+        );
+        let selected = state.selected_row_color(Some(1));
+        assert_eq!(selected, Some((1, Color::rgb(255, 255, 0))));
+    }
+
+    /// The panel divider takes `ui.divider`'s background, which the GPU
+    /// read and the daemon never sent before E10g.2; unset, its constant.
+    #[test]
+    fn e10g_f1_the_panel_divider_takes_ui_divider() {
+        let Some(mut state) = headless_or_skip(480, 320, "alpha") else {
+            return;
+        };
+        let _ = present_panel(&mut state, 4);
+        let divider = |state: &State| -> Vec<[f32; 4]> {
+            quad_colors(&state.panel_quad_vertex_bytes())
+                .into_iter()
+                .take(1)
+                .collect()
+        };
+        assert_eq!(divider(&state), vec![DIVIDER_RGBA], "unset");
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.divider",
+                CellStyle {
+                    bg: CellColor::Rgb(0, 255, 255),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert_eq!(divider(&state), vec![[0.0, 1.0, 1.0, DIVIDER_RGBA[3]]]);
+    }
+
+    /// A terminal pane's cursor takes `ui.caret`'s foreground, as the
+    /// document's caret does; unset, its constant.
+    #[test]
+    fn e10g_f1_the_terminal_cursor_takes_ui_caret() {
+        let Some(mut state) = headless_or_skip(480, 320, "alpha") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let mut frame = plain_terminal_frame(bid, "hello", 40);
+        frame.cursor = Some(pmacs_protocol::CellCoord::new(0, 5));
+        state.apply_terminal_frame(frame);
+        let cursor = |state: &State| quad_colors(&state.terminal_cursor_vertex_bytes());
+        assert_eq!(cursor(&state), vec![TERMINAL_CURSOR_RGBA], "unset");
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.caret",
+                CellStyle {
+                    fg: CellColor::Rgb(255, 0, 0),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert_eq!(
+            cursor(&state),
+            vec![[1.0, 0.0, 0.0, TERMINAL_CURSOR_RGBA[3]]]
+        );
+    }
+
+    /// A math fraction's rule takes the plain text color, the buffer
+    /// face's foreground where the theme sets one; unset, its constant.
+    #[test]
+    fn e10g_f1_the_math_rule_takes_the_buffer_face_fg() {
+        let Some((mut state, _)) = truncating_state(320, 240, r"$\frac{ab}{cd}$") else {
+            return;
+        };
+        let rule_colors = |state: &mut State| -> Vec<[f32; 4]> {
+            state.build_math_paint().1.iter().map(|r| r.color).collect()
+        };
+        let unset = rule_colors(&mut state);
+        assert!(!unset.is_empty(), "precondition: the fraction has a rule");
+        assert!(
+            unset.iter().all(|c| color_close(*c, MATH_INK_RGBA)),
+            "unset: {unset:?}"
+        );
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.default",
+                CellStyle {
+                    fg: CellColor::Rgb(200, 120, 60),
+                    bg: CellColor::Rgb(18, 18, 18),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let want = state.face_rgba(Color::rgb(200, 120, 60), 1.0);
+        let set = rule_colors(&mut state);
+        assert!(
+            set.iter().all(|c| color_close(*c, want)),
+            "{set:?}, not {want:?}"
+        );
+    }
+
+    /// A terminal pane's default colors resolve against the buffer face
+    /// (`terminal_palette`): a default cell's text in its foreground, a
+    /// reversed default cell's background in it too; unset, the plain
+    /// text color. The frame here arrives after the face change; a
+    /// change while a terminal is open and quiet leaves its plan on the
+    /// previous palette until its next frame, which is #429.
+    #[test]
+    fn e10g_f1_a_terminal_pane_s_defaults_take_the_buffer_face() {
+        let Some(mut state) = headless_or_skip(480, 320, "alpha") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let frame = || {
+            let reversed = CellStyle {
+                reverse: true,
+                ..CellStyle::default()
+            };
+            let mut cells = vec![
+                terminal_cell(pmacs_protocol::Glyph::Char('h'), CellStyle::default()),
+                terminal_cell(pmacs_protocol::Glyph::Char('R'), reversed),
+            ];
+            cells.resize(
+                8,
+                terminal_cell(pmacs_protocol::Glyph::Char(' '), CellStyle::default()),
+            );
+            terminal_frame_of(bid, 1, 8, cells)
+        };
+        let colors = |state: &State| {
+            let plan = &state.terminal.as_ref().expect("terminal mode").plan;
+            (
+                plan.runs[0].color,
+                plan.backgrounds
+                    .iter()
+                    .find(|b| b.run.start_col == 1)
+                    .map(|b| b.color),
+            )
+        };
+        state.apply_terminal_frame(frame());
+        let plain = [PLAIN_TEXT.r(), PLAIN_TEXT.g(), PLAIN_TEXT.b()];
+        assert_eq!(colors(&state), (plain, Some(plain)), "unset");
+
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.default",
+                CellStyle {
+                    fg: CellColor::Rgb(200, 120, 60),
+                    bg: CellColor::Rgb(18, 18, 18),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let mut next = frame();
+        next.screen_generation = 2;
+        state.apply_terminal_frame(next);
+        assert_eq!(
+            colors(&state),
+            ([200, 120, 60], Some([200, 120, 60])),
+            "the buffer face's fg"
+        );
+    }
+
+    /// E10g fix round 1 (review 1's Low 4): a minimap line's own color,
+    /// a syntax color as RGB or as a palette index or a diagnostic's
+    /// mark, goes sRGB to linear on an sRGB surface as every face's
+    /// color on a quad does, so the minimap shows it as written, as the
+    /// document's text already does; before, it was shown lighter.
+    #[test]
+    fn e10g_f1_the_minimap_s_line_colors_are_shown_as_written() {
+        let text = "fn main() {}\n".repeat(4);
+        let Some(mut state) = headless_or_skip(480, 240, &text) else {
+            return;
+        };
+        assert!(
+            state.config.format.is_srgb(),
+            "precondition: the surface encodes sRGB, or nothing converts"
+        );
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let fg = |fg| CellStyle {
+            fg,
+            ..CellStyle::default()
+        };
+        let mark = CellStyle {
+            underline_color: CellColor::Rgb(255, 128, 0),
+            ..CellStyle::default()
+        };
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 1,
+            lines: vec![
+                fg(CellColor::Rgb(188, 63, 188)),
+                fg(CellColor::Indexed(1)),
+                mark,
+                CellStyle::default(),
+            ],
+        });
+        let painted = quad_colors(&state.minimap_vertex_bytes());
+        let has = |want: [f32; 4]| painted.iter().any(|c| color_close(*c, want));
+        let index_1 = indexed_to_glyphon(1);
+        for (what, written) in [
+            ("an RGB syntax color", Color::rgb(188, 63, 188)),
+            ("a palette index", index_1),
+            ("a diagnostic's mark", Color::rgb(255, 128, 0)),
+        ] {
+            let linear = state.face_rgba(written, 0.9);
+            let raw = rgb_to_minimap_color(written.r(), written.g(), written.b());
+            assert!(has(linear), "{what}: {linear:?} not in {painted:?}");
+            assert!(!has(raw), "{what}: still unconverted, {raw:?}");
+        }
+        assert!(
+            has(MINIMAP_DEFAULT_LINE),
+            "a line with no color: the constant"
+        );
     }
 }

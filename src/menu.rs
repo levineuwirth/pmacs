@@ -337,6 +337,23 @@ pub fn make_shared_menu() -> SharedMenu {
     Arc::new(Mutex::new(None))
 }
 
+/// E10g.2: the menu's styles from `ui.menu`, `ui.menu.selected` ({fg,
+/// bg} each, over today's constant: [`crate::completion::face_over`])
+/// and `ui.menu.separator` (its rule's {fg}) where the theme sets them,
+/// else today's constants.
+fn menu_styles(theme: Option<&crate::highlight::Theme>) -> (Style, Style, Option<Color>) {
+    use crate::completion::{face_over, fg_bg};
+    let face = |name: &str| theme.and_then(|t| t.face(name));
+    let over = |name: &str, constant: fn() -> Style| {
+        face(name).map_or_else(constant, |f| face_over(fg_bg(f), constant()))
+    };
+    (
+        over("ui.menu", menu_style),
+        over("ui.menu.selected", menu_selected_style),
+        face("ui.menu.separator").map(|f| f.fg),
+    )
+}
+
 /// Popup background (non-selected rows) — a dim fill so the menu reads
 /// as a floating surface over the buffer text it occludes.
 fn menu_style() -> Style {
@@ -347,8 +364,10 @@ fn menu_style() -> Style {
     }
 }
 
-/// Highlighted-row style (the active item).
-fn menu_selected_style() -> Style {
+/// Highlighted-row style (the active item); a set `ui.menu.selected`
+/// goes over it on the completion popup and the band too
+/// ([`crate::completion::BandStyles`]).
+pub(crate) fn menu_selected_style() -> Style {
     Style {
         fg: Color::Indexed(231),
         bg: Color::Indexed(24),
@@ -363,13 +382,22 @@ fn menu_selected_style() -> Style {
 /// occluding the buffer text beneath.
 pub struct MenuView {
     menu: SharedMenu,
+    /// The theme its `ui.menu` faces resolve through (E10g.2); `None`
+    /// in a bare core, which paints today's constants.
+    theme: Option<crate::highlight::ThemeHandle>,
+    /// The cells its last render painted ([`View::popup_cells`]).
+    painted: Option<crate::window::Rect>,
 }
 
 impl MenuView {
     /// Build a view reading `menu`.
     #[must_use]
-    pub fn new(menu: SharedMenu) -> Self {
-        Self { menu }
+    pub fn new(menu: SharedMenu, theme: Option<crate::highlight::ThemeHandle>) -> Self {
+        Self {
+            menu,
+            theme,
+            painted: None,
+        }
     }
 }
 
@@ -378,7 +406,16 @@ impl View for MenuView {
         "context-menu"
     }
 
+    fn is_popup(&self) -> bool {
+        true
+    }
+
+    fn popup_cells(&self) -> Option<crate::window::Rect> {
+        self.painted
+    }
+
     fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        self.painted = None;
         let guard = self.menu.lock().expect("menu mutex poisoned");
         let Some(menu) = guard.as_ref() else {
             return;
@@ -388,6 +425,25 @@ impl View for MenuView {
         let bottom = top + viewport.cell_size.rows;
         let right = left + viewport.cell_size.cols;
         let (arow, acol) = menu.anchor;
+        // The rectangle the rows below paint, clipped to the window as
+        // they are.
+        let rows = arow.max(top)..(arow + menu.rows.len() as u32).min(bottom);
+        let cols = acol.max(left)..(acol + menu.width).min(right);
+        if !rows.is_empty() && !cols.is_empty() {
+            self.painted = Some(crate::window::Rect::new(
+                rows.start,
+                cols.start,
+                rows.end - rows.start,
+                cols.end - cols.start,
+            ));
+        }
+        let (normal_style, selected_style, separator_fg) = {
+            let theme = self
+                .theme
+                .as_ref()
+                .map(|t| t.lock().expect("theme mutex poisoned"));
+            menu_styles(theme.as_deref())
+        };
 
         for (i, row) in menu.rows.iter().enumerate() {
             let r = arow + i as u32;
@@ -396,9 +452,9 @@ impl View for MenuView {
             }
             let selected = i == menu.active;
             let row_style = if selected {
-                menu_selected_style()
+                selected_style
             } else {
-                menu_style()
+                normal_style
             };
             // Paint the full-width row background first.
             for c in 0..menu.width {
@@ -418,7 +474,11 @@ impl View for MenuView {
                         if col < left || col >= right {
                             continue;
                         }
-                        cells.at(CellCoord::new(r, col)).glyph = Glyph::Char('─');
+                        let cell = cells.at(CellCoord::new(r, col));
+                        cell.glyph = Glyph::Char('─');
+                        if let Some(fg) = separator_fg {
+                            cell.style.fg = fg;
+                        }
                     }
                 }
                 MenuRow::Item { label, .. } => {

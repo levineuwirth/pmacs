@@ -775,6 +775,36 @@ impl ConfigRegistry {
         Ok(())
     }
 
+    /// E10g.3: add `choice` to the enum `name`'s choices, a no-op when
+    /// it is one already. For a setting whose choices are defined
+    /// elsewhere and grow (`ui.theme`'s, the defined themes). The
+    /// definition epoch advances only when a choice is added.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::NotFound`] if `name` is undefined, and
+    /// [`ConfigError::TypeMismatch`] if it is not an enum.
+    pub fn add_choice(&mut self, name: &str, choice: &str) -> Result<(), ConfigError> {
+        let def = self
+            .by_name
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::NotFound {
+                name: name.to_owned(),
+            })?;
+        let ConfigKind::Enum { choices } = &mut def.kind else {
+            return Err(ConfigError::TypeMismatch {
+                name: name.to_owned(),
+                expected: def.kind.type_name(),
+                got: "enum",
+            });
+        };
+        if !choices.iter().any(|c| c == choice) {
+            choices.push(choice.to_owned());
+            self.definition_epoch = self.definition_epoch.saturating_add(1);
+        }
+        Ok(())
+    }
+
     fn definition(&self, name: &str) -> Result<&ConfigDefinition, ConfigError> {
         self.by_name.get(name).ok_or_else(|| ConfigError::NotFound {
             name: name.to_owned(),

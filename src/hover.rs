@@ -206,6 +206,8 @@ pub struct HoverView {
     /// The theme its `ui.popup` faces resolve through; `None` in a bare
     /// core, which paints the grid's own defaults.
     theme: Option<ThemeHandle>,
+    /// The cells its last render painted ([`View::popup_cells`]).
+    painted: Option<crate::window::Rect>,
 }
 
 impl HoverView {
@@ -216,6 +218,7 @@ impl HoverView {
             popup,
             window_id,
             theme,
+            painted: None,
         }
     }
 
@@ -239,8 +242,16 @@ impl View for HoverView {
         HOVER_POPUP_KIND
     }
 
+    fn is_popup(&self) -> bool {
+        true
+    }
+
+    fn popup_cells(&self) -> Option<crate::window::Rect> {
+        self.painted
+    }
+
     fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
-        if let Some(popup) = self.shown(buf) {
+        self.painted = self.shown(buf).and_then(|popup| {
             crate::lsp_popup::paint_grid_popup_into(
                 &self.popup,
                 buf,
@@ -248,8 +259,8 @@ impl View for HoverView {
                 cells,
                 &popup,
                 self.theme.as_ref(),
-            );
-        }
+            )
+        });
     }
 }
 

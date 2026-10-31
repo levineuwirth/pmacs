@@ -780,6 +780,14 @@ impl EditorState {
                 include_str!("../builtin/runtime/syntax.lua"),
             )
             .expect("load syntax builtin chunk");
+        // E10g.1: the shipped named themes, defined (not loaded) before
+        // anything can ask for one by name. The active theme is already
+        // `Theme::default_dark()`, which `default-dark` equals.
+        for &(chunk, source) in crate::highlight::SHIPPED_THEMES {
+            lua_host
+                .eval(Some(chunk), source)
+                .unwrap_or_else(|e| panic!("load shipped theme {chunk}: {e}"));
+        }
         // T M4.4 process supervisor. Constructed empty; user code
         // spawns children through `pmacs.process.spawn`. Drop-time
         // shutdown enforces no-zombie cleanup at editor exit.
@@ -1091,6 +1099,15 @@ impl EditorState {
                 include_str!("../builtin/runtime/linewrap.lua"),
             )
             .expect("load linewrap builtin chunk");
+        // E10g.3 and E10g.4: `ui.theme`, `pmacs.theme.restore` for
+        // `install_state_dirs` to call after init.lua, and the
+        // `theme-select` picker.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/theme.lua"),
+                include_str!("../builtin/runtime/theme.lua"),
+            )
+            .expect("load theme builtin chunk");
         // E7.2: the `diff` major mode (hunk motion on `n`/`p`), a mode
         // keymap like dired's. Loaded before `git.lua`, which gives
         // `*git-diff*` the mode when it creates the buffer.
@@ -1385,6 +1402,32 @@ impl EditorState {
         {
             eprintln!("pmacs: could not restore saved zoom: {error}");
         }
+        // E10g.3: the theme, by the ruled precedence --- an explicit
+        // `init.lua` setting, then the picker's kept choice, then the
+        // default --- once state is readable, for the same reason.
+        if let Err(error) = self
+            .lua_host
+            .lua()
+            .load("if pmacs.theme.restore then pmacs.theme.restore() end")
+            .exec()
+        {
+            eprintln!("pmacs: could not restore the theme: {error}");
+        }
+    }
+
+    /// E10g.5: the depth the in-process terminal is painted at: the
+    /// lower of `ui.color-depth` and `detected`, what the terminal
+    /// showed at launch. Every theme color then takes its authored
+    /// fallback for that depth ([`crate::instance_render::RenderState`]).
+    #[must_use]
+    pub fn local_color_depth(
+        &self,
+        detected: crate::color_depth::ColorDepth,
+    ) -> crate::color_depth::ColorDepth {
+        crate::color_depth::ColorDepth::effective(
+            crate::lua_bindings::config_color_depth(self.lua_host.lua()),
+            detected,
+        )
     }
 
     /// Final step of a **local, no-target** launch: greet an untouched
@@ -3872,6 +3915,9 @@ impl EditorState {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let action = MinibufferAction::from_chord(chord);
+        // E10g.4: the selection before the key, so a move it makes calls
+        // the prompt's `on_select` (the theme picker's preview) once.
+        let before = self.core.borrow().minibuffer.selection();
         match action {
             MinibufferAction::Accept => self.minibuffer_accept(frontend_id, false),
             MinibufferAction::AcceptTyped => self.minibuffer_accept(frontend_id, true),
@@ -3928,6 +3974,22 @@ impl EditorState {
                 // (status-line warnings) would clobber the prompt.
                 let _ = (KeyCode::Null, KeyModifiers::NONE);
             }
+        }
+        self.fire_minibuffer_select(&before);
+    }
+
+    /// E10g.4: call the open prompt's `on_select` with the candidate now
+    /// selected, when it is not `before`'s. After an accept or a cancel
+    /// the prompt is gone, or another opened, and nothing is called.
+    fn fire_minibuffer_select(&mut self, before: &(u64, Option<String>)) {
+        let change = self.core.borrow().minibuffer.select_change(before);
+        if let Some((on_select, candidate)) = change
+            && let Err(e) = on_select.call::<mlua::MultiValue>(candidate)
+        {
+            self.core.borrow_mut().status = format!(
+                "minibuffer on_select failed: {}",
+                first_line(&e.to_string())
+            );
         }
     }
 
@@ -5392,9 +5454,13 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
 
     let mut frontend = Frontend::new()?;
     let mut render_state = crate::instance_render::RenderState::new(frontend.size());
+    // E10g.5: what this terminal shows, once; the setting caps it per
+    // frame, so a change of `ui.color-depth` repaints at once.
+    let detected = crate::color_depth::ColorDepth::detect_env();
 
     loop {
         let size = frontend.size();
+        render_state.set_color_depth(state.local_color_depth(detected));
         let _ = state.sync_terminal_layout(FrontendId::LOCAL, size);
         let terminal_snapshots = state.prepare_terminal_views(FrontendId::LOCAL, size);
         let mut messages =
@@ -6018,7 +6084,11 @@ fn paint_window_content(
     // gutter numbers — before the overlays, so a diagnostic overlay
     // can draw its severity sign into the gutter's leading column
     // without the gutter's own blank pass erasing it — then each
-    // overlay in attach order. See [`crate::view::View`].
+    // overlay in attach order, the local selection, and the popups in
+    // attach order last (#435: a popup is a surface apart from the
+    // code, so the selection's wash never shows through one, while the
+    // text's own marks stay under the selection). See
+    // [`crate::view::View`].
     // Record the width text actually wrapped at, taken from the
     // viewport itself rather than recomputed: a second derivation could
     // disagree with the one the renderer used, and the disagreement
@@ -6031,10 +6101,13 @@ fn paint_window_content(
     if gutter_w > 0 {
         paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, folds, theme);
     }
-    for overlay in &mut window.overlays {
+    for overlay in window.overlays.iter_mut().filter(|o| !o.is_popup()) {
         overlay.render(buf, viewport, grid);
     }
     paint_local_selection(grid, buf, window, viewport, inner_rows, folds, theme);
+    for overlay in window.overlays.iter_mut().filter(|o| o.is_popup()) {
+        overlay.render(buf, viewport, grid);
+    }
     // Mode line for this window. Painted last so the line
     // itself is always visible regardless of overlay activity.
     let coord = window
@@ -6380,7 +6453,7 @@ pub fn paint_frame(
         // this borrow does not contend with the one held above.
         let commands = state.lua_host.commands().borrow();
         let col = paint_minibuffer(grid, core, &commands, term_size, &theme);
-        paint_minibuffer_band(grid, core, &commands, term_size);
+        paint_minibuffer_band(grid, core, &commands, term_size, &theme);
         Some(col)
     } else {
         None
@@ -6408,7 +6481,16 @@ pub fn paint_frame(
     let aw = &core.windows[&active];
     let buf = reg.get(aw.buffer_id).ok()?;
     let folds = crate::fold_view::map_for_window(&state.fold_registry, aw);
-    window_cursor_cell(aw, buf, folds.as_ref(), active_rect)
+    let cell = window_cursor_cell(aw, buf, folds.as_ref(), active_rect)?;
+    // #435: a popup over point hides the terminal cursor, which the
+    // terminal would otherwise draw over the popup's cell as a block in
+    // its own cursor color.
+    let covered = aw
+        .overlays
+        .iter()
+        .filter_map(|o| o.popup_cells())
+        .any(|cells| cells.contains(cell));
+    (!covered).then_some(cell)
 }
 
 /// Where one window's caret lands in the cell grid, or `None` when it is
@@ -7320,8 +7402,9 @@ fn paint_minibuffer_band(
     core: &EditorCore,
     commands: &crate::command::CommandRegistry,
     term_size: crate::cell::CellSize,
+    theme: &crate::highlight::Theme,
 ) {
-    use crate::completion::{paint_band_row, popup_window};
+    use crate::completion::{BandStyles, paint_band_row, popup_window};
     use crate::minibuffer::{CompletionSource, MB_VISIBLE, listing_dir, split_dir_base};
 
     let Some(session) = core.minibuffer.session.as_ref() else {
@@ -7345,6 +7428,7 @@ fn paint_minibuffer_band(
         start
     };
     let top = term_size.rows - 1 - shown as u32;
+    let styles = BandStyles::resolve(Some(theme));
     let contents = core.minibuffer.contents();
     let files_dir = match &session.source {
         CompletionSource::Files { root } => {
@@ -7381,6 +7465,7 @@ fn paint_minibuffer_band(
             0,
             term_size.cols,
             start + i == selected,
+            styles,
         );
     }
 }
@@ -8288,6 +8373,8 @@ mod tests {
             source: CompletionSource::None,
             on_accept,
             on_cancel: None,
+            on_select: None,
+            on_replace: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,
@@ -9858,6 +9945,8 @@ mod tests {
                 source: CompletionSource::None,
                 on_accept: dummy.clone(),
                 on_cancel: None,
+                on_select: None,
+                on_replace: None,
                 candidates: Vec::new(),
                 selected: None,
                 history_index: None,
@@ -9884,6 +9973,8 @@ mod tests {
             source: CompletionSource::None,
             on_accept: dummy,
             on_cancel: None,
+            on_select: None,
+            on_replace: None,
             candidates: Vec::new(),
             selected: None,
             history_index: None,

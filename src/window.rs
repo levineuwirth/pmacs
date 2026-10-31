@@ -93,6 +93,15 @@ impl Rect {
     pub fn is_empty(&self) -> bool {
         self.size.rows == 0 || self.size.cols == 0
     }
+
+    /// True iff `cell` lies inside the rect.
+    #[must_use]
+    pub fn contains(&self, cell: CellCoord) -> bool {
+        cell.row >= self.origin.row
+            && cell.row - self.origin.row < self.size.rows
+            && cell.col >= self.origin.col
+            && cell.col - self.origin.col < self.size.cols
+    }
 }
 
 // ---------------------------------------------------------------------------
