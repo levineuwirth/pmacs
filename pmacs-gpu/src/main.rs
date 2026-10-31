@@ -1600,6 +1600,9 @@ fn run_probe(socket: &Path, report: &Path) -> i32 {
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "latency") => {
             run_latency_probe(socket, report, &text)
         }
+        Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "keypaint") => {
+            run_keypaint_probe(socket, report, &text)
+        }
         Some(text) if std::env::var("PMACS_GPU_PROBE_ACTION").is_ok_and(|a| a == "chord") => {
             run_chord_probe(socket, report, &text)
         }
@@ -3531,6 +3534,370 @@ fn marked_covers(marked: &[(u64, u64)], start: u64, end: u64) -> bool {
         }
     }
     at >= end
+}
+
+/// The keypaint probe's session (E10k.1): the production `App`, the
+/// attach events behind it, and the offscreen target a timed frame is
+/// rendered into.
+struct KeypaintSession {
+    app: App,
+    rx: std::sync::mpsc::Receiver<AttachEvent>,
+    view: wgpu::TextureView,
+    disconnect: Option<String>,
+}
+
+impl KeypaintSession {
+    fn state(&self) -> &State {
+        self.app.state.as_ref().expect("the probe's state")
+    }
+
+    /// Apply the attach events that arrive within `wait` of each other,
+    /// the first waited on for `wait`; whether any arrived.
+    fn pump(&mut self, wait: std::time::Duration) -> bool {
+        let mut any = false;
+        while let Ok(event) =
+            self.rx
+                .recv_timeout(if any { std::time::Duration::ZERO } else { wait })
+        {
+            any = true;
+            if let AttachEvent::Disconnected(reason) = &event {
+                self.disconnect = Some(reason.clone());
+            }
+            self.app.dispatch_app_event(AppEvent::Attach(event));
+        }
+        any
+    }
+
+    /// The caret is at `byte`, confirmed by the daemon and fresh, and
+    /// the dispatcher idle: a key typed now goes the optimistic route
+    /// if any does.
+    fn settled_at(&self, byte: u64) -> bool {
+        let s = self.state();
+        s.own_cursor.map(|c| c.byte) == Some(byte)
+            && s.optimistic_cursor_floor.is_none()
+            && s.cursor_fresh
+            && s.dispatch_idle
+    }
+
+    /// Whether `typed` stands at `at`, read where it lands: the probe
+    /// never copies the text.
+    fn landed(&self, at: usize, typed: &str) -> bool {
+        self.state()
+            .current_text
+            .get(at..at + typed.len())
+            .is_some_and(|got| got == typed)
+    }
+
+    /// Render one frame and wait until the GPU has finished it.
+    fn paint(&mut self) {
+        let state = self.app.state.as_mut().expect("the probe's state");
+        state.render_to_view(&self.view);
+        let _ = state.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// Pump until `done` has held for `hold` without a break, or
+    /// `limit` passes; whether `done` held. Not silence: the daemon
+    /// sends its status facts on every tick it produces, so a semantic
+    /// session is never quiet for long.
+    fn settle(
+        &mut self,
+        hold: std::time::Duration,
+        limit: std::time::Duration,
+        done: &dyn Fn(&Self) -> bool,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        let mut held_since: Option<std::time::Instant> = None;
+        loop {
+            let now = std::time::Instant::now();
+            if done(self) {
+                let since = *held_since.get_or_insert(now);
+                if now.duration_since(since) >= hold {
+                    return true;
+                }
+            } else {
+                held_since = None;
+            }
+            if now.duration_since(start) >= limit || self.disconnect.is_some() {
+                return done(self);
+            }
+            self.pump(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn type_char(&mut self, ch: char) {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        self.app
+            .apply_keyboard(&Key::Character(s.into()), Some(s), None);
+    }
+}
+
+/// E10k.1 --- the time from a key's arrival at the GPU to the first
+/// frame painted with its character, through the production `App`
+/// dispatch against a real daemon, at the end of the buffer's last line.
+///
+/// `PMACS_GPU_PROBE_TYPE_TEXT` is a `|`-separated list of bursts
+/// (E10k's suite types `kxv|.,;`: letters, which extend the word before
+/// the caret, and punctuation, which starts no completion). The probe
+/// walks the caret to the end of the last line (`M->`, `C-b`), then for
+/// each burst, `PMACS_GPU_PROBE_SAMPLES` times (eight by default): types
+/// its keys one at a time, each once the caret has stood confirmed for
+/// `PMACS_GPU_PROBE_GAP_MS` (150 by default),
+/// timing each from the call to `apply_keyboard` to the end of the
+/// first frame rendered with its character in the text; deletes them
+/// with Backspace; types the whole burst at once and times it until a
+/// frame shows all of it; and deletes that. A frame is `render_to_view`
+/// into an offscreen target of the window's size, waited until the GPU
+/// has finished it: the windowed path without the surface's `present`.
+/// A key is optimistic when its character stood in the text the moment
+/// `apply_keyboard` returned; otherwise the probe applies the daemon's
+/// messages as they arrive until it does. The probe reads the typed
+/// bytes where they land and never copies the text, so the buffer's
+/// size costs the instrument nothing per key.
+/// `PMACS_GPU_PROBE_SETUP=undo-all` (E10k review 1's P3) cuts the whole
+/// buffer and undoes the cut (`C-x h`, `C-w`, `C-/`) before the caret is
+/// walked, so the replica types into text the arbiter's undo wrote back.
+///
+/// The report: `key.<n>=<burst>|<char>|<total_us>|<apply_us>|<paint_us>|<optimistic>`
+/// per timed key, where `apply_us` is `apply_keyboard` alone and
+/// `paint_us` the frame; `burst.<n>=<burst>|<total_us>|<optimistic>` per
+/// timed burst; `keys`, `bursts`, `text_len` and `typed_at_byte` once;
+/// and `failure` when the caret, a key or a restore did not land.
+/// Nothing is asserted here; `tests/e10k_large_buffer_typing.rs` reads
+/// the report.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-place-sample-restore session, reported line by line"
+)]
+fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
+    use std::fmt::Write as _;
+    use std::time::{Duration, Instant};
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<AttachEvent>();
+    let mut client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    let initial: Vec<AttachEvent> = client
+        .take_initial_message()
+        .map(|message| vec![AttachEvent::Message(Box::new(message))])
+        .unwrap_or_default();
+    state.set_frontend_id(client.frontend_id());
+    state.set_panel_wire(client.session_protocol_version());
+    let target = state.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("pmacs-gpu keypaint target"),
+        size: wgpu::Extent3d {
+            width: state.config.width,
+            height: state.config.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: state.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut session = KeypaintSession {
+        app: App {
+            mode: Mode::Attach {
+                socket: socket.to_path_buf(),
+            },
+            proxy: None,
+            #[cfg(test)]
+            test_force_non_linux: false,
+            state: Some(state),
+            pending_events: Vec::new(),
+            attach_client: Some(client),
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            geometry: geometry::WindowGeometry::default(),
+            geometry_path: None,
+            geometry_dirty_since: None,
+            platform: Platform::current(),
+            exit_code: 0,
+            reconnect: None,
+            exit_requested: false,
+        },
+        rx,
+        view,
+        disconnect: None,
+    };
+    for event in initial {
+        session.app.dispatch_app_event(AppEvent::Attach(event));
+    }
+
+    let env_u64 = |name: &str, default: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(default)
+    };
+    let samples_wanted = env_u64("PMACS_GPU_PROBE_SAMPLES", 8).max(1);
+    let gap = Duration::from_millis(env_u64("PMACS_GPU_PROBE_GAP_MS", 150));
+    // A sample's key, its restore, or the placement may take this long
+    // before the probe calls it failed (a slow base at 18 MiB).
+    let per_step = Duration::from_millis(env_u64("PMACS_GPU_PROBE_SAMPLE_MS", 60_000));
+    let bursts: Vec<String> = text
+        .split('|')
+        .filter(|b| !b.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let mut out = String::new();
+    let mut failure: Option<String> = None;
+    let mut keys = 0usize;
+    let mut burst_count = 0usize;
+
+    // The document and a caret, then the end of its last line.
+    let placed = session.settle(gap, per_step, &|s| {
+        let st = s.state();
+        st.current_buffer_id.is_some() && st.own_cursor.is_some() && st.dispatch_idle
+    });
+    let text_len = session.state().current_text.len();
+    let at = if session.state().current_text.ends_with('\n') {
+        text_len.saturating_sub(1)
+    } else {
+        text_len
+    };
+    if placed {
+        if let Some(client) = session.app.attach_client.as_ref() {
+            if std::env::var("PMACS_GPU_PROBE_SETUP").is_ok_and(|v| v == "undo-all") {
+                let _ = client.send_key(ProtocolKey::Char('x'), Modifiers::CTRL);
+                let _ = client.send_key(ProtocolKey::Char('h'), Modifiers::NONE);
+                let _ = client.send_key(ProtocolKey::Char('w'), Modifiers::CTRL);
+                let _ = client.send_key(ProtocolKey::Char('/'), Modifiers::CTRL);
+            }
+            let _ = client.send_key(ProtocolKey::Char('>'), Modifiers::ALT);
+            let _ = client.send_key(ProtocolKey::Char('b'), Modifiers::CTRL);
+        }
+        if !session.settle(gap, per_step, &|s| s.settled_at(at as u64)) {
+            failure = Some(format!(
+                "the caret did not reach byte {at}: caret={:?} fresh={} idle={}",
+                session.state().own_cursor.map(|c| c.byte),
+                session.state().cursor_fresh,
+                session.state().dispatch_idle
+            ));
+        }
+    } else {
+        failure = Some(String::from("no document and caret arrived"));
+    }
+    let tail_from = at.saturating_sub(16);
+    let tail: String = session
+        .state()
+        .current_text
+        .get(tail_from..)
+        .unwrap_or_default()
+        .to_owned();
+    let restored = |s: &KeypaintSession| {
+        s.state().current_text.len() == text_len
+            && s.state().current_text.get(tail_from..) == Some(tail.as_str())
+            && s.settled_at(at as u64)
+    };
+
+    'samples: for burst in &bursts {
+        let chars: Vec<char> = burst.chars().collect();
+        for _ in 0..samples_wanted {
+            if failure.is_some() {
+                break 'samples;
+            }
+            // One key at a time, each from a confirmed caret.
+            let mut typed = String::new();
+            for &ch in &chars {
+                let caret = (at + typed.len()) as u64;
+                if !session.settle(gap, per_step, &|s| s.settled_at(caret)) {
+                    failure = Some(format!("the caret did not settle at byte {caret}"));
+                    break 'samples;
+                }
+                typed.push(ch);
+                let t0 = Instant::now();
+                session.type_char(ch);
+                let applied = t0.elapsed();
+                let optimistic = session.landed(at, &typed);
+                while !session.landed(at, &typed) {
+                    if t0.elapsed() >= per_step || session.disconnect.is_some() {
+                        failure = Some(format!("{typed:?} did not land at byte {at}"));
+                        break 'samples;
+                    }
+                    session.pump(Duration::from_millis(5));
+                }
+                let before_paint = Instant::now();
+                session.paint();
+                let total = t0.elapsed();
+                let paint = before_paint.elapsed();
+                let _ = writeln!(
+                    out,
+                    "key.{keys}={burst}|{ch}|{}|{}|{}|{optimistic}",
+                    total.as_micros(),
+                    applied.as_micros(),
+                    paint.as_micros()
+                );
+                keys += 1;
+            }
+            for _ in 0..chars.len() {
+                session
+                    .app
+                    .apply_keyboard(&Key::Named(NamedKey::Backspace), None, None);
+            }
+            if !session.settle(gap, per_step, &restored) {
+                failure = Some(format!("the keys of {burst:?} were not deleted"));
+                break 'samples;
+            }
+            // The whole burst at once.
+            let t0 = Instant::now();
+            for &ch in &chars {
+                session.type_char(ch);
+            }
+            let optimistic = session.landed(at, burst);
+            while !session.landed(at, burst) {
+                if t0.elapsed() >= per_step || session.disconnect.is_some() {
+                    failure = Some(format!("the burst {burst:?} did not land at byte {at}"));
+                    break 'samples;
+                }
+                session.pump(Duration::from_millis(5));
+            }
+            session.paint();
+            let _ = writeln!(
+                out,
+                "burst.{burst_count}={burst}|{}|{optimistic}",
+                t0.elapsed().as_micros()
+            );
+            burst_count += 1;
+            for _ in 0..chars.len() {
+                session
+                    .app
+                    .apply_keyboard(&Key::Named(NamedKey::Backspace), None, None);
+            }
+            if !session.settle(gap, per_step, &restored) {
+                failure = Some(format!("the burst {burst:?} was not deleted"));
+                break 'samples;
+            }
+        }
+    }
+
+    let _ = writeln!(out, "keys={keys}");
+    let _ = writeln!(out, "bursts={burst_count}");
+    let _ = writeln!(out, "text_len={text_len}");
+    let _ = writeln!(out, "typed_at_byte={at}");
+    if let Some(reason) = &session.disconnect {
+        let _ = writeln!(out, "disconnect={reason}");
+    }
+    if let Some(reason) = &failure {
+        let _ = writeln!(out, "failure={reason}");
+    }
+    drop(target);
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!("pmacs-gpu probe: write report failed: {error}");
+        return 5;
+    }
+    0
 }
 
 /// E6b.3 --- **the instrument.** Type `text` into the attached
@@ -11912,10 +12279,9 @@ impl State {
         let delta_batches = self.loro_text_delta_batches.clone()?;
         clear_loro_text_delta_batches(&delta_batches);
         let before = doc.oplog_vv();
-        if let Err(e) = doc
-            .get_text(LORO_TEXT_CONTAINER)
-            .insert_utf8(cursor, insert)
-        {
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        let at = loro_char_index_on_boundary(&text, cursor)?;
+        if let Err(e) = text.insert(at, insert) {
             eprintln!("pmacs-gpu: optimistic insert failed: {e:?}");
             return None;
         }
@@ -11949,10 +12315,10 @@ impl State {
         let delta_batches = self.loro_text_delta_batches.clone()?;
         clear_loro_text_delta_batches(&delta_batches);
         let before = doc.oplog_vv();
-        if let Err(e) = doc
-            .get_text(LORO_TEXT_CONTAINER)
-            .delete_utf8(start, end - start)
-        {
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        let from = loro_char_index_on_boundary(&text, start)?;
+        let to = loro_char_index_on_boundary(&text, end)?;
+        if let Err(e) = text.delete(from, to - from) {
             eprintln!("pmacs-gpu: optimistic delete failed: {e:?}");
             return None;
         }
@@ -11979,16 +12345,9 @@ impl State {
         bytes: Vec<u8>,
     ) -> CrdtOpSend {
         if drained.is_empty() {
-            let text = self
-                .loro_doc
-                .as_ref()
-                .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-            if let Some(text) = text {
-                self.set_text(&text);
-            }
-            // Cache rebuilt wholesale — there are no translated
-            // anchors left for frame translation to protect.
-            self.unconfirmed_edits.clear();
+            // A local edit that produced no text delta: the projection
+            // cannot be patched, so it is rebuilt from the replica.
+            self.resync_text_from_replica();
         } else {
             match self.apply_loro_text_delta_batches(drained) {
                 Ok(edits) => {
@@ -12006,14 +12365,7 @@ impl State {
                         "pmacs-gpu: optimistic text update failed ({reason}); falling back to \
                          full materialization"
                     );
-                    let text = self
-                        .loro_doc
-                        .as_ref()
-                        .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-                    if let Some(text) = text {
-                        self.set_text(&text);
-                    }
-                    self.unconfirmed_edits.clear();
+                    self.resync_text_from_replica();
                 }
             }
         }
@@ -12041,6 +12393,25 @@ impl State {
             op: CrdtOp { peer_id, bytes },
             viewport,
         }
+    }
+
+    /// Rebuild the text projection from the whole replica: the recovery
+    /// when an edit's deltas could not patch it, the one whole-text read
+    /// outside a snapshot's arrival (E10k.3). A key's and a remote op's
+    /// paths patch the projection from the deltas and reach this only
+    /// when that fails; `tests/e10k_replica_reads_acceptance.rs` holds
+    /// where it is called.
+    fn resync_text_from_replica(&mut self) {
+        let text = self
+            .loro_doc
+            .as_ref()
+            .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
+        if let Some(text) = text {
+            self.set_text(&text);
+        }
+        // Cache rebuilt wholesale — there are no translated anchors
+        // left for frame translation to protect.
+        self.unconfirmed_edits.clear();
     }
 
     fn mark_cursor_stale_after_round_trip(&mut self) {
@@ -12325,6 +12696,104 @@ impl State {
         }
     }
 
+    /// An `InstanceMessage::CrdtOp`: import the op into the replica and
+    /// patch the text from the deltas the import produced (E10k.3: moved
+    /// out of [`Self::apply_attach_message`] so that what a remote op
+    /// costs per key reads apart from the snapshot's cold path).
+    fn apply_remote_crdt_op(&mut self, buffer_id: BufferId, op: &CrdtOp) -> Option<ViewportSend> {
+        if self.current_buffer_id != Some(buffer_id) {
+            // Edit op for a different buffer than we currently
+            // render. Ignore for now (multi-buffer is a future
+            // session); when buffer-switching lands we'll
+            // index ops by buffer.
+            return None;
+        }
+        let Some(doc) = self.loro_doc.as_ref() else {
+            // Mid-attach race: ops before snapshot. The
+            // snapshot will have the ops baked in.
+            return None;
+        };
+        let delta_batches = self.loro_text_delta_batches.clone();
+        if let Some(delta_batches) = delta_batches.as_ref() {
+            clear_loro_text_delta_batches(delta_batches);
+        }
+        if let Err(e) = doc.import(&op.bytes) {
+            eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
+            return None;
+        }
+        // NOTE: `current_spans` / `current_decorations` index
+        // into the *pre-edit* byte positions. The producer's
+        // next render frame (in pmacs core, post-T M11.7
+        // generation-transition fix) ships `full=true`
+        // styling for buffers whose generation advanced, so
+        // the next message replaces the stale items
+        // wholesale via `replace_style_spans` /
+        // `replace_decorations`. The single-frame gap
+        // between CrdtOp arrival and that next frame paints
+        // styling at stale byte positions — the session-4
+        // documented "one-frame stale" artifact. A previous
+        // attempt to fix it by clearing both vectors here
+        // (`49785c4`) was reverted because the producer's
+        // *incremental* updates ship dirty-range spans only,
+        // and an emptied cache loses the non-dirty viewport
+        // styling entirely.
+        //
+        // InlineAdornments use whole-set suppression rather
+        // than dirty segments, so the same ownership rule
+        // applies here: keep the last set until the producer
+        // sends a replacement. Session 8 closed the stale
+        // inlay case producer-side: `didChange` marks the
+        // inlay store stale, and the producer sends one empty
+        // replacement to clear cached virtual text until a
+        // fresh `textDocument/inlayHint` response arrives.
+        let delta_batches = delta_batches
+            .as_ref()
+            .map(drain_loro_text_delta_batches)
+            .unwrap_or_default();
+        // No text delta from an import that applied something: the
+        // op changed no text (the text container's subscription fires
+        // for every change to it), so there is nothing to patch. Before
+        // E10k.3 this arm copied the whole text out of the replica.
+        if !delta_batches.is_empty() {
+            match self.apply_loro_text_delta_batches(&delta_batches) {
+                Ok(edits) => {
+                    // A daemon-originated edit shifts the text
+                    // under any still-unconfirmed optimistic
+                    // edits. Rebase the journal's anchors so
+                    // frames that include this edit (but not
+                    // ours) translate correctly. Entries are
+                    // inserts (start == old_end) or
+                    // single-codepoint deletes; both rebase by
+                    // position translation, clamped so a range
+                    // can't invert.
+                    for incoming in &edits {
+                        for (_, pending) in &mut self.unconfirmed_edits {
+                            pending.start = translate_byte_position(pending.start, *incoming);
+                            pending.old_end = translate_byte_position(pending.old_end, *incoming)
+                                .max(pending.start);
+                        }
+                    }
+                }
+                Err(reason) => {
+                    eprintln!(
+                        "pmacs-gpu: incremental CRDT text update failed ({reason}); \
+                         falling back to full materialization"
+                    );
+                    self.resync_text_from_replica();
+                }
+            }
+        }
+        // Local typing usually shifts only the viewport's end
+        // byte while the top visible source line stays fixed.
+        // The declared range includes overscan, and the daemon's
+        // generation bump already forces a full style resync, so
+        // re-declaring on every byte is mostly write amplification.
+        // Re-declare here only if the viewport origin moved (for
+        // example because an edit before `scroll_top` shifted the
+        // top line); scroll/resize/snapshot still send exact ranges.
+        self.viewport_send_if_origin_changed(buffer_id)
+    }
+
     #[allow(clippy::too_many_lines)] // per-variant match dispatcher; one arm per InstanceMessage.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
@@ -12442,118 +12911,7 @@ impl State {
                 }
                 self.viewport_send_if_changed(buffer_id)
             }
-            InstanceMessage::CrdtOp { buffer_id, op } => {
-                if self.current_buffer_id != Some(buffer_id) {
-                    // Edit op for a different buffer than we currently
-                    // render. Ignore for now (multi-buffer is a future
-                    // session); when buffer-switching lands we'll
-                    // index ops by buffer.
-                    return None;
-                }
-                let Some(doc) = self.loro_doc.as_ref() else {
-                    // Mid-attach race: ops before snapshot. The
-                    // snapshot will have the ops baked in.
-                    return None;
-                };
-                let delta_batches = self.loro_text_delta_batches.clone();
-                if let Some(delta_batches) = delta_batches.as_ref() {
-                    clear_loro_text_delta_batches(delta_batches);
-                }
-                let import_status = match doc.import(&op.bytes) {
-                    Ok(status) => status,
-                    Err(e) => {
-                        eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
-                        return None;
-                    }
-                };
-                // NOTE: `current_spans` / `current_decorations` index
-                // into the *pre-edit* byte positions. The producer's
-                // next render frame (in pmacs core, post-T M11.7
-                // generation-transition fix) ships `full=true`
-                // styling for buffers whose generation advanced, so
-                // the next message replaces the stale items
-                // wholesale via `replace_style_spans` /
-                // `replace_decorations`. The single-frame gap
-                // between CrdtOp arrival and that next frame paints
-                // styling at stale byte positions — the session-4
-                // documented "one-frame stale" artifact. A previous
-                // attempt to fix it by clearing both vectors here
-                // (`49785c4`) was reverted because the producer's
-                // *incremental* updates ship dirty-range spans only,
-                // and an emptied cache loses the non-dirty viewport
-                // styling entirely.
-                //
-                // InlineAdornments use whole-set suppression rather
-                // than dirty segments, so the same ownership rule
-                // applies here: keep the last set until the producer
-                // sends a replacement. Session 8 closed the stale
-                // inlay case producer-side: `didChange` marks the
-                // inlay store stale, and the producer sends one empty
-                // replacement to clear cached virtual text until a
-                // fresh `textDocument/inlayHint` response arrives.
-                let delta_batches = delta_batches
-                    .as_ref()
-                    .map(drain_loro_text_delta_batches)
-                    .unwrap_or_default();
-                if delta_batches.is_empty() {
-                    if !import_status.success.is_empty() {
-                        let text = self
-                            .loro_doc
-                            .as_ref()
-                            .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-                        if let Some(text) = text {
-                            self.set_text(&text);
-                        }
-                        self.unconfirmed_edits.clear();
-                    }
-                } else {
-                    match self.apply_loro_text_delta_batches(&delta_batches) {
-                        Ok(edits) => {
-                            // A daemon-originated edit shifts the text
-                            // under any still-unconfirmed optimistic
-                            // edits. Rebase the journal's anchors so
-                            // frames that include this edit (but not
-                            // ours) translate correctly. Entries are
-                            // inserts (start == old_end) or
-                            // single-codepoint deletes; both rebase by
-                            // position translation, clamped so a range
-                            // can't invert.
-                            for incoming in &edits {
-                                for (_, pending) in &mut self.unconfirmed_edits {
-                                    pending.start =
-                                        translate_byte_position(pending.start, *incoming);
-                                    pending.old_end =
-                                        translate_byte_position(pending.old_end, *incoming)
-                                            .max(pending.start);
-                                }
-                            }
-                        }
-                        Err(reason) => {
-                            eprintln!(
-                                "pmacs-gpu: incremental CRDT text update failed ({reason}); \
-                                 falling back to full materialization"
-                            );
-                            let text = self
-                                .loro_doc
-                                .as_ref()
-                                .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
-                            if let Some(text) = text {
-                                self.set_text(&text);
-                            }
-                            self.unconfirmed_edits.clear();
-                        }
-                    }
-                }
-                // Local typing usually shifts only the viewport's end
-                // byte while the top visible source line stays fixed.
-                // The declared range includes overscan, and the daemon's
-                // generation bump already forces a full style resync, so
-                // re-declaring on every byte is mostly write amplification.
-                // Re-declare here only if the viewport origin moved (for
-                // example because an edit before `scroll_top` shifted the
-                // top line); scroll/resize/snapshot still send exact ranges.
-                self.viewport_send_if_origin_changed(buffer_id)
-            }
+            InstanceMessage::CrdtOp { buffer_id, op } => self.apply_remote_crdt_op(buffer_id, &op),
             InstanceMessage::StyleSpans {
                 buffer_id,
                 generation,
@@ -20737,6 +21095,31 @@ struct TextProjectionEdit {
     inserted_len: u64,
 }
 
+/// The character index of byte `pos` of `text`, when `pos` is a
+/// character boundary within it (its end included): two lookups in
+/// loro's tree, a byte starting a character when the byte before it lies
+/// in an earlier one (E10k.3), each a walk to one element and a scan of
+/// it, which the daemon's seed keeps to a piece (`pmacs::crdt`'s
+/// `PIECE_BYTES`, carried here by the snapshot). loro's own `insert_utf8` and `delete_utf8`
+/// check a byte position by copying the whole text before it, which an
+/// optimistic key at the end of an 18 MiB document paid in full (#414).
+/// The same check as `pmacs::crdt::CrdtState`'s, copied because this
+/// crate links `pmacs-protocol` alone.
+fn loro_char_index_on_boundary(text: &loro::LoroText, pos: usize) -> Option<usize> {
+    let at = |byte| {
+        text.convert_pos(
+            byte,
+            loro::cursor::PosType::Bytes,
+            loro::cursor::PosType::Unicode,
+        )
+    };
+    let index = at(pos)?;
+    if pos == 0 {
+        return Some(index);
+    }
+    (at(pos - 1)? < index).then_some(index)
+}
+
 fn apply_loro_text_delta_batches(
     text: &mut String,
     line_starts: &mut Vec<u64>,
@@ -23903,6 +24286,34 @@ mod tests {
             optimistic_delete_range(text, 3, ProtocolKey::Char('x'), none),
             None
         );
+    }
+
+    /// E10k.3: the optimistic insert and delete find a byte's character
+    /// index by two lookups, never the replica's text, so a 4-byte
+    /// character either side of the cursor is answered and a byte inside
+    /// one is refused (loro rejects a mid-codepoint offset).
+    #[test]
+    fn e10k_3_a_byte_finds_its_character_beside_a_four_byte_one() {
+        // "a😀\n😀b": a [0,1), 😀 [1,5), \n [5,6), 😀 [6,10), b [10,11).
+        let doc = loro::LoroDoc::new();
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        text.insert(0, "a\u{1F600}\n\u{1F600}b").expect("insert");
+
+        for (byte, index) in [(0, 0), (1, 1), (5, 2), (6, 3), (10, 4), (11, 5)] {
+            assert_eq!(
+                loro_char_index_on_boundary(&text, byte),
+                Some(index),
+                "byte {byte} begins character {index}"
+            );
+        }
+        for byte in [2, 3, 4, 7, 8, 9] {
+            assert_eq!(
+                loro_char_index_on_boundary(&text, byte),
+                None,
+                "byte {byte} is inside a 😀"
+            );
+        }
+        assert_eq!(loro_char_index_on_boundary(&text, 12), None, "past the end");
     }
 
     #[test]
