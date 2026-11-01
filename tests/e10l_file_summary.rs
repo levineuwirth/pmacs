@@ -17,13 +17,17 @@
 //!
 //! The file is #439's, byte for byte what its generator writes
 //! (185,000 entries, 18,070,563 bytes, 1,665,002 lines) in a release
-//! build; a debug build, the gate's `--perf`, writes 20,000 of its
-//! entries (1.95 MB, 180,002 lines), where the walk it replaced is about
-//! 3 × 10^10 steps and the daemon still answers nothing within the
-//! deadline. `PMACS_E10L_ENTRIES` sets another count.
+//! build; a debug build, the gate's `--perf` and CI's `Perf budgets
+//! (debug)`, writes 10,000 of its entries (935,563 bytes, 90,002 lines),
+//! where the walk it replaced is about 8 × 10^9 steps, some 80 s at the
+//! 9.9 ns a step a debug build took on the laptop, so the daemon still
+//! answers nothing within the deadline, while the worker's whole-file
+//! read stays well inside its 2 s limit on a slower machine (0.78 s
+//! here at 20,000). `PMACS_E10L_ENTRIES` sets another count.
 //!
 //! The row is a deadline at a size the gate's default sweep should not
-//! carry (D12): `#[ignore]`, run by exact name by `scripts/perf-budgets`.
+//! carry, so it runs with the budgets (D12): `#[ignore]`, run by exact
+//! name by `scripts/perf-budgets`.
 //! It prints each time with the load average beside it, and the daemon's
 //! main thread's CPU time when the deadline passes.
 
@@ -33,18 +37,19 @@ mod common;
 use std::time::{Duration, Instant};
 
 /// The entries of #439's file a row writes: the issue's 185,000 in a
-/// release build, 20,000 in a debug one.
+/// release build, 10,000 in a debug one.
 const ENTRIES: usize = if cfg!(debug_assertions) {
-    20_000
+    10_000
 } else {
     185_000
 };
 
 /// How long the frame with the viewport's highlighting, and the
 /// summary, may take from the viewport's declaration: generous, for a
-/// debug build under the gate's load.
+/// debug build under the gate's load (1.6 s at 20,000 entries in debug,
+/// 3.0 to 3.6 s for #439's file in release, on the laptop).
 #[cfg(feature = "crdt")]
-const DEADLINE: Duration = Duration::from_mins(1);
+const DEADLINE: Duration = Duration::from_secs(30);
 
 /// The file #439 names, `entries` objects long, byte for byte what its
 /// generator writes: `json.dumps([{"id": i, "name": f"item {i}", "tags":
@@ -187,7 +192,7 @@ fn await_highlighting(
 /// frame with the viewport's highlighting and the summary within the
 /// deadline, and a key after them is answered.
 #[test]
-#[ignore = "wall-clock deadline at a large size; runs under --ignored in the perf jobs and scripts/gate --perf"]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
 fn e10l_a_large_json_file_reaches_a_highlighted_frame_in_the_gpu_route() {
     #[cfg(feature = "crdt")]
     {
