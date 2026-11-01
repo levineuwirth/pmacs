@@ -10226,6 +10226,230 @@ So, at E10g's close: `main` is green at `5f096c0` and at `9338959`, and PR #422 
 this branch's runs and one on `main`, each arm passing; no registry row counts it. Every other count
 above stands.
 
+### E10k's close: PR #426 green at `71747f2` on its merge with E10g, merged as `2972532`, `main` green at `99d73ef` and red at `2972532` on #316's seventeenth and, on attempt 2, #282's ninth
+
+Recorded at E10k's close, after `main`'s attempt 2 ended at 23:16:18Z on 2026-11-01. The owner
+merged PR #426 at 21:49:57Z that day as `2972532`, a squash of
+`71747f2` on `99d73ef` whose diff is the head's against its merge base `c62fbc1` (the same
+`git patch-id --stable`), its tree the head merged into `99d73ef` (`git merge-tree`), GitHub's
+signature valid and `%(trailers)` empty; #413 and #414 closed with it. Every run was read from the
+jobs endpoint by conclusion, and every test leg of each code-bearing run through its own log,
+fetched with escape sequences allowed and stripped, each `running` line paired with its own result
+line. Every run id and job id below was searched for in this file before it was written, and none
+was here. Nothing was rerun but `main`'s attempt 2 at `2972532`, which the owner ran.
+
+#### PR #426's `CI` 41207583424 at `71747f2`, on its merge with E10g: green
+
+At the owner's word the PR was closed and reopened at 13:53Z on 2026-10-31, after E10g's squash
+`9338959` reached `main`, for a run with E10g in it: `pull_request`, the merge `e045e9e` of `71747f2`
+into `9338959`, attempt 1 of 1, created 2026-10-31T13:53:18Z and completed 14:29:01Z (the API's
+`updated_at`): `success`.
+
+Tally (pr426-ci-71747f2-e045e9e): 19 = 18 + 1.
+
+Tally (pr426-ci-71747f2-e045e9e-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 124555720099 | success |
+| Format | 124555720255 | success |
+| Lint (lua54) | 124555720271 | success |
+| Lint (luajit) | 124555720290 | success |
+| Commit attribution (D9) | 124555720309 | success |
+| M1 Acceptance Gates | 124555761870 | success |
+| M5 Perf Gates | 124555761889 | success |
+| M6 Perf Gates | 124555761906 | success |
+| M10 Perf Gates (crdt) | 124555761918 | success |
+| Test (macos-latest / luajit) | 124555761926 | success |
+| Perf budgets (debug) | 124555761927 | success |
+| Test (crdt) | 124555761930 | success |
+| GPU Render (headless) | 124555761946 | success |
+| M4 Perf Gates | 124555761957 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 124555761961 | success |
+| Test (macos-latest / lua54) | 124555761965 | success |
+| Test (ubuntu-latest / luajit) | 124555761978 | success |
+| Test (ubuntu-latest / lua54) | 124555762016 | success |
+| Docs consistency | 124555762981 | skipped |
+
+Tally (pr426-ci-71747f2-e045e9e-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs, each through its own log: `Test (crdt)` 124555761930 ran 13:53:34Z to
+  14:28:02Z, pairing 223 `running` lines with 223 `test result: ok`, 5,358 passed, 73 ignored;
+  `Test (ubuntu-latest / luajit, no crdt)` 124555761961, 224 pairs, 4,825 passed, 59 ignored;
+  `Test (ubuntu-latest / luajit)` 124555761978 and `Test (ubuntu-latest / lua54)` 124555762016,
+  224 pairs each, 5,411 passed, 73 ignored; `Test (macos-latest / luajit)` 124555761926 and
+  `Test (macos-latest / lua54)` 124555761965, 225 pairs each, 5,367 passed, 71 ignored. Against fix
+  round 1's run at the same head (above) every leg has two more pairs and 64 more passed, the head
+  unchanged and the base moved from `33b020d` to `9338959`. `WouldBlock` appears in no test leg's
+  log, and #427's row passed on both macOS legs.
+- `GPU Render (headless)` 124555761946: `pmacs-gpu` 394 passed. `Perf budgets (debug)`
+  124555761927: `every budget ran and held`, E10k's typing suite's five rows (159.67 s) and P1
+  among them. `M10 Perf Gates (crdt)` 124555761918: M10.2's suite `6 passed` (60.64 s).
+
+`Grammar fuzz` 41207583422, attempt 1 of 1, `success`, created 13:53:18Z and completed 14:51:35Z:
+both arms decided `run=true` (`src/syntax.rs changed` since `c62fbc1`, a change from `main`'s side;
+the branch changes no grammar path) and smoked every grammar for 15 s on GCC 13.3.0,
+`Grammar fuzz` 124555720284 and `Grammar fuzz (asan-strict)` 124555719986, each ending `exit 0, its
+parse worker's replay exit 0`. Neither found a crash; each replayed 22 grammars' inputs through the
+worker, every one answered or contained (ubsan 964 inputs, 20 contained; asan-strict 961, 14). Both
+found bash's memory finding again, `exceeded memory cap at 4 GB` (minima 62,886 and 62,374 bytes):
+**#423's seventh occurrence**, commented there (issuecomment-6545160395). Neither replay names
+`bash/memory-0.input` among the inputs it contained, so both answered it, as read from their
+reports; each contained `bash/hang-1.input`, a bash hang not reproduced alone, by the worker's memory
+watch. The slow findings, json's allocations in both arms and markdown_inline's in asan-strict, and
+the hangs not reproduced alone are commented on #293 (issuecomment-6545160777), among them three
+`mispredicted`, all cmake, the issue's third to fifth: ubsan's at exponent 0.98, `returned in 697571
+ms, past its budget of 243997 ms`, and asan-strict's at 0.41 and 1.00, `returned in 215481 ms, past
+its budget of 94461 ms` and `returned in 271803 ms, past its budget of 231075 ms`.
+
+#### `main` at `99d73ef`, E10g's close registry commit: green
+
+`CI` 41212947892 at `99d73ef`, attempt 1 of 1, `push`, created 2026-10-31T15:02:52Z and completed
+15:05:09Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-99d73ef): 15 = 6 + 9.
+
+Tally (main-ci-99d73ef-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 124571554753 | success |
+| Format | 124571554949 | success |
+| Lint (luajit) | 124571554973 | success |
+| Lint (lua54) | 124571554980 | success |
+| Commit attribution (D9) | 124571555046 | success |
+| Docs consistency | 124571594804 | success |
+| Test (matrix) | 124571595867 | skipped |
+| Test (crdt) | 124571595879 | skipped |
+| M10 Perf Gates (crdt) | 124571595989 | skipped |
+| M5 Perf Gates | 124571596073 | skipped |
+| M1 Acceptance Gates | 124571596123 | skipped |
+| Perf budgets (debug) | 124571596205 | skipped |
+| M6 Perf Gates | 124571596347 | skipped |
+| M4 Perf Gates | 124571596526 | skipped |
+| GPU Render (headless) | 124571596739 | skipped |
+
+Tally (main-ci-99d73ef-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 124571594804: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+41212947997 at `99d73ef`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz` 124571554970 and `Grammar fuzz (asan-strict)` 124571555688.
+
+#### `main` at `2972532`, E10k's squash merge of PR #426: red on #316's seventeenth, and on attempt 2 on #282's ninth
+
+`CI` 41354013535 at `2972532`, attempt 1, `push`, created 2026-11-01T21:50:00Z and completed
+22:25:20Z (the API's `updated_at`): `failure`.
+
+Tally (main-ci-2972532): 19 = 17 + 1 + 1.
+
+Tally (main-ci-2972532-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 124990084475 | success |
+| Format | 124990084570 | success |
+| Lint (luajit) | 124990084675 | success |
+| Commit attribution (D9) | 124990084750 | success |
+| Lint (lua54) | 124990084928 | success |
+| M1 Acceptance Gates | 124990132682 | success |
+| M4 Perf Gates | 124990132703 | success |
+| Perf budgets (debug) | 124990132723 | success |
+| M6 Perf Gates | 124990132724 | success |
+| GPU Render (headless) | 124990132726 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 124990132755 | success |
+| M10 Perf Gates (crdt) | 124990132783 | success |
+| Test (macos-latest / luajit) | 124990132786 | success |
+| Test (macos-latest / lua54) | 124990132788 | success |
+| M5 Perf Gates | 124990132798 | success |
+| Test (crdt) | 124990132833 | failure |
+| Test (ubuntu-latest / luajit) | 124990132840 | success |
+| Test (ubuntu-latest / lua54) | 124990132928 | success |
+| Docs consistency | 124990134763 | skipped |
+
+Tally (main-ci-2972532-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` 124990132833 ran 21:50:14Z to 22:25:19Z: its test step paired 222 `running`
+  lines with 222 result lines, 5,356 passed, 1 failed, 73 ignored, and its `cargo test --doc` step
+  was skipped after the failure (the job's step list), one pair fewer than the PR's run. The failure
+  (log lines 4775 to 4815) is
+  `e7i_review3_probes::e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`
+  at `tests/e7i_review3_probes.rs:865:9`, with every required fragment of #316's body as written:
+  `kill 1: nothing held the switch's follow-up parse, which started a worker at once and installed`;
+  `death=killed, " +  ` followed in the same line by `parse:killed`, with `tree=true` and
+  `unit=pid_29814`; and `test result: FAILED. 10 passed; 1 failed; 0 ignored` (18.29 s). Its report
+  reads `busy=true` where the sixteenth's read `busy=false`. **#316's seventeenth**, commented there
+  (issuecomment-6564822266). The squash changes neither `src/parse_isolation.rs`,
+  `builtin/runtime/syntax.lua` nor `tests/e7i_review3_probes.rs`.
+- The other five test legs, each through its own log: `Test (ubuntu-latest / luajit, no crdt)`
+  124990132755, 224 pairs, 4,825 passed, 59 ignored; `Test (ubuntu-latest / luajit)` 124990132840
+  and `Test (ubuntu-latest / lua54)` 124990132928, 224 pairs each, 5,411 passed, 73 ignored;
+  `Test (macos-latest / luajit)` 124990132786 and `Test (macos-latest / lua54)` 124990132788, 225
+  pairs each, 5,367 passed, 71 ignored: the PR's figures on every leg. `WouldBlock` appears in no
+  test leg's log, and #427's row passed on both macOS legs.
+- `GPU Render (headless)` 124990132726: `pmacs-gpu` 394 passed. `Perf budgets (debug)`
+  124990132723: `every budget ran and held`, the typing suite's five rows in 152.16 s.
+  `M10 Perf Gates (crdt)` 124990132783: `6 passed` (60.76 s).
+
+The owner reran attempt 1's failed jobs (`gh run rerun 41354013535 --failed`) on 2026-11-01:
+attempt 2, `push` at `2972532`, ran from 22:39:19Z to 23:16:18Z (the API's `run_started_at` and
+`updated_at`): `failure`. Only `Test (crdt)` ran again; every other job is carried from attempt 1
+under a new id with attempt 1's times, and `Docs consistency` was skipped again.
+
+Tally (main-ci-2972532-attempt2): 19 = 17 + 1 + 1.
+
+Tally (main-ci-2972532-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Test (crdt) | 125002776266 | failure |
+| Format | 125002776923 | success |
+| M6 Perf Gates | 125002777307 | success |
+| Test (ubuntu-latest / lua54) | 125002777478 | success |
+| M4 Perf Gates | 125002777668 | success |
+| Perf budgets (debug) | 125002777805 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 125002778267 | success |
+| GPU Render (headless) | 125002800363 | success |
+| M5 Perf Gates | 125002800766 | success |
+| Docs consistency | 125002801259 | skipped |
+| Changed paths | 125002801465 | success |
+| M1 Acceptance Gates | 125002802114 | success |
+| M10 Perf Gates (crdt) | 125002804253 | success |
+| Test (macos-latest / luajit) | 125002808632 | success |
+| Lint (lua54) | 125002808774 | success |
+| Commit attribution (D9) | 125002810951 | success |
+| Test (ubuntu-latest / luajit) | 125002811081 | success |
+| Test (macos-latest / lua54) | 125002814855 | success |
+| Lint (luajit) | 125002817853 | success |
+
+Tally (main-ci-2972532-attempt2-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` 125002776266 ran 22:39:24Z to 23:16:17Z: its test step paired 222 `running` lines
+  with 222 result lines, 5,356 passed, 1 failed, 73 ignored, and its `cargo test --doc` step was
+  skipped after the failure. #316's row passed (non-reproduction and nothing more). The failure (log
+  lines 4347 to 4526) is `a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors` at
+  `tests/e7b_review_wire_acceptance.rs:1214:5`, with #282's three fragments:
+  `*lsp* names the request and the code: []`; `WIRE *errors* gained ["[lsp] LSP: default-rust
+  refused textDocument/prepareRename as a client error, -32602 InvalidParams: No references found
+  at position"]` with `WIRE label "ready", last_error None`; and `test result: FAILED. 4 passed; 1
+  failed; 2 ignored` (45.67 s), the count moved with the suite as at the third to eighth. Between the
+  row's stdout header and its panic, 107 lines name `$/progress`, 91 of them
+  `rustAnalyzer/cachePriming` reports, against `*lsp*`'s 64-entry ring, the filed mechanism.
+  **#282's ninth occurrence**, its fourth on `main`, commented there (issuecomment-6565390226). The
+  squash changes nothing on the LSP path or in that suite. `WouldBlock` appears nowhere in the log.
+
+`Grammar fuzz` 41354013523 at `2972532`, `success`, both arms deciding `run=false` (`no changed path
+can change the grammar set`): `Grammar fuzz` 124990084681 and `Grammar fuzz (asan-strict)`
+124990084406.
+
+So, at E10k's close: PR #426 merged at `71747f2`, green on its merge with E10g; `main` is green at
+`99d73ef` and red at `2972532` on both attempts, each on a registered intermittent off the squash's
+paths. #316 moves to seventeen and #282 to nine: under the rerun rule each attempt's red is an
+occurrence, and #316's row passing on attempt 2 is non-reproduction and nothing more. #423 moves to
+seven, six on pull-request runs and one on `main`; no registry row counts it. #293's `mispredicted`
+findings reach five, all cmake. #427 met no occurrence: its row passed on both macOS legs of every
+run here. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
