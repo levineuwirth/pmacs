@@ -8874,4 +8874,170 @@ mod tests {
             "twice the entries took {large} steps against {small}: not linear"
         );
     }
+
+    /// E10l.2: the summary's cost on #439's file, broken out, measured
+    /// on the route the daemon takes: the file opened, its parse in a
+    /// worker (`pmacs-parse-unit` beside `deps/`, which `cargo build`
+    /// puts there), then each part of `scoped_file_summary` timed in
+    /// turn on the main thread --- the copy of the buffer
+    /// (`buffer_source_bytes`), the line starts, the worker's whole-file
+    /// span answer against its read limit (`READ_HARD`, 2 s, past which
+    /// the read is abandoned and the unit discarded), the theme's mapping
+    /// and the flatten, and the pass. The tally E10l replaced is timed on
+    /// 2,000 entries and projected to the file's lines times spans.
+    /// Prints, asserts only that each part answered; run by hand, in
+    /// release for the record (185,000 entries, the issue's 18,070,563
+    /// bytes; 20,000 in a debug build; `PMACS_E10L_ENTRIES` for another
+    /// count):
+    ///
+    /// `cargo test --release --lib -- --ignored --exact
+    /// semantic_render::tests::e10l_summary_cost_broken_out --nocapture`
+    #[test]
+    #[ignore = "measurement at a large size; run by hand in release"]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_precision_loss,
+        reason = "one measurement, part by part, printed as it goes"
+    )]
+    fn e10l_summary_cost_broken_out() {
+        use std::time::{Duration, Instant};
+        let entries = std::env::var("PMACS_E10L_ENTRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if cfg!(debug_assertions) {
+                20_000
+            } else {
+                185_000
+            });
+        let load = || {
+            std::fs::read_to_string("/proc/loadavg").map_or_else(
+                |_| "unknown".to_owned(),
+                |s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "),
+            )
+        };
+
+        // The tally E10l replaced, per line and span pair, on 2,000
+        // entries parsed in the editor.
+        let (pair_ns, pairs_small) = {
+            let state = empty_state();
+            let bid = active_buffer(&state);
+            seed_parse_view(
+                &state,
+                bid,
+                issue_439_json(2_000).as_bytes(),
+                "json",
+                "/tmp/x.json",
+            );
+            let (source, spans) = summary_inputs(&state, bid);
+            let starts = line_start_offsets(&source);
+            let started = Instant::now();
+            let lines = reference_line_styles(&spans, &starts, source.len() as u64);
+            let took = started.elapsed();
+            assert_eq!(
+                lines,
+                line_dominant_styles(&spans, &starts, source.len() as u64)
+            );
+            let pairs = (starts.len() * spans.len()) as f64;
+            (took.as_nanos() as f64 / pairs, pairs)
+        };
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("big.json");
+        let text = issue_439_json(entries);
+        if entries == 185_000 {
+            assert_eq!(text.len(), 18_070_563, "#439's file, byte for byte");
+        }
+        std::fs::write(&path, &text).expect("write the file");
+        drop(text);
+        let load_before = load();
+        let opened = Instant::now();
+        let mut state = EditorState::open(path).expect("open the file");
+        let bid = active_buffer(&state);
+        let deadline = opened + Duration::from_mins(2);
+        let bundle = loop {
+            state.tick_async();
+            if !grammar_style_parse_not_ready(&state, bid)
+                && let Some(bundle) = state.syntax_registry.view(bid).and_then(|h| h.current())
+            {
+                break bundle;
+            }
+            assert!(Instant::now() < deadline, "the file's parse never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let parsed = opened.elapsed();
+        let isolated = bundle
+            .isolated
+            .clone()
+            .expect("the parse ran in a worker (pmacs-parse-unit beside deps/)");
+
+        let started = Instant::now();
+        let source = {
+            let core = state.core.borrow();
+            let registry = core.registry.clone();
+            let reg = registry.borrow();
+            buffer_source_bytes(reg.get(bid).expect("buffer"))
+        };
+        let copy = started.elapsed();
+        let len = source.len() as u64;
+
+        let started = Instant::now();
+        let line_starts = line_start_offsets(&source);
+        let starts = started.elapsed();
+
+        let started = Instant::now();
+        let answer = isolated.spans_for(0..source.len());
+        let fetch = started.elapsed();
+        let answer = answer.expect(
+            "the worker answered the whole-file read (past READ_HARD the read is abandoned)",
+        );
+        let raw: usize = answer.layers.iter().map(|layer| layer.spans.len()).sum();
+
+        // The fetched set covers the file, so the producer reads it back
+        // without asking the worker: what remains is the theme's mapping
+        // and the flatten.
+        let started = Instant::now();
+        let spans = grammar_scoped_style_spans(
+            &state,
+            &DeclaredViewport {
+                buffer_id: bid,
+                visible: ByteRange { start: 0, end: len },
+                frontend_generation: 0,
+            },
+        );
+        let map_flatten = started.elapsed();
+
+        let started = Instant::now();
+        let lines = line_dominant_styles(&spans, &line_starts, len);
+        let pass = started.elapsed();
+        assert!(
+            lines.iter().any(|s| *s != Style::default()),
+            "the summary styles the file"
+        );
+
+        let started = Instant::now();
+        let whole = scoped_file_summary(&state, bid, false);
+        let again = started.elapsed();
+        assert_eq!(whole, lines, "the summary is the pass's");
+
+        let pairs = (line_starts.len() * spans.len()) as f64;
+        let projected = Duration::from_secs_f64(pair_ns * pairs / 1e9);
+        let held = copy + starts + fetch + map_flatten + pass;
+        eprintln!(
+            "e10l breakdown, {entries} entries ({len} bytes, {} lines, {raw} spans from the \
+             worker, {} after the flatten); load {load_before} before, {} after\n\
+             - open to the parse installed: {parsed:?}\n\
+             - the copy of the buffer: {copy:?}\n\
+             - the line starts: {starts:?}\n\
+             - the worker's whole-file span answer: {fetch:?} (READ_HARD 2 s)\n\
+             - the theme's mapping and the flatten: {map_flatten:?}\n\
+             - the pass: {pass:?}\n\
+             - the summary's main-thread total: {held:?}; again with the answer \
+             held: {again:?}\n\
+             - the tally it replaced: {pair_ns:.2} ns a line and span pair over {pairs_small} \
+             pairs, so {pairs:.3e} pairs here project to {projected:?}",
+            line_starts.len(),
+            spans.len(),
+            load(),
+        );
+    }
 }
