@@ -13560,9 +13560,10 @@ pub fn make_workspace(lua: &Lua, lsp_manager: &SharedLspManager) -> mlua::Result
 // ---------------------------------------------------------------------------
 
 use crate::completion_framework::{
-    CompletionCandidate, CompletionContext, CompletionRegistry, CompletionTrigger, ProviderFn,
-    ProviderId, SharedCompletionRegistry, SharedSnippetRegistry, Snippet, SnippetRegistry,
-    dabbrev_provider, lsp_completion_provider, project_symbols_provider, snippet_provider,
+    CompletionCandidate, CompletionContext, CompletionRegistry, CompletionText, CompletionTrigger,
+    DABBREV_WINDOW_DEFAULT, ProviderFn, ProviderId, SharedCompletionRegistry,
+    SharedSnippetRegistry, Snippet, SnippetRegistry, dabbrev_provider, lsp_completion_provider,
+    project_symbols_provider, snippet_provider,
 };
 
 fn completion_kind_tag(kind: crate::completion::CompletionItemKind) -> &'static str {
@@ -13656,7 +13657,7 @@ fn ctx_to_lua(lua: &Lua, ctx: &CompletionContext) -> mlua::Result<Table> {
     t.set("prefix", ctx.prefix.as_str())?;
     t.set("line", ctx.line)?;
     t.set("col", ctx.col)?;
-    t.set("buffer_text", ctx.buffer_text.as_ref())?;
+    t.set("buffer_text", ctx.text.whole().as_ref())?;
     if let Some(l) = &ctx.language {
         t.set("language", l.as_str())?;
     }
@@ -13678,11 +13679,43 @@ fn ctx_to_lua(lua: &Lua, ctx: &CompletionContext) -> mlua::Result<Table> {
     Ok(t)
 }
 
-fn lua_table_to_ctx(t: &Table) -> CompletionContext {
+/// The context a Lua table describes. A table naming a `buffer` (and its
+/// `cursor`, a byte offset) gets a text read from that buffer by range,
+/// so nothing is copied that no provider asks for (E10k.2;
+/// `completion.lua` passes these); a table carrying `buffer_text`
+/// instead hands that text over whole, as every caller did before.
+fn lua_table_to_ctx(lua: &Lua, t: &Table) -> CompletionContext {
     let prefix: String = t.get("prefix").unwrap_or_default();
     let line: u32 = t.get("line").unwrap_or(0);
     let col: u32 = t.get("col").unwrap_or(0);
-    let buffer_text: String = t.get("buffer_text").unwrap_or_default();
+    let buffer: Option<BufferIdLua> = t.get::<Option<BufferIdLua>>("buffer").ok().flatten();
+    let cursor: Option<usize> = t.get::<Option<usize>>("cursor").ok().flatten();
+    let reader = buffer.and_then(|handle| {
+        let id = handle.0;
+        let len = with_registry(lua, |r| Ok(resolve(r, id)?.len())).ok()?;
+        let weak = lua.weak();
+        Some(CompletionText::reader(
+            usize::try_from(len).ok()?,
+            move |start, end| {
+                weak.try_upgrade()
+                    .and_then(|lua| {
+                        with_registry(&lua, |r| {
+                            slice_buffer(
+                                r,
+                                id,
+                                i64::try_from(start).unwrap_or(i64::MAX),
+                                i64::try_from(end).unwrap_or(i64::MAX),
+                            )
+                        })
+                        .ok()
+                    })
+                    .unwrap_or_default()
+            },
+        ))
+    });
+    let text = reader.unwrap_or_else(|| {
+        CompletionText::owned(t.get::<String>("buffer_text").unwrap_or_default())
+    });
     let language: Option<String> = t.get::<Option<String>>("language").ok().flatten();
     let project_root: Option<String> = t.get::<Option<String>>("project_root").ok().flatten();
     let trigger_tag: Option<String> = t.get::<Option<String>>("trigger").ok().flatten();
@@ -13699,7 +13732,9 @@ fn lua_table_to_ctx(t: &Table) -> CompletionContext {
         prefix,
         line,
         col,
-        buffer_text: Rc::from(buffer_text),
+        text,
+        cursor,
+        buffer: buffer.map(|handle| handle.0),
         language,
         project_root: project_root.map(std::path::PathBuf::from),
         trigger,
@@ -13973,7 +14008,7 @@ pub fn install_completion_framework(
         m.set(
             "collect",
             lua.create_function(move |lua, ctx_t: Table| {
-                let ctx = lua_table_to_ctx(&ctx_t);
+                let ctx = lua_table_to_ctx(lua, &ctx_t);
                 let cands = reg.borrow().collect(&ctx);
                 let out = lua.create_table_with_capacity(cands.len(), 0)?;
                 for (i, c) in cands.iter().enumerate() {
@@ -14008,7 +14043,9 @@ pub fn install_completion_framework(
                     prefix,
                     line: line.unwrap_or(0),
                     col: col.unwrap_or(0),
-                    buffer_text: Rc::from(buffer_text.unwrap_or_default()),
+                    text: CompletionText::owned(buffer_text.unwrap_or_default()),
+                    cursor: None,
+                    buffer: None,
                     language,
                     project_root: project_root.map(std::path::PathBuf::from),
                     trigger,
@@ -14049,7 +14086,24 @@ pub fn make_completion_framework(
             60,
             project_symbols_provider(indexer.clone()),
         );
-        r.register("dabbrev", 20, dabbrev_provider());
+        // E10k.2: dabbrev reads `completion.dabbrev-window` bytes either
+        // side of the cursor, the setting `completion.lua` defines, read
+        // per request (a buffer-local value included); the default when
+        // nothing defines it.
+        let config = lua
+            .app_data_ref::<SharedConfigRegistry>()
+            .map(|c| c.clone());
+        let window = move |buffer: Option<BufferId>| {
+            config.as_ref().map_or(DABBREV_WINDOW_DEFAULT, |config| {
+                match config.borrow().get("completion.dabbrev-window", buffer) {
+                    Ok(crate::config_registry::ConfigValue::Int(v)) => {
+                        usize::try_from(*v).unwrap_or(DABBREV_WINDOW_DEFAULT)
+                    }
+                    _ => DABBREV_WINDOW_DEFAULT,
+                }
+            })
+        };
+        r.register_ranked("dabbrev", 20, dabbrev_provider(window));
     }
     Ok((registry, snippets))
 }
@@ -14218,7 +14272,9 @@ fn lua_compat_ctx_args(ctx: &CompletionContext) -> LuaProviderArgs {
         ctx.prefix.clone(),
         ctx.line,
         ctx.col,
-        ctx.buffer_text.to_string(),
+        // The whole text, copied for the Lua provider as it always was;
+        // only a registered Lua provider makes a request read it (E10k.2).
+        ctx.text.whole().to_string(),
         ctx.language.clone(),
         ctx.project_root.as_ref().map(|p| p.display().to_string()),
         trigger_tag.to_owned(),

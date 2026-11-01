@@ -238,14 +238,21 @@ impl BufferMirror {
     /// deletes (`crdt.rs::q1_sub_check_3_mid_codepoint_rejection_on_delete`).
     /// A naive 1-byte-retreat would error on multi-byte characters
     /// — using this helper produces a valid CRDT op.
+    ///
+    /// Like the three helpers below it reads one character of the
+    /// replica, never its whole text: before E10k.3 each of the four
+    /// materialized the document, three times a typed key, 18 MiB each
+    /// time on #414's log.
     #[must_use]
     pub fn prev_char_len(&self, buffer_id: BufferId) -> Option<usize> {
         let cursor = self.cursors.get(&buffer_id).copied()?;
         if cursor == 0 {
             return None;
         }
-        let content = self.states.get(&buffer_id)?.materialize_string();
-        content[..cursor].chars().last().map(char::len_utf8)
+        self.states
+            .get(&buffer_id)?
+            .char_before_byte(cursor)
+            .map(char::len_utf8)
     }
 
     /// T M10.10 (post-audit Finding 5) — is the cursor at end-of-
@@ -289,23 +296,18 @@ impl BufferMirror {
     #[must_use]
     pub fn cursor_at_end_of_line_safe_for_delete_back(&self, buffer_id: BufferId) -> Option<bool> {
         let cursor = self.cursors.get(&buffer_id).copied()?;
-        let content = self.states.get(&buffer_id)?.materialize_string();
-        let bytes = content.as_bytes();
+        let state = self.states.get(&buffer_id)?;
         if cursor == 0 {
             return Some(false); // nothing before cursor to delete
         }
-        let at_end_of_line = if cursor >= bytes.len() {
-            true
-        } else {
-            bytes[cursor] == b'\n'
-        };
+        let at_end_of_line = cursor >= state.len_utf8() || state.char_at_byte(cursor) == Some('\n');
         if !at_end_of_line {
             return Some(false);
         }
         // Previous char must not be a newline — otherwise this is a
         // line-join operation that the single-column-erase paint
         // sequence can't represent.
-        let prev_char = content[..cursor].chars().last()?;
+        let prev_char = state.char_before_byte(cursor)?;
         if prev_char == '\n' {
             return Some(false);
         }
@@ -340,15 +342,14 @@ impl BufferMirror {
     #[must_use]
     pub fn cursor_at_end_of_line(&self, buffer_id: BufferId) -> Option<bool> {
         let cursor = self.cursors.get(&buffer_id).copied()?;
-        let content = self.states.get(&buffer_id)?.materialize_string();
-        let bytes = content.as_bytes();
-        if cursor >= bytes.len() {
+        let state = self.states.get(&buffer_id)?;
+        if cursor >= state.len_utf8() {
             // Cursor at or past the buffer's end — always end-of-line.
             return Some(true);
         }
         // `\n` at cursor position means cursor is at the end of the
         // line that precedes the newline.
-        Some(bytes[cursor] == b'\n')
+        Some(state.char_at_byte(cursor) == Some('\n'))
     }
 
     /// Byte length of the character at the current cursor in
@@ -365,11 +366,10 @@ impl BufferMirror {
     #[must_use]
     pub fn next_char_len(&self, buffer_id: BufferId) -> Option<usize> {
         let cursor = self.cursors.get(&buffer_id).copied()?;
-        let content = self.states.get(&buffer_id)?.materialize_string();
-        if cursor >= content.len() {
-            return None;
-        }
-        content[cursor..].chars().next().map(char::len_utf8)
+        self.states
+            .get(&buffer_id)?
+            .char_at_byte(cursor)
+            .map(char::len_utf8)
     }
 
     /// Get the cursor byte position for `buffer_id`. Returns `None`
@@ -596,7 +596,9 @@ impl BufferMirror {
     }
 
     /// Materialize the current text of `buffer_id` as a String.
-    /// Returns None if the buffer isn't ready.
+    /// Returns None if the buffer isn't ready. The whole document,
+    /// copied: for the cold path (`SemanticClient`'s reconstruction),
+    /// never a key's (E10k.3).
     #[must_use]
     pub fn materialize(&self, buffer_id: BufferId) -> Option<String> {
         self.states
@@ -958,6 +960,59 @@ mod tests {
             .expect("init");
         m.set_cursor_byte_pos(id, 3);
         assert!(m.next_char_len(id).is_none());
+    }
+
+    /// E10k.3: the four per-key helpers read one character of the
+    /// replica, so a 4-byte character either side of the cursor is
+    /// measured as the whole character, and a newline after it still
+    /// ends the line.
+    #[test]
+    fn the_per_key_helpers_read_a_four_byte_character_either_side() {
+        let mut m = BufferMirror::new(FrontendId(2));
+        let id = BufferId::next();
+        // "a😀\n😀b": a [0,1), 😀 [1,5), \n [5,6), 😀 [6,10), b [10,11).
+        m.init_from_snapshot(id, &fresh_snapshot(99, "a\u{1F600}\n\u{1F600}b"))
+            .expect("init");
+        m.set_cursor_byte_pos(id, 5); // after the first 😀, before \n
+        assert_eq!(m.prev_char_len(id), Some(4));
+        assert_eq!(m.next_char_len(id), Some(1));
+        assert_eq!(m.cursor_at_end_of_line(id), Some(true));
+        // End of line, but 😀 is two columns wide: no optimistic erase.
+        assert_eq!(
+            m.cursor_at_end_of_line_safe_for_delete_back(id),
+            Some(false)
+        );
+        m.set_cursor_byte_pos(id, 6); // after \n, before the second 😀
+        assert_eq!(m.prev_char_len(id), Some(1));
+        assert_eq!(m.next_char_len(id), Some(4));
+        assert_eq!(m.cursor_at_end_of_line(id), Some(false));
+        m.set_cursor_byte_pos(id, 10); // after the second 😀, before b
+        assert_eq!(m.prev_char_len(id), Some(4));
+        assert_eq!(m.next_char_len(id), Some(1));
+        m.set_cursor_byte_pos(id, 11); // the end
+        assert_eq!(m.prev_char_len(id), Some(1));
+        assert!(m.next_char_len(id).is_none());
+        assert_eq!(m.cursor_at_end_of_line(id), Some(true));
+        assert_eq!(m.cursor_at_end_of_line_safe_for_delete_back(id), Some(true));
+    }
+
+    /// E10k.3: a cursor inside a character (which loro would refuse as
+    /// an edit position) answers nothing rather than reading a byte of
+    /// it; the helpers before E10k.3 panicked slicing the string there.
+    #[test]
+    fn a_cursor_inside_a_character_answers_nothing() {
+        let mut m = BufferMirror::new(FrontendId(2));
+        let id = BufferId::next();
+        m.init_from_snapshot(id, &fresh_snapshot(99, "a\u{1F600}b"))
+            .expect("init");
+        m.set_cursor_byte_pos(id, 3); // inside 😀 [1,5)
+        assert!(m.prev_char_len(id).is_none());
+        assert!(m.next_char_len(id).is_none());
+        assert_eq!(m.cursor_at_end_of_line(id), Some(false));
+        assert_eq!(
+            m.cursor_at_end_of_line_safe_for_delete_back(id),
+            Some(false)
+        );
     }
 
     #[test]

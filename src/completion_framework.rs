@@ -43,12 +43,14 @@
 //!   plain closure; the Lua binding (`pmacs.completion.register`)
 //!   wraps a Lua function as one.
 
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::buffer::BufferId;
 use crate::completion::{CompletionItem, CompletionItemKind};
 
 // ---------------------------------------------------------------------------
@@ -98,6 +100,120 @@ pub enum CompletionTrigger {
     Incomplete,
 }
 
+/// The buffer a request completes in, read by byte range (E10k.2).
+///
+/// A built-in provider reads the stretch it needs ([`Self::bytes`]); the
+/// whole text is copied only when something asks for it
+/// ([`Self::whole`]), at most once a request, and only a Lua provider
+/// does: its fourth argument is the whole text, as it always was. Before
+/// E10k.2 every key that collected copied an 18 MiB buffer into Lua and
+/// again into the context (#413). Every byte handed out is counted
+/// ([`Self::read_bytes`]), which is how
+/// [`CompletionRegistry::last_read_bytes`] says what a request read.
+#[derive(Clone)]
+pub struct CompletionText {
+    len: usize,
+    source: TextSource,
+    whole: Rc<OnceCell<Rc<str>>>,
+    read: Rc<Cell<usize>>,
+}
+
+/// Where a [`CompletionText`] reads from.
+#[derive(Clone)]
+enum TextSource {
+    /// The whole text, handed over by whoever built the context.
+    Owned(Rc<str>),
+    /// The live buffer, read by byte range.
+    Reader(Rc<dyn Fn(usize, usize) -> Vec<u8>>),
+}
+
+impl CompletionText {
+    /// A text handed over whole (a context built from a string).
+    #[must_use]
+    pub fn owned(text: impl Into<Rc<str>>) -> Self {
+        let text = text.into();
+        Self {
+            len: text.len(),
+            source: TextSource::Owned(text),
+            whole: Rc::default(),
+            read: Rc::default(),
+        }
+    }
+
+    /// A buffer of `len` bytes, read by `read(start, end)` a range at a
+    /// time.
+    #[must_use]
+    pub fn reader(len: usize, read: impl Fn(usize, usize) -> Vec<u8> + 'static) -> Self {
+        Self {
+            len,
+            source: TextSource::Reader(Rc::new(read)),
+            whole: Rc::default(),
+            read: Rc::default(),
+        }
+    }
+
+    /// The text's length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the text is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The bytes in `start..end`, clamped to the text, and counted.
+    #[must_use]
+    pub fn bytes(&self, start: usize, end: usize) -> Cow<'_, [u8]> {
+        let end = end.min(self.len);
+        let start = start.min(end);
+        self.read.set(self.read.get() + (end - start));
+        match &self.source {
+            TextSource::Owned(text) => Cow::Borrowed(&text.as_bytes()[start..end]),
+            TextSource::Reader(read) => Cow::Owned(read(start, end)),
+        }
+    }
+
+    /// The whole text: read the first time a request asks, counted then,
+    /// and shared by every later ask in the request.
+    #[must_use]
+    pub fn whole(&self) -> Rc<str> {
+        self.whole
+            .get_or_init(|| {
+                self.read.set(self.read.get() + self.len);
+                match &self.source {
+                    TextSource::Owned(text) => text.clone(),
+                    TextSource::Reader(read) => {
+                        let bytes = read(0, self.len);
+                        Rc::from(
+                            String::from_utf8(bytes).unwrap_or_else(|e| {
+                                String::from_utf8_lossy(e.as_bytes()).into_owned()
+                            }),
+                        )
+                    }
+                }
+            })
+            .clone()
+    }
+
+    /// Bytes handed out so far, by [`Self::bytes`] and [`Self::whole`].
+    #[must_use]
+    pub fn read_bytes(&self) -> usize {
+        self.read.get()
+    }
+}
+
+impl std::fmt::Debug for CompletionText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompletionText")
+            .field("len", &self.len)
+            .field("read_bytes", &self.read.get())
+            .finish_non_exhaustive()
+    }
+}
+
 /// All input a provider sees on a completion request. Owned so
 /// providers can't reach back into editor state.
 #[derive(Clone, Debug)]
@@ -109,10 +225,15 @@ pub struct CompletionContext {
     pub line: u32,
     /// Zero-based column of the cursor.
     pub col: u32,
-    /// Bytes of the currently active buffer at request time.
-    /// Cheap to clone (`Rc<str>` keeps it shareable across
-    /// providers without re-copying).
-    pub buffer_text: Rc<str>,
+    /// The active buffer at request time, read by range.
+    pub text: CompletionText,
+    /// The cursor's byte offset in [`Self::text`]; `None` reads as its
+    /// end, where a context built from a string types.
+    pub cursor: Option<usize>,
+    /// The buffer being completed, when the context names one: a
+    /// buffer-local setting (`completion.dabbrev-window`) is read
+    /// through it.
+    pub buffer: Option<BufferId>,
     /// Language tag (`"rust"`, `"lua"`, …) if known.
     pub language: Option<String>,
     /// Project root, if the active buffer belongs to one.
@@ -127,14 +248,17 @@ pub struct CompletionContext {
 }
 
 impl CompletionContext {
-    /// Construct a context with the most common defaults filled in.
+    /// Construct a context with the most common defaults filled in: the
+    /// whole text handed over, the cursor at its end.
     #[must_use]
     pub fn new(prefix: impl Into<String>, buffer_text: impl Into<Rc<str>>) -> Self {
         Self {
             prefix: prefix.into(),
             line: 0,
             col: 0,
-            buffer_text: buffer_text.into(),
+            text: CompletionText::owned(buffer_text),
+            cursor: None,
+            buffer: None,
             language: None,
             project_root: None,
             trigger: CompletionTrigger::Invoked,
@@ -159,6 +283,11 @@ pub struct CompletionCandidate {
     pub priority: i32,
     /// Match score against [`CompletionContext::prefix`]. Higher = better.
     pub score: i32,
+    /// The item's place in its provider's own output, for a provider
+    /// registered ranked ([`CompletionRegistry::register_ranked`]):
+    /// among candidates of equal score and priority it orders before the
+    /// label does. `None` for every other provider's items.
+    pub rank: Option<usize>,
 }
 
 impl CompletionCandidate {
@@ -195,6 +324,9 @@ pub struct RegisteredProvider {
     pub priority: i32,
     /// Disabled providers contribute nothing to `collect`.
     pub enabled: bool,
+    /// Whether the provider's items come best first, so that its order
+    /// breaks ties before the label does (dabbrev's nearest first).
+    pub ranked: bool,
     source: ProviderFn,
 }
 
@@ -205,6 +337,7 @@ impl std::fmt::Debug for RegisteredProvider {
             .field("name", &self.name)
             .field("priority", &self.priority)
             .field("enabled", &self.enabled)
+            .field("ranked", &self.ranked)
             .finish_non_exhaustive()
     }
 }
@@ -213,6 +346,8 @@ impl std::fmt::Debug for RegisteredProvider {
 #[derive(Default)]
 pub struct CompletionRegistry {
     providers: Vec<RegisteredProvider>,
+    /// What the last [`Self::collect`]'s providers read of the buffer.
+    last_read: Cell<usize>,
 }
 
 impl CompletionRegistry {
@@ -241,15 +376,47 @@ impl CompletionRegistry {
         priority: i32,
         source: ProviderFn,
     ) -> ProviderId {
+        self.register_with(name.into(), priority, source, false)
+    }
+
+    /// Register a provider whose items come best first: among
+    /// candidates of equal score and priority, [`Self::collect`] keeps
+    /// its order rather than sorting them by label. dabbrev registers
+    /// this way, so the nearer of two words is offered first.
+    pub fn register_ranked(
+        &mut self,
+        name: impl Into<String>,
+        priority: i32,
+        source: ProviderFn,
+    ) -> ProviderId {
+        self.register_with(name.into(), priority, source, true)
+    }
+
+    fn register_with(
+        &mut self,
+        name: String,
+        priority: i32,
+        source: ProviderFn,
+        ranked: bool,
+    ) -> ProviderId {
         let id = ProviderId::next();
         self.providers.push(RegisteredProvider {
             id,
-            name: name.into(),
+            name,
             priority,
             enabled: true,
+            ranked,
             source,
         });
         id
+    }
+
+    /// How many bytes of the buffer the last [`Self::collect`]'s
+    /// providers read through its context, the whole text counted when
+    /// one asked for it (E10k.2).
+    #[must_use]
+    pub fn last_read_bytes(&self) -> usize {
+        self.last_read.get()
     }
 
     /// Drop a provider. Returns whether something was removed.
@@ -292,10 +459,12 @@ impl CompletionRegistry {
         &self.providers
     }
 
-    /// Run every enabled provider against `ctx`, dedup, and sort.
-    /// Higher-priority providers' duplicates win.
+    /// Run every enabled provider against `ctx`, dedup, and sort by
+    /// score, then priority, then a ranked provider's own order, then
+    /// label. Higher-priority providers' duplicates win.
     #[must_use]
     pub fn collect(&self, ctx: &CompletionContext) -> Vec<CompletionCandidate> {
+        let read_before = ctx.text.read_bytes();
         // Sort providers by priority descending so that when we
         // walk them in order, the first hit on a dedup key is also
         // the highest-priority hit.
@@ -307,12 +476,13 @@ impl CompletionRegistry {
         let mut out: Vec<CompletionCandidate> = Vec::new();
         for p in order {
             let items = (p.source)(ctx);
-            for item in items {
+            for (place, item) in items.into_iter().enumerate() {
                 let score = score_match(&item, &ctx.prefix);
                 let cand = CompletionCandidate {
                     source: p.name.clone(),
                     priority: p.priority,
                     score,
+                    rank: p.ranked.then_some(place),
                     item,
                 };
                 let key = cand.dedup_key();
@@ -333,8 +503,10 @@ impl CompletionRegistry {
             b.score
                 .cmp(&a.score)
                 .then_with(|| b.priority.cmp(&a.priority))
+                .then_with(|| a.rank.cmp(&b.rank))
                 .then_with(|| a.item.label.cmp(&b.item.label))
         });
+        self.last_read.set(ctx.text.read_bytes() - read_before);
         out
     }
 }
@@ -511,28 +683,92 @@ pub type SharedSnippetRegistry = Rc<RefCell<SnippetRegistry>>;
 // Built-in providers
 // ---------------------------------------------------------------------------
 
-/// dabbrev: scan the buffer text for words starting with the
-/// prefix (other than the prefix itself). Cheap, language-
-/// agnostic. Empty prefix returns nothing.
+/// How many bytes either side of the cursor dabbrev reads when no
+/// setting says otherwise: `completion.dabbrev-window`'s default
+/// (E10k.2). Set from E10k.1's measurement: at the end of an 18 MiB
+/// buffer, in process, a key that collected cost the base about 90 ms
+/// more than one that did not (letters against punctuation at the
+/// median, two runs), about 5 ms a MiB read. 256 KiB either side reads
+/// 512 KiB, 2.5 ms at the base's rate and less on this path, a sixth of
+/// the 16 ms a key may take, and holds about 3,700 lines of 70 bytes
+/// either side of the cursor.
+pub const DABBREV_WINDOW_DEFAULT: usize = 256 * 1024;
+
+/// The most words dabbrev offers for one prefix.
+const DABBREV_MAX: usize = 64;
+
+/// dabbrev: words of the buffer that start with the prefix (other
+/// than the prefix itself, case-insensitively), the nearest the cursor
+/// first, as Emacs's dabbrev searches outward from point; a word as
+/// near before the cursor as another after it comes first. It reads at
+/// most `window(buffer)` bytes either side of the cursor, and the one byte
+/// beyond each edge the window draws, and offers no word beyond them, nor
+/// one the window's edge cuts (E10k.2: before it, every key that collected
+/// read the whole buffer, #413). A word wholly inside the window that
+/// touches its edge is offered: the byte beyond tells it from a cut one
+/// (E10k review 1's Low 4: until fix round 1 every word touching a drawn
+/// edge was dropped). Empty prefix
+/// returns nothing. Registered ranked
+/// ([`CompletionRegistry::register_ranked`]), so its order survives the
+/// registry's sort among equal scores.
 #[must_use]
-pub fn dabbrev_provider() -> ProviderFn {
-    Box::new(|ctx: &CompletionContext| -> Vec<CompletionItem> {
+pub fn dabbrev_provider(window: impl Fn(Option<BufferId>) -> usize + 'static) -> ProviderFn {
+    Box::new(move |ctx: &CompletionContext| -> Vec<CompletionItem> {
         if ctx.prefix.is_empty() {
             return Vec::new();
         }
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for token in word_tokens(ctx.buffer_text.as_ref()) {
-            if token == ctx.prefix {
+        let len = ctx.text.len();
+        let cursor = ctx.cursor.unwrap_or(len).min(len);
+        let reach = window(ctx.buffer);
+        let lo = cursor.saturating_sub(reach);
+        let hi = cursor.saturating_add(reach).min(len);
+        let bytes = ctx.text.bytes(lo, hi);
+        // Whether the window's edge cuts a word: the byte beyond each edge
+        // it drew is a word byte.
+        let word_at = |at: usize| {
+            ctx.text
+                .bytes(at, at + 1)
+                .first()
+                .is_some_and(|&b| is_word_byte(b))
+        };
+        let cut_before = lo > 0 && word_at(lo - 1);
+        let cut_after = hi < len && word_at(hi);
+        let needle = ctx.prefix.to_lowercase();
+        // Every matching word with its distance from the cursor and
+        // whether it stands after it.
+        let mut found: Vec<(usize, bool, &str)> = Vec::new();
+        for (start, end) in word_spans(&bytes) {
+            // A word the window's edge cuts goes on past it.
+            if (start == 0 && cut_before) || (end == bytes.len() && cut_after) {
                 continue;
             }
-            if !token.to_lowercase().starts_with(&ctx.prefix.to_lowercase()) {
+            // Word bytes are ASCII, so the span is a `str`.
+            let Ok(token) = std::str::from_utf8(&bytes[start..end]) else {
+                continue;
+            };
+            if token == ctx.prefix
+                || token.len() < needle.len()
+                || !token.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+            {
                 continue;
             }
-            if !seen.insert(token.to_owned()) {
-                continue;
-            }
-            out.push(CompletionItem {
+            let (start, end) = (lo + start, lo + end);
+            let place = if end <= cursor {
+                (cursor - end, false)
+            } else if start >= cursor {
+                (start - cursor, true)
+            } else {
+                (0, false)
+            };
+            found.push((place.0, place.1, token));
+        }
+        found.sort_by_key(|&(distance, after, _)| (distance, after));
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        found
+            .into_iter()
+            .filter(|&(_, _, token)| seen.insert(token))
+            .take(DABBREV_MAX)
+            .map(|(_, _, token)| CompletionItem {
                 label: token.to_owned(),
                 kind: CompletionItemKind::Text,
                 detail: None,
@@ -541,12 +777,8 @@ pub fn dabbrev_provider() -> ProviderFn {
                 sort_text: None,
                 filter_text: None,
                 carry: crate::completion::CompletionEditsCarry::default(),
-            });
-            if out.len() >= 64 {
-                break;
-            }
-        }
-        out
+            })
+            .collect()
     })
 }
 
@@ -664,9 +896,28 @@ pub fn lsp_completion_provider(lsp: crate::lsp::SharedLspManager) -> ProviderFn 
 // Word tokeniser (used by dabbrev)
 // ---------------------------------------------------------------------------
 
-fn word_tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|t| !t.is_empty())
+/// A word byte: an ASCII letter, digit or `_`.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The `[start, end)` of every run of word bytes ([`is_word_byte`]) in
+/// `bytes`. A byte of a multi-byte character is never a
+/// word byte, so these are the words splitting the text at every other
+/// character gives.
+fn word_spans(bytes: &[u8]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let is_word = |b: &u8| is_word_byte(*b);
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let start = at + bytes[at..].iter().position(is_word)?;
+        let end = start
+            + bytes[start..]
+                .iter()
+                .position(|b| !is_word(b))
+                .unwrap_or(bytes.len() - start);
+        at = end;
+        Some((start, end))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -819,7 +1070,7 @@ mod tests {
 
     #[test]
     fn dabbrev_finds_buffer_words_with_matching_prefix() {
-        let f = dabbrev_provider();
+        let f = dabbrev_provider(|_| DABBREV_WINDOW_DEFAULT);
         let buf = "let parser = Parser::new();\nfn parse_helper() {}\n";
         let cands = f(&ctx("par", buf));
         let names: Vec<_> = cands.iter().map(|i| i.label.as_str()).collect();
@@ -831,9 +1082,82 @@ mod tests {
         assert!(!names.contains(&"par"));
     }
 
+    /// E10k.2: the nearer of two words with the prefix comes first,
+    /// before the cursor or after it, and the registry keeps that order
+    /// among equal scores where it would otherwise sort by label.
+    #[test]
+    fn dabbrev_offers_the_nearer_word_first_through_the_registry() {
+        let mut reg = CompletionRegistry::new();
+        reg.register_ranked("dabbrev", 20, dabbrev_provider(|_| DABBREV_WINDOW_DEFAULT));
+        // `zqaa` is far before the cursor, `zqzz` three bytes before it,
+        // `zqmm` four after it: nearest first is zqzz, zqmm, zqaa; by
+        // label it would be zqaa, zqmm, zqzz.
+        let text = format!("zqaa {} zqzz zq    zqmm", "filler ".repeat(100));
+        let mut c = ctx("zq", text.as_str());
+        c.cursor = Some(text.find("zq    ").expect("fixture") + 2);
+        let labels: Vec<String> = reg
+            .collect(&c)
+            .into_iter()
+            .map(|cand| cand.item.label)
+            .collect();
+        assert_eq!(labels, ["zqzz", "zqmm", "zqaa"]);
+    }
+
+    /// E10k.2: dabbrev reads at most its window either side of the
+    /// cursor, offers no word beyond it, and none the window's edge cuts.
+    #[test]
+    fn dabbrev_reads_its_window_and_offers_nothing_beyond_it() {
+        let window = 64;
+        let f = dabbrev_provider(move |_| window);
+        // `zqfar` x50 is [0, 300), an `x` run [300, 380), then `zqcut`
+        // [381, 386), `zqnear` [387, 393) and the typed `zq`; the cursor
+        // at 396 puts the window at [332, 460), inside the `x` run.
+        let text = format!(
+            "{}{} zqcut zqnear zq{}",
+            "zqfar ".repeat(50),
+            "x".repeat(80),
+            " y".repeat(200)
+        );
+        let mut c = ctx("zq", text.as_str());
+        c.cursor = Some(396);
+        assert_eq!(&text[394..396], "zq", "fixture");
+        let labels: Vec<String> = f(&c).into_iter().map(|i| i.label).collect();
+        assert_eq!(labels, ["zqnear", "zqcut"], "zqfar lies beyond the window");
+        // The window, and the byte beyond each edge it drew (Low 4).
+        assert_eq!(c.text.read_bytes(), 2 * window + 2);
+        // The window's end at 8 falls inside `zqlongword`: its first five
+        // bytes start with the prefix, and it is still not offered.
+        let mut c = ctx("zq", "zq zqlongword");
+        c.cursor = Some(2);
+        let f = dabbrev_provider(|_| 6);
+        assert!(f(&c).is_empty(), "a word the window cuts is not offered");
+    }
+
+    /// E10k.2: a context reads nothing until a provider asks, and the
+    /// whole text once however often it is asked for.
+    #[test]
+    fn a_context_reads_what_its_providers_ask_and_the_whole_text_once() {
+        let mut reg = CompletionRegistry::new();
+        reg.register("quiet", 0, provider_const(Vec::new()));
+        let c = ctx("zq", "one two three");
+        let _ = reg.collect(&c);
+        assert_eq!(reg.last_read_bytes(), 0);
+        reg.register(
+            "whole",
+            0,
+            Box::new(|c: &CompletionContext| {
+                let _ = c.text.whole();
+                let _ = c.text.whole();
+                Vec::new()
+            }),
+        );
+        let _ = reg.collect(&c);
+        assert_eq!(reg.last_read_bytes(), "one two three".len());
+    }
+
     #[test]
     fn dabbrev_returns_empty_on_empty_prefix() {
-        let f = dabbrev_provider();
+        let f = dabbrev_provider(|_| DABBREV_WINDOW_DEFAULT);
         let cands = f(&ctx("", "alpha beta gamma"));
         assert!(cands.is_empty());
     }

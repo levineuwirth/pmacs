@@ -115,6 +115,24 @@ pub struct CrdtState {
     _diff_subscription: loro_internal::Subscription,
 }
 
+impl Drop for CrdtState {
+    /// Dropping the document commits whatever no export has, and while
+    /// it records events (the first subscription turned that on, and
+    /// loro never turns it off) the commit clones the transaction's
+    /// whole diff for subscribers that are this state's own fields and
+    /// drop with it. An editor's edit is committed by its export, but
+    /// M10.2's bare workload commits nothing: since E10k it makes 3.6
+    /// million edits in its 30 s on CI, and that clone ran past 26 GB
+    /// and twenty minutes. So recording stops first.
+    fn drop(&mut self) {
+        self.doc
+            .inner()
+            .app_state()
+            .lock()
+            .stop_and_clear_recording();
+    }
+}
+
 impl CrdtState {
     /// Construct an empty CRDT state.
     ///
@@ -239,7 +257,7 @@ impl CrdtState {
             // ill-formed-byte detail; v0.1 has the same limitation
             // for any operation that reads bytes as text.
             let text = String::from_utf8_lossy(bytes);
-            doc.get_text("body").insert(0, &text)?;
+            insert_in_pieces(&doc.get_text("body"), 0, &text)?;
         }
         // The seed insert is the buffer's starting contents and is
         // not undoable: the arbiter (E6c) records only the spans of
@@ -266,18 +284,42 @@ impl CrdtState {
 
     /// Insert `s` at byte position `pos` in the body text.
     ///
-    /// Routes to loro's byte-native `insert_utf8` per the M10.2 Day 2
-    /// morning audit (Q1 verification). Mid-codepoint positions are
-    /// rejected with a clear error from loro; callers should ensure
-    /// `pos` aligns to a UTF-8 codepoint boundary.
+    /// Byte-addressed, as the M10.2 Day 2 morning audit (Q1 verification)
+    /// settled, and refused at a position inside a character
+    /// (`UTF8InUnicodeCodePoint`) or past the end (`OutOfBound`), as
+    /// loro's `insert_utf8` refuses them. It no longer calls that: loro
+    /// checks a byte position by copying the whole text before it, so
+    /// every insert at the end of an 18 MiB document copied 18 MiB (E10k,
+    /// #414). The position is found and checked by
+    /// [`Self::byte_to_unicode_on_boundary`]'s lookups instead, and the
+    /// text inserted at that character.
     pub fn insert(&self, pos: usize, s: &str) -> LoroResult<()> {
-        self.doc.get_text("body").insert_utf8(pos, s)
+        let unicode = self.checked_unicode(pos)?;
+        insert_in_pieces(&self.doc.get_text("body"), unicode, s)
     }
 
     /// Delete `len` bytes starting at byte position `pos`. Same
-    /// codepoint-boundary requirement as [`Self::insert`].
+    /// codepoint-boundary requirement, and the same lookups, as
+    /// [`Self::insert`].
     pub fn delete(&self, pos: usize, len: usize) -> LoroResult<()> {
-        self.doc.get_text("body").delete_utf8(pos, len)
+        let start = self.checked_unicode(pos)?;
+        let end = self.checked_unicode(pos.saturating_add(len))?;
+        self.doc.get_text("body").delete(start, end - start)
+    }
+
+    /// [`Self::byte_to_unicode_on_boundary`], with loro's own errors for
+    /// a position past the end or inside a character.
+    fn checked_unicode(&self, pos: usize) -> LoroResult<usize> {
+        let len = self.len_utf8();
+        if pos > len {
+            return Err(loro::LoroError::OutOfBound {
+                pos,
+                len,
+                info: "pmacs::crdt::CrdtState byte position".into(),
+            });
+        }
+        self.byte_to_unicode_on_boundary(pos)
+            .ok_or(loro::LoroError::UTF8InUnicodeCodePoint { pos })
     }
 
     /// Length of the body text in bytes (UTF-8 length).
@@ -442,52 +484,123 @@ impl CrdtState {
         Ok(std::mem::take(&mut *guard))
     }
 
-    /// Convert a Unicode scalar offset in the current text projection
-    /// to its UTF-8 byte offset.
+    /// The character starting at byte `pos` of the body text: `None` at
+    /// or past its end, or off a character boundary. Two lookups by
+    /// [`Self::unicode_at_byte`] and one by character, each a walk of
+    /// loro's tree and a scan of one element (E10k.3: the per-key
+    /// questions an attached frontend asks of its mirror answered
+    /// without [`Self::materialize_string`], #414).
     #[must_use]
-    pub fn unicode_to_utf8_pos(&self, pos: usize) -> Option<usize> {
+    pub fn char_at_byte(&self, pos: usize) -> Option<char> {
+        let unicode = self.byte_to_unicode_on_boundary(pos)?;
+        self.doc.get_text("body").char_at(unicode).ok()
+    }
+
+    /// The character ending at byte `pos` of the body text: `None` at
+    /// its start, past its end, or off a character boundary. As cheap as
+    /// [`Self::char_at_byte`].
+    #[must_use]
+    pub fn char_before_byte(&self, pos: usize) -> Option<char> {
+        let unicode = self.byte_to_unicode_on_boundary(pos)?;
+        self.doc
+            .get_text("body")
+            .char_at(unicode.checked_sub(1)?)
+            .ok()
+    }
+
+    /// The Unicode index of the character holding byte `pos` (the end's
+    /// index at the end, `None` past it). loro walks its tree, which
+    /// counts bytes per node, to the element holding `pos` and then scans
+    /// that element from its start: bounded by [`PIECE_BYTES`] for text
+    /// this type wrote in one insert or one undo, and by the whole text
+    /// for a file loro was handed in one insert, which is why
+    /// [`Self::from_bytes`] writes in pieces.
+    /// A byte inside a character answers that character's index.
+    fn unicode_at_byte(&self, pos: usize) -> Option<usize> {
         self.doc.get_text("body").convert_pos(
             pos,
-            loro::cursor::PosType::Unicode,
             loro::cursor::PosType::Bytes,
+            loro::cursor::PosType::Unicode,
         )
+    }
+
+    /// The Unicode offset of byte `pos`, when `pos` is a character
+    /// boundary within the text (its end included). Two lookups: a byte
+    /// starts a character when the byte before it lies in an earlier one.
+    /// Not loro's own check, which converts the index back to bytes by
+    /// copying the text before it.
+    fn byte_to_unicode_on_boundary(&self, pos: usize) -> Option<usize> {
+        let unicode = self.unicode_at_byte(pos)?;
+        if pos == 0 {
+            return Some(unicode);
+        }
+        (self.unicode_at_byte(pos - 1)? < unicode).then_some(unicode)
+    }
+
+    /// Convert a Unicode scalar offset in the current text projection
+    /// to its UTF-8 byte offset (`None` past the end).
+    ///
+    /// The first byte whose character is at or past `pos`, found by
+    /// bisecting the bytes with [`Self::unicode_at_byte`]: about two dozen
+    /// lookups at 18 MiB, each a scan of one piece. loro's own conversion copies the whole
+    /// text before the offset, which the daemon did once an imported key
+    /// (E10k, #414).
+    #[must_use]
+    pub fn unicode_to_utf8_pos(&self, pos: usize) -> Option<usize> {
+        let len = self.len_utf8();
+        if pos > self.unicode_at_byte(len)? {
+            return None;
+        }
+        let (mut lo, mut hi) = (0, len);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.unicode_at_byte(mid)? < pos {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(lo)
     }
 
     /// T M10.10 post-audit-round-4 F26 — validate that importing
     /// the wire bytes `bytes` would attribute every new op to
     /// `expected_peer_id`.
     ///
-    /// Imports into a forked clone so the live state isn't mutated.
-    /// Compares the oplog version vector before and after import:
-    /// every peer whose counter advances must be `expected_peer_id`,
-    /// or the bytes carry ops produced under a different identity
-    /// than the wire wrapper's `op.peer_id`.
+    /// Reads the update's own header (`LoroDoc::decode_import_blob_meta`):
+    /// the range of each peer's ops it carries. A peer whose ops reach
+    /// past what this document holds would advance on import, and every
+    /// such peer must be `expected_peer_id`, or the bytes carry ops
+    /// produced under a different identity than the wire wrapper's
+    /// `op.peer_id`.
     ///
     /// Returns:
-    /// - `Ok(())` — every advancing peer matches `expected_peer_id`,
-    ///   OR the loro decoder rejected the bytes (the real import
-    ///   will surface the same decode error to the caller; we don't
-    ///   reject on validation grounds here).
-    /// - `Err(actual)` — the first peer whose counter advanced and
-    ///   doesn't match `expected_peer_id`. The caller (the daemon's
-    ///   `validate_remote_crdt_op`) treats this as a protocol
-    ///   violation and drops the op.
+    /// - `Ok(())` — every peer the update would advance is
+    ///   `expected_peer_id`, OR the loro decoder rejected the bytes (the
+    ///   real import will surface the same decode error to the caller;
+    ///   we don't reject on validation grounds here).
+    /// - `Err(actual)` — the first such peer that isn't
+    ///   `expected_peer_id`. The caller (the daemon's
+    ///   `validate_remote_crdt_op`) treats this as a protocol violation
+    ///   and drops the op.
     ///
-    /// Cost: doubles the import cost. Loro's `fork()` is shallow;
-    /// the real import reapplies. Acceptable for v1.0 throughput;
-    /// v0.2+ may add a peek API to loro that avoids the second
-    /// import.
+    /// Cost: the update's size, whatever the document's (E10k.4). Until
+    /// E10k.4 this imported the bytes into `LoroDoc::fork()`, which
+    /// encodes the whole document as a snapshot and decodes it again,
+    /// once a typed key from an attached frontend (#414). One reading
+    /// differs: a foreign peer's ops the document cannot apply yet (their
+    /// dependencies missing) advanced nothing in the fork, which passed
+    /// them, to wait in the real import's pending set and apply later
+    /// under that peer; here they are refused.
     pub fn validate_update_peer_ids(&self, expected_peer_id: u64, bytes: &[u8]) -> Result<(), u64> {
-        let fork = self.doc.fork();
-        let before = fork.oplog_vv();
-        if fork.import(bytes).is_err() {
+        let Ok(meta) = LoroDoc::decode_import_blob_meta(bytes, true) else {
             // Decode error: let the real import surface it.
             return Ok(());
-        }
-        let after = fork.oplog_vv();
-        for (peer, after_counter) in after.iter() {
-            let before_counter = before.get(peer).copied().unwrap_or(0);
-            if *after_counter > before_counter && *peer != expected_peer_id {
+        };
+        let held = self.doc.oplog_vv();
+        for (peer, end) in meta.partial_end_vv.iter() {
+            let have = held.get(peer).copied().unwrap_or(0);
+            if *end > have && *peer != expected_peer_id {
                 return Err(*peer);
             }
         }
@@ -537,7 +650,53 @@ impl CrdtState {
     /// same source's next-older span needs it to be. A span whose
     /// text is already gone produces no op; the caller reads
     /// [`Self::spans_since`] to learn whether anything happened.
+    ///
+    /// The text an undo restores is the text the span deleted, and loro's
+    /// own undo writes it back as one insert, one element of any size,
+    /// which every byte lookup near its end then scans whole (E10k review
+    /// 1's High 1: `C-x h`, `C-w`, `C-x u` on an 18 MiB file, and a redone
+    /// paste). So a span whose ops each depend on the one before it, as a
+    /// local edit's do, is undone by [`Self::undo_span_in_pieces`],
+    /// which writes the same compensation in pieces; any other by loro's
+    /// own primitive.
     pub fn undo_span_against(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
+        // What loro's undo does first: a span's ops still in the open
+        // transaction are not yet in the log its changes are read from.
+        self.doc.commit();
+        match self.deps_of_linear_span(span) {
+            Some(deps) => self.undo_span_in_pieces(span, &deps, base),
+            None => self.undo_span_by_loro(span, base),
+        }
+    }
+
+    /// The version `span`'s first op depends on, when each later op in it
+    /// depends on the op before it alone: then loro's undo takes the span
+    /// as one diff, from its last op back to that version (`loro-internal`
+    /// 1.12.0, `oplog.rs`'s `split_span_based_on_deps`, one part). `None`
+    /// when an op inside it depends on another peer's, or a change is not
+    /// in the log.
+    fn deps_of_linear_span(&self, span: IdSpan) -> Option<loro::Frontiers> {
+        let (start, end) = (span.counter.min(), span.counter.norm_end());
+        let first = self.doc.get_change(loro::ID::new(span.peer, start))?;
+        let deps = if first.id.counter == start {
+            first.deps
+        } else {
+            loro::ID::new(span.peer, start - 1).into()
+        };
+        let mut at = first.id.counter + i32::try_from(first.len).ok()?;
+        while at < end {
+            let next = self.doc.get_change(loro::ID::new(span.peer, at))?;
+            if next.deps != loro::ID::new(span.peer, at - 1).into() {
+                return None;
+            }
+            at = next.id.counter + i32::try_from(next.len).ok()?;
+        }
+        Some(deps)
+    }
+
+    /// [`Self::undo_span_against`] by loro's own primitive, which
+    /// computes the compensation and applies it here.
+    fn undo_span_by_loro(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
         let mut remap = loro_internal::FxHashMap::default();
         let against = base.0.clone();
         let commit =
@@ -549,6 +708,141 @@ impl CrdtState {
         drop(commit);
         Ok(())
     }
+
+    /// [`Self::undo_span_against`] for a span loro's undo takes as one
+    /// diff, with the compensation written in pieces. What loro's
+    /// primitive does for such a span (`undo.rs`'s `undo`, its steps for
+    /// one part): the inverse is the diff from the span's last op back to
+    /// `deps`; `base` is transformed by it; the compensation is the
+    /// inverse transformed against `base` as it came in. Here that
+    /// compensation is applied as [`insert_in_pieces`] writes, where loro
+    /// applies it as one insert. Computed on this document and not on a
+    /// fork: loro's own undo of a whole 18 MiB cut, run on a fork decoded
+    /// from its snapshot, restored the text with its pieces out of order
+    /// (fix round 1's scratch run), where on the document itself it was
+    /// right.
+    fn undo_span_in_pieces(
+        &self,
+        span: IdSpan,
+        deps: &loro::Frontiers,
+        base: &mut ChangeBase,
+    ) -> LoroResult<()> {
+        let last = loro::ID::new(span.peer, span.counter.norm_end() - 1);
+        if !self.doc.oplog_vv().includes_id(last) {
+            return Err(loro::LoroError::UndoInvalidIdSpan(last));
+        }
+        let against = base.0.clone();
+        let inverse = self.doc.inner().diff(&last.into(), deps)?;
+        base.0.transform(&inverse, false);
+        let mut compensation = inverse;
+        compensation.transform(&against, true);
+        self.apply_in_pieces(compensation)?;
+        self.doc
+            .commit_with(loro::CommitOptions::new().origin("undo"));
+        Ok(())
+    }
+
+    /// Apply a compensation as loro's `apply_diff` would, the body's
+    /// inserts written in pieces. The body carries no marks; a delta that
+    /// does, and any other container, goes through loro unchanged.
+    fn apply_in_pieces(&self, compensation: DiffBatch) -> LoroResult<()> {
+        let body = self.doc.get_text("body");
+        let body_id = body.id();
+        let DiffBatch {
+            mut cid_to_events,
+            order,
+        } = compensation;
+        let mut rest = DiffBatch::default();
+        for cid in order {
+            let Some(diff) = cid_to_events.remove(&cid) else {
+                continue;
+            };
+            let loro_internal::event::Diff::Text(delta) = &diff else {
+                rest.cid_to_events.insert(cid.clone(), diff);
+                rest.order.push(cid);
+                continue;
+            };
+            if cid != body_id {
+                rest.cid_to_events.insert(cid.clone(), diff);
+                rest.order.push(cid);
+                continue;
+            }
+            let delta = TextDelta::from_text_diff(delta.iter());
+            let marked = delta.iter().any(|d| {
+                matches!(
+                    d,
+                    TextDelta::Insert {
+                        attributes: Some(_),
+                        ..
+                    } | TextDelta::Retain {
+                        attributes: Some(_),
+                        ..
+                    }
+                )
+            });
+            if marked {
+                body.apply_delta(&delta)?;
+                continue;
+            }
+            // Each step at its position in the text before the delta, then
+            // applied back to front, as `insert_in_pieces` writes one
+            // insert: what is written later lies earlier, so no step's ids
+            // run on from the one beside it and no two pieces merge. The
+            // restored text comes as several adjacent inserts, which
+            // written front to back merged into one element again.
+            let mut at = 0;
+            let mut steps = Vec::with_capacity(delta.len());
+            for d in &delta {
+                match d {
+                    TextDelta::Retain { retain, .. } => at += retain,
+                    TextDelta::Insert { insert, .. } => steps.push((at, Ok(insert.as_str()))),
+                    TextDelta::Delete { delete } => {
+                        steps.push((at, Err(*delete)));
+                        at += delete;
+                    }
+                }
+            }
+            for (at, step) in steps.into_iter().rev() {
+                match step {
+                    Ok(insert) => insert_in_pieces(&body, at, insert)?,
+                    Err(len) => body.delete(at, len)?,
+                }
+            }
+        }
+        if !rest.order.is_empty() {
+            self.doc.inner().apply_diff(rest)?;
+        }
+        Ok(())
+    }
+}
+
+/// The most bytes of text one element of loro's tree holds when
+/// `CrdtState` writes it (E10k). loro merges text from contiguous ops into
+/// one element, and finds a byte position inside an element by scanning it
+/// from its start, so a file or a paste inserted in one op is one element
+/// that every byte lookup near its end scans whole: 18 MiB for #414's log,
+/// which E10k's profile found the daemon scanning on every remote key.
+/// Written back to front in pieces of at most this many bytes, no two
+/// pieces merge (each piece's ids run on from the piece after it, not the
+/// one before it), and a lookup scans at most one piece. An undo writes
+/// the text it restores the same way ([`CrdtState::undo_span_against`]).
+const PIECE_BYTES: usize = 16 * 1024;
+
+/// Insert `s` at character `at` of `text`, back to front in pieces of at
+/// most [`PIECE_BYTES`], each cut at the first character boundary within
+/// that many bytes of its end: the same text as one insert, in elements no
+/// lookup has to scan whole. A typed character is one piece, one insert.
+fn insert_in_pieces(text: &loro::LoroText, at: usize, s: &str) -> LoroResult<()> {
+    let mut end = s.len();
+    while end > 0 {
+        let mut start = end.saturating_sub(PIECE_BYTES);
+        while !s.is_char_boundary(start) {
+            start += 1;
+        }
+        text.insert(at, &s[start..end])?;
+        end = start;
+    }
+    Ok(())
 }
 
 /// T M10.3: map a [`crate::protocol::FrontendId`] to the loro `PeerID`
@@ -1302,10 +1596,28 @@ mod tests {
         spans[0]
     }
 
+    std::thread_local! {
+        /// Whether [`undo_against`] goes through loro's own undo
+        /// ([`by_loro`]).
+        static BY_LORO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
     /// Undo `span` against the changes `foreign` captured since it.
     fn undo_against(state: &CrdtState, span: IdSpan, foreign: &ChangeBase) {
         let mut base = foreign.clone();
-        state.undo_span_against(span, &mut base).expect("undo");
+        if BY_LORO.get() {
+            state.undo_span_by_loro(span, &mut base).expect("undo");
+        } else {
+            state.undo_span_against(span, &mut base).expect("undo");
+        }
+    }
+
+    /// Run `row` with every undo through loro's own primitive, the path a
+    /// span with another peer's op inside it takes.
+    fn by_loro(row: fn()) {
+        BY_LORO.set(true);
+        row();
+        BY_LORO.set(false);
     }
 
     #[test]
@@ -1473,6 +1785,254 @@ mod tests {
         b.import_updates(&comp_bytes).unwrap();
         assert_eq!(a.materialize_string(), "!");
         assert_eq!(b.materialize_string(), "!");
+    }
+
+    /// E10k review 1, High 1: since fix round 1 the five scenarios above
+    /// undo through [`CrdtState::undo_span_in_pieces`], the diff written
+    /// in pieces; here each runs through loro's own undo, the path a span
+    /// with another peer's op inside it still takes, and holds the same.
+    #[test]
+    fn e6c_rows_hold_through_loros_own_undo() {
+        for row in [
+            e6c_concurrent_with_sync_a_undoes_b_remains as fn(),
+            e6c_concurrent_without_sync_a_undoes_b_remains,
+            e6c_b_edits_inside_a_region_then_a_undoes,
+            e6c_redo_is_the_compensation_span_undone,
+            e6c_a_third_doc_undoes_an_imported_span,
+        ] {
+            by_loro(row);
+        }
+    }
+
+    /// E10k.3: at every byte of a text of 1- to 4-byte characters, the
+    /// lookups that replaced loro's byte check (which copies the whole
+    /// text before a position) agree with the string itself: the
+    /// boundary, the characters either side, and the insert, refused
+    /// inside a character and past the end with loro's own errors.
+    #[test]
+    fn e10k_3_byte_positions_are_checked_by_lookups_alone() {
+        let text = "a\u{1F600}b\u{4E2D}\u{E9}\n";
+        for pos in 0..=text.len() + 1 {
+            let s = CrdtState::new(1).expect("new");
+            s.insert(0, text).expect("seed");
+            let boundary = pos <= text.len() && text.is_char_boundary(pos);
+            assert_eq!(
+                s.byte_to_unicode_on_boundary(pos).is_some(),
+                boundary,
+                "byte {pos}"
+            );
+            let (before, after) = if boundary {
+                (text[..pos].chars().last(), text[pos..].chars().next())
+            } else {
+                (None, None)
+            };
+            assert_eq!(s.char_before_byte(pos), before, "before byte {pos}");
+            assert_eq!(s.char_at_byte(pos), after, "at byte {pos}");
+            match s.insert(pos, "x") {
+                Ok(()) => {
+                    assert!(boundary, "inserted at byte {pos}");
+                    let mut want = text.to_owned();
+                    want.insert(pos, 'x');
+                    assert_eq!(s.materialize_string(), want);
+                }
+                Err(loro::LoroError::OutOfBound { pos: at, .. }) => {
+                    assert!(pos > text.len() && at == pos, "byte {pos}");
+                }
+                Err(loro::LoroError::UTF8InUnicodeCodePoint { pos: at }) => {
+                    assert!(!boundary && pos <= text.len() && at == pos, "byte {pos}");
+                }
+                Err(other) => panic!("byte {pos}: {other:?}"),
+            }
+        }
+        // Every delete from one boundary to another removes exactly that
+        // range; one ending inside a character is refused.
+        let bounds: Vec<usize> = (0..=text.len())
+            .filter(|&b| text.is_char_boundary(b))
+            .collect();
+        for &from in &bounds {
+            for &to in bounds.iter().filter(|&&to| to > from) {
+                let s = CrdtState::new(1).expect("new");
+                s.insert(0, text).expect("seed");
+                s.delete(from, to - from)
+                    .expect("delete between boundaries");
+                assert_eq!(
+                    s.materialize_string(),
+                    format!("{}{}", &text[..from], &text[to..])
+                );
+            }
+        }
+        let s = CrdtState::new(1).expect("new");
+        s.insert(0, text).expect("seed");
+        assert!(matches!(
+            s.delete(0, 2),
+            Err(loro::LoroError::UTF8InUnicodeCodePoint { pos: 2 })
+        ));
+        assert_eq!(
+            s.materialize_string(),
+            text,
+            "a refused delete changes nothing"
+        );
+    }
+
+    /// E10k.4: the bisecting conversion the daemon's import uses answers
+    /// what loro's own does (which copies the text before the offset), at
+    /// every index of a text of 1- to 4-byte characters, its end and past
+    /// it.
+    #[test]
+    fn e10k_4_unicode_to_utf8_pos_agrees_with_loro_at_every_index() {
+        let s = CrdtState::new(1).expect("new");
+        s.insert(0, "a\u{1F600}b\u{4E2D}\u{E9}\nz").expect("seed");
+        let text = s.doc.get_text("body");
+        for index in 0..=text.len_unicode() + 2 {
+            assert_eq!(
+                s.unicode_to_utf8_pos(index),
+                text.convert_pos(
+                    index,
+                    loro::cursor::PosType::Unicode,
+                    loro::cursor::PosType::Bytes
+                ),
+                "index {index}"
+            );
+        }
+    }
+
+    /// E10k.4: the peer check reads the update's header instead of
+    /// importing it into a fork of the whole document. It passes the
+    /// expected peer's ops, refuses another peer's with that peer's id,
+    /// passes bytes loro cannot decode (the import says why) and ops the
+    /// document already holds; and, where the fork passed them, refuses
+    /// another peer's ops the document cannot apply yet.
+    #[test]
+    fn e10k_4_the_peer_check_reads_the_update_header() {
+        let daemon = CrdtState::new(1).expect("new");
+        daemon.insert(0, "hello").expect("seed");
+        let snapshot = daemon.export_snapshot().expect("snapshot");
+        let replica = |peer: u64| {
+            let state = CrdtState::new(peer).expect("new");
+            state.import_snapshot(&snapshot).expect("import");
+            state
+        };
+        let typed = |state: &CrdtState, text: &str| {
+            let before = state.version();
+            let at = state.len_utf8();
+            state.insert(at, text).expect("type");
+            state.export_updates_since(&before).expect("export")
+        };
+        let own = replica(2);
+        let own_key = typed(&own, "!");
+        assert_eq!(daemon.validate_update_peer_ids(2, &own_key), Ok(()));
+        let other = replica(3);
+        let other_key = typed(&other, "?");
+        assert_eq!(daemon.validate_update_peer_ids(2, &other_key), Err(3));
+        assert_eq!(daemon.validate_update_peer_ids(2, b"not an update"), Ok(()));
+        daemon.import_updates(&other_key).expect("import");
+        assert_eq!(
+            daemon.validate_update_peer_ids(2, &other_key),
+            Ok(()),
+            "ops the document holds advance nothing"
+        );
+        // Peer 4's second key, without its first: pending on import.
+        let late = replica(4);
+        let _first = typed(&late, "a");
+        let second = typed(&late, "b");
+        assert_eq!(daemon.validate_update_peer_ids(2, &second), Err(4));
+    }
+
+    /// E10k: a seed and an insert longer than a piece go in as pieces,
+    /// back to front, and keep their text exactly, a multi-byte character
+    /// at a cut kept whole; a byte lookup at the end reads the last one.
+    #[test]
+    fn e10k_large_text_goes_in_as_pieces_and_keeps_its_text() {
+        let unit = "a\u{1F600}b\u{4E2D}\u{E9}\n";
+        let text = unit.repeat(3 * PIECE_BYTES / unit.len() + 7);
+        assert!(text.len() > 3 * PIECE_BYTES, "four pieces at least");
+        let s = CrdtState::from_bytes(1, text.as_bytes()).expect("seed");
+        assert_eq!(s.materialize_string(), text);
+        assert_eq!(s.char_before_byte(text.len()), Some('\n'));
+        assert_in_pieces(&s, 4, "from_bytes");
+        let at = text.len() / 2;
+        let at = (at..text.len())
+            .find(|&b| text.is_char_boundary(b))
+            .expect("a boundary");
+        s.insert(at, &text).expect("insert");
+        let mut want = text.clone();
+        want.insert_str(at, &text);
+        assert_eq!(s.materialize_string(), want);
+        assert_in_pieces(&s, 8, "a large insert");
+    }
+
+    /// The bytes of each element loro holds the body text in, in order
+    /// (`LoroText::iter` yields them): what a byte lookup scans one of.
+    fn elements(state: &CrdtState) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        state.doc.get_text("body").iter(|chunk| {
+            sizes.push(chunk.len());
+            true
+        });
+        sizes
+    }
+
+    /// E10k review 1, Low 1: the text is held in at least `at_least`
+    /// elements, none longer than [`PIECE_BYTES`], so the pieces row fails
+    /// when the pieces go, not only when the text does.
+    fn assert_in_pieces(state: &CrdtState, at_least: usize, after: &str) {
+        let elements = elements(state);
+        assert!(
+            elements.len() >= at_least && elements.iter().all(|&n| n <= PIECE_BYTES),
+            "after {after}: {} elements, the largest {} bytes; at least {at_least}, none over {PIECE_BYTES}",
+            elements.len(),
+            elements.iter().max().copied().unwrap_or(0)
+        );
+    }
+
+    /// E10k review 1, High 1: the text an undo restores goes back in
+    /// pieces, and a replica importing the undo holds the same pieces.
+    /// loro writes an undo's restored text as one insert, one element,
+    /// which every byte lookup near its end scans whole: after `C-x h`,
+    /// `C-w`, `C-x u`, and after a paste undone and redone. At `700e86f`
+    /// each came back as one element of the whole text.
+    #[test]
+    fn e10k_an_undone_cut_and_a_redone_paste_come_back_in_pieces() {
+        use loro::VersionVector;
+        let unit = "a\u{1F600}b\u{4E2D}\u{E9}\n";
+        let text = unit.repeat(3 * PIECE_BYTES / unit.len() + 7);
+        let none = ChangeBase::default();
+        let largest = |s: &CrdtState| elements(s).into_iter().max().unwrap_or(0);
+
+        let s = CrdtState::from_bytes(9, text.as_bytes()).expect("seed");
+        let cut = span_of(&s, |s| s.delete(0, s.len_utf8()).expect("cut"));
+        assert_eq!(s.len_utf8(), 0);
+        undo_against(&s, cut, &none);
+        assert_eq!(s.materialize_string(), text, "the undo restored the text");
+        assert!(
+            largest(&s) <= PIECE_BYTES,
+            "an undone cut: the largest element is {} bytes of {}",
+            largest(&s),
+            text.len()
+        );
+        let replica = CrdtState::new(2).expect("replica");
+        replica
+            .import_updates(&s.export_updates_since(&VersionVector::default()).unwrap())
+            .unwrap();
+        assert_eq!(replica.materialize_string(), text);
+        assert!(
+            largest(&replica) <= PIECE_BYTES,
+            "a replica of an undone cut: the largest element is {} bytes",
+            largest(&replica)
+        );
+
+        let s = CrdtState::from_bytes(9, b"head\n").expect("seed");
+        let paste = span_of(&s, |s| s.insert(5, &text).expect("paste"));
+        let undone = span_of(&s, |s| undo_against(s, paste, &none));
+        assert_eq!(s.materialize_string(), "head\n");
+        undo_against(&s, undone, &none);
+        assert_eq!(s.materialize_string(), format!("head\n{text}"), "redone");
+        assert!(
+            largest(&s) <= PIECE_BYTES,
+            "a redone paste: the largest element is {} bytes of {}",
+            largest(&s),
+            text.len()
+        );
     }
 
     #[test]

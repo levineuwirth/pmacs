@@ -19,6 +19,21 @@
 local MIN_PREFIX = 2 -- typed word length before the popup auto-opens
 local MAX_ROWS = 64 -- cap on candidates published to the session
 
+-- E10k.2 (#413): dabbrev reads this many bytes either side of the
+-- cursor, nearest words first, and offers none beyond them; before it,
+-- every key that collected copied the whole buffer twice and scanned
+-- all of it. The default is the provider's DABBREV_WINDOW_DEFAULT,
+-- 256 KiB, set from E10k.1's measurement (src/completion_framework.rs
+-- says how), and E10k.2's acceptance holds the two equal.
+pmacs.config.define {
+  name = "completion.dabbrev-window",
+  description = "Bytes either side of the cursor that dabbrev completion reads for words, nearest first; words farther away are not offered.",
+  type = "integer",
+  default = 262144,
+  min = 0,
+  mutability = "live",
+}
+
 -- Snapshot of the previous after-edit invocation (Q#C9).
 local last = { key = nil, cursor = nil }
 
@@ -56,13 +71,15 @@ end
 -- rows for popup_show. Returns the rows plus the uncapped match count.
 local function collect_rows(buf, prefix, trigger, trigger_char)
   local rec = pmacs.lsp.active_attachment() -- peek: uri/language only
-  local ok_text, text = pcall(function() return buf:slice(0, buf:len()) end)
-  if not ok_text or type(text) ~= "string" then return {}, 0 end
+  -- The buffer and the cursor, not a copy of the text (E10k.2): each
+  -- provider reads what it needs, and only a Lua provider, whose fourth
+  -- argument is the whole text, makes the request copy it.
   local ctx = {
     prefix = prefix,
     line = pmacs.editor.cursor_line(),
     col = pmacs.editor.cursor_col(),
-    buffer_text = text,
+    buffer = buf,
+    cursor = pmacs.editor.cursor(),
     language = rec and rec.language or nil,
     uri = rec and rec.uri or nil, -- Q#C8: scope URI-keyed providers
     trigger = trigger,

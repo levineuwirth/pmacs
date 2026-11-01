@@ -1304,7 +1304,9 @@ impl Buffer {
 
     /// T M10.10 post-audit-round-4 F26 — verify that importing the
     /// remote update `bytes` would attribute every new op to
-    /// `expected_peer_id`. Forked-import; doesn't mutate the buffer.
+    /// `expected_peer_id`, from the update's own header
+    /// (`CrdtState::validate_update_peer_ids`); doesn't mutate the
+    /// buffer.
     ///
     /// Returns `Ok(())` on match (or non-CRDT buffer — caller's
     /// other validations gate that case). Returns `Err(actual)` for
@@ -2587,9 +2589,10 @@ pub enum BufferError {
     },
     /// The CRDT-backed buffer mode rejected an op (T M10.2). Reaches
     /// the caller when loro returns an error during edit routing — the
-    /// most common case is a mid-codepoint position that loro's
-    /// `insert_utf8` / `delete_utf8` rejects (per the M10.2 Day 2
-    /// morning audit). Per the Q2 defense-in-depth ordering, the
+    /// most common case is a mid-codepoint position, which
+    /// `CrdtState::insert` / `delete` refuse as loro's `insert_utf8` /
+    /// `delete_utf8` do (per the M10.2 Day 2 morning audit). Per the Q2
+    /// defense-in-depth ordering, the
     /// CRDT op is attempted before the rope mutation, so this error
     /// leaves the rope unchanged.
     #[cfg(feature = "crdt")]
@@ -4640,8 +4643,9 @@ mod tests {
     #[cfg(feature = "crdt")]
     #[test]
     fn crdt_mid_codepoint_position_is_rejected_cleanly() {
-        // Per the Q1 morning audit, loro rejects mid-codepoint
-        // delete_utf8 / insert_utf8. The Buffer routing must surface
+        // Per the Q1 morning audit, a mid-codepoint delete or insert is
+        // refused (CrdtState's own check since E10k, loro's
+        // delete_utf8 / insert_utf8 before). The Buffer routing must surface
         // the rejection as a clean error and leave both rope and CRDT
         // untouched (the rope mutation never runs because Q2 ordering
         // applies CRDT first).
