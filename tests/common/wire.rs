@@ -71,7 +71,27 @@ impl WireSession {
         target: Option<InitialTarget>,
         resume: Option<SessionToken>,
     ) -> Self {
+        Self::semantic_with_patience(daemon, offer, target, resume, Duration::from_secs(10))
+    }
+
+    /// [`Self::semantic`], the socket's reads timing out after `patience`
+    /// rather than ten seconds: the reader thread ends at its first read
+    /// that times out, after which every wait reports the session closed,
+    /// so a row that waits longer on a daemon that may write nothing
+    /// meanwhile (E10l: a whole-file summary on its main thread) says so
+    /// here. Set before the reader starts, so no read runs on the old
+    /// timeout.
+    pub fn semantic_with_patience(
+        daemon: &TestDaemon,
+        offer: u32,
+        target: Option<InitialTarget>,
+        resume: Option<SessionToken>,
+        patience: Duration,
+    ) -> Self {
         let (mut stream, fid) = Self::hello(daemon);
+        stream
+            .set_read_timeout(Some(patience))
+            .expect("read timeout");
         write_message(
             &mut stream,
             &AttachRequest {
@@ -257,9 +277,7 @@ impl WireSession {
                     if let Some(found) = pick(&msg) {
                         return found;
                     }
-                    let mut summary = format!("{msg:?}");
-                    summary.truncate(80);
-                    seen.push(summary);
+                    seen.push(debug_prefix(&msg, 80));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -307,4 +325,37 @@ impl WireSession {
             .shutdown(std::net::Shutdown::Both)
             .expect("shut the socket");
     }
+}
+
+/// The first `limit` bytes of `value`'s `Debug` form, at a character
+/// boundary, formatting no further: a `BufferSnapshot` of a large file
+/// would otherwise be written out whole, every byte of its snapshot, to
+/// keep eighty characters of it (E10l's 18 MB file).
+fn debug_prefix(value: &impl std::fmt::Debug, limit: usize) -> String {
+    use std::fmt::Write as _;
+    struct Prefix {
+        text: String,
+        limit: usize,
+    }
+    impl std::fmt::Write for Prefix {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            let room = self.limit - self.text.len();
+            if s.len() <= room {
+                self.text.push_str(s);
+                return Ok(());
+            }
+            let mut end = room;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.text.push_str(&s[..end]);
+            Err(std::fmt::Error)
+        }
+    }
+    let mut prefix = Prefix {
+        text: String::new(),
+        limit,
+    };
+    let _ = write!(prefix, "{value:?}");
+    prefix.text
 }

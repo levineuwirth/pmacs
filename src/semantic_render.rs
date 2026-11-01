@@ -3863,9 +3863,10 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 /// A's fallback fed it LSP tokens); its diagnostic marks are overlaid
 /// regardless.
 ///
-/// `O(spans × lines)` in the worst case; the caller short-circuits on
-/// unchanged CRDT generation so this only runs on first sight of a
-/// buffer or after an edit, not per frame.
+/// The per-line choice is [`line_dominant_styles`], one walk over the
+/// spans and the lines together; the caller short-circuits on unchanged
+/// CRDT generation so this only runs on first sight of a buffer or after
+/// an edit, not per frame.
 fn scoped_file_summary(
     state: &EditorState,
     buffer_id: BufferId,
@@ -3882,8 +3883,6 @@ fn scoped_file_summary(
     };
     let source_len = source.len() as u64;
     let line_starts = line_start_offsets(&source);
-    let line_count = line_starts.len();
-    let mut out = vec![Style::default(); line_count];
 
     // The grammar producer over a whole-buffer "viewport": the clip is
     // then a no-op and every styled run of every layer is yielded.
@@ -3896,18 +3895,59 @@ fn scoped_file_summary(
         frontend_generation: 0,
     };
     let spans = grammar_scoped_style_spans(state, &vp_all);
+    // No styled runs leaves every line default --- but diagnostic marks
+    // are independent of syntax styling (a plain-text buffer can still
+    // have lints), so they are overlaid either way.
+    let mut out = line_dominant_styles(&spans, &line_starts, source_len);
+    overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
+    out
+}
+
+/// Each line's dominant style: the style covering the most of the line's
+/// bytes among `spans`, [`Style::default`] where no span reaches it, one
+/// entry per element of `line_starts` (as [`line_start_offsets`] returns
+/// them; a line's bytes exclude its `\n`, the last line runs to
+/// `source_len`). A span over several lines counts on each, by the bytes
+/// it covers there. Ties go to the style first met latest, where a style
+/// is first met at the lowest index in `spans` of a span of that style
+/// on the line: what the per-line tally this replaced gave, which kept a
+/// line's styles in the order first met and took `max_by_key`, the last
+/// of equal counts (#439).
+///
+/// One walk over the spans in ascending start and the lines together:
+/// a span is passed over for good once a line starts at or after its
+/// end, and a line's walk stops at the first span starting at or after
+/// its end, so for the disjoint, ascending spans
+/// [`flatten_layer_spans`] returns the cost is lines plus spans (a span
+/// visited once per line it reaches). The tally it replaced walked every
+/// span for every line, about 2.8 × 10^12 steps on an 18 MB JSON file,
+/// on the daemon's main thread. Spans out of order are walked in an
+/// ascending copy of their indices, so the answer does not depend on the
+/// order; spans that overlap are still counted exactly, the walk slower
+/// by the overlap.
+fn line_dominant_styles(spans: &[StyleSpan], line_starts: &[u64], source_len: u64) -> Vec<Style> {
+    let mut out = vec![Style::default(); line_starts.len()];
     if spans.is_empty() {
-        // No styled runs — but diagnostic marks are independent of
-        // syntax styling (a plain-text buffer can still have lints).
-        overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
         return out;
     }
-
-    // Per-line dominant style: tally bytes per style and pick the
-    // winner. `Style` doesn't implement `Hash`, so a small linear-scan
-    // tally is fine — the number of distinct styles per line is
-    // bounded by the theme's vocabulary (single digits in practice).
+    let ascending = spans
+        .windows(2)
+        .all(|pair| pair[0].range.start <= pair[1].range.start);
+    let order: Option<Vec<usize>> = (!ascending).then(|| {
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.sort_by_key(|&i| spans[i].range.start);
+        order
+    });
+    let index = |k: usize| order.as_ref().map_or(k, |order| order[k]);
+    // The first span, in ascending start, that may still reach a line.
+    let mut first = 0usize;
+    // `Style` doesn't implement `Hash`, so a small linear-scan tally is
+    // fine --- the number of distinct styles per line is bounded by the
+    // theme's vocabulary (single digits in practice): the style, its
+    // bytes, and the index in `spans` it was first met at.
+    let mut tally: Vec<(Style, u64, usize)> = Vec::new();
     for (li, line_dominant) in out.iter_mut().enumerate() {
+        summary_step();
         let line_start = line_starts[li];
         // Same trailing-newline semantics as `line_col_to_byte`: the
         // line's byte range excludes the `\n` (`next - 1`), and the
@@ -3915,25 +3955,49 @@ fn scoped_file_summary(
         let line_end = line_starts
             .get(li + 1)
             .map_or(source_len, |&next| next.saturating_sub(1));
-        let mut tally: Vec<(Style, u64)> = Vec::new();
-        for sp in &spans {
+        while first < spans.len() && spans[index(first)].range.end <= line_start {
+            summary_step();
+            first += 1;
+        }
+        tally.clear();
+        for k in first..spans.len() {
+            let i = index(k);
+            let sp = &spans[i];
+            if sp.range.start >= line_end {
+                break;
+            }
+            summary_step();
             let lo = sp.range.start.max(line_start);
             let hi = sp.range.end.min(line_end);
             if hi > lo {
                 let bytes = hi - lo;
-                if let Some(entry) = tally.iter_mut().find(|(s, _)| *s == sp.style) {
+                if let Some(entry) = tally.iter_mut().find(|(s, _, _)| *s == sp.style) {
                     entry.1 += bytes;
+                    entry.2 = entry.2.min(i);
                 } else {
-                    tally.push((sp.style, bytes));
+                    tally.push((sp.style, bytes, i));
                 }
             }
         }
-        if let Some(winner) = tally.into_iter().max_by_key(|(_, c)| *c) {
-            *line_dominant = winner.0;
+        if let Some(&(winner, _, _)) = tally.iter().max_by_key(|(_, bytes, met)| (*bytes, *met)) {
+            *line_dominant = winner;
         }
     }
-    overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The steps [`line_dominant_styles`] has taken on this thread: one
+    /// per line, per span passed over and per span a line's walk reads.
+    static SUMMARY_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one step of [`line_dominant_styles`] (tests only).
+#[inline]
+fn summary_step() {
+    #[cfg(test)]
+    SUMMARY_STEPS.with(|steps| steps.set(steps.get() + 1));
 }
 
 /// Fold diagnostics into the file summary: each line a diagnostic
@@ -6420,8 +6484,9 @@ mod tests {
         // active-set sweep keeps the flatten O(n·log n + Σ active); the
         // pre-sweep O(spans^2) flatten stalled a large grammar-backed file
         // here. (This guards the *flattener* regression specifically — the
-        // summary's separate per-line dominant-style tally is a pre-existing
-        // O(lines × spans) loop, not addressed or claimed linear here.)
+        // summary's separate per-line choice, `line_dominant_styles`, is
+        // held to lines plus spans by `e10l_summary_steps_grow_with_lines_
+        // plus_spans` since E10l, #439.)
         use std::fmt::Write as _;
         let state = empty_state();
         let bid = active_buffer(&state);
@@ -8414,6 +8479,399 @@ mod tests {
             lines[1].underline_color,
             Color::Default,
             "the old warning mark is gone after the republish"
+        );
+    }
+
+    // --- E10l.1: the file summary in one pass (#439) ---
+
+    /// The per-line tally [`line_dominant_styles`] replaced, as it stood
+    /// in `scoped_file_summary` at `2972532`, kept as the reference the
+    /// one-pass walk is held to: for every line, every span, the line's
+    /// styles tallied in the order first met and `max_by_key` taking the
+    /// last of equal counts.
+    fn reference_line_styles(
+        spans: &[StyleSpan],
+        line_starts: &[u64],
+        source_len: u64,
+    ) -> Vec<Style> {
+        let mut out = vec![Style::default(); line_starts.len()];
+        for (li, line_dominant) in out.iter_mut().enumerate() {
+            let line_start = line_starts[li];
+            let line_end = line_starts
+                .get(li + 1)
+                .map_or(source_len, |&next| next.saturating_sub(1));
+            let mut tally: Vec<(Style, u64)> = Vec::new();
+            for sp in spans {
+                let lo = sp.range.start.max(line_start);
+                let hi = sp.range.end.min(line_end);
+                if hi > lo {
+                    let bytes = hi - lo;
+                    if let Some(entry) = tally.iter_mut().find(|(s, _)| *s == sp.style) {
+                        entry.1 += bytes;
+                    } else {
+                        tally.push((sp.style, bytes));
+                    }
+                }
+            }
+            if let Some(winner) = tally.into_iter().max_by_key(|(_, c)| *c) {
+                *line_dominant = winner.0;
+            }
+        }
+        out
+    }
+
+    /// How the reference's tallies fall on each line: `(tied, decided)`,
+    /// where `tied` counts the lines whose top byte count two or more
+    /// styles share, and `decided` those among them whose winner (the
+    /// last of the equals) is not the first of them, so that a walk
+    /// breaking ties the other way would give a different style.
+    fn reference_ties(spans: &[StyleSpan], line_starts: &[u64], source_len: u64) -> (usize, usize) {
+        let (mut tied, mut decided) = (0, 0);
+        for li in 0..line_starts.len() {
+            let line_start = line_starts[li];
+            let line_end = line_starts
+                .get(li + 1)
+                .map_or(source_len, |&next| next.saturating_sub(1));
+            let mut tally: Vec<(Style, u64)> = Vec::new();
+            for sp in spans {
+                let lo = sp.range.start.max(line_start);
+                let hi = sp.range.end.min(line_end);
+                if hi > lo {
+                    if let Some(entry) = tally.iter_mut().find(|(s, _)| *s == sp.style) {
+                        entry.1 += hi - lo;
+                    } else {
+                        tally.push((sp.style, hi - lo));
+                    }
+                }
+            }
+            let Some(top) = tally.iter().map(|(_, c)| *c).max() else {
+                continue;
+            };
+            let equals: Vec<Style> = tally
+                .iter()
+                .filter(|(_, c)| *c == top)
+                .map(|(s, _)| *s)
+                .collect();
+            if equals.len() > 1 {
+                tied += 1;
+                if equals.first() != equals.last() {
+                    decided += 1;
+                }
+            }
+        }
+        (tied, decided)
+    }
+
+    /// The buffer's bytes and the whole-buffer spans the summary reads.
+    fn summary_inputs(state: &EditorState, buffer_id: BufferId) -> (Vec<u8>, Vec<StyleSpan>) {
+        let source = {
+            let core = state.core.borrow();
+            let registry = core.registry.clone();
+            let reg = registry.borrow();
+            buffer_source_bytes(reg.get(buffer_id).expect("buffer"))
+        };
+        let spans = grammar_scoped_style_spans(
+            state,
+            &DeclaredViewport {
+                buffer_id,
+                visible: ByteRange {
+                    start: 0,
+                    end: source.len() as u64,
+                },
+                frontend_generation: 0,
+            },
+        );
+        (source, spans)
+    }
+
+    /// The file #439 names, `entries` objects long, byte for byte what
+    /// its generator writes: `json.dumps([{"id": i, "name": f"item {i}",
+    /// "tags": ["a", "b"], "value": i * 0.5} …], indent=1)` and print's
+    /// newline. 185,000 entries are its 18,070,563 bytes.
+    /// `tests/e10l_file_summary.rs` carries the same generator.
+    fn issue_439_json(entries: usize) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(entries * 98 + 4);
+        out.push('[');
+        for i in 0..entries {
+            out.push_str(if i == 0 { "\n" } else { ",\n" });
+            #[allow(clippy::cast_precision_loss, reason = "entries stay far below 2^52")]
+            let value = i as f64 * 0.5;
+            write!(
+                out,
+                " {{\n  \"id\": {i},\n  \"name\": \"item {i}\",\n  \"tags\": [\n   \"a\",\n   \"b\"\n  ],\n  \"value\": {value:?}\n }}"
+            )
+            .expect("write");
+        }
+        out.push_str("\n]\n");
+        out
+    }
+
+    /// E10l.1: the summary `scoped_file_summary` gives, through the
+    /// grammar producer, is the reference's on every line of files with
+    /// several layers (a markdown file with a Rust fence), spans over
+    /// several lines (a block comment, a fence), empty lines and ties
+    /// (JSON keys as long as their values). Each precondition is
+    /// asserted before the comparison, so a fixture that stopped
+    /// reaching one fails rather than passing vacuously.
+    #[test]
+    fn e10l_summary_matches_the_per_line_tally_on_real_files() {
+        let rust: &[u8] = b"//! A crate.\n\n/* a block\n   comment over\n   three lines */\nfn main() {\n\n    let s = \"a string\";\n    let n = 42; // trailing\n}\n";
+        let markdown: &[u8] = b"# Title\n\nSome *emphasis* and `code`.\n\n```rust\n/* inside\n   the fence */\nfn demo(x: u32) -> u32 { x + 1 }\n\nlet s = \"two\";\n```\n\n- a list item\n";
+        let json: &[u8] = b"{\n  \"a\": 123,\n  \"bb\": \"xx\",\n\n  \"c\": [1, true, null],\n  \"text\": \"a longer value\"\n}\n";
+        let cases: [(&str, &[u8], &str, &str); 3] = [
+            ("rust", rust, "rust", "/tmp/x.rs"),
+            ("markdown", markdown, "markdown", "/tmp/x.md"),
+            ("json", json, "json", "/tmp/x.json"),
+        ];
+        let (mut multi_line, mut tied, mut decided, mut empty) = (0, 0, 0, 0);
+        for (label, text, language, path) in cases {
+            let state = empty_state();
+            let bid = active_buffer(&state);
+            if language == "markdown" {
+                seed_markdown_parse_view(&state, bid, text);
+                let layers = state
+                    .syntax_registry
+                    .view(bid)
+                    .and_then(|h| h.current())
+                    .map_or(0, |bundle| bundle.layers.len());
+                assert!(
+                    layers >= 3,
+                    "{label}: markdown, its inline layer and the fence's Rust ({layers} layers)"
+                );
+            } else {
+                seed_parse_view(&state, bid, text, language, path);
+            }
+            let (source, spans) = summary_inputs(&state, bid);
+            assert_eq!(source, text, "{label}: the buffer holds the fixture");
+            assert!(!spans.is_empty(), "{label}: the grammar styles something");
+            let line_starts = line_start_offsets(&source);
+            let len = source.len() as u64;
+            multi_line += spans
+                .iter()
+                .filter(|sp| {
+                    source[sp.range.start as usize..sp.range.end as usize].contains(&b'\n')
+                })
+                .count();
+            let (t, d) = reference_ties(&spans, &line_starts, len);
+            tied += t;
+            decided += d;
+            empty += line_starts
+                .windows(2)
+                .filter(|pair| pair[1] == pair[0] + 1)
+                .count();
+
+            let expected = reference_line_styles(&spans, &line_starts, len);
+            assert!(
+                expected.iter().any(|s| *s != Style::default()),
+                "{label}: some line has a dominant style"
+            );
+            assert_eq!(
+                scoped_file_summary(&state, bid, false),
+                expected,
+                "{label}: the summary is the per-line tally's, line for line"
+            );
+        }
+        assert!(multi_line > 0, "a span runs over several lines");
+        assert!(empty > 0, "an empty line is summarized");
+        assert!(tied > 0, "some line's top count is shared by two styles");
+        assert!(
+            decided > 0,
+            "some tie is decided by the last of the equals, not the first"
+        );
+    }
+
+    /// E10l.1: the walk gives the reference's style on every line of
+    /// spans in any order, overlapping or not, over several lines, past
+    /// the end of the text or empty, from a palette small enough that
+    /// lines tie often --- and the disjoint, ascending spans the producer
+    /// hands it. Seeded, so a failure names a case that reproduces.
+    #[test]
+    fn e10l_one_pass_matches_the_per_line_tally_on_arbitrary_spans() {
+        let palette = [
+            Style {
+                fg: crate::cell::Color::Indexed(1),
+                ..Style::default()
+            },
+            Style {
+                fg: crate::cell::Color::Indexed(2),
+                ..Style::default()
+            },
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+        ];
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound.max(1)
+        };
+        let (mut unordered, mut overlapping, mut multi_line, mut decided) = (0, 0, 0, 0);
+        for case in 0..4000 {
+            let len = next(96);
+            let source: Vec<u8> = (0..len)
+                .map(|_| if next(5) == 0 { b'\n' } else { b'x' })
+                .collect();
+            let line_starts = line_start_offsets(&source);
+            let mut spans: Vec<StyleSpan> = Vec::new();
+            if case % 2 == 0 {
+                // Disjoint and ascending, as `flatten_layer_spans` returns.
+                let mut at = next(4);
+                while at < len {
+                    let end = (at + 1 + next(24)).min(len);
+                    spans.push(StyleSpan {
+                        range: ByteRange { start: at, end },
+                        style: palette[next(3) as usize],
+                    });
+                    at = end + next(4);
+                }
+            } else {
+                for _ in 0..next(14) {
+                    let (a, b) = (next(len + 4), next(len + 4));
+                    spans.push(StyleSpan {
+                        range: ByteRange {
+                            start: a.min(b),
+                            end: a.max(b),
+                        },
+                        style: palette[next(3) as usize],
+                    });
+                }
+            }
+            unordered += usize::from(
+                spans
+                    .windows(2)
+                    .any(|pair| pair[0].range.start > pair[1].range.start),
+            );
+            overlapping += usize::from(spans.iter().enumerate().any(|(i, a)| {
+                spans[i + 1..]
+                    .iter()
+                    .any(|b| a.range.start.max(b.range.start) < a.range.end.min(b.range.end))
+            }));
+            multi_line += spans
+                .iter()
+                .filter(|sp| {
+                    let (s, e) = (sp.range.start.min(len), sp.range.end.min(len));
+                    source[s as usize..e as usize].contains(&b'\n')
+                })
+                .count();
+            decided += reference_ties(&spans, &line_starts, len).1;
+            assert_eq!(
+                line_dominant_styles(&spans, &line_starts, len),
+                reference_line_styles(&spans, &line_starts, len),
+                "case {case}: source {:?}, spans {:?}",
+                String::from_utf8_lossy(&source),
+                spans
+                    .iter()
+                    .map(|sp| (sp.range.start, sp.range.end, sp.style.fg, sp.style.bold))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(unordered > 0, "some cases hand the walk spans out of order");
+        assert!(overlapping > 0, "some cases hand it overlapping spans");
+        assert!(multi_line > 0, "some spans run over several lines");
+        assert!(
+            decided > 0,
+            "some ties are decided by the last of the equals"
+        );
+    }
+
+    /// E10l.1, the tie rule stated without the reference: of two styles
+    /// covering equal bytes of a line, the one whose first span comes
+    /// later in the list wins, whatever the spans' positions; a span over
+    /// several lines counts on each by the bytes it covers there.
+    #[test]
+    fn e10l_one_pass_breaks_ties_toward_the_style_first_met_latest() {
+        let a = Style {
+            fg: crate::cell::Color::Indexed(1),
+            ..Style::default()
+        };
+        let b = Style {
+            fg: crate::cell::Color::Indexed(2),
+            ..Style::default()
+        };
+        let span = |start, end, style| StyleSpan {
+            range: ByteRange { start, end },
+            style,
+        };
+        // "aaabbb\ncccccc\n\nd": four lines, the third empty.
+        let source = b"aaabbb\ncccccc\n\nd";
+        let starts = line_start_offsets(source);
+        let len = source.len() as u64;
+        // In position order: `a` first met first, so `b` wins the tie.
+        assert_eq!(
+            line_dominant_styles(&[span(0, 3, a), span(3, 6, b)], &starts, len)[0],
+            b
+        );
+        // The same bytes listed the other way round: `a` is met latest.
+        assert_eq!(
+            line_dominant_styles(&[span(3, 6, b), span(0, 3, a)], &starts, len)[0],
+            a
+        );
+        // `a` in two pieces around `b`, three bytes each: `b` met latest.
+        assert_eq!(
+            line_dominant_styles(&[span(0, 1, a), span(1, 4, b), span(4, 6, a)], &starts, len)[0],
+            b
+        );
+        // A span over the first two lines and into the empty third: it
+        // covers three bytes of line 0 against `b`'s two there (a tie
+        // lost by one), all of line 1, nothing of the empty line, and the
+        // last line is unstyled.
+        let lines = line_dominant_styles(&[span(3, 14, a), span(1, 3, b)], &starts, len);
+        assert_eq!(lines, vec![a, a, Style::default(), Style::default()]);
+    }
+
+    /// E10l.1: the walk's steps grow with lines plus spans. Through
+    /// `scoped_file_summary` on #439's JSON at 1,000 and 2,000 entries
+    /// (9,003 and 18,003 lines, a span a line or so), counted by
+    /// [`SUMMARY_STEPS`]: at most three per line and span, and twice the
+    /// entries at most a little over twice the steps. The per-line tally
+    /// it replaced took one step per line and span pair, about 8.1 × 10^7
+    /// at 1,000 entries, and four times that at 2,000.
+    #[test]
+    fn e10l_summary_steps_grow_with_lines_plus_spans() {
+        let steps_for = |entries: usize| {
+            let state = empty_state();
+            let bid = active_buffer(&state);
+            let text = issue_439_json(entries);
+            seed_parse_view(&state, bid, text.as_bytes(), "json", "/tmp/x.json");
+            let (source, spans) = summary_inputs(&state, bid);
+            let lines = line_start_offsets(&source).len() as u64;
+            SUMMARY_STEPS.with(|steps| steps.set(0));
+            let summary = scoped_file_summary(&state, bid, false);
+            let steps = SUMMARY_STEPS.with(std::cell::Cell::get);
+            assert_eq!(summary.len() as u64, lines, "one style a line");
+            assert!(
+                summary.iter().filter(|s| **s != Style::default()).count() as u64 > lines / 2,
+                "most lines of the JSON are styled"
+            );
+            (steps, lines, spans.len() as u64)
+        };
+        let (small, small_lines, small_spans) = steps_for(1_000);
+        let (large, large_lines, large_spans) = steps_for(2_000);
+        eprintln!(
+            "e10l steps: {small} at {small_lines} lines and {small_spans} spans; \
+             {large} at {large_lines} lines and {large_spans} spans"
+        );
+        for (steps, lines, spans) in [
+            (small, small_lines, small_spans),
+            (large, large_lines, large_spans),
+        ] {
+            assert!(
+                steps >= lines + spans,
+                "the count sees every line and every span ({steps} steps)"
+            );
+            assert!(
+                steps <= 3 * (lines + spans),
+                "{steps} steps at {lines} lines and {spans} spans: the walk is not \
+                 lines plus spans"
+            );
+        }
+        assert!(
+            large * 100 <= small * 210,
+            "twice the entries took {large} steps against {small}: not linear"
         );
     }
 }

@@ -636,17 +636,6 @@ fn run_tui(
     figures
 }
 
-/// A daemon holding `file` as its one buffer, its scratch buffer killed
-/// so an attach snapshots the file alone.
-#[cfg(feature = "crdt")]
-fn daemon_holding(file: &Path) -> common::daemon::TestDaemon {
-    let init_lua = format!(
-        "pmacs.buffer.find_or_open({:?})\nfor _, b in ipairs(pmacs.buffer.list()) do\n  if b:name() == '*scratch*' then pcall(pmacs.buffer.kill, b) end\nend\n",
-        file.display().to_string()
-    );
-    common::daemon::TestDaemon::spawn_with_env_and_init(&[], &init_lua)
-}
-
 /// E10k.1, in process: `pmacs <file>` in a PTY, completion on.
 #[test]
 #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
@@ -672,7 +661,7 @@ fn e10k_typing_at_the_end_of_a_large_buffer_in_process() {
 fn attached_figures(size: &Size, undone_cut: bool) -> Figures {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let file = write_fixture(dir.path(), size);
-    let daemon = daemon_holding(&file);
+    let daemon = common::daemon::TestDaemon::holding(&file);
     let socket = daemon
         .socket_path()
         .to_str()
@@ -737,7 +726,7 @@ fn e10k_typing_after_an_undone_cut_attached() {
 fn gpu_figures(binary: &Path, size: &Size, setup: &str) -> Option<Figures> {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let file = write_fixture(dir.path(), size);
-    let daemon = daemon_holding(&file);
+    let daemon = common::daemon::TestDaemon::holding(&file);
     eprintln!("e10k gpu {}: daemon pid {}", size.label, daemon.pid());
     let report = dir.path().join("keypaint.txt");
     let load_before = loadavg();
