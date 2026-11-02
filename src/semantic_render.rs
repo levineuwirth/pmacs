@@ -4013,15 +4013,9 @@ fn line_dominant_styles(spans: &[StyleSpan], line_starts: &[u64], source_len: u6
     if spans.is_empty() {
         return out;
     }
-    let ascending = spans
-        .windows(2)
-        .all(|pair| pair[0].range.start <= pair[1].range.start);
-    let order: Option<Vec<usize>> = (!ascending).then(|| {
-        let mut order: Vec<usize> = (0..spans.len()).collect();
-        order.sort_by_key(|&i| spans[i].range.start);
-        order
-    });
-    let index = |k: usize| order.as_ref().map_or(k, |order| order[k]);
+    // From here every read of a span goes through `spans.at`, counted in
+    // tests; the slice itself is out of reach.
+    let spans = WalkedSpans::new(spans);
     // The first span, in ascending start, that may still reach a line.
     let mut first = 0usize;
     // `Style` doesn't implement `Hash`, so a small linear-scan tally is
@@ -4038,18 +4032,15 @@ fn line_dominant_styles(spans: &[StyleSpan], line_starts: &[u64], source_len: u6
         let line_end = line_starts
             .get(li + 1)
             .map_or(source_len, |&next| next.saturating_sub(1));
-        while first < spans.len() && spans[index(first)].range.end <= line_start {
-            summary_step();
+        while first < spans.len() && spans.at(first).1.range.end <= line_start {
             first += 1;
         }
         tally.clear();
         for k in first..spans.len() {
-            let i = index(k);
-            let sp = &spans[i];
+            let (i, sp) = spans.at(k);
             if sp.range.start >= line_end {
                 break;
             }
-            summary_step();
             let lo = sp.range.start.max(line_start);
             let hi = sp.range.end.min(line_end);
             if hi > lo {
@@ -4069,10 +4060,70 @@ fn line_dominant_styles(spans: &[StyleSpan], line_starts: &[u64], source_len: u6
     out
 }
 
+/// The spans [`line_dominant_styles`] walks, read only through
+/// [`WalkedSpans::at`], which counts every read in tests
+/// ([`summary_step`]), as [`WalkedSpans::new`] counts its own. So the
+/// step row bounds what the walk reads rather than the statements it
+/// marks, whatever its shape (E10l review 1, Low 1: a walk finding each
+/// line's first span by a scan from the start marked lines plus spans
+/// while it read about 4 × 10^7).
+///
+/// In a module of its own, so that its fields are private to the walk
+/// and no read goes around the count.
+mod walked_spans {
+    use super::{StyleSpan, summary_step};
+
+    /// The walk's view of its spans (the module's doc).
+    pub(super) struct WalkedSpans<'a> {
+        spans: &'a [StyleSpan],
+        /// The indices of `spans` in ascending start, where they are not
+        /// given in that order.
+        order: Option<Vec<usize>>,
+    }
+
+    impl<'a> WalkedSpans<'a> {
+        /// Read each span's start once to see whether they ascend, and
+        /// where they do not, sort their indices by it, each start read
+        /// once more.
+        pub(super) fn new(spans: &'a [StyleSpan]) -> Self {
+            let start = |i: usize| {
+                summary_step();
+                spans[i].range.start
+            };
+            let mut previous = 0;
+            let ascending = (0..spans.len()).all(|i| {
+                let here = start(i);
+                let ascends = here >= previous;
+                previous = here;
+                ascends
+            });
+            let order = (!ascending).then(|| {
+                let mut order: Vec<usize> = (0..spans.len()).collect();
+                order.sort_by_cached_key(|&i| start(i));
+                order
+            });
+            Self { spans, order }
+        }
+
+        pub(super) const fn len(&self) -> usize {
+            self.spans.len()
+        }
+
+        /// The `k`th span in ascending start, with its index in the spans as
+        /// given (the tie rule's first-met index): one read, counted.
+        pub(super) fn at(&self, k: usize) -> (usize, &'a StyleSpan) {
+            summary_step();
+            let i = self.order.as_ref().map_or(k, |order| order[k]);
+            (i, &self.spans[i])
+        }
+    }
+}
+use walked_spans::WalkedSpans;
+
 #[cfg(test)]
 thread_local! {
     /// The steps [`line_dominant_styles`] has taken on this thread: one
-    /// per line, per span passed over and per span a line's walk reads.
+    /// per line, and one per read of a span, through [`WalkedSpans`].
     static SUMMARY_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -8910,10 +8961,17 @@ mod tests {
     /// E10l.1: the walk's steps grow with lines plus spans. Through
     /// `scoped_file_summary` on #439's JSON at 1,000 and 2,000 entries
     /// (9,003 and 18,003 lines, a span a line or so), counted by
-    /// [`SUMMARY_STEPS`]: at most three per line and span, and twice the
-    /// entries at most a little over twice the steps. The per-line tally
-    /// it replaced took one step per line and span pair, about 8.1 × 10^7
-    /// at 1,000 entries, and four times that at 2,000.
+    /// [`SUMMARY_STEPS`], which since review 1's Low 1 counts every read
+    /// of a span rather than the statements the walk marks: on these
+    /// disjoint spans three reads a span (the order check, the line's
+    /// walk, the pass over it) and three steps a line (the line, the
+    /// pass-over check that stops, the walk's last read), so 54,002 at
+    /// 9,003 lines and 9,000 spans; at most four per line and span here,
+    /// and twice the entries at most a little over twice the steps. A
+    /// walk finding each line's first span by a scan from the start,
+    /// review 1's plant, reads quadratically and fails it. The per-line
+    /// tally E10l replaced took one step per line and span pair, about
+    /// 8.1 × 10^7 at 1,000 entries, and four times that at 2,000.
     #[test]
     fn e10l_summary_steps_grow_with_lines_plus_spans() {
         let steps_for = |entries: usize| {
@@ -8949,7 +9007,7 @@ mod tests {
                 "the count sees every line and every span ({steps} steps)"
             );
             assert!(
-                steps <= 3 * (lines + spans),
+                steps <= 4 * (lines + spans),
                 "{steps} steps at {lines} lines and {spans} spans: the walk is not \
                  lines plus spans"
             );
