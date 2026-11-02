@@ -360,3 +360,316 @@ fn two_backspaces_in_one_update_around_anothers_insert_undo_in_order() {
     );
     pump_until_text(&mut user, "Zabcdef", "the user sees the same");
 }
+
+// ---------------------------------------------------------------------
+// E10o.2: an update carrying several of a frontend's changes (#444).
+// ---------------------------------------------------------------------
+
+/// `C-x r`, `buffer.redo`.
+fn send_redo(replica: &mut Replica) {
+    send_key(replica, Key::Char('x'), Modifiers::CTRL);
+    send_key(replica, Key::Char('r'), Modifiers::NONE);
+}
+
+/// Send everything the replica holds since `from` as one update: a
+/// frontend that batches its changes.
+fn send_since(replica: &mut Replica, from: &loro::VersionVector) -> Vec<u8> {
+    let bytes = replica
+        .state
+        .export_updates_since(from)
+        .expect("export the batch");
+    send_op(replica, bytes.clone());
+    bytes
+}
+
+/// The other frontend's `abcdef`, seen by both.
+fn start_with_abcdef(user: &mut Replica, other: &mut Replica) {
+    assert_distinct_peers(user, other);
+    type_optimistic(other, 0, "abcdef");
+    both_see(user, other, "abcdef", "abcdef");
+}
+
+/// The batched probe's update: on `abcdef`, the user's Backspace held,
+/// the other's `Z` at 0 imported over it, a second Backspace, both sent
+/// as one update. Leaves both replicas at `Zabcd`.
+fn send_the_batched_backspaces(user: &mut Replica, other: &mut Replica) {
+    let before = user.state.version();
+    user.state.delete(5, 1).expect("the first Backspace, held");
+    type_optimistic(other, 0, "Z");
+    pump_until_text(other, "Zabcdef", "the other's Z");
+    pump_until_text(user, "Zabcde", "the user imports Z over its held Backspace");
+    user.state.delete(5, 1).expect("the second Backspace");
+    send_since(user, &before);
+    both_see(user, other, "Zabcd", "both Backspaces in one update");
+}
+
+/// Redo of the batched update: undo restores both Backspaces' text in
+/// order, and redo deletes it again, on both replicas. Fails at the base
+/// at the undo (`Zabcdfe`).
+#[test]
+fn redo_of_the_batched_backspaces_restores_zabcd() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+    send_the_batched_backspaces(&mut user, &mut other);
+
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "Zabcdef",
+        "the batch undone in order",
+    );
+    send_redo(&mut user);
+    both_see(&mut user, &mut other, "Zabcd", "the batch redone");
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdef", "the redo undone");
+}
+
+/// A batched typed run around the other frontend's insert: on `xy`, the
+/// user types `ab` at the end and holds it, imports the other's `Z` at
+/// 0, types `cd`, and sends all four characters as one update (two
+/// changes, the other's `Z` between them). One undo takes the whole run
+/// around the `Z`, and redo puts it back, on both replicas.
+#[test]
+fn a_batched_typed_run_around_anothers_insert_undoes_and_redoes() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    assert_distinct_peers(&user, &other);
+    type_optimistic(&mut other, 0, "xy");
+    both_see(&mut user, &mut other, "xy", "xy");
+
+    let before = user.state.version();
+    user.state.insert(2, "ab").expect("ab, held");
+    type_optimistic(&mut other, 0, "Z");
+    pump_until_text(&mut other, "Zxy", "the other's Z");
+    pump_until_text(&mut user, "Zxyab", "the user imports Z over its held ab");
+    user.state.insert(5, "cd").expect("cd");
+    send_since(&mut user, &before);
+    both_see(&mut user, &mut other, "Zxyabcd", "the run in one update");
+
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "Zxy",
+        "the whole run undone around Z",
+    );
+    send_redo(&mut user);
+    both_see(&mut user, &mut other, "Zxyabcd", "the run redone");
+}
+
+/// The overlap: the user's first Backspace delivered alone; then, after
+/// the other's `Z` and `Y`, an update carrying all three of the user's
+/// Backspaces, the first again. The daemon integrates only the two new
+/// ones, one span each, and records nothing for the repeated one: one
+/// undo restores the two (`de`, in order) and leaves the first deleted,
+/// and the next undo restores it, its own earlier step.
+#[test]
+fn an_update_repeating_a_delivered_prefix_records_only_what_is_new() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+
+    let before = user.state.version();
+    user.state.delete(5, 1).expect("the first Backspace");
+    send_since(&mut user, &before);
+    both_see(&mut user, &mut other, "abcde", "the first Backspace, alone");
+    type_optimistic(&mut other, 0, "Z");
+    both_see(&mut user, &mut other, "Zabcde", "the other's Z");
+    user.state.delete(5, 1).expect("the second Backspace, held");
+    type_optimistic(&mut other, 0, "Y");
+    pump_until_text(&mut other, "YZabcde", "the other's Y");
+    pump_until_text(
+        &mut user,
+        "YZabcd",
+        "the user imports Y over its held Backspace",
+    );
+    user.state.delete(5, 1).expect("the third Backspace");
+    send_since(&mut user, &before);
+    both_see(&mut user, &mut other, "YZabc", "all three in one update");
+
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "YZabcde",
+        "the two new Backspaces undone, the first kept",
+    );
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "YZabcdef",
+        "the first undone on its own",
+    );
+    send_undo(&mut user);
+    assert_text_stays(&mut user, "YZabcdef", Duration::from_millis(500));
+}
+
+/// Replaying identical bytes adds no undo history: after the batched
+/// run is undone, the same update sent again integrates nothing, and the
+/// redo it would have cleared still redoes. A guard: at the base too an
+/// import that integrates nothing changes no text and is not recorded
+/// (`apply_remote_crdt_op` returns before its stash).
+#[test]
+fn replaying_an_update_adds_no_undo_history() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    assert_distinct_peers(&user, &other);
+    type_optimistic(&mut other, 0, "xy");
+    both_see(&mut user, &mut other, "xy", "xy");
+
+    let before = user.state.version();
+    user.state.insert(2, "ab").expect("ab, held");
+    type_optimistic(&mut other, 0, "Z");
+    pump_until_text(&mut other, "Zxy", "the other's Z");
+    pump_until_text(&mut user, "Zxyab", "the user imports Z over its held ab");
+    user.state.insert(5, "cd").expect("cd");
+    let batch = send_since(&mut user, &before);
+    both_see(&mut user, &mut other, "Zxyabcd", "the run in one update");
+
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zxy", "the run undone");
+    send_op(&mut user, batch);
+    send_redo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "Zxyabcd",
+        "redo still redoes after the replay",
+    );
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zxy", "the redo undone");
+    send_undo(&mut user);
+    assert_text_stays(&mut user, "Zxy", Duration::from_millis(500));
+}
+
+/// The delayed batch: the other's `Y` reaches the daemon after the user
+/// last imported, so the user's update carries changes made without it;
+/// then the other's `W` lands after the update. Undo and redo are exact,
+/// `Y` and `W` kept.
+#[test]
+fn a_batch_made_without_a_foreign_edit_the_daemon_held_undoes_exactly() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+
+    let before = user.state.version();
+    user.state.delete(5, 1).expect("the first Backspace, held");
+    type_optimistic(&mut other, 0, "Z");
+    pump_until_text(&mut other, "Zabcdef", "the other's Z");
+    pump_until_text(
+        &mut user,
+        "Zabcde",
+        "the user imports Z over its held Backspace",
+    );
+    user.state.delete(5, 1).expect("the second Backspace, held");
+    type_optimistic(&mut other, 0, "Y");
+    pump_until_text(&mut other, "YZabcdef", "the other's Y, not yet the user's");
+    assert_eq!(user.state.materialize_string(), "Zabcd", "the user lacks Y");
+    send_since(&mut user, &before);
+    pump_until_text(&mut other, "YZabcd", "the other sees both Backspaces");
+    type_optimistic(&mut other, 0, "W");
+    both_see(
+        &mut user,
+        &mut other,
+        "WYZabcd",
+        "the other's W after the update",
+    );
+
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "WYZabcdef",
+        "the batch undone, Y and W kept",
+    );
+    send_redo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "WYZabcd",
+        "the batch redone, Y and W kept",
+    );
+}
+
+/// The user's earlier step after the delayed batch: the user's typed `x`
+/// is its own group before the batch, and the other's `Z` and `Y` land
+/// after it, `Y` unseen by the user when it sends the batch. Undoing the
+/// batch and then the `x` is exact: the batch's undo leaves the `x`'s
+/// record holding `Z` and `Y` once, so the second undo removes the `x`
+/// and nothing beside it.
+#[test]
+fn the_users_earlier_step_undoes_exactly_after_a_delayed_batch() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+    type_optimistic(&mut user, 0, "x");
+    both_see(&mut user, &mut other, "xabcdef", "the user's x");
+
+    let before = user.state.version();
+    user.state.delete(6, 1).expect("the first Backspace, held");
+    type_optimistic(&mut other, 0, "Z");
+    pump_until_text(&mut other, "Zxabcdef", "the other's Z");
+    pump_until_text(
+        &mut user,
+        "Zxabcde",
+        "the user imports Z over its held Backspace",
+    );
+    user.state.delete(6, 1).expect("the second Backspace, held");
+    type_optimistic(&mut other, 0, "Y");
+    pump_until_text(&mut other, "YZxabcdef", "the other's Y, not yet the user's");
+    send_since(&mut user, &before);
+    both_see(
+        &mut user,
+        &mut other,
+        "YZxabcd",
+        "the batch, Y imported after",
+    );
+
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "YZxabcdef", "the batch undone");
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "YZabcdef",
+        "the x undone, nothing beside it",
+    );
+}
+
+/// A one-change update with several ops is recorded as before, one span
+/// in one step: two Backspaces with nothing between them merge into one
+/// change on the user's replica (loro merges consecutive local changes),
+/// and one undo restores both. A guard: the record is the same at the
+/// base.
+#[test]
+fn a_one_change_update_of_two_backspaces_undoes_as_one_step() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+
+    let before = user.state.version();
+    user.state.delete(5, 1).expect("the first Backspace");
+    user.state.delete(4, 1).expect("the second Backspace");
+    send_since(&mut user, &before);
+    both_see(
+        &mut user,
+        &mut other,
+        "abcd",
+        "both Backspaces in one update",
+    );
+
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "abcdef", "both restored in one step");
+    send_undo(&mut user);
+    assert_text_stays(&mut user, "abcdef", Duration::from_millis(500));
+}
