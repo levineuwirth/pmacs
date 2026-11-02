@@ -29,14 +29,19 @@
 //!   the flatten and the pass alone.
 //! - P4: scrolling after the summary; P6: the GPU binary on the file.
 //!
-//! P5, the summary past the frame (Medium 2), is its fix's witness and
-//! lands with it.
+//! - P5: a file whose summary cannot fit the transport's frame (review
+//!   1's Medium 2). Measured at `f0754a4`: computed on the main thread,
+//!   refused by the transport, and recomputed after a pause, about 2 s
+//!   each time. Since the fix the producer reads nothing for it, and P5
+//!   is that fix's witness: it fails at `f0754a4` on the hold.
 //!
 //! Wall-clock probes: `#[ignore]`, run by hand in release (the file's
-//! 185,000 entries; `PMACS_E10L_R1_ENTRIES` sets another count). Each
-//! prints its figures with the load average beside them. The assertions
-//! are what the North star promises, "the daemon keeps answering": every
-//! key answered within `ANSWER_CEILING`.
+//! 185,000 entries, P2's 370,000 and P5's 270,000;
+//! `PMACS_E10L_R1_ENTRIES` sets another count). Each prints its figures
+//! with the load average beside them. The assertions are what the North
+//! star promises, "the daemon keeps answering": every key answered
+//! within `ANSWER_CEILING`; P5's, that no key after a pause waits past
+//! `SUMMARY_HOLD`.
 
 mod common;
 
@@ -647,6 +652,152 @@ fn p4_scrolling_the_439_file_after_its_summary() {
             "p4 thirty viewports down the file, declaration to styled spans: {}; load {}",
             describe(&scrolls, Duration::from_millis(16)),
             loadavg()
+        );
+    }
+}
+
+/// The longest P5 lets a key wait after its typed letter. At `f0754a4`
+/// the summary's recomputation held a key 1,845 to 2,141 ms at 250,000
+/// entries (review 1); a key otherwise takes tens of milliseconds there.
+#[cfg(feature = "crdt")]
+const SUMMARY_HOLD: Duration = Duration::from_secs(1);
+
+/// P5, Medium 2's witness: a JSON file of #439's shape whose summary
+/// cannot fit the transport's 16 MiB frame whatever its lines' styles
+/// (270,000 entries, 26.6 MB, 2,430,003 lines by default: at seven bytes
+/// a line, `Style::default`'s, past 17 MB). At `f0754a4` the daemon
+/// computed it on the main thread and the transport refused it (`frame
+/// length … exceeds maximum` on the daemon's stderr), at the first frame
+/// and again a second after a typed letter, holding the next key about
+/// 2 s for a message never sent (review 1 measured 1,845 to 2,141 ms at
+/// 250,000 entries, and its P2 the whole-file read abandoned at
+/// `READ_HARD`, 2.00 s, past about 300,000). Since the fix the producer
+/// reads nothing for a summary that cannot fit: after the letter no key
+/// waits past [`SUMMARY_HOLD`], no summary arrives and the stderr names
+/// no refusal. The first frame, the summaries and the refusals are
+/// printed with the load.
+#[test]
+#[ignore = "review probe; wall-clock, run by hand in release"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one probe, its stages printed as they go"
+)]
+fn p5_a_summary_past_the_frame() {
+    #[cfg(feature = "crdt")]
+    {
+        let entries = entries_or(270_000);
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let file = dir.path().join("big.json");
+        let text = issue_439_json(entries);
+        let lines = text.bytes().filter(|b| *b == b'\n').count() + 1;
+        let len = text.len();
+        std::fs::write(&file, &text).expect("write");
+        drop(text);
+        // The precondition: a summary of this many lines, every line at
+        // the smallest encoding a style has, is refused by the transport.
+        let plain = InstanceMessage::FileStyleSummary {
+            buffer_id: pmacs_protocol::BufferId::from_raw(1),
+            generation: 0,
+            lines: vec![pmacs::cell::Style::default(); lines],
+        };
+        assert!(
+            matches!(
+                pmacs_protocol::transport::write_message(&mut Vec::new(), &plain),
+                Err(pmacs_protocol::TransportError::FrameTooLarge { .. })
+            ),
+            "{lines} lines' summary fits the frame unstyled: not P5's file"
+        );
+        drop(plain);
+        let daemon = common::daemon::TestDaemon::holding(&file);
+        let stderr_path = {
+            let mut p = daemon.socket_path().as_os_str().to_os_string();
+            p.push(".stderr.log");
+            std::path::PathBuf::from(p)
+        };
+        let refusals = || {
+            std::fs::read_to_string(&stderr_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("exceeds maximum"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let mut peer = Peer::attach(&daemon);
+        peer.viewport(0, 4096);
+        let highlighted = peer.until(FIRST_FRAME, |m| match m {
+            InstanceMessage::StyleSpans { segments, .. } => segments.iter().any(|s| {
+                s.spans
+                    .iter()
+                    .any(|sp| sp.style != pmacs::cell::Style::default())
+            }),
+            _ => false,
+        });
+        let _ = peer.until(Duration::from_secs(5), |_| false);
+        eprintln!(
+            "p5 {entries} entries ({len} bytes, {lines} lines): highlighted {highlighted:?}; \
+             summaries received {:?}; the daemon's refusals {:?}; load {}",
+            peer.summaries,
+            refusals(),
+            loadavg()
+        );
+        assert!(
+            highlighted.is_some(),
+            "no highlighted frame within {FIRST_FRAME:?}; load {}",
+            loadavg()
+        );
+        peer.walk_into_the_first_name();
+        let typed_at = peer.epoch.elapsed();
+        let typed = peer.key_to(Key::Char('x'), Modifiers::NONE, 28);
+        let mut keys = vec![(typed_at, typed)];
+        let start = Instant::now();
+        let mut m = 0u32;
+        while start.elapsed() < Duration::from_secs(6) {
+            let slot = start + Duration::from_millis(100) * m;
+            if let Some(wait) = slot.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+            let (key, to) = if m.is_multiple_of(2) {
+                ('b', 27)
+            } else {
+                ('f', 28)
+            };
+            let at = peer.epoch.elapsed();
+            keys.push((at, peer.key_to(Key::Char(key), Modifiers::CTRL, to)));
+            m += 1;
+        }
+        let _ = peer.until(Duration::from_secs(2), |_| false);
+        eprintln!(
+            "p5 a letter typed at {:.2}s and the six seconds after: {}; summaries received {:?}; \
+             the daemon's refusals now {:?}; load {}",
+            typed_at.as_secs_f64(),
+            describe(&keys, Duration::from_millis(250)),
+            peer.summaries,
+            refusals(),
+            loadavg()
+        );
+        let (worst_at, worst) = keys
+            .iter()
+            .copied()
+            .max_by_key(|(_, took)| *took)
+            .expect("keys were sent");
+        assert!(
+            worst <= SUMMARY_HOLD,
+            "a key after the typed letter waited {worst:?} (sent at {:.2}s): the main thread held \
+             past {SUMMARY_HOLD:?}, as a summary the frame cannot carry being recomputed holds it; \
+             the daemon's refusals {:?}; load {}",
+            worst_at.as_secs_f64(),
+            refusals(),
+            loadavg()
+        );
+        assert!(
+            peer.summaries.is_empty(),
+            "a summary of {lines} lines arrived: {:?}",
+            peer.summaries
+        );
+        assert!(
+            refusals().is_empty(),
+            "the transport refused a message: {:?}",
+            refusals()
         );
     }
 }

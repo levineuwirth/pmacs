@@ -2684,7 +2684,30 @@ impl SemanticRenderState {
                 }
             }
         }
-        let lines = scoped_file_summary(state, buffer_id, self.peer_knows_theme_facts);
+        let Some(lines) =
+            scoped_file_summary(state, buffer_id, generation, self.peer_knows_theme_facts)
+        else {
+            // Past the frame (E10l review 1, Medium 2): nothing was read
+            // and nothing is sent. The key advances as on a computation,
+            // so the check waits for the next edit or epoch rather than
+            // repeating every tick, and the lines the cache held stay for
+            // the payload comparison after the next summary that fits.
+            let lines = self
+                .last_summary
+                .remove(&buffer_id)
+                .map(|cache| cache.lines)
+                .unwrap_or_default();
+            self.last_summary.insert(
+                buffer_id,
+                SummaryCache {
+                    key,
+                    lines,
+                    seen: (generation, now),
+                    behind_since: None,
+                },
+            );
+            return None;
+        };
         // Payload-equality suppression (Q#TH6): a face edit that
         // leaves the summary unchanged (e.g. `ui.modeline`) emits
         // nothing — but the key still advances, on computation rather
@@ -3867,22 +3890,39 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 /// spans and the lines together; the caller short-circuits on unchanged
 /// CRDT generation so this only runs on first sight of a buffer or after
 /// an edit, not per frame.
+///
+/// `None`, with nothing read, when a summary of the buffer's lines at
+/// `generation` cannot fit the transport's frame whatever its lines'
+/// styles ([`summary_min_frame_len`]): past about 2.4 million lines the
+/// whole-file read, about 2 s on the main thread for a file of #439's
+/// shape, would buy a message `write_message` refuses (E10l review 1,
+/// Medium 2). Short of that bound a summary whose styled lines take it
+/// past the frame is still computed and refused, from about 2.19
+/// million lines of #439's shape (two lines in three styled, an indexed
+/// color eight bytes); a minimap past the frame is E11.4's, with the
+/// summary's wire shape (#437).
 fn scoped_file_summary(
     state: &EditorState,
     buffer_id: BufferId,
+    generation: u64,
     resolve_faces: bool,
-) -> Vec<Style> {
+) -> Option<Vec<Style>> {
     let source = {
         let core = state.core.borrow();
         let registry = core.registry.clone();
         let reg = registry.borrow();
         match reg.get(buffer_id) {
             Ok(buf) => buffer_source_bytes(buf),
-            Err(_) => return Vec::new(),
+            Err(_) => return Some(Vec::new()),
         }
     };
     let source_len = source.len() as u64;
     let line_starts = line_start_offsets(&source);
+    if summary_min_frame_len(buffer_id, generation, line_starts.len())
+        > pmacs_protocol::MAX_FRAME_BYTES
+    {
+        return None;
+    }
 
     // The grammar producer over a whole-buffer "viewport": the clip is
     // then a no-op and every styled run of every layer is yielded.
@@ -3894,13 +3934,56 @@ fn scoped_file_summary(
         },
         frontend_generation: 0,
     };
+    summary_whole_file_read();
     let spans = grammar_scoped_style_spans(state, &vp_all);
     // No styled runs leaves every line default --- but diagnostic marks
     // are independent of syntax styling (a plain-text buffer can still
     // have lints), so they are overlaid either way.
     let mut out = line_dominant_styles(&spans, &line_starts, source_len);
     overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
-    out
+    Some(out)
+}
+
+/// The fewest bytes a `FileStyleSummary` of `lines` lines for
+/// `buffer_id` at `generation` encodes to: every line at
+/// [`Style::default`]'s encoding, the smallest a [`Style`] has (seven
+/// bytes), behind the message's own fields. Past
+/// `pmacs_protocol::MAX_FRAME_BYTES` the transport refuses such a
+/// summary whatever its lines' styles, so [`scoped_file_summary`] does
+/// not read the file for it.
+fn summary_min_frame_len(buffer_id: BufferId, generation: u64, lines: usize) -> usize {
+    let encoded = |bytes: Result<Vec<u8>, postcard::Error>| bytes.map_or(usize::MAX, |b| b.len());
+    // With no lines the message carries its count as one varint byte.
+    let empty = encoded(postcard::to_allocvec(&InstanceMessage::FileStyleSummary {
+        buffer_id,
+        generation,
+        lines: Vec::new(),
+    }));
+    let style = encoded(postcard::to_allocvec(&Style::default()));
+    let mut count = 1;
+    let mut rest = lines >> 7;
+    while rest > 0 {
+        count += 1;
+        rest >>= 7;
+    }
+    empty
+        .saturating_sub(1)
+        .saturating_add(count)
+        .saturating_add(lines.saturating_mul(style))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The whole-file span reads [`scoped_file_summary`] has made on this
+    /// thread (E10l review 1, Medium 2).
+    static SUMMARY_WHOLE_FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one whole-file read of [`scoped_file_summary`] (tests only).
+#[inline]
+fn summary_whole_file_read() {
+    #[cfg(test)]
+    SUMMARY_WHOLE_FILE_READS.with(|reads| reads.set(reads.get() + 1));
 }
 
 /// Each line's dominant style: the style covering the most of the line's
@@ -6501,7 +6584,8 @@ mod tests {
         seed_rust_parse_view(&state, bid, src.as_bytes());
 
         let start = std::time::Instant::now();
-        let summary = scoped_file_summary(&state, bid, false);
+        let summary =
+            scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame");
         let elapsed = start.elapsed();
         assert!(!summary.is_empty(), "summary produced for a styled buffer");
         elapsed
@@ -8667,7 +8751,7 @@ mod tests {
                 "{label}: some line has a dominant style"
             );
             assert_eq!(
-                scoped_file_summary(&state, bid, false),
+                scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame"),
                 expected,
                 "{label}: the summary is the per-line tally's, line for line"
             );
@@ -8840,7 +8924,8 @@ mod tests {
             let (source, spans) = summary_inputs(&state, bid);
             let lines = line_start_offsets(&source).len() as u64;
             SUMMARY_STEPS.with(|steps| steps.set(0));
-            let summary = scoped_file_summary(&state, bid, false);
+            let summary =
+                scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame");
             let steps = SUMMARY_STEPS.with(std::cell::Cell::get);
             assert_eq!(summary.len() as u64, lines, "one style a line");
             assert!(
@@ -8872,6 +8957,96 @@ mod tests {
         assert!(
             large * 100 <= small * 210,
             "twice the entries took {large} steps against {small}: not linear"
+        );
+    }
+
+    /// E10l review 1, Medium 2: a summary of more lines than the frame
+    /// holds at [`Style::default`]'s encoding is neither read nor sent,
+    /// and one of exactly as many as it holds is both. The bound is the
+    /// transport's own: an all-default summary of the largest count that
+    /// fits encodes inside `MAX_FRAME_BYTES`, one line more past it, each
+    /// to the byte [`summary_min_frame_len`] gives. Through the frame
+    /// producer, on JSON buffers whose lines no capture styles (`[`,
+    /// empty lines, `]`), the whole-file reads counted by
+    /// [`SUMMARY_WHOLE_FILE_READS`]; a second frame reads nothing again.
+    #[test]
+    fn e10l_r1_a_summary_that_cannot_fit_the_frame_is_neither_read_nor_sent() {
+        let max = pmacs_protocol::MAX_FRAME_BYTES;
+        let bid = active_buffer(&empty_state());
+        let encoded = |lines: usize| {
+            postcard::to_allocvec(&InstanceMessage::FileStyleSummary {
+                buffer_id: bid,
+                generation: 0,
+                lines: vec![Style::default(); lines],
+            })
+            .expect("encode")
+            .len()
+        };
+        let fits = |lines: usize| summary_min_frame_len(bid, 0, lines) <= max;
+        let mut most = max / 7;
+        while !fits(most) {
+            most -= 1;
+        }
+        while fits(most + 1) {
+            most += 1;
+        }
+        for lines in [most, most + 1] {
+            assert_eq!(
+                summary_min_frame_len(bid, 0, lines),
+                encoded(lines),
+                "the bound at {lines} lines is the encoding's own length"
+            );
+        }
+        assert!(
+            encoded(most) <= max && encoded(most + 1) > max,
+            "{most} lines fit the frame and one more does not"
+        );
+        eprintln!(
+            "e10l r1: an all-default summary of {most} lines is {} bytes, of {} lines {}; the \
+             frame {max}",
+            encoded(most),
+            most + 1,
+            encoded(most + 1)
+        );
+
+        // `(summary lines sent, whole-file reads)` for the first frame
+        // and a second one, on a buffer of `lines` lines at generation 0.
+        let frames = |lines: usize| {
+            let state = empty_state();
+            let mut s = local();
+            let bid = active_buffer(&state);
+            let mut text = vec![b'['];
+            text.resize(lines, b'\n');
+            text.push(b']');
+            seed_parse_view(&state, bid, &text, "json", "/tmp/x.json");
+            s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+            let mut out = Vec::new();
+            for _ in 0..2 {
+                SUMMARY_WHOLE_FILE_READS.with(|reads| reads.set(0));
+                let frame = s.render_frame(&state);
+                let reads = SUMMARY_WHOLE_FILE_READS.with(std::cell::Cell::get);
+                let sent = summary_of(&frame).map(|(generation, lines)| {
+                    assert_eq!(generation, 0, "a buffer without a CRDT is at generation 0");
+                    assert!(
+                        lines.iter().all(|style| *style == Style::default()),
+                        "no line of the fixture is styled"
+                    );
+                    lines.len()
+                });
+                out.push((sent, reads));
+            }
+            out
+        };
+        assert_eq!(
+            frames(most + 1),
+            vec![(None, 0), (None, 0)],
+            "{} lines cannot fit the frame: nothing read, nothing sent",
+            most + 1
+        );
+        assert_eq!(
+            frames(most),
+            vec![(Some(most), 1), (None, 0)],
+            "{most} lines fit: read once and sent, then unchanged"
         );
     }
 
@@ -9015,7 +9190,7 @@ mod tests {
         );
 
         let started = Instant::now();
-        let whole = scoped_file_summary(&state, bid, false);
+        let whole = scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame");
         let again = started.elapsed();
         assert_eq!(whole, lines, "the summary is the pass's");
 
