@@ -4006,8 +4006,15 @@ fn summary_whole_file_read() {
 /// span for every line, about 2.8 × 10^12 steps on an 18 MB JSON file,
 /// on the daemon's main thread. Spans out of order are walked in an
 /// ascending copy of their indices, so the answer does not depend on the
-/// order; spans that overlap are still counted exactly, the walk slower
-/// by the overlap.
+/// order. Spans that overlap are still counted exactly, but the bound is
+/// the disjoint spans' alone: the walk starts each line at the first
+/// span not yet passed over, and a span is passed over only once a line
+/// starts at or after its end, so a long span keeps every line it covers
+/// rereading each span from it to that line's end. One span over the
+/// whole text makes the walk quadratic: on a copy of the walk as it
+/// stood at `f0754a4`, review 1 counted 502,500, 2,005,000 and 8,010,000
+/// steps at 1,000, 2,000 and 4,000 lines of a span each beside it (E10l
+/// review 1, Low 2). The producer never hands it overlapping spans.
 fn line_dominant_styles(spans: &[StyleSpan], line_starts: &[u64], source_len: u64) -> Vec<Style> {
     let mut out = vec![Style::default(); line_starts.len()];
     if spans.is_empty() {
