@@ -88,6 +88,19 @@ impl ChangeBase {
     }
 }
 
+/// One change an import integrated (E10o, #444), as the arbiter records
+/// it when the import integrated more than one: the change's ops this
+/// import added, and the document's versions just before and just after
+/// them, the import's earlier changes in `before` and every op the
+/// document already held in both. See [`CrdtState::changes_since`].
+#[derive(Clone, Debug)]
+pub struct IntegratedChange {
+    /// The change's ops the import integrated.
+    pub span: IdSpan,
+    before: loro::Frontiers,
+    after: loro::Frontiers,
+}
+
 /// The CRDT-backed buffer state.
 ///
 /// Owns a [`LoroDoc`] with a single text container (named `"body"`).
@@ -630,6 +643,75 @@ impl CrdtState {
         spans
     }
 
+    /// E10o: the changes integrated since `from`, one per change, each
+    /// cut to the ops integrated since `from`, in an order they apply in
+    /// (by Lamport time), each with the document's versions just before
+    /// and just after it. `None` when a change cannot be read from the
+    /// log.
+    ///
+    /// One import can integrate several changes of its sender (#444): a
+    /// frontend that sends two of its edits in one update, the second
+    /// made after it imported another frontend's op. Recorded as one span,
+    /// another peer's op lies inside it and loro's own undo takes it in
+    /// parts, restoring a Backspace pair out of order (#438,
+    /// loro-dev/loro#1245). Each change alone is linear: its ops depend
+    /// each on the one before. And the versions are this document's own,
+    /// not the change's causal past: a change whose sender had not yet
+    /// received an op this document already held is undone in the
+    /// coordinates the document had, that op included, which is where
+    /// the arbiter's bases are expressed (see [`ChangeBase`]).
+    #[must_use]
+    pub fn changes_since(&self, from: &VersionVector) -> Option<Vec<IntegratedChange>> {
+        let mut pieces = Vec::new();
+        for span in self.spans_since(from) {
+            let (mut at, end) = (span.counter.min(), span.counter.norm_end());
+            while at < end {
+                let change = self.doc.get_change(loro::ID::new(span.peer, at))?;
+                let change_end = change.id.counter + i32::try_from(change.len).ok()?;
+                let to = change_end.min(end);
+                let lamport = change.lamport + u32::try_from(at - change.id.counter).ok()?;
+                pieces.push((lamport, IdSpan::new(span.peer, at, to)));
+                at = to;
+            }
+        }
+        pieces.sort_by_key(|(lamport, span)| (*lamport, span.peer));
+        let mut version = from.clone();
+        let mut before = self.doc.vv_to_frontiers(&version);
+        Some(
+            pieces
+                .into_iter()
+                .map(|(_, span)| {
+                    version.set_end(loro::ID::new(span.peer, span.counter.norm_end()));
+                    let after = self.doc.vv_to_frontiers(&version);
+                    IntegratedChange {
+                        span,
+                        before: std::mem::replace(&mut before, after.clone()),
+                        after,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// E10o: undo one change an import integrated against the foreign
+    /// changes since it, as new ops on this doc's own peer: the diff from
+    /// the document's version after the change back to its version
+    /// before it, transformed against `base` and written in pieces, as
+    /// [`Self::undo_span_against`] does for a linear span. On return
+    /// `base` is re-expressed in the coordinates before the change.
+    pub fn undo_change_against(
+        &self,
+        change: &IntegratedChange,
+        base: &mut ChangeBase,
+    ) -> LoroResult<()> {
+        self.doc.commit();
+        let last = loro::ID::new(change.span.peer, change.span.counter.norm_end() - 1);
+        if !self.doc.oplog_vv().includes_id(last) {
+            return Err(loro::LoroError::UndoInvalidIdSpan(last));
+        }
+        self.undo_between_in_pieces(&change.after, &change.before, base)
+    }
+
     /// E6c: undo one op span of any peer against the foreign changes
     /// since it, as new ops on this doc's own peer.
     ///
@@ -658,7 +740,13 @@ impl CrdtState {
     /// paste). So a span whose ops each depend on the one before it, as a
     /// local edit's do, is undone by [`Self::undo_span_in_pieces`],
     /// which writes the same compensation in pieces; any other by loro's
-    /// own primitive.
+    /// own primitive, which splits it at each op depending on another
+    /// peer's and can restore the parts out of order (#438,
+    /// loro-dev/loro#1245). Since E10o the arbiter records no such span
+    /// from an import: one that integrated several changes is recorded
+    /// change by change ([`Self::changes_since`]) and undone by
+    /// [`Self::undo_change_against`]; what still reaches loro's primitive
+    /// is a span whose changes the log cannot return.
     pub fn undo_span_against(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
         // What loro's undo does first: a span's ops still in the open
         // transaction are not yet in the log its changes are read from.
@@ -731,8 +819,21 @@ impl CrdtState {
         if !self.doc.oplog_vv().includes_id(last) {
             return Err(loro::LoroError::UndoInvalidIdSpan(last));
         }
+        self.undo_between_in_pieces(&last.into(), deps, base)
+    }
+
+    /// The compensation from version `after` back to version `before`
+    /// (E10k fix round 1, E10o): the inverse is the diff between them,
+    /// `base` is transformed by it, and the inverse transformed against
+    /// `base` as it came in is written in pieces.
+    fn undo_between_in_pieces(
+        &self,
+        after: &loro::Frontiers,
+        before: &loro::Frontiers,
+        base: &mut ChangeBase,
+    ) -> LoroResult<()> {
         let against = base.0.clone();
-        let inverse = self.doc.inner().diff(&last.into(), deps)?;
+        let inverse = self.doc.inner().diff(after, before)?;
         base.0.transform(&inverse, false);
         let mut compensation = inverse;
         compensation.transform(&against, true);

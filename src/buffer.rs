@@ -168,8 +168,37 @@ pub enum UndoSource {
 #[cfg(feature = "crdt")]
 #[derive(Clone, Debug)]
 struct RecordedSpan {
-    span: loro::IdSpan,
+    ops: RecordedOps,
     base: crate::crdt::ChangeBase,
+}
+
+/// What one recorded span undoes (E6c, E10o).
+#[cfg(feature = "crdt")]
+#[derive(Clone, Debug)]
+enum RecordedOps {
+    /// An op span, undone back to what its first op depends on: a local
+    /// edit, an import of one change, a compensation.
+    Span(loro::IdSpan),
+    /// One change of an import that integrated several (#444), undone
+    /// back to the document's version before it
+    /// ([`crate::crdt::CrdtState::changes_since`]).
+    Change(crate::crdt::IntegratedChange),
+}
+
+#[cfg(feature = "crdt")]
+impl RecordedOps {
+    /// Undo these ops against `base`, as new ops on the daemon's peer;
+    /// on return `base` is in the coordinates before them.
+    fn undo_against(
+        &self,
+        crdt: &crate::crdt::CrdtState,
+        base: &mut crate::crdt::ChangeBase,
+    ) -> loro::LoroResult<()> {
+        match self {
+            Self::Span(span) => crdt.undo_span_against(*span, base),
+            Self::Change(change) => crdt.undo_change_against(change, base),
+        }
+    }
 }
 
 /// One undo step for one source (E6c): the loro op spans its edits
@@ -189,12 +218,12 @@ struct SourceGroup {
 
 #[cfg(feature = "crdt")]
 impl SourceGroup {
-    fn of(spans: Vec<loro::IdSpan>) -> Self {
+    fn of(spans: impl IntoIterator<Item = RecordedOps>) -> Self {
         Self {
             spans: spans
                 .into_iter()
-                .map(|span| RecordedSpan {
-                    span,
+                .map(|ops| RecordedSpan {
+                    ops,
                     base: crate::crdt::ChangeBase::default(),
                 })
                 .collect(),
@@ -395,7 +424,7 @@ pub struct Buffer {
     /// in the same synchronous flow with no edit possible between.
     /// Single-threaded, so one slot suffices.
     #[cfg(feature = "crdt")]
-    pending_remote: Option<(Vec<loro::IdSpan>, crate::crdt::ChangeBase)>,
+    pending_remote: Option<(Vec<RecordedOps>, crate::crdt::ChangeBase)>,
     /// Path this buffer is bound to on disk, if any (T M4.5 L1:
     /// relocated here from `EditorCore` so cross-file navigation can
     /// keep each buffer's identity straight — the v0.1 single-file
@@ -1188,7 +1217,7 @@ impl Buffer {
         let text_deltas = text_deltas.map_err(|e| BufferError::CrdtRejected {
             reason: format!("import_updates: {e:?}"),
         })?;
-        let imported = (crdt.spans_since(&pre_version), imported_diff);
+        let imported = (import_record(crdt, &pre_version), imported_diff);
         if let Some((unicode_pos, inserted)) = single_remote_text_insert(&text_deltas)
             && let Some(byte_pos) = crdt.unicode_to_utf8_pos(unicode_pos)
         {
@@ -1640,7 +1669,11 @@ impl Buffer {
             // in CRDT mode it is released here.
             drop(old_rope);
             #[cfg(feature = "crdt")]
-            self.arbiter_record(source, crdt_record.0, &crdt_record.1);
+            self.arbiter_record(
+                source,
+                crdt_record.0.into_iter().map(RecordedOps::Span).collect(),
+                &crdt_record.1,
+            );
         } else {
             if self.undo.len() >= UNDO_HISTORY_LIMIT {
                 self.undo.pop_front();
@@ -1886,7 +1919,7 @@ impl Buffer {
     fn arbiter_record(
         &mut self,
         source: UndoSource,
-        spans: Vec<loro::IdSpan>,
+        spans: Vec<RecordedOps>,
         change: &crate::crdt::ChangeBase,
     ) {
         if spans.is_empty() {
@@ -2205,7 +2238,7 @@ impl Buffer {
                 for recorded in group.spans.into_iter().rev() {
                     let mut base = recorded.base;
                     base.compose(&carry);
-                    crdt.undo_span_against(recorded.span, &mut base)?;
+                    recorded.ops.undo_against(crdt, &mut base)?;
                     carry = base;
                 }
                 Ok::<_, BufferError>(carry)
@@ -2240,15 +2273,16 @@ impl Buffer {
                 stacks.absorb_redo(&change);
             }
         }
+        let produced = SourceGroup::of(produced.into_iter().map(RecordedOps::Span));
         match opposite {
             HistoryStep::Redo => {
                 let stacks = self.arbiter.entry(source).or_default();
                 if stacks.redo.len() >= UNDO_HISTORY_LIMIT {
                     stacks.redo.pop_front();
                 }
-                stacks.redo.push_back(SourceGroup::of(produced));
+                stacks.redo.push_back(produced);
             }
-            HistoryStep::Undo => self.push_group(source, SourceGroup::of(produced)),
+            HistoryStep::Undo => self.push_group(source, produced),
         }
         // Materialize-and-replace, as the M10.4 path did: one minimal
         // covering edit for views and marks, the daemon-peer ops for
@@ -2345,6 +2379,31 @@ type CrdtRoutingResult = (
 /// bytes the rope must mirror, if any, and the wire export.
 #[cfg(feature = "crdt")]
 type RoutedCrdtOps = (Option<Vec<u8>>, Vec<u8>);
+
+/// The arbiter's record of one import (E6c, E10o): the spans it advanced
+/// since `pre_version`, one per peer, when it integrated one change, as
+/// every import was recorded until E10o; one per change, each undone
+/// between the document's own versions around it, when it integrated
+/// more (#444). A typed key is one op, so its import reads no change.
+/// A change the log cannot return leaves the record per peer.
+#[cfg(feature = "crdt")]
+fn import_record(
+    crdt: &crate::crdt::CrdtState,
+    pre_version: &loro::VersionVector,
+) -> Vec<RecordedOps> {
+    let spans = crdt.spans_since(pre_version);
+    let ops: i64 = spans
+        .iter()
+        .map(|span| i64::from(span.counter.norm_end() - span.counter.min()))
+        .sum();
+    if ops > 1
+        && let Some(changes) = crdt.changes_since(pre_version)
+        && changes.len() > 1
+    {
+        return changes.into_iter().map(RecordedOps::Change).collect();
+    }
+    spans.into_iter().map(RecordedOps::Span).collect()
+}
 
 /// Recognize the hot-path projection delta produced by one remote
 /// insertion. Loro's retain/delete lengths use Unicode scalar offsets;
