@@ -1097,6 +1097,15 @@ fn watch_memory<W: Write>(parsing: &Parsing, out: &Mutex<W>, options: ServeOptio
 /// (`getrusage`: kibibytes on Linux, bytes on macOS); 0 where unread.
 #[must_use]
 pub fn peak_resident_bytes() -> u64 {
+    rusage_peak_bytes()
+}
+
+/// `getrusage(RUSAGE_SELF)`'s `ru_maxrss` in bytes (kibibytes on Linux,
+/// bytes on macOS); 0 where unread. On Linux an `exec`'d process keeps the
+/// high-water mark of the address space it replaced, so a child's reading
+/// starts at its spawner's peak (#445).
+#[must_use]
+pub fn rusage_peak_bytes() -> u64 {
     #[cfg(unix)]
     {
         use nix::sys::resource::{UsageWho, getrusage};
