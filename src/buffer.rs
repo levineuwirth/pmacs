@@ -177,10 +177,11 @@ struct RecordedSpan {
 #[derive(Clone, Debug)]
 enum RecordedOps {
     /// An op span, undone back to what its first op depends on: a local
-    /// edit, an import of one change, a compensation.
+    /// edit, a compensation, an import whose changes the log cannot
+    /// return.
     Span(loro::IdSpan),
-    /// One change of an import that integrated several (#444), undone
-    /// back to the document's version before it
+    /// One change an import integrated (#444, #448), undone back to the
+    /// document's version before it
     /// ([`crate::crdt::CrdtState::changes_since`]).
     Change(crate::crdt::IntegratedChange),
 }
@@ -1207,8 +1208,9 @@ impl Buffer {
         // Integrate the remote op and capture Loro's projection diff.
         // Optimistic GUI typing produces one Insert delta, so handle
         // that shape without copying or materializing the document.
-        // E6c: the spans the import advanced are the arbiter's record
-        // of this edit, stashed below once an edit is known to have
+        // E6c, E10o: the changes the import integrated, each between the
+        // document's versions around it, are the arbiter's record of
+        // this edit, stashed below once an edit is known to have
         // happened (a no-op import advances the version but changes
         // no text, and undoing it would do nothing).
         let (pre_version, pre_frontiers) = (crdt.version(), crdt.frontiers());
@@ -2383,31 +2385,29 @@ type CrdtRoutingResult = (
 #[cfg(feature = "crdt")]
 type RoutedCrdtOps = (Option<Vec<u8>>, Vec<u8>);
 
-/// The arbiter's record of one import (E6c, E10o): the spans it advanced
-/// since `pre_version`, one per peer, when it integrated one change, as
-/// every import was recorded until E10o; one per change, each undone
-/// between the document's own versions around it, when it integrated
-/// more (#444), the first version `pre_frontiers`, read beside
-/// `pre_version`. A typed key is one op, so its import reads no change.
-/// A change the log cannot return leaves the record per peer.
+/// The arbiter's record of one import (E6c, E10o): one entry per change
+/// it integrated since `pre_version` (`pre_frontiers`, read beside it),
+/// each undone between the document's own versions just before and
+/// after it, so a change made without an op the document already held is
+/// undone where that op left the text: an update of several changes
+/// (#444) and a keystroke that crossed another frontend's op in flight
+/// (#448) alike. A typed key reads one change. A change the log cannot
+/// return leaves the record per peer, the spans the import advanced, as
+/// every import was recorded until E10o.
 #[cfg(feature = "crdt")]
 fn import_record(
     crdt: &crate::crdt::CrdtState,
     pre_version: &loro::VersionVector,
     pre_frontiers: &loro::Frontiers,
 ) -> Vec<RecordedOps> {
-    let spans = crdt.spans_since(pre_version);
-    let ops: i64 = spans
-        .iter()
-        .map(|span| i64::from(span.counter.norm_end() - span.counter.min()))
-        .sum();
-    if ops > 1
-        && let Some(changes) = crdt.changes_since(pre_version, pre_frontiers)
-        && changes.len() > 1
-    {
-        return changes.into_iter().map(RecordedOps::Change).collect();
+    match crdt.changes_since(pre_version, pre_frontiers) {
+        Some(changes) => changes.into_iter().map(RecordedOps::Change).collect(),
+        None => crdt
+            .spans_since(pre_version)
+            .into_iter()
+            .map(RecordedOps::Span)
+            .collect(),
     }
-    spans.into_iter().map(RecordedOps::Span).collect()
 }
 
 /// Recognize the hot-path projection delta produced by one remote

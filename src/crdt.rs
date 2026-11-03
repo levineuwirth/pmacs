@@ -88,11 +88,11 @@ impl ChangeBase {
     }
 }
 
-/// One change an import integrated (E10o, #444), as the arbiter records
-/// it when the import integrated more than one: the change's ops this
-/// import added, and the document's versions just before and just after
-/// them, the import's earlier changes in `before` and every op the
-/// document already held in both. See [`CrdtState::changes_since`].
+/// One change an import integrated (E10o, #444, #448), as the arbiter
+/// records every import: the change's ops this import added, and the
+/// document's versions just before and just after them, the import's
+/// earlier changes in `before` and every op the document already held in
+/// both. See [`CrdtState::changes_since`].
 #[derive(Clone, Debug)]
 pub struct IntegratedChange {
     /// The change's ops the import integrated.
@@ -668,9 +668,12 @@ impl CrdtState {
     /// not the change's causal past: a change whose sender had not yet
     /// received an op this document already held is undone in the
     /// coordinates the document had, that op included, which is where
-    /// the arbiter's bases are expressed (see [`ChangeBase`]).
+    /// the arbiter's bases are expressed (see [`ChangeBase`]). That holds
+    /// of an import of one change too, a keystroke that crossed another
+    /// frontend's op in flight (#448), so since E10o.4 the arbiter
+    /// records every import here.
     ///
-    /// Cost, per import: [`Self::spans_since`], one
+    /// Cost, which a typed key pays: [`Self::spans_since`], one
     /// `get_change` per change, and the two frontiers. The first version
     /// is the caller's and the last is the op log's own (every op since
     /// `from` is in a piece), so neither is computed; only the versions
@@ -771,11 +774,13 @@ impl CrdtState {
     /// which writes the same compensation in pieces; any other by loro's
     /// own primitive, which splits it at each op depending on another
     /// peer's and can restore the parts out of order (#438,
-    /// loro-dev/loro#1245). Since E10o the arbiter records no such span
-    /// from an import: one that integrated several changes is recorded
-    /// change by change ([`Self::changes_since`]) and undone by
-    /// [`Self::undo_change_against`]; what still reaches loro's primitive
-    /// is a span whose changes the log cannot return.
+    /// loro-dev/loro#1245). Since E10o the arbiter records no import as
+    /// a span: every import is recorded change by change
+    /// ([`Self::changes_since`]) and undone by
+    /// [`Self::undo_change_against`], so the spans here are a local
+    /// edit's and a compensation's, each linear; what still reaches
+    /// loro's primitive is a span whose changes the log cannot return,
+    /// an import's included.
     pub fn undo_span_against(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
         // What loro's undo does first: a span's ops still in the open
         // transaction are not yet in the log its changes are read from.

@@ -1,7 +1,8 @@
 // tests/undo_reach_438_probes.rs --- #438's reach: whether a user's
 // undo meets loro's out-of-order undo of a span it splits into parts,
 // and #444's fix: an update carrying several of a frontend's changes is
-// recorded one span per change.
+// recorded one span per change; #448's: every import is recorded between
+// the daemon's own versions.
 
 //! Probes through a real daemon and two synthetic replicas, each its
 //! own loro peer (the frontend's id; the daemon writes as peer 1), as
@@ -12,9 +13,9 @@
 //! text out of order (#438, loro-dev/loro#1245). The arbiter reaches it
 //! only through `undo_span_by_loro`, for a recorded span that
 //! `deps_of_linear_span` finds non-linear (`src/crdt.rs`). A span is
-//! recorded per forward edit (`spans_since` around one edit or one
-//! import, `src/buffer.rs`), and both shipped frontends send one
-//! `CrdtOp` per keystroke, exported right after that one edit. So:
+//! recorded per forward edit (`spans_since` around one edit or, until
+//! E10o, one import, `src/buffer.rs`), and both shipped frontends send
+//! one `CrdtOp` per keystroke, exported right after that one edit. So:
 //!
 //! - two Backspaces with another peer's insert between them, as the
 //!   frontends send them, are two updates, two one-op spans and two
@@ -28,6 +29,12 @@
 //!   Since E10o the daemon records such an update one span per change,
 //!   each undone between its own versions at the daemon
 //!   (`CrdtState::changes_since`), and the undo restores `Zabcdef`.
+//! - a keystroke the user made before another frontend's op reached it,
+//!   which the daemon already held, is one update of one change, and was
+//!   recorded as its span and undone in its own causal past, without
+//!   that op, so the undo landed beside its place (#448: `Zabcdfe` for a
+//!   Backspace, `Zabcdeg` for a typed `g`). Since E10o.4 every import is
+//!   recorded change by change between the daemon's versions.
 //!
 //! Helpers are the acceptance suite's, copied so the probe stands
 //! alone, plus an optimistic delete and a raw update send.
@@ -645,11 +652,13 @@ fn the_users_earlier_step_undoes_exactly_after_a_delayed_batch() {
     );
 }
 
-/// A one-change update with several ops is recorded as before, one span
-/// in one step: two Backspaces with nothing between them merge into one
-/// change on the user's replica (loro merges consecutive local changes),
-/// and one undo restores both. A guard: the record is the same at the
-/// base.
+/// A one-change update with several ops undoes as one step: two
+/// Backspaces with nothing between them merge into one change on the
+/// user's replica (loro merges consecutive local changes), and one undo
+/// restores both. A guard: until E10o.4 such an update was recorded as
+/// its span, since E10o.4 as its one change between the daemon's
+/// versions, and either undoes it exactly, nothing having landed inside
+/// or beside it.
 #[test]
 fn a_one_change_update_of_two_backspaces_undoes_as_one_step() {
     let daemon = TestDaemon::spawn();
@@ -672,4 +681,121 @@ fn a_one_change_update_of_two_backspaces_undoes_as_one_step() {
     both_see(&mut user, &mut other, "abcdef", "both restored in one step");
     send_undo(&mut user);
     assert_text_stays(&mut user, "abcdef", Duration::from_millis(500));
+}
+
+// ---------------------------------------------------------------------
+// E10o.4: every import between the daemon's versions (#448).
+// ---------------------------------------------------------------------
+
+/// The user's held edit, made on `abcdef` before the other frontend's
+/// `Z` at 0 reaches it: the other types `Z`, the daemon holds it, and the
+/// user, who has not received it, sends its edit alone, one change of one
+/// op, as both shipped frontends send a keystroke that crossed another
+/// frontend's op in flight. Returns once both replicas show `expected`.
+fn send_one_edit_made_without_anothers_z(
+    user: &mut Replica,
+    other: &mut Replica,
+    edit: impl FnOnce(&CrdtState),
+    held: &str,
+    expected: &str,
+) {
+    let before = user.state.version();
+    edit(&user.state);
+    type_optimistic(other, 0, "Z");
+    pump_until_text(other, "Zabcdef", "the other's Z at the daemon");
+    assert_eq!(
+        user.state.materialize_string(),
+        held,
+        "the user has not received Z when it sends its edit"
+    );
+    send_since(user, &before);
+    both_see(user, other, expected, "the user's edit after Z");
+}
+
+/// #448's first probe: a Backspace made without the other's `Z`, which
+/// the daemon held. Undone between the daemon's versions around it, the
+/// undo restores the `f` at its place, and redo deletes it again. Fails
+/// at `fc91a95` with `Zabcdfe`: the change was recorded as its span with
+/// an empty base and undone in its own causal past, which lacks `Z`.
+#[test]
+fn a_backspace_made_without_anothers_insert_the_daemon_held_undoes_at_its_place() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+    send_one_edit_made_without_anothers_z(
+        &mut user,
+        &mut other,
+        |s| s.delete(5, 1).expect("one Backspace, held"),
+        "abcde",
+        "Zabcde",
+    );
+
+    send_undo(&mut user);
+    both_see(
+        &mut user,
+        &mut other,
+        "Zabcdef",
+        "the Backspace undone at its place",
+    );
+    send_redo(&mut user);
+    both_see(&mut user, &mut other, "Zabcde", "the Backspace redone");
+}
+
+/// #448's second probe: a typed `g` at the end, made without the other's
+/// `Z`. The undo removes the `g` and nothing else, and redo puts it back.
+/// Fails at `fc91a95` with `Zabcdeg`: the undo deleted the `f`.
+#[test]
+fn a_typed_char_made_without_anothers_insert_the_daemon_held_undoes_at_its_place() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+    send_one_edit_made_without_anothers_z(
+        &mut user,
+        &mut other,
+        |s| s.insert(6, "g").expect("one typed g, held"),
+        "abcdefg",
+        "Zabcdefg",
+    );
+
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdef", "the g undone, the f kept");
+    send_redo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdefg", "the g redone");
+}
+
+/// The shipped route when typing goes on: the user's `g` crosses the
+/// other's `Z` in flight as in the probe above, and the user, having
+/// received `Z`, types `h`, each key sent alone, one typed run. One undo
+/// takes the run around the `Z`, and redo restores it. Fails at
+/// `fc91a95` with `Zabcdeg`: the `h` is undone at its place, its change
+/// made after `Z`, and the `g`'s undo, in coordinates without `Z`,
+/// deletes the `f`. (With the crossing key last instead, its misplaced
+/// delete takes the run's own `g` and the `g`'s then the `h`, so the
+/// text comes out right at `fc91a95` too and shows nothing.)
+#[test]
+fn a_typed_run_opened_by_a_key_made_without_anothers_insert_undoes_exactly() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+    send_one_edit_made_without_anothers_z(
+        &mut user,
+        &mut other,
+        |s| s.insert(6, "g").expect("one typed g, held"),
+        "abcdefg",
+        "Zabcdefg",
+    );
+    type_optimistic(&mut user, 8, "h");
+    both_see(&mut user, &mut other, "Zabcdefgh", "the user's h after Z");
+
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdef", "the run undone around Z");
+    send_redo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdefgh", "the run redone");
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdef", "the redo undone");
+    send_undo(&mut user);
+    assert_text_stays(&mut user, "Zabcdef", Duration::from_millis(500));
 }
