@@ -30,6 +30,13 @@
 //! name by `scripts/perf-budgets`.
 //! It prints each time with the load average beside it, and the daemon's
 //! main thread's CPU time when the deadline passes.
+//!
+//! Two rows of E10l's fix round 2 (the owner's GUI pass: the minimap
+//! lost its colors on #439's file while the text kept its highlighting)
+//! run in the default sweep on a small file of the same shape: a
+//! whole-file read that fails after a good summary sends nothing, so the
+//! frontend keeps that summary until a read succeeds; and a buffer with
+//! no styles still gets its plain summary.
 
 mod common;
 
@@ -264,5 +271,286 @@ fn e10l_a_large_json_file_reaches_a_highlighted_frame_in_the_gpu_route() {
         let _ = ENTRIES;
         let _ = issue_439_json;
         eprintln!("skipping: a GPU session is a crdt build's");
+    }
+}
+
+/// A daemon holding `file` alone, with no language server (so no
+/// completion popup takes a key and no diagnostics publish moves the
+/// summary's key), its parses traced to `trace` (`PMACS_E7I_TRACE`).
+#[cfg(feature = "crdt")]
+fn holding_traced(file: &std::path::Path, trace: &std::path::Path) -> common::daemon::TestDaemon {
+    let init_lua = format!(
+        "pmacs.lsp.config = {{}}\npmacs.buffer.find_or_open({:?})\nfor _, b in ipairs(pmacs.buffer.list()) do\n  if b:name() == '*scratch*' then pcall(pmacs.buffer.kill, b) end\nend\n",
+        file.display().to_string()
+    );
+    common::daemon::TestDaemon::spawn_with_env_and_init(
+        &[("PMACS_E7I_TRACE", trace.to_str().expect("a UTF-8 path"))],
+        &init_lua,
+    )
+}
+
+/// The worker of each parse the trace records, in order (`"unit":"pid N"`
+/// on its `parsed` event).
+#[cfg(feature = "crdt")]
+fn parsed_units(trace: &std::path::Path) -> Vec<u32> {
+    std::fs::read_to_string(trace)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("\"event\":\"parsed\""))
+        .filter_map(|line| {
+            line.split("\"unit\":\"pid ")
+                .nth(1)?
+                .split('"')
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+/// `kill <sig> <pid>`; whether it was delivered (`-0`: whether `pid` lives).
+#[cfg(feature = "crdt")]
+fn signal(sig: &str, pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Every `FileStyleSummary` for `buffer` that comes within `wait`, as
+/// `(lines, styled lines)`, stopping at the first when `first` is set.
+#[cfg(feature = "crdt")]
+fn summaries_within(
+    gpu: &common::wire::WireSession,
+    buffer: pmacs_protocol::BufferId,
+    wait: Duration,
+    first: bool,
+) -> Vec<(usize, usize)> {
+    use pmacs_protocol::message::InstanceMessage;
+
+    let started = Instant::now();
+    let mut seen = Vec::new();
+    while (seen.is_empty() || !first) && started.elapsed() < wait {
+        match gpu.rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(InstanceMessage::FileStyleSummary {
+                buffer_id, lines, ..
+            }) if buffer_id == buffer => {
+                let styled = lines
+                    .iter()
+                    .filter(|style| **style != pmacs::cell::Style::default())
+                    .count();
+                seen.push((lines.len(), styled));
+            }
+            Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the daemon closed the session")
+            }
+        }
+    }
+    seen
+}
+
+/// Stop `worker` (`SIGSTOP`) and wait for the daemon to discard it, which
+/// it does when a read of the tree it holds runs past `READ_HARD`; the
+/// summaries for `buffer` sent until then and three seconds after, the
+/// failed read's. Fails when nothing read from the worker within 20 s, so
+/// nothing was made to fail.
+#[cfg(feature = "crdt")]
+fn stopped_until_discarded(
+    gpu: &common::wire::WireSession,
+    buffer: pmacs_protocol::BufferId,
+    worker: u32,
+) -> Vec<(usize, usize)> {
+    assert!(signal("-STOP", worker), "stop the worker {worker}");
+    let stopped = Instant::now();
+    let mut after = Vec::new();
+    let gone = loop {
+        after.extend(summaries_within(
+            gpu,
+            buffer,
+            Duration::from_millis(100),
+            false,
+        ));
+        if !signal("-0", worker) {
+            break true;
+        }
+        if stopped.elapsed() > Duration::from_secs(20) {
+            break false;
+        }
+    };
+    if !gone {
+        signal("-CONT", worker);
+    }
+    assert!(
+        gone,
+        "the summary's read never reached the stopped worker {worker} within 20 s: \
+         nothing was made to fail (summaries meanwhile {after:?})"
+    );
+    after.extend(summaries_within(gpu, buffer, Duration::from_secs(3), false));
+    after
+}
+
+/// The caret from byte 0 into `"item 0"` on the fourth line (byte 27,
+/// after its quote), where a typed letter keeps the JSON valid and every
+/// line's style.
+#[cfg(feature = "crdt")]
+fn walk_into_the_first_name(gpu: &mut common::wire::WireSession, buffer: pmacs_protocol::BufferId) {
+    use pmacs_protocol::message::{Key, Modifiers};
+
+    for (key, byte) in [('n', 2), ('n', 5), ('n', 16)] {
+        gpu.key(Key::Char(key), Modifiers::CTRL);
+        gpu.cursor_at(buffer, byte);
+    }
+    for byte in 17..=27 {
+        gpu.key(Key::Char('f'), Modifiers::CTRL);
+        gpu.cursor_at(buffer, byte);
+    }
+}
+
+/// E10l fix round 2 (the owner's GUI pass on #439's file): a whole-file
+/// read that fails after a good summary sends nothing, so the frontend
+/// keeps the last good summary; the read is not taken again until the
+/// summary's key changes, and the next read that succeeds, after an edit,
+/// sends the next. The read is made to fail as a loaded machine fails it:
+/// the worker holding the edit's tree is stopped (`SIGSTOP`) before the
+/// summary asks it for the whole file, so the read runs past `READ_HARD`
+/// and the daemon discards the worker. Before the fix a failed read was a
+/// summary of no styles, sent over the good one: the minimap lost its
+/// colors while the text kept its own, whose spans came with the parse.
+/// 300 of #439's entries (2,703 lines, 26,863 bytes) put the file past
+/// what a parse returns spans for (the viewport and 4096 bytes on each
+/// side).
+#[test]
+fn e10l_f2_a_failed_whole_file_read_keeps_the_last_good_summary() {
+    #[cfg(feature = "crdt")]
+    {
+        use common::wire::WireSession;
+        use pmacs_protocol::message::{Key, Modifiers, PROTOCOL_VERSION};
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let file = dir.path().join("small.json");
+        let trace = dir.path().join("trace.jsonl");
+        let text = issue_439_json(300);
+        let lines = text.bytes().filter(|b| *b == b'\n').count() + 1;
+        assert!(text.len() > 3 * 4096, "the file is past the parse's spans");
+        std::fs::write(&file, &text).expect("write the file");
+
+        let daemon = holding_traced(&file, &trace);
+        let mut gpu =
+            WireSession::semantic_with_patience(&daemon, PROTOCOL_VERSION, None, None, DEADLINE);
+        let buffer = *gpu
+            .bootstrap_snapshots()
+            .first()
+            .expect("the bootstrap snapshots the file");
+        gpu.bootstrap.clear();
+        gpu.declare_viewport(buffer);
+        let good = await_highlighting(&gpu, buffer, daemon.pid(), "300 entries");
+        assert_eq!(good.summary_lines, lines, "one style a line");
+        assert!(
+            good.styled > lines / 2,
+            "the first summary is a good one ({} of {lines} lines styled)",
+            good.styled
+        );
+
+        walk_into_the_first_name(&mut gpu, buffer);
+        let parses = parsed_units(&trace).len();
+        assert!(parses >= 1, "the trace records the file's parse");
+        gpu.type_str("x");
+        gpu.cursor_at(buffer, 28);
+
+        // The edit's parse, and the worker holding its tree, stopped before
+        // the summary reads it, a second after the parse installs.
+        let asked = Instant::now();
+        let worker = loop {
+            if let Some(&pid) = parsed_units(&trace).get(parses) {
+                break pid;
+            }
+            assert!(
+                asked.elapsed() < Duration::from_secs(20),
+                "no parse of the edit in the trace"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let after = stopped_until_discarded(&gpu, buffer, worker);
+        assert!(
+            after.is_empty(),
+            "after the whole-file read failed the daemon sent {after:?} ((lines, styled \
+             lines)) over the good summary's {} styled: a failed read is not a file without \
+             styles",
+            good.styled
+        );
+        // Nor is the read retried with nothing changed: a read of that tree
+        // would first re-parse its text in a fresh worker, which the trace
+        // records.
+        let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+        assert!(
+            !traced.contains("\"event\":\"reestablished\""),
+            "the failed read was taken again with nothing changed, its tree re-parsed in a \
+             fresh worker: {}",
+            traced
+                .lines()
+                .filter(|line| line.contains("reestablished"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+
+        // The next read that succeeds sends the next summary: a line opened
+        // at the end of the fourth line, which parses in a fresh worker.
+        gpu.key(Key::Char('e'), Modifiers::CTRL);
+        gpu.cursor_at(buffer, 36);
+        gpu.key(Key::Enter, Modifiers::NONE);
+        let next = summaries_within(&gpu, buffer, DEADLINE, true);
+        assert!(
+            next.first()
+                .is_some_and(|&(n, styled)| n == lines + 1 && styled > lines / 2),
+            "after the failed read, the next edit's summary is read and sent with its \
+             styles ({next:?}; {} lines, {} styled before)",
+            lines,
+            good.styled
+        );
+    }
+}
+
+/// E10l fix round 2: a buffer with no styles still gets its summary, every
+/// line plain: a JSON file whose lines no capture styles, read from its
+/// worker past the parse's own spans, and a text file with no grammar.
+#[test]
+fn e10l_f2_a_buffer_with_no_styles_still_gets_its_plain_summary() {
+    #[cfg(feature = "crdt")]
+    {
+        use common::wire::WireSession;
+        use pmacs_protocol::message::PROTOCOL_VERSION;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for (name, text) in [
+            ("brackets.json", format!("[{}]\n", "\n".repeat(12_000))),
+            ("notes.txt", "plain words on a line\n".repeat(12_000)),
+        ] {
+            let file = dir.path().join(name);
+            let trace = dir.path().join(format!("{name}.trace"));
+            let lines = text.bytes().filter(|b| *b == b'\n').count() + 1;
+            std::fs::write(&file, &text).expect("write the file");
+            let daemon = holding_traced(&file, &trace);
+            let mut gpu = WireSession::semantic_with_patience(
+                &daemon,
+                PROTOCOL_VERSION,
+                None,
+                None,
+                DEADLINE,
+            );
+            let buffer = *gpu
+                .bootstrap_snapshots()
+                .first()
+                .expect("the bootstrap snapshots the file");
+            gpu.bootstrap.clear();
+            gpu.declare_viewport(buffer);
+            let seen = summaries_within(&gpu, buffer, DEADLINE, true);
+            assert_eq!(
+                seen,
+                vec![(lines, 0)],
+                "{name}: one summary of {lines} plain lines (lines, styled lines)"
+            );
+        }
     }
 }

@@ -2684,14 +2684,25 @@ impl SemanticRenderState {
                 }
             }
         }
-        let Some(lines) =
+        let Ok(lines) =
             scoped_file_summary(state, buffer_id, generation, self.peer_knows_theme_facts)
         else {
-            // Past the frame (E10l review 1, Medium 2): nothing was read
-            // and nothing is sent. The key advances as on a computation,
-            // so the check waits for the next edit or epoch rather than
-            // repeating every tick, and the lines the cache held stay for
-            // the payload comparison after the next summary that fits.
+            // Past the frame (E10l review 1, Medium 2), nothing was read;
+            // a whole-file read that failed (E10l fix round 2: the owner's
+            // GUI pass on #439's file, where a read past `READ_HARD` sent
+            // a summary of plain lines over the good one, the minimap
+            // losing its colors while the text kept its own) has nothing
+            // to say of the file's styles. Either way nothing is sent, so
+            // the frontend keeps the last summary it was sent until a
+            // read succeeds. The key advances as on a computation, so
+            // neither repeats every tick: the next read is at the next
+            // change the key holds, an edit (after the quiet window or
+            // the lag cap), a diagnostics publish or a theme change, never
+            // on a timer; after a read past `READ_HARD` its unit was
+            // discarded, so that read first re-parses the tree's text in a
+            // fresh one unless an edit's parse has installed a newer tree.
+            // The lines the cache held stay for the payload comparison
+            // after the next summary that is read.
             let lines = self
                 .last_summary
                 .remove(&buffer_id)
@@ -3582,13 +3593,25 @@ fn merge_style_span_lists(base: Vec<StyleSpan>, over: Vec<StyleSpan>) -> Vec<Sty
 /// The grammar's own styled runs for the declared viewport: every
 /// injection layer's captures, flattened by priority and mapped through
 /// the theme. The half of [`scoped_style_spans`] that does not read the
-/// token store, and the whole of what [`scoped_file_summary`] reads.
+/// token store; empty where [`grammar_style_spans_read`] could not read
+/// them.
 fn grammar_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
+    grammar_style_spans_read(state, vp).unwrap_or_default()
+}
+
+/// [`grammar_scoped_style_spans`], and the whole of what
+/// [`scoped_file_summary`] reads, `None` when the spans could not be read:
+/// a tree a parse unit holds whose unit did not answer
+/// ([`crate::syntax::IsolatedTree::spans_for`]: the read ran past
+/// `READ_HARD` and the unit was discarded, the unit is gone, or a newer
+/// one has replaced it). Every other case answers, empty where nothing
+/// is styled: a buffer with no grammar, no parse yet, an empty range.
+fn grammar_style_spans_read(state: &EditorState, vp: &DeclaredViewport) -> Option<Vec<StyleSpan>> {
     let Some(handle) = state.syntax_registry.view(vp.buffer_id) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let Some(bundle) = handle.current() else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let theme = state
         .syntax_registry
@@ -3602,15 +3625,13 @@ fn grammar_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec
     let vis_start = vp.visible.start.min(source_len);
     let vis_end = vp.visible.end.min(source_len);
     if vis_end <= vis_start {
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     // E7i: a tree held by a parse unit is read through the spans it
     // returned, per layer in layer order, with the same priorities.
     if let Some(isolated) = bundle.isolated.as_ref() {
-        let Some(set) = isolated.spans_for(vis_start as usize..vis_end as usize) else {
-            return Vec::new();
-        };
+        let set = isolated.spans_for(vis_start as usize..vis_end as usize)?;
         let mut styled: Vec<StyledLayerSpan> = Vec::new();
         for layer in &set.layers {
             for (order, hs) in layer.spans.iter().enumerate() {
@@ -3634,7 +3655,7 @@ fn grammar_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec
                 });
             }
         }
-        return flatten_layer_spans(&styled);
+        return Some(flatten_layer_spans(&styled));
     }
 
     // Collect the styled spans from every injection layer, scoping each
@@ -3678,7 +3699,7 @@ fn grammar_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec
             });
         }
     }
-    flatten_layer_spans(&styled)
+    Some(flatten_layer_spans(&styled))
 }
 
 type LayerSpanPriority = (u32, u32);
@@ -3891,29 +3912,34 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 /// CRDT generation so this only runs on first sight of a buffer or after
 /// an edit, not per frame.
 ///
-/// `None`, with nothing read, when a summary of the buffer's lines at
-/// `generation` cannot fit the transport's frame whatever its lines'
-/// styles ([`summary_min_frame_len`]): past about 2.4 million lines the
-/// whole-file read, about 2 s on the main thread for a file of #439's
-/// shape, would buy a message `write_message` refuses (E10l review 1,
-/// Medium 2). Short of that bound a summary whose styled lines take it
-/// past the frame is still computed and refused, from about 2.19
-/// million lines of #439's shape (two lines in three styled, an indexed
-/// color eight bytes); a minimap past the frame is E11.4's, with the
-/// summary's wire shape (#437).
+/// [`NoSummary::PastFrame`], with nothing read, when a summary of the
+/// buffer's lines at `generation` cannot fit the transport's frame
+/// whatever its lines' styles ([`summary_min_frame_len`]): past about 2.4
+/// million lines the whole-file read, about 2 s on the main thread for a
+/// file of #439's shape, would buy a message `write_message` refuses
+/// (E10l review 1, Medium 2). Short of that bound a summary whose styled
+/// lines take it past the frame is still computed and refused, from about
+/// 2.19 million lines of #439's shape (two lines in three styled, an
+/// indexed color eight bytes); a minimap past the frame is E11.4's, with
+/// the summary's wire shape (#437).
+///
+/// [`NoSummary::ReadFailed`] when the whole-file read did not answer
+/// ([`grammar_style_spans_read`]), which says nothing of the file's
+/// styles: a summary of plain lines for it would tell the frontend the
+/// file has none (E10l fix round 2).
 fn scoped_file_summary(
     state: &EditorState,
     buffer_id: BufferId,
     generation: u64,
     resolve_faces: bool,
-) -> Option<Vec<Style>> {
+) -> Result<Vec<Style>, NoSummary> {
     let source = {
         let core = state.core.borrow();
         let registry = core.registry.clone();
         let reg = registry.borrow();
         match reg.get(buffer_id) {
             Ok(buf) => buffer_source_bytes(buf),
-            Err(_) => return Some(Vec::new()),
+            Err(_) => return Ok(Vec::new()),
         }
     };
     let source_len = source.len() as u64;
@@ -3921,7 +3947,7 @@ fn scoped_file_summary(
     if summary_min_frame_len(buffer_id, generation, line_starts.len())
         > pmacs_protocol::MAX_FRAME_BYTES
     {
-        return None;
+        return Err(NoSummary::PastFrame);
     }
 
     // The grammar producer over a whole-buffer "viewport": the clip is
@@ -3935,13 +3961,25 @@ fn scoped_file_summary(
         frontend_generation: 0,
     };
     summary_whole_file_read();
-    let spans = grammar_scoped_style_spans(state, &vp_all);
+    let spans = grammar_style_spans_read(state, &vp_all).ok_or(NoSummary::ReadFailed)?;
     // No styled runs leaves every line default --- but diagnostic marks
     // are independent of syntax styling (a plain-text buffer can still
     // have lints), so they are overlaid either way.
     let mut out = line_dominant_styles(&spans, &line_starts, source_len);
     overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
-    Some(out)
+    Ok(out)
+}
+
+/// Why [`scoped_file_summary`] has no summary to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoSummary {
+    /// A summary of the buffer's lines cannot fit the transport's frame
+    /// whatever its styles, so nothing was read.
+    PastFrame,
+    /// The whole-file read of a tree a parse unit holds did not answer:
+    /// past `READ_HARD`, as on a loaded machine, its unit discarded; the
+    /// unit gone; or replaced by a newer one.
+    ReadFailed,
 }
 
 /// The fewest bytes a `FileStyleSummary` of `lines` lines for
@@ -6642,8 +6680,8 @@ mod tests {
         seed_rust_parse_view(&state, bid, src.as_bytes());
 
         let start = std::time::Instant::now();
-        let summary =
-            scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame");
+        let summary = scoped_file_summary(&state, bid, 0, false)
+            .expect("a summary is read and fits the frame");
         let elapsed = start.elapsed();
         assert!(!summary.is_empty(), "summary produced for a styled buffer");
         elapsed
@@ -8809,7 +8847,8 @@ mod tests {
                 "{label}: some line has a dominant style"
             );
             assert_eq!(
-                scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame"),
+                scoped_file_summary(&state, bid, 0, false)
+                    .expect("a summary is read and fits the frame"),
                 expected,
                 "{label}: the summary is the per-line tally's, line for line"
             );
@@ -8989,8 +9028,8 @@ mod tests {
             let (source, spans) = summary_inputs(&state, bid);
             let lines = line_start_offsets(&source).len() as u64;
             SUMMARY_STEPS.with(|steps| steps.set(0));
-            let summary =
-                scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame");
+            let summary = scoped_file_summary(&state, bid, 0, false)
+                .expect("a summary is read and fits the frame");
             let steps = SUMMARY_STEPS.with(std::cell::Cell::get);
             assert_eq!(summary.len() as u64, lines, "one style a line");
             assert!(
@@ -9255,7 +9294,8 @@ mod tests {
         );
 
         let started = Instant::now();
-        let whole = scoped_file_summary(&state, bid, 0, false).expect("the summary fits the frame");
+        let whole = scoped_file_summary(&state, bid, 0, false)
+            .expect("a summary is read and fits the frame");
         let again = started.elapsed();
         assert_eq!(whole, lines, "the summary is the pass's");
 
