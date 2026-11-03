@@ -643,11 +643,20 @@ impl CrdtState {
         spans
     }
 
+    /// The document's version as the op log's frontiers, the ops nothing
+    /// depends on yet: the version [`Self::version`] names, read beside
+    /// it, as [`Self::changes_since`] takes it (E10o.4).
+    #[must_use]
+    pub fn frontiers(&self) -> loro::Frontiers {
+        self.doc.oplog_frontiers()
+    }
+
     /// E10o: the changes integrated since `from`, one per change, each
     /// cut to the ops integrated since `from`, in an order they apply in
     /// (by Lamport time), each with the document's versions just before
-    /// and just after it. `None` when a change cannot be read from the
-    /// log.
+    /// and just after it. `from_frontiers` is `from` as frontiers, read
+    /// with it ([`Self::frontiers`] beside [`Self::version`]). `None` when
+    /// a change cannot be read from the log.
     ///
     /// One import can integrate several changes of its sender (#444): a
     /// frontend that sends two of its edits in one update, the second
@@ -660,8 +669,22 @@ impl CrdtState {
     /// received an op this document already held is undone in the
     /// coordinates the document had, that op included, which is where
     /// the arbiter's bases are expressed (see [`ChangeBase`]).
+    ///
+    /// Cost, per import: [`Self::spans_since`], one
+    /// `get_change` per change, and the two frontiers. The first version
+    /// is the caller's and the last is the op log's own (every op since
+    /// `from` is in a piece), so neither is computed; only the versions
+    /// between two changes of one import are, by `vv_to_frontiers`,
+    /// which walks the DAG back from the newest op until it passes the
+    /// oldest peer's last op (`loro-internal` 1.12.0, `version.rs`'s
+    /// `shrink_frontiers`, `loro_dag.rs`'s `travel_ancestors`), a walk
+    /// over every DAG node since that op.
     #[must_use]
-    pub fn changes_since(&self, from: &VersionVector) -> Option<Vec<IntegratedChange>> {
+    pub fn changes_since(
+        &self,
+        from: &VersionVector,
+        from_frontiers: &loro::Frontiers,
+    ) -> Option<Vec<IntegratedChange>> {
         let mut pieces = Vec::new();
         for span in self.spans_since(from) {
             let (mut at, end) = (span.counter.min(), span.counter.norm_end());
@@ -675,14 +698,20 @@ impl CrdtState {
             }
         }
         pieces.sort_by_key(|(lamport, span)| (*lamport, span.peer));
+        let last = pieces.len().saturating_sub(1);
         let mut version = from.clone();
-        let mut before = self.doc.vv_to_frontiers(&version);
+        let mut before = from_frontiers.clone();
         Some(
             pieces
                 .into_iter()
-                .map(|(_, span)| {
-                    version.set_end(loro::ID::new(span.peer, span.counter.norm_end()));
-                    let after = self.doc.vv_to_frontiers(&version);
+                .enumerate()
+                .map(|(i, (_, span))| {
+                    let after = if i == last {
+                        self.doc.oplog_frontiers()
+                    } else {
+                        version.set_end(loro::ID::new(span.peer, span.counter.norm_end()));
+                        self.doc.vv_to_frontiers(&version)
+                    };
                     IntegratedChange {
                         span,
                         before: std::mem::replace(&mut before, after.clone()),
@@ -2168,5 +2197,61 @@ mod tests {
         // C's state matches a's and b's. All three converged.
         assert_eq!(c.materialize_string(), a.materialize_string());
         assert_eq!(c.materialize_string(), b.materialize_string());
+    }
+
+    /// E10o.4: `changes_since` takes an import's first version as its
+    /// caller read it and its last from the op log, computing only the
+    /// versions between two of its changes, and each is the version
+    /// `vv_to_frontiers` computes from the version vector. The case: a
+    /// daemon holding the other peer's `Z` and `Y`, and the user's update
+    /// of two Backspaces, the second made after `Z` and both without `Y`.
+    #[test]
+    fn changes_since_names_the_versions_vv_to_frontiers_computes() {
+        use loro::VersionVector;
+        let daemon = CrdtState::new(1).expect("daemon");
+        let user = CrdtState::new(2).expect("user");
+        let other = CrdtState::new(3).expect("other");
+        let zero = VersionVector::default();
+        daemon.insert(0, "abcdef").expect("abcdef");
+        let start = daemon.export_updates_since(&zero).expect("export");
+        user.import_updates(&start).expect("user imports");
+        other.import_updates(&start).expect("other imports");
+        let foreign = |at: &str| {
+            let v = other.version();
+            other.insert(0, at).expect("other's insert");
+            other.export_updates_since(&v).expect("export")
+        };
+
+        let held = user.version();
+        user.delete(5, 1).expect("the first Backspace, held");
+        let z = foreign("Z");
+        daemon.import_updates(&z).expect("the daemon imports Z");
+        user.import_updates(&z).expect("the user imports Z");
+        user.delete(5, 1).expect("the second Backspace");
+        daemon
+            .import_updates(&foreign("Y"))
+            .expect("the daemon imports Y");
+
+        let (pre_version, pre_frontiers) = (daemon.version(), daemon.frontiers());
+        assert_eq!(pre_frontiers, daemon.doc.vv_to_frontiers(&pre_version));
+        daemon
+            .import_updates(&user.export_updates_since(&held).expect("export"))
+            .expect("the daemon imports the batch");
+        assert_eq!(daemon.materialize_string(), "YZabcd");
+        let changes = daemon
+            .changes_since(&pre_version, &pre_frontiers)
+            .expect("the changes");
+        assert_eq!(changes.len(), 2, "two changes, Z between them");
+        let mut version = pre_version;
+        for change in &changes {
+            assert_eq!(change.before, daemon.doc.vv_to_frontiers(&version));
+            version.set_end(loro::ID::new(
+                change.span.peer,
+                change.span.counter.norm_end(),
+            ));
+            assert_eq!(change.after, daemon.doc.vv_to_frontiers(&version));
+        }
+        assert_eq!(version, daemon.version());
+        assert_eq!(changes[1].after, daemon.frontiers());
     }
 }

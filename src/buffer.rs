@@ -1211,13 +1211,16 @@ impl Buffer {
         // of this edit, stashed below once an edit is known to have
         // happened (a no-op import advances the version but changes
         // no text, and undoing it would do nothing).
-        let pre_version = crdt.version();
+        let (pre_version, pre_frontiers) = (crdt.version(), crdt.frontiers());
         let (text_deltas, imported_diff) =
             crdt.capture(|| crdt.import_updates_with_text_deltas(op_bytes));
         let text_deltas = text_deltas.map_err(|e| BufferError::CrdtRejected {
             reason: format!("import_updates: {e:?}"),
         })?;
-        let imported = (import_record(crdt, &pre_version), imported_diff);
+        let imported = (
+            import_record(crdt, &pre_version, &pre_frontiers),
+            imported_diff,
+        );
         if let Some((unicode_pos, inserted)) = single_remote_text_insert(&text_deltas)
             && let Some(byte_pos) = crdt.unicode_to_utf8_pos(unicode_pos)
         {
@@ -2384,12 +2387,14 @@ type RoutedCrdtOps = (Option<Vec<u8>>, Vec<u8>);
 /// since `pre_version`, one per peer, when it integrated one change, as
 /// every import was recorded until E10o; one per change, each undone
 /// between the document's own versions around it, when it integrated
-/// more (#444). A typed key is one op, so its import reads no change.
+/// more (#444), the first version `pre_frontiers`, read beside
+/// `pre_version`. A typed key is one op, so its import reads no change.
 /// A change the log cannot return leaves the record per peer.
 #[cfg(feature = "crdt")]
 fn import_record(
     crdt: &crate::crdt::CrdtState,
     pre_version: &loro::VersionVector,
+    pre_frontiers: &loro::Frontiers,
 ) -> Vec<RecordedOps> {
     let spans = crdt.spans_since(pre_version);
     let ops: i64 = spans
@@ -2397,7 +2402,7 @@ fn import_record(
         .map(|span| i64::from(span.counter.norm_end() - span.counter.min()))
         .sum();
     if ops > 1
-        && let Some(changes) = crdt.changes_since(pre_version)
+        && let Some(changes) = crdt.changes_since(pre_version, pre_frontiers)
         && changes.len() > 1
     {
         return changes.into_iter().map(RecordedOps::Change).collect();
