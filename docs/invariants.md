@@ -56,7 +56,7 @@ Lua reads the boundary through `ed.this_command()` and `ed.last_command()`.
 ## Undo
 
 One mechanism, at the daemon: `Buffer` records each forward edit's loro
-op spans under its `UndoSource`, and `buffer.undo` pops the acting
+ops under its `UndoSource`, and `buffer.undo` pops the acting
 source's own last group, compensating on the daemon peer. No frontend
 undoes locally, and a compensation is never recorded as a group.
 

@@ -56,8 +56,10 @@ type TextDeltaSubscription = (TextDeltaBatches, Arc<AtomicBool>, loro::Subscript
 type DiffCapture = Arc<Mutex<DiffBatch>>;
 type DiffSubscription = (DiffCapture, Arc<AtomicBool>, loro_internal::Subscription);
 
-/// The foreign changes that landed after one recorded op span (E6c),
-/// in the coordinates of the document right after that span.
+/// The foreign changes that landed after one recorded op span (E6c) or
+/// an import's change (E10o, [`IntegratedChange`]), in the coordinates
+/// of the document right after it: for a change, the daemon's version
+/// just after it.
 ///
 /// The arbiter's undo is loro's own: the inverse of a span is a delta
 /// in the coordinates the span left the document in, and it is
@@ -623,10 +625,12 @@ impl CrdtState {
     /// E6c: the op spans applied since `from`, one per peer whose
     /// counter advanced, in peer order.
     ///
-    /// The cross-peer undo arbiter records every forward edit as the
-    /// spans it produced: a local edit advances this doc's own peer,
-    /// a remote import advances the sending peer (and any peer whose
-    /// ops the update carried). Captured with the same
+    /// The cross-peer undo arbiter records a local edit as the spans it
+    /// produced, which advance this doc's own peer. A remote import
+    /// advances the sending peer (and any peer whose new ops the update
+    /// carried), and since E10o it is recorded change by change from
+    /// these spans ([`Self::changes_since`]); it is recorded as them
+    /// only when a change cannot be read. Captured with the same
     /// `version()` → mutate → query idiom as the wire export, so a
     /// span names exactly the ops of one edit.
     #[must_use]

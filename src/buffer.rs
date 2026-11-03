@@ -159,12 +159,14 @@ pub enum UndoSource {
     Daemon,
 }
 
-/// One recorded op span (E6c) with the foreign changes that landed
-/// after it, in its own coordinates (see
-/// [`crate::crdt::ChangeBase`]). The base of a group's last span
-/// absorbs everything foreign that happens while the group is the
-/// newest thing its source did; the base of an earlier span holds what
-/// landed between it and the next.
+/// One recorded edit's ops (E6c), a span or an import's change (E10o,
+/// [`RecordedOps`]), with the foreign changes that landed after them,
+/// in the coordinates their undo starts from (see
+/// [`crate::crdt::ChangeBase`]): the document just after a local edit
+/// or a compensation, the daemon's version just after an import's
+/// change. The base of a group's last record absorbs everything foreign
+/// that happens while the group is the newest thing its source did; the
+/// base of an earlier one holds what landed between it and the next.
 #[cfg(feature = "crdt")]
 #[derive(Clone, Debug)]
 struct RecordedSpan {
@@ -202,11 +204,12 @@ impl RecordedOps {
     }
 }
 
-/// One undo step for one source (E6c): the loro op spans its edits
-/// produced, in application order. Up to `undo.amalgamate` consecutive
-/// typed inserts merge into one group; every other forward edit is a
-/// group of its own. A span names ops by `(peer, counter range)`, so a
-/// group can hold a frontend's optimistic ops beside the daemon-peer
+/// One undo step for one source (E6c): the ops its edits produced, a
+/// local edit's spans and an import's changes ([`RecordedOps`]), in
+/// application order. Up to `undo.amalgamate` consecutive typed
+/// inserts merge into one group; every other forward edit is a group of
+/// its own. A record names ops by `(peer, counter range)`, so a group
+/// can hold a frontend's optimistic ops beside the daemon-peer
 /// ops a hook added inside the same command (the auto-pair closer),
 /// and undoing it removes both. `seqno` orders groups across sources
 /// for the recency pick (see [`Buffer::undo_for`]).
@@ -408,8 +411,9 @@ pub struct Buffer {
     /// Cross-peer undo arbiter record (E6c, CRDT mode): per-source
     /// group stacks plus one open group each. Replaces E6.4's single
     /// global loro `UndoManager` group. Every forward edit is recorded
-    /// here with its source (see [`UndoSource`]) as the op spans it
-    /// produced; `buffer.undo` pops the acting source's most recent
+    /// here with its source (see [`UndoSource`]) by the ops it produced
+    /// (`Buffer::undo_for` says how a local edit's and an import's
+    /// differ); `buffer.undo` pops the acting source's most recent
     /// group and compensates on the daemon peer.
     #[cfg(feature = "crdt")]
     arbiter: HashMap<UndoSource, SourceUndoStacks>,
@@ -418,7 +422,7 @@ pub struct Buffer {
     /// daemon's unowned ones.
     #[cfg(feature = "crdt")]
     arbiter_seq: u64,
-    /// A remote import's spans and diff, stashed by
+    /// A remote import's recorded changes and diff, stashed by
     /// [`Self::apply_remote_crdt_op`] for [`Self::arbiter_settle_remote`]:
     /// the op's typed-ness and the source's run counter live in the
     /// core, so the daemon settles the record right after the import,
@@ -593,11 +597,11 @@ impl Buffer {
     /// **Undo-history loss**: Pre-upgrade entries in the v0.1 undo
     /// stack (and redo stack) are cleared explicitly during the
     /// upgrade. Post-upgrade undo routes through the cross-peer
-    /// arbiter (E6c), which records edits as loro op spans, and a
-    /// pre-upgrade edit has no ops to name. Users wishing to preserve
-    /// undo history should attach collaboration before making edits,
-    /// or accept that mid-session collaboration loses prior undo
-    /// state.
+    /// arbiter (E6c), which records edits by the loro ops they
+    /// produced, and a pre-upgrade edit has no ops to name. Users
+    /// wishing to preserve undo history should attach collaboration
+    /// before making edits, or accept that mid-session collaboration
+    /// loses prior undo state.
     ///
     /// Used by M10.8 (multi-frontend instance state) when a v0.1
     /// frontend's buffer is promoted to CRDT-backed at attach time
@@ -1908,8 +1912,9 @@ impl Buffer {
         self.arbiter.values().any(|s| !s.groups.is_empty())
     }
 
-    /// Record one forward edit in the arbiter (E6c): the op spans it
-    /// produced, and what it did to the document.
+    /// Record one forward edit in the arbiter (E6c): the ops it
+    /// produced (a local edit's spans, an import's changes; see
+    /// [`Self::undo_for`]), and what it did to the document.
     ///
     /// For every other source the edit is foreign, and its change is
     /// composed into the base of that source's newest undo group and
@@ -2098,13 +2103,27 @@ impl Buffer {
     /// peer: given any peer's op span it computes the inverse and
     /// transforms it against everything that landed after. So the
     /// daemon, where every op from every peer already passes and the
-    /// command boundary is already stamped, records each forward edit
-    /// as the op spans it produced under its source, and undo pops
-    /// the acting source's most recent group and undoes its spans,
-    /// newest first, as ordinary daemon-peer ops. That is the
-    /// compensation: it broadcasts as any edit does and converges on
-    /// every replica, and the frontend-side arm is retired --- one
-    /// mechanism, every binding, both frontends.
+    /// command boundary is already stamped, records each forward edit's
+    /// ops under its source, and undo pops the acting source's most
+    /// recent group and undoes what it recorded, newest first, as
+    /// ordinary daemon-peer ops. That is the compensation: it
+    /// broadcasts as any edit does and converges on every replica, and
+    /// the frontend-side arm is retired --- one mechanism, every
+    /// binding, both frontends.
+    ///
+    /// **What is recorded** (E10o). A local edit and a compensation are
+    /// recorded as the op spans they produced, each undone back to what
+    /// its first op depends on, the document the daemon had. An import
+    /// is recorded as the changes it integrated, each undone between
+    /// the daemon's own versions just before and just after it
+    /// ([`crate::crdt::CrdtState::changes_since`],
+    /// [`crate::crdt::CrdtState::undo_change_against`]): a change made
+    /// without an op the daemon already held, a batch's later change
+    /// (#444) or a keystroke that crossed another frontend's op in
+    /// flight (#448), is undone where that op left the text and not in
+    /// the change's own causal past, which lacks it. Only an import
+    /// whose changes the log cannot return is recorded as its spans, as
+    /// every import was until E10o.
     ///
     /// **The compensation is not a group of its own.** It never
     /// passes through the forward-edit path, so nothing records it on
