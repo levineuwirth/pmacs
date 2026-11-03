@@ -11092,6 +11092,162 @@ So, at E10l's fix round 2: `main` is green at `1991508`, and PR #441 is red at i
 on #316's eighteenth, its first on this PR, not rerun. #316 moves to eighteen. Every other count
 above stands.
 
+### E10l's close: PR #441 green on attempt 2 at `d28bc01`, merged as `cdb6ca9`, `main` green at `984bf7a` and red at `cdb6ca9` on #453's first occurrence
+
+Recorded 2026-11-03 at E10l's close. The owner merged PR #441 at 19:22:36Z as `cdb6ca9`, a squash of
+`d28bc01` on `984bf7a` whose diff is the head's against its merge base `366f419` (the same `git
+patch-id --stable`), its tree the head merged into `984bf7a` (`git merge-tree`), GitHub's signature
+valid and `%(trailers)` empty, its body the prepared file; #439 closed with it. The merge came after
+the owner's recheck of the minimap on #439's file in the GUI at `d28bc01`, and after attempt 2 of
+the head's run. Every run was read from the jobs endpoint by conclusion, and every test leg of each
+code-bearing run through its own log, fetched with escape sequences allowed and stripped, each
+`running` line paired with its own result line. Every run id and job id below was searched for in
+this file before it was written, and only attempt 1's run id was here. Nothing was rerun but attempt
+2, which the owner ran.
+
+#### `main` at `984bf7a`, E10l fix round 2's registry commit: green
+
+`main`'s runs at `1991508` are recorded in E10l fix round 2's section above. `CI` 41633733833 at
+`984bf7a`, attempt 1 of 1, `push`, created 2026-11-03T12:12:15Z and completed 12:13:58Z (the API's
+`updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-984bf7a): 15 = 6 + 9.
+
+Tally (main-ci-984bf7a-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 125909518857 | success |
+| Lint (luajit) | 125909518892 | success |
+| Format | 125909519012 | success |
+| Lint (lua54) | 125909519124 | success |
+| Changed paths | 125909519196 | success |
+| Docs consistency | 125909604968 | success |
+| M5 Perf Gates | 125909606915 | skipped |
+| GPU Render (headless) | 125909606945 | skipped |
+| Test (matrix) | 125909607076 | skipped |
+| M4 Perf Gates | 125909607350 | skipped |
+| M10 Perf Gates (crdt) | 125909607402 | skipped |
+| Perf budgets (debug) | 125909608070 | skipped |
+| M1 Acceptance Gates | 125909608136 | skipped |
+| Test (crdt) | 125909608178 | skipped |
+| M6 Perf Gates | 125909608236 | skipped |
+
+Tally (main-ci-984bf7a-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 125909604968: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+41633733832 at `984bf7a`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz` 125909518750 and `Grammar fuzz (asan-strict)` 125909519689.
+
+#### PR #441's `CI` 41627412250 at `d28bc01`, attempt 2: green
+
+Attempt 1 is recorded above, red on #316's eighteenth occurrence. The owner reran its failed jobs
+(`gh run rerun 41627412250 --failed`) on 2026-11-03, after the minimap recheck: attempt 2,
+`pull_request`, the same merge `c7f8006` of `d28bc01` into `1991508` (its checkout's `HEAD is now
+at` line), ran from 19:04:05Z to 19:19:34Z (the API's `run_started_at` and `updated_at`): `success`.
+Only `Test (macos-latest / lua54)` ran again; every other job is carried from attempt 1 under a new
+id, and `Docs consistency` was skipped again.
+
+Tally (pr441-ci-d28bc01-attempt2): 19 = 18 + 1.
+
+Tally (pr441-ci-d28bc01-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 126139630356 | success |
+| Test (macos-latest / lua54) | 126139630579 | success |
+| Lint (luajit) | 126139631830 | success |
+| Docs consistency | 126139632124 | skipped |
+| Test (ubuntu-latest / luajit) | 126139632183 | success |
+| Test (crdt) | 126139632212 | success |
+| Test (macos-latest / luajit) | 126139632359 | success |
+| M10 Perf Gates (crdt) | 126139632368 | success |
+| Perf budgets (debug) | 126139632407 | success |
+| M6 Perf Gates | 126139632557 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126139632907 | success |
+| Test (ubuntu-latest / lua54) | 126139632909 | success |
+| GPU Render (headless) | 126139633441 | success |
+| M1 Acceptance Gates | 126139686957 | success |
+| Changed paths | 126139687375 | success |
+| Lint (lua54) | 126139691888 | success |
+| M5 Perf Gates | 126139702350 | success |
+| M4 Perf Gates | 126139706078 | success |
+| Commit attribution (D9) | 126139709267 | success |
+
+Tally (pr441-ci-d28bc01-attempt2-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (macos-latest / lua54)` 126139630579, 19:04:10Z to 19:19:34Z: its test step paired 227
+  `running` lines with 227 `test result: ok`, 5,384 passed, 79 ignored, #316's row
+  `e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer ... ok` (log
+  line 4706); its doc-test step ran this time (`Doc-tests pmacs` at log line 7645) and its protocol
+  step with it; `WouldBlock` appears nowhere in its log. These are `Test (macos-latest / luajit)`'s
+  figures at attempt 1. Under the rerun rule this establishes non-reproduction and nothing more:
+  #316 stays at eighteen.
+
+#### `main` at `cdb6ca9`, E10l's squash merge of PR #441: red on #453's first occurrence
+
+`CI` 41702688025 at `cdb6ca9`, attempt 1 of 1, `push`, created 2026-11-03T19:22:39Z and completed
+19:59:30Z (the API's `updated_at`): `failure`.
+
+Tally (main-ci-cdb6ca9): 19 = 17 + 1 + 1.
+
+Tally (main-ci-cdb6ca9-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 126149783572 | success |
+| Lint (lua54) | 126149783952 | success |
+| Lint (luajit) | 126149783989 | success |
+| Format | 126149784051 | success |
+| Changed paths | 126149784307 | success |
+| M10 Perf Gates (crdt) | 126150091200 | success |
+| M4 Perf Gates | 126150091209 | success |
+| Test (crdt) | 126150091211 | failure |
+| M1 Acceptance Gates | 126150091234 | success |
+| GPU Render (headless) | 126150091274 | success |
+| Test (ubuntu-latest / lua54) | 126150091287 | success |
+| Test (macos-latest / luajit) | 126150091321 | success |
+| Perf budgets (debug) | 126150091330 | success |
+| Test (ubuntu-latest / luajit) | 126150091344 | success |
+| M5 Perf Gates | 126150091411 | success |
+| Test (macos-latest / lua54) | 126150091498 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126150091516 | success |
+| M6 Perf Gates | 126150091569 | success |
+| Docs consistency | 126150094511 | skipped |
+
+Tally (main-ci-cdb6ca9-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` 126150091211 ran 19:23:16Z to 19:59:30Z: its test step paired 224 `running` lines
+  with 224 result lines, 5,373 passed, 1 failed, 81 ignored, and its `cargo test --doc` step was
+  skipped after the failure (the job's step list), one pair fewer than the head's run. The failure
+  (log lines 4995 to 5021) is
+  `e8b_switch_buffer_acceptance::e8b_fr1_the_gpu_kills_the_buffer_its_own_name_names_and_says_so` at
+  `tests/e8b_switch_buffer_acceptance.rs:679:28`, the fixture's own check that `C-x d RET` listed
+  `proj/`: `fixture: C-x d RET opened a listing of proj; "WHERE src/"`, and `test result: FAILED. 9
+  passed; 1 failed; 0 ignored` (74.35 s). No row or issue named this selector: filed as **#453**,
+  its first occurrence, the shape #420 records for its sibling row (a window not on the buffer the
+  row switched to); the squash changes neither `pmacs-gpu`, the switch-buffer and dired paths nor
+  that suite.
+- The other five test legs, each through its own log: `Test (ubuntu-latest / luajit)` 126150091344
+  and `Test (ubuntu-latest / lua54)` 126150091287, 226 pairs each, 5,428 passed, 81 ignored; `Test
+  (ubuntu-latest / luajit, no crdt)` 126150091516, 226 pairs, 4,842 passed, 67 ignored; `Test
+  (macos-latest / luajit)` 126150091321 and `Test (macos-latest / lua54)` 126150091498, 227 pairs
+  each, 5,384 passed, 79 ignored: the head's figures on every leg, attempt 2's on macOS `lua54`.
+  `WouldBlock` appears in no test leg's log.
+- `GPU Render (headless)` 126150091274: `pmacs-gpu` 394 passed. `Perf budgets (debug)` 126150091330:
+  `every budget ran and held`, E10l's GPU-route row
+  `e10l_a_large_json_file_reaches_a_highlighted_frame_in_the_gpu_route` among them. `M10 Perf Gates
+  (crdt)` 126150091200: M10.2's suite `6 passed` (60.68 s).
+
+`Grammar fuzz` 41702688023 at `cdb6ca9`, `success`, both arms deciding `run=false` (`no changed path
+can change the grammar set`): `Grammar fuzz` 126149783671 and `Grammar fuzz (asan-strict)`
+126149783295.
+
+So, at E10l's close: `main` is green at `984bf7a` and red at `cdb6ca9` on #453's first occurrence,
+and PR #441 merged green at `d28bc01` on its attempt 2. #316 stays at eighteen under the rerun rule,
+and #453 is at one. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
