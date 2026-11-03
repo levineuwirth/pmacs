@@ -36,6 +36,18 @@
 //!   Backspace, `Zabcdeg` for a typed `g`). Since E10o.4 every import is
 //!   recorded change by change between the daemon's versions.
 //!
+//! A row whose update is made without a foreign edit the daemon already
+//! held forces that order. The foreign edit and the user's update go out
+//! on two sockets, and the daemon's reader threads race them into its
+//! one channel (`src/daemon.rs`), so a row that only waits on the
+//! sender's own replica leaves the order to the scheduler: pinned to one
+//! CPU, #448's rows passed at `fc91a95`'s record 86 times in 90 (E10o
+//! review 1). A third replica, the observer, sends nothing and pumps
+//! the daemon's broadcasts until it shows the foreign edit. The daemon
+//! broadcasts an op only after applying it and applies one event at a
+//! time, so an update written after that wait is applied after the
+//! foreign edit, on any schedule.
+//!
 //! Helpers are the acceptance suite's, copied so the probe stands
 //! alone, plus an optimistic delete and a raw update send.
 
@@ -396,6 +408,20 @@ fn start_with_abcdef(user: &mut Replica, other: &mut Replica) {
     both_see(user, other, "abcdef", "abcdef");
 }
 
+/// The daemon has applied a foreign edit: `observer`, a replica that
+/// sends nothing, pumps the daemon's broadcasts until it shows
+/// `at_daemon`. The daemon broadcasts an op after applying it
+/// (`handle_remote_crdt_op`, then `broadcast_pending_crdt_ops`) and its
+/// dispatcher takes one event at a time, so an update written after this
+/// returns is applied after that edit (the module's note).
+fn await_daemon_shows(observer: &mut Replica, at_daemon: &str, what: &str) {
+    pump_until_text(
+        observer,
+        at_daemon,
+        &format!("the observer: the daemon applied {what}"),
+    );
+}
+
 /// The batched probe's update: on `abcdef`, the user's Backspace held,
 /// the other's `Z` at 0 imported over it, a second Backspace, both sent
 /// as one update. Leaves both replicas at `Zabcd`.
@@ -559,12 +585,14 @@ fn replaying_an_update_adds_no_undo_history() {
 /// The delayed batch: the other's `Y` reaches the daemon after the user
 /// last imported, so the user's update carries changes made without it;
 /// then the other's `W` lands after the update. Undo and redo are exact,
-/// `Y` and `W` kept.
+/// `Y` and `W` kept. The observer shows `Y` at the daemon before the
+/// update is sent, so the daemon holds it when the update arrives.
 #[test]
 fn a_batch_made_without_a_foreign_edit_the_daemon_held_undoes_exactly() {
     let daemon = TestDaemon::spawn();
     let mut user = attach_replica(&daemon);
     let mut other = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
     start_with_abcdef(&mut user, &mut other);
 
     let before = user.state.version();
@@ -578,8 +606,12 @@ fn a_batch_made_without_a_foreign_edit_the_daemon_held_undoes_exactly() {
     );
     user.state.delete(5, 1).expect("the second Backspace, held");
     type_optimistic(&mut other, 0, "Y");
-    pump_until_text(&mut other, "YZabcdef", "the other's Y, not yet the user's");
-    assert_eq!(user.state.materialize_string(), "Zabcd", "the user lacks Y");
+    await_daemon_shows(&mut observer, "YZabcdef", "the other's Y");
+    assert_eq!(
+        user.state.materialize_string(),
+        "Zabcd",
+        "the user has not received Y when it sends its batch"
+    );
     send_since(&mut user, &before);
     pump_until_text(&mut other, "YZabcd", "the other sees both Backspaces");
     type_optimistic(&mut other, 0, "W");
@@ -608,15 +640,17 @@ fn a_batch_made_without_a_foreign_edit_the_daemon_held_undoes_exactly() {
 
 /// The user's earlier step after the delayed batch: the user's typed `x`
 /// is its own group before the batch, and the other's `Z` and `Y` land
-/// after it, `Y` unseen by the user when it sends the batch. Undoing the
-/// batch and then the `x` is exact: the batch's undo leaves the `x`'s
-/// record holding `Z` and `Y` once, so the second undo removes the `x`
-/// and nothing beside it.
+/// after it, `Y` unseen by the user when it sends the batch and shown at
+/// the daemon by the observer before it does. Undoing the batch and then
+/// the `x` is exact: the batch's undo leaves the `x`'s record holding `Z`
+/// and `Y` once, so the second undo removes the `x` and nothing beside
+/// it.
 #[test]
 fn the_users_earlier_step_undoes_exactly_after_a_delayed_batch() {
     let daemon = TestDaemon::spawn();
     let mut user = attach_replica(&daemon);
     let mut other = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
     start_with_abcdef(&mut user, &mut other);
     type_optimistic(&mut user, 0, "x");
     both_see(&mut user, &mut other, "xabcdef", "the user's x");
@@ -632,7 +666,12 @@ fn the_users_earlier_step_undoes_exactly_after_a_delayed_batch() {
     );
     user.state.delete(6, 1).expect("the second Backspace, held");
     type_optimistic(&mut other, 0, "Y");
-    pump_until_text(&mut other, "YZxabcdef", "the other's Y, not yet the user's");
+    await_daemon_shows(&mut observer, "YZxabcdef", "the other's Y");
+    assert_eq!(
+        user.state.materialize_string(),
+        "Zxabcd",
+        "the user has not received Y when it sends its batch"
+    );
     send_since(&mut user, &before);
     both_see(
         &mut user,
@@ -687,45 +726,76 @@ fn a_one_change_update_of_two_backspaces_undoes_as_one_step() {
 // E10o.4: every import between the daemon's versions (#448).
 // ---------------------------------------------------------------------
 
+/// The crossing, forced (E10o review 1's `cross`): the user's `edit`
+/// held; `foreign` run by the other (or anything else that changes the
+/// daemon's text); the observer pumped until it shows `at_daemon`, so the
+/// daemon applied the foreign edit; the user, still showing `held`, sends
+/// its edit alone, one change, as both shipped frontends send a keystroke
+/// that crossed another frontend's op in flight. That the user shows
+/// `held` holds by construction (its replica has read nothing since);
+/// the observer's wait is what makes the update cross the foreign edit
+/// at the daemon.
+fn cross(
+    user: &mut Replica,
+    other: &mut Replica,
+    observer: &mut Replica,
+    edit: impl FnOnce(&CrdtState),
+    foreign: impl FnOnce(&mut Replica),
+    held: &str,
+    at_daemon: &str,
+) {
+    let before = user.state.version();
+    edit(&user.state);
+    foreign(other);
+    await_daemon_shows(observer, at_daemon, "the foreign edit");
+    assert_eq!(
+        user.state.materialize_string(),
+        held,
+        "the user has not received the foreign edit"
+    );
+    send_since(user, &before);
+}
+
 /// The user's held edit, made on `abcdef` before the other frontend's
-/// `Z` at 0 reaches it: the other types `Z`, the daemon holds it, and the
-/// user, who has not received it, sends its edit alone, one change of one
-/// op, as both shipped frontends send a keystroke that crossed another
-/// frontend's op in flight. Returns once both replicas show `expected`.
+/// `Z` at 0 reaches it, crossing it at the daemon ([`cross`]). Returns
+/// once both replicas show `expected`.
 fn send_one_edit_made_without_anothers_z(
     user: &mut Replica,
     other: &mut Replica,
+    observer: &mut Replica,
     edit: impl FnOnce(&CrdtState),
     held: &str,
     expected: &str,
 ) {
-    let before = user.state.version();
-    edit(&user.state);
-    type_optimistic(other, 0, "Z");
-    pump_until_text(other, "Zabcdef", "the other's Z at the daemon");
-    assert_eq!(
-        user.state.materialize_string(),
+    cross(
+        user,
+        other,
+        observer,
+        edit,
+        |o| type_optimistic(o, 0, "Z"),
         held,
-        "the user has not received Z when it sends its edit"
+        "Zabcdef",
     );
-    send_since(user, &before);
     both_see(user, other, expected, "the user's edit after Z");
 }
 
 /// #448's first probe: a Backspace made without the other's `Z`, which
 /// the daemon held. Undone between the daemon's versions around it, the
 /// undo restores the `f` at its place, and redo deletes it again. Fails
-/// at `fc91a95` with `Zabcdfe`: the change was recorded as its span with
-/// an empty base and undone in its own causal past, which lacks `Z`.
+/// at `fc91a95` with `Zabcdfe` on any schedule: the change was recorded
+/// as its span with an empty base and undone in its own causal past,
+/// which lacks `Z`.
 #[test]
 fn a_backspace_made_without_anothers_insert_the_daemon_held_undoes_at_its_place() {
     let daemon = TestDaemon::spawn();
     let mut user = attach_replica(&daemon);
     let mut other = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
     start_with_abcdef(&mut user, &mut other);
     send_one_edit_made_without_anothers_z(
         &mut user,
         &mut other,
+        &mut observer,
         |s| s.delete(5, 1).expect("one Backspace, held"),
         "abcde",
         "Zabcde",
@@ -744,16 +814,20 @@ fn a_backspace_made_without_anothers_insert_the_daemon_held_undoes_at_its_place(
 
 /// #448's second probe: a typed `g` at the end, made without the other's
 /// `Z`. The undo removes the `g` and nothing else, and redo puts it back.
-/// Fails at `fc91a95` with `Zabcdeg`: the undo deleted the `f`.
+/// Fails at `fc91a95` with `Zabcdeg` on any schedule: the undo deleted
+/// the `f`. Without the crossing it passes there
+/// (`r1_p5_the_448_typed_char_row_without_its_crossing_passes_either_way`).
 #[test]
 fn a_typed_char_made_without_anothers_insert_the_daemon_held_undoes_at_its_place() {
     let daemon = TestDaemon::spawn();
     let mut user = attach_replica(&daemon);
     let mut other = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
     start_with_abcdef(&mut user, &mut other);
     send_one_edit_made_without_anothers_z(
         &mut user,
         &mut other,
+        &mut observer,
         |s| s.insert(6, "g").expect("one typed g, held"),
         "abcdefg",
         "Zabcdefg",
@@ -773,16 +847,19 @@ fn a_typed_char_made_without_anothers_insert_the_daemon_held_undoes_at_its_place
 /// made after `Z`, and the `g`'s undo, in coordinates without `Z`,
 /// deletes the `f`. (With the crossing key last instead, its misplaced
 /// delete takes the run's own `g` and the `g`'s then the `h`, so the
-/// text comes out right at `fc91a95` too and shows nothing.)
+/// text comes out right at `fc91a95` too and shows nothing.) The `g`
+/// crosses `Z` at the daemon on any schedule ([`cross`]).
 #[test]
 fn a_typed_run_opened_by_a_key_made_without_anothers_insert_undoes_exactly() {
     let daemon = TestDaemon::spawn();
     let mut user = attach_replica(&daemon);
     let mut other = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
     start_with_abcdef(&mut user, &mut other);
     send_one_edit_made_without_anothers_z(
         &mut user,
         &mut other,
+        &mut observer,
         |s| s.insert(6, "g").expect("one typed g, held"),
         "abcdefg",
         "Zabcdefg",
@@ -798,4 +875,69 @@ fn a_typed_run_opened_by_a_key_made_without_anothers_insert_undoes_exactly() {
     both_see(&mut user, &mut other, "Zabcdef", "the redo undone");
     send_undo(&mut user);
     assert_text_stays(&mut user, "Zabcdef", Duration::from_millis(500));
+}
+
+// ---------------------------------------------------------------------
+// E10o review 1's probes: states the phase's rows did not choose, each
+// crossing forced by the observer.
+// ---------------------------------------------------------------------
+
+/// The user, the other frontend and the observer all show `expected`.
+fn all_see(r: &mut [&mut Replica; 3], expected: &str, what: &str) {
+    for (who, replica) in ["user", "other", "observer"].iter().zip(r.iter_mut()) {
+        pump_until_text(replica, expected, &format!("{who} {what}"));
+    }
+}
+
+/// Three frontends of one daemon: the user, the other, and an observer
+/// that only watches. The other types `abcdef` and then a dispatched
+/// `Home`, which ends its typed run, so its next key is a group of its
+/// own.
+fn three_on_abcdef(daemon: &TestDaemon) -> (Replica, Replica, Replica) {
+    let mut user = attach_replica(daemon);
+    let mut other = attach_replica(daemon);
+    let mut observer = attach_replica(daemon);
+    let daemon_peer = pmacs::crdt::peer_id_from_frontend(FrontendId::LOCAL);
+    for r in [&user, &other, &observer] {
+        assert_ne!(r.state.peer_id(), daemon_peer);
+    }
+    assert_ne!(user.state.peer_id(), other.state.peer_id());
+    type_optimistic(&mut other, 0, "abcdef");
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "abcdef",
+        "abcdef",
+    );
+    send_key(&mut other, Key::Home, Modifiers::NONE);
+    (user, other, observer)
+}
+
+/// R1-P5, a guard: the other interleaving of
+/// `a_typed_char_made_without_anothers_insert_the_daemon_held_undoes_at_its_place`.
+/// The user's held `g` reaches the daemon BEFORE the other's `Z` (the
+/// observer shows `abcdefg` before `Z` is typed): the same keys, the
+/// same texts on every replica, the same undo, and `Zabcdef` at the head
+/// and at `fc91a95`'s record alike. With the daemon applying the user's
+/// update first nothing crosses, so this is what that row read at the
+/// base whenever its order inverted, before it forced the crossing.
+#[test]
+fn r1_p5_the_448_typed_char_row_without_its_crossing_passes_either_way() {
+    let daemon = TestDaemon::spawn();
+    let (mut user, mut other, mut observer) = three_on_abcdef(&daemon);
+    let before = user.state.version();
+    user.state.insert(6, "g").expect("g, held");
+    send_since(&mut user, &before);
+    await_daemon_shows(&mut observer, "abcdefg", "the user's g, first");
+    type_optimistic(&mut other, 0, "Z");
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "Zabcdefg",
+        "g, then Z",
+    );
+    send_undo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "Zabcdef",
+        "the g undone",
+    );
 }
