@@ -941,3 +941,188 @@ fn r1_p5_the_448_typed_char_row_without_its_crossing_passes_either_way() {
         "the g undone",
     );
 }
+
+/// R1-P1. The user's `g`, made without the other's `Z`, which the
+/// daemon held; then the OTHER undoes its `Z`; then the user undoes its
+/// `g`. The user's record now holds the other's compensation in its
+/// base, expressed in the daemon's coordinates; the `g`'s undo must be
+/// too. Expected `abcdef`; at `fc91a95`'s record E10o review 1 read
+/// `abcdeg` (the `g`'s delete at 6, in coordinates without `Z`, moved
+/// left by the other's undo).
+#[test]
+fn r1_p1_a_crossing_key_undoes_at_its_place_after_the_other_undoes_its_insert() {
+    let daemon = TestDaemon::spawn();
+    let (mut user, mut other, mut observer) = three_on_abcdef(&daemon);
+    cross(
+        &mut user,
+        &mut other,
+        &mut observer,
+        |s| s.insert(6, "g").expect("g, held"),
+        |o| type_optimistic(o, 0, "Z"),
+        "abcdefg",
+        "Zabcdef",
+    );
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "Zabcdefg",
+        "the crossing",
+    );
+    send_undo(&mut other);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "abcdefg",
+        "the other's Z undone",
+    );
+    send_undo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "abcdef",
+        "the user's g undone at its place",
+    );
+}
+
+/// R1-P2. The crossing `g`, then the other's `W` at 0 landing after it,
+/// then the user's undo: `WZabcdef`, and redo restores `WZabcdefg`. At
+/// `fc91a95`'s record E10o review 1 read `WZabcdeg`.
+#[test]
+fn r1_p2_a_crossing_key_undoes_at_its_place_after_anothers_later_insert() {
+    let daemon = TestDaemon::spawn();
+    let (mut user, mut other, mut observer) = three_on_abcdef(&daemon);
+    cross(
+        &mut user,
+        &mut other,
+        &mut observer,
+        |s| s.insert(6, "g").expect("g, held"),
+        |o| type_optimistic(o, 0, "Z"),
+        "abcdefg",
+        "Zabcdef",
+    );
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "Zabcdefg",
+        "the crossing",
+    );
+    type_optimistic(&mut other, 0, "W");
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "WZabcdefg",
+        "the other's W after it",
+    );
+    send_undo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "WZabcdef",
+        "the g undone, W, Z and f kept",
+    );
+    send_redo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "WZabcdefg",
+        "the g redone",
+    );
+}
+
+/// R1-P3. The user's `g` typed between `e` and `f`, made without the
+/// other's two Backspaces that deleted both; the daemon held them. The
+/// `g` lands where its neighbours were (`abcdg`), and its undo removes
+/// it alone: `abcd`. At `fc91a95`'s record E10o review 1 read the text
+/// staying `abcdg`, the inverse being a delete at 5 of a five-character
+/// text.
+#[test]
+fn r1_p3_a_crossing_insert_between_two_deleted_characters_undoes_alone() {
+    let daemon = TestDaemon::spawn();
+    let (mut user, mut other, mut observer) = three_on_abcdef(&daemon);
+    cross(
+        &mut user,
+        &mut other,
+        &mut observer,
+        |s| s.insert(5, "g").expect("g between e and f, held"),
+        |o| {
+            backspace_optimistic(o, 5);
+            backspace_optimistic(o, 4);
+        },
+        "abcdegf",
+        "abcd",
+    );
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "abcdg",
+        "the crossing",
+    );
+    send_undo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "abcd",
+        "the g undone alone",
+    );
+    send_undo(&mut user);
+    assert_text_stays(&mut user, "abcd", Duration::from_millis(500));
+}
+
+/// R1-P4. The foreign op on the daemon's own peer: the other types `Z`
+/// through the key route (dispatched at the daemon after its `Home`),
+/// which the user's optimistic `g` crosses. Undo: `Zabcdef`. At
+/// `fc91a95`'s record E10o review 1 read `Zabcdeg`.
+#[test]
+fn r1_p4_a_crossing_key_undoes_at_its_place_after_a_key_route_insert() {
+    let daemon = TestDaemon::spawn();
+    let (mut user, mut other, mut observer) = three_on_abcdef(&daemon);
+    cross(
+        &mut user,
+        &mut other,
+        &mut observer,
+        |s| s.insert(6, "g").expect("g, held"),
+        |o| send_key(o, Key::Char('Z'), Modifiers::NONE),
+        "abcdefg",
+        "Zabcdef",
+    );
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "Zabcdefg",
+        "the crossing",
+    );
+    send_undo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "Zabcdef",
+        "the g undone, the f kept",
+    );
+}
+
+/// R1-P6, a guard: the auto-pair closer crossing the next key (#448's
+/// other reach, which E10o handoff 2 named by reading). The user types
+/// `(` at the end and, before the daemon's closer reaches it, `x`. The
+/// daemon inserts `)` on its own peer into the user's open run; the `x`
+/// is made without it. Every replica converges, and one undo takes the
+/// run, closer included, back to `abcdef`, at the head and at
+/// `fc91a95`'s record alike: every part of the group is deleted on
+/// either record. Where the `x` lands is not asserted: after the closer
+/// (`abcdef()x`), where the same keys dispatched at the daemon give
+/// `(x)`, is #452's, outside E10o.
+#[test]
+fn r1_p6_a_key_crossing_the_auto_pair_closer_undoes_with_its_run() {
+    let daemon = TestDaemon::spawn();
+    let (mut user, mut other, mut observer) = three_on_abcdef(&daemon);
+    type_optimistic(&mut user, 6, "(");
+    let closed = pump_until(&mut observer, "the daemon's closer", |t| t.len() == 8);
+    eprintln!("after ( at the daemon: {closed:?}");
+    assert_eq!(
+        user.state.materialize_string(),
+        "abcdef(",
+        "the user lacks the closer"
+    );
+    type_optimistic(&mut user, 7, "x");
+    let crossed = pump_until(&mut observer, "the crossing x", |t| t.len() == 9);
+    eprintln!("after x at the daemon: {crossed:?}");
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        &crossed,
+        "the crossing",
+    );
+    send_undo(&mut user);
+    all_see(
+        &mut [&mut user, &mut other, &mut observer],
+        "abcdef",
+        "the run undone, closer included",
+    );
+}
