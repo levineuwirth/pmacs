@@ -159,12 +159,19 @@ fn rust_source(lines: usize) -> String {
 /// the unit busy again), `open` and `edit` parse as a user's buffer is
 /// parsed (an explicit dispatch only where `syntax.lua`'s hooks made none),
 /// and `grow` takes the daemon past [`BALLAST_MIB`] MiB, held for its life.
+/// `PMACS_E10N_UNIT_PATH`, set by hand, names another worker binary through
+/// `syntax.parse-unit-path`: E10n.3's "before" runs the base's worker under
+/// the same editor and the same rows.
 #[cfg(target_os = "linux")]
 fn lua_prelude(report: &Path, settings: &str) -> String {
+    let unit = std::env::var("PMACS_E10N_UNIT_PATH")
+        .map(|path| format!("pmacs.config.set('syntax.parse-unit-path', {path:?})"))
+        .unwrap_or_default();
     format!(
         "pmacs.lsp.config = {{}}\n\
          pmacs.config.set('syntax.isolation', 'process')\n\
          {settings}\n\
+         {unit}\n\
          local REPORT = {report:?}\n\
          local out = {{}}\n\
          local function note(s) out[#out + 1] = s end\n\
@@ -307,12 +314,17 @@ fn unit_pid(event: &serde_json::Value) -> u32 {
 }
 
 /// Spawn a daemon with `env` and `init` (whose Lua calls `finish` once),
-/// tracing its parse units, and wait up to `limit` for its report.
+/// tracing its parse units to `dir`'s `trace.jsonl`, and wait up to
+/// `limit` for its report; the daemon, alive, and the report.
 #[cfg(target_os = "linux")]
-fn run_daemon(dir: &Path, env: &[(&str, &str)], init: &str, limit: Duration) -> Run {
+fn spawn_and_wait(
+    dir: &Path,
+    env: &[(&str, &str)],
+    init: &str,
+    limit: Duration,
+) -> (common::daemon::TestDaemon, String) {
     let report = dir.join("report.txt");
-    let trace = dir.join("trace.jsonl");
-    let trace_env = trace.display().to_string();
+    let trace_env = dir.join("trace.jsonl").display().to_string();
     let mut env: Vec<(&str, &str)> = env.to_vec();
     env.push(("PMACS_E7I_TRACE", &trace_env));
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(&env, init);
@@ -329,17 +341,32 @@ fn run_daemon(dir: &Path, env: &[(&str, &str)], init: &str, limit: Duration) -> 
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    drop(daemon);
     assert!(
         !notes.lines().any(|l| l.starts_with("error")),
         "the daemon's run failed:\n{notes}"
     );
-    let trace = std::fs::read_to_string(&trace)
+    (daemon, notes)
+}
+
+/// The unit events `dir`'s daemon traced so far.
+#[cfg(target_os = "linux")]
+fn trace_events(dir: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("trace.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    Run { notes, trace }
+        .collect()
+}
+
+/// [`spawn_and_wait`], the daemon then gone: its notes and its trace.
+#[cfg(target_os = "linux")]
+fn run_daemon(dir: &Path, env: &[(&str, &str)], init: &str, limit: Duration) -> Run {
+    let (daemon, notes) = spawn_and_wait(dir, env, init, limit);
+    drop(daemon);
+    Run {
+        notes,
+        trace: trace_events(dir),
+    }
 }
 
 /// E10n.1's daemon: an early Rust file parsed before the daemon grows, then
@@ -467,7 +494,10 @@ fn e10n_measure_a_daemon_past_256_mib_and_its_workers() {
     let run = grown_run(edits);
     let load_after = loadavg();
     assert_grown(&run);
-    eprintln!("e10n measure: load {load_before} before, {load_after} after; {edits} edits a file");
+    eprintln!(
+        "e10n measure: load {load_before} before, {load_after} after; {edits} edits a file; {}",
+        worker_in_use()
+    );
     for label in ["start", "early", "grown", "end"] {
         eprintln!(
             "e10n daemon {label}: VmHWM {}, VmRSS {}",
@@ -728,5 +758,173 @@ fn e10n_a_worker_whose_own_parse_passes_the_threshold_is_still_recycled() {
     assert!(
         small.iter().all(|&p| p == small[0]) && run.recycles(&small) == 0,
         "the small file's worker is kept: {small:?}"
+    );
+}
+
+/// Which worker a measurement ran: the one beside this build's `pmacs`, or
+/// the binary `PMACS_E10N_UNIT_PATH` names.
+#[cfg(target_os = "linux")]
+fn worker_in_use() -> String {
+    std::env::var("PMACS_E10N_UNIT_PATH").map_or_else(
+        |_| "the worker beside this build's pmacs".to_owned(),
+        |path| format!("the worker at {path}"),
+    )
+}
+
+/// The `q`th percentile of `values`, nearest rank.
+#[cfg(all(target_os = "linux", feature = "crdt"))]
+fn percentile(values: &[u64], q: usize) -> u64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted
+        .get((sorted.len() * q / 100).min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// E10n.3, typing: keys typed through the GPU's route into a small Rust
+/// file in a daemon grown past 256 MiB, each timed from the frontend's
+/// `apply_keyboard` to the end of the first frame painted with it
+/// (`pmacs-gpu --headless-probe`'s `keypaint`, E10k.1's instrument:
+/// `kxv` and `.,;` at the end of the last line, each key and each burst
+/// deleted again), and, from the daemon's trace over the same keys, what
+/// each parse they caused did: its worker, whether it was sent the whole
+/// text, its round trip. The three are reported apart, since faster or
+/// rarer background parsing alone does not make a key reach the screen
+/// sooner. `PMACS_E10N_SAMPLES` (eight by default) sets the samples.
+#[cfg(all(target_os = "linux", feature = "crdt"))]
+#[test]
+#[ignore = "a measurement: run by hand with --ignored --nocapture"]
+fn e10n_measure_typing_in_a_daemon_past_256_mib_gpu() {
+    let Some(binary) = common::gpu_probe::gpu_probe_binary() else {
+        return;
+    };
+    let samples = std::env::var("PMACS_E10N_SAMPLES").unwrap_or_else(|_| "8".into());
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let file = dir.join("typed.rs");
+    std::fs::write(&file, rust_source(60)).expect("typed.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local b = open({file:?}, 'rust')\n\
+           if not settle(b) then return finish('error the file did not settle') end\n\
+           for _, x in ipairs(pmacs.buffer.list()) do\n\
+             if x:name() == '*scratch*' then pcall(pmacs.buffer.kill, x) end\n\
+           end\n\
+           note('parsed typed 0 ' .. unit(b))\n\
+           finish('ready')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        file = file.display().to_string(),
+    );
+    let (daemon, notes) = spawn_and_wait(&dir, &[], &init, Duration::from_mins(2));
+    let ready = trace_events(&dir).len();
+    let report = dir.join("keypaint.txt");
+    let load_before = loadavg();
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_ACTION", "keypaint")
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", "kxv|.,;")
+        .env("PMACS_GPU_PROBE_SAMPLES", &samples)
+        .env("PMACS_GPU_PROBE_GAP_MS", "150")
+        .env("PMACS_GPU_PROBE_SAMPLE_MS", "120000")
+        .output()
+        .expect("run the keypaint probe");
+    let load_after = loadavg();
+    drop(daemon);
+    let run = Run {
+        notes,
+        trace: trace_events(&dir),
+    };
+    assert_grown(&run);
+    let Some(facts) = common::gpu_probe::probe_facts(&output, &report, "e10n typing") else {
+        return;
+    };
+    assert!(
+        !facts.contains_key("failure"),
+        "the probe failed: {:?}",
+        facts.get("failure")
+    );
+    eprintln!(
+        "e10n typing: load {load_before} before, {load_after} after; {samples} samples; {}",
+        worker_in_use()
+    );
+    print_keys(&facts);
+    print_typed_parses(&run.trace[ready..]);
+}
+
+/// The keypaint probe's keys and bursts of each kind, at the median and
+/// the 95th percentile, with how many keys were painted optimistically.
+#[cfg(all(target_os = "linux", feature = "crdt"))]
+fn print_keys(facts: &std::collections::HashMap<String, String>) {
+    let count = |key: &str| -> usize {
+        common::gpu_probe::fact(facts, key)
+            .parse()
+            .unwrap_or_else(|_| panic!("{key}"))
+    };
+    for kind in ["kxv", ".,;"] {
+        let (mut keys, mut optimistic) = (Vec::new(), 0);
+        for n in 0..count("keys") {
+            let line = common::gpu_probe::fact(facts, &format!("key.{n}"));
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(parts.len(), 6, "key.{n}: {line}");
+            if parts[0] == kind {
+                keys.push(parts[2].parse::<u64>().expect("microseconds"));
+                optimistic += usize::from(parts[5] == "true");
+            }
+        }
+        let bursts: Vec<u64> = (0..count("bursts"))
+            .map(|n| common::gpu_probe::fact(facts, &format!("burst.{n}")))
+            .filter(|line| line.starts_with(&format!("{kind}|")))
+            .map(|line| {
+                line.split('|')
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .expect("burst")
+            })
+            .collect();
+        eprintln!(
+            "  {kind}: {} keys ({optimistic} optimistic) p50 {:.2} ms p95 {:.2} ms; {} bursts p50 {:.2} ms",
+            keys.len(),
+            percentile(&keys, 50) as f64 / 1000.0,
+            percentile(&keys, 95) as f64 / 1000.0,
+            bursts.len(),
+            percentile(&bursts, 50) as f64 / 1000.0,
+        );
+    }
+}
+
+/// What the parses in `events` did: how many, in how many workers, how
+/// many recycled and sent the whole text, and their round trips.
+#[cfg(all(target_os = "linux", feature = "crdt"))]
+fn print_typed_parses(events: &[serde_json::Value]) {
+    let typed: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["event"].as_str() == Some("parsed"))
+        .collect();
+    let mut workers: Vec<u32> = typed.iter().map(|e| unit_pid(e)).collect();
+    workers.dedup();
+    let calls: Vec<u64> = typed
+        .iter()
+        .map(|e| e["call_us"].as_u64().unwrap_or(0))
+        .collect();
+    eprintln!(
+        "  the parses the keys caused: {} parses, {} workers, {} recycled, {} full; round trip p50 {:.2} ms p95 {:.2} ms",
+        typed.len(),
+        workers.len(),
+        events
+            .iter()
+            .filter(|e| e["event"].as_str() == Some("recycle"))
+            .count(),
+        typed
+            .iter()
+            .filter(|e| e["full"].as_bool() == Some(true))
+            .count(),
+        percentile(&calls, 50) as f64 / 1000.0,
+        percentile(&calls, 95) as f64 / 1000.0,
     );
 }
