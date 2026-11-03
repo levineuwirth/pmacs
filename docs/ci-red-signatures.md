@@ -10810,6 +10810,167 @@ In the worktree `pmacs-e10k-base` on its target, logs copied to `~/build/e10l-f1
 So, at E10l's fix round 1: `main` is green at `52755c8`, and PR #441 is green at its head
 `1df74e6`. Every count above stands.
 
+### E10o.4: PR #449 at `8d766a6`, `main` green at `57a2ed7`, the gate listed
+
+Recorded 2026-11-03 at E10o.4, before E10o's review 1. PR #449 (`e10o/one-span-per-change`) moved
+from `fc91a95` to `8d766a6` by two signed commits: `changes_since` reads an import's first and last
+versions rather than computing them (`src/crdt.rs`, with a unit row), and every import is recorded
+change by change between the daemon's versions, one-change updates included (#448;
+`src/buffer.rs`, three rows in `tests/undo_reach_438_probes.rs`). Every run was read from the jobs
+endpoint by conclusion, and every test leg of the code-bearing runs through its own log, fetched
+with escape sequences allowed and stripped, each `running` line paired with its own result line.
+Every run id and job id below was searched for in this file before it was written, and none was
+here but attempt 1 of `CI` 41515219128, recorded in C10o's section. Nothing was rerun by this
+session.
+
+#### `main` at `57a2ed7`, E10l fix round 1's registry commit: green
+
+`main`'s runs at `52755c8` are recorded in E10l fix round 1's section above. `CI` 41523291760 at
+`57a2ed7`, attempt 1 of 1, `push`, created 2026-11-02T20:53:15Z and completed 20:55:36Z (the API's
+`updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-57a2ed7): 15 = 6 + 9.
+
+Tally (main-ci-57a2ed7-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 125544469531 | success |
+| Lint (luajit) | 125544469861 | success |
+| Lint (lua54) | 125544469888 | success |
+| Changed paths | 125544469983 | success |
+| Commit attribution (D9) | 125544470112 | success |
+| Docs consistency | 125544649249 | success |
+| M10 Perf Gates (crdt) | 125544651256 | skipped |
+| M1 Acceptance Gates | 125544651432 | skipped |
+| M6 Perf Gates | 125544651471 | skipped |
+| M5 Perf Gates | 125544651515 | skipped |
+| Perf budgets (debug) | 125544651691 | skipped |
+| M4 Perf Gates | 125544651723 | skipped |
+| Test (matrix) | 125544651825 | skipped |
+| GPU Render (headless) | 125544652262 | skipped |
+| Test (crdt) | 125544653002 | skipped |
+
+Tally (main-ci-57a2ed7-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 125544649249: `running 18 tests`, `test result: ok. 18 passed`. The skipped
+matrix row is the one job the API names with its unexpanded template, written here as `Test
+(matrix)`. `Grammar fuzz` 41523291845 at `57a2ed7`, `success`, both arms deciding `run=false`
+(`no changed path can change the grammar set`): `Grammar fuzz` 125544469796 and `Grammar fuzz
+(asan-strict)` 125544470178.
+
+#### PR #449's `CI` 41515219128 at `fc91a95`, attempt 2: green, #450 not reproduced
+
+Attempt 1 is recorded in C10o's section above, red on #450's first occurrence. The owner reran its
+failed jobs on 2026-11-02: attempt 2, `pull_request`, the same merge `6967d4d` into `a70487f` (its
+checkout's `HEAD is now at` line), ran from 21:35:01Z to 22:01:16Z (the API's `run_started_at` and
+`updated_at`): `success`. Only `Test (ubuntu-latest / luajit, no crdt)` ran again; every other job
+is carried from attempt 1 under a new id with attempt 1's times, and `Docs consistency` was skipped
+again.
+
+Tally (pr449-ci-fc91a95-attempt2): 19 = 18 + 1.
+
+Tally (pr449-ci-fc91a95-attempt2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 125566282517 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 125566282759 | success |
+| Test (crdt) | 125566283642 | success |
+| Lint (lua54) | 125566283817 | success |
+| M1 Acceptance Gates | 125566283821 | success |
+| GPU Render (headless) | 125566283829 | success |
+| M5 Perf Gates | 125566283895 | success |
+| Test (ubuntu-latest / luajit) | 125566284014 | success |
+| M6 Perf Gates | 125566284082 | success |
+| Test (ubuntu-latest / lua54) | 125566284092 | success |
+| M10 Perf Gates (crdt) | 125566284182 | success |
+| M4 Perf Gates | 125566284779 | success |
+| Test (macos-latest / lua54) | 125566284995 | success |
+| Docs consistency | 125566285907 | skipped |
+| Test (macos-latest / luajit) | 125566286057 | success |
+| Lint (luajit) | 125566333987 | success |
+| Changed paths | 125566348338 | success |
+| Perf budgets (debug) | 125566349595 | success |
+| Format | 125566355834 | success |
+
+Tally (pr449-ci-fc91a95-attempt2-success): 18 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit, no crdt)` 125566282759, 21:35:07Z to 22:01:15Z: its log (7,375
+  lines) paired 225 `running` lines with 225 `test result: ok`, 4,825 passed, 0 failed, 59
+  ignored; `undo_reach_438_probes` ran as the empty binary its `#![cfg(feature = "crdt")]` leaves
+  (`running 0 tests`); `WouldBlock` appears nowhere in it. Against PR #441's same leg at `f0754a4`
+  (225, 4,834 / 61), nine fewer passed and two fewer ignored: E10l's rows, which this branch does
+  not carry. Under the rerun rule this establishes non-reproduction and nothing more: #450 stays
+  at one.
+
+#### PR #449's `CI` 41621711128 at `8d766a6`: green
+
+`pull_request`, the merge `2d96d92` of `8d766a6` into `57a2ed7` (its checkout's `HEAD is now at`
+line), attempt 1 of 1, created 2026-11-03T10:44:05Z and completed 11:20:39Z (the API's
+`updated_at`): `success`.
+
+Tally (pr449-ci-8d766a6): 19 = 18 + 1.
+
+Tally (pr449-ci-8d766a6-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 125868796743 | success |
+| Format | 125868797052 | success |
+| Lint (lua54) | 125868797143 | success |
+| Commit attribution (D9) | 125868797166 | success |
+| Lint (luajit) | 125868797206 | success |
+| M4 Perf Gates | 125868895506 | success |
+| M10 Perf Gates (crdt) | 125868895518 | success |
+| M5 Perf Gates | 125868895558 | success |
+| Test (crdt) | 125868895591 | success |
+| GPU Render (headless) | 125868895636 | success |
+| Test (ubuntu-latest / lua54) | 125868895680 | success |
+| Test (macos-latest / lua54) | 125868895689 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 125868895726 | success |
+| M1 Acceptance Gates | 125868895794 | success |
+| M6 Perf Gates | 125868895799 | success |
+| Test (macos-latest / luajit) | 125868895841 | success |
+| Perf budgets (debug) | 125868895881 | success |
+| Test (ubuntu-latest / luajit) | 125868895907 | success |
+| Docs consistency | 125868897748 | skipped |
+
+Tally (pr449-ci-8d766a6-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs pair each `running` line with a `test result: ok`: `Test (crdt)` 125868895591,
+  10:44:20Z to 11:20:38Z, 224 pairs, 5,378 passed, 73 ignored; `Test (ubuntu-latest / luajit)`
+  125868895907 and `Test (ubuntu-latest / lua54)` 125868895680, 225 each, 5,431 passed, 73
+  ignored; `Test (ubuntu-latest / luajit, no crdt)` 125868895726, 225, 4,825 passed, 59 ignored;
+  `Test (macos-latest / luajit)` 125868895841 and `Test (macos-latest / lua54)` 125868895689, 226
+  each, 5,387 passed, 71 ignored. Against attempt 1 at `fc91a95` (C10o's section; the `no crdt` leg
+  its attempt 2, above) each leg has the same pairs and ignored rows and four more passed on the
+  five crdt legs (the three rows and the library row
+  `changes_since_names_the_versions_vv_to_frontiers_computes`), none on `no crdt`, where both are
+  compiled out. `undo_reach_438_probes` ran 19 and passed 19 on
+  the five crdt legs and ran its empty binary on `no crdt`. `WouldBlock` appears in no test leg's
+  log.
+- `Perf budgets (debug)` 125868895881: `every budget ran and held`. `GPU Render (headless)`
+  125868895636: `pmacs-gpu` 394 passed.
+
+`Grammar fuzz` 41621711120 at `8d766a6`, attempt 1 of 1, `success`, both arms deciding `run=false`
+(`no changed path can change the grammar set`): `Grammar fuzz` 125868797388, `Grammar fuzz
+(asan-strict)` 125868796786.
+
+#### E10o.4's gate: listed, not tallied
+
+In the worktree `pmacs-e10o` on its target `pmacs-e10o-2ca10753`, logs in
+`~/build/e10o/e10o4/`.
+
+- `20261103T102613Z-1232160` at `8d766a6`, `--perf`, 10:26:13Z to 10:43:26Z: all seven stages ok;
+  `05-sweep` 5,823 passed / 0 failed / 73 ignored at 233 pairs, every `running` line paired with a
+  result line, no daemon surviving (identified by environ); `perf` held every budget. No
+  intermittent appeared, so nothing was commented.
+
+So, at E10o.4: `main` is green at `57a2ed7`, and PR #449 is green at its head `8d766a6`; its
+earlier head `fc91a95` went green on the owner's rerun of #450's leg, which stays at one. Every
+other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
