@@ -77,6 +77,18 @@ impl TestDaemon {
         Self::spawn_with_env_and_config(env_vars, Some(init_lua))
     }
 
+    /// A daemon holding `file` as its one buffer, its scratch buffer
+    /// killed so an attach snapshots the file alone. Extracted at E10l
+    /// (D37) from `tests/e10k_large_buffer_typing.rs`.
+    #[allow(dead_code)] // consumed per-suite; not every test crate uses it
+    pub fn holding(file: &Path) -> Self {
+        let init_lua = format!(
+            "pmacs.buffer.find_or_open({:?})\nfor _, b in ipairs(pmacs.buffer.list()) do\n  if b:name() == '*scratch*' then pcall(pmacs.buffer.kill, b) end\nend\n",
+            file.display().to_string()
+        );
+        Self::spawn_with_env_and_init(&[], &init_lua)
+    }
+
     fn spawn_with_env_and_config(env_vars: &[(&str, &str)], init_lua: Option<&str>) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         // tempfile::TempDir creates 0755-mode directories; the daemon
