@@ -480,3 +480,253 @@ fn e10n_measure_a_daemon_past_256_mib_and_its_workers() {
     assert_eq!(run.units("after").len(), edits + 1, "{}", run.notes);
     assert_eq!(run.units("early").len(), edits + 1, "{}", run.notes);
 }
+
+/// E10n.2 (i): in a daemon grown past 256 MiB (asserted), a worker started
+/// after the growth parses a small Rust file, reports a peak under the
+/// threshold, and is the same worker at each next parse, which is
+/// incremental; the worker started before the growth likewise. At the base
+/// the late worker reported the daemon's peak (about 369 MiB) and was
+/// replaced at every parse, each one full.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10n_a_worker_started_after_the_daemon_grew_reports_its_own_peak_and_is_kept() {
+    let run = grown_run(2);
+    assert_grown(&run);
+    for buffer in ["after", "early"] {
+        let pids = run.units(buffer);
+        let parses = run.parses(&pids);
+        assert_eq!(
+            parses.len(),
+            3,
+            "{buffer}: three parses traced: {:?}",
+            run.trace
+        );
+        let peak = parses[0]["peak"].as_u64().expect("a peak");
+        assert!(
+            peak < THRESHOLD,
+            "{buffer}'s worker reports its own peak, under the {} threshold: it reported {} (the daemon's VmHWM {})",
+            mib(THRESHOLD),
+            mib(peak),
+            mib(run.mem("grown", "hwm"))
+        );
+        assert!(
+            pids.iter().all(|&p| p == pids[0]),
+            "{buffer}'s worker is kept across its parses: {pids:?}"
+        );
+        assert_eq!(
+            run.recycles(&pids),
+            0,
+            "{buffer}'s worker was never recycled"
+        );
+        for (i, parse) in parses.iter().enumerate().skip(1) {
+            assert_eq!(
+                parse["full"].as_bool(),
+                Some(false),
+                "{buffer}'s parse {i} is incremental: {parse}"
+            );
+        }
+    }
+}
+
+/// #296's paragraph as the issue generates it, `lines` lines long.
+#[cfg(target_os = "linux")]
+fn underscores(lines: usize) -> String {
+    let line = format!("{}a `_`_", "_".repeat(582));
+    vec![line; lines].join("\n") + "\n"
+}
+
+/// The allowance the memory-watch row gives its worker, MiB.
+#[cfg(target_os = "linux")]
+const ALLOWANCE_MIB: u64 = 64;
+
+/// E10n.2 (ii): a worker started by a daemon grown past 256 MiB, with the
+/// memory watch forced (`PMACS_PARSE_UNIT_MEMORY=watch`, so no `RLIMIT_AS`)
+/// and a 64 MiB allowance, is stopped by its watch at a limit equal to its
+/// own memory at start plus the allowance, independent of the daemon's
+/// peak. The worker first parses a small markdown file, after which the
+/// daemon's Lua reads its own peak (`VmHWM`, never below what it held when
+/// its watch started); then #296's paragraph is appended, whose parse grows
+/// without bound. The deadline is two minutes and the row waits one, so no
+/// deadline can supply the death; the death record names the watch and the
+/// limit it applied. At the base the limit was the daemon's peak plus the
+/// allowance.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10n_the_memory_watch_holds_a_worker_to_its_own_start_plus_its_allowance() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let victim = dir.join("victim.md");
+    std::fs::write(&victim, "# A note\n\nSome text, and *emphasis*.\n").expect("victim");
+    let paragraph = dir.join("paragraph.md");
+    std::fs::write(&paragraph, format!("\n{}", underscores(28))).expect("paragraph");
+    let settings = format!(
+        "pmacs.config.set('syntax.parse-memory-limit-mb', {ALLOWANCE_MIB})\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 120000)\n\
+         pmacs.config.set('syntax.parse-worker-recycle-mb', 0)"
+    );
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local b = open({victim:?}, 'markdown')\n\
+           if not settle(b) then return finish('error the note did not settle') end\n\
+           local pid = unit(b):match('%d+')\n\
+           note(string.format('worker pid=%s hwm=%d', pid, status('VmHWM', pid)))\n\
+           local f = assert(io.open({paragraph:?}))\n\
+           local text = f:read('*a'); f:close()\n\
+           b:insert(b:len(), text)\n\
+           if (pmacs.parse._pending_edits(b) or 0) > 0 then pmacs.parse._dispatch(b, 'markdown') end\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 60000 do\n\
+             pmacs.workers.sleep(20):await()\n\
+             local r = pmacs.parse._unit_report(b)\n\
+             if r.deaths > 0 then\n\
+               note(string.format('stopped after_ms=%d', pmacs.editor.monotonic_ms() - t0))\n\
+               return finish('death ' .. tostring(r.last_death))\n\
+             end\n\
+           end\n\
+           finish('error the worker parsing the paragraph was not stopped within 60 s')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), &settings),
+        victim = victim.display().to_string(),
+        paragraph = paragraph.display().to_string(),
+    );
+    let run = run_daemon(
+        &dir,
+        &[("PMACS_PARSE_UNIT_MEMORY", "watch")],
+        &init,
+        Duration::from_mins(2),
+    );
+    let hwm = run.mem("grown", "hwm");
+    let rss = run.mem("grown", "rss");
+    assert!(
+        hwm > THRESHOLD && rss > THRESHOLD,
+        "the daemon grew past {} before the worker started: VmHWM {}, VmRSS {}",
+        mib(THRESHOLD),
+        mib(hwm),
+        mib(rss)
+    );
+    let worker_hwm: u64 = run
+        .notes
+        .lines()
+        .find_map(|l| l.strip_prefix("worker "))
+        .and_then(|l| l.split("hwm=").nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no worker note in\n{}", run.notes));
+    let death = run
+        .notes
+        .lines()
+        .find_map(|l| l.strip_prefix("death "))
+        .unwrap_or_else(|| panic!("no death note in\n{}", run.notes));
+    eprintln!(
+        "e10n watch: the daemon's VmHWM {}, the worker's after its first parse {}; {death}",
+        mib(hwm),
+        mib(worker_hwm)
+    );
+    assert!(
+        death.starts_with("memory:") && death.contains("(by watch, "),
+        "the worker was stopped by its own memory watch: {death}"
+    );
+    let limit: u64 = death
+        .split("a limit of ")
+        .nth(1)
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("the death names the watch's limit: {death}"));
+    let start = limit.saturating_sub(ALLOWANCE_MIB << 20);
+    assert!(
+        start < hwm,
+        "the watch's limit is the worker's own start plus {ALLOWANCE_MIB} MiB, independent of the daemon's peak: its start read {} against the daemon's VmHWM {}",
+        mib(start),
+        mib(hwm)
+    );
+    assert!(
+        start > 0 && start <= worker_hwm,
+        "the watch's start is the worker's own memory when its watch began, at most its VmHWM after its first parse ({}): {}",
+        mib(worker_hwm),
+        mib(start)
+    );
+}
+
+/// The threshold the recycle row sets, MiB: above a small file's worker's
+/// own peak (about 10 MiB here) and below the large file's.
+#[cfg(target_os = "linux")]
+const RECYCLE_MIB: u64 = 32;
+
+/// E10n.2, a worker whose own parse passes the threshold is still recycled:
+/// in a daemon grown past 256 MiB (asserted) with
+/// `syntax.parse-worker-recycle-mb` at 32, a large Rust file's worker passes
+/// it in its first parse and is replaced at the next (a new worker, a
+/// `recycle`, the whole text sent), while a small file's worker in the same
+/// daemon stays under it and is kept. The large half is a guard, holding at
+/// the base too, where every worker in the grown daemon passed it; the small
+/// half failed there, as (i) does.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10n_a_worker_whose_own_parse_passes_the_threshold_is_still_recycled() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let small = dir.join("small.rs");
+    let large = dir.join("large.rs");
+    std::fs::write(&small, rust_source(60)).expect("small.rs");
+    std::fs::write(&large, rust_source(20_000)).expect("large.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           for _, name in ipairs({{'small', 'large'}}) do\n\
+             local b = open(name == 'small' and {small:?} or {large:?}, 'rust')\n\
+             if not settle(b) then return finish('error ' .. name .. ' did not settle') end\n\
+             note('parsed ' .. name .. ' 0 ' .. unit(b))\n\
+             for i = 1, 2 do\n\
+               if not edit(b, 'rust', i) then return finish('error ' .. name .. ', edit ' .. i) end\n\
+               note('parsed ' .. name .. ' ' .. i .. ' ' .. unit(b))\n\
+             end\n\
+           end\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(
+            &dir.join("report.txt"),
+            &format!("pmacs.config.set('syntax.parse-worker-recycle-mb', {RECYCLE_MIB})")
+        ),
+        small = small.display().to_string(),
+        large = large.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(3));
+    assert_grown(&run);
+    let threshold = RECYCLE_MIB << 20;
+    print_parses(&run, "the small file", "small");
+    print_parses(&run, "the large file", "large");
+    let (small, large) = (run.units("small"), run.units("large"));
+    let large_parses = run.parses(&large);
+    let large_peak = large_parses[0]["peak"].as_u64().expect("a peak");
+    assert!(
+        large_peak > threshold,
+        "the large file's first parse took its worker past {}: {}",
+        mib(threshold),
+        mib(large_peak)
+    );
+    assert_ne!(
+        large[0], large[1],
+        "the large file's worker was replaced: {large:?}"
+    );
+    assert!(run.recycles(&large) >= 1, "the trace records the recycle");
+    assert_eq!(
+        large_parses[1]["full"].as_bool(),
+        Some(true),
+        "the fresh worker was sent the whole text: {}",
+        large_parses[1]
+    );
+    let small_parses = run.parses(&small);
+    let small_peak = small_parses[0]["peak"].as_u64().expect("a peak");
+    assert!(
+        small_peak < threshold,
+        "the small file's worker reports its own peak, under {}: {}",
+        mib(threshold),
+        mib(small_peak)
+    );
+    assert!(
+        small.iter().all(|&p| p == small[0]) && run.recycles(&small) == 0,
+        "the small file's worker is kept: {small:?}"
+    );
+}

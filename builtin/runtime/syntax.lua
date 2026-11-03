@@ -153,7 +153,10 @@ pmacs.config.define {
 -- mark of its largest parse: a worker that parsed a pathological 903 MiB
 -- file still held 849 MiB after re-parsing 24 bytes, where a fresh one
 -- holds 6 MiB. So one whose peak passed this in a parse is replaced at the
--- buffer's next parse; ordinary files peak at 24 to 79 MiB.
+-- buffer's next parse; ordinary files peak at 24 to 79 MiB. (Those figures
+-- were read before E10n, when a worker on Linux counted the editor's own
+-- peak as its start: an editor past this many MiB replaced every worker it
+-- started after each parse, #445. A worker now reports its own peak.)
 pmacs.config.define {
   name = "syntax.parse-worker-recycle-mb",
   description = "Under syntax.isolation process: a parse worker whose memory passed this many MiB in a parse is replaced by a fresh one at the buffer's next parse, releasing what the large parse left behind. 0 keeps a worker for the buffer's life.",

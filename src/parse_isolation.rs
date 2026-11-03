@@ -114,9 +114,10 @@ pub struct Limits {
     /// `syntax.parse-deadline-ms`: enforced inside the unit through the
     /// progress callback, and by the boundary [`HARD_GRACE`] after it.
     pub deadline: Option<Duration>,
-    /// `syntax.parse-worker-recycle-mb`: a worker whose peak passed this
-    /// many bytes in a parse is replaced at the buffer's next parse (E7i.4);
-    /// 0 keeps workers for the buffer's life.
+    /// `syntax.parse-worker-recycle-mb`: a worker whose own peak passed
+    /// this many bytes in a parse is replaced at the buffer's next parse
+    /// (E7i.4); its own, not its spawner's, since E10n (#445). 0 keeps
+    /// workers for the buffer's life.
     pub recycle: u64,
 }
 
@@ -469,8 +470,8 @@ struct Slot {
     /// Bytes of text whose spans a renderer asked the unit for after its
     /// parse, beyond what came back with the parse.
     fetched: u64,
-    /// The unit's peak passed `syntax.parse-worker-recycle-mb` in its last
-    /// parse: the next parse runs in a fresh worker (E7i.4).
+    /// The unit's own peak passed `syntax.parse-worker-recycle-mb` in its
+    /// last parse: the next parse runs in a fresh worker (E7i.4).
     recycle_next: bool,
     /// The worker the last parse replaced, kept for one parse so the tree
     /// the editor shows until the new one settles is still read from it.
