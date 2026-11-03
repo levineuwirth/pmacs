@@ -212,6 +212,9 @@ pub enum Death {
         /// For the memory watch, how far past the allowance the worker's
         /// peak was when the watch stopped it, bytes: its overshoot.
         overshoot: Option<u64>,
+        /// For the memory watch, the peak it held the worker to, bytes:
+        /// the worker's memory when its watch began plus the allowance.
+        watch_limit: Option<u64>,
     },
     /// The units together reached the editor-wide total.
     Total {
@@ -361,12 +364,14 @@ impl Death {
             Self::Memory {
                 by,
                 overshoot: Some(over),
+                watch_limit,
                 ..
             } => format!(
-                "{}: {} (by {}, {over} bytes over)",
+                "{}: {} (by {}, {over} bytes over{})",
                 self.kind(),
                 self.message(),
-                by.name()
+                by.name(),
+                watch_limit.map_or_else(String::new, |limit| format!(" a limit of {limit} bytes"))
             ),
             Self::Memory { by, .. } | Self::Total { by, .. } => {
                 format!("{}: {} (by {})", self.kind(), self.message(), by.name())
@@ -1664,10 +1669,12 @@ impl ProcessUnit {
             .and_then(std::os::unix::process::ExitStatusExt::signal);
         let stderr = self.stderr.lock().map(|s| s.clone()).unwrap_or_default();
         if code == Some(pmacs_parse_unit::MEMORY_WATCH_EXIT) {
+            let stop = watch_stop(&stderr);
             return Death::Memory {
                 limit: self.limits.unit_memory,
                 by: Enforcer::Watch,
-                overshoot: watch_overshoot(&stderr),
+                overshoot: stop.map(|(peak, limit)| peak.saturating_sub(limit)),
+                watch_limit: stop.map(|(_, limit)| limit),
             };
         }
         if signal == Some(nix::sys::signal::Signal::SIGKILL as i32) {
@@ -1693,6 +1700,7 @@ impl ProcessUnit {
                 limit: self.limits.unit_memory,
                 by: Enforcer::Rlimit,
                 overshoot: None,
+                watch_limit: None,
             };
         }
         // Neither the editor's kill nor a limit: the worker died on its
@@ -1767,10 +1775,10 @@ fn route_answers(
     }
 }
 
-/// How far past its limit a worker's peak was when its memory watch
-/// stopped it, from its last words (`peak resident P bytes passed the limit
-/// L`).
-fn watch_overshoot(stderr: &str) -> Option<u64> {
+/// What a worker's memory watch said as it stopped the worker, from its
+/// last words (`peak resident P bytes passed the limit L`): the peak `P`
+/// and the limit `L`, bytes.
+fn watch_stop(stderr: &str) -> Option<(u64, u64)> {
     let line = stderr.lines().rev().find(|l| l.contains("memory watch:"))?;
     let number = |after: &str| -> Option<u64> {
         line.split(after)
@@ -1780,7 +1788,7 @@ fn watch_overshoot(stderr: &str) -> Option<u64> {
             .parse()
             .ok()
     };
-    Some(number("peak resident ")?.saturating_sub(number("the limit ")?))
+    Some((number("peak resident ")?, number("the limit ")?))
 }
 
 /// A crashed worker's stderr read for the injected layer it was parsing
@@ -2099,5 +2107,36 @@ impl Cgroup {
                     .and_then(|n| n.trim().parse().ok())
             })
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A memory watch's last words name its peak and its limit, and the
+    /// death record says both how far over the worker went and the limit
+    /// itself (E10n): `e7i_the_memory_watch_stops_296_and_says_by_how_much`
+    /// reads the first number after `(by watch, `, and
+    /// `e10n_the_memory_watch_holds_a_worker_to_its_own_start_plus_its_allowance`
+    /// reads the limit.
+    #[test]
+    fn a_watch_stop_names_its_overshoot_and_its_limit() {
+        let stderr = "pmacs-parse-unit: something earlier\n\
+             pmacs-parse-unit: memory watch: peak resident 77594624 bytes passed the limit 77201408\n";
+        assert_eq!(watch_stop(stderr), Some((77_594_624, 77_201_408)));
+        assert_eq!(watch_stop("pmacs-parse-unit: exited\n"), None);
+        let death = Death::Memory {
+            limit: 64 << 20,
+            by: Enforcer::Watch,
+            overshoot: Some(393_216),
+            watch_limit: Some(77_201_408),
+        };
+        assert_eq!(
+            death.describe(),
+            format!(
+                "memory: {PARSE_LIMIT_MESSAGE}: its parse unit grew past 64 MiB (by watch, 393216 bytes over a limit of 77201408 bytes)"
+            )
+        );
     }
 }
