@@ -11380,6 +11380,74 @@ allowed and stripped, each `running` line paired with its own result line. Each 
 job ids below was searched for in this file before it was written, and none was here, a known id as
 the control. Nothing was rerun.
 
+#### `main` at `fcaf6d8`, E10o fix round 1's registry commit: green
+
+`CI` 41754474879 at `fcaf6d8`, attempt 1 of 1, `push`, created 2026-11-04T01:30:07Z and completed
+01:32:44Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-fcaf6d8): 15 = 6 + 9.
+
+Tally (main-ci-fcaf6d8-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 126327239376 | success |
+| Lint (lua54) | 126327239619 | success |
+| Lint (luajit) | 126327239627 | success |
+| Changed paths | 126327239698 | success |
+| Commit attribution (D9) | 126327239822 | success |
+| Docs consistency | 126327308656 | success |
+| Test (matrix) | 126327310139 | skipped |
+| GPU Render (headless) | 126327310538 | skipped |
+| Test (crdt) | 126327310557 | skipped |
+| M5 Perf Gates | 126327310775 | skipped |
+| M4 Perf Gates | 126327310780 | skipped |
+| M10 Perf Gates (crdt) | 126327310822 | skipped |
+| M6 Perf Gates | 126327311119 | skipped |
+| Perf budgets (debug) | 126327311185 | skipped |
+| M1 Acceptance Gates | 126327311331 | skipped |
+
+Tally (main-ci-fcaf6d8-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 126327308656: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+41754474837 at `fcaf6d8`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz (asan-strict)` 126327239270 and `Grammar fuzz` 126327239574.
+
+#### `main` at `ce508c9`, this section's first commit: green
+
+`CI` 41769913122 at `ce508c9`, attempt 1 of 1, `push`, created 2026-11-04T03:54:03Z and completed
+03:56:19Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-ce508c9): 15 = 6 + 9.
+
+Tally (main-ci-ce508c9-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 126376928183 | success |
+| Lint (lua54) | 126376928387 | success |
+| Format | 126376928464 | success |
+| Changed paths | 126376928485 | success |
+| Commit attribution (D9) | 126376928580 | success |
+| Docs consistency | 126376992039 | success |
+| GPU Render (headless) | 126376993692 | skipped |
+| Test (matrix) | 126376993709 | skipped |
+| Perf budgets (debug) | 126376993778 | skipped |
+| Test (crdt) | 126376993856 | skipped |
+| M1 Acceptance Gates | 126376993963 | skipped |
+| M6 Perf Gates | 126376994008 | skipped |
+| M4 Perf Gates | 126376994159 | skipped |
+| M5 Perf Gates | 126376994237 | skipped |
+| M10 Perf Gates (crdt) | 126376994465 | skipped |
+
+Tally (main-ci-ce508c9-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 126376992039: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+41769913150 at `ce508c9`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz (asan-strict)` 126376928224 and `Grammar fuzz` 126376928450.
+
 #### The dispatch `CI` 41706323262 at `65d305b`: red on #328's third, and macOS's answer
 
 `workflow_dispatch` on the branch at E10n.1's first commit before its rebase (now `3d71c0a`, the
@@ -11538,7 +11606,7 @@ In the worktree `pmacs-e10k-base` on its target `pmacs-e10k-base-1a13b891`, logs
   `05-sweep` 5,830 / 0 / 83 at 235 pairs, every `running` line paired with a result line,
   `WouldBlock` in none, no daemon surviving (identified by environ); `perf` held every budget.
 
-So, at E10n's close: PR #456 is red at its head on #328's fourth, on a required check, off the
+So, at E10n's close: `main` is green at `fcaf6d8` and `ce508c9`, and PR #456 is red at its head on #328's fourth, on a required check, off the
 change's paths, and not rerun. #328 is at four, each of the last two on the 73,325 MB root. #316 and
 #312 met local samples, listed and not counted, and do not move. Every other count above stands.
 
