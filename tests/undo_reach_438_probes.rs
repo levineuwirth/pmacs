@@ -48,6 +48,16 @@
 //! time, so an update written after that wait is applied after the
 //! foreign edit, on any schedule.
 //!
+//! That needs a replica that holds nothing up while it holds an edit.
+//! The daemon writes to every session synchronously from its one
+//! dispatcher thread, with no write timeout (#390), and an idle daemon
+//! writes a grid session frames every tick, so a socket nobody reads
+//! fills inside a second: a row's thread paused for about that long
+//! stalled the daemon on a replica it was not reading, and the observer
+//! never saw the foreign edit (E10o review 2, between 500 and 750 ms in
+//! debug on the laptop). So a thread reads each replica's socket into a
+//! queue from the attach on, and the replica imports only when pumped.
+//!
 //! Helpers are the acceptance suite's, copied so the probe stands
 //! alone, plus an optimistic delete and a raw update send.
 
@@ -62,6 +72,7 @@ use pmacs::transport::write_message;
 
 mod common;
 use common::daemon::{TestDaemon, attach_multi};
+use common::wire::read_into_queue;
 
 fn read_initial_snapshot(
     stream: &mut std::os::unix::net::UnixStream,
@@ -77,12 +88,24 @@ fn read_initial_snapshot(
     }
 }
 
-/// One attached synthetic replica: stream + mirror + identity.
+/// One attached synthetic replica: stream + mirror + identity, and the
+/// queue a thread reads its socket into from the attach on. It imports
+/// only when a pump takes from the queue, so a replica holding an edit
+/// has imported nothing and holds up nothing (the module's note).
 struct Replica {
     stream: std::os::unix::net::UnixStream,
     state: CrdtState,
     fid: FrontendId,
     buffer_id: pmacs::buffer::BufferId,
+    rx: std::sync::mpsc::Receiver<pmacs::protocol::InstanceMessage>,
+}
+
+/// The reader thread holds a clone of the socket, so dropping the stream
+/// alone would leave the daemon's session attached.
+impl Drop for Replica {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 fn attach_replica(daemon: &TestDaemon) -> Replica {
@@ -91,11 +114,14 @@ fn attach_replica(daemon: &TestDaemon) -> Replica {
     let (buffer_id, snap) = read_initial_snapshot(&mut stream);
     let state = CrdtState::new(fid.0).expect("CrdtState::new");
     state.import_snapshot(&snap).expect("import_snapshot");
+    stream.set_read_timeout(None).expect("blocking reads");
+    let rx = read_into_queue(&stream);
     Replica {
         stream,
         state,
         fid,
         buffer_id,
+        rx,
     }
 }
 
@@ -164,6 +190,19 @@ fn send_undo(replica: &mut Replica) {
     send_key(replica, Key::Char('u'), Modifiers::NONE);
 }
 
+/// Import one broadcast from the queue into the replica, if one comes
+/// within `wait`; says whether one did.
+fn pump_once(replica: &mut Replica, wait: Duration) -> bool {
+    if let Ok(pmacs::protocol::InstanceMessage::CrdtOp { buffer_id: b, op }) =
+        replica.rx.recv_timeout(wait)
+        && b == replica.buffer_id
+    {
+        let _ = replica.state.import_updates(&op.bytes);
+        return true;
+    }
+    false
+}
+
 /// Pump broadcast messages into the replica until `accept` holds of
 /// its text, or the deadline passes; returns the text.
 fn pump_until(replica: &mut Replica, what: &str, accept: impl Fn(&str) -> bool) -> String {
@@ -178,16 +217,7 @@ fn pump_until(replica: &mut Replica, what: &str, accept: impl Fn(&str) -> bool) 
             "pump timeout waiting for {what}: text={now:?}"
         );
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        replica
-            .stream
-            .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
-            .ok();
-        if let Ok(pmacs::protocol::InstanceMessage::CrdtOp { buffer_id: b, op }) =
-            pmacs::transport::read_message::<pmacs::protocol::InstanceMessage>(&mut replica.stream)
-            && b == replica.buffer_id
-        {
-            let _ = replica.state.import_updates(&op.bytes);
-        }
+        pump_once(replica, remaining.min(Duration::from_millis(100)));
     }
 }
 
@@ -201,15 +231,7 @@ fn pump_until_text(replica: &mut Replica, expected: &str, what: &str) {
 fn assert_text_stays(replica: &mut Replica, expected: &str, window: Duration) {
     let deadline = std::time::Instant::now() + window;
     while std::time::Instant::now() < deadline {
-        replica
-            .stream
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .ok();
-        if let Ok(pmacs::protocol::InstanceMessage::CrdtOp { buffer_id: b, op }) =
-            pmacs::transport::read_message::<pmacs::protocol::InstanceMessage>(&mut replica.stream)
-            && b == replica.buffer_id
-        {
-            let _ = replica.state.import_updates(&op.bytes);
+        if pump_once(replica, Duration::from_millis(50)) {
             assert_eq!(
                 replica.state.materialize_string(),
                 expected,
@@ -1125,4 +1147,51 @@ fn r1_p6_a_key_crossing_the_auto_pair_closer_undoes_with_its_run() {
         "abcdef",
         "the run undone, closer included",
     );
+}
+
+// ---------------------------------------------------------------------
+// E10o review 2's Low 2: a crossing on a schedule that pauses the row.
+// ---------------------------------------------------------------------
+
+/// The row's thread away from every socket for longer than the daemon's
+/// frames take to fill one nobody reads: between 500 and 750 ms in debug
+/// on the laptop (E10o review 2's R2-D1), and at 1,500 ms it stalled every
+/// time.
+const A_PAUSE_PAST_THE_SEND_BUFFERS: Duration = Duration::from_millis(1_500);
+
+/// [`cross`] with the row's thread paused before the foreign edit, so
+/// before the observer's wait: what a loaded machine can do to any of
+/// the forced rows. Each replica's socket is read on a thread, so the
+/// pause holds up nothing, the observer sees `Z`, and the rest is #448's
+/// typed `g`: its undo and redo at its place. With a replica read only
+/// while pumped, as the suite had at `f013954`, the daemon stalls writing
+/// to one nobody reads, and this row fails on the observer's five seconds:
+/// `pump timeout waiting for the observer: the daemon applied the foreign
+/// edit`, at `abcdef`.
+#[test]
+fn a_crossing_paused_before_the_observers_wait_still_crosses() {
+    let daemon = TestDaemon::spawn();
+    let mut user = attach_replica(&daemon);
+    let mut other = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
+    start_with_abcdef(&mut user, &mut other);
+    cross(
+        &mut user,
+        &mut other,
+        &mut observer,
+        |s| s.insert(6, "g").expect("one typed g, held"),
+        |o| {
+            std::thread::sleep(A_PAUSE_PAST_THE_SEND_BUFFERS);
+            type_optimistic(o, 0, "Z");
+        },
+        "abcdefg",
+        "Zabcdef",
+    );
+    both_see(&mut user, &mut other, "Zabcdefg", "the user's g after Z");
+    await_daemon_shows(&mut observer, "Zabcdefg", "the user's g");
+
+    send_undo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdef", "the g undone, the f kept");
+    send_redo(&mut user);
+    both_see(&mut user, &mut other, "Zabcdefg", "the g redone");
 }

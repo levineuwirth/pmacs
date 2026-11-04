@@ -38,6 +38,25 @@ pub fn semantic_caps() -> FrontendCapabilities {
     }
 }
 
+/// A thread reading everything the daemon writes to `stream` into a
+/// queue, until a read fails: the socket closed, or a read timed out if
+/// the stream has a timeout. A session read this way holds nothing up
+/// while nobody looks at it, where one read only when a row waits on it
+/// stalls the daemon inside a second: the daemon writes to every session
+/// synchronously from its one dispatcher thread (#390).
+pub fn read_into_queue(stream: &UnixStream) -> mpsc::Receiver<InstanceMessage> {
+    let mut reader = stream.try_clone().expect("clone stream");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(msg) = read_message::<InstanceMessage>(&mut reader) {
+            if tx.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// One attached session: its writer, a channel of everything the daemon
 /// wrote to it after the bootstrap, its id, the token it was minted (a
 /// semantic session at v27 or later) and what the daemon wrote before
@@ -178,15 +197,7 @@ impl WireSession {
 
     /// Start the reader thread on `stream`.
     fn reading(stream: UnixStream, fid: FrontendId) -> Self {
-        let mut reader = stream.try_clone().expect("clone stream");
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(msg) = read_message::<InstanceMessage>(&mut reader) {
-                if tx.send(msg).is_err() {
-                    break;
-                }
-            }
-        });
+        let rx = read_into_queue(&stream);
         Self {
             stream,
             rx,
