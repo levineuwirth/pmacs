@@ -1100,14 +1100,20 @@ fn watch_memory<W: Write>(parsing: &Parsing, out: &Mutex<W>, options: ServeOptio
 
 /// This process's own peak resident memory, bytes: the high-water mark of
 /// its own address space, not one an `exec` carried over from the process
-/// that spawned it (#445). Where `/proc` has it (Linux) that is `VmHWM` in
-/// `/proc/self/status`, since `getrusage` there starts at the spawner's
-/// peak ([`rusage_peak_bytes`]); elsewhere `getrusage`'s reading, which on
-/// macOS is the process's own (E10n.1's platform row, run on CI's macOS
-/// legs). 0 where neither is read.
+/// that spawned it (#445). On Linux that is `VmHWM` in `/proc/self/status`,
+/// since `getrusage` there starts at the spawner's peak
+/// ([`rusage_peak_bytes`], which still stands in if `/proc` is unreadable).
+/// Elsewhere it is `getrusage`'s reading, which on macOS is the process's
+/// own (E10n.1's platform row, run on CI's macOS legs), taken without trying
+/// `/proc`: every macOS worker's memory watch reads this each
+/// [`WATCH_EVERY`] while a parse runs. 0 where neither is read.
 #[must_use]
 pub fn peak_resident_bytes() -> u64 {
-    proc_status_bytes("self", "VmHWM:").unwrap_or_else(rusage_peak_bytes)
+    if cfg!(target_os = "linux") {
+        proc_status_bytes("self", "VmHWM:").unwrap_or_else(rusage_peak_bytes)
+    } else {
+        rusage_peak_bytes()
+    }
 }
 
 /// The figure `key` names in `/proc/<who>/status`, kibibytes there, as
