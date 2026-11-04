@@ -44,8 +44,8 @@ pub fn semantic_caps() -> FrontendCapabilities {
 /// queue, until a read fails: the socket closed, or a read timed out if
 /// the stream has a timeout. A session read this way holds nothing up
 /// while nobody looks at it, where one read only when a row waits on it
-/// stalls the daemon inside a second: the daemon writes to every session
-/// synchronously from its one dispatcher thread (#390).
+/// fills its socket inside a second, holds up the daemon's dispatcher for
+/// up to `FRAME_WRITE_BOUND`, and is then dropped (#390, E10r).
 pub fn read_into_queue(stream: &UnixStream) -> mpsc::Receiver<InstanceMessage> {
     read_into_queue_unless(stream, Arc::new(AtomicBool::new(false)))
 }

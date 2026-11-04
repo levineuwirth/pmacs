@@ -50,9 +50,10 @@ fn read_initial_snapshot(stream: &mut UnixStream) -> (pmacs::buffer::BufferId, V
 /// queue: a replica "holding" its edit has not imported anything, and the
 /// daemon, which writes to every session synchronously from its one
 /// dispatcher thread (#390), is never held up by it. Without the thread a
-/// replica that does not read for about a second stalls the daemon, and a
-/// wait on any other replica then times out (the paused row in
-/// `undo_reach_438_probes`).
+/// replica that does not read for about a second holds up the daemon, for
+/// up to `FRAME_WRITE_BOUND` since E10r and then is dropped; at E10o the
+/// write had no bound, and a wait on any other replica timed out (the
+/// paused row in `undo_reach_438_probes`).
 struct Replica {
     stream: UnixStream,
     state: CrdtState,
