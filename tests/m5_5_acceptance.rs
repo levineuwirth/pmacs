@@ -2237,8 +2237,9 @@ fn m10_10_f14_production_path_keystroke_flows_to_broadcast() {
     write_message(&mut stream_a, &req_a).expect("A AttachRequest");
 
     // B attaches with multi-frontend test caps so it's a replica too
-    // — it will receive A's broadcast.
-    let (_hello_b, mut stream_b) = attach_multi(&daemon);
+    // — it will receive A's broadcast. A thread reads it from here.
+    let (_hello_b, stream_b) = attach_multi(&daemon);
+    let reads_b = common::wire::queue_from_here(&stream_b);
 
     // A's bootstrap: BufferSnapshot first, then drain frames until
     // CursorByte arrives (the byte-position pairing M10.10 added).
@@ -2310,14 +2311,35 @@ fn m10_10_f14_production_path_keystroke_flows_to_broadcast() {
     assert_eq!(event_buffer_id, buffer_id);
     assert_eq!(op_peer_id, hello_a.assigned_frontend_id.0);
 
+    // B's first frame says the dispatcher has reached B's bootstrap, so B is a
+    // recipient before A's op is handled. `attach_multi` only wrote B's request:
+    // an op handled ahead of it lands in B's snapshot, no broadcast ever comes,
+    // and that was #286, which a 400 ms delay in B's attach reproduces every time.
+    reads_b
+        .recv_timeout(common::ready::DEADLINE)
+        .expect("B's first frame");
+
     // Send the produced event upstream; B must see the broadcast. A is not
     // read again, so a thread reads it, or its full socket would hold up the
     // daemon on the way to B (#390, E10r).
     let _reads_a = common::wire::queue_from_here(&stream_a);
     write_message(&mut stream_a, &frontend_event).expect("write CrdtOp");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let broadcast = wait_for_crdt_op_broadcast(&mut stream_b, deadline)
-        .expect("F14: B must receive A's CrdtOp broadcast end-to-end");
+    let sent = Instant::now();
+    let broadcast = loop {
+        match reads_b.recv_timeout(common::ready::DEADLINE.saturating_sub(sent.elapsed())) {
+            Ok(InstanceMessage::CrdtOp { buffer_id, op }) => break Some((buffer_id, op)),
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    }
+    .unwrap_or_else(|| {
+        panic!(
+            "F14: B must receive A's CrdtOp broadcast end-to-end; waited {:?}; the daemon's log:\n{}",
+            sent.elapsed(),
+            std::fs::read_to_string(format!("{}.stderr.log", daemon.socket_path().display()))
+                .unwrap_or_default()
+        )
+    });
     assert_eq!(broadcast.0, buffer_id);
     assert_eq!(broadcast.1.peer_id, hello_a.assigned_frontend_id.0);
     assert_eq!(
