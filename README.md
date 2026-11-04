@@ -422,9 +422,26 @@ tests/               integration tests (acceptance gates per milestone)
 
 ## License
 
-Dual-licensed under either of:
+Copyright (c) 2026 Pmacs Authors.
 
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+pmacs is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License, version 3, as published by the Free
+Software Foundation ([LICENSE](LICENSE)). It comes with no warranty, as sections
+15 and 16 of that license set out.
 
-at your option.
+Versions before the change to this license remain available under their earlier
+license, MIT or Apache-2.0 at your option.
+
+The source of a release is at its tag in
+<https://github.com/levineuwirth/pmacs>.
+
+Additional permission under GNU GPL version 3 section 7: if you modify this
+Program, or any covered work, by linking or combining it with the JetBrains Mono
+font (or a modified version of that font), containing parts covered by the terms
+of the SIL Open Font License 1.1, or with the Latin Modern Math font (or a
+modified version of that font), containing parts covered by the terms of the
+GUST Font License, the licensors of this Program grant you additional permission
+to convey the resulting work.
+
+Material from others, those two fonts among it, stays under its own license:
+[THIRD-PARTY.md](THIRD-PARTY.md) lists it.
