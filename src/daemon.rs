@@ -4659,7 +4659,8 @@ fn handle_remote_crdt_op(
                 },
             );
         }
-        // E6c: settle the import's stashed span in the cross-peer
+        // E6c: settle the import's stashed recorded ops
+        // (`Buffer::undo_for` says what they are) in the cross-peer
         // arbiter. A single-codepoint insert joins the source's
         // amalgamation run exactly like a dispatched keystroke (the
         // run counter rotated above); any other shape closes the

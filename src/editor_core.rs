@@ -3211,8 +3211,8 @@ impl EditorCore {
     /// Redo the most recently undone edit on the active buffer.
     ///
     /// E6c: redoes the acting frontend's most recently undone group
-    /// (see [`Buffer::redo_for`]); any forward edit by any source
-    /// clears every source's redo stack.
+    /// (see [`Buffer::redo_for`]); a forward edit clears its own
+    /// source's redo stack and no other source's.
     pub fn redo(&mut self) {
         self.active_window_mut().goal_col = None;
         let buffer_id = self.active_buffer_id();
@@ -5240,8 +5240,9 @@ impl EditorCore {
         }
     }
 
-    /// E6c: settle a remote import's stashed span (see
-    /// [`Buffer::arbiter_settle_remote`]). The daemon calls this
+    /// E6c: settle a remote import's stashed recorded ops (see
+    /// [`Buffer::arbiter_settle_remote`], and [`Buffer::undo_for`] for
+    /// what they are). The daemon calls this
     /// synchronously after a successful import with the source's
     /// current run counter, so a typed op joins the source's
     /// amalgamation run exactly like a dispatched keystroke --- and,

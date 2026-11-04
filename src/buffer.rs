@@ -1152,7 +1152,8 @@ impl Buffer {
     /// 3. Apply the rope stages (rope mutation + mark adjustment +
     ///    revision bump + modified flag + `on_edit` broadcast).
     ///    Skips the CRDT-application stage (already done in step 2)
-    ///    and the v0.1 undo push. The op's spans are stashed for the
+    ///    and the v0.1 undo push. The import's recorded ops (its
+    ///    changes; [`Self::undo_for`] says how) are stashed for the
     ///    arbiter (E6c) rather than recorded: the import's typed-ness
     ///    and the source's run counter are the daemon's to settle,
     ///    right after this returns, via
@@ -1956,7 +1957,8 @@ impl Buffer {
         }
     }
 
-    /// Settle a remote import's stashed spans in the arbiter (E6c).
+    /// Settle a remote import's stashed recorded ops in the arbiter
+    /// (E6c; [`Self::undo_for`] says what they are).
     ///
     /// Called by the daemon synchronously after
     /// [`Self::apply_remote_crdt_op`] returned an edit, with the
@@ -1968,7 +1970,7 @@ impl Buffer {
     /// stashed nothing settles to nothing.
     #[cfg(feature = "crdt")]
     pub fn arbiter_settle_remote(&mut self, source: UndoSource, run: u32, limit: u32, typed: bool) {
-        let Some((spans, change)) = self.pending_remote.take() else {
+        let Some((ops, change)) = self.pending_remote.take() else {
             return;
         };
         if typed {
@@ -1976,7 +1978,7 @@ impl Buffer {
         } else {
             self.arbiter_close(source);
         }
-        self.arbiter_record(source, spans, &change);
+        self.arbiter_record(source, ops, &change);
     }
 
     /// How many undo steps the v0.1 stack holds; `None` in CRDT mode,
@@ -2179,9 +2181,11 @@ impl Buffer {
     /// means undoing the compensation --- the compensation's spans are
     /// a group like any other, and undoing them re-applies what the
     /// user undid. Each source has its own redo stack, fed only by its
-    /// own undos, and any forward edit by any source clears every redo
-    /// stack. The redo's own ops become a closed group on `source`'s
-    /// undo stack, so undo after redo round-trips.
+    /// own undos; a forward edit clears its own source's redo stack and
+    /// is composed into the newest group of every other source's
+    /// (`arbiter_record`), so another frontend's redo outlives it. The
+    /// redo's own ops become a closed group on `source`'s undo stack,
+    /// so undo after redo round-trips.
     ///
     /// Threading: main thread only.
     pub fn redo_for(&mut self, source: UndoSource) -> Result<Edit, BufferError> {
