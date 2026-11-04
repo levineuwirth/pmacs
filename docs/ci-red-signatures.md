@@ -11769,6 +11769,124 @@ So, at E10o's fix round 2: `main` is green at `d595be7` and `8e2696a`, and PR #4
 head `203855f`. #291 met a local sample, listed and not counted, and does not move. Every other
 count above stands.
 
+### E10o's close: PR #449 merged as `5cf359b`, `main` green at `0d74bf7` and red at `5cf359b` on #288's third
+
+Recorded 2026-11-04 at E10o's close. The owner merged PR #449 at 15:47:25Z as `5cf359b`, a squash of
+`203855f` on `0d74bf7` whose diff is the head's against its merge base `5a029e4` (the same `git
+patch-id --stable`), its tree the head merged into `0d74bf7` (`git merge-tree`), GitHub's signature
+valid and `%(trailers)` empty, its body the prepared file; #444 and #448 closed with it. Every run
+was read from the jobs endpoint by conclusion, and every test leg of the code-bearing run through
+its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its
+own result line. Every run id and job id below was searched for in this file before it was written,
+and only PR #449's `CI` 41850584550, cited below from fix round 2's section, was here. Nothing was
+rerun.
+
+#### `main` at `0d74bf7`, E10o fix round 2's registry commit: green
+
+`CI` 41857902454 at `0d74bf7`, attempt 1 of 1, `push`, created 2026-11-04T15:27:16Z and completed
+15:29:49Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-0d74bf7): 15 = 6 + 9.
+
+Tally (main-ci-0d74bf7-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 126671388042 | success |
+| Lint (luajit) | 126671388130 | success |
+| Commit attribution (D9) | 126671388253 | success |
+| Changed paths | 126671388259 | success |
+| Lint (lua54) | 126671388766 | success |
+| Docs consistency | 126671511637 | success |
+| M1 Acceptance Gates | 126671514511 | skipped |
+| M10 Perf Gates (crdt) | 126671514729 | skipped |
+| M6 Perf Gates | 126671514772 | skipped |
+| Perf budgets (debug) | 126671514987 | skipped |
+| GPU Render (headless) | 126671515021 | skipped |
+| M5 Perf Gates | 126671515400 | skipped |
+| Test (crdt) | 126671515459 | skipped |
+| M4 Perf Gates | 126671515641 | skipped |
+| Test (matrix) | 126671515669 | skipped |
+
+Tally (main-ci-0d74bf7-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 126671511637: `test result: ok. 18 passed`. The skipped matrix row is the one job
+the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz`
+41857902397 at `0d74bf7`, `success`, both arms deciding `run=false` (`no changed path can change the
+grammar set`): `Grammar fuzz` 126671386551 and `Grammar fuzz (asan-strict)` 126671385910.
+
+#### `main` at `5cf359b`, E10o's squash merge of PR #449: red on #288's third, one leg never run
+
+`CI` 41861397364 at `5cf359b`, attempt 1 of 1, `push`, created 2026-11-04T15:47:30Z and completed
+16:26:50Z (the API's `updated_at`): `failure`. The tally reads success, failure, cancelled and
+skipped.
+
+Tally (main-ci-5cf359b): 19 = 16 + 1 + 1 + 1.
+
+Tally (main-ci-5cf359b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 126683845077 | success |
+| Lint (lua54) | 126683845356 | success |
+| Format | 126683845417 | success |
+| Commit attribution (D9) | 126683845626 | success |
+| Lint (luajit) | 126683846063 | success |
+| M1 Acceptance Gates | 126684008507 | success |
+| Perf budgets (debug) | 126684008644 | success |
+| GPU Render (headless) | 126684008653 | success |
+| M6 Perf Gates | 126684008668 | success |
+| M4 Perf Gates | 126684008700 | success |
+| M5 Perf Gates | 126684008707 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126684008751 | success |
+| M10 Perf Gates (crdt) | 126684008752 | success |
+| Test (crdt) | 126684008775 | success |
+| Test (ubuntu-latest / luajit) | 126684008776 | success |
+| Test (ubuntu-latest / lua54) | 126684008844 | failure |
+| Test (macos-latest / lua54) | 126684008934 | success |
+| Test (macos-latest / luajit) | 126684009129 | cancelled |
+| Docs consistency | 126684011525 | skipped |
+
+Tally (main-ci-5cf359b-success): 16 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / lua54)` 126684008844 ran 15:47:49Z to 16:25:06Z: its test step paired 226
+  `running` lines with 226 result lines, 5,422 passed, 1 failed, 81 ignored, and its `cargo test
+  --doc` and protocol steps were skipped after the failure (the job's step list). The failure (log
+  lines 4594 to 4608) is
+  `e7c_indicator_acceptance::e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line` at
+  `tests/e7c_indicator_acceptance.rs:451:5`, every required fragment of #288: `the check's
+  diagnostic landed: ["pmacs-fake-lsp"]` and `test result: FAILED. 4 passed; 1 failed; 0 ignored`
+  (3.82 s). **#288's third CI occurrence**, after PR #287's at `ac61f97` and `main`'s at `0b72108`;
+  the samples its comments list since were local, listed and not counted. The same row was `ok` on
+  this leg in PR #449's `CI` 41850584550 at `203855f`, and on the four other legs that ran it here.
+  No line of the squash's `src/` diff names a save, a diagnostic or LSP, and it touches neither the
+  suite nor the fake: an argument from the diff, not a measurement. The runner's root was
+  `/dev/root`, 147,718 MB, 33,674 MB available after the tests, target 51,590 MB. Commented on #288
+  (issuecomment-6636110243).
+- `Test (macos-latest / luajit)` 126684009129, `cancelled`, 15:47:46Z to 16:02:49Z, its runner name
+  empty and its logs endpoint answering 404: `The job was not acquired by Runner of type hosted even
+  after multiple attempts`, beside the notice that capacity constraints may lengthen queue times on
+  macOS arm64 runners. It ran nothing, so it says nothing of this tree. It passed at `203855f` (229
+  pairs, 5,433 / 0 / 79), on a merge whose tree differs from this squash's by the registry alone.
+- The other four test legs, each through its own log: `Test (crdt)` 126684008775, 227 pairs, 5,424
+  passed, 81 ignored; `Test (ubuntu-latest / luajit)` 126684008776, 228 pairs, 5,477 passed, 81
+  ignored; `Test (ubuntu-latest / luajit, no crdt)` 126684008751, 228 pairs, 4,842 passed, 67
+  ignored; `Test (macos-latest / lua54)` 126684008934, 229 pairs, 5,433 passed, 79 ignored: the
+  head's figures on every leg. E10o's 17 `r2_` rows and its paused row are `ok` on these three crdt
+  legs and on the red one. `WouldBlock` and `signal 7` appear in no test leg's log.
+- `GPU Render (headless)` 126684008653: `394 passed`. `Perf budgets (debug)` 126684008644: `every
+  budget ran and held`. `M10 Perf Gates (crdt)` 126684008752: `6 passed` (60.70 s). `Commit
+  attribution (D9)` 126683845626: one commit in `0d74bf7..5cf359b`, carrying no attribution and no
+  trailer.
+
+`Grammar fuzz` 41861397340 at `5cf359b`, `success`, both arms deciding `run=false` (`no changed path
+can change the grammar set`): `Grammar fuzz` 126683844657 and `Grammar fuzz (asan-strict)`
+126683845252.
+
+So, at E10o's close: `main` is green at `0d74bf7` and red at `5cf359b` on #288's third, with `Test
+(macos-latest / luajit)` not run there, and PR #449 merged green at `203855f`. #288 is at three.
+Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
