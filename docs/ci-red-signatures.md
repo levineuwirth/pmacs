@@ -11610,6 +11610,165 @@ So, at E10n's close: `main` is green at `fcaf6d8` and `ce508c9`, and PR #456 is 
 change's paths, and not rerun. #328 is at four, each of the last two on the 73,325 MB root. #316 and
 #312 met local samples, listed and not counted, and do not move. Every other count above stands.
 
+### E10o fix round 2: PR #449 green at `203855f`, `main` green at `d595be7` and `8e2696a`, the gates listed
+
+Recorded 2026-11-04 at E10o's fix round 2, on review 2. PR #449 (`e10o/one-span-per-change`) moved
+from `f013954` to `203855f` by three signed commits: comments on an import's route and on whose redo
+a forward edit clears (`f9274d6`); the undo suite's replicas read on a thread, with a row in
+`cross`'s shape paused 1,500 ms (`8482391`); the review's probes as a suite of their own
+(`203855f`). Every run was read from the jobs endpoint by conclusion, and every test leg of the
+code-bearing run through its own log, fetched with escape sequences allowed and stripped, each
+`running` line paired with its own result line. Each of the 61 run and job ids below was searched
+for in this file before it was written, and none was here, a known id as the control. Nothing was
+rerun.
+
+#### `main` at `d595be7` and `8e2696a`, E10n's registry commits: green
+
+E10n's section records `main` through `ce508c9`. `CI` 41770338627 at `d595be7`, attempt 1 of 1,
+`push`, created 2026-11-04T03:58:29Z and completed 04:00:30Z (the API's `updated_at`): `success`,
+the registry-push shape.
+
+Tally (main-ci-d595be7): 15 = 6 + 9.
+
+Tally (main-ci-d595be7-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 126378313043 | success |
+| Format | 126378313329 | success |
+| Lint (lua54) | 126378313363 | success |
+| Lint (luajit) | 126378313393 | success |
+| Changed paths | 126378313491 | success |
+| Docs consistency | 126378372090 | success |
+| Test (crdt) | 126378373279 | skipped |
+| Test (matrix) | 126378373327 | skipped |
+| M4 Perf Gates | 126378373520 | skipped |
+| GPU Render (headless) | 126378373549 | skipped |
+| M10 Perf Gates (crdt) | 126378373698 | skipped |
+| M6 Perf Gates | 126378373751 | skipped |
+| M1 Acceptance Gates | 126378373814 | skipped |
+| M5 Perf Gates | 126378374298 | skipped |
+| Perf budgets (debug) | 126378374479 | skipped |
+
+Tally (main-ci-d595be7-success): 6 rows of the table above with `result` = `success`.
+
+`CI` 41770397029 at `8e2696a`, attempt 1 of 1, `push`, created 2026-11-04T03:59:07Z and completed
+04:01:11Z (the API's `updated_at`): `success`, the same shape.
+
+Tally (main-ci-8e2696a): 15 = 6 + 9.
+
+Tally (main-ci-8e2696a-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 126378504179 | success |
+| Changed paths | 126378504328 | success |
+| Format | 126378504336 | success |
+| Lint (lua54) | 126378504421 | success |
+| Commit attribution (D9) | 126378504591 | success |
+| Docs consistency | 126378553763 | success |
+| M4 Perf Gates | 126378554771 | skipped |
+| M10 Perf Gates (crdt) | 126378555055 | skipped |
+| GPU Render (headless) | 126378555096 | skipped |
+| Test (matrix) | 126378555171 | skipped |
+| M6 Perf Gates | 126378555265 | skipped |
+| Perf budgets (debug) | 126378555545 | skipped |
+| M1 Acceptance Gates | 126378555789 | skipped |
+| M5 Perf Gates | 126378555831 | skipped |
+| Test (crdt) | 126378556509 | skipped |
+
+Tally (main-ci-8e2696a-success): 6 rows of the table above with `result` = `success`.
+
+`Docs consistency` 126378372090 and 126378553763: `test result: ok. 18 passed` each. The skipped
+matrix row is the one job the API names with its unexpanded template, written here as `Test
+(matrix)`. `Grammar fuzz` 41770338613 at `d595be7`, `success`, both arms deciding `run=false` (`no
+changed path can change the grammar set`): `Grammar fuzz` 126378313246 and `Grammar fuzz
+(asan-strict)` 126378312941. `Grammar fuzz` 41770397021 at `8e2696a`, `success`, the same: `Grammar
+fuzz` 126378504117 and `Grammar fuzz (asan-strict)` 126378504410.
+
+#### PR #449's `CI` 41850584550 at `203855f`: green
+
+`pull_request`, the merge `3ac74ee` of `203855f` into `8e2696a` (its checkout's `HEAD is now at`
+line), attempt 1 of 1, created 2026-11-04T14:44:30Z and completed 15:22:26Z (the API's
+`updated_at`): `success`.
+
+Tally (pr449-ci-203855f): 19 = 18 + 1.
+
+Tally (pr449-ci-203855f-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 126645493827 | success |
+| Lint (lua54) | 126645494295 | success |
+| Commit attribution (D9) | 126645494326 | success |
+| Lint (luajit) | 126645494509 | success |
+| Format | 126645494515 | success |
+| GPU Render (headless) | 126645630108 | success |
+| M5 Perf Gates | 126645630222 | success |
+| M4 Perf Gates | 126645630344 | success |
+| Test (macos-latest / lua54) | 126645630347 | success |
+| Perf budgets (debug) | 126645630409 | success |
+| M10 Perf Gates (crdt) | 126645630429 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126645630474 | success |
+| M1 Acceptance Gates | 126645630492 | success |
+| Test (ubuntu-latest / luajit) | 126645630495 | success |
+| M6 Perf Gates | 126645630513 | success |
+| Test (macos-latest / luajit) | 126645630631 | success |
+| Test (crdt) | 126645630811 | success |
+| Test (ubuntu-latest / lua54) | 126645630931 | success |
+| Docs consistency | 126645634017 | skipped |
+
+Tally (pr449-ci-203855f-success): 18 rows of the table above with `result` = `success`.
+
+- The six test legs pair each `running` line with a `test result: ok`: `Test (crdt)` 126645630811,
+  14:44:48Z to 15:22:25Z, 227 pairs, 5,424 passed, 81 ignored; `Test (ubuntu-latest / luajit)`
+  126645630495 and `Test (ubuntu-latest / lua54)` 126645630931, 228 each, 5,477 passed, 81 ignored;
+  `Test (ubuntu-latest / luajit, no crdt)` 126645630474, 228, 4,842 passed, 67 ignored; `Test
+  (macos-latest / luajit)` 126645630631 and `Test (macos-latest / lua54)` 126645630347, 229 each,
+  5,433 passed, 79 ignored. Against this PR's `CI` 41746714536 at `f013954`, each leg has one more
+  pair, `e10o_review2_probes`, and each crdt leg 23 more passed: that suite's 22 and the paused row
+  in `undo_reach_438_probes`; on `no crdt` the suite is its empty binary and the passed count does
+  not move. `undo_reach_438_probes` ran 26 and passed 26, and `e10o_review2_probes` ran 22 and
+  passed 22, on the five crdt legs, each block read by the names in it, since a `Running` line can
+  print before the previous binary's result. The 17 `r2_` rows and
+  `a_crossing_paused_before_the_observers_wait_still_crosses` are each `ok` on those five.
+  `WouldBlock` appears in no test leg's log, and no test line reads `FAILED`.
+- `Perf budgets (debug)` 126645630409: `every budget ran and held`. `GPU Render (headless)`
+  126645630108: `pmacs-gpu` 394 passed. `M10 Perf Gates (crdt)` 126645630429: M10.2's suite `6
+  passed` (60.65 s). `Commit attribution (D9)` 126645494326: `11 commit(s) in 5a029e4..203855f`,
+  none carrying attribution and none a trailer. `Docs consistency` 126645634017 is skipped.
+
+`Grammar fuzz` 41850584535 at `203855f`, attempt 1 of 1, `success`, both arms deciding `run=false`
+(`no changed path can change the grammar set`): `Grammar fuzz` 126645494881, `Grammar fuzz
+(asan-strict)` 126645495544.
+
+#### The gates: listed, not tallied
+
+In the worktree `pmacs-e10o` on its target `pmacs-e10o-2ca10753`. The fix round's logs are in
+`~/build/e10o-f2/gate-logs/`, review 2's in `~/build/e10o-r2/gate-logs/`.
+
+- `20261104T083045Z-2100319` at `f013954`, E10o review 2's, `--perf`: all seven stages ok;
+  `05-sweep`, to 08:45:44Z, 5,846 passed / 0 failed / 81 ignored at 235 pairs, `WouldBlock` in none,
+  no daemon surviving (identified by environ); `perf` held every budget across a suspend (08:47:01Z
+  to 11:22:13Z), so no measurement, and held them again on the clean tree, 12:32:55Z to 12:37:22Z.
+  Listed here because the review made no registry commit.
+- `20261104T140301Z-3973647` at `203855f`, `--perf`, 14:03:01Z to 14:22:43Z, its start check reading
+  `some avg60` 0.07 on the CPU and 0.00 on memory: six of seven; `05-sweep` 5,868 / 1 / 81 at 236
+  pairs, `WouldBlock` in none, no daemon surviving; `perf` held every budget. The red: #291's
+  fragments on `e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` (`store []`, a
+  trace with `LSP:ready·setting` and no `processi`, `4 passed; 1 failed; 0 ignored`, 127.29 s, log
+  lines 3865 to 3880), commented there (issuecomment-6633605975). Its sampler over the two samples
+  naming the row's binary: load 4.45 to 8.65, `some avg60` 0.80 to 3.67 on the CPU and 0.05 to 0.17
+  on memory, another project's `java` and `site` beside it.
+- `20261104T142321Z-8626` at `203855f`, `--perf`, 14:23:21Z to 14:39:06Z, its start check reading
+  20.64 and 0.01: all seven stages ok; `05-sweep` 5,869 / 0 / 81 at 236 pairs, every `running` line
+  paired with a result line, `WouldBlock` in none, no daemon surviving (identified by environ);
+  `perf` held every budget. The same row count as the red gate, the HLS row `ok`.
+
+So, at E10o's fix round 2: `main` is green at `d595be7` and `8e2696a`, and PR #449 is green at its
+head `203855f`. #291 met a local sample, listed and not counted, and does not move. Every other
+count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
