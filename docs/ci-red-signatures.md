@@ -11376,7 +11376,7 @@ So, at E10o's fix round 1: `main` is green at `5a029e4`, and PR #449 is green at
 Recorded 2026-11-04 at E10n's close. PR #456 (`e10n/worker-own-peak`, closing #445) is six signed
 commits on `fcaf6d8`, in the worktree `pmacs-e10k-base`. Every run was read from the jobs endpoint
 by conclusion, and every test leg that ran tests through its own log, fetched with escape sequences
-allowed and stripped, each `running` line paired with its own result line. Each of the 66 run and
+allowed and stripped, each `running` line paired with its own result line. Each of the 104 run and
 job ids below was searched for in this file before it was written, and none was here, a known id as
 the control. Nothing was rerun.
 
