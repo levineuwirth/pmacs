@@ -1107,13 +1107,14 @@ fn watch_memory<W: Write>(parsing: &Parsing, out: &Mutex<W>, options: ServeOptio
 /// legs). 0 where neither is read.
 #[must_use]
 pub fn peak_resident_bytes() -> u64 {
-    self_status_bytes("VmHWM:").unwrap_or_else(rusage_peak_bytes)
+    proc_status_bytes("self", "VmHWM:").unwrap_or_else(rusage_peak_bytes)
 }
 
-/// The figure `key` names in `/proc/self/status`, kibibytes there, as
-/// bytes; `None` where there is none.
-fn self_status_bytes(key: &str) -> Option<u64> {
-    std::fs::read_to_string("/proc/self/status")
+/// The figure `key` names in `/proc/<who>/status`, kibibytes there, as
+/// bytes; `None` where there is none (macOS).
+#[must_use]
+pub fn proc_status_bytes(who: &str, key: &str) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/{who}/status"))
         .ok()?
         .lines()
         .find_map(|l| l.strip_prefix(key))
@@ -1151,5 +1152,5 @@ pub fn rusage_peak_bytes() -> u64 {
 /// (Linux), else the peak, which is never below it.
 #[must_use]
 pub fn resident_bytes() -> u64 {
-    self_status_bytes("VmRSS:").unwrap_or_else(peak_resident_bytes)
+    proc_status_bytes("self", "VmRSS:").unwrap_or_else(peak_resident_bytes)
 }

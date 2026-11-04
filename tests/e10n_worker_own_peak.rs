@@ -46,17 +46,6 @@ const CHILD: &str = "PMACS_E10N_CHILD";
 /// What the platform row's parent holds while it spawns its child.
 const HELD: usize = 384 << 20;
 
-/// `key`'s figure in kB from `/proc/<who>/status`, in bytes; `None` where
-/// there is none (macOS).
-fn proc_status_bytes(who: &str, key: &str) -> Option<u64> {
-    std::fs::read_to_string(format!("/proc/{who}/status"))
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix(key))
-        .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
-        .map(|kb| kb * 1024)
-}
-
 fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / MIB)
 }
@@ -78,7 +67,7 @@ fn e10n_a_child_s_rusage_peak_and_its_spawner_s() {
         println!(
             "e10n-child rusage={} hwm={}",
             pmacs_parse_unit::rusage_peak_bytes(),
-            proc_status_bytes("self", "VmHWM:").unwrap_or(0)
+            pmacs_parse_unit::proc_status_bytes("self", "VmHWM:").unwrap_or(0)
         );
         return;
     }
@@ -525,10 +514,11 @@ fn e10n_a_worker_started_after_the_daemon_grew_reports_its_own_peak_and_is_kept(
     for buffer in ["after", "early"] {
         let pids = run.units(buffer);
         let parses = run.parses(&pids);
-        assert_eq!(
-            parses.len(),
-            3,
-            "{buffer}: three parses traced: {:?}",
+        // At least the three its notes name; a follow-up dispatch under load
+        // would add one, in the same worker and as incremental.
+        assert!(
+            parses.len() >= 3,
+            "{buffer}: its three parses traced: {:?}",
             run.trace
         );
         let peak = parses[0]["peak"].as_u64().expect("a peak");
