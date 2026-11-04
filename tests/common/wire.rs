@@ -50,6 +50,14 @@ pub fn read_into_queue(stream: &UnixStream) -> mpsc::Receiver<InstanceMessage> {
     read_into_queue_unless(stream, Arc::new(AtomicBool::new(false)))
 }
 
+/// [`read_into_queue`] for a socket a row has been reading itself, or that
+/// `attach_multi` gave a read timeout: the timeout goes first, or the thread
+/// would end at its first quiet read and the socket would be left unread.
+pub fn queue_from_here(stream: &UnixStream) -> mpsc::Receiver<InstanceMessage> {
+    stream.set_read_timeout(None).expect("blocking reads");
+    read_into_queue(stream)
+}
+
 /// [`read_into_queue`], reading nothing while `paused` holds, as a stopped
 /// process reads nothing with its socket open (E10r): the frame in hand
 /// is read whole, and from then on the daemon's writes fill the socket.

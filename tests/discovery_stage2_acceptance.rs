@@ -571,14 +571,14 @@ fn pump<T>(
 /// everything that arrived.
 #[cfg(feature = "crdt")]
 fn collect_minibuffer(
-    stream: &mut UnixStream,
+    reads: &std::sync::mpsc::Receiver<InstanceMessage>,
     what: &str,
     mut done: impl FnMut(&Mb) -> bool,
 ) -> Vec<Mb> {
     let mut seen = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        match read_message::<InstanceMessage>(stream) {
+        match reads.recv_timeout(Duration::from_millis(100)) {
             Ok(InstanceMessage::MinibufferPrompt {
                 prompt, candidates, ..
             }) => {
@@ -587,7 +587,7 @@ fn collect_minibuffer(
             Ok(InstanceMessage::MinibufferPromptRows { prompt, rows, .. }) => {
                 seen.push(Mb::Rows { prompt, rows });
             }
-            Ok(_) => continue,
+            Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(error) => panic!("{what}: read stopped: {error}"),
         }
         if done(seen.last().expect("just pushed")) {
@@ -628,8 +628,12 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
     // The compatibility half attaches FIRST, deliberately: it is the
     // half an over-eager bump destroys, so a regression fails here
     // rather than after the interesting half has already passed.
-    let (mut legacy, _legacy_fid) = attach_semantic(&daemon, 22);
+    // A thread reads each from its attach on, so the wait on one holds nothing
+    // up on the other and neither is dropped (#390, E10r).
+    let (legacy, _legacy_fid) = attach_semantic(&daemon, 22);
+    let reads_legacy = common::wire::queue_from_here(&legacy);
     let (mut current, current_fid) = attach_semantic(&daemon, PROTOCOL_VERSION);
+    let reads_current = common::wire::queue_from_here(&current);
     assert_eq!(PROTOCOL_VERSION, 27);
 
     // Open the real `M-x` through the real key path, then narrow to the
@@ -641,7 +645,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
         send_key(&mut current, current_fid, Key::Char(ch), Modifiers::NONE);
     }
 
-    let on_current = collect_minibuffer(&mut current, "v23 open", |mb| match mb {
+    let on_current = collect_minibuffer(&reads_current, "v23 open", |mb| match mb {
         Mb::Rows { prompt, rows } => {
             prompt.is_some() && rows.iter().any(|row| row.label == "zzprobe")
         }
@@ -665,7 +669,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
     );
 
     // The same session state, seen by the v22 peer, in the frozen shape.
-    let on_legacy = collect_minibuffer(&mut legacy, "v22 open", |mb| match mb {
+    let on_legacy = collect_minibuffer(&reads_legacy, "v22 open", |mb| match mb {
         Mb::Legacy { prompt, candidates } => {
             prompt.is_some() && candidates.iter().any(|c| c == "zzprobe")
         }
@@ -681,7 +685,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
     // forever, and the witness for "it actually cleared" is a `prompt:
     // None` in the family the frontend is mirroring.
     send_key(&mut current, current_fid, Key::Escape, Modifiers::NONE);
-    let closed_current = collect_minibuffer(&mut current, "v23 close", |mb| {
+    let closed_current = collect_minibuffer(&reads_current, "v23 close", |mb| {
         matches!(mb, Mb::Rows { prompt: None, .. })
     });
     assert!(
@@ -690,7 +694,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
             .all(|mb| matches!(mb, Mb::Rows { .. })),
         "the v23 close must not arrive as a legacy clear: {closed_current:?}"
     );
-    let closed_legacy = collect_minibuffer(&mut legacy, "v22 close", |mb| {
+    let closed_legacy = collect_minibuffer(&reads_legacy, "v22 close", |mb| {
         matches!(mb, Mb::Legacy { prompt: None, .. })
     });
     assert!(

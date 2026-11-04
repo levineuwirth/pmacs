@@ -611,15 +611,15 @@ fn m10_7_no_negotiation_for_v1_frontend() {
 fn m10_8_two_frontends_attached_simultaneously_receive_presence_broadcasts() {
     let daemon = TestDaemon::spawn();
 
+    // A thread reads each from its first frame on, so the one this row is not
+    // looking at holds nothing up and is not dropped (#390, E10r).
     let (hello_a, mut stream_a) = attach_multi(&daemon);
-    let (hello_b, mut stream_b) = attach_multi(&daemon);
-    assert_ne!(hello_a.assigned_frontend_id, hello_b.assigned_frontend_id);
-
-    // Read initial frames synchronously so kernel buffers stay
-    // drained; drain_pending's 50ms-timeout reads back up under
-    // the dispatcher's per-tick writes.
     let _initial_a: InstanceMessage = read_message(&mut stream_a).expect("A initial frame");
+    let _reads_a = common::wire::queue_from_here(&stream_a);
+    let (hello_b, mut stream_b) = attach_multi(&daemon);
     let _initial_b: InstanceMessage = read_message(&mut stream_b).expect("B initial frame");
+    let reads_b = common::wire::queue_from_here(&stream_b);
+    assert_ne!(hello_a.assigned_frontend_id, hello_b.assigned_frontend_id);
 
     // Send a key event from A. The daemon dispatches it to A's
     // active window; cursor moves; per-tick presence sweep
@@ -636,13 +636,10 @@ fn m10_8_two_frontends_attached_simultaneously_receive_presence_broadcasts() {
     // checking that B receives a PresenceUpdate sourced from
     // hello_a.assigned_frontend_id.
     let deadline = Instant::now() + Duration::from_secs(2);
-    stream_b
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
     let mut saw_presence_from_a = false;
     while Instant::now() < deadline {
         if let Ok(InstanceMessage::PresenceUpdate { frontend_id, .. }) =
-            read_message::<InstanceMessage>(&mut stream_b)
+            reads_b.recv_timeout(Duration::from_millis(200))
             && frontend_id == hello_a.assigned_frontend_id
         {
             saw_presence_from_a = true;
@@ -924,10 +921,12 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
     let (_hello_b, mut stream_b) = attach_multi(&daemon);
     let _initial_b_cd: InstanceMessage = read_message(&mut stream_b).expect("B initial cd");
     let _initial_b_cu: InstanceMessage = read_message(&mut stream_b).expect("B initial cursor");
+    let reads_b = common::wire::queue_from_here(&stream_b);
 
     // A attaches the first time.
     let (hello_a1, mut stream_a1) = attach_multi(&daemon);
     let _a1_init: InstanceMessage = read_message(&mut stream_a1).expect("A1 init");
+    let reads_a1 = common::wire::queue_from_here(&stream_a1);
     // A1 moves cursor so an overlay is generated for B.
     let key1 = FrontendEvent::Key(KeyEvent {
         frontend_id: hello_a1.assigned_frontend_id,
@@ -938,16 +937,20 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
     write_message(&mut stream_a1, &key1).expect("send key from A1");
 
     // Capture A1's overlay color from B.
-    let color_a1 = wait_for_palette_color_in_b(&mut stream_b, Duration::from_secs(2))
+    let color_a1 = wait_for_palette_color_in_b(&reads_b, Duration::from_secs(2))
         .expect("should observe A1's overlay color");
 
     // Detach A1 and reattach as A2. Nothing has to settle in between:
     // the slot is keyed by the peer's uid at attach time, not by A1's
     // departure, so A2 needs no readiness wait (the pause that used to
     // sit here waited for nothing).
-    drop(stream_a1);
+    stream_a1
+        .shutdown(std::net::Shutdown::Both)
+        .expect("A1's reader holds a clone, so its socket is shut, not dropped");
+    drop(reads_a1);
     let (hello_a2, mut stream_a2) = attach_multi(&daemon);
     let _a2_init: InstanceMessage = read_message(&mut stream_a2).expect("A2 init");
+    let _reads_a2 = common::wire::queue_from_here(&stream_a2);
     let key2 = FrontendEvent::Key(KeyEvent {
         frontend_id: hello_a2.assigned_frontend_id,
         key: Key::Char('y'),
@@ -956,7 +959,7 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
     });
     write_message(&mut stream_a2, &key2).expect("send key from A2");
 
-    let color_a2 = wait_for_palette_color_in_b(&mut stream_b, Duration::from_secs(2))
+    let color_a2 = wait_for_palette_color_in_b(&reads_b, Duration::from_secs(2))
         .expect("should observe A2's overlay color");
 
     // The daemon learns the peer's uid through SO_PEERCRED, which exists
@@ -981,14 +984,14 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
 /// `stream` for up to `timeout` and return the first palette
 /// color found in any overlay cell.
 #[cfg(feature = "crdt")]
-fn wait_for_palette_color_in_b(stream: &mut UnixStream, timeout: Duration) -> Option<Color> {
+fn wait_for_palette_color_in_b(
+    reads: &std::sync::mpsc::Receiver<InstanceMessage>,
+    timeout: Duration,
+) -> Option<Color> {
     let deadline = Instant::now() + timeout;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .ok();
     while Instant::now() < deadline {
         if let Ok(InstanceMessage::CellDelta { spans, .. }) =
-            read_message::<InstanceMessage>(stream)
+            reads.recv_timeout(Duration::from_millis(200))
         {
             for span in &spans {
                 for cell in &span.cells {
@@ -1536,10 +1539,10 @@ fn m10_10_criterion_3_two_frontend_conflict_converges() {
     let daemon = TestDaemon::spawn();
 
     // Two replica frontends.
+    // Both receive BufferSnapshot for *scratch* (empty buffer). A thread reads
+    // each from then on, so the wait on one holds nothing up on the other
+    // (#390, E10r).
     let (hello_a, mut stream_a) = attach_multi(&daemon);
-    let (hello_b, mut stream_b) = attach_multi(&daemon);
-
-    // Both receive BufferSnapshot for *scratch* (empty buffer).
     let (buffer_id, snap_a) = match read_message::<InstanceMessage>(&mut stream_a).expect("A snap")
     {
         InstanceMessage::BufferSnapshot {
@@ -1548,10 +1551,13 @@ fn m10_10_criterion_3_two_frontend_conflict_converges() {
         } => (buffer_id, crdt_snapshot),
         other => panic!("expected BufferSnapshot, got {other:?}"),
     };
+    let reads_a = common::wire::queue_from_here(&stream_a);
+    let (hello_b, mut stream_b) = attach_multi(&daemon);
     let snap_b = match read_message::<InstanceMessage>(&mut stream_b).expect("B snap") {
         InstanceMessage::BufferSnapshot { crdt_snapshot, .. } => crdt_snapshot,
         other => panic!("expected BufferSnapshot, got {other:?}"),
     };
+    let reads_b = common::wire::queue_from_here(&stream_b);
 
     // Bootstrap test-side replicas from the snapshots. These
     // simulate the frontends' BufferMirror state.
@@ -1603,19 +1609,13 @@ fn m10_10_criterion_3_two_frontend_conflict_converges() {
     // Both frontends should receive the OTHER frontend's op via
     // daemon broadcast. Drain incoming streams until each has seen
     // the other's CrdtOp.
-    stream_a
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    stream_b
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut a_received_b_op = false;
     let mut b_received_a_op = false;
     while Instant::now() < deadline && !(a_received_b_op && b_received_a_op) {
         if !a_received_b_op
             && let Ok(InstanceMessage::CrdtOp { op, .. }) =
-                read_message::<InstanceMessage>(&mut stream_a)
+                reads_a.recv_timeout(Duration::from_millis(500))
             && op.peer_id == hello_b.assigned_frontend_id.0
         {
             replica_a
@@ -1625,7 +1625,7 @@ fn m10_10_criterion_3_two_frontend_conflict_converges() {
         }
         if !b_received_a_op
             && let Ok(InstanceMessage::CrdtOp { op, .. }) =
-                read_message::<InstanceMessage>(&mut stream_b)
+                reads_b.recv_timeout(Duration::from_millis(500))
             && op.peer_id == hello_a.assigned_frontend_id.0
         {
             replica_b
@@ -2310,7 +2310,10 @@ fn m10_10_f14_production_path_keystroke_flows_to_broadcast() {
     assert_eq!(event_buffer_id, buffer_id);
     assert_eq!(op_peer_id, hello_a.assigned_frontend_id.0);
 
-    // Send the produced event upstream; B must see the broadcast.
+    // Send the produced event upstream; B must see the broadcast. A is not
+    // read again, so a thread reads it, or its full socket would hold up the
+    // daemon on the way to B (#390, E10r).
+    let _reads_a = common::wire::queue_from_here(&stream_a);
     write_message(&mut stream_a, &frontend_event).expect("write CrdtOp");
     let deadline = Instant::now() + Duration::from_secs(2);
     let broadcast = wait_for_crdt_op_broadcast(&mut stream_b, deadline)

@@ -99,6 +99,7 @@ mod crdt {
     use std::process::{Child, ChildStdin};
 
     use common::reap::Reaped;
+    use common::wire::queue_from_here;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -852,22 +853,30 @@ mod crdt {
 
         let existing_socket = temp.path().join("existing-target.sock");
         let mut daemon = spawn_daemon(&existing_socket, &[]);
+        // A thread reads each session from its attach on, so the others are
+        // held up by none of them and none is dropped (#390, E10r).
         let mut alpha = attach_target(&existing_socket, &cwd, Path::new("alpha.txt"));
-        let mut same_alpha = attach_target(&existing_socket, &cwd, Path::new("./alpha.txt"));
+        let _reads_alpha = queue_from_here(&alpha.stream);
+        let same_alpha = attach_target(&existing_socket, &cwd, Path::new("./alpha.txt"));
+        let reads_same_alpha = queue_from_here(&same_alpha.stream);
         let beta = attach_target(&existing_socket, &cwd, Path::new("nested/../beta.txt"));
+        let _reads_beta = queue_from_here(&beta.stream);
         assert_eq!(alpha.replica.materialize_string(), "alpha\n");
         assert_eq!(same_alpha.buffer_id, alpha.buffer_id);
         assert_eq!(beta.replica.materialize_string(), "beta\n");
         assert_ne!(beta.buffer_id, alpha.buffer_id);
         if let Some(raw_name) = &raw_name {
             let raw = attach_target(&existing_socket, &cwd, Path::new(raw_name.as_os_str()));
+            let _reads_raw = queue_from_here(&raw.stream);
             assert_eq!(raw.replica.materialize_string(), "raw\n");
         }
         let missing_path = Path::new("new-draft.txt");
         let missing = attach_target(&existing_socket, &cwd, missing_path);
+        let _reads_missing = queue_from_here(&missing.stream);
         assert_eq!(missing.replica.materialize_string(), "");
         assert!(!cwd.join(missing_path).exists());
         let same_missing = attach_target(&existing_socket, &cwd, Path::new("./new-draft.txt"));
+        let _reads_same_missing = queue_from_here(&same_missing.stream);
         assert_eq!(same_missing.buffer_id, missing.buffer_id);
 
         let version = alpha.replica.version();
@@ -893,7 +902,8 @@ mod crdt {
         )
         .expect("send alpha edit");
         loop {
-            match read_message::<InstanceMessage>(&mut same_alpha.stream)
+            match reads_same_alpha
+                .recv_timeout(Duration::from_secs(5))
                 .expect("read alpha broadcast")
             {
                 InstanceMessage::CrdtOp { buffer_id, op } if buffer_id == alpha.buffer_id => {
