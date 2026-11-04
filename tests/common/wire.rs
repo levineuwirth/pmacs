@@ -13,6 +13,8 @@
 //! what its bootstrap carried.
 
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -45,10 +47,26 @@ pub fn semantic_caps() -> FrontendCapabilities {
 /// stalls the daemon inside a second: the daemon writes to every session
 /// synchronously from its one dispatcher thread (#390).
 pub fn read_into_queue(stream: &UnixStream) -> mpsc::Receiver<InstanceMessage> {
+    read_into_queue_unless(stream, Arc::new(AtomicBool::new(false)))
+}
+
+/// [`read_into_queue`], reading nothing while `paused` holds, as a stopped
+/// process reads nothing with its socket open (E10r): the frame in hand
+/// is read whole, and from then on the daemon's writes fill the socket.
+fn read_into_queue_unless(
+    stream: &UnixStream,
+    paused: Arc<AtomicBool>,
+) -> mpsc::Receiver<InstanceMessage> {
     let mut reader = stream.try_clone().expect("clone stream");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        while let Ok(msg) = read_message::<InstanceMessage>(&mut reader) {
+        loop {
+            while paused.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let Ok(msg) = read_message::<InstanceMessage>(&mut reader) else {
+                break;
+            };
             if tx.send(msg).is_err() {
                 break;
             }
@@ -75,6 +93,8 @@ pub struct WireSession {
     /// and the target's result of a semantic bootstrap. Empty for a
     /// session minted no token.
     pub bootstrap: Vec<InstanceMessage>,
+    /// Holds while [`Self::stop_reading`] has the reader thread idle.
+    paused: Arc<AtomicBool>,
 }
 
 impl WireSession {
@@ -197,14 +217,78 @@ impl WireSession {
 
     /// Start the reader thread on `stream`.
     fn reading(stream: UnixStream, fid: FrontendId) -> Self {
-        let rx = read_into_queue(&stream);
+        let paused = Arc::new(AtomicBool::new(false));
+        let rx = read_into_queue_unless(&stream, Arc::clone(&paused));
         Self {
             stream,
             rx,
             fid,
             token: None,
             bootstrap: Vec::new(),
+            paused,
         }
+    }
+
+    /// Stop reading the socket and keep it open, as a stopped process
+    /// does (E10r): what the daemon writes from here on stays in the
+    /// socket until it is full.
+    pub fn stop_reading(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Attach a grid session as [`Self::grid`] does and never read it:
+    /// a frontend stopped before its bootstrap. Nothing is read past the
+    /// `Hello`, so the socket is the row's, with no read timeout left on
+    /// it, and the daemon's first writes to it are its bootstrap's.
+    pub fn grid_unread(daemon: &TestDaemon, size: CellSize) -> (UnixStream, FrontendId) {
+        let (mut stream, fid) = Self::hello(daemon);
+        let mut caps = semantic_caps();
+        caps.semantic_render = false;
+        write_message(
+            &mut stream,
+            &AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                frontend_capabilities: caps,
+                initial_size: size,
+            },
+        )
+        .expect("AttachRequest");
+        (stream, fid)
+    }
+
+    /// Attach a semantic session as [`Self::semantic`] does at this
+    /// build's version, its bootstrap carrying `target`, and never read
+    /// it.
+    pub fn semantic_unread(
+        daemon: &TestDaemon,
+        target: Option<InitialTarget>,
+    ) -> (UnixStream, FrontendId) {
+        let (mut stream, fid) = Self::hello(daemon);
+        write_message(
+            &mut stream,
+            &AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                frontend_capabilities: semantic_caps(),
+                initial_size: CellSize::new(24, 80),
+            },
+        )
+        .expect("AttachRequest");
+        write_message(
+            &mut stream,
+            &SessionBootstrapRequest {
+                initial_target: target,
+            },
+        )
+        .expect("bootstrap");
+        write_message(
+            &mut stream,
+            &FrontendEvent::Resume {
+                frontend_id: fid,
+                token: None,
+            },
+        )
+        .expect("Resume");
+        (stream, fid)
     }
 
     /// The buffers the bootstrap sent snapshots of, in order.
