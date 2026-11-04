@@ -56,8 +56,10 @@ type TextDeltaSubscription = (TextDeltaBatches, Arc<AtomicBool>, loro::Subscript
 type DiffCapture = Arc<Mutex<DiffBatch>>;
 type DiffSubscription = (DiffCapture, Arc<AtomicBool>, loro_internal::Subscription);
 
-/// The foreign changes that landed after one recorded op span (E6c),
-/// in the coordinates of the document right after that span.
+/// The foreign changes that landed after one recorded op span (E6c) or
+/// an import's change (E10o, [`IntegratedChange`]), in the coordinates
+/// of the document right after it: for a change, the daemon's version
+/// just after it.
 ///
 /// The arbiter's undo is loro's own: the inverse of a span is a delta
 /// in the coordinates the span left the document in, and it is
@@ -86,6 +88,19 @@ impl ChangeBase {
             .values()
             .all(loro_internal::event::Diff::is_empty)
     }
+}
+
+/// One change an import integrated (E10o, #444, #448), as the arbiter
+/// records every import: the change's ops this import added, and the
+/// document's versions just before and just after them, the import's
+/// earlier changes in `before` and every op the document already held in
+/// both. See [`CrdtState::changes_since`].
+#[derive(Clone, Debug)]
+pub struct IntegratedChange {
+    /// The change's ops the import integrated.
+    pub span: IdSpan,
+    before: loro::Frontiers,
+    after: loro::Frontiers,
 }
 
 /// The CRDT-backed buffer state.
@@ -610,10 +625,12 @@ impl CrdtState {
     /// E6c: the op spans applied since `from`, one per peer whose
     /// counter advanced, in peer order.
     ///
-    /// The cross-peer undo arbiter records every forward edit as the
-    /// spans it produced: a local edit advances this doc's own peer,
-    /// a remote import advances the sending peer (and any peer whose
-    /// ops the update carried). Captured with the same
+    /// The cross-peer undo arbiter records a local edit as the spans it
+    /// produced, which advance this doc's own peer. A remote import
+    /// advances the sending peer (and any peer whose new ops the update
+    /// carried), and since E10o it is recorded change by change from
+    /// these spans ([`Self::changes_since`]); it is recorded as them
+    /// only when a change cannot be read. Captured with the same
     /// `version()` → mutate → query idiom as the wire export, so a
     /// span names exactly the ops of one edit.
     #[must_use]
@@ -628,6 +645,107 @@ impl CrdtState {
             .collect();
         spans.sort_by_key(|span| span.peer);
         spans
+    }
+
+    /// The document's version as the op log's frontiers, the ops nothing
+    /// depends on yet: the version [`Self::version`] names, read beside
+    /// it, as [`Self::changes_since`] takes it (E10o.4).
+    #[must_use]
+    pub fn frontiers(&self) -> loro::Frontiers {
+        self.doc.oplog_frontiers()
+    }
+
+    /// E10o: the changes integrated since `from`, one per change, each
+    /// cut to the ops integrated since `from`, in an order they apply in
+    /// (by Lamport time), each with the document's versions just before
+    /// and just after it. `from_frontiers` is `from` as frontiers, read
+    /// with it ([`Self::frontiers`] beside [`Self::version`]). `None` when
+    /// a change cannot be read from the log.
+    ///
+    /// One import can integrate several changes of its sender (#444): a
+    /// frontend that sends two of its edits in one update, the second
+    /// made after it imported another frontend's op. Recorded as one span,
+    /// another peer's op lies inside it and loro's own undo takes it in
+    /// parts, restoring a Backspace pair out of order (#438,
+    /// loro-dev/loro#1245). Each change alone is linear: its ops depend
+    /// each on the one before. And the versions are this document's own,
+    /// not the change's causal past: a change whose sender had not yet
+    /// received an op this document already held is undone in the
+    /// coordinates the document had, that op included, which is where
+    /// the arbiter's bases are expressed (see [`ChangeBase`]). That holds
+    /// of an import of one change too, a keystroke that crossed another
+    /// frontend's op in flight (#448), so since E10o.4 the arbiter
+    /// records every import here.
+    ///
+    /// Cost, which a typed key pays: [`Self::spans_since`], one
+    /// `get_change` per change, and the two frontiers. The first version
+    /// is the caller's and the last is the op log's own (every op since
+    /// `from` is in a piece), so neither is computed; only the versions
+    /// between two changes of one import are, by `vv_to_frontiers`,
+    /// which walks the DAG back from the newest op until it passes the
+    /// oldest peer's last op (`loro-internal` 1.12.0, `version.rs`'s
+    /// `shrink_frontiers`, `loro_dag.rs`'s `travel_ancestors`), a walk
+    /// over every DAG node since that op.
+    #[must_use]
+    pub fn changes_since(
+        &self,
+        from: &VersionVector,
+        from_frontiers: &loro::Frontiers,
+    ) -> Option<Vec<IntegratedChange>> {
+        let mut pieces = Vec::new();
+        for span in self.spans_since(from) {
+            let (mut at, end) = (span.counter.min(), span.counter.norm_end());
+            while at < end {
+                let change = self.doc.get_change(loro::ID::new(span.peer, at))?;
+                let change_end = change.id.counter + i32::try_from(change.len).ok()?;
+                let to = change_end.min(end);
+                let lamport = change.lamport + u32::try_from(at - change.id.counter).ok()?;
+                pieces.push((lamport, IdSpan::new(span.peer, at, to)));
+                at = to;
+            }
+        }
+        pieces.sort_by_key(|(lamport, span)| (*lamport, span.peer));
+        let last = pieces.len().saturating_sub(1);
+        let mut version = from.clone();
+        let mut before = from_frontiers.clone();
+        Some(
+            pieces
+                .into_iter()
+                .enumerate()
+                .map(|(i, (_, span))| {
+                    let after = if i == last {
+                        self.doc.oplog_frontiers()
+                    } else {
+                        version.set_end(loro::ID::new(span.peer, span.counter.norm_end()));
+                        self.doc.vv_to_frontiers(&version)
+                    };
+                    IntegratedChange {
+                        span,
+                        before: std::mem::replace(&mut before, after.clone()),
+                        after,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// E10o: undo one change an import integrated against the foreign
+    /// changes since it, as new ops on this doc's own peer: the diff from
+    /// the document's version after the change back to its version
+    /// before it, transformed against `base` and written in pieces, as
+    /// [`Self::undo_span_against`] does for a linear span. On return
+    /// `base` is re-expressed in the coordinates before the change.
+    pub fn undo_change_against(
+        &self,
+        change: &IntegratedChange,
+        base: &mut ChangeBase,
+    ) -> LoroResult<()> {
+        self.doc.commit();
+        let last = loro::ID::new(change.span.peer, change.span.counter.norm_end() - 1);
+        if !self.doc.oplog_vv().includes_id(last) {
+            return Err(loro::LoroError::UndoInvalidIdSpan(last));
+        }
+        self.undo_between_in_pieces(&change.after, &change.before, base)
     }
 
     /// E6c: undo one op span of any peer against the foreign changes
@@ -658,7 +776,15 @@ impl CrdtState {
     /// paste). So a span whose ops each depend on the one before it, as a
     /// local edit's do, is undone by [`Self::undo_span_in_pieces`],
     /// which writes the same compensation in pieces; any other by loro's
-    /// own primitive.
+    /// own primitive, which splits it at each op depending on another
+    /// peer's and can restore the parts out of order (#438,
+    /// loro-dev/loro#1245). Since E10o the arbiter records no import as
+    /// a span: every import is recorded change by change
+    /// ([`Self::changes_since`]) and undone by
+    /// [`Self::undo_change_against`], so the spans here are a local
+    /// edit's and a compensation's, each linear; what still reaches
+    /// loro's primitive is a span whose changes the log cannot return,
+    /// an import's included.
     pub fn undo_span_against(&self, span: IdSpan, base: &mut ChangeBase) -> LoroResult<()> {
         // What loro's undo does first: a span's ops still in the open
         // transaction are not yet in the log its changes are read from.
@@ -731,8 +857,21 @@ impl CrdtState {
         if !self.doc.oplog_vv().includes_id(last) {
             return Err(loro::LoroError::UndoInvalidIdSpan(last));
         }
+        self.undo_between_in_pieces(&last.into(), deps, base)
+    }
+
+    /// The compensation from version `after` back to version `before`
+    /// (E10k fix round 1, E10o): the inverse is the diff between them,
+    /// `base` is transformed by it, and the inverse transformed against
+    /// `base` as it came in is written in pieces.
+    fn undo_between_in_pieces(
+        &self,
+        after: &loro::Frontiers,
+        before: &loro::Frontiers,
+        base: &mut ChangeBase,
+    ) -> LoroResult<()> {
         let against = base.0.clone();
-        let inverse = self.doc.inner().diff(&last.into(), deps)?;
+        let inverse = self.doc.inner().diff(after, before)?;
         base.0.transform(&inverse, false);
         let mut compensation = inverse;
         compensation.transform(&against, true);
@@ -2067,5 +2206,61 @@ mod tests {
         // C's state matches a's and b's. All three converged.
         assert_eq!(c.materialize_string(), a.materialize_string());
         assert_eq!(c.materialize_string(), b.materialize_string());
+    }
+
+    /// E10o.4: `changes_since` takes an import's first version as its
+    /// caller read it and its last from the op log, computing only the
+    /// versions between two of its changes, and each is the version
+    /// `vv_to_frontiers` computes from the version vector. The case: a
+    /// daemon holding the other peer's `Z` and `Y`, and the user's update
+    /// of two Backspaces, the second made after `Z` and both without `Y`.
+    #[test]
+    fn changes_since_names_the_versions_vv_to_frontiers_computes() {
+        use loro::VersionVector;
+        let daemon = CrdtState::new(1).expect("daemon");
+        let user = CrdtState::new(2).expect("user");
+        let other = CrdtState::new(3).expect("other");
+        let zero = VersionVector::default();
+        daemon.insert(0, "abcdef").expect("abcdef");
+        let start = daemon.export_updates_since(&zero).expect("export");
+        user.import_updates(&start).expect("user imports");
+        other.import_updates(&start).expect("other imports");
+        let foreign = |at: &str| {
+            let v = other.version();
+            other.insert(0, at).expect("other's insert");
+            other.export_updates_since(&v).expect("export")
+        };
+
+        let held = user.version();
+        user.delete(5, 1).expect("the first Backspace, held");
+        let z = foreign("Z");
+        daemon.import_updates(&z).expect("the daemon imports Z");
+        user.import_updates(&z).expect("the user imports Z");
+        user.delete(5, 1).expect("the second Backspace");
+        daemon
+            .import_updates(&foreign("Y"))
+            .expect("the daemon imports Y");
+
+        let (pre_version, pre_frontiers) = (daemon.version(), daemon.frontiers());
+        assert_eq!(pre_frontiers, daemon.doc.vv_to_frontiers(&pre_version));
+        daemon
+            .import_updates(&user.export_updates_since(&held).expect("export"))
+            .expect("the daemon imports the batch");
+        assert_eq!(daemon.materialize_string(), "YZabcd");
+        let changes = daemon
+            .changes_since(&pre_version, &pre_frontiers)
+            .expect("the changes");
+        assert_eq!(changes.len(), 2, "two changes, Z between them");
+        let mut version = pre_version;
+        for change in &changes {
+            assert_eq!(change.before, daemon.doc.vv_to_frontiers(&version));
+            version.set_end(loro::ID::new(
+                change.span.peer,
+                change.span.counter.norm_end(),
+            ));
+            assert_eq!(change.after, daemon.doc.vv_to_frontiers(&version));
+        }
+        assert_eq!(version, daemon.version());
+        assert_eq!(changes[1].after, daemon.frontiers());
     }
 }
