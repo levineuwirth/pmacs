@@ -31,6 +31,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -43,6 +44,9 @@ use std::thread;
 use std::time::Duration;
 
 use std::time::Instant;
+
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::attach_reconnect::{
     BackoffSchedule, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
@@ -485,7 +489,6 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
 /// case the caller propagates the error before raw mode engages.
 fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error> {
     let reader = stream.try_clone()?;
-    reader.set_nonblocking(true)?;
     let kick_handle = stream.try_clone()?;
     let kicked = Arc::new(AtomicBool::new(false));
     let reader_kicked = Arc::clone(&kicked);
@@ -502,28 +505,35 @@ fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error>
     })
 }
 
-/// Non-blocking poll-based reader with a kick flag.
+/// A reader that waits in `poll` with a kick flag.
+///
+/// The socket stays blocking and is read only once `poll` says it holds
+/// something, so data is taken as it arrives. Until E10r this was a
+/// non-blocking read with a 10 ms sleep between tries, which had two
+/// costs: a frame larger than the socket's buffer arrived a bufferful per
+/// sleep, about 30 MB/s, so a healthy TUI held the daemon's dispatcher for
+/// 630 ms on a 16.5 MB frame where the GPU's reader took 5 ms; and
+/// `O_NONBLOCK` is shared across clones, so the writer was non-blocking
+/// too, and a paste larger than the socket's buffer failed with `EAGAIN`
+/// and ended the session.
 ///
 /// # Wake semantics
 ///
 /// This reader has two cooperating wake paths, only one of which is
 /// load-bearing:
 ///
-/// 1. **Atomic flag (correctness):** the reader runs a non-blocking
-///    poll loop with a 10ms sleep between iterations. After the kick
-///    sets `kicked`, the next loop iteration observes it and returns
-///    `Ok(0)`. Worst-case wake latency is one poll cycle (~10ms).
-///    This path is platform-independent and is the mechanism the
-///    caller relies on for correctness.
+/// 1. **Atomic flag (correctness):** `poll` waits at most 10 ms. After
+///    the kick sets `kicked`, the first wait that times out observes it
+///    and returns `Ok(0)`. Worst-case wake latency is one poll cycle
+///    (~10ms). This path is platform-independent and is the mechanism
+///    the caller relies on for correctness.
 ///
 /// 2. **`shutdown(Both)` on a sibling clone (best-effort speedup):**
-///    if the reader happens to be inside `self.stream.read()` when
-///    the kick fires, and the platform honors cross-clone shutdown
-///    wakes, the read returns `Ok(0)` immediately and the loop
-///    skips its sleep. This path is **not** load-bearing — Unix
-///    socket cross-clone shutdown semantics are not portably
-///    guaranteed, and any wake it provides is a bonus on top of
-///    path 1.
+///    if the platform honors cross-clone shutdown wakes, `poll` returns
+///    at once and the read returns `Ok(0)`. This path is **not**
+///    load-bearing — Unix socket cross-clone shutdown semantics are not
+///    portably guaranteed, and any wake it provides is a bonus on top
+///    of path 1.
 ///
 /// In other words: the atomic flag wakes the reader; the shutdown
 /// just shaves up to ~10ms off the wake when the platform plays
@@ -538,19 +548,15 @@ struct KickAwareUnixReader {
 impl Read for KickAwareUnixReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            match self.stream.read(buf) {
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
+            let mut fds = [PollFd::new(self.stream.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut fds, PollTimeout::from(10u16)) {
+                Ok(0) | Err(Errno::EINTR) => {
                     if self.kicked.load(Ordering::SeqCst) {
                         return Ok(0);
                     }
-                    thread::sleep(Duration::from_millis(10));
                 }
-                other => return other,
+                Ok(_) => return self.stream.read(buf),
+                Err(errno) => return Err(errno.into()),
             }
         }
     }
