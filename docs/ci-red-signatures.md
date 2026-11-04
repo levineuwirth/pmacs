@@ -11371,6 +11371,177 @@ In the worktree `pmacs-e10o` on its target `pmacs-e10o-2ca10753`. The fix round'
 So, at E10o's fix round 1: `main` is green at `5a029e4`, and PR #449 is green at its head `f013954`.
 #291 met a local sample, listed and not counted, and does not move. Every other count above stands.
 
+### E10n: PR #456 red at `d1c5f6b` on #328's fourth, the dispatch at `65d305b` on #328's third, the gates listed
+
+Recorded 2026-11-04 at E10n's close. PR #456 (`e10n/worker-own-peak`, closing #445) is six signed
+commits on `fcaf6d8`, in the worktree `pmacs-e10k-base`. Every run was read from the jobs endpoint
+by conclusion, and every test leg that ran tests through its own log, fetched with escape sequences
+allowed and stripped, each `running` line paired with its own result line. Each of the 66 run and
+job ids below was searched for in this file before it was written, and none was here, a known id as
+the control. Nothing was rerun.
+
+#### The dispatch `CI` 41706323262 at `65d305b`: red on #328's third, and macOS's answer
+
+`workflow_dispatch` on the branch at E10n.1's first commit before its rebase (now `3d71c0a`, the
+non-registry diff between them empty), so that CI's macOS legs would read the row E10n.1 asks of
+them, attempt 1 of 1, created 2026-11-03T19:46:06Z and completed 20:21:40Z (the API's `updated_at`):
+`failure`.
+
+Tally (e10n-ci-65d305b): 19 = 17 + 1 + 1.
+
+Tally (e10n-ci-65d305b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 126162486347 | success |
+| Lint (luajit) | 126162486572 | success |
+| Lint (lua54) | 126162486855 | success |
+| Format | 126162486986 | success |
+| Commit attribution (D9) | 126162487117 | success |
+| M4 Perf Gates | 126162674013 | success |
+| GPU Render (headless) | 126162674038 | success |
+| Test (crdt) | 126162674065 | failure |
+| M6 Perf Gates | 126162674104 | success |
+| Test (ubuntu-latest / luajit) | 126162674161 | success |
+| M10 Perf Gates (crdt) | 126162674169 | success |
+| Test (ubuntu-latest / lua54) | 126162674181 | success |
+| Test (macos-latest / lua54) | 126162674182 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126162674317 | success |
+| Perf budgets (debug) | 126162674332 | success |
+| M1 Acceptance Gates | 126162674380 | success |
+| M5 Perf Gates | 126162674629 | success |
+| Test (macos-latest / luajit) | 126162674641 | success |
+| Docs consistency | 126162676945 | skipped |
+
+Tally (e10n-ci-65d305b-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (crdt)` 126162674065, a required check, 19:46:31Z to 19:49:11Z: **#328's third**, the first
+  on that leg and the first with a disk figure. The test step died compiling with every fragment of
+  the row's body, `collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped`
+  three times beside `could not compile `pmacs``, no `running` line in its 798-line log, `No space
+  left on device` zero times. `scripts/ci-disk`: `/dev/mapper/cow-root`, 73,325 MB, 9,875 MB
+  available before the workspace build and 410 MB (100%) after the failed step, target 11,567 MB.
+  Commented on the issue, 6614574390.
+- The five other test legs pair each `running` line with a `test result: ok`: `Test (ubuntu-latest /
+  luajit)` 126162674161 and `Test (ubuntu-latest / lua54)` 126162674181, 227 each, 5,434 passed, 82
+  ignored; `Test (ubuntu-latest / luajit, no crdt)` 126162674317, 227, 4,848, 68; `Test
+  (macos-latest / lua54)` 126162674182 and `Test (macos-latest / luajit)` 126162674641, 228 each,
+  5,390, 79, each with `e10n_a_child_s_rusage_peak_and_its_spawner_s ... ok`, which is E10n.1's
+  answer: a macOS child's `getrusage` peak is its own.
+
+#### PR #456's `CI` 41764800858 at `4df6827`: cancelled by the next push
+
+`pull_request`, attempt 1 of 1, created 2026-11-04T03:04:37Z and completed 03:12:51Z (the API's
+`updated_at`): `cancelled`, the head having moved to `d1c5f6b` at 03:11:27Z, so its six test legs
+say nothing. `Grammar fuzz` 41764800945, `success`, both arms deciding `run=false`: `Grammar fuzz`
+126360558680 and `Grammar fuzz (asan-strict)` 126360559099.
+
+Tally (pr456-ci-4df6827): 19 = 12 + 6 + 1.
+
+Tally (pr456-ci-4df6827-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 126360558693 | success |
+| Lint (luajit) | 126360558795 | success |
+| Format | 126360558812 | success |
+| Changed paths | 126360558894 | success |
+| Lint (lua54) | 126360558936 | success |
+| Test (crdt) | 126360623798 | cancelled |
+| M1 Acceptance Gates | 126360623838 | success |
+| GPU Render (headless) | 126360623857 | success |
+| M4 Perf Gates | 126360623869 | success |
+| Perf budgets (debug) | 126360623936 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126360623943 | cancelled |
+| Test (macos-latest / luajit) | 126360623944 | cancelled |
+| M5 Perf Gates | 126360623984 | success |
+| Test (ubuntu-latest / lua54) | 126360624000 | cancelled |
+| Test (ubuntu-latest / luajit) | 126360624034 | cancelled |
+| M10 Perf Gates (crdt) | 126360624071 | success |
+| M6 Perf Gates | 126360624078 | success |
+| Test (macos-latest / lua54) | 126360624130 | cancelled |
+| Docs consistency | 126360625322 | skipped |
+
+Tally (pr456-ci-4df6827-success): 12 rows of the table above with `result` = `success`.
+
+Tally (pr456-ci-4df6827-cancelled): 6 rows of the table above with `result` = `cancelled`.
+
+#### PR #456's `CI` 41765552502 at `d1c5f6b`: red on #328's fourth
+
+`pull_request`, the merge `9a94651` of `d1c5f6b` into `fcaf6d8` (its checkout's `HEAD is now at`
+line), attempt 1 of 1, created 2026-11-04T03:11:32Z and completed 03:48:47Z (the API's
+`updated_at`): `failure`.
+
+Tally (pr456-ci-d1c5f6b): 19 = 17 + 1 + 1.
+
+Tally (pr456-ci-d1c5f6b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 126363419130 | success |
+| Commit attribution (D9) | 126363419369 | success |
+| Lint (lua54) | 126363419522 | success |
+| Lint (luajit) | 126363419538 | success |
+| Changed paths | 126363419557 | success |
+| GPU Render (headless) | 126363478689 | success |
+| M4 Perf Gates | 126363478691 | success |
+| Test (macos-latest / luajit) | 126363478700 | success |
+| Perf budgets (debug) | 126363478727 | success |
+| Test (macos-latest / lua54) | 126363478734 | success |
+| M6 Perf Gates | 126363478736 | success |
+| M1 Acceptance Gates | 126363478762 | success |
+| Test (crdt) | 126363478774 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126363478829 | success |
+| Test (ubuntu-latest / luajit) | 126363478843 | success |
+| M10 Perf Gates (crdt) | 126363478844 | success |
+| M5 Perf Gates | 126363478867 | success |
+| Test (ubuntu-latest / lua54) | 126363478919 | failure |
+| Docs consistency | 126363480178 | skipped |
+
+Tally (pr456-ci-d1c5f6b-success): 17 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / lua54)` 126363478919, a required check, 03:13:05Z to 03:16:24Z: **#328's
+  fourth**, the first on that leg. The test step (13) died compiling with every fragment of the
+  row's body, `collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped` three
+  times beside `could not compile `pmacs`` for `e10k_large_buffer_typing`, `e7i_review3_probes` and
+  `m6_7_scrollback_acceptance`, and `##[error]Process completed with exit code 101.`; no `running`
+  line in its 925-line log, `No space left on device` zero times. `scripts/ci-disk`:
+  `/dev/mapper/cow-root`, 73,325 MB, 9,322 MB available before the workspace build, 7,617 after it,
+  308 MB (100%) after the failed step, target 11,133 MB. Commented on the issue, 6622049500. Not
+  rerun: a rerun of the failed leg, or the bypass, is the owner's call.
+- The five other test legs pair each `running` line with a `test result: ok`, `WouldBlock` in none:
+  `Test (crdt)` 126363478774, 03:13:05Z to 03:48:46Z, 226 pairs, 5,385 passed, 83 ignored; `Test
+  (ubuntu-latest / luajit)` 126363478843, 227, 5,438, 83; `Test (ubuntu-latest / luajit, no crdt)`
+  126363478829, 227, 4,852, 68; `Test (macos-latest / lua54)` 126363478734 and `Test (macos-latest /
+  luajit)` 126363478700, 228 each, 5,391, 79. The three Ubuntu legs ran on `/dev/root`, 147,718 MB,
+  with 83,394 to 83,947 MB available before the build.
+- `Docs consistency` 126363480178 is skipped. `Grammar fuzz`
+  41765552583, `success`, both arms deciding `run=false`: `Grammar fuzz` 126362963867 and `Grammar
+  fuzz (asan-strict)` 126362964247. That a worker change decides `run=false` is #454, filed; the
+  arms were run by hand.
+
+#### The gates: listed, not tallied
+
+In the worktree `pmacs-e10k-base` on its target `pmacs-e10k-base-1a13b891`, logs copied to
+`~/build/e10n/gate-logs/`.
+
+- `20261103T194918Z-1557431` at `65d305b`, default plan, 19:49:18Z to 20:01:24Z: five of six;
+  `05-sweep` 5,825 / 1 / 82 at 235 pairs, `WouldBlock` in none, no daemon surviving. The red: a #316
+  local sample (`kill 3`, the row's template), commented there, 6614146281.
+- `20261103T202441Z-1857606` at `22fbb5a` (now `8797076`), default plan, 20:24:41Z to 20:37:33Z,
+  starting at load 3.26: five of six; `05-sweep` 5,829 / 1 / 82 at 235 pairs. The red: #312's third
+  local sample, commented there, 6614865482.
+- `20261104T024507Z-648135` at `4df6827`, `--perf`, 02:45:07Z to 03:01:56Z: all seven stages ok;
+  `05-sweep` 5,830 / 0 / 83 at 235 pairs, `WouldBlock` in none, no daemon surviving; `perf` held
+  every budget.
+- `20261104T031134Z-897084` at `d1c5f6b`, `--perf`, 03:11:34Z to 03:27:30Z: all seven stages ok;
+  `05-sweep` 5,830 / 0 / 83 at 235 pairs, every `running` line paired with a result line,
+  `WouldBlock` in none, no daemon surviving (identified by environ); `perf` held every budget.
+
+So, at E10n's close: PR #456 is red at its head on #328's fourth, on a required check, off the
+change's paths, and not rerun. #328 is at four, each of the last two on the 73,325 MB root. #316 and
+#312 met local samples, listed and not counted, and do not move. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
