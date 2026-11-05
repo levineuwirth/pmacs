@@ -607,8 +607,8 @@ fn e10r_3_the_attached_tui_stopped_past_the_bound_comes_back() {
         tui.wait_for_exit(Duration::from_millis(100)).is_none(),
         "the TUI came back rather than exiting"
     );
-    tui.write_input(b"\x18b").expect("C-x b");
-    wait_for_output(&tui, "witch", Duration::from_secs(10));
+    tui.write_input(b"\x1bx").expect("M-x");
+    wait_for_output(&tui, "M-x", Duration::from_secs(10));
     tui.write_input(b"\x07").expect("C-g");
     // The daemon and the other frontend are none the worse for it.
     other.key(Key::Char('.'), Modifiers::NONE);
@@ -644,6 +644,70 @@ fn e10r_3_a_daemon_killed_under_the_attached_tui_ends_it_saying_why() {
     assert!(
         said.contains("is gone") && said.contains("refused"),
         "the reason is on the terminal the user is left with: {said:?}"
+    );
+}
+
+/// The real thing, which the rows above with no shell cannot see: a client stopped
+/// under a job-control shell and brought back by `fg`. `bash` hands it a canonical
+/// terminal, so a TUI that came back with nothing done about that reconnects and
+/// then hears no key. Linux, for the `pgrep` and for a `bash` that behaves as this
+/// one; the modes are set again on every platform.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
+    let daemon = TestDaemon::spawn();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let go = dir.path().join("go");
+    let socket = daemon.socket_path().to_str().expect("utf-8").to_owned();
+    let mut shell = common::pty::spawn_pmacs_in_pty_under(
+        &[
+            "bash",
+            "--norc",
+            "--noprofile",
+            "-i",
+            "-c",
+            "\"$0\" \"$@\"; until [ -e \"$E10R_GO\" ]; do sleep 0.02; done; fg",
+        ],
+        &["--attach", "--socket", &socket],
+        &[
+            ("HOME", dir.path()),
+            ("XDG_CONFIG_HOME", dir.path()),
+            ("E10R_GO", &go),
+        ],
+        24,
+        80,
+    );
+    wait_for_output(&shell, "*scratch*", Duration::from_secs(30));
+    let bash = shell.process_id().expect("the shell's pid").to_string();
+    let children = std::process::Command::new("pgrep")
+        .args(["-P", &bash])
+        .output()
+        .expect("pgrep");
+    let tui: i32 = String::from_utf8_lossy(&children.stdout)
+        .split_whitespace()
+        .next()
+        .expect("the shell's child")
+        .parse()
+        .expect("a pid");
+    stop(tui);
+    let deadline = Instant::now() + LIMIT;
+    while !daemon_log(&daemon).contains("sent no EOF within") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        daemon_log(&daemon).contains("sent no EOF within"),
+        "{}",
+        daemon_log(&daemon)
+    );
+    std::fs::write(&go, b"").expect("say go");
+    wait_for_output(&shell, "reconnected on a new view", Duration::from_secs(20));
+    shell.write_input(b"\x1bx").expect("M-x");
+    wait_for_output(&shell, "M-x", Duration::from_secs(10));
+    shell.write_input(b"\x07").expect("C-g");
+    shell.write_input(b"\x1b[24~").expect("F12");
+    assert!(
+        shell.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ended the TUI, and the shell's script with it"
     );
 }
 

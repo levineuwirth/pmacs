@@ -527,6 +527,37 @@ impl Frontend {
         self.out.flush()
     }
 
+    /// Take the terminal's modes back after something else had it.
+    ///
+    /// A client stopped under an interactive shell gives the shell the
+    /// terminal, and `fg` does not always hand it back as it found it: under
+    /// `bash` it comes back canonical, so no key reaches this process until a
+    /// newline, and the bracketed paste and mouse the shell's line editor may
+    /// have turned off stay off. So raw mode is left and entered again (entering
+    /// alone is a no-op while crossterm believes it is on), and the modes
+    /// [`Self::new`] set are set again. The alternate screen is not: no shell
+    /// leaves it, and entering it clears what is there.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if the terminal refuses a mode or a
+    /// write to it fails.
+    pub fn retake_terminal(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        enable_raw_mode()?;
+        self.raw_mode = true;
+        queue!(self.out, EnableBracketedPaste, EnableMouseCapture)?;
+        self.bracketed_paste = true;
+        self.mouse = true;
+        if self.keyboard_enhancement {
+            queue!(
+                self.out,
+                PopKeyboardEnhancementFlags,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            )?;
+        }
+        self.out.flush()
+    }
+
     /// Wait for the next input event, up to `timeout`.
     ///
     /// Returns `Ok(None)` on timeout, `Ok(Some(event))` on event,

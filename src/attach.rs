@@ -625,6 +625,8 @@ fn run_local_sessions(
             unbootstrapped = unbootstrapped.saturating_add(1);
         }
         cut_short = lost.cut_short;
+        // A loss is usually a stop, and a stop may have left the terminal cooked.
+        let _ = frontend.retake_terminal();
         session = loop {
             if unbootstrapped >= HANDSHAKE_RETRY_CAP {
                 return Err(AttachError::SessionsDropped {
