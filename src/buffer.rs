@@ -2047,12 +2047,14 @@ impl Buffer {
 
     /// Redo a previously undone edit.
     ///
-    /// Symmetric to [`Buffer::undo`]. The redo stack is cleared by any
-    /// forward edit, so `redo` is only meaningful immediately after a
-    /// sequence of `undo`s.
+    /// Symmetric to [`Buffer::undo`]. Without CRDT this is the v0.1
+    /// stack, which any forward edit clears, so `redo` is only
+    /// meaningful immediately after a sequence of `undo`s.
     ///
-    /// In CRDT mode this redoes the daemon's own last undo; a
-    /// frontend's redo is [`Self::redo_for`]. Threading: main thread
+    /// In CRDT mode this redoes the daemon's own last undo, from the
+    /// daemon's own redo stack, which a forward edit clears only if it
+    /// is the daemon's; a frontend's redo is [`Self::redo_for`], which
+    /// says what another source's edit does. Threading: main thread
     /// only.
     pub fn redo(&mut self) -> Result<Edit, BufferError> {
         self.redo_for(UndoSource::Daemon)
