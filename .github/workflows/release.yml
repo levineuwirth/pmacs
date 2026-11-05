@@ -198,6 +198,9 @@ jobs:
           cp target/release/pmacs-gpu "staging/$name/"
           cp target/release/pmacs-parse-unit "staging/$name/"
           cp README.md LICENSE* "staging/$name/" 2>/dev/null || true
+          cp THIRD-PARTY.md "staging/$name/"
+          mkdir -p "staging/$name/licenses"
+          cp licenses/Apache-2.0.txt pmacs-gpu/fonts/OFL.txt pmacs-gpu/fonts/GUST-FONT-LICENSE.txt "staging/$name/licenses/"
           chmod +x "staging/$name/pmacs" "staging/$name/pmacs-gpu" "staging/$name/pmacs-parse-unit"
           tar -C staging -czf "$name.tar.gz" "$name"
           echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
@@ -229,6 +232,12 @@ jobs:
           for required in pmacs pmacs-gpu pmacs-parse-unit; do
             echo "$members" | grep -qx "$required" \
               || { echo "::error::$required missing from $archive"; exit 1; }
+          done
+
+          # The license, and the notices of what the binaries carry from others.
+          for notice in README.md LICENSE THIRD-PARTY.md licenses/Apache-2.0.txt licenses/OFL.txt licenses/GUST-FONT-LICENSE.txt; do
+            echo "$members" | grep -qx "$notice" \
+              || { echo "::error::$notice missing from $archive"; exit 1; }
           done
 
           # Executable bits, read back out of the archive itself.
