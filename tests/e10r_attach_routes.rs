@@ -42,6 +42,11 @@ fn daemon_log(daemon: &TestDaemon) -> String {
 /// past the bound its socket fills and the write fails at the bound, and resumed
 /// it comes back and a key typed after that is the daemon's to answer. A build
 /// without CRDT admits one frontend, so this is the bound's one row there.
+///
+/// Nothing here writes but the idle tick, which takes under a second to fill a
+/// stopped TUI's socket on Linux and about thirty on macOS (CI's two legs: one
+/// write failure inside thirty seconds and none inside thirty), so the wait is
+/// long and ends when the drop does.
 #[test]
 fn a_lone_attached_tui_stopped_past_the_bound_comes_back() {
     let daemon = TestDaemon::spawn();
@@ -52,7 +57,7 @@ fn a_lone_attached_tui_stopped_past_the_bound_comes_back() {
     tui.wait_for_output("*scratch*", Duration::from_secs(30));
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
     let dropped = || daemon_log(&daemon).contains("sent no EOF within");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !dropped() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
