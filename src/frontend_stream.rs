@@ -14,27 +14,28 @@
 //! as any failed one does. There is no `impl Write` here, and the socket is
 //! private, so a write past the bound does not compile.
 //!
-//! The bound is per frame, not per system call. The socket stays blocking,
-//! because its reader thread reads a clone of it and `O_NONBLOCK` is shared
-//! across clones, so each `send` asks not to wait (`MSG_DONTWAIT`) and the
-//! waiting happens here, in `poll`, for what is left of the frame's time. A
-//! healthy small frame costs one `send` per piece, as a blocking write does,
-//! and no wait. `set_write_timeout` would not do: `SO_SNDTIMEO` starts again
-//! at each wait, inside one `send` as well as between them, so one call
-//! writing a large frame to a reader that trickles runs far past it
-//! (measured on Linux 7.2: a 200 ms timeout, one 4 MiB `send`, a reader
-//! taking 200 KiB every 50 ms, and the call returned whole after a second;
-//! `tests/e10r_frontend_write_bound.rs` holds the frame-level row).
+//! The bound is per frame, not per system call. The socket is non-blocking
+//! for its whole life, through every clone, and the waiting happens here, in
+//! `poll`: a write for what is left of the frame's time, a read for as long as
+//! it takes, so the reader thread sees what a blocking socket would show it. A
+//! healthy small frame costs one `write` per piece, as a blocking write does,
+//! and no wait. Two shorter roads do not work. `set_write_timeout`:
+//! `SO_SNDTIMEO` starts again at each wait, inside one `send` as well as
+//! between them, so one call writing a large frame to a reader that trickles
+//! runs far past it (measured on Linux 7.2: a 200 ms timeout, one 4 MiB `send`,
+//! a reader taking 200 KiB every 50 ms, and the call returned whole after a
+//! second). `MSG_DONTWAIT` on a blocking socket, which leaves the reader's clone
+//! alone: on macOS the write to a socket nobody read never returned (both of CI
+//! 41934447652's macOS legs, this module's row running to the job's ceiling).
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use nix::sys::socket::{MsgFlags, send};
 use serde::Serialize;
 
 use crate::transport::{TransportError, write_message};
@@ -62,17 +63,16 @@ pub struct FrontendStream {
 }
 
 impl FrontendStream {
-    /// Wrap an accepted socket, before anything is written to it. The socket
-    /// is expected to be blocking, for the reads.
-    #[must_use]
-    pub fn new(stream: UnixStream) -> Self {
+    /// Wrap an accepted socket, before anything is written to it, and make it
+    /// non-blocking from here on, whatever it inherited from the listener.
+    pub fn new(stream: UnixStream) -> io::Result<Self> {
         Self::with_bound(stream, FRAME_WRITE_BOUND)
     }
 
     /// [`Self::new`] with another bound, for this module's rows.
-    #[must_use]
-    pub fn with_bound(stream: UnixStream, bound: Duration) -> Self {
-        Self { stream, bound }
+    pub fn with_bound(stream: UnixStream, bound: Duration) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self { stream, bound })
     }
 
     /// Write `message` as one frame, within the bound. A frame past the bound
@@ -104,11 +104,23 @@ impl FrontendStream {
     }
 }
 
-/// Reads are a blocking socket's, unbounded: a frontend owes the daemon no
-/// input, and waiting for it holds up only its own reader thread.
+/// Reads wait as a blocking socket's do, unbounded: a frontend owes the daemon
+/// no input, and waiting for it holds up only its own reader thread. A shut
+/// socket answers `poll` at once and the read says EOF.
 impl Read for FrontendStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stream.read(buf)
+        loop {
+            match self.stream.read(buf) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let mut fds = [PollFd::new(self.stream.as_fd(), PollFlags::POLLIN)];
+                    match poll(&mut fds, PollTimeout::NONE) {
+                        Ok(_) | Err(Errno::EINTR) => {}
+                        Err(errno) => return Err(errno.into()),
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 }
 
@@ -127,8 +139,8 @@ struct BoundedFrame<'a> {
 
 impl BoundedFrame<'_> {
     /// Wait for room in the socket for what is left of the frame's time. A
-    /// wait that returns early only means the next `send` looks again: a peer
-    /// gone is that `send`'s error, and no room is this wait's next round.
+    /// wait that returns early only means the next `write` looks again: a peer
+    /// gone is that `write`'s error, and no room is this wait's next round.
     fn wait_for_room(&self) -> io::Result<()> {
         let left = self.deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -158,12 +170,11 @@ impl BoundedFrame<'_> {
 
 impl Write for BoundedFrame<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut stream = self.stream;
         loop {
-            match send(self.stream.as_raw_fd(), buf, MsgFlags::MSG_DONTWAIT) {
-                Ok(written) => return Ok(written),
-                Err(Errno::EINTR) => {}
-                Err(Errno::EAGAIN) => self.wait_for_room()?,
-                Err(errno) => return Err(errno.into()),
+            match stream.write(buf) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait_for_room()?,
+                other => return other,
             }
         }
     }
@@ -200,7 +211,10 @@ mod tests {
     /// The peer of a stream given `bound`.
     fn pair(bound: Duration) -> (FrontendStream, UnixStream) {
         let (ours, theirs) = UnixStream::pair().expect("socketpair");
-        (FrontendStream::with_bound(ours, bound), theirs)
+        (
+            FrontendStream::with_bound(ours, bound).expect("non-blocking"),
+            theirs,
+        )
     }
 
     #[test]
@@ -263,6 +277,29 @@ mod tests {
             "{error:?}"
         );
         assert!(took < bound + SLACK, "held {took:?} on a {bound:?} bound");
+    }
+
+    /// The socket is non-blocking and the reader thread must not see it: a read
+    /// waits for its data, and a socket shut by its peer says EOF.
+    #[test]
+    fn a_read_waits_for_its_frame_and_says_eof_at_the_end() {
+        let (mut stream, mut peer) = pair(Duration::from_secs(30));
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            write_message(&mut peer, &vec![1u8, 2, 3]).expect("write");
+        });
+        assert_eq!(
+            read_message::<Vec<u8>>(&mut stream).expect("waited for the frame"),
+            vec![1u8, 2, 3]
+        );
+        writer.join().expect("writer");
+        assert!(
+            matches!(
+                read_message::<Vec<u8>>(&mut stream),
+                Err(TransportError::Eof)
+            ),
+            "the peer's end closed with the writer"
+        );
     }
 
     #[test]

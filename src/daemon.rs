@@ -613,16 +613,13 @@ fn accept_loop(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                // macOS can inherit O_NONBLOCK from the listener onto
-                // accepted Unix streams. The per-attach reader loop
-                // expects blocking reads; a nonblocking stream would
-                // turn "no frontend event yet" into WouldBlock, which
-                // looks like an immediate detach before the first frame.
-                stream.set_nonblocking(false)?;
                 daemon_debug("accepted frontend socket; spawning per-attach thread");
                 let daemon_state = Arc::clone(daemon_state);
                 let tx = dispatcher_tx.clone();
-                let stream = FrontendStream::new(stream);
+                // Non-blocking from here on, whatever the socket inherited
+                // from the listener (macOS can pass its O_NONBLOCK on), its
+                // reads waiting as a blocking socket's do.
+                let stream = FrontendStream::new(stream)?;
                 thread::spawn(move || per_attach_thread(stream, daemon_state, tx));
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -5519,7 +5516,7 @@ mod tests {
             (live_grid_peer, live_grid_server),
             (dead_grid_peer, dead_grid_server),
         ] {
-            registry.install_stream(peer, FrontendStream::new(stream));
+            registry.install_stream(peer, FrontendStream::new(stream).expect("non-blocking"));
         }
         let published_buffer = crate::buffer::BufferId::from_raw(900);
         let message = InstanceMessage::BufferSnapshot {
@@ -5582,7 +5579,7 @@ mod tests {
             client
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .expect("delivery timeout");
-            registry.install_stream(fid, FrontendStream::new(server));
+            registry.install_stream(fid, FrontendStream::new(server).expect("non-blocking"));
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: doc_buf,
                 crdt_snapshot: vec![1, 2, 3],
@@ -5600,7 +5597,7 @@ mod tests {
         // The PANEL-only buffer's snapshot must NOT be delivered.
         {
             let (server, mut client) = UnixStream::pair().expect("socketpair");
-            registry.install_stream(fid, FrontendStream::new(server));
+            registry.install_stream(fid, FrontendStream::new(server).expect("non-blocking"));
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: panel_buf,
                 crdt_snapshot: vec![4, 5, 6],
@@ -5653,8 +5650,14 @@ mod tests {
         dead_client
             .shutdown(Shutdown::Read)
             .expect("the peer stops reading");
-        registry.install_stream(live, FrontendStream::new(live_server));
-        registry.install_stream(dead, FrontendStream::new(dead_server));
+        registry.install_stream(
+            live,
+            FrontendStream::new(live_server).expect("non-blocking"),
+        );
+        registry.install_stream(
+            dead,
+            FrontendStream::new(dead_server).expect("non-blocking"),
+        );
         let message = InstanceMessage::Signal(InstanceSignal::Bell);
 
         let mut reported = Vec::new();
@@ -6016,7 +6019,7 @@ mod tests {
                     path: target.as_os_str().as_bytes().to_vec(),
                 }),
                 resume: None,
-                write_stream: FrontendStream::new(write_stream),
+                write_stream: FrontendStream::new(write_stream).expect("non-blocking"),
                 departing: Arc::new(AtomicBool::new(false)),
             },
             &mut editor,
@@ -6105,7 +6108,7 @@ mod tests {
                 initial_size: CellSize::new(24, 80),
                 initial_target: None,
                 resume,
-                write_stream: FrontendStream::new(write_stream),
+                write_stream: FrontendStream::new(write_stream).expect("non-blocking"),
                 departing,
             };
         macro_rules! feed {
@@ -12320,7 +12323,7 @@ mod tests {
                 0,
             ),
         );
-        session_registry.install_stream(fid, FrontendStream::new(server));
+        session_registry.install_stream(fid, FrontendStream::new(server).expect("non-blocking"));
         {
             let session = session_registry.session_mut(fid).expect("registered");
             session.term_size = Some(CellSize::new(24, 80));
