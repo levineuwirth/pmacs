@@ -201,10 +201,13 @@ fn lua_prelude(report: &Path, settings: &str) -> String {
            if not pmacs.parse._has_view(b) then pmacs.parse._dispatch(b, lang) end\n\
            return b\n\
          end\n\
-         local function edit(b, lang, i)\n\
-           b:insert(0, string.format('// edit %d\\n', i))\n\
+         local function kick(b, lang)\n\
            if (pmacs.parse._pending_edits(b) or 0) > 0 then pmacs.parse._dispatch(b, lang) end\n\
            return settle(b)\n\
+         end\n\
+         local function edit(b, lang, i)\n\
+           b:insert(0, string.format('// edit %d\\n', i))\n\
+           return kick(b, lang)\n\
          end\n\
          local function unit(b) return pmacs.parse._unit_report(b).unit end\n\
          local function grow()\n\
@@ -872,6 +875,72 @@ fn e10n_a_worker_whose_own_parse_passes_the_threshold_is_still_recycled() {
     assert!(
         small.iter().all(|&p| p == small[0]) && run.recycles(&small) == 0,
         "the small file's worker is kept: {small:?}"
+    );
+}
+
+/// R1-P8 (review 1, Low 1), E10n.2's "peak": the worker's answer is its
+/// `VmHWM`, not what it holds now. A large parse with the recycle off, the
+/// buffer cut down, more parses: the report after them still carries the large
+/// parse's high-water mark though the worker has released memory. With what it
+/// holds now in the report, a worker that came back down before its report
+/// would be kept past the threshold, and nothing else here tells the two apart.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p8_the_report_after_a_cut_is_the_peak_not_the_resident() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let large = dir.join("large.rs");
+    // One 64 MiB comment: a large text and a small tree, so what the cut
+    // releases is the text, in allocations large enough to go back to the
+    // kernel. A file of many small nodes keeps its resident memory after the
+    // cut (240.9 MiB against a VmHWM of 243.1, measured) and cannot tell the
+    // two readings apart.
+    let mut text = format!("// {}\n", "a".repeat(64 << 20));
+    text.push_str(&rust_source(4));
+    std::fs::write(&large, text).expect("large.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           local b = open({large:?}, 'rust')\n\
+           if not settle(b) then return finish('error the large file did not settle') end\n\
+           local pid = unit(b):match('%d+')\n\
+           note(string.format('large hwm=%d rss=%d', status('VmHWM', pid), status('VmRSS', pid)))\n\
+           b:delete(40, b:len())\n\
+           if not kick(b, 'rust') then return finish('error the cut did not settle') end\n\
+           for k = 1, 6 do\n\
+             if not edit(b, 'rust', k) then return finish('error edit ' .. k) end\n\
+           end\n\
+           note(string.format('cut hwm=%d rss=%d', status('VmHWM', pid), status('VmRSS', pid)))\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(
+            &dir.join("report.txt"),
+            "pmacs.config.set('syntax.parse-worker-recycle-mb', 0)"
+        ),
+        large = large.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(3));
+    let large_hwm = run.note_figure("large ", "hwm=");
+    let cut_rss = run.note_figure("cut ", "rss=");
+    assert!(
+        cut_rss < large_hwm,
+        "the worker released memory after the cut: VmRSS {} against the large parse's VmHWM {}",
+        mib(cut_rss),
+        mib(large_hwm)
+    );
+    let reported = run.events("parsed").last().expect("a parse")["peak"]
+        .as_u64()
+        .expect("a peak");
+    eprintln!(
+        "r1-p8: after the large parse VmHWM {}; after the cut VmRSS {}; the cut's parse reported {}",
+        mib(large_hwm),
+        mib(cut_rss),
+        mib(reported)
+    );
+    assert!(
+        reported >= large_hwm,
+        "the report is the high-water mark: {} against {}",
+        mib(reported),
+        mib(large_hwm)
     );
 }
 
