@@ -60,20 +60,16 @@
 use crate::attach::AttachError;
 use crate::protocol::GoodbyeReason;
 
-/// Maximum number of pre-success handshake retries before the outer
-/// loop converts [`ReconnectVerdict::ReconnectHandshake`] into a
-/// give-up error.
-///
-/// Sized for "DNS hiccup + SSH agent re-prompt + retry-with-fresh-key"
-/// scenarios without letting permanent misconfiguration loop forever.
-/// The handshake-failure tail (stderr from each attempt) is folded
-/// into the give-up error for diagnostic purposes.
-pub const HANDSHAKE_RETRY_CAP: u32 = 3;
-
-/// The backoff schedule and its test override, shared with `pmacs-gpu`
-/// through the protocol crate since E9.2 (the GPU never depends on
-/// `pmacs`); re-exported so this module's callers keep their paths.
-pub use pmacs_protocol::reconnect::{BackoffSchedule, PMACS_TEST_BACKOFF_SCALE_MS};
+/// The backoff schedule, its test override and the cap, shared with
+/// `pmacs-gpu` through the protocol crate (the GPU never depends on `pmacs`);
+/// re-exported so this module's callers keep their paths. The cap is also the
+/// maximum number of pre-success handshake retries before the outer loop
+/// converts [`ReconnectVerdict::ReconnectHandshake`] into a give-up error, the
+/// handshake-failure tail (stderr from each attempt) folded into that error for
+/// diagnostic purposes.
+pub use pmacs_protocol::reconnect::{
+    BackoffSchedule, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS,
+};
 
 /// What the outer reconnect loop should do after a session attempt
 /// returns.

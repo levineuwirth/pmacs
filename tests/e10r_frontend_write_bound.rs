@@ -25,6 +25,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use pmacs::attach::PMACS_TEST_SSH_BIN;
 use pmacs::attach_reconnect::{HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 use pmacs::daemon::WRITE_FAILURE_DRAIN;
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
@@ -833,6 +835,206 @@ fn e10r_floor_a_session_that_comes_back_after_a_cut_says_the_bound_is_why() {
         said.contains("reconnected on a new view: a frame did not arrive within 2 s"),
         "{said:?}"
     );
+}
+
+/// A stand-in for `ssh` on the attach's own channel (stderr, the default): what
+/// `sessions[n - 1]` says on its `n`th invocation, the last repeating. The stand-in
+/// plays each session's bytes, keeps its pipes open long enough for the attach to
+/// answer, and exits with the code given, as `ssh` exits with its remote command's.
+struct StandInSsh {
+    dir: tempfile::TempDir,
+}
+
+/// One invocation of [`StandInSsh`].
+struct RemoteSession {
+    bytes: Vec<u8>,
+    exit: i32,
+}
+
+impl StandInSsh {
+    fn new(sessions: &[RemoteSession]) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cases = String::new();
+        for (i, session) in sessions.iter().enumerate() {
+            let n = i + 1;
+            let bytes = dir.path().join(format!("session-{n}.bin"));
+            std::fs::write(&bytes, &session.bytes).expect("write the session's bytes");
+            let arm = if n == sessions.len() {
+                "*".to_owned()
+            } else {
+                n.to_string()
+            };
+            writeln!(
+                cases,
+                "{arm}) cat '{}' >&2; sleep 0.1; exit {} ;;",
+                bytes.display(),
+                session.exit
+            )
+            .expect("write to a String");
+        }
+        let counter = dir.path().join("count");
+        std::fs::write(&counter, "0").expect("seed the counter");
+        let script = dir.path().join("ssh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nn=$(cat '{counter}')\nn=$((n+1))\necho $n > '{counter}'\ncase $n in\n{cases}esac\n",
+                counter = counter.display(),
+            ),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        Self { dir }
+    }
+
+    fn invocations(&self) -> usize {
+        std::fs::read_to_string(self.dir.path().join("count"))
+            .expect("the counter")
+            .trim()
+            .parse()
+            .expect("a count")
+    }
+
+    fn attach(&self) -> common::pty::PmacsPty {
+        let home = self.dir.path();
+        let script = home.join("ssh");
+        common::pty::spawn_pmacs_in_pty(
+            &["--attach", "farhost"],
+            &[
+                ("HOME", home),
+                ("XDG_CONFIG_HOME", home),
+                (PMACS_TEST_SSH_BIN, &script),
+                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1")),
+            ],
+            24,
+            80,
+        )
+    }
+}
+
+fn hello_frame() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_message(
+        &mut bytes,
+        &Hello {
+            protocol_version: PROTOCOL_VERSION,
+            assigned_frontend_id: FrontendId(2),
+            instance_identity: InstanceIdentity {
+                pmacs_version: "0.0.0-test".to_owned(),
+                build_hash: None,
+                instance_name: Some("stand-in".to_owned()),
+                uptime_secs: 0,
+                working_directory: "/tmp".to_owned(),
+            },
+            instance_capabilities: InstanceCapabilities::default(),
+        },
+    )
+    .expect("encode Hello");
+    bytes
+}
+
+/// A session that gets as far as `Hello`, and then `after`.
+fn session_with(after: &[u8], exit: i32) -> RemoteSession {
+    let mut bytes = hello_frame();
+    bytes.extend_from_slice(after);
+    RemoteSession { bytes, exit }
+}
+
+fn frame_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_message(
+        &mut bytes,
+        &InstanceMessage::CellDelta {
+            spans: Vec::new(),
+            full_grid: true,
+        },
+    )
+    .expect("encode a frame");
+    bytes
+}
+
+fn cut_bytes() -> Vec<u8> {
+    let mut bytes = 1000u32.to_be_bytes().to_vec();
+    bytes.extend_from_slice(&[0u8; 10]);
+    bytes
+}
+
+/// An `ssh` that exits with a failure after a frame cut short in the bootstrap
+/// is a reconnect, which at `8c46d9f` went on for ever. It stops at the cap with
+/// the floor's sentence, so a route past the floor holds the others up only so
+/// many times.
+#[test]
+fn e10r_remote_an_ssh_failing_after_a_cut_stops_at_the_cap_saying_why() {
+    let ssh = StandInSsh::new(&[session_with(&cut_bytes(), 1)]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
+    assert_eq!(
+        ssh.invocations(),
+        usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap")
+    );
+    assert!(!status.success(), "{status:?}");
+    let said = after_the_alternate_screen(&tui);
+    assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
+}
+
+/// The real bridge exits 0 when the daemon closes its socket, so a session the
+/// daemon dropped has always ended this route at once, with status 0 and nothing
+/// said: one hold-up, and no reason. It stops the same way, now saying why.
+#[test]
+fn e10r_remote_the_bridges_own_end_after_a_cut_stops_at_once_saying_why() {
+    let ssh = StandInSsh::new(&[session_with(&cut_bytes(), 0)]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("it stops");
+    assert_eq!(ssh.invocations(), 1, "and does not try again");
+    assert!(!status.success(), "{status:?}");
+    let said = after_the_alternate_screen(&tui);
+    assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
+}
+
+/// A session that reached its first frame starts the count again: an `ssh` that
+/// keeps failing after one keeps its reconnects, as it always has. The last
+/// session's clean end says so where it can be read.
+#[test]
+fn e10r_remote_a_first_frame_starts_the_count_again() {
+    let failures = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 2;
+    let mut sessions: Vec<RemoteSession> = (0..failures)
+        .map(|_| session_with(&frame_bytes(), 1))
+        .collect();
+    sessions.push(session_with(&frame_bytes(), 0));
+    let ssh = StandInSsh::new(&sessions);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the clean end ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), failures + 1);
+    let said = after_the_alternate_screen(&tui);
+    assert!(said.contains("instance closed connection"), "{said:?}");
+}
+
+/// A network that is down reaches no `Hello` and counts nothing: past the cap's
+/// worth of attempts it is still reconnecting, as it does at `8c46d9f`. A guard.
+#[test]
+fn e10r_remote_a_network_that_is_down_keeps_reconnecting() {
+    let down = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 2;
+    let mut sessions = vec![session_with(&frame_bytes(), 1)];
+    sessions.extend((0..down).map(|_| RemoteSession {
+        bytes: Vec::new(),
+        exit: 255,
+    }));
+    sessions.push(session_with(&frame_bytes(), 0));
+    let ssh = StandInSsh::new(&sessions);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the network comes back and the clean end ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), down + 2);
 }
 
 /// `C-c` in the wait ends the local route with status 0, as the SSH route's

@@ -215,7 +215,9 @@ whole. Under one cap a growing register squeezes the rules.
   (`pmacs_protocol::reconnect`, E9.2), presenting the token of its last
   session so the daemon starts the new socket on the view it retained
   (E9.1); after thirty failed attempts, about twelve minutes, it stops
-  and the band says to close the window. An attempt succeeds only at the
+  and the band says to close the window, and after three sessions in a
+  row cut short before their token, the write bound's floor (E10r), it
+  stops sooner and says that. An attempt succeeds only at the
   daemon's `SessionToken` on the new socket: until then nothing is sent
   on it and what the daemon writes is held. The daemon closes, with
   nothing written, a socket presenting the token of a session it still
@@ -235,8 +237,10 @@ whole. Under one cap a growing register squeezes the rules.
   reconnects on the same schedule since E10r, with no `Goodbye` as what
   starts it, but never presents a token, since a grid session is minted
   none: it comes back on a fresh view and says so on its bottom row, and
-  a daemon that is gone ends it, saying why. Removed when the token
-  family reaches grid sessions, which is a wire question.
+  a daemon that is gone ends it, saying why. Over SSH the bridge exits 0
+  when the daemon closes its socket, so a dropped session ends the route
+  as it always has, now saying why when a frame was cut short. Removed
+  when the token family reaches grid sessions, which is a wire question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon
   keeps one desktop for each kind of window that attaches to it, under
   its own identity and the kind: `desktop::frontend_session_key`, the

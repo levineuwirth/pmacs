@@ -4914,6 +4914,13 @@ struct Reconnect {
     /// read from the schedule, whose first delay is drawn at the loss
     /// before any attempt is made.
     failed: u32,
+    /// E10r fix round 1 --- the sessions in a row whose bootstrap was cut
+    /// short, the first attach's included: each held the daemon's other
+    /// frontends up to the write bound, and a link past the floor fails
+    /// the same way every time, so [`pmacs_protocol::HANDSHAKE_RETRY_CAP`]
+    /// of them end the loop. A token ends the loop, so a session that
+    /// completes its bootstrap starts this again by starting a new loop.
+    cut_short: u32,
     /// E9 fix round 3 (review 3's Medium 1) --- an attempt whose
     /// handshake is done and whose `Resume` is sent, held until the
     /// daemon accepts it; `None` between attempts.
@@ -6436,6 +6443,27 @@ impl App {
                             state.request_redraw();
                         }
                     }
+                    None if reason == pmacs_protocol::TransportError::CutShort.to_string() => {
+                        let reconnect = self.reconnect.as_mut().expect("checked above");
+                        reconnect.cut_short += 1;
+                        if reconnect.cut_short >= pmacs_protocol::HANDSHAKE_RETRY_CAP {
+                            self.reconnect = None;
+                            if let Some(state) = self.state.as_mut() {
+                                state.connection_notice = Some(format!(
+                                    "daemon connection lost; {}; stopped after {} sessions in a \
+                                     row ended this way; close the window (C-x C-c)",
+                                    pmacs_protocol::FRAME_CUT_SHORT_SENTENCE,
+                                    pmacs_protocol::HANDSHAKE_RETRY_CAP
+                                ));
+                                state.request_redraw();
+                            }
+                        } else {
+                            let _ = self.fail_reconnect_attempt(
+                                std::time::Instant::now(),
+                                pmacs_protocol::FRAME_CUT_SHORT_SENTENCE,
+                            );
+                        }
+                    }
                     None => {
                         let _ = self.fail_reconnect_attempt(
                             std::time::Instant::now(),
@@ -6748,6 +6776,10 @@ impl App {
                         let mut reconnect = Reconnect {
                             schedule: pmacs_protocol::BackoffSchedule::new(),
                             next_at: std::time::Instant::now(),
+                            cut_short: u32::from(
+                                reason == pmacs_protocol::TransportError::CutShort.to_string()
+                                    && state.session_token.is_none(),
+                            ),
                             last_error: reason,
                             failed: 0,
                             pending: None,
@@ -8682,6 +8714,7 @@ mod lost_socket_tests {
             next_at: now,
             last_error: "cut".to_owned(),
             failed: 0,
+            cut_short: 0,
             pending: None,
         });
         let refused = || {
@@ -8727,6 +8760,63 @@ mod lost_socket_tests {
     }
 
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// E10r fix round 1 --- a daemon that cuts short each new session's
+    /// bootstrap, as a link past the write bound's floor makes it, holds the
+    /// others up on each try, so the loop stops at the cap and says why. The
+    /// E9 refusal, a close with nothing written, keeps its own larger cap,
+    /// in the row beside this one.
+    #[test]
+    fn sessions_cut_short_in_their_bootstrap_stop_the_loop_at_the_cap_saying_why() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("cut.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                pmacs_protocol::write_message(&mut stream, &test_hello()).expect("write Hello");
+                let _: pmacs_protocol::AttachRequest =
+                    pmacs_protocol::read_message(&mut stream).expect("read AttachRequest");
+                let _: pmacs_protocol::SessionBootstrapRequest =
+                    pmacs_protocol::read_message(&mut stream).expect("read bootstrap");
+                let _: pmacs_protocol::FrontendEvent =
+                    pmacs_protocol::read_message(&mut stream).expect("read Resume");
+                // A length prefix, and less than it promised.
+                stream.write_all(&1000u32.to_be_bytes()).expect("prefix");
+                stream.write_all(&[0u8; 10]).expect("part");
+            }
+        });
+        let window = pmacs_protocol::SessionToken([7; pmacs_protocol::SESSION_TOKEN_BYTES]);
+        let mut h = EffectHarness::with_document("one\ntwo\n");
+        lose_window(&mut h, path, window);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut connects = 0u32;
+        while h.app.reconnect.is_some() {
+            assert!(
+                connects < 2 * pmacs_protocol::HANDSHAKE_RETRY_CAP,
+                "the loop goes on: {}",
+                band(&h.app)
+            );
+            let _ = attempt(&mut h.app, &tx);
+            connects += 1;
+            let closed = rx.recv_timeout(WAIT).expect("the attempt's close");
+            assert!(
+                matches!(&closed, AttachEvent::Disconnected(reason)
+                    if *reason == pmacs_protocol::TransportError::CutShort.to_string()),
+                "{closed:?}"
+            );
+            h.app.dispatch_app_event(AppEvent::Attach(closed));
+            assert!(h.app.attach_client.is_none(), "it installs nothing");
+        }
+        assert_eq!(connects, pmacs_protocol::HANDSHAKE_RETRY_CAP);
+        let notice = band(&h.app);
+        assert!(
+            notice.contains(pmacs_protocol::FRAME_CUT_SHORT_SENTENCE)
+                && notice.contains("close the window (C-x C-c)"),
+            "{notice}"
+        );
+    }
 
     /// A daemon in miniature at `dir/fake.sock`, for the reconnect's
     /// acceptance (E9 fix round 3): per connection, the handshake as the

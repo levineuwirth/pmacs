@@ -84,7 +84,7 @@ pub use popup::{
     MAX_POPUP_LINE_BYTES, MAX_POPUP_LINES, MAX_POPUP_TEXT_BYTES, POPUP_MIN_VERSION,
     PopupActiveRange, PopupFrame, PopupFrameError, PopupKind, PopupPayload, place_popup,
 };
-pub use reconnect::{BackoffSchedule, PMACS_TEST_BACKOFF_SCALE_MS};
+pub use reconnect::{BackoffSchedule, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 pub use session::{SESSION_MIN_VERSION, SESSION_TOKEN_BYTES, SessionToken};
 pub use socket_file::{ConnectFailure, classify_connect_failure};
 pub use terminal::{

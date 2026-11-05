@@ -26,6 +26,16 @@
 
 use std::time::Duration;
 
+/// How many sessions in a row a frontend's route lets end before their
+/// bootstrap completed before it stops trying.
+///
+/// Sized for "DNS hiccup + SSH agent re-prompt + retry-with-fresh-key"
+/// scenarios without letting permanent misconfiguration loop forever. Since
+/// E10r it is also what stops a frontend past the daemon's write bound's floor
+/// from holding the others up on every try. It lives here beside the schedule
+/// because `pmacs-gpu` counts by it too.
+pub const HANDSHAKE_RETRY_CAP: u32 = 3;
+
 /// Maximum delay between reconnect attempts. The schedule plateaus
 /// here once the pre-cap doubling reaches it.
 pub const MAX_DELAY: Duration = Duration::from_secs(30);
