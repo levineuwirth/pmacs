@@ -284,6 +284,16 @@ impl Run {
             .count()
     }
 
+    /// The figure `key` carries in the first note starting with `prefix`.
+    fn note_figure(&self, prefix: &str, key: &str) -> u64 {
+        self.notes
+            .lines()
+            .find(|l| l.starts_with(prefix))
+            .and_then(|l| l.split_whitespace().find_map(|w| w.strip_prefix(key)))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no {key} in a {prefix} note:\n{}", self.notes))
+    }
+
     /// How long starting `pid` took, if the trace records its spawn.
     fn spawn_us(&self, pid: u32) -> Option<u64> {
         self.events("spawn")
@@ -559,17 +569,22 @@ fn underscores(lines: usize) -> String {
 #[cfg(target_os = "linux")]
 const ALLOWANCE_MIB: u64 = 64;
 
-/// E10n.2 (ii): a worker started by a daemon grown past 256 MiB, with the
-/// memory watch forced (`PMACS_PARSE_UNIT_MEMORY=watch`, so no `RLIMIT_AS`)
-/// and a 64 MiB allowance, is stopped by its watch at a limit equal to its
-/// own memory at start plus the allowance, independent of the daemon's
-/// peak. The worker first parses a small markdown file, after which the
-/// daemon's Lua reads its own peak (`VmHWM`, never below what it held when
-/// its watch started); then #296's paragraph is appended, whose parse grows
-/// without bound. The deadline is two minutes and the row waits one, so no
-/// deadline can supply the death; the death record names the watch and the
-/// limit it applied. At the base the limit was the daemon's peak plus the
-/// allowance.
+/// E10n.2 (ii), its independence: a worker started by a daemon grown past
+/// 256 MiB, with the memory watch forced (`PMACS_PARSE_UNIT_MEMORY=watch`, so
+/// no `RLIMIT_AS`) and a 64 MiB allowance, is stopped by its own watch at a
+/// limit that does not carry the daemon's peak. The worker first parses a
+/// small markdown file, after which the daemon's Lua reads the worker's peak
+/// (`VmHWM`, never below what it held when its watch started); then #296's
+/// paragraph is appended, whose parse grows without bound. The deadline is
+/// two minutes and the row waits one, so no deadline can supply the death;
+/// the death record names the watch and the limit it applied. At the base the
+/// limit was the daemon's peak plus the allowance.
+///
+/// The row reads no start: "the limit less the allowance" below is derived
+/// from the limit, so these bounds hold for a limit with no start in it
+/// (review 1, Medium 1). The equality the gate row asks for is R1-P10's, in
+/// `pmacs-parse-unit/tests/worker.rs`, against a reading of the start, and
+/// R1-P5's below, through a daemon.
 #[cfg(target_os = "linux")]
 #[test]
 fn e10n_the_memory_watch_holds_a_worker_to_its_own_start_plus_its_allowance() {
@@ -653,19 +668,128 @@ fn e10n_the_memory_watch_holds_a_worker_to_its_own_start_plus_its_allowance() {
         .and_then(|v| v.split_whitespace().next())
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| panic!("the death names the watch's limit: {death}"));
-    let start = limit.saturating_sub(ALLOWANCE_MIB << 20);
+    let less_allowance = limit.saturating_sub(ALLOWANCE_MIB << 20);
     assert!(
-        start < hwm,
-        "the watch's limit is the worker's own start plus {ALLOWANCE_MIB} MiB, independent of the daemon's peak: its start read {} against the daemon's VmHWM {}",
-        mib(start),
+        less_allowance < hwm,
+        "the watch's limit does not carry the daemon's peak: less the {ALLOWANCE_MIB} MiB allowance it is {} against the daemon's VmHWM {}",
+        mib(less_allowance),
         mib(hwm)
     );
     assert!(
-        start > 0 && start <= worker_hwm,
-        "the watch's start is the worker's own memory when its watch began, at most its VmHWM after its first parse ({}): {}",
+        less_allowance > 0 && less_allowance <= worker_hwm,
+        "the watch's limit less its allowance is at most the worker's VmHWM after its first parse ({}): {}",
         mib(worker_hwm),
-        mib(start)
+        mib(less_allowance)
     );
+}
+
+/// One forced-watch daemon stopped on #296's paragraph, grown first or not:
+/// the limit the death names, the worker's `VmHWM` after its first parse, and
+/// the daemon's own `VmHWM`.
+#[cfg(target_os = "linux")]
+fn watch_limit(grown: bool, allowance: u64) -> (u64, u64, u64) {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let victim = dir.join("victim.md");
+    std::fs::write(&victim, "# A note\n\nSome text, and *emphasis*.\n").expect("victim");
+    let paragraph = dir.join("paragraph.md");
+    std::fs::write(&paragraph, format!("\n{}", underscores(28))).expect("paragraph");
+    let settings = format!(
+        "pmacs.config.set('syntax.parse-memory-limit-mb', {allowance})\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 120000)\n\
+         pmacs.config.set('syntax.parse-worker-recycle-mb', 0)"
+    );
+    let growth = if grown { "grow()" } else { "" };
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           {growth}\n\
+           mem('grown')\n\
+           local b = open({victim:?}, 'markdown')\n\
+           if not settle(b) then return finish('error the note did not settle') end\n\
+           local pid = unit(b):match('%d+')\n\
+           note(string.format('worker hwm=%d', status('VmHWM', pid)))\n\
+           local f = assert(io.open({paragraph:?}))\n\
+           local text = f:read('*a'); f:close()\n\
+           b:insert(b:len(), text)\n\
+           if (pmacs.parse._pending_edits(b) or 0) > 0 then pmacs.parse._dispatch(b, 'markdown') end\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 60000 do\n\
+             pmacs.workers.sleep(20):await()\n\
+             local r = pmacs.parse._unit_report(b)\n\
+             if r.deaths > 0 then return finish('death ' .. tostring(r.last_death)) end\n\
+           end\n\
+           finish('error the worker was not stopped within 60 s')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), &settings),
+        victim = victim.display().to_string(),
+        paragraph = paragraph.display().to_string(),
+    );
+    let run = run_daemon(
+        &dir,
+        &[("PMACS_PARSE_UNIT_MEMORY", "watch")],
+        &init,
+        Duration::from_mins(2),
+    );
+    let death = run
+        .notes
+        .lines()
+        .find_map(|l| l.strip_prefix("death "))
+        .unwrap_or_else(|| panic!("no death in\n{}", run.notes));
+    assert!(death.contains("(by watch, "), "{death}");
+    let limit: u64 = death
+        .split("a limit of ")
+        .nth(1)
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("the limit: {death}"));
+    (
+        limit,
+        run.note_figure("worker ", "hwm="),
+        run.mem("grown", "hwm"),
+    )
+}
+
+/// R1-P5 (review 1, Medium 1), E10n.2 (ii) through a daemon: the same worker
+/// under a small parent and a grown one is stopped at the same limit, and the
+/// limit less the allowance is memory the worker really held at its start,
+/// a figure R1-P10 reads directly at the worker's own seam. A limit with no
+/// start in it fails the lower bound here; the row above has none.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p5_the_watch_s_limit_does_not_move_with_the_parent() {
+    const ALLOWANCE: u64 = 64;
+    let (small_limit, small_hwm, small_parent) = watch_limit(false, ALLOWANCE);
+    let (grown_limit, grown_hwm, grown_parent) = watch_limit(true, ALLOWANCE);
+    eprintln!(
+        "r1-p5: parent {} -> limit {} (worker's VmHWM {}); parent {} -> limit {} (worker's VmHWM {})",
+        mib(small_parent),
+        mib(small_limit),
+        mib(small_hwm),
+        mib(grown_parent),
+        mib(grown_limit),
+        mib(grown_hwm)
+    );
+    assert!(
+        grown_parent > THRESHOLD && small_parent < THRESHOLD,
+        "one parent small, one grown: {} and {}",
+        mib(small_parent),
+        mib(grown_parent)
+    );
+    assert!(
+        small_limit.abs_diff(grown_limit) < 8 << 20,
+        "the limit moved with the parent: {} against {}",
+        mib(small_limit),
+        mib(grown_limit)
+    );
+    for (limit, hwm) in [(small_limit, small_hwm), (grown_limit, grown_hwm)] {
+        let start = limit.saturating_sub(ALLOWANCE << 20);
+        assert!(
+            start >= 1 << 20 && start <= hwm,
+            "the limit less the allowance is the worker's own memory at its start: {} (its VmHWM {})",
+            mib(start),
+            mib(hwm)
+        );
+    }
 }
 
 /// The threshold the recycle row sets, MiB: above a small file's worker's
