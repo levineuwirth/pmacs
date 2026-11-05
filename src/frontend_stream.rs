@@ -80,10 +80,14 @@ impl FrontendStream {
     /// stream can carry nothing more: the caller stops writing to it, which
     /// E10d's path and the bootstrap both do. A message the transport refuses
     /// writes nothing and leaves the stream whole.
+    ///
+    /// The clock starts at the frame's first write, not here: the transport
+    /// encodes before it writes, and encoding is the daemon's own work, which
+    /// says nothing of the frontend. It holds the dispatcher all the same.
     pub fn write_message<M: Serialize>(&mut self, message: &M) -> Result<(), TransportError> {
         let mut frame = BoundedFrame {
             stream: &self.stream,
-            deadline: Instant::now() + self.bound,
+            deadline: None,
             bound: self.bound,
         };
         write_message(&mut frame, message)
@@ -130,10 +134,10 @@ impl AsFd for FrontendStream {
     }
 }
 
-/// One frame's writes, sharing one deadline.
+/// One frame's writes, sharing one deadline, which the first of them sets.
 struct BoundedFrame<'a> {
     stream: &'a UnixStream,
-    deadline: Instant,
+    deadline: Option<Instant>,
     bound: Duration,
 }
 
@@ -141,8 +145,8 @@ impl BoundedFrame<'_> {
     /// Wait for room in the socket for what is left of the frame's time. A
     /// wait that returns early only means the next `write` looks again: a peer
     /// gone is that `write`'s error, and no room is this wait's next round.
-    fn wait_for_room(&self) -> io::Result<()> {
-        let left = self.deadline.saturating_duration_since(Instant::now());
+    fn wait_for_room(&self, deadline: Instant) -> io::Result<()> {
+        let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(self.past_the_bound());
         }
@@ -170,10 +174,14 @@ impl BoundedFrame<'_> {
 
 impl Write for BoundedFrame<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let bound = self.bound;
+        let deadline = *self.deadline.get_or_insert_with(|| Instant::now() + bound);
         let mut stream = self.stream;
         loop {
             match stream.write(buf) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait_for_room()?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.wait_for_room(deadline)?;
+                }
                 other => return other,
             }
         }
@@ -208,6 +216,20 @@ mod tests {
         Payload(vec![0x5a; len])
     }
 
+    /// A message that takes `encoding` to encode, as a large frame does on a
+    /// debug build under load, and then encodes `payload`.
+    struct SlowToEncode {
+        encoding: Duration,
+        payload: Payload,
+    }
+
+    impl Serialize for SlowToEncode {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            thread::sleep(self.encoding);
+            self.payload.serialize(serializer)
+        }
+    }
+
     /// The peer of a stream given `bound`.
     fn pair(bound: Duration) -> (FrontendStream, UnixStream) {
         let (ours, theirs) = UnixStream::pair().expect("socketpair");
@@ -224,6 +246,34 @@ mod tests {
         let expect = sent.0.clone();
         let reader = thread::spawn(move || read_message::<Vec<u8>>(&mut peer).expect("read"));
         stream.write_message(&sent).expect("write");
+        assert_eq!(reader.join().expect("reader"), expect);
+    }
+
+    /// E10r fix round 1: the clock starts at the frame's first write. A frame
+    /// past the socket's room, whose encoding outlasts the bound, reaches a
+    /// reader that keeps up. With the clock started before the encoding, the
+    /// first time the socket had no room found the deadline already gone, and
+    /// a healthy frontend was dropped for the daemon's own work.
+    #[test]
+    fn a_frame_slower_to_encode_than_the_bound_reaches_a_reader_that_keeps_up() {
+        let bound = Duration::from_secs(1);
+        let (mut stream, mut peer) = pair(bound);
+        let sent = SlowToEncode {
+            encoding: bound + bound / 2,
+            payload: big(4 * 1024 * 1024),
+        };
+        let expect = sent.payload.0.clone();
+        let reader = thread::spawn(move || {
+            // Held back until the frame's first byte, and a little past it, so
+            // the socket runs out of room whatever the scheduler does.
+            let mut fds = [PollFd::new(peer.as_fd(), PollFlags::POLLIN)];
+            poll(&mut fds, PollTimeout::NONE).expect("poll");
+            thread::sleep(Duration::from_millis(50));
+            read_message::<Vec<u8>>(&mut peer).expect("read")
+        });
+        stream
+            .write_message(&sent)
+            .expect("the encoding is not the frontend's doing");
         assert_eq!(reader.join().expect("reader"), expect);
     }
 
