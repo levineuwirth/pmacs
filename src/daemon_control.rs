@@ -258,7 +258,9 @@ pub fn stop(socket: &Path) -> Result<Hello, DaemonControlError> {
         }
         match read_message::<InstanceMessage>(&mut stream) {
             Ok(InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown))
-            | Err(crate::transport::TransportError::Eof) => return Ok(hello),
+            | Err(
+                crate::transport::TransportError::Eof | crate::transport::TransportError::CutShort,
+            ) => return Ok(hello),
             Ok(InstanceMessage::Goodbye(reason)) => {
                 return Err(DaemonControlError::Rejected(reason));
             }

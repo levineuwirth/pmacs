@@ -62,11 +62,16 @@ pub enum TransportError {
         /// the encoded payload (write side).
         len: usize,
     },
-    /// Peer disconnected before a full frame could be read. The same
-    /// error is returned for "EOF before any bytes," "EOF mid
-    /// length-prefix," and "EOF mid payload"; the caller treats these
-    /// identically.
+    /// Peer disconnected at a frame's boundary, with nothing of the next
+    /// frame read.
     Eof,
+    /// Peer disconnected partway through a frame, its length prefix or its
+    /// payload. A daemon that means to end a session says `Goodbye` first
+    /// and writes whole frames, so this is a frame it could not finish:
+    /// since E10r, usually one not written within its bound, after which it
+    /// writes nothing more ([`FRAME_CUT_SHORT_SENTENCE`] is what a frontend
+    /// says of it). It can also be a daemon killed in the middle of a write.
+    CutShort,
 }
 
 impl std::fmt::Display for TransportError {
@@ -79,6 +84,7 @@ impl std::fmt::Display for TransportError {
                 write!(f, "frame length {len} exceeds maximum {MAX_FRAME_BYTES}")
             }
             Self::Eof => write!(f, "peer disconnected before frame complete"),
+            Self::CutShort => write!(f, "peer disconnected partway through a frame"),
         }
     }
 }
@@ -99,11 +105,20 @@ impl From<std::io::Error> for TransportError {
     }
 }
 
+/// What a frontend says when a frame from its daemon is cut short: what
+/// happened, that each frame must arrive within the daemon's bound, and what a
+/// user can do about it. The bound is `pmacs::frontend_stream::FRAME_WRITE_BOUND`,
+/// in a crate `pmacs-gpu` does not depend on, and a row there holds this
+/// sentence's figure to it.
+pub const FRAME_CUT_SHORT_SENTENCE: &str = "the daemon dropped this session because a frame did \
+     not arrive within 2 s, which every frame must: this client was stopped, or its link is too \
+     slow for a buffer this large (a frame's bytes over 2 s, so 4 MB/s for an 8 MB snapshot)";
+
 /// Read a single framed message from `reader`.
 ///
-/// Returns [`TransportError::Eof`] if the peer disconnected before a
-/// full frame arrived (whether at the start, mid length-prefix, or
-/// mid payload — all three look identical to the caller).
+/// Returns [`TransportError::Eof`] if the peer disconnected with nothing of
+/// a frame read, and [`TransportError::CutShort`] if it disconnected partway
+/// through one, its length prefix or its payload.
 pub fn read_message<M: DeserializeOwned>(reader: &mut impl Read) -> Result<M, TransportError> {
     let mut len_buf = [0u8; 4];
     read_exact_or_eof(reader, &mut len_buf)?;
@@ -112,7 +127,10 @@ pub fn read_message<M: DeserializeOwned>(reader: &mut impl Read) -> Result<M, Tr
         return Err(TransportError::FrameTooLarge { len });
     }
     let mut buf = vec![0u8; len];
-    read_exact_or_eof(reader, &mut buf)?;
+    read_exact_or_eof(reader, &mut buf).map_err(|error| match error {
+        TransportError::Eof => TransportError::CutShort,
+        other => other,
+    })?;
     postcard::from_bytes(&buf).map_err(TransportError::Decode)
 }
 
@@ -131,9 +149,9 @@ pub fn write_message<M: Serialize>(writer: &mut impl Write, msg: &M) -> Result<(
     Ok(())
 }
 
-/// Fill `buf` from `reader`, returning [`TransportError::Eof`] if the
-/// peer disconnects before the buffer is full. Retries on
-/// [`std::io::ErrorKind::Interrupted`].
+/// Fill `buf` from `reader`, returning [`TransportError::Eof`] if the peer
+/// disconnects before a byte of it, and [`TransportError::CutShort`] if it
+/// disconnects after some. Retries on [`std::io::ErrorKind::Interrupted`].
 ///
 /// `std::io::Read::read_exact` collapses both "read 0 bytes" and "read
 /// some-but-not-all" into `ErrorKind::UnexpectedEof`, but it is not
@@ -143,7 +161,8 @@ fn read_exact_or_eof(reader: &mut impl Read, buf: &mut [u8]) -> Result<(), Trans
     let mut filled = 0;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]) {
-            Ok(0) => return Err(TransportError::Eof),
+            Ok(0) if filled == 0 => return Err(TransportError::Eof),
+            Ok(0) => return Err(TransportError::CutShort),
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => return Err(TransportError::Io(e)),
@@ -240,24 +259,34 @@ mod tests {
     }
 
     #[test]
-    fn truncated_length_prefix_returns_eof() {
+    fn truncated_length_prefix_is_cut_short() {
         // Two bytes of a four-byte length prefix.
         let mut cursor = Cursor::new(vec![0x00, 0x10]);
         match read_message::<Hello>(&mut cursor) {
-            Err(TransportError::Eof) => {}
-            other => panic!("expected Eof, got {other:?}"),
+            Err(TransportError::CutShort) => {}
+            other => panic!("expected CutShort, got {other:?}"),
         }
     }
 
     #[test]
-    fn truncated_payload_returns_eof() {
+    fn truncated_payload_is_cut_short() {
         // Length advertises 100 bytes; only 5 follow.
         let mut bytes = 100u32.to_be_bytes().to_vec();
         bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
         let mut cursor = Cursor::new(bytes);
         match read_message::<Hello>(&mut cursor) {
-            Err(TransportError::Eof) => {}
-            other => panic!("expected Eof, got {other:?}"),
+            Err(TransportError::CutShort) => {}
+            other => panic!("expected CutShort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_length_prefix_with_no_payload_is_cut_short() {
+        // The prefix whole, and none of what it advertises.
+        let mut cursor = Cursor::new(100u32.to_be_bytes().to_vec());
+        match read_message::<Hello>(&mut cursor) {
+            Err(TransportError::CutShort) => {}
+            other => panic!("expected CutShort, got {other:?}"),
         }
     }
 
@@ -280,14 +309,14 @@ mod tests {
     fn frame_at_exact_max_size_passes_length_check() {
         // Advertise exactly MAX_FRAME_BYTES — the boundary case must
         // not be rejected by the length check. We don't actually have
-        // a payload this large; we expect Eof from the body fetch,
+        // a payload this large; we expect CutShort from the body fetch,
         // which proves the length check passed.
         let len = u32::try_from(MAX_FRAME_BYTES).expect("fits in u32");
         let bytes = len.to_be_bytes().to_vec();
         let mut cursor = Cursor::new(bytes);
         match read_message::<Hello>(&mut cursor) {
-            Err(TransportError::Eof) => {}
-            other => panic!("expected Eof at MAX_FRAME_BYTES boundary, got {other:?}"),
+            Err(TransportError::CutShort) => {}
+            other => panic!("expected CutShort at MAX_FRAME_BYTES boundary, got {other:?}"),
         }
     }
 

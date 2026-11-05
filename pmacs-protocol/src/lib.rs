@@ -92,7 +92,9 @@ pub use terminal::{
     MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,
     TerminalFrameError, TerminalProcessState, TerminalSelectionSpan,
 };
-pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};
+pub use transport::{
+    FRAME_CUT_SHORT_SENTENCE, MAX_FRAME_BYTES, TransportError, read_message, write_message,
+};
 pub use wire_grid::{
     MAX_WIRE_GRID_GLYPH_BYTES, MAX_WIRE_GRID_GRAPHEME_BYTES, WireGridError, WireGridLimits,
     checked_area, validate_wire_grid,

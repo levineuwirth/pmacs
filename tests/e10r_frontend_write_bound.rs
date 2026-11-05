@@ -25,7 +25,7 @@
 
 mod common;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ use pmacs_protocol::message::{
     InstanceMessage, Key, Modifiers, PROTOCOL_VERSION,
 };
 use pmacs_protocol::transport::{read_message, write_message};
-use pmacs_protocol::{FrontendId, MAX_FRAME_BYTES};
+use pmacs_protocol::{FRAME_CUT_SHORT_SENTENCE, FrontendId, MAX_FRAME_BYTES};
 
 use common::daemon::TestDaemon;
 use common::gpu_probe::fact;
@@ -765,6 +765,74 @@ fn e10r_3_a_first_frame_starts_the_local_routes_count_again() {
     assert_eq!(daemon.connections(), sessions);
     let said = String::from_utf8_lossy(&tui.output()).into_owned();
     assert!(said.contains("reconnected on a new view"), "{said:?}");
+}
+
+/// Part of a frame and then the end of the socket, as a write past the bound
+/// leaves it: a length prefix promising more than the bytes that follow it.
+fn part_of_a_frame(stream: &mut UnixStream) {
+    stream
+        .write_all(&1000u32.to_be_bytes())
+        .and_then(|()| stream.write_all(&[0u8; 10]))
+        .expect("part of a frame");
+}
+
+/// A frame cut short cannot be followed by a `Goodbye`, so the frontend says
+/// what happened and what the floor is, in the sentence a user can act on,
+/// where it can be read. This is an attach past the floor, on the local route.
+#[test]
+fn e10r_floor_a_session_cut_short_says_each_frame_must_arrive_within_the_bound() {
+    let daemon = StandInDaemon::serve(|_, stream| part_of_a_frame(stream));
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the route stops");
+    assert!(!status.success(), "{status:?}");
+    assert_eq!(
+        daemon.connections(),
+        usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap")
+    );
+    let said = after_the_alternate_screen(&tui);
+    assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
+    assert!(said.contains("within 2 s"), "{said:?}");
+}
+
+/// A session that had its first frame and is then cut short comes back saying
+/// the bound is why, on the new session's bottom row.
+#[test]
+fn e10r_floor_a_session_that_comes_back_after_a_cut_says_the_bound_is_why() {
+    let daemon = StandInDaemon::serve(|n, stream| {
+        first_frame(stream);
+        if n == 1 {
+            part_of_a_frame(stream);
+        } else {
+            std::thread::sleep(Duration::from_millis(500));
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+            )
+            .expect("Goodbye");
+        }
+    });
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(
+        said.contains("reconnected on a new view: a frame did not arrive within 2 s"),
+        "{said:?}"
+    );
 }
 
 /// `C-c` in the wait ends the local route with status 0, as the SSH route's

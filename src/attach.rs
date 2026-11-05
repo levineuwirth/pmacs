@@ -33,7 +33,10 @@
 //! comes back on a fresh view, not its own: a grid session is minted no token
 //! (`docs/divergences.md`). A daemon that is gone ends it, saying why once the
 //! alternate screen is left; so do [`HANDSHAKE_RETRY_CAP`] sessions in a row
-//! that end before their first frame, so the route cannot spin.
+//! that end before their first frame, so the route cannot spin. A frame cut
+//! short is the daemon's bound, and the frontend says so
+//! ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]): no `Goodbye` can follow a
+//! part-written frame.
 //!
 //! The F12 choice is tentative for v0.1; it conflicts with any user
 //! keybind on F12, which we accept because F12 is rarely bound. A
@@ -69,7 +72,7 @@ use crate::protocol::{
     AttachRequest, AttachTarget, FrontendCapabilities, FrontendEvent, FrontendId, GoodbyeReason,
     Hello, InstanceMessage, PROTOCOL_VERSION,
 };
-use crate::transport::{TransportError, read_message, write_message};
+use crate::transport::{FRAME_CUT_SHORT_SENTENCE, TransportError, read_message, write_message};
 
 /// Environment variable that overrides the SSH binary used by
 /// [`run_attach_ssh`]. Test-flavored — production users do not set
@@ -207,6 +210,8 @@ pub enum AttachError {
     SessionsDropped {
         /// How many in a row.
         attempts: u32,
+        /// Whether the last of them ended with a frame cut short.
+        cut_short: bool,
     },
 }
 
@@ -298,7 +303,18 @@ impl std::fmt::Display for AttachError {
                  and attach",
                 socket.display()
             ),
-            Self::SessionsDropped { attempts } => write!(
+            Self::SessionsDropped {
+                attempts,
+                cut_short: true,
+            } => write!(
+                f,
+                "{FRAME_CUT_SHORT_SENTENCE}; stopped after {attempts} sessions in a row ended \
+                 this way"
+            ),
+            Self::SessionsDropped {
+                attempts,
+                cut_short: false,
+            } => write!(
                 f,
                 "the daemon closed {attempts} sessions in a row before their first frame, so \
                  this one has stopped trying"
@@ -482,6 +498,11 @@ const LOCAL_RECONNECT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// key: the view is fresh, so the user is told why the buffer changed.
 const NOTICE_FRESH_VIEW: &str = "[pmacs reconnected on a new view: the daemon closed the last one]";
 
+/// [`NOTICE_FRESH_VIEW`] when the last one ended with a frame cut short: the
+/// daemon's bound, in what a terminal's bottom row has room for.
+const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
+    "[pmacs reconnected on a new view: a frame did not arrive within 2 s]";
+
 /// Connect to the daemon at `socket_path` and run the attach client.
 ///
 /// Returns when the session ends on purpose (F12, or the daemon's `Goodbye`),
@@ -584,6 +605,7 @@ fn run_local_sessions(
     let mut unbootstrapped: u32 = 0;
     let mut session = (first, first_id);
     let mut notice = None;
+    let mut cut_short;
     loop {
         let (io, id) = session;
         let lost = match run_attach_pair(io, frontend, id, notice.take())? {
@@ -596,10 +618,12 @@ fn run_local_sessions(
         } else {
             unbootstrapped = unbootstrapped.saturating_add(1);
         }
+        cut_short = lost.cut_short;
         session = loop {
             if unbootstrapped >= HANDSHAKE_RETRY_CAP {
                 return Err(AttachError::SessionsDropped {
                     attempts: unbootstrapped,
+                    cut_short,
                 });
             }
             let delay = schedule.next_delay();
@@ -616,7 +640,11 @@ fn run_local_sessions(
                 Err(_) => unbootstrapped = unbootstrapped.saturating_add(1),
             }
         };
-        notice = Some(NOTICE_FRESH_VIEW);
+        notice = Some(if cut_short {
+            NOTICE_FRESH_VIEW_CUT_SHORT
+        } else {
+            NOTICE_FRESH_VIEW
+        });
     }
 }
 
@@ -819,6 +847,8 @@ pub(crate) struct LostSession {
     /// The write that found the socket gone, when one did before the reader
     /// saw its end: a key typed while the frontend was stopped, say.
     pub write_error: Option<AttachError>,
+    /// Whether the reader's last read ended partway through a frame.
+    pub cut_short: bool,
 }
 
 /// Bidirectional pump: forward local input to the writer, apply
@@ -906,6 +936,7 @@ pub(crate) fn run_attach_pair(
             AttachError::Transport(TransportError::Io(_)) => Ok(PumpEnd::Lost(LostSession {
                 bootstrapped,
                 write_error: Some(error),
+                cut_short: false,
             })),
             other => Err(other),
         };
@@ -1038,6 +1069,7 @@ pub(crate) fn run_attach_pair(
                 return Ok(PumpEnd::Lost(LostSession {
                     bootstrapped,
                     write_error: None,
+                    cut_short: false,
                 }));
             }
 
@@ -1225,9 +1257,12 @@ pub(crate) fn run_attach_pair(
     // before kick has any effect.
     drop(writer);
     kick();
-    let _ = reader_handle.join();
+    let cut_short = reader_handle.join().unwrap_or(false);
 
-    result
+    result.map(|end| match end {
+        PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
+        over @ PumpEnd::Over => over,
+    })
 }
 
 /// F12 is the v0.1 detach key. Any modifier combination triggers
@@ -1306,16 +1341,20 @@ fn forward_event<W: Write>(
 // Generic over any `Read + Send` so the same loop drives a
 // `UnixStream` clone (local-socket transport) or a `ChildStdout`
 // (SSH transport, M5.7e) without per-transport branching.
+//
+// Returns whether the socket ended partway through a frame, which the channel's
+// close cannot say.
 #[allow(clippy::needless_pass_by_value)]
-fn run_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<InstanceMessage>) {
+fn run_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<InstanceMessage>) -> bool {
     loop {
         match read_message::<InstanceMessage>(&mut reader) {
             Ok(msg) => {
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
             }
-            Err(_) => return,
+            Err(TransportError::CutShort) => return true,
+            Err(_) => return false,
         }
     }
 }
@@ -2506,6 +2545,7 @@ mod tests {
             PumpEnd::Lost(LostSession {
                 bootstrapped: false,
                 write_error: None,
+                cut_short: false,
             })
         ));
         assert!(matches!(
@@ -2513,6 +2553,15 @@ mod tests {
             PumpEnd::Lost(LostSession {
                 bootstrapped: false,
                 write_error: None,
+                cut_short: false,
+            })
+        ));
+        assert!(matches!(
+            run(|w| w.write_all(&100u32.to_be_bytes()).expect("write")),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: false,
+                write_error: None,
+                cut_short: true,
             })
         ));
         assert!(matches!(
@@ -2527,6 +2576,7 @@ mod tests {
             PumpEnd::Lost(LostSession {
                 bootstrapped: true,
                 write_error: None,
+                cut_short: false,
             })
         ));
     }

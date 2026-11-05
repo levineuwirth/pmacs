@@ -44,10 +44,16 @@ use crate::transport::{TransportError, write_message};
 /// byte to its last: at most the hold-up a frontend that stops reading costs
 /// the others, once.
 ///
-/// Two seconds, the most the owner's ruling of 2026-11-04 allows. A healthy
-/// local frontend takes milliseconds for the largest frame, so this is not
-/// about them: a larger bound is what a frontend behind a slow link needs,
-/// since a frame that cannot reach it in time can never be delivered at all.
+/// Two seconds, the most the owner's ruling of 2026-11-04 allows, and kept by
+/// the ruling of 2026-11-05. A healthy local frontend takes milliseconds for
+/// the largest frame, so this is not about them.
+///
+/// **It is a floor on a frontend's link.** A frame that cannot reach a frontend
+/// in time can never be delivered at all, so a link must carry a frame's bytes
+/// over two seconds: an 8 MB snapshot needs 4 MB/s, and a 1 to 5 MB file about
+/// 1 MB/s (a snapshot is about twice text that does not compress, and 42% of a
+/// repetitive log). No `Goodbye` can follow a part-written frame, so the
+/// frontend says this itself ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]).
 ///
 /// A constant, as [`crate::daemon::WRITE_FAILURE_DRAIN`] is, for its reason:
 /// what a user would tune it for is a trade inside a connection already in
@@ -275,6 +281,18 @@ mod tests {
             .write_message(&sent)
             .expect("the encoding is not the frontend's doing");
         assert_eq!(reader.join().expect("reader"), expect);
+    }
+
+    /// What a frontend tells its user of the bound is the bound: the sentence
+    /// lives where `pmacs-gpu` can read it, and this constant does not.
+    #[test]
+    fn the_sentence_a_frontend_says_names_the_bound() {
+        let seconds = format!("within {} s", FRAME_WRITE_BOUND.as_secs());
+        assert_eq!(FRAME_WRITE_BOUND.subsec_nanos(), 0, "whole seconds");
+        assert!(
+            crate::transport::FRAME_CUT_SHORT_SENTENCE.contains(&seconds),
+            "{seconds}"
+        );
     }
 
     #[test]

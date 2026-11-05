@@ -20592,6 +20592,9 @@ fn disconnect_notice(
         Some(error) if error == pmacs_protocol::TransportError::Eof.to_string() => {
             "(daemon closed the connection without a Goodbye)".to_owned()
         }
+        Some(error) if error == pmacs_protocol::TransportError::CutShort.to_string() => {
+            format!("({})", pmacs_protocol::FRAME_CUT_SHORT_SENTENCE)
+        }
         Some(error) => format!("(daemon connection lost: {error})"),
         None => "(daemon disconnected)".to_owned(),
     }
@@ -25763,6 +25766,10 @@ mod tests {
         assert_eq!(
             disconnect_notice(None, Some(&TransportError::Eof.to_string())),
             "(daemon closed the connection without a Goodbye)"
+        );
+        assert_eq!(
+            disconnect_notice(None, Some(&TransportError::CutShort.to_string())),
+            format!("({})", pmacs_protocol::FRAME_CUT_SHORT_SENTENCE)
         );
         assert_eq!(
             disconnect_notice(None, Some("Io(Os { code: 104 })")),

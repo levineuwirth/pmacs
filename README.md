@@ -165,6 +165,13 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 `local:/path.sock`, and bare hostnames (treated as SSH). See
 `pmacs --help` for the full matrix.
 
+The daemon writes to every frontend from one thread, so it gives each
+frame 2 s to reach a frontend and then drops that frontend, rather than
+hold the others up. A client stopped past that comes back when resumed.
+A link has to carry a frame's bytes over 2 s or it cannot receive that
+frame at all: an 8 MB snapshot needs 4 MB/s, and a 1 to 5 MB file about
+1 MB/s, so attaching to a large file over a slow link fails, saying so.
+
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),
 loaded after the builtin runtime so plain assignments override
