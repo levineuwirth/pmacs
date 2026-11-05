@@ -36,11 +36,11 @@
 //! 4. **SSH dies mid-pump → reconnect succeeds.** Counter-aware fake
 //!    SSH that completes the handshake on every call but exits
 //!    non-zero on calls 1–2 and exits 0 on call 3; pmacs reconnects
-//!    and exits clean. The "daemon dies mid-pump" case is
-//!    indistinguishable from this at pmacs's observation point (in
-//!    both cases the SSH child exits non-zero with the daemon-side
-//!    closure cascading through the bridge), so it's covered by the
-//!    same test.
+//!    and exits clean. A daemon dying is not this case: the real
+//!    bridge exits 0 when its socket closes
+//!    (`m5_7_acceptance::daemon_attach_handles_daemon_crash_as_clean_eof`),
+//!    which ends the route and does not reconnect
+//!    (`tests/e10r_attach_routes.rs`).
 //! 5. **Ctrl-C during reconnect sleep → clean exit.** Fake SSH whose
 //!    first call completes handshake then exits non-zero; pmacs
 //!    enters `sleep_with_countdown`; the test injects `\x03` via the

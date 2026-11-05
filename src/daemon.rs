@@ -1548,8 +1548,8 @@ fn write_to_session(
 ///    routes them to per-recipient streams.
 /// 3. Writes outgoing messages to each frontend's write stream
 ///    (synchronous, each frame within
-///    [`crate::frontend_stream::FRAME_WRITE_BOUND`], so a frontend that
-///    stops reading holds up the others once, for at most that, E10r).
+///    [`crate::frontend_stream::FRAME_WRITE_BOUND`], E10r: a frontend that
+///    stops reading holds up the others once, for about that).
 /// 4. Ticks async / processes / LSP.
 ///
 /// Exits when the editor's `quit` flag is set, the `shutdown` flag

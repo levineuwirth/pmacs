@@ -41,8 +41,19 @@ use serde::Serialize;
 use crate::transport::{TransportError, write_message};
 
 /// How long one frame may take to reach a frontend's socket, from its first
-/// byte to its last: at most the hold-up a frontend that stops reading costs
-/// the others, once.
+/// byte to its last.
+///
+/// **This bounds a write, not what another frontend waits.** The dispatcher holds
+/// up the others for the write and for whatever else it was doing: the frame's
+/// encoding, which comes first and is not on this clock, and the keys queued
+/// behind it. The suite reads a key's answer past this on a loaded machine, up to
+/// 2,921 ms on the laptop and 3,278 ms on macOS's CI legs.
+///
+/// **Once is a stopped frontend's.** Its write fails, nothing more is written to
+/// it, and the others are free. A reader that keeps up just under this can hold
+/// them up to it on every frame, as the row asks, and a route attaching past a
+/// link's floor once per try, up to
+/// [`crate::attach_reconnect::HANDSHAKE_RETRY_CAP`].
 ///
 /// Two seconds, the most the owner's ruling of 2026-11-04 allows, and kept by
 /// the ruling of 2026-11-05. A healthy local frontend takes milliseconds for
