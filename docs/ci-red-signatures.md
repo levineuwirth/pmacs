@@ -11887,6 +11887,126 @@ So, at E10o's close: `main` is green at `0d74bf7` and red at `5cf359b` on #288's
 (macos-latest / luajit)` not run there, and PR #449 merged green at `203855f`. #288 is at three.
 Every other count above stands.
 
+### E10r's checkpoint: PR #462 green at `8c46d9f`, `main` green at `ebf46e7`, and the rerun at `5cf359b`
+
+Recorded 2026-11-05 at E10r's early checkpoint (roadmap §E10r, #390), which leaves `main` where E10o's close
+left it. Every run was read from the jobs endpoint by conclusion, and every test leg of the head's run through
+its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result
+line. Every run id and job id below was searched for in this file before it was written, and none was here.
+Nothing was rerun by this session. No registry row has a new CI occurrence.
+
+#### `main` at `ebf46e7`, E10o's close: green
+
+`CI` 41868590721 at `ebf46e7`, attempt 1 of 1, `push`, created 2026-11-04T16:34:14Z and completed 16:36:56Z (the
+API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-ebf46e7): 15 = 6 + 9.
+
+Tally (main-ci-ebf46e7-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 126709177230 | success |
+| Lint (lua54) | 126709177521 | success |
+| Changed paths | 126709177606 | success |
+| Commit attribution (D9) | 126709177822 | success |
+| Format | 126709177910 | success |
+| Docs consistency | 126709324065 | success |
+| Test (crdt) | 126709325578 | skipped |
+| M10 Perf Gates (crdt) | 126709325583 | skipped |
+| Perf budgets (debug) | 126709325649 | skipped |
+| M4 Perf Gates | 126709326690 | skipped |
+| GPU Render (headless) | 126709326743 | skipped |
+| Test (matrix) | 126709326997 | skipped |
+| M5 Perf Gates | 126709327159 | skipped |
+| M1 Acceptance Gates | 126709327185 | skipped |
+| M6 Perf Gates | 126709327604 | skipped |
+
+Tally (main-ci-ebf46e7-success): 6 rows of the table above with `result` = `success`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test
+(matrix)`. `Grammar fuzz` 41868590482 at `ebf46e7`, `success`: `Grammar fuzz` 126709174860 and `Grammar fuzz
+(asan-strict)` 126709175373.
+
+#### `main` at `5cf359b`: attempt 2, the owner's, green
+
+E10o's close recorded `CI` 41861397364 at attempt 1 of 1, red on #288's third with `Test (macos-latest /
+luajit)` never acquired. It now reads attempt 2, `success`, completed 2026-11-04T18:12:09Z (the API's
+`updated_at`): 18 success, 1 skipped, `Test (ubuntu-latest / lua54)` 126744750635 and `Test (macos-latest /
+luajit)` 126744750311 among them. A green rerun establishes non-reproduction and nothing more: #288's third
+stands as counted, and attempt 1's jobs stay as that section lists them.
+
+#### PR #462 at `8c46d9f`: green
+
+`CI` 41947274309 on the merge `be29a5c` of `8c46d9f` into `ebf46e7`, attempt 1 of 1, `pull_request`, created
+2026-11-05T01:15:34Z and completed 01:53:19Z: `success`.
+
+Tally (pr-462-ci-8c46d9f): 19 = 18 + 1.
+
+Tally (pr-462-ci-8c46d9f-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 126982477070 | success |
+| Format | 126982477274 | success |
+| Commit attribution (D9) | 126982477290 | success |
+| Lint (lua54) | 126982477311 | success |
+| Lint (luajit) | 126982477370 | success |
+| Test (crdt) | 126982547389 | success |
+| M4 Perf Gates | 126982547422 | success |
+| GPU Render (headless) | 126982547454 | success |
+| M10 Perf Gates (crdt) | 126982547490 | success |
+| M1 Acceptance Gates | 126982547502 | success |
+| M6 Perf Gates | 126982547550 | success |
+| Test (macos-latest / luajit) | 126982547570 | success |
+| Perf budgets (debug) | 126982547571 | success |
+| M5 Perf Gates | 126982547592 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 126982547657 | success |
+| Test (macos-latest / lua54) | 126982547676 | success |
+| Test (ubuntu-latest / luajit) | 126982547688 | success |
+| Test (ubuntu-latest / lua54) | 126982547775 | success |
+| Docs consistency | 126982549510 | skipped |
+
+Tally (pr-462-ci-8c46d9f-success): 18 rows of the table above with `result` = `success`.
+
+Paired by their own logs: `Test (crdt)` 228 pairs, 5,445 passed, 0 failed, 81 ignored; `Test (ubuntu-latest /
+luajit)` and `lua54` 229 each, 5,498 / 0 / 81; `no crdt` 229, 4,849 / 0 / 67; both macOS 230 each, 5,454 / 0 / 79;
+`GPU Render (headless)` 1 pair, 394 / 0 / 0; `WouldBlock` in none. `Grammar fuzz` 41947274529, `success`:
+`Grammar fuzz` 126982477744 and `Grammar fuzz (asan-strict)` 126982478264.
+
+#### PR #462's earlier heads
+
+Each attempt 1 of 1, each red on this branch's own new rows or their code, and none of it a registry row:
+
+- `CI` 41934447652 at `f391dda`, created 2026-11-04T23:31:57Z, `failure`, 19 = 14 + 1 skipped (`Docs consistency`
+  126939353690) + 2 failure + 2 cancelled. `Test (ubuntu-latest / lua54)` 126939351352 and `Test (ubuntu-latest /
+  luajit)` 126939351332 on `e10r_3_the_real_gpu_stopped_past_the_bound_comes_back`, `the probe ended early:
+  ExitStatus(unix_wait_status(768))`: no adapter, fixed by `87dc1fb`. `Test (macos-latest / lua54)` 126939351370 and
+  `Test (macos-latest / luajit)` 126939351446 cancelled at the job's 45-minute ceiling inside `cargo test`, with
+  `frontend_stream::tests::a_frame_nobody_reads_fails_at_the_bound_and_no_later has been running for over 60
+  seconds`: `send` with `MSG_DONTWAIT` on a blocking socket did not stop there, fixed by `6ee1344`. `Grammar fuzz`
+  41934447584 `success`.
+- `CI` 41941125574 at `87dc1fb`, created 2026-11-05T00:24:46Z, `cancelled` at 00:29:59Z when the next push
+  superseded it, 19 = 7 + 1 skipped + 11 cancelled. `Grammar fuzz` 41941125472 `success`.
+- `CI` 41941557476 at `6ee1344`, created 2026-11-05T00:28:19Z, `failure`, 19 = 16 + 1 skipped (`Docs consistency`
+  126964155751) + 2 failure. `Test (macos-latest / lua54)` 126964153789 and `Test (macos-latest / luajit)`
+  126964153898, 228 pairs each, 5,398 / 2 / 79, on `e10r_ii_a_frontend_stopping_in_its_all_buffer_bootstrap_holds_up_nobody`
+  (`read timeout: Os { code: 22, kind: InvalidInput`) and `e10r_ii_a_frontend_stopping_in_its_target_bootstrap_holds_up_nobody`
+  (`the bootstrap's write failed and its socket was shut`): macOS refuses `SO_RCVTIMEO` on a shut socket and did not
+  report `POLLHUP` where the row polled, fixed by `8c46d9f`. `Grammar fuzz` 41941557474 `success`.
+
+#### The local gates, listed and not tallied (D38)
+
+Nine `scripts/gate --perf` runs at the 2 s bound on the laptop, at `nice -n 19` and six jobs. Reds, each classified
+from its own log and commented on its issue: `20261104T215726Z-3497858` at `5d54edb`, `e7h_ordinary_large_files_parse_inside_the_default_deadline`,
+#460's first, filed, and the selector and message of #340 without its attempt trace; `20261104T222015Z-3778630` at
+`5d54edb`, #286's fragments; `20261104T225836Z-422154` at `f391dda`, #316's selector, `kill 3`, `busy=true`;
+`20261104T233448Z-772960` at `aa3d430`, #340's selector and message again without the trace;
+`20261104T235117Z-952619` at `aa3d430`, #291, every fragment. Green, all seven stages: `20261104T231635Z-629801` at
+`f391dda`, `20261105T000917Z-1080364` at `87dc1fb`, `20261105T002820Z-1222268` at `6ee1344`, and
+`20261105T005853Z-1403459` at the head `8c46d9f`, 237 pairs, 5,890 / 0 / 81. `f391dda` diagnoses #286 as a race in
+the row, its first explanation with a forced control; the issue stays this registry's until the owner merges.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
