@@ -943,6 +943,193 @@ fn e10n_a_worker_whose_own_parse_passes_the_threshold_is_still_recycled() {
     );
 }
 
+/// A forced-watch daemon grown past the threshold: a worker started under a
+/// 512 MiB limit, kept, the knob lowered to 64 live, and #296's paragraph
+/// appended, whose parse grows without bound. The death's text, and how many
+/// recycles and limit changes the trace records for it.
+#[cfg(target_os = "linux")]
+fn live_limit_run(recycle: &str) -> (String, usize, usize) {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let victim = dir.join("victim.md");
+    std::fs::write(&victim, "# A note\n\nSome text, and *emphasis*.\n").expect("victim");
+    let paragraph = dir.join("paragraph.md");
+    std::fs::write(&paragraph, format!("\n{}", underscores(28))).expect("paragraph");
+    let settings = format!(
+        "pmacs.config.set('syntax.parse-memory-limit-mb', 512)\n\
+         pmacs.config.set('syntax.parse-deadline-ms', 120000)\n\
+         {recycle}"
+    );
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local b = open({victim:?}, 'markdown')\n\
+           if not settle(b) then return finish('error the note did not settle') end\n\
+           pmacs.config.set('syntax.parse-memory-limit-mb', 64)\n\
+           note('knob ' .. tostring(pmacs.config.get('syntax.parse-memory-limit-mb')))\n\
+           local f = assert(io.open({paragraph:?}))\n\
+           local text = f:read('*a'); f:close()\n\
+           b:insert(b:len(), text)\n\
+           if (pmacs.parse._pending_edits(b) or 0) > 0 then pmacs.parse._dispatch(b, 'markdown') end\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.editor.monotonic_ms() - t0 < 60000 do\n\
+             pmacs.workers.sleep(20):await()\n\
+             local r = pmacs.parse._unit_report(b)\n\
+             if r.deaths > 0 then return finish('death ' .. tostring(r.last_death)) end\n\
+           end\n\
+           finish('error not stopped within 60 s')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), &settings),
+        victim = victim.display().to_string(),
+        paragraph = paragraph.display().to_string(),
+    );
+    let run = run_daemon(
+        &dir,
+        &[("PMACS_PARSE_UNIT_MEMORY", "watch")],
+        &init,
+        Duration::from_mins(2),
+    );
+    assert_grown(&run);
+    let death = run
+        .notes
+        .lines()
+        .find_map(|l| l.strip_prefix("death "))
+        .unwrap_or_else(|| panic!("no death in\n{}", run.notes));
+    (
+        death.to_owned(),
+        run.events("recycle").count(),
+        run.events("limit-changed").count(),
+    )
+}
+
+/// R1-P6 (review 1, Low 5), `syntax.parse-memory-limit-mb` is registered
+/// `live` and E10n's coherence line is "the recycle and the memory limit mean
+/// what their knobs say": lowered after a worker exists, in a daemon past the
+/// threshold, at the default recycle. At the reviewed head the kept worker
+/// held its old 512; before E10n a recycle happened to take the new figure.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p6_a_live_limit_reaches_a_kept_worker_at_the_default_recycle() {
+    let (death, recycles, changes) = live_limit_run("");
+    assert!(
+        death.contains("grew past 64 MiB"),
+        "the kept worker was held to the knob's new 64 MiB: {death}"
+    );
+    assert_eq!(
+        (recycles, changes),
+        (0, 1),
+        "the limit's change replaced it, not a recycle: {death}"
+    );
+}
+
+/// R1-P6 again at recycle 0, where a worker is never recycled, so nothing but
+/// the limit's own change can reach it. A small daemon's worker behaved this
+/// way before E10n too, at 512.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p6_a_live_limit_reaches_a_kept_worker_at_recycle_0() {
+    let (death, recycles, changes) =
+        live_limit_run("pmacs.config.set('syntax.parse-worker-recycle-mb', 0)");
+    assert!(
+        death.contains("grew past 64 MiB"),
+        "the kept worker was held to the knob's new 64 MiB: {death}"
+    );
+    assert_eq!(
+        (recycles, changes),
+        (0, 1),
+        "the limit's change replaced it: {death}"
+    );
+}
+
+/// What Low 5's fix costs, and what it does not. Setting the knob to the value
+/// it has keeps the worker; a real change costs one full parse, at the buffer's
+/// next parse and not before, in a new worker that is then kept; the replaced
+/// worker still answers reads of the tree it held until one parse later, as a
+/// recycled one does, and then it is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10n_a_changed_limit_costs_one_full_parse_and_an_unchanged_one_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let file = dir.join("file.rs");
+    std::fs::write(&file, rust_source(60)).expect("file.rs");
+    let init = format!(
+        "{prelude}\
+         local function alive(u)\n\
+           local p = io.popen('kill -0 ' .. u:match('%d+') .. ' 2>/dev/null; echo $?')\n\
+           local code = p:read('*l'); p:close(); return code == '0'\n\
+         end\n\
+         pmacs.async(function()\n\
+           local b = open({file:?}, 'rust')\n\
+           if not settle(b) then return finish('error the file did not settle') end\n\
+           note('parsed before 0 ' .. unit(b))\n\
+           if not edit(b, 'rust', 1) then return finish('error edit 1') end\n\
+           note('parsed before 1 ' .. unit(b))\n\
+           pmacs.config.set('syntax.parse-memory-limit-mb', pmacs.config.get('syntax.parse-memory-limit-mb'))\n\
+           if not edit(b, 'rust', 2) then return finish('error edit 2') end\n\
+           note('parsed before 2 ' .. unit(b))\n\
+           local kept, held = unit(b), pmacs.parse.tree(b)\n\
+           pmacs.config.set('syntax.parse-memory-limit-mb', 512)\n\
+           note('knob-alone ' .. tostring(unit(b) == kept))\n\
+           if not edit(b, 'rust', 3) then return finish('error edit 3') end\n\
+           note('parsed after 3 ' .. unit(b))\n\
+           note('held ' .. tostring(held:root():type()) .. ' alive=' .. tostring(alive(kept)))\n\
+           if not edit(b, 'rust', 4) then return finish('error edit 4') end\n\
+           note('parsed after 4 ' .. unit(b))\n\
+           note('gone alive=' .. tostring(alive(kept)))\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        file = file.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(3));
+    let (before, after) = (run.units("before"), run.units("after"));
+    assert!(
+        before.iter().all(|&p| p == before[0]) && before.len() == 3,
+        "a set to the value it has kept the worker: {}",
+        run.notes
+    );
+    for parse in &run.parses(&before)[1..] {
+        assert_eq!(parse["full"].as_bool(), Some(false), "{parse}");
+    }
+    assert!(
+        run.notes.contains("knob-alone true"),
+        "the change alone replaces nothing: {}",
+        run.notes
+    );
+    assert!(
+        after.len() == 2 && after[0] == after[1] && after[0] != before[0],
+        "the next parse runs in a new worker, which is kept: {}",
+        run.notes
+    );
+    let parses = run.parses(&after);
+    assert_eq!(
+        parses[0]["full"].as_bool(),
+        Some(true),
+        "one full parse: {}",
+        parses[0]
+    );
+    for parse in &parses[1..] {
+        assert_eq!(
+            parse["full"].as_bool(),
+            Some(false),
+            "and only one: {parse}"
+        );
+    }
+    assert!(
+        run.notes.contains("held source_file alive=true"),
+        "the replaced worker still answers for the tree it held: {}",
+        run.notes
+    );
+    assert!(
+        run.notes.contains("gone alive=false"),
+        "one parse later it is gone: {}",
+        run.notes
+    );
+    assert_eq!(run.events("limit-changed").count(), 1, "{:?}", run.trace);
+    assert_eq!(run.events("recycle").count(), 0, "{:?}", run.trace);
+}
+
 /// R1-P8 (review 1, Low 1), E10n.2's "peak": the worker's answer is its
 /// `VmHWM`, not what it holds now. A large parse with the recycle off, the
 /// buffer cut down, more parses: the report after them still carries the large

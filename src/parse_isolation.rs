@@ -107,7 +107,9 @@ impl Isolation {
 pub struct Limits {
     /// The boundary.
     pub mode: Isolation,
-    /// What one unit may grow by beyond what it holds when it starts.
+    /// What one unit may grow by beyond what it holds when it starts. A unit
+    /// keeps the figure it started with, and one whose figure no longer
+    /// matches is replaced at its buffer's next parse (`unit_for`).
     pub unit_memory: u64,
     /// What every unit together may hold; 0 leaves the total unbounded.
     pub total_memory: u64,
@@ -881,6 +883,24 @@ fn unit_for(
         slot.unit = None;
         slot.mode = job.limits.mode;
         slot.synced = false;
+    }
+    // A worker holds the limit it started with, so a changed
+    // `syntax.parse-memory-limit-mb` reaches a buffer by replacing its worker
+    // at the buffer's next parse, which is one full parse (E10n review 1,
+    // Low 5). It retires as a recycled worker does: the tree the editor shows
+    // until the new one settles is still read from it.
+    if slot
+        .unit
+        .as_ref()
+        .is_some_and(|unit| unit.limits.unit_memory != job.limits.unit_memory)
+    {
+        slot.retiring = slot.unit.take();
+        slot.synced = false;
+        host.trace(&[
+            ("event", json_str("limit-changed")),
+            ("buffer", job.buffer.raw().to_string()),
+            ("limit", job.limits.unit_memory.to_string()),
+        ]);
     }
     if slot.unit.is_none() {
         // After a crash the buffer's next worker waits out its back-off,

@@ -138,7 +138,7 @@ end
 
 pmacs.config.define {
   name = "syntax.parse-memory-limit-mb",
-  description = "Under syntax.isolation process: how many MiB one buffer's parse worker may grow by before its parse is stopped.",
+  description = "Under syntax.isolation process: how many MiB one buffer's parse worker may grow by before its parse is stopped. A change reaches a buffer at its next parse, which replaces its worker and so costs one full parse.",
   type = "integer",
   default = 1024,
   min = 16,
