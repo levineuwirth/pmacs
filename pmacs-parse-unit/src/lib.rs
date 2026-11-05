@@ -373,8 +373,9 @@ impl From<WireNode> for pmacs_syntax::NodeFacts {
 pub struct Parsed {
     /// The installed tree's generation, which a read of it names.
     pub generation: u64,
-    /// The unit's peak resident memory after the parse, bytes, as the
-    /// kernel counts it (`getrusage`); 0 where it cannot be read.
+    /// The unit's own peak resident memory after the parse, bytes
+    /// ([`peak_resident_bytes`]), not its spawner's; 0 where it cannot be
+    /// read.
     pub peak_bytes: u64,
     /// The installed layers: the root first, then injections in depth
     /// order, as `ParseTreeBundle::layers` holds them.
@@ -894,8 +895,9 @@ fn spans_over(installed: &Installed, ranges: &[(u32, u32)]) -> SpanSet {
 /// What [`serve`] watches and reports about the unit's own memory.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ServeOptions {
-    /// Stop the process ([`MEMORY_WATCH_EXIT`]) once its peak resident
-    /// memory passes what it held at start plus this many bytes: the memory
+    /// Stop the process ([`MEMORY_WATCH_EXIT`]) once its own peak resident
+    /// memory ([`peak_resident_bytes`]) passes what it held at start plus
+    /// this many bytes, whatever its spawner's peak: the memory
     /// limit where `RLIMIT_AS` is refused (macOS), checked every
     /// [`WATCH_EVERY`] while a parse runs. Reactive where `RLIMIT_AS` is
     /// preventive: it overshoots by what the parse grows between two checks.
@@ -1063,8 +1065,11 @@ pub fn serve<R: Read, W: Write + Send + 'static>(
     served
 }
 
-/// The memory watch: while a parse runs, stop the process once its peak
-/// passes the allowance, and report its resident memory when asked to.
+/// The memory watch: while a parse runs, stop the process once its own
+/// peak passes its own peak at start plus the allowance, and report its
+/// resident memory when asked to. Both readings are the process's own
+/// (#445): on Linux `getrusage`'s would start at the spawner's peak and
+/// widen the limit by it.
 fn watch_memory<W: Write>(parsing: &Parsing, out: &Mutex<W>, options: ServeOptions) {
     let limit = options
         .watch_growth
@@ -1093,10 +1098,43 @@ fn watch_memory<W: Write>(parsing: &Parsing, out: &Mutex<W>, options: ServeOptio
     }
 }
 
-/// This process's peak resident memory, bytes, as the kernel counts it
-/// (`getrusage`: kibibytes on Linux, bytes on macOS); 0 where unread.
+/// This process's own peak resident memory, bytes: the high-water mark of
+/// its own address space, not one an `exec` carried over from the process
+/// that spawned it (#445). On Linux that is `VmHWM` in `/proc/self/status`,
+/// since `getrusage` there starts at the spawner's peak
+/// ([`rusage_peak_bytes`], which still stands in if `/proc` is unreadable).
+/// Elsewhere it is `getrusage`'s reading, which on macOS is the process's
+/// own (E10n.1's platform row, run on CI's macOS legs), taken without trying
+/// `/proc`: every macOS worker's memory watch reads this each
+/// [`WATCH_EVERY`] while a parse runs. 0 where neither is read.
 #[must_use]
 pub fn peak_resident_bytes() -> u64 {
+    if cfg!(target_os = "linux") {
+        proc_status_bytes("self", "VmHWM:").unwrap_or_else(rusage_peak_bytes)
+    } else {
+        rusage_peak_bytes()
+    }
+}
+
+/// The figure `key` names in `/proc/<who>/status`, kibibytes there, as
+/// bytes; `None` where there is none (macOS).
+#[must_use]
+pub fn proc_status_bytes(who: &str, key: &str) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/{who}/status"))
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix(key))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|kb| kb.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+}
+
+/// `getrusage(RUSAGE_SELF)`'s `ru_maxrss` in bytes (kibibytes on Linux,
+/// bytes on macOS); 0 where unread. On Linux an `exec`'d process keeps the
+/// high-water mark of the address space it replaced, so a child's reading
+/// starts at its spawner's peak (#445).
+#[must_use]
+pub fn rusage_peak_bytes() -> u64 {
     #[cfg(unix)]
     {
         use nix::sys::resource::{UsageWho, getrusage};
@@ -1120,14 +1158,5 @@ pub fn peak_resident_bytes() -> u64 {
 /// (Linux), else the peak, which is never below it.
 #[must_use]
 pub fn resident_bytes() -> u64 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find_map(|l| l.strip_prefix("VmRSS:"))
-                .and_then(|v| v.split_whitespace().next())
-                .and_then(|kb| kb.parse::<u64>().ok())
-        })
-        .map_or_else(peak_resident_bytes, |kb| kb * 1024)
+    proc_status_bytes("self", "VmRSS:").unwrap_or_else(peak_resident_bytes)
 }
