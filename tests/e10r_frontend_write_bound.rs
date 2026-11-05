@@ -507,12 +507,23 @@ fn e10r_3_the_real_gpu_stopped_past_the_bound_comes_back() {
         .expect("spawn the headless GPU probe");
     let deadline = Instant::now() + Duration::from_mins(1);
     while !ready.exists() && Instant::now() < deadline {
-        if let Ok(Some(status)) = child.try_wait() {
-            panic!("the probe ended early: {status:?}");
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(ready.exists(), "the probe never typed");
+    if !ready.exists() {
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("wait for the probe");
+        // No adapter (status 3), as on a runner with no GPU: skipped, which
+        // `probe_facts` turns into a panic under `PMACS_REQUIRE_GPU`.
+        assert!(
+            common::gpu_probe::probe_facts(&output, &report, "before it typed").is_none(),
+            "the probe never typed; stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let pid = i32::try_from(child.id()).expect("pid");
     stop(pid);
     let dropped = || daemon_log(&daemon).contains("sent no EOF within");
