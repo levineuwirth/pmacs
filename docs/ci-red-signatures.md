@@ -12281,6 +12281,97 @@ fourth, on a required check, in a file the branch does not touch, and not rerun.
 four; #328 did not meet this head and stays at four. #316 met a local sample, listed and not
 counted. Every other count above stands.
 
+### E10n's close: PR #456 merged as `f58fb04`, `main` green there, and #363's fourth not reproduced
+
+Recorded 2026-11-05 at E10n's merge (roadmap §E10n, #445). Every run was read from the jobs endpoint by
+conclusion, and the test legs named below through their own logs, fetched with escape sequences allowed and
+stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in
+this file before it was written, and none was here but `CI` 42028957415, whose attempt 1 E10n fix round 1's
+section records. No issue gains a CI occurrence.
+
+#### `main` at `da6c307`, E10n fix round 1's registry commit: green
+
+`CI` 42063209046 at `da6c307`, attempt 1 of 1, `push`, created 2026-11-05T16:19:26Z and completed 16:21:44Z (the
+API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-da6c307): 15 = 6 + 9.
+
+Tally (main-ci-da6c307-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127370188524 | success |
+| Format | 127370188787 | success |
+| Lint (lua54) | 127370188951 | success |
+| Commit attribution (D9) | 127370189236 | success |
+| Lint (luajit) | 127370189414 | success |
+| Docs consistency | 127370312021 | success |
+| Test (matrix) | 127370313979 | skipped |
+| Test (crdt) | 127370314022 | skipped |
+| M1 Acceptance Gates | 127370314406 | skipped |
+| M5 Perf Gates | 127370314542 | skipped |
+| M6 Perf Gates | 127370314547 | skipped |
+| Perf budgets (debug) | 127370314792 | skipped |
+| GPU Render (headless) | 127370315039 | skipped |
+| M4 Perf Gates | 127370315672 | skipped |
+| M10 Perf Gates (crdt) | 127370316047 | skipped |
+
+Tally (main-ci-da6c307-success): 6 rows of the table above with `result` = `success`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test
+(matrix)`. `Grammar fuzz` 42063208925 at `da6c307`, `success`: `Grammar fuzz` 127370188751 and `Grammar fuzz
+(asan-strict)` 127370189478.
+
+#### PR #456 at `1a41056`: attempt 2, the owner's, green
+
+E10n fix round 1's section recorded `CI` 42028957415 at attempt 1 of 1, red on #363's fourth. It now reads
+attempt 2, the owner's rerun of `Test (macos-latest / luajit)`, on the same merge `e9bcda8`, started
+2026-11-05T16:33:57Z and completed 17:09:11Z: `success`, `Docs consistency` 127379231181 the skipped job, the
+leg 127379228688, 230 pairs, 5,441 / 0 / 79,
+`e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered` `ok`. A green rerun establishes
+non-reproduction and nothing more: #363's fourth stands as counted, and attempt 1's jobs stay as that section
+lists them. E10m.10 takes #363.
+
+Tally (pr-456-ci-1a41056-a2): 19 = 18 + 1.
+
+#### `main` at `f58fb04`, E10n's squash: green
+
+`CI` 42072793229 at `f58fb04`, attempt 1 of 1, `push`, created 2026-11-05T17:15:16Z and completed 17:53:11Z (the
+API's `updated_at`): `success`.
+
+Tally (main-ci-f58fb04): 19 = 18 + 1.
+
+Tally (main-ci-f58fb04-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 127404916200 | success |
+| Changed paths | 127404916353 | success |
+| Commit attribution (D9) | 127404916357 | success |
+| Lint (lua54) | 127404916425 | success |
+| Format | 127404916765 | success |
+| M5 Perf Gates | 127405039558 | success |
+| M1 Acceptance Gates | 127405039749 | success |
+| GPU Render (headless) | 127405039790 | success |
+| M10 Perf Gates (crdt) | 127405039796 | success |
+| Test (macos-latest / luajit) | 127405039803 | success |
+| M6 Perf Gates | 127405039835 | success |
+| Test (crdt) | 127405039861 | success |
+| Test (ubuntu-latest / lua54) | 127405039863 | success |
+| Test (ubuntu-latest / luajit) | 127405039897 | success |
+| Perf budgets (debug) | 127405039966 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127405040044 | success |
+| Test (macos-latest / lua54) | 127405040136 | success |
+| M4 Perf Gates | 127405040295 | success |
+| Docs consistency | 127405043317 | skipped |
+
+Tally (main-ci-f58fb04-success): 18 rows of the table above with `result` = `success`.
+
+Paired by their own logs: `Test (crdt)` 228 pairs, 5,443 / 0 / 87; `Test (ubuntu-latest / luajit)` and `lua54`
+229 each, 5,496 / 0 / 87; `no crdt` 229, 4,861 / 0 / 71; both macOS 230 each, 5,441 / 0 / 79; `GPU Render
+(headless)` 1 pair, 394 / 0 / 0; `WouldBlock` in none. `Grammar fuzz` 42072793185, `success`: `Grammar fuzz`
+127404916069 and `Grammar fuzz (asan-strict)` 127404915826.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
