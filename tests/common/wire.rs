@@ -246,8 +246,9 @@ impl WireSession {
 
     /// Attach a grid session as [`Self::grid`] does and never read it:
     /// a frontend stopped before its bootstrap. Nothing is read past the
-    /// `Hello`, so the socket is the row's, with no read timeout left on
-    /// it, and the daemon's first writes to it are its bootstrap's.
+    /// `Hello`, so the socket is the row's, its read timeout still the
+    /// `Hello`'s ten seconds, and the daemon's first writes to it are its
+    /// bootstrap's.
     pub fn grid_unread(daemon: &TestDaemon, size: CellSize) -> (UnixStream, FrontendId) {
         let (mut stream, fid) = Self::hello(daemon);
         let mut caps = semantic_caps();

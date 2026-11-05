@@ -26,14 +26,12 @@
 mod common;
 
 use std::io::Read;
-use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use pmacs::daemon::WRITE_FAILURE_DRAIN;
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
 use pmacs_protocol::cell::CellSize;
@@ -236,24 +234,11 @@ fn e10r_ii_a_frontend_stopping_in_its_target_bootstrap_holds_up_nobody() {
             path: file.to_str().expect("utf-8").as_bytes().to_vec(),
         }),
     );
-    let served = serve_until(&mut other, || shut_by_the_daemon(&stopped));
+    // Past the bound and a margin; reading to EOF below says the socket was shut.
+    let started = Instant::now();
+    let served = serve_until(&mut other, || started.elapsed() > FRAME_WRITE_BOUND * 2);
     assert_held_up_by_at_most_the_bound(&served, &daemon, "a frontend stopped in its target");
-    assert!(
-        shut_by_the_daemon(&stopped),
-        "the bootstrap's write failed and its socket was shut: {}",
-        daemon_log(&daemon)
-    );
     assert_part_of_a_frame_then_eof(&mut stopped, fid, &daemon);
-}
-
-/// Whether the daemon has shut this socket both ways, read without taking
-/// anything from it.
-fn shut_by_the_daemon(stream: &UnixStream) -> bool {
-    let mut fds = [PollFd::new(stream.as_fd(), PollFlags::empty())];
-    poll(&mut fds, PollTimeout::ZERO).is_ok_and(|ready| ready > 0)
-        && fds[0]
-            .revents()
-            .is_some_and(|got| got.contains(PollFlags::POLLHUP))
 }
 
 /// How many log lines hold both `needle` and the bound's own words.
@@ -265,11 +250,9 @@ fn bound_failures_named(daemon: &TestDaemon, needle: &str) -> usize {
 }
 
 /// What `stopped` still holds: fewer bytes than the frame its header
-/// declares, then EOF, the daemon having shut the socket.
+/// declares, then EOF, the daemon having shut the socket. The read timeout is
+/// the attach's ten seconds: macOS refuses `SO_RCVTIMEO` on a shut socket.
 fn assert_part_of_a_frame_then_eof(stopped: &mut UnixStream, fid: FrontendId, daemon: &TestDaemon) {
-    stopped
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .expect("read timeout");
     let mut held = Vec::new();
     stopped.read_to_end(&mut held).unwrap_or_else(|error| {
         panic!(
