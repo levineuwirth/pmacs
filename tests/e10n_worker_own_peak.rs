@@ -22,6 +22,7 @@
 
 mod common;
 
+use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
@@ -58,7 +59,11 @@ fn mib(bytes: u64) -> String {
 /// parent held (it inherits the parent's high-water mark at `exec`) while
 /// its `VmHWM` is its own. On macOS the child's `getrusage` peak is its
 /// own: the row asserts it, so CI's macOS legs answer the question (a red
-/// there would say macOS inherits too, with both figures).
+/// there would say macOS inherits too, with both figures), and a real reading
+/// on both ends is part of the answer ([`judge_macos_reading`]). The figures
+/// go to the test's own stderr, past libtest's capture, as e7i's memory-watch
+/// row does: a passing row's `eprintln!` reaches no CI log, and review 1 found
+/// `e10n platform` in none of a run's six.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn e10n_a_child_s_rusage_peak_and_its_spawner_s() {
@@ -98,15 +103,26 @@ fn e10n_a_child_s_rusage_peak_and_its_spawner_s() {
             .unwrap_or_else(|| panic!("no {key} in {line}"))
     };
     let (child, child_hwm) = (figure("rusage="), figure("hwm="));
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "e10n platform ({}): the parent held {} (its getrusage peak {}); the child's getrusage peak {}, its VmHWM {}",
         std::env::consts::OS,
         mib(HELD as u64),
         mib(parent),
         mib(child),
-        mib(child_hwm)
+        if child_hwm > 0 {
+            mib(child_hwm)
+        } else {
+            "not read here".to_owned()
+        }
     );
     if cfg!(target_os = "linux") {
+        assert!(
+            parent >= HELD as u64,
+            "the parent's getrusage peak reads what it held: {} against {}",
+            mib(parent),
+            mib(HELD as u64)
+        );
         assert!(
             child >= HELD as u64,
             "on Linux a child's getrusage peak carries its spawner's: {} against the {} its parent held",
@@ -118,13 +134,62 @@ fn e10n_a_child_s_rusage_peak_and_its_spawner_s() {
             "on Linux a child's VmHWM is its own: {}",
             mib(child_hwm)
         );
-    } else {
-        assert!(
-            child < HELD as u64 / 2,
+    } else if let Err(why) = judge_macos_reading(parent, child) {
+        panic!("{why}");
+    }
+}
+
+/// The macOS half of the platform row: that a child's `getrusage` peak is its
+/// own needs a reading on both ends, or a platform reading 0 ("0 where
+/// unread", [`pmacs_parse_unit::rusage_peak_bytes`]) would pass as an answer.
+/// It takes the figures as arguments so that a run on Linux can falsify it,
+/// the branch that calls it running only on CI's macOS legs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn judge_macos_reading(parent: u64, child: u64) -> Result<(), String> {
+    let held = HELD as u64;
+    if parent < held {
+        return Err(format!(
+            "the parent's getrusage peak reads what it held: {} against {}, so this platform's reading says nothing of its child's",
+            mib(parent),
+            mib(held)
+        ));
+    }
+    if child == 0 {
+        return Err(
+            "the child's getrusage peak was not read: 0 bytes says nothing of what it carries"
+                .to_owned(),
+        );
+    }
+    if child >= held / 2 {
+        return Err(format!(
             "on macOS a child's getrusage peak is its own, not its spawner's: {} against the {} its parent held (its parent's peak {})",
             mib(child),
-            mib(HELD as u64),
+            mib(held),
             mib(parent)
+        ));
+    }
+    Ok(())
+}
+
+/// Review 1's Low 2: the macOS half has a positive control. Each reading it
+/// has to refuse, and the shape it has to accept, on any platform that builds
+/// the row.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn e10n_the_macos_half_refuses_a_reading_of_nothing() {
+    let held = HELD as u64;
+    let own = 8 << 20;
+    assert!(judge_macos_reading(held + (4 << 20), own).is_ok());
+    for (parent, child, why) in [
+        (held + (4 << 20), 0, "not read"),
+        (0, own, "reads what it held"),
+        (0, 0, "reads what it held"),
+        (held + (4 << 20), held, "its own, not its spawner's"),
+    ] {
+        let verdict = judge_macos_reading(parent, child);
+        assert!(
+            verdict.as_ref().is_err_and(|e| e.contains(why)),
+            "parent {parent}, child {child}: {verdict:?}, wanted {why:?}"
         );
     }
 }
