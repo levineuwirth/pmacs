@@ -188,7 +188,10 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
         "false",
         "an empty change fuzzes nothing"
     );
+}
 
+#[test]
+fn e7g_the_fuzz_job_always_reports_and_fuzzes_on_the_scripts_word() {
     let wf = read(".github/workflows/grammar-fuzz.yml");
     let on = wf
         .split("\non:\n")
