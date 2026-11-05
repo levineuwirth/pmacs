@@ -29,13 +29,18 @@ use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use pmacs::attach_reconnect::{HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 use pmacs::daemon::WRITE_FAILURE_DRAIN;
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
 use pmacs_protocol::cell::CellSize;
-use pmacs_protocol::message::{InitialTarget, InstanceMessage, Key, Modifiers, PROTOCOL_VERSION};
+use pmacs_protocol::message::{
+    AttachRequest, GoodbyeReason, Hello, InitialTarget, InstanceCapabilities, InstanceIdentity,
+    InstanceMessage, Key, Modifiers, PROTOCOL_VERSION,
+};
+use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{FrontendId, MAX_FRAME_BYTES};
 
 use common::daemon::TestDaemon;
@@ -535,49 +540,251 @@ fn e10r_3_the_real_gpu_stopped_past_the_bound_comes_back() {
     );
 }
 
-/// What the attached TUI does today, stated as a row so that it cannot
-/// change unseen: dropped this way and resumed, it reads what is left and
-/// EOF, and exits at once with its terminal restored. It does not hang, and
-/// it does not come back: a grid session has no token (`Resume` is read only
-/// from a semantic session, `src/daemon.rs`), and the local `pmacs --attach`
-/// has no reconnect loop (`run_attach` beside `run_attach_ssh`).
+/// Attach a real TUI in a PTY to `socket` with `envs`, as `pmacs --attach` runs.
+fn attached_tui(socket: &Path, home: &Path, envs: &[(&str, &Path)]) -> common::pty::PmacsPty {
+    let mut all: Vec<(&str, &Path)> = vec![("HOME", home), ("XDG_CONFIG_HOME", home)];
+    all.extend_from_slice(envs);
+    common::pty::spawn_pmacs_in_pty(
+        &["--attach", "--socket", socket.to_str().expect("utf-8")],
+        &all,
+        24,
+        80,
+    )
+}
+
+/// Wait until `needle` is in what `tui` wrote to its terminal, or say what it
+/// wrote instead.
+fn wait_for_output(tui: &common::pty::PmacsPty, needle: &str, patience: Duration) {
+    let deadline = Instant::now() + patience;
+    loop {
+        let output = String::from_utf8_lossy(&tui.output()).into_owned();
+        if output.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{needle:?} never reached the terminal, which was given: {:?}",
+            output.chars().rev().take(400).collect::<String>()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What the TUI wrote after it last left the alternate screen: what its user
+/// is left looking at, which is where a reason has to be to be read.
+fn after_the_alternate_screen(tui: &common::pty::PmacsPty) -> String {
+    let output = tui.output();
+    let leave = b"\x1b[?1049l";
+    let at = output
+        .windows(leave.len())
+        .rposition(|w| w == leave)
+        .expect("it left the alternate screen");
+    String::from_utf8_lossy(&output[at + leave.len()..]).into_owned()
+}
+
+/// The attached TUI, dropped this way and resumed, comes back on a fresh view
+/// (the owner's ruling of 2026-11-05: a grid session has no token) and says so,
+/// and a key typed after that is the daemon's to answer: a prompt, which no
+/// frontend paints for itself. F12 still ends it, and status 0.
 #[test]
-fn e10r_3_the_attached_tui_stopped_past_the_bound_exits_when_resumed() {
+fn e10r_3_the_attached_tui_stopped_past_the_bound_comes_back() {
     let daemon = TestDaemon::spawn();
     let mut other = WireSession::grid(&daemon, SIZE);
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let home = dir.path().to_path_buf();
-    let socket = daemon.socket_path().to_str().expect("utf-8").to_owned();
-    let mut tui = common::pty::spawn_pmacs_in_pty(
-        &["--attach", "--socket", &socket],
-        &[("HOME", &home), ("XDG_CONFIG_HOME", &home)],
-        24,
-        80,
-    );
+    let mut tui = attached_tui(daemon.socket_path(), dir.path(), &[]);
     let pid = i32::try_from(tui.process_id().expect("pid")).expect("pid");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !String::from_utf8_lossy(&tui.output()).contains("*scratch*") && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_output(&tui, "*scratch*", Duration::from_secs(30));
     stop(pid);
     let dropped = || daemon_log(&daemon).contains("sent no EOF within");
     let served = serve_until(&mut other, dropped);
     assert_held_up_by_at_most_the_bound(&served, &daemon, "the attached TUI stopped");
     assert!(dropped(), "{}", daemon_log(&daemon));
     resume(pid);
-    let status = tui
-        .wait_for_exit(Duration::from_secs(20))
-        .expect("a resumed TUI exits rather than hangs");
-    assert!(status.success(), "{status:?}");
-    let output = tui.output();
+    wait_for_output(&tui, "reconnected on a new view", Duration::from_secs(20));
     assert!(
-        output.windows(8).any(|w| w == b"\x1b[?1049l"),
-        "it left the alternate screen on its way out"
+        tui.wait_for_exit(Duration::from_millis(100)).is_none(),
+        "the TUI came back rather than exiting"
     );
+    tui.write_input(b"\x18b").expect("C-x b");
+    wait_for_output(&tui, "witch", Duration::from_secs(10));
+    tui.write_input(b"\x07").expect("C-g");
     // The daemon and the other frontend are none the worse for it.
     other.key(Key::Char('.'), Modifiers::NONE);
     other.where_am_i();
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("F12 ends the session");
+    assert!(status.success(), "{status:?}");
+}
+
+/// A daemon killed under an attached TUI ends it, saying why where the user can
+/// read it, with no try after the one the connect refused. Until E10r's fix
+/// round it exited with status 0, its one line on the alternate screen it was
+/// leaving.
+#[test]
+fn e10r_3_a_daemon_killed_under_the_attached_tui_ends_it_saying_why() {
+    let mut daemon = TestDaemon::spawn();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(daemon.socket_path(), dir.path(), &[]);
+    wait_for_output(&tui, "*scratch*", Duration::from_secs(30));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL");
+    daemon.wait_for_exit().expect("the daemon is gone");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the TUI does not go on trying");
+    assert!(!status.success(), "{status:?}");
+    let said = after_the_alternate_screen(&tui);
+    assert!(
+        said.contains("is gone") && said.contains("refused"),
+        "the reason is on the terminal the user is left with: {said:?}"
+    );
+}
+
+/// A daemon of the row's own on `socket`, in a thread: each connection is
+/// handed to `session` with its number from 1, after the `Hello` and the
+/// `AttachRequest`, until `session` says to stop by returning `false`. Returns
+/// how many connections came.
+struct StandInDaemon {
+    connections: Arc<AtomicUsize>,
+    dir: tempfile::TempDir,
+}
+
+impl StandInDaemon {
+    fn serve(session: impl Fn(usize, &mut UnixStream) + Send + 'static) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("d.sock"))
+            .expect("bind the stand-in's socket");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&connections);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let n = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                let hello = Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    assigned_frontend_id: FrontendId(u64::try_from(n).expect("n")),
+                    instance_identity: InstanceIdentity {
+                        pmacs_version: "0.0.0-test".to_owned(),
+                        build_hash: None,
+                        instance_name: Some("stand-in".to_owned()),
+                        uptime_secs: 0,
+                        working_directory: "/tmp".to_owned(),
+                    },
+                    instance_capabilities: InstanceCapabilities::default(),
+                };
+                if write_message(&mut stream, &hello).is_err()
+                    || read_message::<AttachRequest>(&mut stream).is_err()
+                {
+                    continue;
+                }
+                session(n, &mut stream);
+                // The stream closes here, with no `Goodbye` unless `session`
+                // wrote one.
+            }
+        });
+        Self { connections, dir }
+    }
+
+    fn socket(&self) -> std::path::PathBuf {
+        self.dir.path().join("d.sock")
+    }
+
+    fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+}
+
+fn first_frame(stream: &mut UnixStream) {
+    write_message(
+        stream,
+        &InstanceMessage::CellDelta {
+            spans: Vec::new(),
+            full_grid: true,
+        },
+    )
+    .expect("the first frame");
+}
+
+/// A daemon that closes every new session before its first frame stops the
+/// local route at the cap, so it cannot spin, saying why where the user can
+/// read it.
+#[test]
+fn e10r_3_sessions_dropped_before_their_first_frame_stop_the_local_route() {
+    let daemon = StandInDaemon::serve(|_, _| {});
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the route stops");
+    assert_eq!(
+        daemon.connections(),
+        usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap"),
+        "as many sessions as the cap, and no more"
+    );
+    assert!(!status.success(), "{status:?}");
+    let said = after_the_alternate_screen(&tui);
+    assert!(said.contains("before their first frame"), "{said:?}");
+}
+
+/// A session that reached its first frame starts the count again, so a route
+/// that keeps getting a working session is not stopped by the cap, and each
+/// new one says why the view is fresh. The stand-in's `Goodbye` ends it, with
+/// status 0, as a daemon's `Goodbye` always has.
+#[test]
+fn e10r_3_a_first_frame_starts_the_local_routes_count_again() {
+    let sessions = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 3;
+    let daemon = StandInDaemon::serve(move |n, stream| {
+        first_frame(stream);
+        if n == sessions {
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+            )
+            .expect("Goodbye");
+        }
+    });
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), sessions);
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(said.contains("reconnected on a new view"), "{said:?}");
+}
+
+/// `C-c` in the wait ends the local route with status 0, as the SSH route's
+/// does; nothing else a user can reach does while a daemon keeps answering.
+#[test]
+fn e10r_3_ctrl_c_in_the_local_routes_wait_ends_it() {
+    let daemon = StandInDaemon::serve(|_, stream| first_frame(stream));
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("2000"))],
+    );
+    wait_for_output(&tui, "reconnecting in", Duration::from_secs(20));
+    tui.write_input(b"\x03").expect("C-c");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("C-c ends the wait");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), 1, "and nothing tried again");
 }
 
 /// A paste larger than the socket's buffer through the attached TUI reaches

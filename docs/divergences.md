@@ -232,10 +232,11 @@ whole. Under one cap a growing register squeezes the rules.
   hear its `Detach` on: the view stays retained for
   `session.view-retention-secs` and holds `daemon.idle-exit-secs`'s
   clock that long. The local grid attach (`pmacs --attach` on a socket)
-  does neither: it exits when the daemon's socket closes, as it always
-  has, and never presents a token, since a grid session is minted none.
-  Removed when the local attach reconnects on the same schedule and the
-  token family reaches grid sessions.
+  reconnects on the same schedule since E10r, with no `Goodbye` as what
+  starts it, but never presents a token, since a grid session is minted
+  none: it comes back on a fresh view and says so on its bottom row, and
+  a daemon that is gone ends it, saying why. Removed when the token
+  family reaches grid sessions, which is a wire question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon
   keeps one desktop for each kind of window that attaches to it, under
   its own identity and the kind: `desktop::frontend_session_key`, the

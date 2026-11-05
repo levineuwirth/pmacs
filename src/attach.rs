@@ -24,6 +24,17 @@
 //! between F12 and "just close the terminal" is up to the user;
 //! both result in the same daemon-side cleanup.
 //!
+//! # A socket that ends with no `Goodbye`
+//!
+//! The daemon says `Goodbye` when it means to end a session. A socket that
+//! ends without one was lost, which since E10r is what a frontend that stopped
+//! reading past the daemon's bound finds when it is resumed, so the local route
+//! attaches again ([`run_attach`]), on the SSH route's schedule and banners. It
+//! comes back on a fresh view, not its own: a grid session is minted no token
+//! (`docs/divergences.md`). A daemon that is gone ends it, saying why once the
+//! alternate screen is left; so do [`HANDSHAKE_RETRY_CAP`] sessions in a row
+//! that end before their first frame, so the route cannot spin.
+//!
 //! The F12 choice is tentative for v0.1; it conflicts with any user
 //! keybind on F12, which we accept because F12 is rarely bound. A
 //! later release will make it configurable.
@@ -183,6 +194,20 @@ pub enum AttachError {
         /// them in their terminal scrollback).
         stderr_tail: String,
     },
+    /// The daemon an attached session was on is gone: its socket refused
+    /// the connect, or is not there.
+    DaemonGone {
+        /// The socket the session was attached to.
+        socket: PathBuf,
+        /// What the connect found.
+        found: &'static str,
+    },
+    /// [`HANDSHAKE_RETRY_CAP`] sessions in a row ended before their first
+    /// frame, so the route stopped trying.
+    SessionsDropped {
+        /// How many in a row.
+        attempts: u32,
+    },
 }
 
 impl std::fmt::Display for AttachError {
@@ -267,6 +292,17 @@ impl std::fmt::Display for AttachError {
                     ),
                 }
             }
+            Self::DaemonGone { socket, found } => write!(
+                f,
+                "the daemon at {} is gone ({found}), so this session has ended; start it again \
+                 and attach",
+                socket.display()
+            ),
+            Self::SessionsDropped { attempts } => write!(
+                f,
+                "the daemon closed {attempts} sessions in a row before their first frame, so \
+                 this one has stopped trying"
+            ),
         }
     }
 }
@@ -277,7 +313,11 @@ impl std::error::Error for AttachError {
             Self::Io(e) | Self::Terminal(e) => Some(e),
             Self::Transport(e) => Some(e),
             Self::SshSpawnFailed { source, .. } => Some(source),
-            Self::VersionMismatch { .. } | Self::Rejected(_) | Self::SshChildExited { .. } => None,
+            Self::VersionMismatch { .. }
+            | Self::Rejected(_)
+            | Self::SshChildExited { .. }
+            | Self::DaemonGone { .. }
+            | Self::SessionsDropped { .. } => None,
         }
     }
 }
@@ -366,6 +406,17 @@ pub(crate) trait AttachPumpFrontend {
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
     fn size(&self) -> CellSize;
 
+    /// Say `text` on the bottom row, over what a frame put there. Default
+    /// no-op: a test's stub has no screen.
+    fn show_notice(&mut self, _text: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Take a notice off the bottom row.
+    fn clear_notice(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// T M10.10 Day 3 step 5 Path β — paint an optimistic insert
     /// at the terminal's current cursor position. Used when the
     /// optimistic-apply orchestrator landed a `CrdtOp` AND the
@@ -406,6 +457,12 @@ impl AttachPumpFrontend for Frontend {
     fn size(&self) -> CellSize {
         Frontend::size(self)
     }
+    fn show_notice(&mut self, text: &str) -> std::io::Result<()> {
+        self.draw_status_overlay(text)
+    }
+    fn clear_notice(&mut self) -> std::io::Result<()> {
+        self.clear_status_overlay()
+    }
     #[cfg(feature = "crdt")]
     fn paint_optimistic_insert(&mut self, c: char) -> std::io::Result<()> {
         Frontend::paint_optimistic_insert(self, c)
@@ -416,10 +473,21 @@ impl AttachPumpFrontend for Frontend {
     }
 }
 
+/// How long a new session of the local route waits for its `Hello`. A
+/// daemon that takes the connect and says nothing costs an attempt, not the
+/// terminal, whose keys nothing reads during a handshake.
+const LOCAL_RECONNECT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// On the bottom row of a session that replaced a lost one, until the next
+/// key: the view is fresh, so the user is told why the buffer changed.
+const NOTICE_FRESH_VIEW: &str = "[pmacs reconnected on a new view: the daemon closed the last one]";
+
 /// Connect to the daemon at `socket_path` and run the attach client.
 ///
-/// Returns when the daemon disconnects (clean detach, instance
-/// shutdown, version mismatch, etc.) or when the user presses F12.
+/// Returns when the session ends on purpose (F12, or the daemon's `Goodbye`),
+/// or when it cannot go on: the daemon is gone, or sessions keep ending before
+/// their first frame. A socket that ends with no `Goodbye` while the daemon is
+/// there is attached again, on a fresh view.
 // Owned `PathBuf` lets callers hand the result of
 // `resolve_socket_path` straight in; clippy's pedantic
 // pass-by-value is wrong for this entry point.
@@ -431,7 +499,30 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // raw mode engages. If the daemon refuses the attach (version
     // mismatch, malformed Hello, EOF), the error message reaches a
     // normal terminal — `Frontend::new` hasn't taken over yet.
-    let hello: Hello = read_message(&mut stream)?;
+    let hello = read_local_hello(&mut stream)?;
+    print_attach_info(&hello);
+
+    let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
+    let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
+    write_attach_request(&mut stream, &hello, initial_size)?;
+
+    // Take over the terminal. Frontend's Drop tears it down.
+    let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
+
+    let io = build_local_socket_io(stream)?;
+    let result = run_local_sessions(&socket_path, io, hello.assigned_frontend_id, &mut frontend);
+
+    // Frontend drops here; raw mode + alternate screen + mouse capture
+    // all torn down before we return, so what the caller prints of the
+    // result lands on the terminal the user is left with.
+    drop(frontend);
+
+    result
+}
+
+/// Read a daemon's `Hello` and check its version.
+fn read_local_hello(stream: &mut UnixStream) -> Result<Hello, AttachError> {
+    let hello: Hello = read_message(stream)?;
     // T M10.5: relaxed from strict equality to range membership per
     // `§sec:m10-backward-compat`. A v1.0 frontend accepts a Hello
     // from a v0.1 daemon (protocol_version=1) and downgrades its own
@@ -444,11 +535,15 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
             client: PROTOCOL_VERSION,
         });
     }
-    print_attach_info(&hello);
+    Ok(hello)
+}
 
-    let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
-    let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
-
+/// Answer `hello` with this frontend's `AttachRequest`.
+fn write_attach_request(
+    stream: &mut UnixStream,
+    hello: &Hello,
+    initial_size: CellSize,
+) -> Result<(), AttachError> {
     // T M10.5: match the server's protocol version so a v1.0 frontend
     // connecting to a v0.1 daemon advertises protocol_version=1 in
     // its AttachRequest (the v0.1 daemon's strict-equality check will
@@ -466,19 +561,88 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
         frontend_capabilities: build_capabilities(),
         initial_size,
     };
-    write_message(&mut stream, &req)?;
+    write_message(stream, &req)?;
+    Ok(())
+}
 
-    // Take over the terminal. Frontend's Drop tears it down.
-    let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
+/// The local route's sessions, one after another for as long as each is lost
+/// and the daemon is there.
+///
+/// The schedule starts again after a session that reached its first frame, and
+/// so does the count of those that did not, which [`HANDSHAKE_RETRY_CAP`]
+/// bounds so a daemon that drops every new session in its bootstrap holds
+/// nobody up for long and this route cannot spin. Unlike the SSH route's, a
+/// schedule here restarts: a loss is an event of its own on a local socket, not
+/// a network that may stay down, and it starts from a daemon known to be there.
+fn run_local_sessions(
+    socket_path: &std::path::Path,
+    first: AttachIo,
+    first_id: FrontendId,
+    frontend: &mut Frontend,
+) -> Result<(), AttachError> {
+    let mut schedule = BackoffSchedule::new();
+    let mut unbootstrapped: u32 = 0;
+    let mut session = (first, first_id);
+    let mut notice = None;
+    loop {
+        let (io, id) = session;
+        let lost = match run_attach_pair(io, frontend, id, notice.take())? {
+            PumpEnd::Over => return Ok(()),
+            PumpEnd::Lost(lost) => lost,
+        };
+        if lost.bootstrapped {
+            schedule.reset();
+            unbootstrapped = 0;
+        } else {
+            unbootstrapped = unbootstrapped.saturating_add(1);
+        }
+        session = loop {
+            if unbootstrapped >= HANDSHAKE_RETRY_CAP {
+                return Err(AttachError::SessionsDropped {
+                    attempts: unbootstrapped,
+                });
+            }
+            let delay = schedule.next_delay();
+            match sleep_with_countdown(Some(&mut *frontend), delay) {
+                SleepOutcome::Cancelled => return Ok(()),
+                SleepOutcome::Elapsed => {}
+            }
+            let _ = frontend.draw_status_overlay(banner_session_reconnect());
+            match connect_again(socket_path, frontend.size()) {
+                Ok(next) => break next,
+                Err(
+                    error @ (AttachError::DaemonGone { .. } | AttachError::VersionMismatch { .. }),
+                ) => return Err(error),
+                Err(_) => unbootstrapped = unbootstrapped.saturating_add(1),
+            }
+        };
+        notice = Some(NOTICE_FRESH_VIEW);
+    }
+}
 
-    let io = build_local_socket_io(stream)?;
-    let result = run_attach_pair(io, &mut frontend, hello.assigned_frontend_id);
-
-    // Frontend drops here; raw mode + alternate screen + mouse capture
-    // all torn down before we return.
-    drop(frontend);
-
-    result
+/// One new session on the local route's socket: its connect and handshake.
+fn connect_again(
+    socket_path: &std::path::Path,
+    size: CellSize,
+) -> Result<(AttachIo, FrontendId), AttachError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        use pmacs_protocol::{ConnectFailure, classify_connect_failure};
+        let found = match classify_connect_failure(socket_path, &error) {
+            ConnectFailure::Missing => "no socket is there",
+            ConnectFailure::Stale => "its socket refused the connection",
+            ConnectFailure::NotASocket => "what is there is not a socket",
+            ConnectFailure::Other | ConnectFailure::Inspect(_) => return AttachError::Io(error),
+        };
+        AttachError::DaemonGone {
+            socket: socket_path.to_path_buf(),
+            found,
+        }
+    })?;
+    stream.set_read_timeout(Some(LOCAL_RECONNECT_HELLO_TIMEOUT))?;
+    let hello = read_local_hello(&mut stream)?;
+    stream.set_read_timeout(None)?;
+    write_attach_request(&mut stream, &hello, size)?;
+    Ok((build_local_socket_io(stream)?, hello.assigned_frontend_id))
 }
 
 /// Build an [`AttachIo`] for a connected `UnixStream`.
@@ -636,6 +800,27 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
+/// How an attach pump ended, when it did not end on an error of its own.
+#[derive(Debug)]
+pub(crate) enum PumpEnd {
+    /// The session ended on purpose: the daemon's `Goodbye`, or F12.
+    Over,
+    /// The socket ended with no `Goodbye`.
+    Lost(LostSession),
+}
+
+/// What a lost session reached, for the loop deciding what comes next.
+#[derive(Debug)]
+pub(crate) struct LostSession {
+    /// Whether its first frame arrived. A grid session's bootstrap is its
+    /// snapshots and nothing marks its end, so the first `CellDelta`, which
+    /// the first tick after the bootstrap writes, is what says so.
+    pub bootstrapped: bool,
+    /// The write that found the socket gone, when one did before the reader
+    /// saw its end: a key typed while the frontend was stopped, say.
+    pub write_error: Option<AttachError>,
+}
+
 /// Bidirectional pump: forward local input to the writer, apply
 /// instance messages to the terminal.
 ///
@@ -653,6 +838,9 @@ fn format_uptime(secs: u64) -> String {
 /// while pump errors happen behind raw mode.
 ///
 /// # Tear-down contract
+///
+/// `notice`, if any, goes on the bottom row over the session's first frame and
+/// comes off at the next key.
 ///
 /// On any exit path — clean Goodbye, reader EOF, F12 detach, IO
 /// error, or terminal error — `io.kick` fires and `reader_handle`
@@ -673,7 +861,11 @@ pub(crate) fn run_attach_pair(
     io: AttachIo,
     frontend: &mut dyn AttachPumpFrontend,
     assigned_id: FrontendId,
-) -> Result<(), AttachError> {
+    notice: Option<&str>,
+) -> Result<PumpEnd, AttachError> {
+    let mut notice = notice;
+    let mut notice_up = false;
+    let mut bootstrapped = false;
     let AttachIo {
         reader,
         mut writer,
@@ -706,7 +898,17 @@ pub(crate) fn run_attach_pair(
     // through to `kick()` and `reader_handle.join()` below. Without
     // this wrapping a writer-side IO error inside the loop would skip
     // the wind-down.
-    let result: Result<(), AttachError> = (|| {
+    let result: Result<PumpEnd, AttachError> = (|| {
+        // A write that fails on the socket is the same loss as its EOF, and may
+        // come first. Anything else a write says (a paste past the frame) is
+        // not, and ends the session as it says.
+        let lost_or_failed = |error: AttachError, bootstrapped: bool| match error {
+            AttachError::Transport(TransportError::Io(_)) => Ok(PumpEnd::Lost(LostSession {
+                bootstrapped,
+                write_error: Some(error),
+            })),
+            other => Err(other),
+        };
         loop {
             // Drain instance messages. Goodbye exits immediately;
             // BufferSnapshot routes to the mirror; other messages are
@@ -816,15 +1018,27 @@ pub(crate) fn run_attach_pair(
             {
                 return Err(AttachError::Terminal(e));
             }
+            if batch
+                .iter()
+                .any(|message| matches!(message, InstanceMessage::CellDelta { .. }))
+            {
+                bootstrapped = true;
+                if let Some(text) = notice.take() {
+                    let _ = frontend.show_notice(text);
+                    notice_up = true;
+                }
+            }
             if let Some(reason) = goodbye {
                 // Stderr buffered behind raw mode; surfaces after
                 // Frontend's Drop runs.
                 eprintln!("pmacs: instance disconnected: {reason:?}");
-                return Ok(());
+                return Ok(PumpEnd::Over);
             }
             if reader_eof {
-                eprintln!("pmacs: instance closed connection");
-                return Ok(());
+                return Ok(PumpEnd::Lost(LostSession {
+                    bootstrapped,
+                    write_error: None,
+                }));
             }
 
             let event = match frontend.poll_event(Duration::from_millis(50)) {
@@ -835,9 +1049,14 @@ pub(crate) fn run_attach_pair(
                 continue;
             };
 
+            if notice_up && matches!(ev, Event::Key(_)) {
+                let _ = frontend.clear_notice();
+                notice_up = false;
+            }
+
             if is_detach_key(&ev) {
                 let _ = write_message(&mut writer, &FrontendEvent::Detach(assigned_id));
-                return Ok(());
+                return Ok(PumpEnd::Over);
             }
 
             // T M10.10 Day 3 step 3b — text-input optimistic-apply
@@ -902,8 +1121,7 @@ pub(crate) fn run_attach_pair(
                         pmacs_key,
                     );
                     if let Err(e) = write_message(&mut writer, &frontend_event) {
-                        eprintln!("pmacs: write keystroke failed: {e}");
-                        return Err(AttachError::from(e));
+                        return lost_or_failed(AttachError::from(e), bootstrapped);
                     }
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command
@@ -963,9 +1181,7 @@ pub(crate) fn run_attach_pair(
             if !optimistic_handled
                 && let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size())
             {
-                // Likely a broken pipe — instance went away.
-                eprintln!("pmacs: {e}");
-                return Err(e);
+                return lost_or_failed(e, bootstrapped);
             }
             // Post-audit-round-6 F30 — `forward_event` (success
             // path) may write a Mouse / Paste / Resize /
@@ -1811,7 +2027,14 @@ fn run_pump_and_reap(
         writer: Box::new(child_stdin),
         kick: ssh_kick(pid),
     };
-    let pump_result = run_attach_pair(io, frontend, assigned_frontend_id);
+    let pump_result =
+        run_attach_pair(io, frontend, assigned_frontend_id, None).and_then(|end| match end {
+            PumpEnd::Lost(LostSession {
+                write_error: Some(error),
+                ..
+            }) => Err(error),
+            PumpEnd::Over | PumpEnd::Lost(_) => Ok(()),
+        });
     attach_debug(format!(
         "attach pump exited: {:?}",
         pump_result.as_ref().err()
@@ -2246,7 +2469,7 @@ mod tests {
         });
 
         let mut frontend = FakeFrontend::default();
-        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL);
+        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None);
 
         daemon.join().expect("daemon thread");
 
@@ -2256,6 +2479,92 @@ mod tests {
             frontend.presented[0],
             InstanceMessage::Cursor(None)
         ));
+    }
+
+    /// E10r fix round 1: the pump tells a session that ended on purpose from
+    /// one whose socket ended, and says whether a lost one reached its first
+    /// frame, which is what the routes decide on.
+    #[test]
+    fn the_pump_tells_a_goodbye_from_a_lost_socket() {
+        let run = |write: fn(&mut UnixStream)| {
+            let (mut daemon_side, frontend_side) = UnixStream::pair().expect("pair");
+            let io = build_local_socket_io(frontend_side).expect("io");
+            write(&mut daemon_side);
+            drop(daemon_side);
+            let mut frontend = FakeFrontend::default();
+            run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None).expect("no error")
+        };
+        assert!(matches!(
+            run(
+                |w| write_message(w, &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown))
+                    .expect("write")
+            ),
+            PumpEnd::Over
+        ));
+        assert!(matches!(
+            run(|_| {}),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: false,
+                write_error: None,
+            })
+        ));
+        assert!(matches!(
+            run(|w| write_message(w, &InstanceMessage::Cursor(None)).expect("write")),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: false,
+                write_error: None,
+            })
+        ));
+        assert!(matches!(
+            run(|w| write_message(
+                w,
+                &InstanceMessage::CellDelta {
+                    spans: Vec::new(),
+                    full_grid: true,
+                },
+            )
+            .expect("write")),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: true,
+                write_error: None,
+            })
+        ));
+    }
+
+    /// E10r fix round 1: what a connect finds decides whether the local route
+    /// goes on. A daemon that is gone ends it; so does a path that is not a
+    /// socket; the error says which.
+    #[test]
+    fn a_connect_that_finds_no_daemon_is_a_daemon_gone() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let size = CellSize::new(24, 80);
+        let missing = dir.path().join("missing.sock");
+        match connect_again(&missing, size) {
+            Err(AttachError::DaemonGone { socket, found }) => {
+                assert_eq!(socket, missing);
+                assert_eq!(found, "no socket is there");
+            }
+            other => panic!("expected DaemonGone: {:?}", other.err()),
+        }
+        let stale = dir.path().join("stale.sock");
+        let Some(listener) = bind_or_skip(&stale) else {
+            return;
+        };
+        drop(listener);
+        match connect_again(&stale, size) {
+            Err(AttachError::DaemonGone { found, .. }) => {
+                assert_eq!(found, "its socket refused the connection");
+            }
+            other => panic!("expected DaemonGone: {:?}", other.err()),
+        }
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"not a socket").expect("write");
+        match connect_again(&file, size) {
+            Err(AttachError::DaemonGone { found, .. }) => {
+                assert_eq!(found, "what is there is not a socket");
+            }
+            other => panic!("expected DaemonGone: {:?}", other.err()),
+        }
     }
 
     #[test]
@@ -2274,7 +2583,7 @@ mod tests {
         });
 
         let mut frontend = FakeFrontend::default();
-        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL);
+        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None);
 
         daemon.join().expect("daemon thread");
 
@@ -2305,7 +2614,7 @@ mod tests {
             presented: Vec::new(),
             present_returns_error: true,
         };
-        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL);
+        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None);
 
         daemon.join().expect("daemon thread");
 
