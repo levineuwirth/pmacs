@@ -294,6 +294,14 @@ mod tests {
         assert_eq!(reader.join().expect("reader"), expect);
     }
 
+    /// The owner's figure, ruled 2026-11-04 and kept 2026-11-05. The suite's rows
+    /// take the bound from the constant, so a longer one moves their limits with
+    /// it and nothing else would say.
+    #[test]
+    fn the_bound_is_two_seconds() {
+        assert_eq!(FRAME_WRITE_BOUND, Duration::from_secs(2));
+    }
+
     /// What a frontend tells its user of the bound is the bound: the sentence
     /// lives where `pmacs-gpu` can read it, and this constant does not.
     #[test]

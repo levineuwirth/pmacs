@@ -77,6 +77,36 @@ impl PmacsPty {
         }
     }
 
+    /// Wait until `needle` is in what pmacs wrote to its terminal, or say what it
+    /// wrote instead.
+    pub fn wait_for_output(&self, needle: &str, patience: Duration) {
+        let deadline = Instant::now() + patience;
+        loop {
+            let output = String::from_utf8_lossy(&self.output()).into_owned();
+            if output.contains(needle) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{needle:?} never reached the terminal, which was given: {:?}",
+                output.chars().rev().take(400).collect::<String>()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// What pmacs wrote after it last left the alternate screen: what its user
+    /// is left looking at, which is where a reason has to be to be read.
+    pub fn after_the_alternate_screen(&self) -> String {
+        let output = self.output();
+        let leave = b"\x1b[?1049l";
+        let at = output
+            .windows(leave.len())
+            .rposition(|w| w == leave)
+            .expect("it left the alternate screen");
+        String::from_utf8_lossy(&output[at + leave.len()..]).into_owned()
+    }
+
     /// The OS process id of the running pmacs child, if portable-pty
     /// can surface it. Used by M10.11's Drop-discipline test to
     /// verify post-drop process death via `kill(pid, 0)`.
@@ -91,6 +121,18 @@ impl Drop for PmacsPty {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Attach a real TUI to `socket` in a PTY, `home` its home and `envs` on top.
+pub fn attached_tui(socket: &Path, home: &Path, envs: &[(&str, &Path)]) -> PmacsPty {
+    let mut all: Vec<(&str, &Path)> = vec![("HOME", home), ("XDG_CONFIG_HOME", home)];
+    all.extend_from_slice(envs);
+    spawn_pmacs_in_pty(
+        &["--attach", "--socket", socket.to_str().expect("utf-8")],
+        &all,
+        24,
+        80,
+    )
 }
 
 /// Spawn pmacs inside a fresh PTY pair, returning a handle that
