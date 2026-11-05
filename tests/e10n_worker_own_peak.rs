@@ -1176,3 +1176,319 @@ fn print_typed_parses(events: &[serde_json::Value]) {
         percentile(&calls, 95) as f64 / 1000.0,
     );
 }
+
+// ---------------------------------------------------------------------------
+// R1-P9 (review 1, Low 3), keys on the routes C10n did not time. A measurement
+// that prints; it holds nothing about how fast a key should be. Each run is a
+// figure only under runbook §2's `quiet-run`, with the worker alternated by
+// `PMACS_E10N_UNIT_PATH`, and `PMACS_E10N_SAMPLES` sets the keys.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod keys {
+    use std::time::{Duration, Instant};
+
+    use super::common::pty::{OutputTap, PmacsPty};
+    use pmacs::ansi::{AnsiParser, AnsiParserProfile};
+    use pmacs::cell::{CellCoord, CellSize, Glyph};
+    use pmacs::terminal::screen::TerminalScreen;
+
+    pub const ROWS: u16 = 40;
+    pub const COLS: u16 = 120;
+    const GAP: Duration = Duration::from_millis(150);
+    const STEP_LIMIT: Duration = Duration::from_mins(2);
+
+    pub struct Tui {
+        pub pty: PmacsPty,
+        tap: OutputTap,
+        parser: AnsiParser,
+        screen: TerminalScreen,
+    }
+
+    impl Tui {
+        pub fn new((pty, tap): (PmacsPty, OutputTap)) -> Self {
+            Self {
+                pty,
+                tap,
+                parser: AnsiParser::with_profile(AnsiParserProfile::FullScreen),
+                screen: TerminalScreen::new(CellSize::new(ROWS.into(), COLS.into()), 0)
+                    .expect("a valid screen"),
+            }
+        }
+        fn feed(&mut self, bytes: &[u8]) -> bool {
+            let before = self.screen.snapshot();
+            for event in self.parser.feed(bytes) {
+                let _ = self.screen.apply_event(event);
+            }
+            let after = self.screen.snapshot();
+            before.cells != after.cells || before.cursor != after.cursor
+        }
+        fn char_at(&self, row: u32, col: u32) -> Option<char> {
+            let snap = self.screen.snapshot();
+            let cell = snap.cells.get((row * snap.size.cols + col) as usize)?;
+            match cell.glyph {
+                Glyph::Char(c) => Some(c),
+                _ => None,
+            }
+        }
+        fn cursor(&self) -> Option<CellCoord> {
+            self.screen.snapshot().cursor
+        }
+        fn rows(&self) -> Vec<String> {
+            let snap = self.screen.snapshot();
+            snap.cells
+                .chunks(snap.size.cols as usize)
+                .map(|row| {
+                    row.iter()
+                        .map(|c| match c.glyph {
+                            Glyph::Char(ch) => ch,
+                            _ => ' ',
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            self.pty.write_input(bytes).expect("write to the PTY");
+        }
+        fn wait_for(
+            &mut self,
+            limit: Duration,
+            what: &str,
+            done: &dyn Fn(&Self) -> bool,
+        ) -> Instant {
+            let start = Instant::now();
+            if done(self) {
+                return start;
+            }
+            loop {
+                let received = limit
+                    .checked_sub(start.elapsed())
+                    .and_then(|left| self.tap.recv_timeout(left).ok());
+                let Some((at, bytes)) = received else {
+                    panic!(
+                        "{what}: not on screen after {limit:?};\n{}",
+                        self.rows().join("\n")
+                    );
+                };
+                self.feed(&bytes);
+                if done(self) {
+                    return at;
+                }
+            }
+        }
+        fn settle(&mut self, what: &str, done: &dyn Fn(&Self) -> bool) {
+            let start = Instant::now();
+            let mut last = Instant::now();
+            loop {
+                if done(self) && last.elapsed() >= GAP {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < STEP_LIMIT,
+                    "{what}: not settled;\n{}",
+                    self.rows().join("\n")
+                );
+                if let Ok((_, bytes)) = self.tap.recv_timeout(Duration::from_millis(10))
+                    && self.feed(&bytes)
+                {
+                    last = Instant::now();
+                }
+            }
+        }
+    }
+
+    /// Type `burst` key by key at the end of the buffer, `samples` times,
+    /// each key timed from its write to the read that shows it, the keys
+    /// deleted after every sample.
+    pub fn type_keys(tui: &mut Tui, burst: &str, samples: usize) -> Vec<Duration> {
+        tui.settle("the file on screen", &|t| {
+            t.rows().iter().any(|r| r.contains("fn main"))
+                || t.rows().iter().any(|r| r.contains("value_59"))
+        });
+        tui.write(b"\x1b>");
+        tui.settle("M->", &|t| {
+            t.cursor().is_some() && t.rows().iter().any(|r| r.contains("value_59"))
+        });
+        let at = tui.cursor().expect("a caret");
+        let mut keys = Vec::new();
+        for _ in 0..samples {
+            for (i, ch) in burst.chars().enumerate() {
+                let caret = CellCoord::new(at.row, at.col + i as u32);
+                tui.settle("the caret before a key", &|t| t.cursor() == Some(caret));
+                let mut buf = [0u8; 4];
+                let t0 = Instant::now();
+                tui.write(ch.encode_utf8(&mut buf).as_bytes());
+                let painted = tui.wait_for(STEP_LIMIT, "a typed key", &|t| {
+                    t.char_at(at.row, at.col + i as u32) == Some(ch)
+                });
+                keys.push(painted.saturating_duration_since(t0));
+            }
+            tui.settle("the keys in place", &|t| {
+                t.cursor() == Some(CellCoord::new(at.row, at.col + burst.len() as u32))
+            });
+            tui.write("\x7f".repeat(burst.len()).as_bytes());
+            tui.settle("the keys deleted", &|t| t.cursor() == Some(at));
+        }
+        keys
+    }
+
+    pub fn p(values: &[Duration], q: usize) -> f64 {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        sorted[(sorted.len() * q / 100).min(sorted.len() - 1)].as_secs_f64() * 1000.0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn report_keys(route: &str, tui: &mut keys::Tui, dir: &Path, samples: usize, before: &str) {
+    for burst in ["kxv", ".,;"] {
+        let keys = keys::type_keys(tui, burst, samples);
+        eprintln!(
+            "r1-p9 {route} {burst}: {} keys p50 {:.2} ms p95 {:.2} ms",
+            keys.len(),
+            keys::p(&keys, 50),
+            keys::p(&keys, 95)
+        );
+    }
+    let trace = trace_events(dir);
+    let parsed: Vec<&serde_json::Value> = trace
+        .iter()
+        .filter(|e| e["event"].as_str() == Some("parsed"))
+        .collect();
+    let mut calls: Vec<u64> = parsed
+        .iter()
+        .map(|e| e["call_us"].as_u64().unwrap_or(0))
+        .collect();
+    calls.sort_unstable();
+    eprintln!(
+        "r1-p9 {route}: load {before} -> {}; worker {:?}; {} parses, {} full, {} recycled, peaks {} to {} MiB, round trip p50 {:.2} ms",
+        loadavg(),
+        std::env::var("PMACS_E10N_UNIT_PATH").unwrap_or_else(|_| "beside pmacs".into()),
+        parsed.len(),
+        parsed
+            .iter()
+            .filter(|e| e["full"].as_bool() == Some(true))
+            .count(),
+        trace
+            .iter()
+            .filter(|e| e["event"].as_str() == Some("recycle"))
+            .count(),
+        parsed
+            .iter()
+            .map(|e| e["peak"].as_u64().unwrap_or(0) >> 20)
+            .min()
+            .unwrap_or(0),
+        parsed
+            .iter()
+            .map(|e| e["peak"].as_u64().unwrap_or(0) >> 20)
+            .max()
+            .unwrap_or(0),
+        calls
+            .get(calls.len() / 2)
+            .map_or(0.0, |us| *us as f64 / 1000.0),
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn samples() -> usize {
+    std::env::var("PMACS_E10N_SAMPLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+}
+
+/// R1-P9, in process: `pmacs <file>` in a PTY, an editor grown past 256 MiB
+/// from its `init.lua`. Its key is painted by the same thread that dispatches
+/// the parse, and nothing optimistic stands between, which the GPU route's
+/// figures cannot speak for. Timed: a quiet window, each worker in turn.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "timed: by hand in release, each worker in turn, in a quiet window"]
+fn r1_p9_keys_in_process_in_a_grown_editor() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let file = dir.join("typed.rs");
+    std::fs::write(&file, rust_source(60)).expect("typed.rs");
+    let unit = std::env::var("PMACS_E10N_UNIT_PATH")
+        .map(|path| format!("pmacs.config.set('syntax.parse-unit-path', {path:?})\n"))
+        .unwrap_or_default();
+    let config = dir.join("pmacs");
+    std::fs::create_dir_all(&config).expect("config");
+    std::fs::write(
+        config.join("init.lua"),
+        format!(
+            "pmacs.lsp.config = {{}}\n\
+             pmacs.config.set('syntax.isolation', 'process')\n\
+             {unit}\
+             local ballast = {{}}\n\
+             for i = 1, {BALLAST_MIB} do\n\
+               ballast[i] = string.rep(string.char(65 + i % 26), 1048576 - 16) .. string.format('%016d', i)\n\
+             end\n\
+             _G.e10n_ballast = ballast\n"
+        ),
+    )
+    .expect("init.lua");
+    let trace = dir.join("trace.jsonl");
+    let file_arg = file.to_str().expect("UTF-8").to_owned();
+    let before = loadavg();
+    let mut tui = keys::Tui::new(common::pty::spawn_pmacs_in_pty_tapped(
+        &[&file_arg],
+        &[
+            ("HOME", &dir),
+            ("XDG_CONFIG_HOME", &dir),
+            ("XDG_DATA_HOME", &dir),
+            ("XDG_STATE_HOME", &dir),
+            ("XDG_CACHE_HOME", &dir),
+            ("PMACS_STATE_HOME", &dir),
+            ("PMACS_E7I_TRACE", &trace),
+        ],
+        keys::ROWS,
+        keys::COLS,
+    ));
+    report_keys("in process", &mut tui, &dir, samples(), &before);
+}
+
+/// R1-P9, attached: `pmacs --attach` against a grown daemon, its mirror
+/// painting the key. Timed, as above.
+#[cfg(all(target_os = "linux", feature = "crdt"))]
+#[test]
+#[ignore = "timed: by hand in release, each worker in turn, in a quiet window"]
+fn r1_p9_keys_attached_to_a_grown_daemon() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let file = dir.join("typed.rs");
+    std::fs::write(&file, rust_source(60)).expect("typed.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local b = open({file:?}, 'rust')\n\
+           if not settle(b) then return finish('error the file did not settle') end\n\
+           for _, x in ipairs(pmacs.buffer.list()) do\n\
+             if x:name() == '*scratch*' then pcall(pmacs.buffer.kill, x) end\n\
+           end\n\
+           finish('ready')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        file = file.display().to_string(),
+    );
+    let (daemon, _notes) = spawn_and_wait(&dir, &[], &init, Duration::from_mins(2));
+    let socket = daemon
+        .socket_path()
+        .to_str()
+        .expect("UTF-8 socket")
+        .to_owned();
+    let home = daemon
+        .socket_path()
+        .parent()
+        .expect("socket dir")
+        .to_path_buf();
+    let before = loadavg();
+    let mut tui = keys::Tui::new(common::pty::spawn_pmacs_in_pty_tapped(
+        &["--attach", "--socket", &socket],
+        &[("HOME", &home), ("XDG_CONFIG_HOME", &home)],
+        keys::ROWS,
+        keys::COLS,
+    ));
+    report_keys("attached", &mut tui, &dir, samples(), &before);
+}
