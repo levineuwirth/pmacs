@@ -1,6 +1,7 @@
 #!/bin/sh
 # scripts/grammar-fuzz-needed --- whether a change touches what the
-# grammar fuzz job fuzzes (E7h fix round 1).
+# grammar fuzz job fuzzes (E7h fix round 1), or the parse worker its arms
+# replay through (E10q).
 #
 #   scripts/grammar-fuzz-needed --base REF [--head REF]
 #   scripts/grammar-fuzz-needed --paths < CHANGED-PATHS
@@ -8,7 +9,7 @@
 # Prints two lines in GITHUB_OUTPUT's form:
 #
 #   run=true|false
-#   reason=<the first changed path that can change the grammar set, or why not>
+#   reason=<the first changed path on the list below, or why not>
 #
 # `--base` diffs BASE...HEAD (from their merge base, as a pull request's
 # changes are counted); `--paths` reads one path per line. A base this
@@ -30,13 +31,20 @@ die() { echo "grammar-fuzz-needed: $*" >&2; exit 2; }
 # What can change the grammar set, how its C is compiled, or what the
 # harness does with it: the crate graph, the C flags, the table and the
 # query overlays it compiles in, the harness and its script and seeds, the
-# vendored grammars, this decision and the workflow.
+# vendored grammars, this decision and the workflow. And since E10q (#454)
+# the parse worker: both arms build it and replay fuzz/regress/ through it,
+# at the cost that a change to it builds both arms and fuzzes every grammar
+# briefly, on a job that runs ten minutes for a touched grammar. The
+# spawner, src/parse_isolation.rs, stays off the list: the arms drive the
+# worker through `pmacs_grammar_fuzz replay-unit`, which takes one constant
+# from that file (AFTER_PARSE_HARD), and they do not run it.
 fuzzed() {
     case "$1" in
         Cargo.lock | Cargo.toml | .cargo/config.toml) return 0 ;;
         src/syntax.rs | src/bin/pmacs_grammar_fuzz.rs) return 0 ;;
         # The table and run_parse, moved out of src/syntax.rs at E7i.
         pmacs-syntax/*) return 0 ;;
+        pmacs-parse-unit/*) return 0 ;;
         scripts/fuzz-grammars | scripts/grammar-fuzz-needed) return 0 ;;
         fuzz/* | vendor/* | builtin/queries/*) return 0 ;;
         .github/workflows/grammar-fuzz.yml) return 0 ;;
@@ -67,7 +75,7 @@ decide() {
         fi
     done
     echo "run=false"
-    echo "reason=no changed path can change the grammar set"
+    echo "reason=no changed path can change the grammar set or the parse worker"
 }
 
 if [ "$from_stdin" = 1 ]; then

@@ -65,8 +65,11 @@ Always true:
   ThreadSanitizer worker reported their race in tree-sitter's reference
   counts. CI's
   grammar fuzz runs on every change, fuzzes when one can
-  change the grammar set (`scripts/grammar-fuzz-needed`; the touched
-  grammars ten minutes, the rest briefly), and builds two arms on
+  change the grammar set or the parse worker
+  (`scripts/grammar-fuzz-needed`, whose list holds `pmacs-parse-unit/*`
+  since E10q and not `src/parse_isolation.rs`, the spawner the arms do
+  not run; the touched grammars ten minutes, the rest briefly, so a
+  worker change fuzzes every grammar briefly), and builds two arms on
   `ubuntu-24.04`'s GCC 13, which it prints: `ubsan`, the check named
   `Grammar fuzz`, and `asan-strict`, `Grammar fuzz (asan-strict)`. On the
   inputs a run reaches, CI catches a memory error ASan sees at the access,

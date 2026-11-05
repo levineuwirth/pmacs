@@ -16,7 +16,7 @@
 # parsed; the owner's real file, two `{-# LANGUAGE #-}` pragmas, aborted
 # the editor within minutes. So a grammar ships only after this has run
 # over it, and CI runs it (.github/workflows/grammar-fuzz.yml) whenever
-# the grammar set can have changed.
+# the grammar set or the parse worker can have changed.
 #
 # What it does:
 #
