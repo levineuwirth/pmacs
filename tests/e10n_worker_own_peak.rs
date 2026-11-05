@@ -943,6 +943,372 @@ fn e10n_a_worker_whose_own_parse_passes_the_threshold_is_still_recycled() {
     );
 }
 
+// Review 1's probes of states a user reaches that the author's rows did not
+// choose. Each passes here, and fails with the base's worker
+// (`PMACS_E10N_UNIT_PATH`) or under M1, the base's reading, for the reason its
+// doc gives.
+
+/// #439's file, the same shape as its generator: 18,070,563 bytes.
+#[cfg(target_os = "linux")]
+fn big_json() -> String {
+    use std::fmt::Write as _;
+    let n = 185_000usize;
+    let mut text = String::from("[\n");
+    for i in 0..n {
+        let value = i as f64 * 0.5;
+        let value = if value.fract() == 0.0 {
+            format!("{value:.1}")
+        } else {
+            format!("{value}")
+        };
+        let _ = write!(
+            text,
+            " {{\n  \"id\": {i},\n  \"name\": \"item {i}\",\n  \"tags\": [\n   \"a\",\n   \"b\"\n  ],\n  \"value\": {value}\n }}"
+        );
+        text.push_str(if i + 1 == n { "\n" } else { ",\n" });
+    }
+    text.push_str("]\n");
+    text
+}
+
+/// What every row holds a worker started after the growth to: its own
+/// peak under the threshold, one worker across `buffer`'s named parses, each
+/// after the first incremental.
+#[cfg(target_os = "linux")]
+fn assert_kept(run: &Run, buffer: &str) {
+    let pids = run.units(buffer);
+    let parses = run.parses(&pids);
+    assert!(parses.len() >= 3, "{buffer}: {:?}", run.trace);
+    let peak = parses[0]["peak"].as_u64().expect("a peak");
+    assert!(
+        peak < THRESHOLD,
+        "{buffer}'s worker reports its own peak, under the threshold: {}",
+        mib(peak)
+    );
+    assert!(
+        pids.iter().all(|&p| p == pids[0]),
+        "{buffer}'s worker is kept: {pids:?}"
+    );
+    for (i, parse) in parses.iter().enumerate().skip(1) {
+        assert_eq!(
+            parse["full"].as_bool(),
+            Some(false),
+            "{buffer}'s parse {i} is incremental: {parse}"
+        );
+    }
+}
+
+/// R1-P1, a daemon past the threshold the way a user's gets there: it holds
+/// #439's 18 MB file, no Lua ballast. The small file opened after that keeps
+/// its worker. The row grows by edits of the JSON until its `VmHWM` passes
+/// (or twelve edits), and records the JSON worker's own reading: on the
+/// head's worker 595 MiB, past the threshold on its own, every parse full in
+/// a fresh worker. So #440's sentence holds on the worker's own reading,
+/// which #445's 623 MB, read through `getrusage`, could not say.
+/// Heavy: release, by hand.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "heavy: an 18 MB file with a grammar, parsed repeatedly; by hand in release"]
+fn r1_p1_a_daemon_past_the_threshold_by_a_real_file() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let json = dir.join("big.json");
+    let small = dir.join("small.rs");
+    std::fs::write(&json, big_json()).expect("big.json");
+    std::fs::write(&small, rust_source(60)).expect("small.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           local j = open({json:?}, 'json')\n\
+           if not settle(j) then return finish('error the JSON did not settle') end\n\
+           note('parsed json 0 ' .. unit(j))\n\
+           local i = 0\n\
+           while status('VmHWM') <= {THRESHOLD} and i < 12 do\n\
+             i = i + 1\n\
+             j:insert(2, ' ')\n\
+             if not kick(j, 'json') then return finish('error the JSON, edit ' .. i) end\n\
+             note('parsed json ' .. i .. ' ' .. unit(j))\n\
+           end\n\
+           mem('grown')\n\
+           local s = open({small:?}, 'rust')\n\
+           if not settle(s) then return finish('error the small file did not settle') end\n\
+           note('parsed small 0 ' .. unit(s))\n\
+           for k = 1, 3 do\n\
+             if not edit(s, 'rust', k) then return finish('error the small file, edit ' .. k) end\n\
+             note('parsed small ' .. k .. ' ' .. unit(s))\n\
+           end\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        json = json.display().to_string(),
+        small = small.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(9));
+    let (hwm, rss) = (run.mem("grown", "hwm"), run.mem("grown", "rss"));
+    assert!(hwm > THRESHOLD, "the daemon grew: VmHWM {}", mib(hwm));
+    let json_pids = run.units("json");
+    let json_parses = run.parses(&json_pids);
+    eprintln!(
+        "r1-p1: the daemon VmHWM {} VmRSS {}; the JSON: {} parses, {} workers, peaks {:?} MiB, full {:?}",
+        mib(hwm),
+        mib(rss),
+        json_parses.len(),
+        json_pids.len(),
+        json_parses
+            .iter()
+            .map(|p| p["peak"].as_u64().unwrap_or(0) >> 20)
+            .collect::<Vec<_>>(),
+        json_parses
+            .iter()
+            .map(|p| p["full"].as_bool().unwrap_or(false))
+            .collect::<Vec<_>>()
+    );
+    assert_kept(&run, "small");
+}
+
+/// R1-P2, the daemon's peak past the threshold and its resident memory back
+/// under it: a user who closed what grew it. The row's own precondition asks
+/// for both past; `exec` carries the peak alone. Holds at the head; the
+/// base's worker reports the old peak and is replaced.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p2_a_daemon_that_grew_and_shrank_keeps_its_workers() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let small = dir.join("small.rs");
+    std::fs::write(&small, rust_source(60)).expect("small.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           _G.e10n_ballast = nil\n\
+           collectgarbage('collect')\n\
+           collectgarbage('collect')\n\
+           mem('shrunk')\n\
+           local s = open({small:?}, 'rust')\n\
+           if not settle(s) then return finish('error the small file did not settle') end\n\
+           note('parsed small 0 ' .. unit(s))\n\
+           for k = 1, 2 do\n\
+             if not edit(s, 'rust', k) then return finish('error edit ' .. k) end\n\
+             note('parsed small ' .. k .. ' ' .. unit(s))\n\
+           end\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        small = small.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(3));
+    let (hwm, rss) = (run.mem("shrunk", "hwm"), run.mem("shrunk", "rss"));
+    eprintln!(
+        "r1-p2: the daemon shrunk: VmHWM {}, VmRSS {}",
+        mib(hwm),
+        mib(rss)
+    );
+    assert!(
+        hwm > THRESHOLD && rss < THRESHOLD,
+        "peak past and resident under: {} {}",
+        mib(hwm),
+        mib(rss)
+    );
+    assert_kept(&run, "small");
+}
+
+/// R1-P3, a worker killed from outside in a grown daemon: the replacement a
+/// crash path starts also reads its own peak and is kept from then on.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p3_the_worker_that_replaces_a_killed_one_reads_its_own_peak() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let small = dir.join("small.rs");
+    std::fs::write(&small, rust_source(60)).expect("small.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local s = open({small:?}, 'rust')\n\
+           if not settle(s) then return finish('error the small file did not settle') end\n\
+           local first = unit(s):match('%d+')\n\
+           note('first ' .. first)\n\
+           os.execute('kill -KILL ' .. first)\n\
+           pmacs.workers.sleep(200):await()\n\
+           pmacs.parse._dispatch(s, 'rust')\n\
+           local t0 = pmacs.editor.monotonic_ms()\n\
+           while pmacs.parse._unit_report(s).deaths < 1 and pmacs.editor.monotonic_ms() - t0 < 20000 do\n\
+             pmacs.workers.sleep(20):await()\n\
+           end\n\
+           note('deaths ' .. pmacs.parse._unit_report(s).deaths .. ' ' .. tostring(pmacs.parse._unit_report(s).last_death))\n\
+           local replaced = false\n\
+           for k = 1, 3 do\n\
+             if not edit(s, 'rust', k) then return finish('error edit ' .. k) end\n\
+             if unit(s):match('%d+') ~= first then\n\
+               replaced = true\n\
+               note('parsed small ' .. k .. ' ' .. unit(s))\n\
+             end\n\
+           end\n\
+           if not replaced then return finish('error the worker was never replaced') end\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        small = small.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(3));
+    assert!(run.mem("grown", "hwm") > THRESHOLD);
+    let pids = run.units("small");
+    assert!(pids.len() >= 2, "{}", run.notes);
+    assert!(pids.iter().all(|&p| p == pids[0]), "{pids:?}");
+    let parses = run.parses(&pids);
+    let peak = parses[0]["peak"].as_u64().expect("a peak");
+    eprintln!("r1-p3: the replacement {:?} reports {}", pids[0], mib(peak));
+    assert!(peak < THRESHOLD, "{}", mib(peak));
+    assert_eq!(parses[0]["full"].as_bool(), Some(true));
+    assert_eq!(parses[1]["full"].as_bool(), Some(false));
+}
+
+/// R1-P4, a recycle that ends: a large file's worker passes the threshold
+/// and is replaced; the user then cuts the buffer down; the replacement
+/// reports its own small peak and the recycling stops. The handoff's guard
+/// looks at a file that stays large, where every worker recycles whichever
+/// reading it has. At the base the replacement inherits the daemon's peak and
+/// the recycling never ends.
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_p4_recycling_stops_when_the_file_shrinks() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let large = dir.join("large.rs");
+    std::fs::write(&large, rust_source(20_000)).expect("large.rs");
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local b = open({large:?}, 'rust')\n\
+           if not settle(b) then return finish('error the large file did not settle') end\n\
+           note('stage large 0 ' .. unit(b))\n\
+           b:delete(40, b:len())\n\
+           if not kick(b, 'rust') then return finish('error the cut did not settle') end\n\
+           note('stage cut ' .. unit(b))\n\
+           for k = 1, 3 do\n\
+             if not edit(b, 'rust', k) then return finish('error edit ' .. k) end\n\
+             note('stage after-' .. k .. ' ' .. unit(b))\n\
+           end\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(
+            &dir.join("report.txt"),
+            &format!("pmacs.config.set('syntax.parse-worker-recycle-mb', {RECYCLE_MIB})")
+        ),
+        large = large.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(3));
+    assert!(run.mem("grown", "hwm") > THRESHOLD);
+    let stages: Vec<(String, u32)> = run
+        .notes
+        .lines()
+        .filter_map(|l| l.strip_prefix("stage "))
+        .map(|l| {
+            let name = l.split_whitespace().next().unwrap_or("").to_owned();
+            let pid = l.split("pid ").nth(1).and_then(|p| p.trim().parse().ok());
+            (name, pid.unwrap_or(0))
+        })
+        .collect();
+    let all: Vec<(u32, bool, u64)> = run
+        .events("parsed")
+        .map(|e| {
+            (
+                unit_pid(e),
+                e["full"].as_bool().unwrap_or(false),
+                e["peak"].as_u64().unwrap_or(0) >> 20,
+            )
+        })
+        .collect();
+    eprintln!("r1-p4: stages {stages:?}; parses (pid, full, peak MiB) {all:?}");
+    let threshold = RECYCLE_MIB << 20;
+    let first_peak = run.events("parsed").next().expect("a parse")["peak"]
+        .as_u64()
+        .expect("a peak");
+    assert!(
+        first_peak > threshold,
+        "the large parse: {}",
+        mib(first_peak)
+    );
+    let after: Vec<u32> = stages
+        .iter()
+        .filter(|(name, _)| name.starts_with("after-"))
+        .map(|(_, pid)| *pid)
+        .collect();
+    assert_eq!(after.len(), 3);
+    assert_ne!(after[0], stages[0].1, "the large worker was replaced");
+    assert!(
+        after.iter().all(|&p| p == after[0]),
+        "the recycling stopped once the text was small: {after:?}"
+    );
+    let last = run.events("parsed").last().expect("a parse");
+    assert_eq!(last["full"].as_bool(), Some(false), "{last}");
+    assert!(
+        last["peak"].as_u64().unwrap_or(u64::MAX) < threshold,
+        "the replacement's reading is its own: {last}"
+    );
+}
+
+/// R1-P7, the handoff's attack surface (a), measured: a grown daemon holding
+/// forty small-to-mid files, each opened and edited three times; every child
+/// of the daemon read from `ps`. Run with each worker
+/// (`PMACS_E10N_UNIT_PATH`). Asserts only the default total's 4096 MiB.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "a measurement of resident memory: by hand, with each worker"]
+fn r1_p7_forty_buffers_workers_resident() {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    for i in 0..40 {
+        std::fs::write(dir.join(format!("f{i}.rs")), rust_source(3_000)).expect("a file");
+    }
+    let init = format!(
+        "{prelude}\
+         pmacs.async(function()\n\
+           grow()\n\
+           mem('grown')\n\
+           local bs = {{}}\n\
+           for i = 0, 39 do\n\
+             local b = open({dir:?} .. '/f' .. i .. '.rs', 'rust')\n\
+             if not settle(b) then return finish('error f' .. i) end\n\
+             bs[#bs + 1] = b\n\
+           end\n\
+           local function children(label)\n\
+             local me = io.open('/proc/self/stat'):read('*a'):match('^(%d+)')\n\
+             local p = io.popen('ps -o rss= --ppid ' .. me)\n\
+             local sum, n = 0, 0\n\
+             for line in p:lines() do sum = sum + tonumber(line); n = n + 1 end\n\
+             p:close()\n\
+             note(string.format('children %s n=%d rss_kib=%d', label, n, sum))\n\
+           end\n\
+           children('opened')\n\
+           for k = 1, 3 do\n\
+             for _, b in ipairs(bs) do\n\
+               if not edit(b, 'rust', k) then return finish('error edit') end\n\
+             end\n\
+             children('edit-' .. k)\n\
+           end\n\
+           finish('done')\n\
+         end)\n",
+        prelude = lua_prelude(&dir.join("report.txt"), ""),
+        dir = dir.display().to_string(),
+    );
+    let run = run_daemon(&dir, &[], &init, Duration::from_mins(9));
+    assert!(run.mem("grown", "hwm") > THRESHOLD);
+    for line in run.notes.lines().filter(|l| l.starts_with("children")) {
+        eprintln!("r1-p7: {line}");
+    }
+    let parsed = run.events("parsed").count();
+    let recycled = run.events("recycle").count();
+    let full = run
+        .events("parsed")
+        .filter(|e| e["full"].as_bool() == Some(true))
+        .count();
+    eprintln!("r1-p7: {parsed} parses, {recycled} recycled, {full} full");
+    let last = run.note_figure("children edit-3", "rss_kib=");
+    assert!(last < 4096 * 1024, "{last} KiB");
+}
+
 /// A forced-watch daemon grown past the threshold: a worker started under a
 /// 512 MiB limit, kept, the knob lowered to 64 live, and #296's paragraph
 /// appended, whose parse grows without bound. The death's text, and how many
