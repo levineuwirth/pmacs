@@ -138,8 +138,12 @@ Always true:
   edit sequence recorded beside it, since its bytes alone parse at once),
   and answers #296's asterisks, a large parse that returns, which a debug
   build's or an ASan arm's overhead stops at the replay's 5 s and 1 GiB;
-  the `tsan` arm replays at 30 s and 4 GiB, so it answers them too and
-  stops the underscores by time (`fuzz/regress/README.md`).
+  the `tsan` arm replays at 30 s and 4 GiB and stops the underscores by
+  time, and the asterisks it answers alone, in about 27 s of the 30 s, and
+  stops at the deadline in its own sequence (`--corpus` then
+  `--findings fuzz/regress`): contained either way, only a crash failing
+  the replay, and why the sequence costs the extra time not established
+  (#455, `fuzz/regress/README.md`).
   A row is keyed to
   the defect, not the route. Adding a row is the owner's ruling, never a
   session's; a session that meets a finding it believes known files or
