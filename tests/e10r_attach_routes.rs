@@ -57,7 +57,7 @@ fn a_lone_attached_tui_stopped_past_the_bound_comes_back() {
     tui.wait_for_output("*scratch*", Duration::from_secs(30));
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
     let dropped = || daemon_log(&daemon).contains("sent no EOF within");
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while !dropped() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
