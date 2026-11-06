@@ -55,6 +55,18 @@ use crate::transport::{TransportError, write_message};
 /// link's floor once per try, up to
 /// [`crate::attach_reconnect::HANDSHAKE_RETRY_CAP`].
 ///
+/// **What the holds cost, and they add.** The dispatcher writes to each frontend in
+/// turn, so three stopped reading together held a live TUI's `M-x` 6,008 ms in one
+/// hold, against 1,956 ms for one. A link past the floor costs the others three
+/// tries (E10r review 1, E10k's fixture, a snapshot of 7,987,097 B, 2 MB/s; release
+/// and quiet debug through `quiet-run` at a load of about 1):
+///
+/// | | release | debug, quiet | debug, load 7 to 15 |
+/// |---|---|---|---|
+/// | another TUI's wait by try, s | 2.00, 2.11, 2.00 | 2.72, 2.78, 2.73 | 3.38, 3.41, 3.47 |
+/// | until the route stops, s | 9.7 | 11.9 | 14.0 |
+/// | held up in all, s | about 6.1 | about 8.2 | about 10.3 |
+///
 /// Two seconds, the most the owner's ruling of 2026-11-04 allows, and kept by
 /// the ruling of 2026-11-05. A healthy local frontend takes milliseconds for
 /// the largest frame, so this is not about them.

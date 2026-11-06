@@ -186,7 +186,9 @@ so, and on a local socket it ends. A link has to carry a
 frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
 snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
 a large file over a slow link fails, saying so, after three tries that
-each hold the others up.
+each hold the others up about 2 s, about 6 s of the 10 it takes in a
+release build. Clients stopped together add, since the daemon writes to
+each in turn: three stopped reading hold the others about 6 s, once.
 
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),
