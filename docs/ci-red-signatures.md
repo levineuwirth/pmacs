@@ -12632,6 +12632,65 @@ at 237 pairs. `--docs` `20261106T111730Z-109898` at `d2b223b`: all four ok, `doc
 So, at E10q's checkpoint: PR #473 is green at its head and `main` is green at `4437018`. By CI #423 moves to thirteen,
 a correction of a count that had stopped being kept, and every other count above stands.
 
+### E10r's F9: PR #462 green at `5fd9d25`
+
+Recorded 2026-11-06 at F9 of E10r's fix round 1 (roadmap §E10r, the owner's ruling of 2026-11-06). The run was read from
+the jobs endpoint by conclusion, and every test leg through its own log, fetched with escape sequences allowed and
+stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in this
+file before it was written, and none was here. Nothing was rerun by this session. `main`'s runs at `0d88575` and
+`9d6b7ac` are not recorded here: they are E10q's close's, which waits on the owner's call on a rerun.
+
+#### PR #462 at `5fd9d25`: green
+
+`CI` 42231835053 on the merge `52bc955` of `5fd9d25` into `9d6b7ac`, attempt 1 of 1, `pull_request`, created
+2026-11-06T14:12:21Z and completed 14:53:09Z: `success`.
+
+Tally (pr-462-ci-5fd9d25): 19 = 18 + 1.
+
+Tally (pr-462-ci-5fd9d25-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127939388754 | success |
+| Lint (lua54) | 127939389105 | success |
+| Commit attribution (D9) | 127939389142 | success |
+| Format | 127939389287 | success |
+| Lint (luajit) | 127939389427 | success |
+| M5 Perf Gates | 127939476271 | success |
+| M4 Perf Gates | 127939476295 | success |
+| M1 Acceptance Gates | 127939476353 | success |
+| M6 Perf Gates | 127939476360 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127939476380 | success |
+| GPU Render (headless) | 127939476403 | success |
+| Test (ubuntu-latest / luajit) | 127939476408 | success |
+| Perf budgets (debug) | 127939476422 | success |
+| Test (ubuntu-latest / lua54) | 127939476429 | success |
+| Test (macos-latest / luajit) | 127939476459 | success |
+| M10 Perf Gates (crdt) | 127939476492 | success |
+| Test (macos-latest / lua54) | 127939476686 | success |
+| Test (crdt) | 127939476870 | success |
+| Docs consistency | 127939480087 | skipped |
+
+Tally (pr-462-ci-5fd9d25-success): 18 rows of the table above with `result` = `success`.
+
+Skipped: `Docs consistency` 127939480087. Paired by their own logs: `Test (crdt)`
+230 pairs, 5,508 / 0 / 87; the Ubuntu matrix legs 231 each, 5,562 / 0 / 87; no crdt 231, 4,912 / 0 / 71; macOS 232 each,
+5,505 / 0 / 79; `GPU Render (headless)` 1 pair, 395 / 0 / 0; `WouldBlock` in none. `Grammar fuzz` 42231834806 at
+`5fd9d25`, `success`, `run=true`, `reason=Cargo.toml changed`, the PR's diff against its base: `Grammar fuzz`
+127939388524, `exit 0, its parse worker's replay exit 0`, 962 inputs, 941 answered, 21 contained, 0 crashed; `Grammar
+fuzz (asan-strict)` 127939388149, the same, 962, 947, 15, 0.
+
+The three reds of `CI` 42093180686 at `b25e779`, above, were not rerun, and each of those legs passes at this head: for
+#375, #282 and #471 that is non-reproduction and nothing more.
+
+#### The local gate, listed and not tallied (D38)
+
+`scripts/gate --perf` `20261106T134953Z-785540` at the head `5fd9d25`, on the laptop at `nice -n 19` and six jobs, the
+sampler's 1-minute load 4 to 29: all seven stages ok, 5,935 / 0 / 81 at 238 pairs, every budget held.
+
+So, at F9: PR #462 is green at its head, not merged. No row moves: this section adds no occurrence, and every count above
+stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
