@@ -163,6 +163,15 @@ const SSH_STDERR_TAIL_CAP: usize = 4096;
 /// already-exited child.
 const SSH_KICK_WATCHDOG: Duration = Duration::from_secs(1);
 
+/// How long an `ssh` has after the kick's SIGTERM before it has a SIGKILL. A real `ssh`
+/// dies on the SIGTERM; a wrapper around one, or anything else in its place, may not.
+const SSH_KILL_AFTER_TERM: Duration = Duration::from_secs(3);
+
+/// How long the pump waits for its reader after the kick, which outlasts the kick's
+/// SIGKILL, since something that `ssh` left behind may hold the pipe open past it. So
+/// a deliberate end holds a raw terminal for at most this.
+const READER_JOIN_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How long a reconnect over SSH waits for its `Hello` before it kills `ssh` and that
 /// is one failed attempt on the schedule, a daemon that cannot be reached, which backs
 /// off with no limit. 120 s by the owner's ruling of 2026-11-06, since `ssh` runs with no
@@ -1483,7 +1492,7 @@ pub(crate) fn run_attach_pair(
     // before kick has any effect.
     drop(writer);
     kick();
-    let cut_short = reader_handle.join().unwrap_or(false);
+    let cut_short = join_within(reader_handle, READER_JOIN_DEADLINE).unwrap_or(false);
 
     result.map(|end| match end {
         PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
@@ -1920,18 +1929,36 @@ fn spawn_stderr_tee(
 ///
 /// Per the kick contract, this is best-effort: if SIGTERM itself
 /// fails (ESRCH because the child already exited, EPERM in some
-/// container scenarios), the error is dropped. The reader thread
-/// will exit either way (cascade or signal).
-fn ssh_kick(child_pid: u32) -> Box<dyn FnOnce() + Send> {
+/// container scenarios), the error is dropped. A child that outlasts it has a
+/// SIGKILL [`SSH_KILL_AFTER_TERM`] later, and `reaped` says it is gone before either,
+/// so neither reaches a pid that may be another process's by then. The reader thread
+/// ends by the cascade or the signal, or is left behind at [`READER_JOIN_DEADLINE`].
+fn ssh_kick(child_pid: u32, reaped: Arc<AtomicBool>) -> Box<dyn FnOnce() + Send> {
     Box::new(move || {
         thread::spawn(move || {
-            thread::sleep(SSH_KICK_WATCHDOG);
+            let reaped_within = |within: Duration| {
+                let deadline = Instant::now() + within;
+                while Instant::now() < deadline {
+                    if reaped.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                reaped.load(Ordering::SeqCst)
+            };
             // Cast to nix's `Pid` (an `i32` newtype). On Linux the
             // PID space fits in `i32`; the cast is lossless for any
             // real process ID.
             #[allow(clippy::cast_possible_wrap)]
             let pid = nix::unistd::Pid::from_raw(child_pid as i32);
+            if reaped_within(SSH_KICK_WATCHDOG) {
+                return;
+            }
             let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+            if reaped_within(SSH_KILL_AFTER_TERM) {
+                return;
+            }
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
         });
     })
 }
@@ -2439,10 +2466,11 @@ fn run_pump_and_reap(
     notice: Option<Notice>,
 ) -> Result<(), AttachError> {
     let pid = child.id();
+    let reaped = Arc::new(AtomicBool::new(false));
     let io = AttachIo {
         reader: protocol_reader,
         writer: Box::new(child_stdin),
-        kick: ssh_kick(pid),
+        kick: ssh_kick(pid, Arc::clone(&reaped)),
     };
     let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, notice);
     let over = matches!(pump_end, Ok(PumpEnd::Over(_)));
@@ -2463,10 +2491,13 @@ fn run_pump_and_reap(
         "attach pump exited: {:?}",
         pump_result.as_ref().err()
     ));
+    // The kick's SIGKILL bounds this wait, the child being this process's own.
     let exit_status = child.wait().ok();
-    let _ = stderr_handle.join();
-    // A session ended on purpose has ended, whatever `ssh` says after it: an
-    // `ssh` slower to leave than the kick's watchdog exits on its SIGTERM.
+    reaped.store(true, Ordering::SeqCst);
+    let _ = join_within(stderr_handle, SSH_TERM_GRACE);
+    // A session ended on purpose has ended, whatever `ssh` says after it: its exit is
+    // read and ignored, since an `ssh` slower to leave than the kick's watchdog exits
+    // on its SIGTERM, and this does not return before it does.
     if over {
         return Ok(());
     }

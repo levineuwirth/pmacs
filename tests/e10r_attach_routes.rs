@@ -2148,3 +2148,50 @@ fn p18_a_second_tui_on_a_build_with_no_crdt_reads_already_attached() {
     first.write_input(b"\x1b[24~").expect("F12");
     let _ = first.wait_for_exit(Duration::from_secs(10));
 }
+
+/// **Review 1's Low 6, the fourth row of its `p9_outlast`:** an `ssh` that outlasts the
+/// kick's `SIGTERM`, here a wrapper not `exec`ing its bridge, with its daemon stopped so
+/// the bridge never ends. `F12` ends the TUI within the bound the kick and the join state,
+/// where at `5fd9d25` it sat in `join`, raw and painted, with nothing reading a key.
+#[test]
+fn p9_f12_ends_it_within_the_bound_past_an_ssh_that_outlasts_the_kick() {
+    let daemon = TestDaemon::spawn();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let script = dir.path().join("ssh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntrap '' TERM\nPMACS_ATTACH_PROTOCOL_FD=2 '{pmacs}' --daemon-attach --socket '{socket}'\n",
+            pmacs = env!("CARGO_BIN_EXE_pmacs"),
+            socket = daemon.socket_path().display(),
+        ),
+    )
+    .expect("write the stand-in");
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let mut tui = common::pty::spawn_pmacs_in_pty(
+        &["--attach", "farhost"],
+        &[
+            ("HOME", dir.path()),
+            ("XDG_CONFIG_HOME", dir.path()),
+            (PMACS_TEST_SSH_BIN, &script),
+        ],
+        24,
+        80,
+    );
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid"));
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
+    let pressed = Instant::now();
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let ended = tui.wait_for_exit(Duration::from_secs(12));
+    let took = pressed.elapsed();
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    let status = ended.expect("F12 held by an ssh that outlasted its SIGTERM");
+    assert!(status.success(), "{status:?}");
+    assert!(
+        took < Duration::from_secs(8),
+        "F12 took {} ms, against a stated bound of about 5 s",
+        took.as_millis()
+    );
+}
