@@ -255,7 +255,14 @@ whole. Under one cap a growing register squeezes the rules.
   `[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`.
   A pane too narrow for those reads `[new daemon; work not autosaved is
   gone]` or `[this may be a new daemon]`. The local route says the same
-  if a new daemon answers there.
+  if a new daemon answers there. A reconnect over SSH may be asked for a
+  passphrase, since `ssh` runs with no `BatchMode`, so its wait for
+  `Hello` lends the terminal, as a shell would give it, and reads no key:
+  `C-c` is a signal there, which ends the route and `ssh` with it, status
+  0; `F12` does nothing, its bytes going to whatever is reading the
+  terminal, a prompt if there is one, and what nothing read goes with
+  the wait. At 120 s `ssh` is killed and that is a failed attempt on the
+  schedule, with no limit.
   Removed when the token family reaches grid sessions, which is a wire
   question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon

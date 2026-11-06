@@ -149,6 +149,10 @@ pub struct Frontend {
     /// over it can come off and leave it as they left it. A frame only says what
     /// changed, so nothing else would ever repaint it.
     status_row: Vec<Cell>,
+    /// E10r: the terminal's modes while it is lent, read when [`Self::lend_terminal`]
+    /// left raw mode: what [`Self::take_terminal_back`] returns to first, whatever a
+    /// prompt that was killed left behind, so they are what an exit restores.
+    lent_modes: Option<nix::sys::termios::Termios>,
 }
 
 impl Frontend {
@@ -172,6 +176,7 @@ impl Frontend {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::detect_env(),
             status_row: vec![Cell::default(); size.cols as usize],
+            lent_modes: None,
         };
         // Best-effort sequence of init steps. Each step that succeeds
         // is recorded so teardown can skip steps that never ran.
@@ -566,6 +571,55 @@ impl Frontend {
         };
         write_frame(&mut self.out, std::slice::from_ref(&row), false, self.depth)?;
         queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// Lend the terminal to whatever may ask it something, for a wait in which this
+    /// process reads no key: `ssh`'s passphrase prompt, on a reconnect.
+    ///
+    /// It is left as a shell would give it: raw mode off, so a prompt has its line
+    /// editing and `Enter`, and `C-c` is a signal and not a byte; mouse reporting and
+    /// bracketed paste off, or a moved mouse types into the prompt; the keyboard's
+    /// flags popped, or `C-c` arrives as an escape sequence and raises nothing. The
+    /// cursor shows on the row above the banner, where a prompt can be read. A
+    /// resync repaints all of it.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if a write or a mode change fails.
+    pub fn lend_terminal(&mut self) -> io::Result<()> {
+        if self.keyboard_enhancement {
+            queue!(self.out, PopKeyboardEnhancementFlags)?;
+        }
+        queue!(
+            self.out,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            MoveTo(0, self.size.rows.saturating_sub(2) as u16),
+            Clear(ClearType::CurrentLine),
+            cursor::Show,
+        )?;
+        self.out.flush()?;
+        disable_raw_mode()?;
+        self.lent_modes = nix::sys::termios::tcgetattr(io::stdin()).ok();
+        Ok(())
+    }
+
+    /// Take the terminal back after [`Self::lend_terminal`]. What was typed that nothing
+    /// read goes with the wait, so it does not land on the view a session comes back to.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if the terminal refuses a mode or a write to
+    /// it fails.
+    pub fn take_terminal_back(&mut self) -> io::Result<()> {
+        use nix::sys::termios::{FlushArg, SetArg, tcflush, tcsetattr};
+        if let Some(modes) = self.lent_modes.take() {
+            let _ = tcsetattr(io::stdin(), SetArg::TCSANOW, &modes);
+        }
+        let _ = tcflush(io::stdin(), FlushArg::TCIFLUSH);
+        self.retake_terminal()?;
+        queue!(self.out, cursor::Hide)?;
         self.out.flush()
     }
 
@@ -979,6 +1033,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::ThemeFacts {
             faces: vec![pmacs_protocol::ThemeFace {
@@ -1005,6 +1060,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::FontFacts {
             family: Some("Iosevka".into()),
@@ -1025,6 +1081,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::StatuslineSegments {
             buffer_id: crate::buffer::BufferId::from_raw(7),

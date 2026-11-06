@@ -236,6 +236,8 @@ pub fn classify_for_reconnect(
         AttachError::Rejected(GoodbyeReason::AlreadyAttached) => {
             ReconnectVerdict::ExitPolicy { error }
         }
+        // `C-c` in a reconnect's wait: the user ended it, and there is nothing to say.
+        AttachError::ReconnectCancelled => ReconnectVerdict::ExitClean,
         // Everything else — daemon shutting down, broken pipes,
         // transport / decode errors, SSH child exits / spawn
         // failures — is transient. The cap depends on whether we've
@@ -413,6 +415,23 @@ mod tests {
             ReconnectVerdict::Reconnect { .. } => {}
             other => panic!("expected Reconnect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_cancelled_reconnect_is_a_clean_end_and_a_silent_one_is_another_attempt() {
+        assert!(matches!(
+            classify_for_reconnect(AttachError::ReconnectCancelled, true),
+            ReconnectVerdict::ExitClean
+        ));
+        assert!(matches!(
+            classify_for_reconnect(
+                AttachError::ReconnectHelloTimedOut {
+                    after: Duration::from_mins(2)
+                },
+                true
+            ),
+            ReconnectVerdict::Reconnect { .. }
+        ));
     }
 
     #[test]

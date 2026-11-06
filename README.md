@@ -174,7 +174,10 @@ what autosave kept and nothing else. The client says
 `[pmacs: new daemon; work not autosaved is gone; M-x recover-file]` when
 it is certain, and
 `[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`
-when it cannot tell. A link has to carry a
+when it cannot tell. While a reconnect waits on the far side, `ssh` has
+the terminal, for a passphrase if it asks: `C-c` ends the attempt and the
+session, `F12` does nothing, and after 120 s the attempt is killed and the
+next one comes. A link has to carry a
 frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
 snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
 a large file over a slow link fails, saying so, after three tries that

@@ -38,6 +38,9 @@
 //! `Hello` cannot ([`DaemonSeen`]), on either route.
 //! [`HANDSHAKE_RETRY_CAP`] sessions in a row
 //! that end before their first frame stop either route, so neither can spin. A
+//! reconnect over SSH may be asked for a passphrase, so its wait for `Hello` lends the
+//! terminal and reads no key: `C-c` is a signal there and ends the route, and `F12`
+//! does nothing ([`RECONNECT_HELLO_DEADLINE`]). A
 //! frame cut short is the daemon's bound, and the frontend says so
 //! ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]): no `Goodbye` can follow a
 //! part-written frame.
@@ -160,6 +163,19 @@ const SSH_STDERR_TAIL_CAP: usize = 4096;
 /// already-exited child.
 const SSH_KICK_WATCHDOG: Duration = Duration::from_secs(1);
 
+/// How long a reconnect over SSH waits for its `Hello` before it kills `ssh` and that
+/// is one failed attempt on the schedule, a daemon that cannot be reached, which backs
+/// off with no limit. 120 s by the owner's ruling of 2026-11-06, since `ssh` runs with no
+/// `BatchMode` and may be asking for a passphrase: a shorter wait kills someone typing.
+const RECONNECT_HELLO_DEADLINE: Duration = Duration::from_mins(2);
+
+/// A test's override of [`RECONNECT_HELLO_DEADLINE`], in milliseconds.
+pub const PMACS_TEST_RECONNECT_HELLO_MS: &str = "PMACS_TEST_RECONNECT_HELLO_MS";
+
+/// How long `ssh` has to leave after a `SIGTERM` this client gave it during a handshake
+/// before it has a `SIGKILL`. A stand-in that ignores one must not hold the route.
+const SSH_TERM_GRACE: Duration = Duration::from_secs(1);
+
 /// Errors that abort the attach client.
 #[derive(Debug)]
 pub enum AttachError {
@@ -209,6 +225,13 @@ pub enum AttachError {
         socket: PathBuf,
         /// What the connect found.
         found: &'static str,
+    },
+    /// `C-c` in a reconnect's wait for `Hello`, which ends the route with nothing to say.
+    ReconnectCancelled,
+    /// A reconnect's `Hello` did not come within [`RECONNECT_HELLO_DEADLINE`].
+    ReconnectHelloTimedOut {
+        /// How long it waited.
+        after: Duration,
     },
     /// [`HANDSHAKE_RETRY_CAP`] sessions in a row ended before their first
     /// frame, so the route stopped trying.
@@ -308,6 +331,12 @@ impl std::fmt::Display for AttachError {
                  and attach",
                 socket.display()
             ),
+            Self::ReconnectCancelled => write!(f, "the reconnect was cancelled"),
+            Self::ReconnectHelloTimedOut { after } => write!(
+                f,
+                "the far side did not say hello within {} s",
+                after.as_secs()
+            ),
             Self::SessionsDropped {
                 attempts,
                 cut_short: true,
@@ -338,6 +367,8 @@ impl std::error::Error for AttachError {
             | Self::Rejected(_)
             | Self::SshChildExited { .. }
             | Self::DaemonGone { .. }
+            | Self::ReconnectCancelled
+            | Self::ReconnectHelloTimedOut { .. }
             | Self::SessionsDropped { .. } => None,
         }
     }
@@ -1912,8 +1943,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
         // first handshake (Frontend never came up).
         if iteration > 0 {
             if let Some(f) = frontend_slot.as_mut() {
-                let banner = banner_session_reconnect();
-                let _ = f.draw_status_overlay(banner);
+                let _ = f.draw_status_overlay(banner_remote_reconnect());
             } else {
                 // Slot is None and we're past iteration 0 — only
                 // reachable through `ReconnectHandshake`. Show the
@@ -2085,6 +2115,12 @@ fn remote_verdict(
 /// No counter — session reconnects are unbounded.
 fn banner_session_reconnect() -> &'static str {
     "[pmacs reconnecting...]"
+}
+
+/// [`banner_session_reconnect`] on the SSH route, whose wait lends the terminal, so
+/// `C-c` reaches it as a signal and `F12` reaches nothing.
+fn banner_remote_reconnect() -> &'static str {
+    "[pmacs reconnecting... Ctrl-C to exit]"
 }
 
 /// Banner painted while a handshake-reconnect attempt is in flight.
@@ -2345,25 +2381,122 @@ fn run_pump_and_reap(
     classify_ssh_exit(pump_result, exit_status, stderr_text)
 }
 
-/// Body of [`attempt_session`] expressed in raw `AttachError` so the
-/// caller can fold the result through [`classify_for_reconnect`].
-/// Splitting this out keeps the IO path linear and tests-friendly:
-/// `attempt_session` is just classify + dispatch.
-// The protocol-channel, Hello-watchdog, and pump-and-reap phases are
-// already factored out (`open_protocol_channel`, `spawn_hello_watchdog`,
-// `run_pump_and_reap`). What remains is a linear Hello/AttachRequest
-// handshake whose several early-return error paths each need ownership
-// of `child` + the stderr handles to tear down via
-// `handshake_error_with_child`; extracting it further would fragment
-// that error-ownership flow rather than clarify it. Same precedent as
-// the `#[allow(clippy::too_many_lines)]` on `run_attach_pair` above.
-#[allow(clippy::too_many_lines)]
-fn run_one_session(
-    frontend_slot: &mut Option<Frontend>,
+/// A session's `ssh`, its channels, and the `Hello` it said.
+struct OpenSession {
+    child: Child,
+    child_stdin: std::process::ChildStdin,
+    channel: ProtocolChannel,
+    hello: Hello,
+}
+
+/// What `C-c` and `C-\` do while a reconnect waits for its `Hello`: with the terminal
+/// lent they are signals, to this process and to `ssh` beside it. The handlers are
+/// installed once and stay, so outside a wait they take the default action, as a signal
+/// from elsewhere did before this existed; raw mode raises none from the keyboard.
+struct HelloWaitSignals {
+    pressed: Arc<AtomicBool>,
+    outside_a_wait: Arc<AtomicBool>,
+}
+
+impl HelloWaitSignals {
+    /// The signals, armed for one wait.
+    fn armed() -> std::io::Result<&'static Self> {
+        use signal_hook::consts::{SIGINT, SIGQUIT};
+        use signal_hook::flag::{register, register_conditional_default};
+        static SIGNALS: OnceLock<Result<HelloWaitSignals, std::io::ErrorKind>> = OnceLock::new();
+        let signals = SIGNALS.get_or_init(|| {
+            let signals = Self {
+                pressed: Arc::new(AtomicBool::new(false)),
+                outside_a_wait: Arc::new(AtomicBool::new(true)),
+            };
+            for signal in [SIGINT, SIGQUIT] {
+                register_conditional_default(signal, Arc::clone(&signals.outside_a_wait))
+                    .and_then(|_| register(signal, Arc::clone(&signals.pressed)))
+                    .map_err(|error| error.kind())?;
+            }
+            Ok(signals)
+        });
+        let signals = signals
+            .as_ref()
+            .map_err(|kind| std::io::Error::from(*kind))?;
+        signals.pressed.store(false, Ordering::SeqCst);
+        signals.outside_a_wait.store(false, Ordering::SeqCst);
+        Ok(signals)
+    }
+
+    fn pressed(&self) -> bool {
+        self.pressed.load(Ordering::SeqCst)
+    }
+
+    /// The wait is over. Whether one was pressed in it.
+    fn disarm(&self) -> bool {
+        self.outside_a_wait.store(true, Ordering::SeqCst);
+        self.pressed()
+    }
+}
+
+/// How a reconnect's wait for `Hello` came out.
+enum HelloWait {
+    Heard(Hello, Box<dyn Read + Send>),
+    Failed(TransportError),
+    Cancelled,
+    TimedOut(Duration),
+}
+
+/// The deadline, or what a test set in its place.
+fn reconnect_hello_deadline() -> Duration {
+    std::env::var(PMACS_TEST_RECONNECT_HELLO_MS)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(RECONNECT_HELLO_DEADLINE, Duration::from_millis)
+}
+
+/// Wait for a reconnect's `Hello`, reading no key: the terminal is lent, and a byte
+/// taken from it could be a passphrase's. The read is on a thread of its own, which is
+/// left behind if it never returns, since something `ssh` started may hold the pipe.
+fn wait_for_hello(mut reader: Box<dyn Read + Send>, signals: &HelloWaitSignals) -> HelloWait {
+    const TICK: Duration = Duration::from_millis(20);
+    let after = reconnect_hello_deadline();
+    let deadline = Instant::now() + after;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let said = read_message::<Hello>(&mut reader);
+        let _ = tx.send((said, reader));
+    });
+    loop {
+        if signals.pressed() {
+            return HelloWait::Cancelled;
+        }
+        match rx.recv_timeout(TICK) {
+            Ok((Ok(hello), reader)) => return HelloWait::Heard(hello, reader),
+            Ok((Err(error), _)) => {
+                // `ssh` dying of the same `C-c` may be heard first.
+                thread::sleep(TICK);
+                return if signals.pressed() {
+                    HelloWait::Cancelled
+                } else {
+                    HelloWait::Failed(error)
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return HelloWait::TimedOut(after);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return HelloWait::Failed(TransportError::Eof);
+            }
+        }
+    }
+}
+
+/// Spawn `ssh` and hear its `Hello`. The first attempt (`signals` is `None`) reads it on
+/// a cooked terminal, where `C-c` ends the process and a failure reaches the user
+/// directly. A reconnect has lent the terminal, and waits with a deadline.
+fn open_session(
     target: &AttachTarget,
-    loss: &mut Option<SessionLoss>,
-    memory: &mut SessionMemory,
-) -> Result<(), AttachError> {
+    signals: Option<&HelloWaitSignals>,
+) -> Result<OpenSession, AttachError> {
     let mut cmd = build_ssh_command(target).expect("target shape pre-validated by caller");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2381,7 +2514,7 @@ fn run_one_session(
         .stdout
         .take()
         .expect("Stdio::piped on stdout guarantees a handle");
-    let mut child_stdin = child
+    let child_stdin = child
         .stdin
         .take()
         .expect("Stdio::piped on stdin guarantees a handle");
@@ -2395,35 +2528,102 @@ fn run_one_session(
         child_stdout,
         child_stderr,
         protocol_over_stderr,
-        frontend_slot.is_none(),
+        signals.is_none(),
     );
 
+    attach_debug("waiting for Hello from remote daemon bridge");
+    let hello_wait_done = spawn_hello_watchdog();
+    let heard = match signals {
+        None => read_message(&mut protocol_reader)
+            .map_err(AttachError::from)
+            .map(|hello: Hello| (hello, protocol_reader)),
+        Some(signals) => match wait_for_hello(protocol_reader, signals) {
+            HelloWait::Heard(hello, reader) => Ok((hello, reader)),
+            HelloWait::Failed(error) => Err(error.into()),
+            HelloWait::Cancelled => Err(AttachError::ReconnectCancelled),
+            HelloWait::TimedOut(after) => Err(AttachError::ReconnectHelloTimedOut { after }),
+        },
+    };
+    hello_wait_done.store(true, Ordering::SeqCst);
+    let (hello, protocol_reader) = match heard {
+        Ok(heard) => heard,
+        Err(error) => {
+            attach_debug(format!("failed reading Hello: {error}"));
+            return Err(handshake_error_with_child(
+                child,
+                stderr_handle,
+                stderr_tail,
+                error,
+            ));
+        }
+    };
+    attach_debug(format!(
+        "received Hello: protocol_version={}, assigned_frontend_id={}",
+        hello.protocol_version, hello.assigned_frontend_id.0
+    ));
+    Ok(OpenSession {
+        child,
+        child_stdin,
+        channel: (protocol_reader, stderr_handle, stderr_tail),
+        hello,
+    })
+}
+
+/// [`open_session`] on a reconnect: the terminal lent for the wait and taken back after
+/// it, whatever came of it, so the schedule's wait reads its `C-c` from a raw terminal.
+fn reopen_session(
+    frontend: &mut Frontend,
+    target: &AttachTarget,
+) -> Result<OpenSession, AttachError> {
+    let signals = HelloWaitSignals::armed().map_err(AttachError::Terminal)?;
+    if let Err(error) = frontend.lend_terminal() {
+        signals.disarm();
+        return Err(AttachError::Terminal(error));
+    }
+    let opened = open_session(target, Some(signals));
+    let back = frontend.take_terminal_back();
+    let pressed = signals.disarm();
+    let opened = match (opened, pressed) {
+        // Pressed as the `Hello` arrived.
+        (Ok(open), true) => {
+            let (_, stderr_handle, stderr_tail) = open.channel;
+            Err(handshake_error_with_child(
+                open.child,
+                stderr_handle,
+                stderr_tail,
+                AttachError::ReconnectCancelled,
+            ))
+        }
+        (opened, _) => opened,
+    };
+    back.map_err(AttachError::Terminal).and(opened)
+}
+
+/// Body of [`attempt_session`] expressed in raw `AttachError` so the
+/// caller can fold the result through [`classify_for_reconnect`].
+/// Splitting this out keeps the IO path linear and tests-friendly:
+/// `attempt_session` is just classify + dispatch.
+fn run_one_session(
+    frontend_slot: &mut Option<Frontend>,
+    target: &AttachTarget,
+    loss: &mut Option<SessionLoss>,
+    memory: &mut SessionMemory,
+) -> Result<(), AttachError> {
     // Hello / AttachRequest handshake. On the FIRST attempt
     // (`frontend_slot` is `None`) raw mode is not engaged yet, so
     // failures here reach a cooked terminal via main.rs's eprintln.
     // On reconnect (`Some`) the Frontend is up and the M5.8c
     // overlay communicates state; handshake errors here are bubbled
     // up so the M5.8d loop can decide whether to retry.
-    attach_debug("waiting for Hello from remote daemon bridge");
-    let hello_wait_done = spawn_hello_watchdog();
-    let hello: Hello = match read_message(&mut protocol_reader) {
-        Ok(h) => h,
-        Err(e) => {
-            hello_wait_done.store(true, Ordering::SeqCst);
-            attach_debug(format!("failed reading Hello: {e}"));
-            return Err(handshake_error_with_child(
-                child,
-                stderr_handle,
-                stderr_tail,
-                e.into(),
-            ));
-        }
+    let OpenSession {
+        child,
+        mut child_stdin,
+        channel: (protocol_reader, stderr_handle, stderr_tail),
+        hello,
+    } = match frontend_slot.as_mut() {
+        None => open_session(target, None)?,
+        Some(frontend) => reopen_session(frontend, target)?,
     };
-    hello_wait_done.store(true, Ordering::SeqCst);
-    attach_debug(format!(
-        "received Hello: protocol_version={}, assigned_frontend_id={}",
-        hello.protocol_version, hello.assigned_frontend_id.0
-    ));
     // T M10.5: relaxed to range membership per
     // `§sec:m10-backward-compat`. Symmetric with the local-socket
     // attach path above.
@@ -2531,16 +2731,34 @@ fn handshake_error_with_child(
     original_error: AttachError,
 ) -> AttachError {
     // Best-effort tear-down of the child. SIGTERM unsticks any read
-    // it might be doing on its end of our broken handshake; wait
-    // reaps. Errors are ignored — if the child has already exited
-    // (e.g., remote `pmacs` not on PATH), `kill` returns ESRCH and
-    // we move on.
+    // it might be doing on its end of our broken handshake, and one that
+    // outlasts it has a SIGKILL. Errors are ignored — if the child has
+    // already exited (e.g., remote `pmacs` not on PATH), `kill` returns
+    // ESRCH and we move on. Something it started may hold its stderr open
+    // past it, so the tee is not waited for without a limit.
     #[allow(clippy::cast_possible_wrap)]
     let pid = nix::unistd::Pid::from_raw(child.id() as i32);
     let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+    let deadline = Instant::now() + SSH_TERM_GRACE;
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let _ = child.kill();
     let _ = child.wait();
-    let _ = stderr_handle.join();
+    let _ = join_within(stderr_handle, SSH_TERM_GRACE);
     original_error
+}
+
+/// Join `handle` if it finishes within `within`, and leave it running if it does not.
+fn join_within<T>(handle: thread::JoinHandle<T>, within: Duration) -> Option<T> {
+    let deadline = Instant::now() + within;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    handle.join().ok()
 }
 
 /// Drain the stderr tail ring buffer into an owned `String`,
@@ -3547,6 +3765,15 @@ mod tests {
     #[test]
     fn banner_session_reconnect_is_static_text() {
         assert_eq!(banner_session_reconnect(), "[pmacs reconnecting...]");
+        assert_eq!(
+            banner_remote_reconnect(),
+            "[pmacs reconnecting... Ctrl-C to exit]"
+        );
+    }
+
+    #[test]
+    fn a_reconnects_hello_deadline_is_120_s_as_ruled() {
+        assert_eq!(RECONNECT_HELLO_DEADLINE, Duration::from_mins(2));
     }
 
     #[test]

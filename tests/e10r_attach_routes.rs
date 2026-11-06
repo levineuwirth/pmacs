@@ -522,19 +522,20 @@ impl StandInSsh {
     }
 
     fn attach_scaled(&self, scale_ms: &str) -> common::pty::PmacsPty {
+        self.attach_with(scale_ms, &[])
+    }
+
+    fn attach_with(&self, scale_ms: &str, envs: &[(&str, &Path)]) -> common::pty::PmacsPty {
         let home = self.dir.path();
         let script = home.join("ssh");
-        common::pty::spawn_pmacs_in_pty(
-            &["--attach", "farhost"],
-            &[
-                ("HOME", home),
-                ("XDG_CONFIG_HOME", home),
-                (PMACS_TEST_SSH_BIN, &script),
-                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
-            ],
-            24,
-            80,
-        )
+        let mut all: Vec<(&str, &Path)> = vec![
+            ("HOME", home),
+            ("XDG_CONFIG_HOME", home),
+            (PMACS_TEST_SSH_BIN, &script),
+            (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
+        ];
+        all.extend_from_slice(envs);
+        common::pty::spawn_pmacs_in_pty(&["--attach", "farhost"], &all, 24, 80)
     }
 }
 
@@ -635,6 +636,56 @@ impl BridgedSsh {
                 _holder: Some(holder),
             },
         )
+    }
+
+    /// A stand-in like [`Self::new`] whose second invocation on runs `first` before it
+    /// starts its bridge.
+    fn first_running(socket: &Path, first: &str) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let count = dir.path().join("count");
+        let script = dir.path().join("ssh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+echo $$ >> '{count}'
+if [ "$(wc -l < '{count}')" -ge 2 ]; then
+  {first}
+fi
+PMACS_ATTACH_PROTOCOL_FD=2 exec '{pmacs}' --daemon-attach --socket '{socket}'
+"#,
+                count = count.display(),
+                pmacs = env!("CARGO_BIN_EXE_pmacs"),
+                socket = socket.display(),
+            ),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        Self { dir }
+    }
+
+    /// [`Self::first_running`] asking on the terminal, as `ssh` asks for a passphrase:
+    /// `asking` beside it before a line read from `/dev/tty` lands in `got`, with
+    /// `prologue` before that.
+    fn asking_on_the_terminal(socket: &Path, prologue: &str) -> Self {
+        Self::first_running(
+            socket,
+            &format!(
+                "{prologue}\n  here=\"$(dirname \"$0\")\"\n  : > \"$here/asking\"\n  IFS= read -r line < /dev/tty\n  printf %s \"$line\" > \"$here/got\""
+            ),
+        )
+    }
+
+    /// Wait for the invocation to be asking, and a moment for it to be in its read.
+    fn wait_until_asking(&self) {
+        let asking = self.dir.path().join("asking");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !asking.exists() {
+            assert!(Instant::now() < deadline, "the second ssh never asked");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     /// Whatever pid each invocation so far wrote, in order.
@@ -1655,4 +1706,200 @@ fn p4_a_prompt_under_the_notice_comes_back_when_it_comes_off() {
         tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
         "F12 ends it"
     );
+}
+
+/// Whether the process `pid` has gone, reaped or a zombie waiting on nobody's account.
+fn gone(pid: i32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// A first session that worked and then failed, for a row about the reconnect after it.
+fn worked_then_failed() -> RemoteSession {
+    session_with(&frame_bytes(), 255)
+}
+
+/// **Review 1's Medium 4, its `p2`:** the link lost and the next `ssh` connects and says
+/// nothing. `C-c`, which the banner offers, ends the route, status 0, and the `ssh` with
+/// it. At `5fd9d25` nothing read a key and the route could be ended only from outside.
+#[test]
+fn p2_ctrl_c_ends_a_reconnect_whose_hello_never_comes() {
+    let ssh = StandInSsh::new(&[
+        worked_then_failed(),
+        RemoteSession {
+            bytes: Vec::new(),
+            then: "echo $$ > \"$(dirname \"$0\")/second\"; exec sleep 30".to_owned(),
+        },
+    ]);
+    let mut tui = ssh.attach();
+    let second = ssh.dir.path().join("second");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !second.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(second.exists(), "the second ssh started");
+    std::thread::sleep(Duration::from_millis(500));
+    tui.write_input(b"\x03").expect("C-c");
+    let status = tui.wait_for_exit(Duration::from_secs(5)).expect(
+        "C-c, which the banner offers, did nothing: the route waits on a Hello with no deadline",
+    );
+    assert!(status.success(), "{status:?}");
+    let pid = std::fs::read_to_string(&second)
+        .expect("its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(gone(pid), "the ssh went with it");
+    assert_eq!(ssh.invocations(), 2, "and nothing tried again");
+}
+
+/// **G3's proof:** what `ssh` does on a reconnect, a stand-in reading a line from
+/// `/dev/tty` before it passes anything on. It receives every byte typed, `Enter` ending
+/// the line as on any terminal, and the route goes on: the session comes back and a
+/// key typed after that is the daemon's to answer. At `5fd9d25` the terminal was raw, so
+/// the line never ended and the route never went on.
+#[test]
+fn g3_a_prompt_on_the_terminal_gets_every_byte_and_the_route_goes_on() {
+    let daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::asking_on_the_terminal(daemon.socket_path(), "");
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(ssh.pids()[0]),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    ssh.wait_until_asking();
+    tui.write(b"s3cret passphrase\r");
+    let got = ssh.dir.path().join("got");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !got.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&got).expect("the prompt never got its line"),
+        "s3cret passphrase",
+        "every byte typed reaches the prompt, and none the TUI"
+    );
+    tui.wait_for(Duration::from_secs(30), "the session, back", &|t| {
+        t.bottom_row().contains("reconnected")
+    });
+    std::thread::sleep(NOTICE_STANDS);
+    tui.write(b"\x1bx");
+    tui.wait_for(Duration::from_secs(10), "the daemon's answer", &|t| {
+        t.bottom_row().contains("M-x")
+    });
+    tui.write(b"\x07");
+    tui.write(b"\x1b[24~");
+    let status = tui
+        .pty
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("F12 ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), 2, "one reconnect");
+}
+
+/// `C-c` at that prompt ends the route, status 0, its terminal handed back, and kills an
+/// `ssh` that does not die of the signal itself. At `5fd9d25` it did nothing.
+#[test]
+fn g3_ctrl_c_at_a_prompt_ends_the_route_and_the_ssh() {
+    let daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::asking_on_the_terminal(daemon.socket_path(), "trap '' INT");
+    let mut tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(ssh.pids()[0]),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    ssh.wait_until_asking();
+    tui.write_input(b"\x03").expect("C-c");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("C-c at the prompt ends the route");
+    assert!(status.success(), "{status:?}");
+    assert!(gone(ssh.pids()[1]), "the ssh went with it");
+    assert_eq!(ssh.invocations(), 2, "and nothing tried again");
+    tui.after_the_alternate_screen();
+}
+
+/// A stand-in that never speaks is killed at the deadline, shortened here, and that is a
+/// failed attempt on the schedule: more of them than the cap, and the route goes on until
+/// a far side answers, whose `Goodbye` ends it. At `5fd9d25` the first of them held it.
+#[test]
+fn g3_a_far_side_that_never_speaks_is_killed_at_the_deadline_with_no_limit() {
+    let silent = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 1;
+    let mut sessions = vec![worked_then_failed()];
+    sessions.extend((0..silent).map(|_| RemoteSession {
+        bytes: Vec::new(),
+        then: "echo $$ >> \"$(dirname \"$0\")/silent\"; exec sleep 300".to_owned(),
+    }));
+    sessions.push(session_with(&goodbye_bytes(), 0));
+    let ssh = StandInSsh::new(&sessions);
+    let mut tui = ssh.attach_with("1", &[("PMACS_TEST_RECONNECT_HELLO_MS", Path::new("300"))]);
+    let status = tui
+        .wait_for_exit(Duration::from_mins(1))
+        .unwrap_or_else(|| panic!("it held: {} attempts", ssh.invocations()));
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), silent + 2);
+    let pids = std::fs::read_to_string(ssh.dir.path().join("silent")).expect("the pids");
+    let pids: Vec<i32> = pids
+        .lines()
+        .map(|pid| pid.parse().expect("a pid"))
+        .collect();
+    assert_eq!(pids.len(), silent);
+    for pid in pids {
+        assert!(gone(pid), "{pid} was killed at the deadline");
+    }
+}
+
+/// `F12` in that wait does nothing, since nothing reads a key: its bytes go to whatever
+/// is reading the terminal, and what nothing read goes with the wait, so it does not land
+/// on the view the session comes back to. `C-c` is what ends a wait.
+#[test]
+fn g3_f12_in_the_wait_ends_nothing_and_what_was_typed_goes_with_the_wait() {
+    let daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::first_running(
+        daemon.socket_path(),
+        ": > \"$(dirname \"$0\")/asking\"; until [ -e \"$(dirname \"$0\")/go\" ]; do sleep 0.02; done",
+    );
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(ssh.pids()[0]),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    ssh.wait_until_asking();
+    tui.write(b"\x1b[24~qqq");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(1)).is_none(),
+        "F12 ended the wait"
+    );
+    std::fs::write(ssh.dir.path().join("go"), b"").expect("say go");
+    tui.wait_for(Duration::from_secs(30), "the session, back", &|t| {
+        t.bottom_row().contains("reconnected")
+    });
+    assert!(
+        tui.watch_for(Duration::from_secs(1), &|t| t.screen_contains("qqq"))
+            .is_none(),
+        "what was typed in the wait landed on the new view: {}",
+        tui.describe()
+    );
+    tui.write(b"\x1b[24~");
+    let status = tui
+        .pty
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("F12 ends it");
+    assert!(status.success(), "{status:?}");
 }
