@@ -744,6 +744,41 @@ fn kill_from_outside(pid: &str) {
     assert!(killed.success(), "killed the worker {pid} from outside");
 }
 
+/// From here on the runtime's settle records what each parse job came to,
+/// in order: the settle is what sets and clears the mode line's parse mark,
+/// and only it tells an installed parse from a report that merely reads idle.
+fn record_settles(state: &EditorState) {
+    exec(
+        state,
+        "local install = pmacs.parse._install_settled\n\
+         settle_statuses = {}\n\
+         pmacs.parse._install_settled = function(job)\n\
+           local status, detail = install(job)\n\
+           settle_statuses[#settle_statuses + 1] = status\n\
+           return status, detail\n\
+         end",
+    );
+}
+
+/// The statuses [`record_settles`] has seen, oldest first, space-separated.
+fn settles(state: &EditorState) -> String {
+    eval(state, "return table.concat(settle_statuses, ' ')")
+}
+
+/// Whether a parse settled as installed after the `kill`th kill's own settle.
+fn installed_after_kill(settles: &str, kill: usize) -> bool {
+    settles
+        .split(' ')
+        .skip_while({
+            let mut kills = 0;
+            move |status| {
+                kills += usize::from(*status == "killed");
+                kills < kill
+            }
+        })
+        .any(|status| status.starts_with("installed"))
+}
+
 /// What `*errors*` says of kills and of crashes.
 fn told_killed(state: &EditorState) -> usize {
     errors_text(state)
@@ -785,6 +820,7 @@ fn e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_b
         ),
     );
     wait_installed(&mut state, "the first parse installed");
+    record_settles(&state);
     let mut rows = Vec::new();
     for kill in 1..=3 {
         let r = report(&state);
@@ -812,9 +848,38 @@ fn e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_b
                 Probe::Pending(r)
             }
         });
-        quiesce(&mut state);
+        // #316: the mark is set and cleared by the runtime's settle, a tick
+        // after the worker slot the report reads, so neither `busy=false`
+        // nor `tree=true` (the kill keeps the last tree) says the follow-up
+        // parse installed. The row waits for that install's own settle, and
+        // then for the mark to go: a mark that outlives it still fails here.
+        ready::tick_until(
+            &mut state,
+            "the switch's follow-up parse settled as installed after the kill",
+            Duration::from_mins(1),
+            |s| {
+                let settles = settles(s);
+                if installed_after_kill(&settles, kill) {
+                    Probe::Ready(())
+                } else {
+                    Probe::Pending(format!("settles [{settles}], {}", report(s)))
+                }
+            },
+        );
+        let found_line = ready::tick_until(
+            &mut state,
+            "the mode line's parse mark gone after the follow-up parse installed",
+            Duration::from_mins(1),
+            |s| {
+                let line = mode_line(&paint(s));
+                if line.contains("parse:") {
+                    Probe::Pending(format!("{}, mode line {line:?}", report(s)))
+                } else {
+                    Probe::Ready(line)
+                }
+            },
+        );
         let found = report(&state);
-        let found_line = mode_line(&paint(&state));
         // The next edit: a line entered at the head.
         exec(&state, "pmacs.editor.goto_byte(0)");
         type_keys(&mut state, "\n");
