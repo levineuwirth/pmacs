@@ -12372,6 +12372,140 @@ Paired by their own logs: `Test (crdt)` 228 pairs, 5,443 / 0 / 87; `Test (ubuntu
 (headless)` 1 pair, 394 / 0 / 0; `WouldBlock` in none. `Grammar fuzz` 42072793185, `success`: `Grammar fuzz`
 127404916069 and `Grammar fuzz (asan-strict)` 127404915826.
 
+### E10r fix round 1: PR #462 red at `b25e779` on #375's second, #282's tenth and #471's first, `main` green at `2a87a1f`
+
+Recorded 2026-11-06 at E10r's fix round 1 (roadmap §E10r, #390), which leaves `main` where E10n's close left it.
+Every run was read from the jobs endpoint by conclusion, and every test leg of PR #462's three runs through its own
+log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every
+run id and job id below was searched for in this file before it was written, and none was here. Nothing was rerun
+by this session.
+
+#### `main` at `2a87a1f`, E10n's close: green
+
+`CI` 42079645597 at `2a87a1f`, attempt 1 of 1, `push`, created 2026-11-05T17:57:37Z and completed 18:00:06Z (the
+API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-2a87a1f): 15 = 6 + 9.
+
+Tally (main-ci-2a87a1f-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127429022058 | success |
+| Lint (luajit) | 127429022239 | success |
+| Format | 127429022297 | success |
+| Commit attribution (D9) | 127429022322 | success |
+| Lint (lua54) | 127429022344 | success |
+| Docs consistency | 127429124796 | success |
+| Test (crdt) | 127429125579 | skipped |
+| GPU Render (headless) | 127429125739 | skipped |
+| M5 Perf Gates | 127429125900 | skipped |
+| M10 Perf Gates (crdt) | 127429126538 | skipped |
+| Test (matrix) | 127429126571 | skipped |
+| M6 Perf Gates | 127429126611 | skipped |
+| M1 Acceptance Gates | 127429126737 | skipped |
+| Perf budgets (debug) | 127429127416 | skipped |
+| M4 Perf Gates | 127429127786 | skipped |
+
+Tally (main-ci-2a87a1f-success): 6 rows of the table above with `result` = `success`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test
+(matrix)`. `Grammar fuzz` 42079645594 at `2a87a1f`, `success`: `Grammar fuzz` 127429022197 and `Grammar fuzz
+(asan-strict)` 127429022761.
+
+#### PR #462 at `b25e779`: red on three intermittents, one each, none rerun
+
+`CI` 42093180686 on the merge `513fb7f` of `b25e779` into `2a87a1f`, attempt 1 of 1, `pull_request`, created
+2026-11-05T19:21:58Z and completed 20:02:33Z: `failure`.
+
+Tally (pr-462-ci-b25e779): 19 = 15 + 1 + 3.
+
+Tally (pr-462-ci-b25e779-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127476293485 | success |
+| Lint (luajit) | 127476293707 | success |
+| Lint (lua54) | 127476293771 | success |
+| Format | 127476293787 | success |
+| Commit attribution (D9) | 127476293948 | success |
+| M6 Perf Gates | 127476395608 | success |
+| Test (crdt) | 127476395617 | failure |
+| GPU Render (headless) | 127476395683 | success |
+| M10 Perf Gates (crdt) | 127476395739 | success |
+| Test (ubuntu-latest / lua54) | 127476395762 | success |
+| M1 Acceptance Gates | 127476395777 | success |
+| Test (macos-latest / lua54) | 127476395793 | failure |
+| Test (macos-latest / luajit) | 127476395800 | success |
+| M4 Perf Gates | 127476395812 | success |
+| Perf budgets (debug) | 127476395826 | success |
+| Test (ubuntu-latest / luajit) | 127476395838 | success |
+| M5 Perf Gates | 127476395985 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127476396089 | failure |
+| Docs consistency | 127476399133 | skipped |
+
+Tally (pr-462-ci-b25e779-success): 15 rows of the table above with `result` = `success`.
+
+Tally (pr-462-ci-b25e779-failure): 3 rows of the table above with `result` = `failure`.
+
+Skipped: `Docs consistency` 127476399133. Paired by their own logs: `Test (crdt)` 229 pairs, 5,485 / 1 / 87; the Ubuntu
+matrix legs 231 each, 5,541 / 0 / 87; no crdt 229, 4,836 / 1 / 71; `macos-latest / luajit` 232, 5,485 / 0 / 79;
+`macos-latest / lua54` 230, 5,429 / 1 / 79; `GPU Render (headless)` 1 pair, 395 / 0 / 0; `WouldBlock` in none. The
+reds, each its leg's only one, each commented or filed, and none on a row this branch reaches by reading:
+
+- `Test (crdt)` 127476395617: `autosave_periodic_acceptance::typing_goes_on_while_a_periodic_copy_syncs`, `the
+  editor painted the key before the copy's sync returned`, `11 passed; 1 failed`: **#375's second**. The panic site
+  reads `:550:5` where the issue's fragment reads `:551:5`, the assertion one line earlier in the file than at
+  `587de75`, read from both.
+- `Test (ubuntu-latest / luajit, no crdt)` 127476396089:
+  `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`, `*lsp* names
+  the request and the code: []`, `WIRE label "ready", last_error None, *lsp* errors []`, `4 passed; 1 failed; 2
+  ignored`: **#282's tenth**.
+- `Test (macos-latest / lua54)` 127476395793:
+  `lean4_server_acceptance::r6_every_spawned_fallback_server_is_bounded`, `every fallback server must be bounded; an
+  unwatched root reached attempt 2`, `44 passed; 1 failed`: no row or open issue, **#471, filed, its first**. It is
+  not #313, closed, which is that selector stalling with no assertion reached.
+
+`Grammar fuzz` 42093180697 at `b25e779`, `success`: `Grammar fuzz` 127476290065 and `Grammar fuzz (asan-strict)`
+127476290144.
+
+#### PR #462's earlier heads in this round
+
+Each attempt 1 of 1:
+
+- `CI` 42075380980 at `9e59b3c`, created 2026-11-05T17:31:03Z and completed 18:14:51Z, `failure`, 19 = 16 + 1 skipped
+  (`Docs consistency` 127414194629) + 2 failure, this branch's own row and none of it a registry row: `Test
+  (macos-latest / lua54)` 127414192762 and `Test (macos-latest / luajit)` 127414192565, 230 pairs each, 5,429 / 1 /
+  79, on `a_lone_attached_tui_stopped_past_the_bound_comes_back`, `the daemon never dropped it`: a lone idle TUI's
+  socket takes about 30 s to fill on macOS, and the row waited 30, fixed by `38f8c62`. The four Linux legs green,
+  no crdt 231 pairs, 4,892 / 0 / 71. `Grammar fuzz` 42075381040 `cancelled` when the next push superseded it:
+  `Grammar fuzz` 127414060727 and `Grammar fuzz (asan-strict)` 127414060055.
+- `CI` 42082457831 at `38f8c62`, created 2026-11-05T18:15:21Z and completed 19:03:39Z, `failure`, 19 = 14 + 1 skipped
+  (`Docs consistency` 127438890751) + 4 failure. `Lint (luajit)` 127438766919 and `Lint (lua54)` 127438766986 on this
+  branch's `Duration::from_secs(120)`, fixed by `b25e779`. `Test (ubuntu-latest / luajit, no crdt)` 127438887389,
+  229 pairs, 4,836 / 1 / 71, `m6_5_repl_spawns_fish`, both of the issue's fragments, **#254's third**. `Test
+  (macos-latest / lua54)` 127438887526, 230 pairs, 5,429 / 1 / 79, `e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered`,
+  `quiet before the request`, `left: Some("⋯1 parse rust`, **#363's fifth**. `Grammar fuzz` 42082457107 `success`:
+  `Grammar fuzz` 127439379085 and `Grammar fuzz (asan-strict)` 127439379686.
+
+#### The local gates, listed and not tallied (D38)
+
+Five `scripts/gate --protocol --perf` runs on the laptop, at `nice -n 19` and six jobs. `20261105T162945Z-4113162` at
+`9e59b3c`, the sampler's 1-minute load 10 to 62: the sweep green, `07-sweep-luajit` 5,264 / 2 / 67 on #304's caret
+row and #340's `the warm parse installed`, each commented; `perf` red on `dired_renders_10k_entries_within_200ms` at
+220.9 ms and `e7h_budget_cancellation_lands_within_a_millisecond`, measurements. `20261105T170444Z-605471` at
+`9e59b3c`, load 7 to 28: `06-sweep` 5,913 / 2 / 81 on #304's `overwide_status_runs_never_wrap_and_keep_the_suffix_pinned`
+and `e7_3_a_late_answer_is_never_applied` at 945.7 ms against its 900 ms, the second commented on #364 as the same
+shape on another selector. `20261105T173101Z-987406` at `9e59b3c`, load 6 to 24: all nine stages ok.
+`20261105T181458Z-1478051` at `38f8c62`, load 4 to 13: `clippy` and `clippy-luajit` on the same `from_secs`, every other
+stage ok. **`20261105T192152Z-1933124` at the head `b25e779`, load 2 to 13: all nine ok**, 5,915 / 0 / 81 and luajit
+5,266 / 0 / 67, each at 238 pairs, every budget held.
+
+So, at E10r's fix round 1: `main` is green at `2a87a1f`, and PR #462 is red at its head on required checks, on rows
+this branch does not reach by reading, not rerun. By CI #375 moves to two, #282 to ten, #254 to three and #363 to five,
+and #471 is filed at one. #304, #340 and #364's shape met local samples, listed and not counted. Every other count
+above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
