@@ -44,6 +44,8 @@ const MAYBE_NEW_DAEMON_NOTICE: &str =
 const PLAIN_DAEMON_NOTICE: &str =
     "[pmacs reconnected on a new view: the daemon closed the last one]";
 const PLAIN_LINK_NOTICE: &str = "[pmacs reconnected on a new view: the connection was lost]";
+/// How long a notice stands whatever is typed under it, by G2's ruling.
+const NOTICE_STANDS: Duration = Duration::from_secs(5);
 
 /// A daemon too old for its age to fall inside the slack, for a row about what a real
 /// session on a healthy daemon reads: under it, a `Hello` reads `may be a new daemon`,
@@ -1302,7 +1304,7 @@ fn p1_the_notice_does_not_call_what_autosave_holds_gone() {
     );
     assert_eq!(said, NEW_DAEMON_NOTICE);
     // What that sentence sends the user to, once the notice has stood.
-    std::thread::sleep(Duration::from_secs(6));
+    std::thread::sleep(NOTICE_STANDS + Duration::from_secs(1));
     run_command(&mut tui, "editor.switch-buffer");
     tui.wait_for(Duration::from_secs(30), "the switch prompt", &|t| {
         t.bottom_row().contains("witch")
@@ -1486,7 +1488,7 @@ fn p6_a_hello_held_past_the_slack_on_a_real_daemon_reads_may_be() {
         before,
         "the same daemon"
     );
-    std::thread::sleep(Duration::from_secs(6));
+    std::thread::sleep(NOTICE_STANDS + Duration::from_secs(1));
     run_command(&mut tui, "editor.switch-buffer");
     tui.wait_for(Duration::from_secs(30), "the switch prompt", &|t| {
         t.bottom_row().contains("witch")
@@ -1558,4 +1560,99 @@ fn p4_a_narrow_pane_still_reads_what_is_gone() {
     );
     let said = read(maybe, 30);
     assert!(said.contains("[this may be a new daemon]"), "{said:?}");
+}
+
+/// Whether what `up` reads stays false, the row having just seen it so: a read of the
+/// terminal can end inside a large update, between its frame and the notice over it.
+fn staying_off(tui: &mut ScreenTui, up: &dyn Fn(&ScreenTui) -> bool) -> bool {
+    tui.watch_for(Duration::from_millis(300), up).is_none()
+}
+
+/// **Review 1's Medium 3, `p4_typing`:** keys every 200 ms across a daemon's death, each
+/// reaching the new daemon under the notice, which comes off only at the first key after
+/// it has stood its floor. At `5fd9d25` it stood 128 ms, one key's gap.
+#[test]
+fn p4_the_notice_stands_its_floor_under_typing_and_the_keys_reach_the_daemon() {
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons("");
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    started.kill_the_one_running();
+    let up = |t: &ScreenTui| t.bottom_row() == NEW_DAEMON_NOTICE;
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let shown = loop {
+        tui.write(b"q");
+        if let Some(at) = tui.watch_for(Duration::from_millis(200), &up) {
+            break at;
+        }
+        assert!(Instant::now() < deadline, "{}", tui.describe());
+    };
+    let mut typed_under_it = false;
+    let off = loop {
+        tui.write(b"q");
+        if let Some(at) = tui.watch_for(Duration::from_millis(200), &|t| !up(t))
+            && staying_off(&mut tui, &up)
+        {
+            break at;
+        }
+        typed_under_it = typed_under_it || tui.screen_contains("qq");
+        assert!(Instant::now() < deadline, "{}", tui.describe());
+    };
+    let stood = off.saturating_duration_since(shown);
+    assert!(
+        stood >= NOTICE_STANDS,
+        "the notice stood {} ms under typing",
+        stood.as_millis()
+    );
+    assert!(
+        stood < NOTICE_STANDS + Duration::from_secs(5),
+        "it came off at the first key after the floor: {} ms; {}",
+        stood.as_millis(),
+        tui.describe()
+    );
+    assert!(typed_under_it, "the keys reach the daemon under it");
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// A frame that takes the bottom row while the notice stands does not take the notice
+/// off, and what that frame put there comes back when the notice does come off: the
+/// daemon sends a cell only when it changes, so nothing else would ever repaint it.
+#[test]
+fn p4_a_prompt_under_the_notice_comes_back_when_it_comes_off() {
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons("");
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    started.kill_the_one_running();
+    let up = |t: &ScreenTui| t.bottom_row() == NEW_DAEMON_NOTICE;
+    tui.wait_for(Duration::from_mins(1), "the notice", &up);
+    tui.write(b"\x1bx");
+    let until = Instant::now() + Duration::from_secs(2);
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        if tui.watch_for(left, &|t| !up(t)).is_some() {
+            assert!(
+                !staying_off(&mut tui, &up),
+                "a prompt under the notice took it off: {}",
+                tui.describe()
+            );
+        }
+    }
+    std::thread::sleep(NOTICE_STANDS);
+    tui.write(b"h");
+    tui.wait_for(Duration::from_secs(20), "the prompt, come back", &|t| {
+        let row = t.bottom_row();
+        row.contains("M-x") && row.contains('h')
+    });
+    tui.write(b"\x07");
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
 }

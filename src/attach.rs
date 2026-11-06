@@ -427,13 +427,17 @@ pub(crate) trait AttachPumpFrontend {
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
     fn size(&self) -> CellSize;
 
-    /// Say `text` on the bottom row, over what a frame put there. Default
-    /// no-op: a test's stub has no screen.
-    fn show_notice(&mut self, _text: &str) -> std::io::Result<()> {
-        Ok(())
+    /// [`Self::present_messages`] with `text` standing on the bottom row, over what
+    /// the frames put there. A test's stub has no screen, so by default it only presents.
+    fn present_under_notice(
+        &mut self,
+        msgs: &[InstanceMessage],
+        _text: &str,
+    ) -> std::io::Result<()> {
+        self.present_messages(msgs)
     }
 
-    /// Take a notice off the bottom row.
+    /// Take a notice off the bottom row, leaving what the frames put there.
     fn clear_notice(&mut self) -> std::io::Result<()> {
         Ok(())
     }
@@ -478,11 +482,15 @@ impl AttachPumpFrontend for Frontend {
     fn size(&self) -> CellSize {
         Frontend::size(self)
     }
-    fn show_notice(&mut self, text: &str) -> std::io::Result<()> {
-        self.draw_status_overlay(text)
+    fn present_under_notice(
+        &mut self,
+        msgs: &[InstanceMessage],
+        text: &str,
+    ) -> std::io::Result<()> {
+        Frontend::present_under_notice(self, msgs, text)
     }
     fn clear_notice(&mut self) -> std::io::Result<()> {
-        self.clear_status_overlay()
+        Frontend::clear_notice(self)
     }
     #[cfg(feature = "crdt")]
     fn paint_optimistic_insert(&mut self, c: char) -> std::io::Result<()> {
@@ -499,8 +507,14 @@ impl AttachPumpFrontend for Frontend {
 /// terminal, whose keys nothing reads during a handshake.
 const LOCAL_RECONNECT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// On the bottom row of a session that replaced a lost one, until the next
-/// key: the view is fresh, so the user is told why the buffer changed.
+/// How long a notice stands whatever is typed under it: a user typing when a link
+/// drops is the likeliest to be at the keyboard, and at 5 keys a second it stood for
+/// 128 ms when any key took it off (review 1, ruled 2026-11-06). Keys reach the daemon
+/// under it, and it comes off at the first one after this.
+const NOTICE_FLOOR: Duration = Duration::from_secs(5);
+
+/// On the bottom row of a session that replaced a lost one, for [`NOTICE_FLOOR`] and
+/// until the next key: the view is fresh, so the user is told why the buffer changed.
 const NOTICE_FRESH_VIEW: &str = "[pmacs reconnected on a new view: the daemon closed the last one]";
 
 /// [`NOTICE_FRESH_VIEW`] when the last one ended with a frame cut short: the
@@ -985,8 +999,9 @@ pub(crate) struct LostSession {
 ///
 /// # Tear-down contract
 ///
-/// `notice`, if any, goes on the bottom row over the session's first frame and
-/// comes off at the next key.
+/// `notice`, if any, goes on the bottom row over the session's first frame. It stands
+/// [`NOTICE_FLOOR`] whatever is typed, painted again over a frame that takes that row,
+/// and comes off at the first key after that, what the frames left there coming back.
 ///
 /// On any exit path — clean Goodbye, reader EOF, F12 detach, IO
 /// error, or terminal error — `io.kick` fires and `reader_handle`
@@ -1010,7 +1025,7 @@ pub(crate) fn run_attach_pair(
     notice: Option<Notice>,
 ) -> Result<PumpEnd, AttachError> {
     let mut notice = notice;
-    let mut notice_up = false;
+    let mut standing: Option<(Notice, Instant)> = None;
     let mut bootstrapped = false;
     let AttachIo {
         reader,
@@ -1160,19 +1175,34 @@ pub(crate) fn run_attach_pair(
                     }
                 }
             }
-            if !batch.is_empty()
-                && let Err(e) = frontend.present_messages(&batch)
-            {
-                return Err(AttachError::Terminal(e));
-            }
-            if batch
-                .iter()
-                .any(|message| matches!(message, InstanceMessage::CellDelta { .. }))
-            {
-                bootstrapped = true;
-                if let Some(text) = notice.take() {
-                    let _ = frontend.show_notice(text.fitting(frontend.size().cols));
-                    notice_up = true;
+            if !batch.is_empty() {
+                // The session's first frame puts up the notice, and a frame that takes
+                // the bottom row while it stands has it painted again.
+                let framed = batch
+                    .iter()
+                    .any(|message| matches!(message, InstanceMessage::CellDelta { .. }));
+                let mut over = if framed {
+                    standing.filter(|_| takes_bottom_row(&batch, frontend.size()))
+                } else {
+                    None
+                };
+                if framed {
+                    bootstrapped = true;
+                    if let Some(first) = notice.take() {
+                        let shown = (first, Instant::now());
+                        standing = Some(shown);
+                        over = Some(shown);
+                    }
+                }
+                let presented = match over {
+                    Some((up, _)) => {
+                        let text = up.fitting(frontend.size().cols);
+                        frontend.present_under_notice(&batch, text)
+                    }
+                    None => frontend.present_messages(&batch),
+                };
+                if let Err(e) = presented {
+                    return Err(AttachError::Terminal(e));
                 }
             }
             if let Some(reason) = goodbye {
@@ -1197,9 +1227,11 @@ pub(crate) fn run_attach_pair(
                 continue;
             };
 
-            if notice_up && matches!(ev, Event::Key(_)) {
+            if matches!(ev, Event::Key(_))
+                && standing.is_some_and(|(_, since)| since.elapsed() >= NOTICE_FLOOR)
+            {
                 let _ = frontend.clear_notice();
-                notice_up = false;
+                standing = None;
             }
 
             if is_detach_key(&ev) {
@@ -1378,6 +1410,20 @@ pub(crate) fn run_attach_pair(
     result.map(|end| match end {
         PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
         over @ PumpEnd::Over => over,
+    })
+}
+
+/// Whether a batch paints on a terminal's bottom row, as a resync always may.
+fn takes_bottom_row(batch: &[InstanceMessage], size: CellSize) -> bool {
+    let bottom = size.rows.saturating_sub(1);
+    batch.iter().any(|message| match message {
+        InstanceMessage::CellDelta { spans, full_grid } => {
+            *full_grid
+                || spans
+                    .iter()
+                    .any(|span| span.start.row == bottom && !span.cells.is_empty())
+        }
+        _ => false,
     })
 }
 
@@ -3391,6 +3437,11 @@ mod tests {
 
     /// The owner's words, each at the width it was ruled for, so a sentence is not cut
     /// before the clause that matters.
+    #[test]
+    fn the_notice_stands_five_seconds_as_ruled() {
+        assert_eq!(NOTICE_FLOOR, Duration::from_secs(5));
+    }
+
     #[test]
     fn a_notice_takes_the_form_that_fits() {
         let first = "[pmacs: new daemon; work not autosaved is gone; M-x recover-file]";

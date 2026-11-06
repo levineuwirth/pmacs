@@ -420,6 +420,25 @@ impl ScreenTui {
         }
     }
 
+    /// Read for at most `limit` until `done` holds; the arrival of the read that made
+    /// it hold, or `None`, with nothing panicking, for a row that keys while it reads.
+    pub fn watch_for(&mut self, limit: Duration, done: &dyn Fn(&Self) -> bool) -> Option<Instant> {
+        let start = Instant::now();
+        if done(self) {
+            return Some(start);
+        }
+        while let Some(left) = limit.checked_sub(start.elapsed()) {
+            let Ok((at, bytes)) = self.tap.recv_timeout(left) else {
+                return None;
+            };
+            self.feed(&bytes);
+            if done(self) {
+                return Some(at);
+            }
+        }
+        None
+    }
+
     /// Read until `done` holds and the screen has not changed for `quiet`.
     pub fn settle(
         &mut self,
