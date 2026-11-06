@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use pmacs::attach::PMACS_TEST_SSH_BIN;
-use pmacs::attach_reconnect::{HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
+use pmacs::attach_reconnect::{DAEMON_AGE_SLACK, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
 use pmacs_protocol::message::{
     AttachRequest, GoodbyeReason, Hello, InstanceCapabilities, InstanceIdentity, InstanceMessage,
@@ -211,6 +211,14 @@ struct StandInDaemon {
 
 impl StandInDaemon {
     fn serve(session: impl Fn(usize, &mut UnixStream) + Send + 'static) -> Self {
+        Self::serve_aged(|_| 0, session)
+    }
+
+    /// [`Self::serve`], its `Hello` saying `uptime_secs(n)` to connection `n`.
+    fn serve_aged(
+        uptime_secs: impl Fn(usize) -> u64 + Send + 'static,
+        session: impl Fn(usize, &mut UnixStream) + Send + 'static,
+    ) -> Self {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let listener = std::os::unix::net::UnixListener::bind(dir.path().join("d.sock"))
             .expect("bind the stand-in's socket");
@@ -227,7 +235,7 @@ impl StandInDaemon {
                         pmacs_version: "0.0.0-test".to_owned(),
                         build_hash: None,
                         instance_name: Some("stand-in".to_owned()),
-                        uptime_secs: 0,
+                        uptime_secs: uptime_secs(n),
                         working_directory: "/tmp".to_owned(),
                     },
                     instance_capabilities: InstanceCapabilities::default(),
@@ -320,6 +328,43 @@ fn e10r_3_a_first_frame_starts_the_local_routes_count_again() {
     assert_eq!(daemon.connections(), sessions);
     let said = String::from_utf8_lossy(&tui.output()).into_owned();
     assert!(said.contains("reconnected on a new view"), "{said:?}");
+}
+
+/// A new daemon answering the local route's socket, younger than the last would be
+/// by now, is said on the bottom row, since it has none of the last one's unsaved
+/// work. A daemon restarted on its socket is how this route meets one: with nobody
+/// there it ends instead. The stand-in's `Goodbye` ends it.
+#[test]
+fn e10r_3_a_new_daemon_on_the_local_routes_socket_says_the_old_ones_work_is_gone() {
+    let daemon = StandInDaemon::serve_aged(
+        |n| if n == 1 { 1_000 } else { 0 },
+        |n, stream| {
+            first_frame(stream);
+            if n == 2 {
+                std::thread::sleep(Duration::from_millis(500));
+                write_message(
+                    stream,
+                    &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+                )
+                .expect("Goodbye");
+            }
+        },
+    );
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(
+        said.contains("reconnected to a new daemon: the old one's unsaved work is gone"),
+        "{said:?}"
+    );
 }
 
 /// Part of a frame and then the end of the socket, as a write past the bound
@@ -653,6 +698,80 @@ fn e10r_remote_a_tui_brought_back_by_a_shells_fg_is_on_a_fresh_view_and_hears_it
         shell.wait_for_exit(Duration::from_secs(10)).is_some(),
         "F12 ended the TUI, and the shell's script with it"
     );
+    assert_eq!(ssh.invocations(), 2, "and nothing tried again");
+}
+
+/// A daemon the bridge started, which nothing here spawned: its lockfile names it,
+/// and it is gone when this is.
+struct StartedByTheBridge {
+    lockfile: std::path::PathBuf,
+}
+
+impl StartedByTheBridge {
+    fn pid(&self) -> Option<i32> {
+        std::fs::read_to_string(&self.lockfile)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+}
+
+impl Drop for StartedByTheBridge {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid().map(nix::unistd::Pid::from_raw) else {
+            return;
+        };
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while nix::sys::signal::kill(pid, None).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
+/// F9's second witness: a daemon killed under the TUI, over the real bridge. The next
+/// bridge finds nobody and starts a new daemon, without the old one's unsaved work, so
+/// the notice says that, told by `Hello`'s `uptime_secs`, and a key typed after that
+/// is the new daemon's to answer. At `b25e779` the bridge's exit 0 ended it, status 0,
+/// saying nothing of the kind. The session outlives the slack first, since a daemon
+/// younger than that is not told from its successor.
+#[test]
+fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_the_old_ones_work_is_gone() {
+    let mut daemon = TestDaemon::spawn();
+    let started = StartedByTheBridge {
+        lockfile: daemon.lockfile_path(),
+    };
+    let first = started.pid().expect("the daemon's lockfile");
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("500");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    std::thread::sleep(DAEMON_AGE_SLACK + Duration::from_secs(2));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL");
+    daemon.wait_for_exit().expect("the daemon is gone");
+    tui.wait_for_output(
+        "reconnected to a new daemon: the old one's unsaved work is gone",
+        Duration::from_mins(1),
+    );
+    assert_eq!(ssh.invocations(), 2, "one new session");
+    assert_ne!(
+        started.pid().expect("the new daemon's lockfile"),
+        first,
+        "a daemon of its own"
+    );
+    tui.write_input(b"\x1bx").expect("M-x");
+    tui.wait_for_output("M-x", Duration::from_secs(10));
+    tui.write_input(b"\x07").expect("C-g");
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("F12 ends the session");
+    assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), 2, "and nothing tried again");
 }
 

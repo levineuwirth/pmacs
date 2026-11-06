@@ -59,6 +59,8 @@
 //! handshake, three quick attempts is courtesy and after that we owe
 //! you a clear failure message.
 
+use std::time::{Duration, Instant};
+
 use crate::attach::AttachError;
 use crate::protocol::GoodbyeReason;
 
@@ -72,6 +74,48 @@ use crate::protocol::GoodbyeReason;
 pub use pmacs_protocol::reconnect::{
     BackoffSchedule, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS,
 };
+
+/// How far a `Hello`'s age may fall short of the age the last daemon would have
+/// reached by now and still be that daemon. Read on the real bridge at `b25e779`,
+/// 15 connects over 97 s: 0.01 to 0.86 s short, since `uptime_secs` is whole seconds.
+/// The rest is for a `Hello` that takes longer to arrive than the last one did.
+pub const DAEMON_AGE_SLACK: Duration = Duration::from_secs(5);
+
+/// How old a daemon said it was, and when: what tells the daemon a session was on
+/// from a new one at the same address, with no wire change (`Hello`'s `uptime_secs`).
+#[derive(Clone, Copy, Debug)]
+pub struct DaemonAge {
+    uptime_secs: u64,
+    read_at: Instant,
+}
+
+impl DaemonAge {
+    /// A `Hello`'s `uptime_secs`, read at `read_at`.
+    #[must_use]
+    pub fn new(uptime_secs: u64, read_at: Instant) -> Self {
+        Self {
+            uptime_secs,
+            read_at,
+        }
+    }
+
+    /// Whether `later`, a `Hello` read after this one, is younger than this daemon
+    /// would be by then, by more than [`DAEMON_AGE_SLACK`].
+    ///
+    /// What that cannot tell, each said so a notice is not read for more than it is.
+    /// A daemon that lived less than the slack is not told from its successor, and
+    /// had no time to hold unsaved work. Both clocks are `Instant`s, which stop while
+    /// a machine sleeps, so on one machine they agree; over SSH, a remote host that
+    /// slept past the slack reads as a new daemon, and a client that slept may read a
+    /// new daemon someone else started as the old one. A `Hello` held past the slack,
+    /// by a stop or a stalled link, reads as a new daemon.
+    #[must_use]
+    pub fn is_older_than_possible_for(&self, later: &Self) -> bool {
+        let elapsed = later.read_at.saturating_duration_since(self.read_at);
+        let expected = Duration::from_secs(self.uptime_secs).saturating_add(elapsed);
+        Duration::from_secs(later.uptime_secs).saturating_add(DAEMON_AGE_SLACK) < expected
+    }
+}
 
 /// What the outer reconnect loop should do after a session attempt
 /// returns.
@@ -183,6 +227,48 @@ mod tests {
 
     fn io_err() -> AttachError {
         AttachError::Io(io::Error::other("test transient io error"))
+    }
+
+    // -----------------------------------------------------------------
+    // DaemonAge
+    // -----------------------------------------------------------------
+
+    /// Is a `Hello` of `later` seconds, read `after` seconds on, a new daemon, after
+    /// one of `first`?
+    fn new_daemon(first: u64, after: f64, later: u64) -> bool {
+        let start = Instant::now();
+        DaemonAge::new(first, start).is_older_than_possible_for(&DaemonAge::new(
+            later,
+            start + Duration::from_secs_f64(after),
+        ))
+    }
+
+    #[test]
+    fn a_daemon_that_went_on_is_the_same_one() {
+        assert!(!new_daemon(100, 10.0, 110));
+        // Whole seconds, each way, the worst of what the real bridge read.
+        assert!(!new_daemon(0, 3.86, 3));
+        // Older than expected: a client that slept, its clock stopped.
+        assert!(!new_daemon(100, 10.0, 8_000));
+    }
+
+    #[test]
+    fn a_daemon_younger_than_the_last_would_be_is_new() {
+        assert!(new_daemon(100, 10.0, 0));
+        // One this very session started: only the time since says so.
+        assert!(new_daemon(0, 8.0, 0));
+    }
+
+    #[test]
+    fn the_age_slack_is_what_a_daemon_may_fall_short_by() {
+        assert!(!new_daemon(0, 5.0, 0));
+        assert!(new_daemon(0, 5.5, 0));
+    }
+
+    #[test]
+    fn a_daemons_age_past_a_duration_does_not_panic() {
+        assert!(!new_daemon(u64::MAX, 1.0, u64::MAX));
+        assert!(new_daemon(u64::MAX, 1.0, 0));
     }
 
     #[test]

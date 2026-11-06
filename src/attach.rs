@@ -33,7 +33,9 @@
 //! of banners. A session comes back on a fresh view, not its own, and says why:
 //! a grid session is minted no token (`docs/divergences.md`). A daemon that is
 //! gone ends the local route, saying why once the alternate screen is left; the
-//! SSH route's bridge starts a new one. [`HANDSHAKE_RETRY_CAP`] sessions in a row
+//! SSH route's bridge starts a new one, without the old one's unsaved work, and
+//! the notice says that, told by `Hello`'s `uptime_secs` ([`DaemonAge`]) on either
+//! route. [`HANDSHAKE_RETRY_CAP`] sessions in a row
 //! that end before their first frame stop either route, so neither can spin. A
 //! frame cut short is the daemon's bound, and the frontend says so
 //! ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]): no `Goodbye` can follow a
@@ -64,7 +66,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::attach_reconnect::{
-    BackoffSchedule, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
+    BackoffSchedule, DaemonAge, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
 };
 use crate::cell::CellSize;
 use crate::frontend::{Event, Frontend, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -508,6 +510,58 @@ const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
 /// the daemon: the bridge exits 0 when the daemon closes its socket.
 const NOTICE_FRESH_VIEW_LINK: &str = "[pmacs reconnected on a new view: the connection was lost]";
 
+/// On the bottom row of a session on a daemon that is not the last session's.
+const NOTICE_NEW_DAEMON: &str =
+    "[pmacs reconnected to a new daemon: the old one's unsaved work is gone]";
+
+/// What a route keeps between sessions, to say why a new one is a new view.
+#[derive(Debug, Default)]
+struct SessionMemory {
+    /// How old the last session's daemon said it was.
+    age: Option<DaemonAge>,
+    /// A `Hello` came from a daemon that is not the one before it, and no session
+    /// on it has yet reached the first frame that puts this on screen. It outlasts a
+    /// session lost before that, whose successor's `Hello` is the new daemon's own.
+    new_daemon: bool,
+    /// Why the last session was lost.
+    why: Option<&'static str>,
+}
+
+impl SessionMemory {
+    /// A session's `Hello` said this.
+    fn heard(&mut self, uptime_secs: u64) {
+        self.heard_at(uptime_secs, Instant::now());
+    }
+
+    fn heard_at(&mut self, uptime_secs: u64, at: Instant) {
+        let age = DaemonAge::new(uptime_secs, at);
+        if self
+            .age
+            .is_some_and(|last| last.is_older_than_possible_for(&age))
+        {
+            self.new_daemon = true;
+        }
+        self.age = Some(age);
+    }
+
+    /// A session was lost, for the reason `why` says of it.
+    fn lost(&mut self, bootstrapped: bool, why: &'static str) {
+        if bootstrapped {
+            self.new_daemon = false;
+        }
+        self.why = Some(why);
+    }
+
+    /// What the next session puts on its bottom row.
+    fn notice(&self) -> Option<&'static str> {
+        if self.new_daemon {
+            Some(NOTICE_NEW_DAEMON)
+        } else {
+            self.why
+        }
+    }
+}
+
 /// Connect to the daemon at `socket_path` and run the attach client.
 ///
 /// Returns when the session ends on purpose (F12, or the daemon's `Goodbye`),
@@ -527,6 +581,8 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // normal terminal — `Frontend::new` hasn't taken over yet.
     let hello = read_local_hello(&mut stream)?;
     print_attach_info(&hello);
+    let mut memory = SessionMemory::default();
+    memory.heard(hello.instance_identity.uptime_secs);
 
     let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
     let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
@@ -536,7 +592,13 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
 
     let io = build_local_socket_io(stream)?;
-    let result = run_local_sessions(&socket_path, io, hello.assigned_frontend_id, &mut frontend);
+    let result = run_local_sessions(
+        &socket_path,
+        io,
+        hello.assigned_frontend_id,
+        &mut frontend,
+        &mut memory,
+    );
 
     // Frontend drops here; raw mode + alternate screen + mouse capture
     // all torn down before we return, so what the caller prints of the
@@ -605,18 +667,26 @@ fn run_local_sessions(
     first: AttachIo,
     first_id: FrontendId,
     frontend: &mut Frontend,
+    memory: &mut SessionMemory,
 ) -> Result<(), AttachError> {
     let mut schedule = BackoffSchedule::new();
     let mut unbootstrapped: u32 = 0;
     let mut session = (first, first_id);
-    let mut notice = None;
     let mut cut_short;
     loop {
         let (io, id) = session;
-        let lost = match run_attach_pair(io, frontend, id, notice.take())? {
+        let lost = match run_attach_pair(io, frontend, id, memory.notice())? {
             PumpEnd::Over => return Ok(()),
             PumpEnd::Lost(lost) => lost,
         };
+        memory.lost(
+            lost.bootstrapped,
+            if lost.cut_short {
+                NOTICE_FRESH_VIEW_CUT_SHORT
+            } else {
+                NOTICE_FRESH_VIEW
+            },
+        );
         if lost.bootstrapped {
             schedule.reset();
             unbootstrapped = 0;
@@ -639,7 +709,7 @@ fn run_local_sessions(
                 SleepOutcome::Elapsed => {}
             }
             let _ = frontend.draw_status_overlay(banner_session_reconnect());
-            match connect_again(socket_path, frontend.size()) {
+            match connect_again(socket_path, frontend.size(), memory) {
                 Ok(next) => break next,
                 Err(
                     error @ (AttachError::DaemonGone { .. } | AttachError::VersionMismatch { .. }),
@@ -647,11 +717,6 @@ fn run_local_sessions(
                 Err(_) => unbootstrapped = unbootstrapped.saturating_add(1),
             }
         };
-        notice = Some(if cut_short {
-            NOTICE_FRESH_VIEW_CUT_SHORT
-        } else {
-            NOTICE_FRESH_VIEW
-        });
     }
 }
 
@@ -659,6 +724,7 @@ fn run_local_sessions(
 fn connect_again(
     socket_path: &std::path::Path,
     size: CellSize,
+    memory: &mut SessionMemory,
 ) -> Result<(AttachIo, FrontendId), AttachError> {
     let mut stream = UnixStream::connect(socket_path).map_err(|error| {
         use pmacs_protocol::{ConnectFailure, classify_connect_failure};
@@ -675,6 +741,7 @@ fn connect_again(
     })?;
     stream.set_read_timeout(Some(LOCAL_RECONNECT_HELLO_TIMEOUT))?;
     let hello = read_local_hello(&mut stream)?;
+    memory.heard(hello.instance_identity.uptime_secs);
     stream.set_read_timeout(None)?;
     write_attach_request(&mut stream, &hello, size)?;
     Ok((build_local_socket_io(stream)?, hello.assigned_frontend_id))
@@ -1746,7 +1813,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     let mut backoff = BackoffSchedule::new();
     let mut handshake_attempts: u32 = 0;
     let mut unbootstrapped: u32 = 0;
-    let mut notice: Option<&'static str> = None;
+    let mut memory = SessionMemory::default();
     let mut iteration: u32 = 0;
 
     let result: Result<(), AttachError> = loop {
@@ -1778,10 +1845,10 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
             &target,
             initial_handshake_complete,
             &mut loss,
-            notice,
+            &mut memory,
         );
         if let Some(lost) = loss {
-            notice = Some(lost.notice(&verdict));
+            memory.lost(lost.bootstrapped, lost.notice(&verdict));
         }
         let verdict = remote_verdict(verdict, loss, &mut unbootstrapped);
 
@@ -2069,9 +2136,9 @@ fn attempt_session(
     target: &AttachTarget,
     initial_handshake_complete: bool,
     loss: &mut Option<SessionLoss>,
-    notice: Option<&str>,
+    memory: &mut SessionMemory,
 ) -> ReconnectVerdict {
-    let raw_result = run_one_session(frontend_slot, target, loss, notice);
+    let raw_result = run_one_session(frontend_slot, target, loss, memory);
     match raw_result {
         Ok(()) => ReconnectVerdict::ExitClean,
         Err(error) => classify_for_reconnect(error, initial_handshake_complete),
@@ -2207,7 +2274,7 @@ fn run_one_session(
     frontend_slot: &mut Option<Frontend>,
     target: &AttachTarget,
     loss: &mut Option<SessionLoss>,
-    notice: Option<&str>,
+    memory: &mut SessionMemory,
 ) -> Result<(), AttachError> {
     let mut cmd = build_ssh_command(target).expect("target shape pre-validated by caller");
     cmd.stdin(Stdio::piped())
@@ -2284,6 +2351,8 @@ fn run_one_session(
         ));
     }
 
+    memory.heard(hello.instance_identity.uptime_secs);
+
     // Determine initial_size. On reconnect, use the Frontend's
     // already-known size (it tracks resizes). On first attempt, query
     // crossterm directly because the Frontend isn't up yet.
@@ -2359,7 +2428,7 @@ fn run_one_session(
         frontend,
         hello.assigned_frontend_id,
         loss,
-        notice,
+        memory.notice(),
     )
 }
 
@@ -2697,7 +2766,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let size = CellSize::new(24, 80);
         let missing = dir.path().join("missing.sock");
-        match connect_again(&missing, size) {
+        match connect_again(&missing, size, &mut SessionMemory::default()) {
             Err(AttachError::DaemonGone { socket, found }) => {
                 assert_eq!(socket, missing);
                 assert_eq!(found, "no socket is there");
@@ -2709,7 +2778,7 @@ mod tests {
             return;
         };
         drop(listener);
-        match connect_again(&stale, size) {
+        match connect_again(&stale, size, &mut SessionMemory::default()) {
             Err(AttachError::DaemonGone { found, .. }) => {
                 assert_eq!(found, "its socket refused the connection");
             }
@@ -2717,7 +2786,7 @@ mod tests {
         }
         let file = dir.path().join("file");
         std::fs::write(&file, b"not a socket").expect("write");
-        match connect_again(&file, size) {
+        match connect_again(&file, size, &mut SessionMemory::default()) {
             Err(AttachError::DaemonGone { found, .. }) => {
                 assert_eq!(found, "what is there is not a socket");
             }
@@ -3243,6 +3312,32 @@ mod tests {
                 error: AttachError::Terminal(_)
             }
         ));
+    }
+
+    /// A new daemon is said until a session reaches the first frame that shows it,
+    /// and not after.
+    #[test]
+    fn a_new_daemon_is_said_until_a_first_frame_shows_it() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let mut memory = SessionMemory::default();
+        memory.heard_at(1_000, at(0));
+        assert_eq!(memory.notice(), None, "nothing was lost");
+        memory.lost(true, NOTICE_FRESH_VIEW);
+        memory.heard_at(1_010, at(10));
+        assert_eq!(memory.notice(), Some(NOTICE_FRESH_VIEW), "the same daemon");
+        memory.lost(true, NOTICE_FRESH_VIEW);
+        memory.heard_at(0, at(20));
+        assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
+        // Lost before its first frame: the next session's Hello is the new daemon's
+        // own, and says nothing new, and the user has still not been told.
+        memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
+        memory.heard_at(1, at(21));
+        assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
+        // Told, so a later loss on that daemon says only its own reason.
+        memory.lost(true, NOTICE_FRESH_VIEW);
+        memory.heard_at(11, at(31));
+        assert_eq!(memory.notice(), Some(NOTICE_FRESH_VIEW));
     }
 
     /// What the next session says of a lost one.
