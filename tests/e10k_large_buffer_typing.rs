@@ -54,10 +54,8 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::pty::{OutputTap, PmacsPty, spawn_pmacs_in_pty_tapped};
-use pmacs::ansi::{AnsiParser, AnsiParserProfile};
-use pmacs::cell::{CellCoord, CellSize, Glyph};
-use pmacs::terminal::screen::TerminalScreen;
+use common::pty::{OutputTap, PmacsPty, ScreenTui as Tui, spawn_pmacs_in_pty_tapped};
+use pmacs::cell::CellCoord;
 
 /// Bytes per line of the fixture, its newline included.
 const LINE_BYTES: usize = 70;
@@ -335,159 +333,9 @@ impl Figures {
 // A TUI in a PTY, its screen modelled from what it writes
 // ---------------------------------------------------------------------------
 
-struct Tui {
-    pty: PmacsPty,
-    tap: OutputTap,
-    parser: AnsiParser,
-    screen: TerminalScreen,
-}
-
-impl Tui {
-    fn new((pty, tap): (PmacsPty, OutputTap)) -> Self {
-        Self {
-            pty,
-            tap,
-            // The full-screen profile: the default one is a compile
-            // buffer's, which keeps no cursor.
-            parser: AnsiParser::with_profile(AnsiParserProfile::FullScreen),
-            screen: TerminalScreen::new(CellSize::new(ROWS.into(), COLS.into()), 0)
-                .expect("a valid screen"),
-        }
-    }
-
-    /// Apply `bytes`; whether the published screen or caret changed. A
-    /// TUI writes a frame every tick whether or not anything moved, so
-    /// a write is not a change.
-    fn feed(&mut self, bytes: &[u8]) -> bool {
-        let before = self.screen.snapshot();
-        for event in self.parser.feed(bytes) {
-            let _ = self.screen.apply_event(event);
-        }
-        let after = self.screen.snapshot();
-        before.cells != after.cells || before.cursor != after.cursor
-    }
-
-    /// The published character at `(row, col)`.
-    fn char_at(&self, row: u32, col: u32) -> Option<char> {
-        let snap = self.screen.snapshot();
-        let cell = snap.cells.get((row * snap.size.cols + col) as usize)?;
-        match cell.glyph {
-            Glyph::Char(c) => Some(c),
-            _ => None,
-        }
-    }
-
-    fn cursor(&self) -> Option<CellCoord> {
-        self.screen.snapshot().cursor
-    }
-
-    /// Whether `text` stands at `(row, col)` onwards.
-    fn shows(&self, row: u32, col: u32, text: &str) -> bool {
-        text.chars()
-            .zip(col..)
-            .all(|(ch, c)| self.char_at(row, c) == Some(ch))
-    }
-
-    /// The published screen's rows as text.
-    fn rows(&self) -> Vec<String> {
-        let snap = self.screen.snapshot();
-        snap.cells
-            .chunks(snap.size.cols as usize)
-            .map(|row| {
-                row.iter()
-                    .map(|c| match c.glyph {
-                        Glyph::Char(ch) => ch,
-                        _ => ' ',
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// Any row holds `needle`.
-    fn screen_contains(&self, needle: &str) -> bool {
-        self.rows().iter().any(|row| row.contains(needle))
-    }
-
-    /// The column the modeline reports (`L<line>:C<col>`): the editor's
-    /// own word for where its caret is, which an attached TUI hears from
-    /// the daemon, so it confirms what the TUI painted on its own.
-    fn modeline_col(&self) -> Option<u32> {
-        self.rows().iter().rev().find_map(|row| {
-            let (_, after) = row.split_once(":C")?;
-            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
-        })
-    }
-
-    /// What the row saw, for a failure: the screen, the caret, and the
-    /// last of what the TUI wrote.
-    fn describe(&self) -> String {
-        let out = self.pty.output();
-        let tail = &out[out.len().saturating_sub(600)..];
-        let dump = std::env::temp_dir().join(format!("e10k-tui-{}.out", std::process::id()));
-        let _ = std::fs::write(&dump, &out);
-        format!(
-            "caret {:?}, {} bytes written (all of them in {}); screen:\n{}\nlast bytes: {:?}",
-            self.cursor(),
-            out.len(),
-            dump.display(),
-            self.rows().join("\n"),
-            String::from_utf8_lossy(tail)
-        )
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        self.pty.write_input(bytes).expect("write to the PTY");
-    }
-
-    /// Read until `done` holds; the arrival of the read that made it
-    /// hold. Panics after `limit`.
-    fn wait_for(&mut self, limit: Duration, what: &str, done: &dyn Fn(&Self) -> bool) -> Instant {
-        let start = Instant::now();
-        if done(self) {
-            return start;
-        }
-        loop {
-            let received = limit
-                .checked_sub(start.elapsed())
-                .and_then(|left| self.tap.recv_timeout(left).ok());
-            let Some((at, bytes)) = received else {
-                panic!("{what}: not on screen after {limit:?}; {}", self.describe());
-            };
-            self.feed(&bytes);
-            if done(self) {
-                return at;
-            }
-        }
-    }
-
-    /// Read until `done` holds and the screen has not changed for `quiet`.
-    fn settle(
-        &mut self,
-        quiet: Duration,
-        limit: Duration,
-        what: &str,
-        done: &dyn Fn(&Self) -> bool,
-    ) {
-        let start = Instant::now();
-        let mut last = Instant::now();
-        loop {
-            if done(self) && last.elapsed() >= quiet {
-                return;
-            }
-            assert!(
-                start.elapsed() < limit,
-                "{what}: not settled after {limit:?}; {}",
-                self.describe()
-            );
-            if let Ok((_, bytes)) = self.tap.recv_timeout(Duration::from_millis(10))
-                && self.feed(&bytes)
-            {
-                last = Instant::now();
-            }
-        }
-    }
+/// A [`ScreenTui`] of this suite's size.
+fn tui((pty, tap): (PmacsPty, OutputTap)) -> Tui {
+    Tui::new(pty, tap, ROWS, COLS)
 }
 
 /// `C-x h`, `C-w`, `C-x u`: the whole buffer cut and the cut undone, so
@@ -608,7 +456,7 @@ fn run_tui(
     spawn: impl FnOnce() -> (PmacsPty, OutputTap),
 ) -> Figures {
     let load_before = loadavg();
-    let mut tui = Tui::new(spawn());
+    let mut tui = tui(spawn());
     if undone_cut {
         cut_and_undo(&mut tui);
     }
