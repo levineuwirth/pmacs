@@ -379,10 +379,10 @@ struct StandInSsh {
     dir: tempfile::TempDir,
 }
 
-/// One invocation of [`StandInSsh`].
+/// One invocation of [`StandInSsh`]: the bytes it plays and the shell that ends it.
 struct RemoteSession {
     bytes: Vec<u8>,
-    exit: i32,
+    then: String,
 }
 
 impl StandInSsh {
@@ -400,9 +400,9 @@ impl StandInSsh {
             };
             writeln!(
                 cases,
-                "{arm}) cat '{}' >&2; sleep 0.1; exit {} ;;",
+                "{arm}) cat '{}' >&2; sleep 0.1; {} ;;",
                 bytes.display(),
-                session.exit
+                session.then
             )
             .expect("write to a String");
         }
@@ -472,7 +472,10 @@ fn hello_frame() -> Vec<u8> {
 fn session_with(after: &[u8], exit: i32) -> RemoteSession {
     let mut bytes = hello_frame();
     bytes.extend_from_slice(after);
-    RemoteSession { bytes, exit }
+    RemoteSession {
+        bytes,
+        then: format!("exit {exit}"),
+    }
 }
 
 fn frame_bytes() -> Vec<u8> {
@@ -485,6 +488,16 @@ fn frame_bytes() -> Vec<u8> {
         },
     )
     .expect("encode a frame");
+    bytes
+}
+
+fn goodbye_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_message(
+        &mut bytes,
+        &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+    )
+    .expect("encode Goodbye");
     bytes
 }
 
@@ -559,7 +572,7 @@ fn e10r_remote_a_network_that_is_down_keeps_reconnecting() {
     let mut sessions = vec![session_with(&frame_bytes(), 1)];
     sessions.extend((0..down).map(|_| RemoteSession {
         bytes: Vec::new(),
-        exit: 255,
+        then: "exit 255".to_owned(),
     }));
     sessions.push(session_with(&frame_bytes(), 0));
     let ssh = StandInSsh::new(&sessions);
@@ -569,6 +582,41 @@ fn e10r_remote_a_network_that_is_down_keeps_reconnecting() {
         .expect("the network comes back and the clean end ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), down + 2);
+}
+
+/// The daemon's `Goodbye` ends the route, status 0, whatever `ssh` exits with
+/// after it, so a daemon stopped on purpose is not started again by a reconnect.
+/// At `b25e779` a failing `ssh` made it a reconnect. A guard of F9's.
+#[test]
+fn e10r_remote_a_goodbye_ends_it_whatever_ssh_exits_with() {
+    let mut after = frame_bytes();
+    after.extend_from_slice(&goodbye_bytes());
+    let ssh = StandInSsh::new(&[session_with(&after, 1)]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .unwrap_or_else(|| panic!("it went on: {} attempts", ssh.invocations()));
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), 1, "and nothing tried again");
+}
+
+/// F12 ends the route, status 0, though `ssh` outlasts the kick and exits on its
+/// SIGTERM, as a slow link's may. At `b25e779` that was a reconnect. A guard of
+/// F9's.
+#[test]
+fn e10r_remote_f12_ends_it_though_ssh_outlasts_the_kick() {
+    let ssh = StandInSsh::new(&[RemoteSession {
+        bytes: [hello_frame(), frame_bytes()].concat(),
+        then: "exec sleep 30".to_owned(),
+    }]);
+    let mut tui = ssh.attach();
+    tui.wait_for_output("\x1b[?1049h", Duration::from_secs(10));
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .unwrap_or_else(|| panic!("it went on: {} attempts", ssh.invocations()));
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), 1, "and nothing tried again");
 }
 
 /// `C-c` in the wait ends the local route with status 0, as the SSH route's

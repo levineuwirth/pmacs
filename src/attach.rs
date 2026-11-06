@@ -2141,23 +2141,29 @@ fn run_pump_and_reap(
         writer: Box::new(child_stdin),
         kick: ssh_kick(pid),
     };
-    let pump_result =
-        run_attach_pair(io, frontend, assigned_frontend_id, None).and_then(|end| match end {
-            PumpEnd::Over => Ok(()),
-            PumpEnd::Lost(lost) => {
-                *loss = Some(SessionLoss {
-                    bootstrapped: lost.bootstrapped,
-                    cut_short: lost.cut_short,
-                });
-                lost.write_error.map_or(Ok(()), Err)
-            }
-        });
+    let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, None);
+    let over = matches!(pump_end, Ok(PumpEnd::Over));
+    let pump_result = pump_end.and_then(|end| match end {
+        PumpEnd::Over => Ok(()),
+        PumpEnd::Lost(lost) => {
+            *loss = Some(SessionLoss {
+                bootstrapped: lost.bootstrapped,
+                cut_short: lost.cut_short,
+            });
+            lost.write_error.map_or(Ok(()), Err)
+        }
+    });
     attach_debug(format!(
         "attach pump exited: {:?}",
         pump_result.as_ref().err()
     ));
     let exit_status = child.wait().ok();
     let _ = stderr_handle.join();
+    // A session ended on purpose has ended, whatever `ssh` says after it: an
+    // `ssh` slower to leave than the kick's watchdog exits on its SIGTERM.
+    if over {
+        return Ok(());
+    }
     let stderr_text = drain_stderr_tail(&stderr_tail);
     classify_ssh_exit(pump_result, exit_status, stderr_text)
 }
