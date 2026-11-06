@@ -1174,6 +1174,18 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+    // The watch ends at a fixed time, so whatever the server began just
+    // before it can stand on the label at this read: `Cargo.lock` appearing
+    // starts a `Fetching` cycle (#474). Those states are E7b.1's and the
+    // refusal did not cause them, so they pass; any other label, `degraded`
+    // above all, stops the wait and fails below.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while lsp_segment(&s).is_some_and(|l| l == "LSP:idx" || l.starts_with("LSP:ready·"))
+        && Instant::now() < deadline
+    {
+        tick(&mut s);
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let (label, error): (String, Option<String>) = eval(
         &s,
         "local rec = pmacs.lsp.active_attachment()
