@@ -28,9 +28,9 @@
 //! The verdict tells the loop what to do next:
 //!
 //! * [`ReconnectVerdict::Reconnect`] — mid-session disconnect, full
-//!   exponential backoff, indefinite retries. The user has a working
-//!   session somewhere on the remote and we're going to get them back
-//!   to it.
+//!   exponential backoff, indefinite retries unless the route's own counts stop it
+//!   ([`DyingDaemons`], `attach::remote_verdict`). A grid session is minted no token,
+//!   so the next one is on a fresh view of what the daemon holds, not the last one's.
 //! * [`ReconnectVerdict::ReconnectHandshake`] — pre-session failure
 //!   (initial connect, Hello / `AttachRequest` exchange). Bounded by
 //!   [`HANDSHAKE_RETRY_CAP`] so a permanently misconfigured target

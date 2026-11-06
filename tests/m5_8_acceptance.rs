@@ -526,8 +526,9 @@ fn ssh_dies_mid_pump_then_reconnect_succeeds() {
 /// t≈1120ms, and the test injects at t≈400ms.
 #[test]
 fn ctrl_c_during_reconnect_sleep_yields_clean_exit() {
-    // Fake SSH: every call completes handshake, sleeps 100ms, exits 1.
-    // Pmacs would keep retrying forever without the Ctrl-C cancel.
+    // Fake SSH: every call completes handshake, sleeps 100ms, exits 1. Those sessions
+    // reach no first frame, so with no Ctrl-C the route stops at the cap, later than
+    // this cancel: it is the cancel that ends it here, status 0, where the cap's is 1.
     let fx = setup_pty_fixture(100, &[1]);
 
     let mut pty = spawn_pmacs_in_pty(

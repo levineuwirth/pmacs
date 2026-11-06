@@ -83,7 +83,7 @@ impl std::fmt::Display for TransportError {
             Self::FrameTooLarge { len } => {
                 write!(f, "frame length {len} exceeds maximum {MAX_FRAME_BYTES}")
             }
-            Self::Eof => write!(f, "peer disconnected before frame complete"),
+            Self::Eof => write!(f, "peer disconnected between frames"),
             Self::CutShort => write!(f, "peer disconnected partway through a frame"),
         }
     }
@@ -179,6 +179,21 @@ mod tests {
         InstanceCapabilities, InstanceIdentity, Key, KeyEvent, Modifiers, PROTOCOL_VERSION,
     };
     use std::io::Cursor;
+
+    /// A close at a boundary and a close inside a frame say which they are: this text
+    /// reaches a daemon's log and a local attach, and `Eof`'s read the other way until
+    /// E10r's fix round 2.
+    #[test]
+    fn a_close_at_a_boundary_does_not_read_as_one_inside_a_frame() {
+        assert_eq!(
+            TransportError::Eof.to_string(),
+            "peer disconnected between frames"
+        );
+        assert_eq!(
+            TransportError::CutShort.to_string(),
+            "peer disconnected partway through a frame"
+        );
+    }
 
     fn round_trip<M: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq>(msg: &M) {
         let mut buf = Vec::new();
