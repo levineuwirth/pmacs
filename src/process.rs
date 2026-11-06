@@ -4958,6 +4958,26 @@ mod tests {
         let _ = drain_until(&mut sup, plain_id, Duration::from_secs(5), has_exited);
     }
 
+    /// A group of one process that ignores `SIGTERM`: an ignored disposition
+    /// survives `exec`, so the group's `SIGKILL` is the leader's own. With a
+    /// shell left waiting on a child, as macOS's kept its `sleep` where this
+    /// machine's tail-execs it, the child can die first and the shell report
+    /// it and exit 137 (#427), and the leader's event is then an exit.
+    const TERM_IGNORING_LEADER: &str = "trap '' TERM; echo ready; exec sleep 30";
+
+    /// Until the shell has said `ready`, past its `trap`: a row that went on
+    /// without it would terminate a shell that had not yet ignored `SIGTERM`.
+    /// The bound reports; it does not pace.
+    fn wait_for_term_ignoring_leader(sup: &mut ProcessSupervisor, id: ProcessId) {
+        let events = drain_until(sup, id, Duration::from_secs(30), |evs| {
+            stdout_contains(evs, b"ready")
+        });
+        assert!(
+            stdout_contains(&events, b"ready"),
+            "the group's leader said `ready` before it was terminated; events: {events:?}"
+        );
+    }
+
     #[test]
     fn terminate_group_escalates_to_sigkill_on_term_trapping_child() {
         let mut sup = ProcessSupervisor::new();
@@ -4965,14 +4985,9 @@ mod tests {
         // Readiness echo: terminating before the trap is installed
         // would let plain SIGTERM win and vacuously pass.
         let id = sup
-            .spawn(sh_group_spec(
-                "trap-test",
-                "trap '' TERM; echo ready; sleep 30",
-            ))
+            .spawn(sh_group_spec("trap-test", TERM_IGNORING_LEADER))
             .expect("spawn");
-        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
-            stdout_contains(evs, b"ready")
-        });
+        wait_for_term_ignoring_leader(&mut sup, id);
         let t0 = Instant::now();
         sup.terminate(id).expect("terminate");
         let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
@@ -5035,14 +5050,9 @@ mod tests {
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_millis(500));
         let id = sup
-            .spawn(sh_group_spec(
-                "re-term",
-                "trap '' TERM; echo ready; sleep 30",
-            ))
+            .spawn(sh_group_spec("re-term", TERM_IGNORING_LEADER))
             .expect("spawn");
-        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
-            stdout_contains(evs, b"ready")
-        });
+        wait_for_term_ignoring_leader(&mut sup, id);
         let t0 = Instant::now();
         sup.terminate(id).expect("terminate");
         // Re-terminate at half the grace window: with plain
