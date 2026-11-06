@@ -2031,3 +2031,120 @@ fn g4_a_daemon_the_bridge_starts_keeps_its_stderr_beside_its_socket() {
         "F12 ends it"
     );
 }
+
+/// `pmacs --daemon --stop`, as a user runs it. A build with no CRDT refuses that second
+/// frontend while a TUI is attached, saying so, so there the row stops it by `SIGTERM`,
+/// which says the same `Goodbye`.
+fn stop_the_daemon(daemon: &TestDaemon, home: &Path) {
+    if cfg!(feature = "crdt") {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs"))
+            .args(["--daemon", "--stop", "--socket"])
+            .arg(daemon.socket_path())
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", home)
+            .env("XDG_DATA_HOME", home)
+            .env("XDG_STATE_HOME", home)
+            .env("XDG_CACHE_HOME", home)
+            .env("PMACS_STATE_HOME", home)
+            .output()
+            .expect("--stop");
+        assert!(output.status.success(), "{output:?}");
+    } else {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .expect("SIGTERM");
+    }
+}
+
+/// **Review 1's Low 5, its `p10_goodbye`:** a daemon's `Goodbye` under a live TUI, on
+/// either route: the reason is on the terminal the user is left with, status 0. At
+/// `5fd9d25` it was written to the alternate screen it was leaving, a false comment
+/// beside it saying it would surface after, and the terminal read nothing.
+#[test]
+fn p10_a_goodbyes_reason_is_on_the_terminal_on_either_route() {
+    let mut daemon = TestDaemon::spawn();
+    let socket = daemon.socket_path().to_path_buf();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(&socket, dir.path(), &[]);
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    stop_the_daemon(&daemon, dir.path());
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(said.contains("ShuttingDown"), "local: {said:?}");
+    daemon.wait_for_exit().expect("the daemon is gone");
+
+    let mut daemon = TestDaemon::spawn();
+    let socket = daemon.socket_path().to_path_buf();
+    let ssh = BridgedSsh::new(&socket);
+    let mut tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    stop_the_daemon(&daemon, dir.path());
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(said.contains("ShuttingDown"), "remote: {said:?}");
+    assert_eq!(ssh.invocations(), 1, "and nothing tried again");
+    daemon.wait_for_exit().expect("the daemon is gone");
+}
+
+/// **Review 1's Low 5, its `p18_refusal`, on every leg:** a daemon that refuses the
+/// attach ends the route saying so, not status 0 with nothing said, on either route.
+#[test]
+fn p18_a_refusal_ends_the_route_saying_so_on_either_route() {
+    let refusing = || {
+        StandInDaemon::serve(|_, stream| {
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::AlreadyAttached),
+            )
+            .expect("Goodbye");
+        })
+    };
+    let daemon = refusing();
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(&daemon.socket(), home.path(), &[]);
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the refusal ends it");
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(said.contains("AlreadyAttached"), "local: {said:?}");
+
+    let daemon = refusing();
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the refusal ends it");
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(said.contains("AlreadyAttached"), "remote: {said:?}");
+    assert_eq!(daemon.connections(), 1, "and nothing tried again");
+}
+
+/// `p18_refusal` itself: a build with no CRDT admits one frontend, and a second TUI on a
+/// real daemon reads the refusal.
+#[cfg(not(feature = "crdt"))]
+#[test]
+fn p18_a_second_tui_on_a_build_with_no_crdt_reads_already_attached() {
+    let daemon = TestDaemon::spawn();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut first = attached_tui(daemon.socket_path(), dir.path(), &[]);
+    first.wait_for_output("*scratch*", Duration::from_secs(30));
+    let mut second = attached_tui(daemon.socket_path(), dir.path(), &[]);
+    let status = second
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the refusal ends it");
+    assert!(!status.success(), "{status:?}");
+    let said = second.after_the_alternate_screen();
+    assert!(said.contains("AlreadyAttached"), "{said:?}");
+    first.write_input(b"\x1b[24~").expect("F12");
+    let _ = first.wait_for_exit(Duration::from_secs(10));
+}

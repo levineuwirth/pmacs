@@ -724,7 +724,25 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // result lands on the terminal the user is left with.
     drop(frontend);
 
-    result
+    said_goodbye(result?)
+}
+
+/// What a daemon's `Goodbye` said, once the alternate screen is left and it can be read,
+/// where the pump could only have written it to the screen it was leaving. A refusal is
+/// an error, which ends the process saying so. A frontend's own quit (`Detached`) and
+/// its own `F12` (`None`) say nothing to whoever did them.
+fn said_goodbye(reason: Option<GoodbyeReason>) -> Result<(), AttachError> {
+    match reason {
+        None | Some(GoodbyeReason::Detached) => Ok(()),
+        Some(GoodbyeReason::ShuttingDown) => {
+            eprintln!(
+                "pmacs: instance disconnected: {:?}",
+                GoodbyeReason::ShuttingDown
+            );
+            Ok(())
+        }
+        Some(refused) => Err(AttachError::Rejected(refused)),
+    }
 }
 
 /// Read a daemon's `Hello` and check its version.
@@ -787,7 +805,7 @@ fn run_local_sessions(
     first_id: FrontendId,
     frontend: &mut Frontend,
     memory: &mut SessionMemory,
-) -> Result<(), AttachError> {
+) -> Result<Option<GoodbyeReason>, AttachError> {
     let mut schedule = BackoffSchedule::new();
     let mut unbootstrapped: u32 = 0;
     let mut session = (first, first_id);
@@ -795,7 +813,7 @@ fn run_local_sessions(
     loop {
         let (io, id) = session;
         let lost = match run_attach_pair(io, frontend, id, memory.notice())? {
-            PumpEnd::Over => return Ok(()),
+            PumpEnd::Over(reason) => return Ok(reason),
             PumpEnd::Lost(lost) => lost,
         };
         memory.lost(
@@ -824,7 +842,7 @@ fn run_local_sessions(
             }
             let delay = schedule.next_delay();
             match sleep_with_countdown(Some(&mut *frontend), delay) {
-                SleepOutcome::Cancelled => return Ok(()),
+                SleepOutcome::Cancelled => return Ok(None),
                 SleepOutcome::Elapsed => {}
             }
             let _ = frontend.draw_status_overlay(banner_session_reconnect());
@@ -1024,8 +1042,8 @@ fn format_uptime(secs: u64) -> String {
 /// How an attach pump ended, when it did not end on an error of its own.
 #[derive(Debug)]
 pub(crate) enum PumpEnd {
-    /// The session ended on purpose: the daemon's `Goodbye`, or F12.
-    Over,
+    /// The session ended on purpose: the daemon's `Goodbye`, with its reason, or F12.
+    Over(Option<GoodbyeReason>),
     /// The socket ended with no `Goodbye`.
     Lost(LostSession),
 }
@@ -1269,10 +1287,7 @@ pub(crate) fn run_attach_pair(
                 }
             }
             if let Some(reason) = goodbye {
-                // Stderr buffered behind raw mode; surfaces after
-                // Frontend's Drop runs.
-                eprintln!("pmacs: instance disconnected: {reason:?}");
-                return Ok(PumpEnd::Over);
+                return Ok(PumpEnd::Over(Some(reason)));
             }
             if reader_eof {
                 return Ok(PumpEnd::Lost(LostSession {
@@ -1299,7 +1314,7 @@ pub(crate) fn run_attach_pair(
 
             if is_detach_key(&ev) {
                 let _ = write_message(&mut writer, &FrontendEvent::Detach(assigned_id));
-                return Ok(PumpEnd::Over);
+                return Ok(PumpEnd::Over(None));
             }
 
             // T M10.10 Day 3 step 3b — text-input optimistic-apply
@@ -1472,7 +1487,7 @@ pub(crate) fn run_attach_pair(
 
     result.map(|end| match end {
         PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
-        over @ PumpEnd::Over => over,
+        over @ PumpEnd::Over(_) => over,
     })
 }
 
@@ -1968,7 +1983,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     let mut dying = DyingDaemons::default();
     let mut iteration: u32 = 0;
 
-    let result: Result<(), AttachError> = loop {
+    let result: Result<Option<GoodbyeReason>, AttachError> = loop {
         // Pre-attempt overlay (skipped on the very first iteration —
         // no Frontend yet, and "reconnecting" would lie about state).
         // The chosen banner depends on whether we're reconnecting
@@ -1990,14 +2005,15 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
         }
 
         let initial_handshake_complete = frontend_slot.is_some();
-        let mut loss = None;
+        let mut ended = SessionEnded::default();
         let verdict = attempt_session(
             &mut frontend_slot,
             &target,
             initial_handshake_complete,
-            &mut loss,
+            &mut ended,
             &mut memory,
         );
+        let loss = ended.loss;
         let mut keeps_dying = false;
         if let Some(lost) = loss {
             memory.lost(lost.bootstrapped, lost.notice(&verdict));
@@ -2017,7 +2033,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 if let Some(f) = frontend_slot.as_mut() {
                     let _ = f.clear_status_overlay();
                 }
-                break Ok(());
+                break Ok(ended.goodbye);
             }
             ReconnectVerdict::ExitProtocolError { error }
             | ReconnectVerdict::ExitPolicy { error } => {
@@ -2039,7 +2055,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 }
                 let delay = backoff.next_delay();
                 match sleep_with_countdown(frontend_slot.as_mut(), delay) {
-                    SleepOutcome::Cancelled => break Ok(()),
+                    SleepOutcome::Cancelled => break Ok(None),
                     SleepOutcome::Elapsed => {}
                 }
             }
@@ -2066,7 +2082,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 }
                 let delay = backoff.next_delay();
                 match sleep_with_countdown(frontend_slot.as_mut(), delay) {
-                    SleepOutcome::Cancelled => break Ok(()),
+                    SleepOutcome::Cancelled => break Ok(None),
                     SleepOutcome::Elapsed => {}
                 }
             }
@@ -2078,7 +2094,17 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     // Tear down raw mode (if engaged) before main.rs's eprintln.
     drop(frontend_slot);
 
-    result
+    said_goodbye(result?)
+}
+
+/// How a session that reached its pump ended, for the loop deciding what comes next.
+#[derive(Debug, Default)]
+struct SessionEnded {
+    /// It was lost, and what it had reached; `None` for one that never got as far, and
+    /// for one that ended on purpose.
+    loss: Option<SessionLoss>,
+    /// What its daemon's `Goodbye` said.
+    goodbye: Option<GoodbyeReason>,
 }
 
 /// What the remote route says when new daemons keep dying, naming what it knows: the
@@ -2323,10 +2349,10 @@ fn attempt_session(
     frontend_slot: &mut Option<Frontend>,
     target: &AttachTarget,
     initial_handshake_complete: bool,
-    loss: &mut Option<SessionLoss>,
+    ended: &mut SessionEnded,
     memory: &mut SessionMemory,
 ) -> ReconnectVerdict {
-    let raw_result = run_one_session(frontend_slot, target, loss, memory);
+    let raw_result = run_one_session(frontend_slot, target, ended, memory);
     match raw_result {
         Ok(()) => ReconnectVerdict::ExitClean,
         Err(error) => classify_for_reconnect(error, initial_handshake_complete),
@@ -2409,7 +2435,7 @@ fn run_pump_and_reap(
     (protocol_reader, stderr_handle, stderr_tail): ProtocolChannel,
     frontend: &mut Frontend,
     assigned_frontend_id: FrontendId,
-    loss: &mut Option<SessionLoss>,
+    ended: &mut SessionEnded,
     notice: Option<Notice>,
 ) -> Result<(), AttachError> {
     let pid = child.id();
@@ -2419,11 +2445,14 @@ fn run_pump_and_reap(
         kick: ssh_kick(pid),
     };
     let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, notice);
-    let over = matches!(pump_end, Ok(PumpEnd::Over));
+    let over = matches!(pump_end, Ok(PumpEnd::Over(_)));
     let pump_result = pump_end.and_then(|end| match end {
-        PumpEnd::Over => Ok(()),
+        PumpEnd::Over(reason) => {
+            ended.goodbye = reason;
+            Ok(())
+        }
         PumpEnd::Lost(lost) => {
-            *loss = Some(SessionLoss {
+            ended.loss = Some(SessionLoss {
                 bootstrapped: lost.bootstrapped,
                 cut_short: lost.cut_short,
             });
@@ -2670,7 +2699,7 @@ fn reopen_session(
 fn run_one_session(
     frontend_slot: &mut Option<Frontend>,
     target: &AttachTarget,
-    loss: &mut Option<SessionLoss>,
+    ended: &mut SessionEnded,
     memory: &mut SessionMemory,
 ) -> Result<(), AttachError> {
     // Hello / AttachRequest handshake. On the FIRST attempt
@@ -2779,7 +2808,7 @@ fn run_one_session(
         (protocol_reader, stderr_handle, stderr_tail),
         frontend,
         hello.assigned_frontend_id,
-        loss,
+        ended,
         memory.notice(),
     )
 }
@@ -3085,7 +3114,7 @@ mod tests {
                 |w| write_message(w, &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown))
                     .expect("write")
             ),
-            PumpEnd::Over
+            PumpEnd::Over(Some(GoodbyeReason::ShuttingDown))
         ));
         assert!(matches!(
             run(|_| {}),
