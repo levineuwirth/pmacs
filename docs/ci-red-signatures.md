@@ -12506,6 +12506,132 @@ this branch does not reach by reading, not rerun. By CI #375 moves to two, #282 
 and #471 is filed at one. #304, #340 and #364's shape met local samples, listed and not counted. Every other count
 above stands.
 
+### E10q: PR #473 green at `d2b223b`, #423's count corrected to thirteen, `main` green at `4437018`
+
+Recorded 2026-11-06 at E10q's checkpoint (roadmap §E10q, #454, #455). Every run was read from the jobs endpoint by
+conclusion, and the test legs named below through their own logs, fetched with escape sequences allowed and
+stripped, each `running` line paired with its own result line. Every run id and job id in this section's two tables
+and in its prose on PR #473 and on `4437018` was searched for in this file before it was written, and none was here.
+The six earlier `Grammar fuzz` runs named under #423 are each in this file already, in their phases' sections. No
+required check is red, and no registry row gains a CI occurrence.
+
+#### PR #473 at `d2b223b`: green at attempt 1
+
+`CI` 42209599689 at `d2b223b`, attempt 1 of 1, `pull_request`, the merge `2106315` into `4437018`, created
+2026-11-06T11:21:06Z and completed 11:58:05Z (the API's `updated_at`): `success`.
+
+Tally (pr-473-ci-d2b223b): 19 = 18 + 1.
+
+Tally (pr-473-ci-d2b223b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 127864665652 | success |
+| Lint (luajit) | 127864665984 | success |
+| Changed paths | 127864666051 | success |
+| Format | 127864666066 | success |
+| Commit attribution (D9) | 127864666419 | success |
+| Test (crdt) | 127864737203 | success |
+| M1 Acceptance Gates | 127864737232 | success |
+| M4 Perf Gates | 127864737238 | success |
+| M5 Perf Gates | 127864737305 | success |
+| Test (ubuntu-latest / luajit) | 127864737308 | success |
+| M10 Perf Gates (crdt) | 127864737332 | success |
+| Test (macos-latest / luajit) | 127864737344 | success |
+| Test (macos-latest / lua54) | 127864737362 | success |
+| M6 Perf Gates | 127864737374 | success |
+| Test (ubuntu-latest / lua54) | 127864737378 | success |
+| Perf budgets (debug) | 127864737384 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127864737398 | success |
+| GPU Render (headless) | 127864738710 | success |
+| Docs consistency | 127864739036 | skipped |
+
+Tally (pr-473-ci-d2b223b-success): 18 rows of the table above with `result` = `success`.
+
+Skipped: `Docs consistency` 127864739036. Paired by their own logs: `Test (crdt)` 228 pairs, 5,444 / 0 / 87; `Test
+(ubuntu-latest / luajit)` and `Test (ubuntu-latest / lua54)` 229 each, 5,497 / 0 / 87; no crdt 229, 4,862 / 0 / 71;
+`Test (macos-latest / luajit)` and `Test (macos-latest / lua54)` 230 each, 5,442 / 0 / 79; `GPU Render (headless)` 1
+pair, 394 / 0 / 0; `WouldBlock` and `Bus error` in none. Each macOS log has one line more that matches `running`, the
+workflow's own `grep -q 'running 1 test'` echoed in its step, and is paired by excluding it.
+
+`Grammar fuzz` 42209599635 at `d2b223b`, attempt 1 of 1, created 2026-11-06T11:21:06Z and completed 12:19:08Z:
+`success`, both arms `run=true`, `reason=fuzz/regress/README.md changed`, the 15 s smoke per grammar on GCC 13.3.0, 22
+grammars.
+
+Tally (pr-473-fuzz-d2b223b): 2 = 2 + 0.
+
+- `Grammar fuzz` 127864665771 (`ubsan`): `exit 0, its parse worker's replay exit 0`. 10,031 inputs, 120,315 parses,
+  0 crashes, 0 hangs, 1 memory, 6 slow, 1 alloc, 2 unconfirmed, 0 accepted. The replay: 962 inputs, 943 answered, 19
+  contained, 0 crashed.
+- `Grammar fuzz (asan-strict)` 127864665317: `exit 0, its parse worker's replay exit 0`. 10,250 inputs, 122,645
+  parses, 0 crashes, 0 hangs, 1 memory, 6 slow, 2 allocs, 1 unconfirmed, 0 accepted. The replay: 962 inputs, 944
+  answered, 18 contained, 0 crashed.
+
+The `reason` names the first changed path on the script's list, and the PR's diff has no path under
+`pmacs-parse-unit/`, so this run shows the arms running on `fuzz/*` and not a worker path deciding, which E10q.1's row,
+its bite and the script's own answer show. Both arms' replays contain `296-asterisks-8k.input` by
+`memory: the worker's watch`, as `fuzz/regress/README.md` has it for an ASan arm in CI, and `296-underscores-16k.input`
+and #301's three.
+
+**#423, corrected to thirteen.** `bash`, `exceeded memory cap at 4 GB`, `reproduced: alone`, minimal 63,798 and 62,886
+bytes in the two arms, contained in both replays by `memory: the worker's watch`, commented there
+(issuecomment-6684751546). This registry last counted seven, at E10k. Five runs since show the same finding, were
+never commented on the issue and are counted here, read from their job logs with each arm `success`: `Grammar fuzz`
+41917205765 at `3259dee`, 42021676451 at `136696f` on `main`, 42028957407 at `1a41056`, 42082457107 at `38f8c62`,
+42093180697 at `b25e779`. `Grammar fuzz` 42075381040 at `9e59b3c` was cancelled before either arm reported. So
+thirteen runs, eleven on pull requests and two on `main`; no registry row counts it. The job ids and minima are on the
+issue.
+
+**#293.** Six slow findings in each arm, two of them `mispredicted`, both cmake, `returned in 683396 ms, past its
+budget of 263475 ms` and `returned in 600532 ms, past its budget of 215813 ms`, commented there
+(issuecomment-6684752006), with the five runs above named as not commented there.
+
+#### `main` at `4437018`, E10r fix round 1's registry commit: green
+
+`CI` 42191933445 at `4437018`, attempt 1 of 1, `push`, created 2026-11-06T09:01:50Z and completed 09:04:17Z (the
+API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-4437018): 15 = 6 + 9.
+
+Tally (main-ci-4437018-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 127805806084 | success |
+| Lint (luajit) | 127805806459 | success |
+| Lint (lua54) | 127805806505 | success |
+| Changed paths | 127805806547 | success |
+| Commit attribution (D9) | 127805806699 | success |
+| Docs consistency | 127805879260 | success |
+| GPU Render (headless) | 127805880595 | skipped |
+| Test (crdt) | 127805881551 | skipped |
+| M1 Acceptance Gates | 127805881623 | skipped |
+| M10 Perf Gates (crdt) | 127805881676 | skipped |
+| Test (matrix) | 127805881871 | skipped |
+| M4 Perf Gates | 127805882012 | skipped |
+| M5 Perf Gates | 127805882058 | skipped |
+| M6 Perf Gates | 127805882121 | skipped |
+| Perf budgets (debug) | 127805882181 | skipped |
+
+Tally (main-ci-4437018-success): 6 rows of the table above with `result` = `success`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test (matrix)`.
+`Grammar fuzz` 42191933443 at `4437018`, `success`, 2026-11-06T09:01:50Z to 09:02:05Z: `Grammar fuzz` and `Grammar fuzz
+(asan-strict)`, jobs 127805804319 and 127805804593.
+
+#### The local gates, listed and not tallied (D38)
+
+On the laptop at `nice -n 19` and six jobs, each started on the runbook's pressure check. `20261105T175624Z-1247989` at
+`8ce4355`: `clippy` red on `too_many_lines`, 102 lines against 100, in `tests/e7g_grammar_fuzz_acceptance.rs`, this
+branch's own list entries, fixed by `fc4775e`; every other stage ok, the sweep 5,889 / 0 / 87 at 237 pairs.
+`20261105T190911Z-1723326` at `fc4775e`: all six ok, 5,890 / 0 / 87 at 237 pairs. `20261106T091727Z-2261124` at
+`d2b223b`: **lost**, the laptop entered `PM: suspend entry (s2idle)` 74 s in and did not come back, no evidence either
+way, and the cause of the suspend is not established. `20261106T110603Z-15678` at `d2b223b`: all six ok, 5,890 / 0 / 87
+at 237 pairs. `--docs` `20261106T111730Z-109898` at `d2b223b`: all four ok, `docs_consistency` 18 passed.
+
+So, at E10q's checkpoint: PR #473 is green at its head and `main` is green at `4437018`. By CI #423 moves to thirteen,
+a correction of a count that had stopped being kept, and every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
