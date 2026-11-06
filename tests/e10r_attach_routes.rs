@@ -114,19 +114,19 @@ fn e10r_3_a_daemon_killed_under_the_attached_tui_ends_it_saying_why() {
     );
 }
 
-/// The real thing, which the rows above with no shell cannot see: a client stopped
-/// under a job-control shell and brought back by `fg`. `bash` hands it a canonical
-/// terminal, so a TUI that came back with nothing done about that reconnects and
-/// then hears no key. Linux, for the `pgrep` and for a `bash` that behaves as this
-/// one; the modes are set again on every platform.
+/// pmacs with `args` under a real job-control `bash`, which runs `fg` once `go`
+/// exists: `go` under `dir`, and `envs` beside the home.
 #[cfg(target_os = "linux")]
-#[test]
-fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
-    let daemon = TestDaemon::spawn();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let go = dir.path().join("go");
-    let socket = daemon.socket_path().to_str().expect("utf-8").to_owned();
-    let mut shell = common::pty::spawn_pmacs_in_pty_under(
+fn under_a_shell(
+    args: &[&str],
+    dir: &Path,
+    go: &Path,
+    envs: &[(&str, &Path)],
+) -> common::pty::PmacsPty {
+    let mut all: Vec<(&str, &Path)> =
+        vec![("HOME", dir), ("XDG_CONFIG_HOME", dir), ("E10R_GO", go)];
+    all.extend_from_slice(envs);
+    common::pty::spawn_pmacs_in_pty_under(
         &[
             "bash",
             "--norc",
@@ -135,16 +135,17 @@ fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
             "-c",
             "\"$0\" \"$@\"; until [ -e \"$E10R_GO\" ]; do sleep 0.02; done; fg",
         ],
-        &["--attach", "--socket", &socket],
-        &[
-            ("HOME", dir.path()),
-            ("XDG_CONFIG_HOME", dir.path()),
-            ("E10R_GO", &go),
-        ],
+        args,
+        &all,
         24,
         80,
-    );
-    shell.wait_for_output("*scratch*", Duration::from_secs(30));
+    )
+}
+
+/// Stop the shell's child with an external `SIGSTOP`, which gives the terminal back
+/// to the shell, and wait for the daemon to have torn its session down.
+#[cfg(target_os = "linux")]
+fn stop_the_shells_child_until_dropped(shell: &common::pty::PmacsPty, daemon: &TestDaemon) {
     let bash = shell.process_id().expect("the shell's pid").to_string();
     let children = std::process::Command::new("pgrep")
         .args(["-P", &bash])
@@ -161,15 +162,32 @@ fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
         nix::sys::signal::Signal::SIGSTOP,
     )
     .expect("SIGSTOP");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !daemon_log(&daemon).contains("sent no EOF within") && Instant::now() < deadline {
+    let deadline = Instant::now() + Duration::from_mins(2);
+    while !daemon_log(daemon).contains("sent no EOF within") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        daemon_log(&daemon).contains("sent no EOF within"),
+        daemon_log(daemon).contains("sent no EOF within"),
         "{}",
-        daemon_log(&daemon)
+        daemon_log(daemon)
     );
+}
+
+/// The real thing, which the rows above with no shell cannot see: a client stopped
+/// under a job-control shell and brought back by `fg`. `bash` hands it a canonical
+/// terminal, so a TUI that came back with nothing done about that reconnects and
+/// then hears no key. Linux, for the `pgrep` and for a `bash` that behaves as this
+/// one; the modes are set again on every platform.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
+    let daemon = TestDaemon::spawn();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let go = dir.path().join("go");
+    let socket = daemon.socket_path().to_str().expect("utf-8").to_owned();
+    let mut shell = under_a_shell(&["--attach", "--socket", &socket], dir.path(), &go, &[]);
+    shell.wait_for_output("*scratch*", Duration::from_secs(30));
+    stop_the_shells_child_until_dropped(&shell, &daemon);
     std::fs::write(&go, b"").expect("say go");
     shell.wait_for_output("reconnected on a new view", Duration::from_secs(20));
     shell.write_input(b"\x1bx").expect("M-x");
@@ -580,6 +598,62 @@ fn e10r_remote_an_ssh_failing_after_a_cut_stops_at_the_cap_saying_why() {
     assert!(!status.success(), "{status:?}");
     let said = tui.after_the_alternate_screen();
     assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
+}
+
+/// An `init.lua` that keeps a daemon writing to its frontends: every 20 ms a line at
+/// the top of `*scratch*` that moves every row a window shows. A stopped frontend's
+/// pipe and socket then fill in seconds, where an idle tick's small frames took 53.6 s
+/// to fill the pipe a bridge writes to first (read once at `b25e779`).
+#[cfg(target_os = "linux")]
+const KEEPS_WRITING: &str = r#"
+local count = 0
+pmacs.async(function()
+  while true do
+    pmacs.workers.sleep(20):await()
+    count = count + 1
+    for _, b in ipairs(pmacs.buffer.list()) do
+      if b:name() == "*scratch*" then
+        b:insert(0, string.rep(tostring(count) .. " ", 16) .. "\n")
+      end
+    end
+  end
+end)
+"#;
+
+/// F9's first witness, the real thing over the remote route: a TUI stopped past the
+/// bound through the real bridge and brought back by a real shell's `fg` is on a
+/// fresh view, its notice saying why, and a key typed after that arrives. At
+/// `b25e779` the bridge's exit 0 ended it, status 0. `bash` hands back a canonical
+/// terminal, so with no `retake_terminal` on this route it says it is back and hears
+/// nothing, the local row's defect. Linux, as that row is.
+#[cfg(target_os = "linux")]
+#[test]
+fn e10r_remote_a_tui_brought_back_by_a_shells_fg_is_on_a_fresh_view_and_hears_its_keys() {
+    let daemon = TestDaemon::spawn_with_config(KEEPS_WRITING);
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let go = dir.path().join("go");
+    let script = ssh.dir.path().join("ssh");
+    let mut shell = under_a_shell(
+        &["--attach", "farhost"],
+        dir.path(),
+        &go,
+        &[(PMACS_TEST_SSH_BIN, &script)],
+    );
+    shell.wait_for_output("*scratch*", Duration::from_secs(30));
+    stop_the_shells_child_until_dropped(&shell, &daemon);
+    std::fs::write(&go, b"").expect("say go");
+    shell.wait_for_output("reconnected on a new view", Duration::from_secs(30));
+    assert_eq!(ssh.invocations(), 2, "one new session");
+    shell.write_input(b"\x1bx").expect("M-x");
+    shell.wait_for_output("M-x", Duration::from_secs(10));
+    shell.write_input(b"\x07").expect("C-g");
+    shell.write_input(b"\x1b[24~").expect("F12");
+    assert!(
+        shell.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ended the TUI, and the shell's script with it"
+    );
+    assert_eq!(ssh.invocations(), 2, "and nothing tried again");
 }
 
 /// A link past the floor, through the real bridge, which exits 0 when the daemon

@@ -1805,6 +1805,11 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 if loss.is_some_and(|lost| lost.bootstrapped) {
                     backoff.reset();
                 }
+                // A loss is usually a stop, and a stop may have left the
+                // terminal cooked, as on the local route.
+                if let (Some(_), Some(f)) = (loss, frontend_slot.as_mut()) {
+                    let _ = f.retake_terminal();
+                }
                 let delay = backoff.next_delay();
                 match sleep_with_countdown(frontend_slot.as_mut(), delay) {
                     SleepOutcome::Cancelled => break Ok(()),
