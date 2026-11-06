@@ -12691,6 +12691,168 @@ sampler's 1-minute load 4 to 29: all seven stages ok, 5,935 / 0 / 81 at 238 pair
 So, at F9: PR #462 is green at its head, not merged. No row moves: this section adds no occurrence, and every count above
 stands.
 
+### E10q's close: PR #473 merged as `9d6b7ac`, `main` red there on #328's fifth, #409's second and third, then #282's eleventh
+
+Recorded 2026-11-06 at E10q's merge (roadmap §E10q, #454, #455). Every run was read from the jobs endpoint by
+conclusion, and the test legs named below through their own logs, fetched with escape sequences allowed and
+stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in
+this file before it was written, and none was here but `CI` 42209599689, PR #473's, recorded at `0d88575` and
+named below for comparison.
+
+#### `main` at `0d88575`, E10q's registry commit: green
+
+`CI` 42217876746 at `0d88575`, attempt 1 of 1, `push`, created 2026-11-06T12:28:04Z and completed 12:30:39Z (the
+API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-0d88575): 15 = 6 + 9.
+
+Tally (main-ci-0d88575-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 127892321370 | success |
+| Lint (luajit) | 127892321764 | success |
+| Lint (lua54) | 127892321788 | success |
+| Changed paths | 127892321827 | success |
+| Commit attribution (D9) | 127892321922 | success |
+| Docs consistency | 127892502748 | success |
+| Test (matrix) | 127892503687 | skipped |
+| M4 Perf Gates | 127892503908 | skipped |
+| M1 Acceptance Gates | 127892504024 | skipped |
+| M10 Perf Gates (crdt) | 127892504410 | skipped |
+| Test (crdt) | 127892504414 | skipped |
+| Perf budgets (debug) | 127892504595 | skipped |
+| M5 Perf Gates | 127892504629 | skipped |
+| GPU Render (headless) | 127892505021 | skipped |
+| M6 Perf Gates | 127892505184 | skipped |
+
+Tally (main-ci-0d88575-success): 6 rows of the table above with `result` = `success`.
+
+`Grammar fuzz` 42217876709 at `0d88575`, `success`: `Grammar fuzz` 127892321449 and `Grammar fuzz (asan-strict)`
+127892321061.
+
+#### `main` at `9d6b7ac`, E10q's squash, attempt 1: red, no test failed
+
+`CI` 42219030761 at `9d6b7ac`, attempt 1, `push`, created 2026-11-06T12:36:59Z and completed 13:22:41Z (the
+attempt's `updated_at`): `failure`, three test legs with no verdict, 15 success, 1 skipped, 1 failure, 2
+cancelled.
+
+Tally (main-ci-9d6b7ac-a1): 19 = 15 + 1 + 1 + 2.
+
+Tally (main-ci-9d6b7ac-a1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 127896149799 | success |
+| Lint (lua54) | 127896150048 | success |
+| Format | 127896150175 | success |
+| Changed paths | 127896150227 | success |
+| Commit attribution (D9) | 127896150258 | success |
+| GPU Render (headless) | 127896238307 | success |
+| Perf budgets (debug) | 127896238377 | success |
+| M4 Perf Gates | 127896238391 | success |
+| Test (ubuntu-latest / lua54) | 127896238428 | cancelled |
+| Test (macos-latest / luajit) | 127896238431 | success |
+| M1 Acceptance Gates | 127896238459 | success |
+| Test (crdt) | 127896238499 | cancelled |
+| M6 Perf Gates | 127896238501 | success |
+| Test (macos-latest / lua54) | 127896238502 | success |
+| Test (ubuntu-latest / luajit) | 127896238548 | failure |
+| M5 Perf Gates | 127896238557 | success |
+| M10 Perf Gates (crdt) | 127896238585 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127896238590 | success |
+| Docs consistency | 127896239892 | skipped |
+
+Tally (main-ci-9d6b7ac-a1-success): 15 rows of the table above with `result` = `success`.
+
+- `Test (ubuntu-latest / luajit)` 127896238548, a required check, 12:37:15Z to 12:40:54Z: **#328's fifth**, the
+  third with a disk figure and the first on `main`. The test step died compiling with every fragment of the
+  row's body, `collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped` four times beside
+  `could not compile `pmacs`` for `e6b_styling_under_edit_acceptance`, `e7h_grammar_gate_acceptance`,
+  `e10k_completion_window_acceptance` and `m11_5_semantic_acceptance`, and `##[error]Process completed with exit
+  code 101.`; no `running` line in its log, `No space left on device` zero times. `scripts/ci-disk`:
+  `/dev/mapper/cow-root`, 73,325 MB, 12,863 MB available before the workspace build, 11,180 after it, 278 MB
+  (100%) after the failed step, target 14,705 MB. Commented on the issue, 6686167174.
+- `Test (ubuntu-latest / lua54)` 127896238428 and `Test (crdt)` 127896238499, required checks, each cancelled at
+  `timeout-minutes: 45` by the annotation `The job has exceeded the maximum execution time of 45m0s`, about
+  13:22:40Z: **#409's second and third**, each on runner image `20261101.360.1`. Their `apt-get install` read
+  `Fetched 19.6 MB in 8min 11s (39.8 kB/s)` and `Fetched 11.1 MB in 7min 38s (24.2 kB/s)`, after each leg's
+  `scripts/ci-apt-update` fetched its indexes in a second. The lua54 leg prints no `Ign:` line and its rate is
+  not about 24 kB/s, which the comment says; a reader who splits them reads #409 at two. No test failed: lua54
+  197 `running` lines, 196 paired, 5,050 / 0 / 87, cut in `m9_5_acceptance`; crdt 214, 213, 5,241 / 0 / 87, cut
+  in `terminal_config_acceptance`. Against the same legs on `CI` 42209599689, time before the test step was
+  10:13 and 8:52 against 1:52 and 1:05, leaving 0:51 and 0:27 under the ceiling, and the test steps then ran
+  2:34 and 1:46 behind, which was not explained. Commented on the issue, 6686167680.
+- The three other test legs pair each `running` line with a `test result: ok`: `Test (ubuntu-latest / luajit, no
+  crdt)` 127896238590, 229 pairs, 4,862 / 0 / 71; `Test (macos-latest / luajit)` 127896238431 and `Test
+  (macos-latest / lua54)` 127896238502, 230 each, 5,442 / 0 / 79. `GPU Render (headless)` 127896238307, 1 pair,
+  394 / 0 / 0.
+
+`Grammar fuzz` 42219030757 at `9d6b7ac`, attempt 1 of 1, `success`, `run=true`, and the reason it printed is
+`reason=fuzz/regress/README.md changed`, so this run does not show E10q's rule on the parse worker firing, which
+`tests/e7g_grammar_fuzz_acceptance.rs` carries. `Grammar fuzz` 127896149798, `exit 0, its parse worker's replay
+exit 0`, 963 inputs, 944 answered, 19 contained, 0 crashed; `Grammar fuzz (asan-strict)` 127896150261, the same,
+961, 946, 15, 0.
+
+#### `main` at `9d6b7ac`, attempt 2, the owner's: red on #282's eleventh
+
+The owner's rerun of attempt 1's three legs, on the same commit, started 2026-11-06T15:47:41Z and completed
+16:24:54Z: `failure`, 17 success, 1 skipped (`Docs consistency` 127989542350), 1 failure. The sixteen jobs it
+did not run carry attempt 1's results and times under new ids, and attempt 1's jobs stay as the table above
+lists them.
+
+Tally (main-ci-9d6b7ac-a2): 19 = 17 + 1 + 1.
+
+- `Test (ubuntu-latest / luajit)` 127989471260, a required check, 15:47:46Z to 16:24:53Z: **#282's eleventh, the
+  fifth on `main`.** `a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`, `*lsp* names the
+  request and the code: []` at `tests/e7b_review_wire_acceptance.rs:1214:5`, with `WIRE label "ready",
+  last_error None, *lsp* errors []` and the `WIRE *errors* gained` line, and `test result: FAILED. 4 passed; 1
+  failed; 2 ignored` in 41.61 s; the row's stdout has 109 lines naming `$/progress`, 93 of them
+  `rustAnalyzer/cachePriming`. The leg's only failure: 227 pairs, 5,442 / 1 / 87, its doc-test and
+  `pmacs-protocol` steps skipped after it. `scripts/ci-disk`: `/dev/root`, 147,718 MB, 83,623 MB available
+  before the workspace build, target 52,337 MB after the tests; `signal 7` zero times, so for #328 this is
+  non-reproduction on another disk and nothing more. Commented on #282, 6689857401, and on #328, 6689857870.
+- `Test (crdt)` 127989470834, 15:47:46Z to 16:24:50Z, 228 pairs, 5,444 / 0 / 87, and `Test (ubuntu-latest /
+  lua54)` 127989471386, 15:47:47Z to 16:23:18Z, 229 pairs, 5,497 / 0 / 87: green, which for #409 is
+  non-reproduction and nothing more. Commented on the issue, 6689858266.
+
+#### `main` at `d1f1576`, E10r F9's registry commit: green
+
+`CI` 42242370456 at `d1f1576`, attempt 1 of 1, `push`, created 2026-11-06T15:22:02Z and completed 15:24:38Z (the
+API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-d1f1576): 15 = 6 + 9.
+
+Tally (main-ci-d1f1576-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127975663876 | success |
+| Lint (luajit) | 127975664246 | success |
+| Commit attribution (D9) | 127975664394 | success |
+| Format | 127975664421 | success |
+| Lint (lua54) | 127975664494 | success |
+| Docs consistency | 127975781452 | success |
+| GPU Render (headless) | 127975783628 | skipped |
+| M4 Perf Gates | 127975783639 | skipped |
+| M10 Perf Gates (crdt) | 127975783705 | skipped |
+| M1 Acceptance Gates | 127975783726 | skipped |
+| Test (crdt) | 127975784033 | skipped |
+| Test (matrix) | 127975784596 | skipped |
+| M5 Perf Gates | 127975784619 | skipped |
+| Perf budgets (debug) | 127975784938 | skipped |
+| M6 Perf Gates | 127975785945 | skipped |
+
+Tally (main-ci-d1f1576-success): 6 rows of the table above with `result` = `success`.
+
+`Grammar fuzz` 42242370463 at `d1f1576`, `success`: `Grammar fuzz` 127975664150 and `Grammar fuzz (asan-strict)`
+127975663524.
+
+So, at E10q's close: `main` is green at `0d88575` and `d1f1576` and red at `9d6b7ac` on both attempts, each of
+its reds on a registered issue, on no test of the squash's paths by reading of its diff. Not rerun again: a
+further rerun is the owner's. By CI #328 moves to five, #409 to three and #282 to eleven, and every other count
+stands. E10m.7, E10m.11 and E10m.2 take those three in PR #476, which is not on `main`.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
