@@ -639,6 +639,7 @@ fn e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans() {
         ),
     );
     wait_installed(&mut state, "the first parse installed");
+    record_settles(&state);
     let cut_told = |s: &EditorState| {
         errors_text(s)
             .matches("an embedded region's parse ran past")
@@ -660,7 +661,22 @@ fn e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans() {
             &state,
             "pmacs.config.set('syntax.parse-deadline-ms', 0) pmacs.editor.goto_byte(0)",
         );
+        let warm = settle_count(&state);
         type_keys(&mut state, "\n");
+        // #340: an edit's parse reads as idle before its thread takes the
+        // worker and again after it ends, a tick short of its settle, so
+        // `quiesce` alone does not say it installed.
+        wait_settled_since(
+            &mut state,
+            warm,
+            "the warm parse installed",
+            |s, statuses| {
+                statuses
+                    .iter()
+                    .any(|status| status.starts_with("installed"))
+                    && current(s)
+            },
+        );
         quiesce(&mut state);
         assert!(current(&state), "the warm parse installed");
         let root_ms: u64 = eval(
@@ -678,7 +694,15 @@ fn e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans() {
                 "pmacs.config.set('syntax.parse-deadline-ms', {deadline}) pmacs.editor.goto_byte(0)"
             ),
         );
+        let under_deadline = settle_count(&state);
         type_keys(&mut state, "\n");
+        // Whatever that parse comes to, the attempt reads it once it has.
+        wait_settled_since(
+            &mut state,
+            under_deadline,
+            "the parse under the deadline settled",
+            |_, statuses| !statuses.is_empty(),
+        );
         quiesce(&mut state);
         say(&format!(
             "attempt {attempt}: root {root_ms} ms, deadline {deadline} ms, cut told {}, current {}, {}",
@@ -763,6 +787,40 @@ fn record_settles(state: &EditorState) {
 /// The statuses [`record_settles`] has seen, oldest first, space-separated.
 fn settles(state: &EditorState) -> String {
     eval(state, "return table.concat(settle_statuses, ' ')")
+}
+
+/// How many settles [`record_settles`] has seen.
+fn settle_count(state: &EditorState) -> usize {
+    eval(state, "return tostring(#settle_statuses)")
+        .parse()
+        .expect("a count of settles")
+}
+
+/// Tick until the settles after the first `since` satisfy `done` and no parse
+/// of the open buffer is running or waiting. A timeout names `what`, with the
+/// worker's report and every settle seen.
+fn wait_settled_since(
+    state: &mut EditorState,
+    since: usize,
+    what: &str,
+    done: impl Fn(&EditorState, &[&str]) -> bool,
+) {
+    ready::tick_until(state, what, Duration::from_mins(1), |s| {
+        let r = report(s);
+        let all = settles(s);
+        let statuses: Vec<&str> = all
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .skip(since)
+            .collect();
+        if field(&r, "busy") == "false" && field(&r, "pending") == "0" && done(s, &statuses) {
+            Probe::Ready(())
+        } else {
+            Probe::Pending(format!(
+                "{r}; settles {all:?}, of which {since} before this edit"
+            ))
+        }
+    });
 }
 
 /// Whether a parse settled as installed after the `kill`th kill's own settle.
