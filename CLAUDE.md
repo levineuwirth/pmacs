@@ -65,8 +65,11 @@ Always true:
   ThreadSanitizer worker reported their race in tree-sitter's reference
   counts. CI's
   grammar fuzz runs on every change, fuzzes when one can
-  change the grammar set (`scripts/grammar-fuzz-needed`; the touched
-  grammars ten minutes, the rest briefly), and builds two arms on
+  change the grammar set or the parse worker
+  (`scripts/grammar-fuzz-needed`, whose list holds `pmacs-parse-unit/*`
+  since E10q and not `src/parse_isolation.rs`, the spawner the arms do
+  not run; the touched grammars ten minutes, the rest briefly, so a
+  worker change fuzzes every grammar briefly), and builds two arms on
   `ubuntu-24.04`'s GCC 13, which it prints: `ubsan`, the check named
   `Grammar fuzz`, and `asan-strict`, `Grammar fuzz (asan-strict)`. On the
   inputs a run reaches, CI catches a memory error ASan sees at the access,
@@ -135,8 +138,12 @@ Always true:
   edit sequence recorded beside it, since its bytes alone parse at once),
   and answers #296's asterisks, a large parse that returns, which a debug
   build's or an ASan arm's overhead stops at the replay's 5 s and 1 GiB;
-  the `tsan` arm replays at 30 s and 4 GiB, so it answers them too and
-  stops the underscores by time (`fuzz/regress/README.md`).
+  the `tsan` arm replays at 30 s and 4 GiB and stops the underscores by
+  time, and the asterisks it answers alone, in about 27 s of the 30 s, and
+  stops at the deadline in its own sequence (`--corpus` then
+  `--findings fuzz/regress`): contained either way, only a crash failing
+  the replay, and why the sequence costs the extra time not established
+  (#455, `fuzz/regress/README.md`).
   A row is keyed to
   the defect, not the route. Adding a row is the owner's ruling, never a
   session's; a session that meets a finding it believes known files or

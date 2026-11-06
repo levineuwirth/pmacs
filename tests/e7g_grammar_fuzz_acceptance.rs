@@ -147,6 +147,10 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
         // E7i moved the table and `run_parse` into `pmacs-syntax`.
         "pmacs-syntax/src/lib.rs",
         "pmacs-syntax/Cargo.toml",
+        // E10q (#454): the worker, which both arms build and replay
+        // `fuzz/regress/` through.
+        "pmacs-parse-unit/src/lib.rs",
+        "pmacs-parse-unit/Cargo.toml",
         "src/bin/pmacs_grammar_fuzz.rs",
         "scripts/fuzz-grammars",
         "scripts/grammar-fuzz-needed",
@@ -164,6 +168,9 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
     for path in [
         "docs/invariants.md",
         "src/editor.rs",
+        // The spawner: the arms drive the worker through `replay-unit`,
+        // which takes one constant from it, and do not run it (E10q).
+        "src/parse_isolation.rs",
         "tests/e7g_grammar_fuzz_acceptance.rs",
         "vendored/x.c",
         "fuzzy.txt",
@@ -181,7 +188,10 @@ fn e7g_the_fuzz_job_runs_on_every_change_to_the_grammar_set() {
         "false",
         "an empty change fuzzes nothing"
     );
+}
 
+#[test]
+fn e7g_the_fuzz_job_always_reports_and_fuzzes_on_the_scripts_word() {
     let wf = read(".github/workflows/grammar-fuzz.yml");
     let on = wf
         .split("\non:\n")

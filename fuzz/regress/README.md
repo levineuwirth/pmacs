@@ -32,12 +32,14 @@ larger, so what the deadline or the watch stops there is a superset. The
 its shadow memory resident beside the parse, so it stops less. Its column
 was measured at E7i's fix round 2 with fix round 1's TSan worker
 (`79ca25d2`, kept under `~/build/e7i-fix1/tsan-workers/`) at those
-limits, as E7i review 2 had found it.
+limits, as E7i review 2 had found it. The asterisks' cell is #455's,
+which replayed them both alone and in the arm's own sequence (`--corpus`
+then `--findings fuzz/regress`).
 
 | file | released worker | debug worker | `tsan` arm (30 s, 4 GiB) |
 |---|---|---|---|
 | `296-underscores-16k.input` | stopped by the memory limit (`RLIMIT_AS`) | the same | stopped at the deadline |
-| `296-asterisks-8k.input` | **answered**: it returns, in about 1.8 s | stopped at the deadline | **answered** |
+| `296-asterisks-8k.input` | **answered**: it returns, in about 1.8 s | stopped at the deadline | alone **answered**, in about 27 s of the 30 s deadline; in the arm's sequence stopped at the deadline |
 | `301-nested-openers-98.input` | stopped at the deadline (it returns after 23 s) | the same | the same |
 | `301-hang-596.input` with its edits | stopped at the deadline (in-process, the third recorded parse never returns) | the same | the same |
 | `301-hang-7672.input` | stopped at the deadline | the same | the same |
@@ -54,7 +56,11 @@ So the replay proves the worker contains #296's underscore paragraph by
 its memory limit and #301 by the deadline, three ways. It does not prove
 #296's asterisks contained in a shipped worker: there they are a large
 parse that returns, and only the overhead of a debug build or an ASan arm
-(the watch, in CI) stops them; the `tsan` arm answers them, and stops the
+(the watch, in CI) stops them. Under the `tsan` arm they are answered
+alone, in a fresh worker, in about 27 s of its 30 s deadline, and stopped
+at that deadline in the arm's own sequence (#455, one sample of each); why
+the sequence costs the extra time was not established. They are contained
+either way, and only a crash fails the replay. The same arm stops the
 underscores by time and not by memory.
 
 Two records corrected at E7i's fix round 1 (review 1, Low 3). The 7,672
