@@ -18,11 +18,13 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use pmacs::attach::PMACS_TEST_SSH_BIN;
-use pmacs::attach_reconnect::{DAEMON_AGE_SLACK, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
+#[cfg(feature = "crdt")]
+use pmacs::attach_reconnect::DAEMON_AGE_SLACK;
+use pmacs::attach_reconnect::{HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
 use pmacs_protocol::message::{
     AttachRequest, GoodbyeReason, Hello, InstanceCapabilities, InstanceIdentity, InstanceMessage,
@@ -211,12 +213,13 @@ struct StandInDaemon {
 
 impl StandInDaemon {
     fn serve(session: impl Fn(usize, &mut UnixStream) + Send + 'static) -> Self {
-        Self::serve_aged(|_| 0, session)
+        Self::serve_saying(|n| (u64::try_from(n).expect("n"), 0), session)
     }
 
-    /// [`Self::serve`], its `Hello` saying `uptime_secs(n)` to connection `n`.
-    fn serve_aged(
-        uptime_secs: impl Fn(usize) -> u64 + Send + 'static,
+    /// [`Self::serve`], its `Hello` saying `identity(n)`, a frontend number and an
+    /// `uptime_secs`, to connection `n`.
+    fn serve_saying(
+        identity: impl Fn(usize) -> (u64, u64) + Send + 'static,
         session: impl Fn(usize, &mut UnixStream) + Send + 'static,
     ) -> Self {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -228,14 +231,15 @@ impl StandInDaemon {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
                 let n = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                let (id, uptime_secs) = identity(n);
                 let hello = Hello {
                     protocol_version: PROTOCOL_VERSION,
-                    assigned_frontend_id: FrontendId(u64::try_from(n).expect("n")),
+                    assigned_frontend_id: FrontendId(id),
                     instance_identity: InstanceIdentity {
                         pmacs_version: "0.0.0-test".to_owned(),
                         build_hash: None,
                         instance_name: Some("stand-in".to_owned()),
-                        uptime_secs: uptime_secs(n),
+                        uptime_secs,
                         working_directory: "/tmp".to_owned(),
                     },
                     instance_capabilities: InstanceCapabilities::default(),
@@ -331,13 +335,14 @@ fn e10r_3_a_first_frame_starts_the_local_routes_count_again() {
 }
 
 /// A new daemon answering the local route's socket, younger than the last would be
-/// by now, is said on the bottom row, since it has none of the last one's unsaved
-/// work. A daemon restarted on its socket is how this route meets one: with nobody
-/// there it ends instead. The stand-in's `Goodbye` ends it.
+/// by now and past its frontend number, as one is when others got there first, is
+/// said on the bottom row, since it has none of the last one's unsaved work. A daemon
+/// restarted on its socket is how this route meets one: with nobody there it ends
+/// instead. The stand-in's `Goodbye` ends it.
 #[test]
 fn e10r_3_a_new_daemon_on_the_local_routes_socket_says_the_old_ones_work_is_gone() {
-    let daemon = StandInDaemon::serve_aged(
-        |n| if n == 1 { 1_000 } else { 0 },
+    let daemon = StandInDaemon::serve_saying(
+        |n| if n == 1 { (2, 1_000) } else { (9, 0) },
         |n, stream| {
             first_frame(stream);
             if n == 2 {
@@ -361,10 +366,7 @@ fn e10r_3_a_new_daemon_on_the_local_routes_socket_says_the_old_ones_work_is_gone
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     let said = String::from_utf8_lossy(&tui.output()).into_owned();
-    assert!(
-        said.contains("reconnected to a new daemon: the old one's unsaved work is gone"),
-        "{said:?}"
-    );
+    assert!(said.contains(NEW_DAEMON_NOTICE), "{said:?}");
 }
 
 /// Part of a frame and then the end of the socket, as a write past the bound
@@ -564,13 +566,16 @@ impl BridgedSsh {
     }
 }
 
+/// A `Hello` with the next frontend number, as one daemon's are, so that sessions
+/// built in order are the same daemon's.
 fn hello_frame() -> Vec<u8> {
+    static NEXT: AtomicU64 = AtomicU64::new(2);
     let mut bytes = Vec::new();
     write_message(
         &mut bytes,
         &Hello {
             protocol_version: PROTOCOL_VERSION,
-            assigned_frontend_id: FrontendId(2),
+            assigned_frontend_id: FrontendId(NEXT.fetch_add(1, Ordering::SeqCst)),
             instance_identity: InstanceIdentity {
                 pmacs_version: "0.0.0-test".to_owned(),
                 build_hash: None,
@@ -701,6 +706,8 @@ fn e10r_remote_a_tui_brought_back_by_a_shells_fg_is_on_a_fresh_view_and_hears_it
     assert_eq!(ssh.invocations(), 2, "and nothing tried again");
 }
 
+const NEW_DAEMON_NOTICE: &str = "reconnected to a new daemon: the old one's unsaved work is gone";
+
 /// A daemon the bridge started, which nothing here spawned: its lockfile names it,
 /// and it is gone when this is.
 struct StartedByTheBridge {
@@ -733,10 +740,11 @@ impl Drop for StartedByTheBridge {
 
 /// F9's second witness: a daemon killed under the TUI, over the real bridge. The next
 /// bridge finds nobody and starts a new daemon, without the old one's unsaved work, so
-/// the notice says that, told by `Hello`'s `uptime_secs`, and a key typed after that
-/// is the new daemon's to answer. At `b25e779` the bridge's exit 0 ended it, status 0,
-/// saying nothing of the kind. The session outlives the slack first, since a daemon
-/// younger than that is not told from its successor.
+/// the notice says that, and a key typed after that is the new daemon's to answer. At
+/// `b25e779` the bridge's exit 0 ended it, status 0, saying nothing of the kind. The
+/// kill comes as soon as the session is up, which `uptime_secs` alone cannot tell (a
+/// real run read the plain notice here): the new daemon's first frontend number is
+/// what says so.
 #[test]
 fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_the_old_ones_work_is_gone() {
     let mut daemon = TestDaemon::spawn();
@@ -747,17 +755,13 @@ fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_the_old_ones_work_
     let ssh = BridgedSsh::new(daemon.socket_path());
     let mut tui = ssh.attach("500");
     tui.wait_for_output("*scratch*", Duration::from_secs(30));
-    std::thread::sleep(DAEMON_AGE_SLACK + Duration::from_secs(2));
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
         nix::sys::signal::Signal::SIGKILL,
     )
     .expect("SIGKILL");
     daemon.wait_for_exit().expect("the daemon is gone");
-    tui.wait_for_output(
-        "reconnected to a new daemon: the old one's unsaved work is gone",
-        Duration::from_mins(1),
-    );
+    tui.wait_for_output(NEW_DAEMON_NOTICE, Duration::from_mins(1));
     assert_eq!(ssh.invocations(), 2, "one new session");
     assert_ne!(
         started.pid().expect("the new daemon's lockfile"),
@@ -773,6 +777,47 @@ fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_the_old_ones_work_
         .expect("F12 ends the session");
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), 2, "and nothing tried again");
+}
+
+/// Where other frontends got to the new daemon first, this one's number is past its
+/// last, so only `uptime_secs` says what happened: two real TUIs through the real
+/// bridge on a daemon that lived past the slack, one reattached quickly and the other
+/// at a scale that leaves time for connections of the row's own to take the numbers
+/// past its last. Two frontends, so a build with CRDT.
+#[cfg(feature = "crdt")]
+#[test]
+fn e10r_remote_a_new_daemon_another_frontend_reached_first_is_told_by_its_uptime() {
+    let mut daemon = TestDaemon::spawn();
+    let started = StartedByTheBridge {
+        lockfile: daemon.lockfile_path(),
+    };
+    let socket = daemon.socket_path().to_path_buf();
+    let ssh = BridgedSsh::new(&socket);
+    let mut late = ssh.attach("3000");
+    late.wait_for_output("*scratch*", Duration::from_secs(30));
+    let mut quick = ssh.attach("1");
+    quick.wait_for_output("*scratch*", Duration::from_secs(30));
+    std::thread::sleep(DAEMON_AGE_SLACK + Duration::from_secs(2));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL");
+    daemon.wait_for_exit().expect("the daemon is gone");
+    quick.wait_for_output(NEW_DAEMON_NOTICE, Duration::from_mins(1));
+    for _ in 0..4 {
+        let mut stream = UnixStream::connect(socket.as_path()).expect("the new daemon");
+        let _: Hello = read_message(&mut stream).expect("its Hello");
+    }
+    late.wait_for_output(NEW_DAEMON_NOTICE, Duration::from_mins(1));
+    for tui in [&mut late, &mut quick] {
+        tui.write_input(b"\x1b[24~").expect("F12");
+        let status = tui
+            .wait_for_exit(Duration::from_secs(10))
+            .expect("F12 ends the session");
+        assert!(status.success(), "{status:?}");
+    }
+    drop(started);
 }
 
 /// A link past the floor, through the real bridge, which exits 0 when the daemon

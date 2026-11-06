@@ -246,8 +246,9 @@ whole. Under one cap a growing register squeezes the rules.
   frame, a link past the write bound's floor, cost the bound a try and
   stop at three. The bridge starts a daemon when it finds none, so a
   reconnect after a crash lands on a new daemon without the old one's
-  unsaved work, and the notice says that, told by `Hello`'s
-  `uptime_secs`, as on the local route if a new daemon answers there.
+  unsaved work, and the notice says that, told by `Hello`'s frontend
+  number and `uptime_secs`, as on the local route if a new daemon
+  answers there.
   Removed when the token family reaches grid sessions, which is a wire
   question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon

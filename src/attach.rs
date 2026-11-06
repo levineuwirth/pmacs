@@ -34,8 +34,8 @@
 //! a grid session is minted no token (`docs/divergences.md`). A daemon that is
 //! gone ends the local route, saying why once the alternate screen is left; the
 //! SSH route's bridge starts a new one, without the old one's unsaved work, and
-//! the notice says that, told by `Hello`'s `uptime_secs` ([`DaemonAge`]) on either
-//! route. [`HANDSHAKE_RETRY_CAP`] sessions in a row
+//! the notice says that, told by `Hello` ([`DaemonSeen`]) on either route.
+//! [`HANDSHAKE_RETRY_CAP`] sessions in a row
 //! that end before their first frame stop either route, so neither can spin. A
 //! frame cut short is the daemon's bound, and the frontend says so
 //! ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]): no `Goodbye` can follow a
@@ -66,7 +66,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::attach_reconnect::{
-    BackoffSchedule, DaemonAge, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
+    BackoffSchedule, DaemonSeen, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
 };
 use crate::cell::CellSize;
 use crate::frontend::{Event, Frontend, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -517,8 +517,8 @@ const NOTICE_NEW_DAEMON: &str =
 /// What a route keeps between sessions, to say why a new one is a new view.
 #[derive(Debug, Default)]
 struct SessionMemory {
-    /// How old the last session's daemon said it was.
-    age: Option<DaemonAge>,
+    /// What the last session's `Hello` said of its daemon.
+    seen: Option<DaemonSeen>,
     /// A `Hello` came from a daemon that is not the one before it, and no session
     /// on it has yet reached the first frame that puts this on screen. It outlasts a
     /// session lost before that, whose successor's `Hello` is the new daemon's own.
@@ -529,19 +529,20 @@ struct SessionMemory {
 
 impl SessionMemory {
     /// A session's `Hello` said this.
-    fn heard(&mut self, uptime_secs: u64) {
-        self.heard_at(uptime_secs, Instant::now());
+    fn heard(&mut self, hello: &Hello) {
+        self.heard_at(
+            hello.assigned_frontend_id,
+            hello.instance_identity.uptime_secs,
+            Instant::now(),
+        );
     }
 
-    fn heard_at(&mut self, uptime_secs: u64, at: Instant) {
-        let age = DaemonAge::new(uptime_secs, at);
-        if self
-            .age
-            .is_some_and(|last| last.is_older_than_possible_for(&age))
-        {
+    fn heard_at(&mut self, id: FrontendId, uptime_secs: u64, at: Instant) {
+        let seen = DaemonSeen::new(id, uptime_secs, at);
+        if self.seen.is_some_and(|last| last.is_succeeded_by(&seen)) {
             self.new_daemon = true;
         }
-        self.age = Some(age);
+        self.seen = Some(seen);
     }
 
     /// A session was lost, for the reason `why` says of it.
@@ -582,7 +583,7 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     let hello = read_local_hello(&mut stream)?;
     print_attach_info(&hello);
     let mut memory = SessionMemory::default();
-    memory.heard(hello.instance_identity.uptime_secs);
+    memory.heard(&hello);
 
     let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
     let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
@@ -741,7 +742,7 @@ fn connect_again(
     })?;
     stream.set_read_timeout(Some(LOCAL_RECONNECT_HELLO_TIMEOUT))?;
     let hello = read_local_hello(&mut stream)?;
-    memory.heard(hello.instance_identity.uptime_secs);
+    memory.heard(&hello);
     stream.set_read_timeout(None)?;
     write_attach_request(&mut stream, &hello, size)?;
     Ok((build_local_socket_io(stream)?, hello.assigned_frontend_id))
@@ -2351,7 +2352,7 @@ fn run_one_session(
         ));
     }
 
-    memory.heard(hello.instance_identity.uptime_secs);
+    memory.heard(&hello);
 
     // Determine initial_size. On reconnect, use the Frontend's
     // already-known size (it tracks resizes). On first attempt, query
@@ -3321,22 +3322,22 @@ mod tests {
         let start = Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
         let mut memory = SessionMemory::default();
-        memory.heard_at(1_000, at(0));
+        memory.heard_at(FrontendId(5), 1_000, at(0));
         assert_eq!(memory.notice(), None, "nothing was lost");
         memory.lost(true, NOTICE_FRESH_VIEW);
-        memory.heard_at(1_010, at(10));
+        memory.heard_at(FrontendId(6), 1_010, at(10));
         assert_eq!(memory.notice(), Some(NOTICE_FRESH_VIEW), "the same daemon");
         memory.lost(true, NOTICE_FRESH_VIEW);
-        memory.heard_at(0, at(20));
+        memory.heard_at(FrontendId(7), 0, at(20));
         assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
         // Lost before its first frame: the next session's Hello is the new daemon's
         // own, and says nothing new, and the user has still not been told.
         memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
-        memory.heard_at(1, at(21));
+        memory.heard_at(FrontendId(8), 1, at(21));
         assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
         // Told, so a later loss on that daemon says only its own reason.
         memory.lost(true, NOTICE_FRESH_VIEW);
-        memory.heard_at(11, at(31));
+        memory.heard_at(FrontendId(9), 11, at(31));
         assert_eq!(memory.notice(), Some(NOTICE_FRESH_VIEW));
     }
 

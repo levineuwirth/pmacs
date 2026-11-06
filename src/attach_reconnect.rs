@@ -62,7 +62,7 @@
 use std::time::{Duration, Instant};
 
 use crate::attach::AttachError;
-use crate::protocol::GoodbyeReason;
+use crate::protocol::{FrontendId, GoodbyeReason};
 
 /// The backoff schedule, its test override and the cap, shared with
 /// `pmacs-gpu` through the protocol crate (the GPU never depends on `pmacs`);
@@ -81,36 +81,45 @@ pub use pmacs_protocol::reconnect::{
 /// The rest is for a `Hello` that takes longer to arrive than the last one did.
 pub const DAEMON_AGE_SLACK: Duration = Duration::from_secs(5);
 
-/// How old a daemon said it was, and when: what tells the daemon a session was on
-/// from a new one at the same address, with no wire change (`Hello`'s `uptime_secs`).
+/// What a session's `Hello` says of its daemon, and when it was read: what tells the
+/// daemon a session was on from a new one at the same address, with no wire change.
 #[derive(Clone, Copy, Debug)]
-pub struct DaemonAge {
+pub struct DaemonSeen {
+    frontend_id: FrontendId,
     uptime_secs: u64,
     read_at: Instant,
 }
 
-impl DaemonAge {
-    /// A `Hello`'s `uptime_secs`, read at `read_at`.
+impl DaemonSeen {
+    /// A `Hello`'s `assigned_frontend_id` and `uptime_secs`, read at `read_at`.
     #[must_use]
-    pub fn new(uptime_secs: u64, read_at: Instant) -> Self {
+    pub fn new(frontend_id: FrontendId, uptime_secs: u64, read_at: Instant) -> Self {
         Self {
+            frontend_id,
             uptime_secs,
             read_at,
         }
     }
 
-    /// Whether `later`, a `Hello` read after this one, is younger than this daemon
-    /// would be by then, by more than [`DAEMON_AGE_SLACK`].
+    /// Whether `later`, a `Hello` read after this one, cannot be this daemon's.
     ///
-    /// What that cannot tell, each said so a notice is not read for more than it is.
-    /// A daemon that lived less than the slack is not told from its successor, and
-    /// had no time to hold unsaved work. Both clocks are `Instant`s, which stop while
-    /// a machine sleeps, so on one machine they agree; over SSH, a remote host that
-    /// slept past the slack reads as a new daemon, and a client that slept may read a
-    /// new daemon someone else started as the old one. A `Hello` held past the slack,
-    /// by a stop or a stalled link, reads as a new daemon.
+    /// A daemon numbers its frontends upward, so a number not past this one is another
+    /// daemon's, on no clock. That misses a new daemon only where other frontends got
+    /// there first, so a `Hello` younger than this daemon would be by then, by more
+    /// than [`DAEMON_AGE_SLACK`], says so too.
+    ///
+    /// What the age cannot tell, each said so a notice is not read for more than it
+    /// is. Both clocks are `Instant`s, which stop while a machine sleeps, so on one
+    /// machine they agree; over SSH, a remote host that slept past the slack reads as a
+    /// new daemon, and a client that slept may read a new daemon others got to first as
+    /// the old one. A `Hello` held past the slack, by a stop or a stalled link, reads
+    /// as a new daemon. A daemon that lived less than the slack is told only by the
+    /// number.
     #[must_use]
-    pub fn is_older_than_possible_for(&self, later: &Self) -> bool {
+    pub fn is_succeeded_by(&self, later: &Self) -> bool {
+        if later.frontend_id.0 <= self.frontend_id.0 {
+            return true;
+        }
         let elapsed = later.read_at.saturating_duration_since(self.read_at);
         let expected = Duration::from_secs(self.uptime_secs).saturating_add(elapsed);
         Duration::from_secs(later.uptime_secs).saturating_add(DAEMON_AGE_SLACK) < expected
@@ -230,17 +239,40 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // DaemonAge
+    // DaemonSeen
     // -----------------------------------------------------------------
 
-    /// Is a `Hello` of `later` seconds, read `after` seconds on, a new daemon, after
-    /// one of `first`?
+    /// Is a `Hello` of `later` seconds, read `after` seconds on with a higher number,
+    /// a new daemon, after one of `first`?
     fn new_daemon(first: u64, after: f64, later: u64) -> bool {
         let start = Instant::now();
-        DaemonAge::new(first, start).is_older_than_possible_for(&DaemonAge::new(
+        DaemonSeen::new(FrontendId(5), first, start).is_succeeded_by(&DaemonSeen::new(
+            FrontendId(6),
             later,
             start + Duration::from_secs_f64(after),
         ))
+    }
+
+    #[test]
+    fn a_frontend_number_not_past_the_last_is_a_new_daemon_on_no_clock() {
+        let start = Instant::now();
+        for id in [2, 5] {
+            assert!(
+                DaemonSeen::new(FrontendId(5), 0, start).is_succeeded_by(&DaemonSeen::new(
+                    FrontendId(id),
+                    0,
+                    start
+                )),
+                "{id}"
+            );
+        }
+        assert!(
+            !DaemonSeen::new(FrontendId(5), 0, start).is_succeeded_by(&DaemonSeen::new(
+                FrontendId(6),
+                0,
+                start
+            )),
+        );
     }
 
     #[test]
