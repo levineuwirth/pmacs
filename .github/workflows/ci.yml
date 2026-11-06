@@ -51,7 +51,7 @@ env:
 # ambiguous about a commit that has already landed — the one place this
 # saving is not worth having.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job carries `timeout-minutes`. Without one a job inherits
