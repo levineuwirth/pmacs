@@ -12853,6 +12853,538 @@ its reds on a registered issue, on no test of the squash's paths by reading of i
 further rerun is the owner's. By CI #328 moves to five, #409 to three and #282 to eleven, and every other count
 stands. E10m.7, E10m.11 and E10m.2 take those three in PR #476, which is not on `main`.
 
+### E10m: PR #476 green at `da6d721`, its dispatches by job, #375's third and #474's first, and `main` green at `b6d4569`
+
+Recorded 2026-11-06 at E10m's checkpoint (roadmap §E10m). Every run was read from the jobs endpoint by conclusion, and every test leg named through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Each table is generated from the API, and every run id and job id below was searched for in this file before it was written and none was here, but `CI` 42209599689, 42219030761, 42231835053 and 42242370456, read for comparison and each recorded in its own section.
+
+**Under E10m.6, a forced control is a named run and not an occurrence.** The dispatches below hold a ballast or a sleep planted on a probe branch, so what those plants produced moves no count: the SIGBUS at `CI` 42225370681, 42232908313 and 42232921670 is not #328's sixth, and the cancels at `CI` 42248640485 are not #409's fourth. What a dispatch met that its plant did not cause is counted: #474's first and #375's third. Local samples are listed, not tallied. A job name GitHub reports unexpanded on a run that skips the matrix is written `Lint (matrix)` or `Test (matrix)`, as earlier sections do, since its expression would split the table's cell.
+
+#### PR #476 at `da6d721`, the head: green at attempt 1
+
+`CI` 42257200411 at `da6d721`, attempt 1 of 1, `pull_request`, created 2026-11-06T16:57:44Z and completed 2026-11-06T17:34:25Z: `success`. The merge `2617024` into `b6d4569`.
+
+Tally (pr-476-ci-da6d721): 19 = 18 + 1.
+
+Tally (pr-476-ci-da6d721-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 128027429541 | success |
+| Commit attribution (D9) | 128027429613 | success |
+| Lint (luajit) | 128027429684 | success |
+| Lint (lua54) | 128027429772 | success |
+| Format | 128027429790 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128027551120 | success |
+| Test (crdt) | 128027551122 | success |
+| M6 Perf Gates | 128027551127 | success |
+| Test (ubuntu-latest / lua54) | 128027551144 | success |
+| M4 Perf Gates | 128027551162 | success |
+| GPU Render (headless) | 128027551180 | success |
+| Test (ubuntu-latest / luajit) | 128027551202 | success |
+| M1 Acceptance Gates | 128027551241 | success |
+| M10 Perf Gates (crdt) | 128027551248 | success |
+| Perf budgets (debug) | 128027551251 | success |
+| Test (macos-latest / lua54) | 128027551289 | success |
+| Test (macos-latest / luajit) | 128027551357 | success |
+| M5 Perf Gates | 128027551398 | success |
+| Docs consistency | 128027554140 | skipped |
+
+Tally (pr-476-ci-da6d721-success): 18 rows of the table above with `result` = `success`.
+Tally (pr-476-ci-da6d721-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-476-ci-da6d721-legs): 6 items in the list below.
+
+- `Test (ubuntu-latest / luajit, no crdt)` 128027551120: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 65,896 MB available after the tests.
+- `Test (crdt)` 128027551122: `success`, 228 `running` lines and 228 results, 5,446 / 0 / 87, 59,277 MB available after the tests.
+- `Test (ubuntu-latest / lua54)` 128027551144: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 59,360 MB available after the tests.
+- `Test (ubuntu-latest / luajit)` 128027551202: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 58,744 MB available after the tests.
+- `Test (macos-latest / lua54)` 128027551289: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+- `Test (macos-latest / luajit)` 128027551357: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+
+`Grammar fuzz` 42257200424 at `da6d721`, attempt 1 of 1: `success`, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`, jobs 128027429675 (`Grammar fuzz`) and 128027429808 (`Grammar fuzz (asan-strict)`), each `success`. `WouldBlock` and `Bus error` in no test leg.
+
+Tally (pr-476-fuzz-da6d721): 2 = 2 + 0.
+
+#### PR #476 at `68c7294`, the head before E10m.11: green at attempt 1
+
+`CI` 42246213639 at `68c7294`, attempt 1 of 1, `pull_request`, created 2026-11-06T15:46:49Z and completed 2026-11-06T16:25:03Z: `success`. The merge `000381f` into `d1f1576`; the Linux legs' cache cold, E10m.7's profile being in the key. Both macOS legs pass E10m.3's `stty` row.
+
+Tally (pr-476-ci-68c7294): 19 = 18 + 1.
+
+Tally (pr-476-ci-68c7294-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 127988987444 | success |
+| Lint (luajit) | 127988987847 | success |
+| Lint (lua54) | 127988987856 | success |
+| Changed paths | 127988987964 | success |
+| Commit attribution (D9) | 127988987971 | success |
+| M4 Perf Gates | 127989091219 | success |
+| Test (crdt) | 127989091227 | success |
+| M1 Acceptance Gates | 127989091321 | success |
+| M6 Perf Gates | 127989091359 | success |
+| M10 Perf Gates (crdt) | 127989091448 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127989091494 | success |
+| Test (macos-latest / luajit) | 127989091501 | success |
+| GPU Render (headless) | 127989091509 | success |
+| Test (ubuntu-latest / lua54) | 127989091530 | success |
+| Test (macos-latest / lua54) | 127989091543 | success |
+| Perf budgets (debug) | 127989091599 | success |
+| Test (ubuntu-latest / luajit) | 127989091891 | success |
+| M5 Perf Gates | 127989091917 | success |
+| Docs consistency | 127989093550 | skipped |
+
+Tally (pr-476-ci-68c7294-success): 18 rows of the table above with `result` = `success`.
+Tally (pr-476-ci-68c7294-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-476-ci-68c7294-legs): 6 items in the list below.
+
+- `Test (crdt)` 127989091227: `success`, 228 `running` lines and 228 results, 5,446 / 0 / 87, 59,277 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127989091494: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 65,898 MB available after the tests.
+- `Test (macos-latest / luajit)` 127989091501: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+- `Test (ubuntu-latest / lua54)` 127989091530: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 59,361 MB available after the tests.
+- `Test (macos-latest / lua54)` 127989091543: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+- `Test (ubuntu-latest / luajit)` 127989091891: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 58,740 MB available after the tests.
+
+`Grammar fuzz` 42246213519 at `68c7294`, attempt 1 of 1: `success`, jobs 127988986905 (`Grammar fuzz (asan-strict)`) and 127988986931 (`Grammar fuzz`), each `success`.
+
+Tally (pr-476-fuzz-68c7294): 2 = 2 + 0.
+
+#### The dispatches: E10m.7, the small root (#328)
+
+Each on a probe branch, never merged: `e10m/ci-disk-probe` at `82c3583` and `4672d6f`, `e10m/ci-disk-probe-2` at `63aae5c`, `e10m/ci-disk-probe-3` at `68061ce`, each the phase's tree at that moment and the Ubuntu test legs alone, the other jobs skipped. `0c11a59`, the probe's first form with an invalid workflow, was replaced before any run. `CI` 42225381417, 42225391423 and 42225401331, at `82c3583`, each ended `cancelled` with no job at all, the first two by the workflow's concurrency group, keyed by head then, and the third by me once `4672d6f` gave each dispatch its own group.
+
+Tally (e10m-no-jobs): 3 items in the list below.
+
+- `CI` 42225381417, `line-tables-only`, `cancelled`, no job.
+- `CI` 42225391423, `split-debuginfo=unpacked`, `cancelled`, no job.
+- `CI` 42225401331, the toolchains removed, `cancelled`, no job.
+
+#### `CI` 42225370681: the ballast alone, 9.5 GB left, nothing changed
+
+`CI` 42225370681 at `82c3583`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T13:25:24Z and completed 2026-11-06T13:34:42Z: `failure`. The row's control at its own figure; it does not show the row's fragments exactly, since `Test (crdt)` holds one `No space left on device` beside its SIGBUS and `luajit` fails without one.
+
+Tally (e10m-d-ballast): 16 = 1 + 4 + 11.
+
+Tally (e10m-d-ballast-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127917385861 | success |
+| Format | 127917388301 | skipped |
+| Lint (matrix) | 127917388307 | skipped |
+| Commit attribution (D9) | 127917388624 | skipped |
+| Test (ubuntu-latest / lua54) | 127917463361 | failure |
+| Test (crdt) | 127917463393 | failure |
+| Test (ubuntu-latest / luajit) | 127917463399 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 127917463437 | failure |
+| GPU Render (headless) | 127917465257 | skipped |
+| Docs consistency | 127917465534 | skipped |
+| M1 Acceptance Gates | 127917465702 | skipped |
+| M5 Perf Gates | 127917465734 | skipped |
+| M10 Perf Gates (crdt) | 127917465930 | skipped |
+| Perf budgets (debug) | 127917466185 | skipped |
+| M4 Perf Gates | 127917466365 | skipped |
+| M6 Perf Gates | 127917466463 | skipped |
+
+Tally (e10m-d-ballast-success): 1 row of the table above with `result` = `success`.
+Tally (e10m-d-ballast-failure): 4 rows of the table above with `result` = `failure`.
+Tally (e10m-d-ballast-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-ballast-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / lua54)` 127917463361: `failure`, its log gone (`BlobNotFound`).
+- `Test (crdt)` 127917463393: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 478 MB available after the tests, `signal 7` 3 and `No space left on device` 1 times.
+- `Test (ubuntu-latest / luajit)` 127917463399: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 163 MB available after the tests, `signal 7` 0 and `No space left on device` 4 times.
+- `Test (ubuntu-latest / luajit, no crdt)` 127917463437: `failure`, its log gone (`BlobNotFound`).
+
+#### `CI` 42225484477: `line-tables-only`, no ballast
+
+`CI` 42225484477 at `4672d6f`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T13:26:15Z and completed 2026-11-06T14:07:42Z: `success`. The figure the fix takes: `Test (crdt)`'s target 26,799 MB at the end of its tests.
+
+Tally (e10m-d-line-tables): 16 = 5 + 11.
+
+Tally (e10m-d-line-tables-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127917771241 | success |
+| Commit attribution (D9) | 127917773149 | skipped |
+| Lint (matrix) | 127917773238 | skipped |
+| Format | 127917773581 | skipped |
+| Test (crdt) | 127917856006 | success |
+| Test (ubuntu-latest / luajit) | 127917856262 | success |
+| Test (ubuntu-latest / lua54) | 127917856264 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127917856354 | success |
+| M4 Perf Gates | 127917857313 | skipped |
+| M6 Perf Gates | 127917857729 | skipped |
+| GPU Render (headless) | 127917858069 | skipped |
+| M5 Perf Gates | 127917858092 | skipped |
+| Docs consistency | 127917858176 | skipped |
+| M10 Perf Gates (crdt) | 127917858479 | skipped |
+| M1 Acceptance Gates | 127917858498 | skipped |
+| Perf budgets (debug) | 127917858944 | skipped |
+
+Tally (e10m-d-line-tables-success): 5 rows of the table above with `result` = `success`.
+Tally (e10m-d-line-tables-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-line-tables-legs): 4 items in the list below.
+
+- `Test (crdt)` 127917856006: `success`, 228 `running` lines and 228 results, 5,444 / 0 / 87, 59,278 MB available after the tests.
+- `Test (ubuntu-latest / luajit)` 127917856262: `success`, 229 `running` lines and 229 results, 5,497 / 0 / 87, 58,739 MB available after the tests.
+- `Test (ubuntu-latest / lua54)` 127917856264: `success`, 229 `running` lines and 229 results, 5,497 / 0 / 87, 59,360 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127917856354: `success`, 229 `running` lines and 229 results, 4,862 / 0 / 71, 65,900 MB available after the tests.
+
+#### `CI` 42225496635: `split-debuginfo=unpacked`, no ballast
+
+`CI` 42225496635 at `4672d6f`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T13:26:21Z and completed 2026-11-06T14:12:23Z: `success`. Target 26,487 MB on `Test (crdt)`, whose job ran 45:46.
+
+Tally (e10m-d-split): 16 = 5 + 11.
+
+Tally (e10m-d-split-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127917812951 | success |
+| Lint (matrix) | 127917814533 | skipped |
+| Commit attribution (D9) | 127917815208 | skipped |
+| Format | 127917815325 | skipped |
+| Test (ubuntu-latest / lua54) | 127917887827 | success |
+| Test (crdt) | 127917887888 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127917887912 | success |
+| Test (ubuntu-latest / luajit) | 127917888059 | success |
+| GPU Render (headless) | 127917889868 | skipped |
+| Docs consistency | 127917890346 | skipped |
+| M4 Perf Gates | 127917890398 | skipped |
+| Perf budgets (debug) | 127917890409 | skipped |
+| M10 Perf Gates (crdt) | 127917890554 | skipped |
+| M6 Perf Gates | 127917890583 | skipped |
+| M1 Acceptance Gates | 127917890637 | skipped |
+| M5 Perf Gates | 127917890714 | skipped |
+
+Tally (e10m-d-split-success): 5 rows of the table above with `result` = `success`.
+Tally (e10m-d-split-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-split-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / lua54)` 127917887827: `success`, 229 `running` lines and 229 results, 5,497 / 0 / 87, 59,681 MB available after the tests.
+- `Test (crdt)` 127917887888: `success`, 228 `running` lines and 228 results, 5,444 / 0 / 87, 59,589 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127917887912: `success`, 229 `running` lines and 229 results, 4,862 / 0 / 71, 65,434 MB available after the tests.
+- `Test (ubuntu-latest / luajit)` 127917888059: `success`, 229 `running` lines and 229 results, 5,497 / 0 / 87, 59,055 MB available after the tests.
+
+#### `CI` 42225508887: the toolchains removed, the profile unchanged, no ballast
+
+`CI` 42225508887 at `4672d6f`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T13:26:27Z and completed 2026-11-06T14:05:15Z: `failure`. Frees 30,602 MB; target 51,995 MB on `Test (crdt)`. **#474's first occurrence** on `Test (ubuntu-latest / luajit, no crdt)` 127917941455, unforced, commented when filed.
+
+Tally (e10m-d-toolchains): 16 = 4 + 1 + 11.
+
+Tally (e10m-d-toolchains-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127917856837 | success |
+| Format | 127917858991 | skipped |
+| Lint (matrix) | 127917859136 | skipped |
+| Commit attribution (D9) | 127917859337 | skipped |
+| Test (ubuntu-latest / luajit) | 127917941396 | success |
+| Test (crdt) | 127917941397 | success |
+| Test (ubuntu-latest / lua54) | 127917941452 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127917941455 | failure |
+| M6 Perf Gates | 127917943541 | skipped |
+| Docs consistency | 127917943728 | skipped |
+| Perf budgets (debug) | 127917943809 | skipped |
+| GPU Render (headless) | 127917943937 | skipped |
+| M4 Perf Gates | 127917943953 | skipped |
+| M5 Perf Gates | 127917944016 | skipped |
+| M1 Acceptance Gates | 127917944128 | skipped |
+| M10 Perf Gates (crdt) | 127917944298 | skipped |
+
+Tally (e10m-d-toolchains-success): 4 rows of the table above with `result` = `success`.
+Tally (e10m-d-toolchains-failure): 1 row of the table above with `result` = `failure`.
+Tally (e10m-d-toolchains-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-toolchains-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 127917941396: `success`, 229 `running` lines and 229 results, 5,497 / 0 / 87, 63,694 MB available after the tests.
+- `Test (crdt)` 127917941397: `success`, 228 `running` lines and 228 results, 5,444 / 0 / 87, 64,570 MB available after the tests.
+- `Test (ubuntu-latest / lua54)` 127917941452: `success`, 229 `running` lines and 229 results, 5,497 / 0 / 87, 64,256 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127917941455: `failure`, 227 `running` lines and 227 results, 4,807 / 1 / 71, 83,124 MB available after the tests, failing `a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors`.
+
+#### `CI` 42232908313: the ballast, line tables, no removal
+
+`CI` 42232908313 at `63aae5c`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T14:19:34Z and completed 2026-11-06T14:24:15Z: `failure`. Half the fix: dies on every leg, the surviving log with `signal 7` and no `No space left on device`.
+
+Tally (e10m-d-half-room): 16 = 1 + 4 + 11.
+
+Tally (e10m-d-half-room-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127943036027 | success |
+| Lint (matrix) | 127943038362 | skipped |
+| Format | 127943038424 | skipped |
+| Commit attribution (D9) | 127943038721 | skipped |
+| Test (ubuntu-latest / luajit, no crdt) | 127943141207 | failure |
+| Test (ubuntu-latest / luajit) | 127943141225 | failure |
+| Test (ubuntu-latest / lua54) | 127943141231 | failure |
+| Test (crdt) | 127943141356 | failure |
+| M5 Perf Gates | 127943142963 | skipped |
+| M4 Perf Gates | 127943143149 | skipped |
+| M6 Perf Gates | 127943143216 | skipped |
+| M1 Acceptance Gates | 127943143222 | skipped |
+| GPU Render (headless) | 127943143344 | skipped |
+| Docs consistency | 127943143800 | skipped |
+| M10 Perf Gates (crdt) | 127943144227 | skipped |
+| Perf budgets (debug) | 127943144269 | skipped |
+
+Tally (e10m-d-half-room-success): 1 row of the table above with `result` = `success`.
+Tally (e10m-d-half-room-failure): 4 rows of the table above with `result` = `failure`.
+Tally (e10m-d-half-room-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-half-room-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / luajit, no crdt)` 127943141207: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 180 MB available after the tests, `signal 7` 3 and `No space left on device` 0 times.
+- `Test (ubuntu-latest / luajit)` 127943141225: `failure`, its log gone (`BlobNotFound`).
+- `Test (ubuntu-latest / lua54)` 127943141231: `failure`, its log gone (`BlobNotFound`).
+- `Test (crdt)` 127943141356: `failure`, its log gone (`BlobNotFound`).
+
+#### `CI` 42232921670: the ballast, removal, full debug
+
+`CI` 42232921670 at `63aae5c`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T14:19:40Z and completed 2026-11-06T14:51:45Z: `failure`. Half the fix: three legs die with `signal 7` four times each and no `No space left on device`, the issue's fragments. The one leg that ran reads red only on the probe's own text.
+
+Tally (e10m-d-half-debug): 16 = 1 + 4 + 11.
+
+Tally (e10m-d-half-debug-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127943087669 | success |
+| Format | 127943089781 | skipped |
+| Commit attribution (D9) | 127943089962 | skipped |
+| Lint (matrix) | 127943090397 | skipped |
+| Test (crdt) | 127943185418 | failure |
+| Test (ubuntu-latest / lua54) | 127943185502 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 127943185615 | failure |
+| Test (ubuntu-latest / luajit) | 127943185682 | failure |
+| M5 Perf Gates | 127943187466 | skipped |
+| Perf budgets (debug) | 127943187640 | skipped |
+| GPU Render (headless) | 127943187655 | skipped |
+| M4 Perf Gates | 127943188079 | skipped |
+| Docs consistency | 127943188190 | skipped |
+| M1 Acceptance Gates | 127943188192 | skipped |
+| M10 Perf Gates (crdt) | 127943188196 | skipped |
+| M6 Perf Gates | 127943188325 | skipped |
+
+Tally (e10m-d-half-debug-success): 1 row of the table above with `result` = `success`.
+Tally (e10m-d-half-debug-failure): 4 rows of the table above with `result` = `failure`.
+Tally (e10m-d-half-debug-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-half-debug-legs): 4 items in the list below.
+
+- `Test (crdt)` 127943185418: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 514 MB available after the tests, `signal 7` 4 and `No space left on device` 0 times.
+- `Test (ubuntu-latest / lua54)` 127943185502: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 254 MB available after the tests, `signal 7` 4 and `No space left on device` 0 times.
+- `Test (ubuntu-latest / luajit, no crdt)` 127943185615: `failure`, 227 `running` lines and 227 results, 4,809 / 1 / 71, 6,355 MB available after the tests, failing `the_ubuntu_test_legs_make_room_and_build_with_line_tables`.
+- `Test (ubuntu-latest / luajit)` 127943185682: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 90 MB available after the tests, `signal 7` 4 and `No space left on device` 0 times.
+
+#### `CI` 42232893235: the ballast and the whole fix, its text overridden
+
+`CI` 42232893235 at `63aae5c`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T14:19:28Z and completed 2026-11-06T15:02:23Z: `failure`. Every leg ran its tests and every leg reads red on `the_ubuntu_test_legs_make_room_and_build_with_line_tables`, since this probe overrode the text that row reads: not the ballast leg. **#375's third occurrence** on `Test (ubuntu-latest / luajit, no crdt)` 127943088620, `the editor painted the key before the copy's sync returned`, unforced, commented 6688010460.
+
+Tally (e10m-d-overrode): 16 = 1 + 4 + 11.
+
+Tally (e10m-d-overrode-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127942987675 | success |
+| Format | 127942988227 | skipped |
+| Commit attribution (D9) | 127942989073 | skipped |
+| Lint (matrix) | 127943046057 | skipped |
+| Test (crdt) | 127943088027 | failure |
+| Test (ubuntu-latest / luajit) | 127943088542 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 127943088620 | failure |
+| Test (ubuntu-latest / lua54) | 127943088656 | failure |
+| Docs consistency | 127943090136 | skipped |
+| M5 Perf Gates | 127943090237 | skipped |
+| M6 Perf Gates | 127943090535 | skipped |
+| M4 Perf Gates | 127943090640 | skipped |
+| M10 Perf Gates (crdt) | 127943090938 | skipped |
+| GPU Render (headless) | 127943091055 | skipped |
+| Perf budgets (debug) | 127943091508 | skipped |
+| M1 Acceptance Gates | 127943091615 | skipped |
+
+Tally (e10m-d-overrode-success): 1 row of the table above with `result` = `success`.
+Tally (e10m-d-overrode-failure): 4 rows of the table above with `result` = `failure`.
+Tally (e10m-d-overrode-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-overrode-legs): 4 items in the list below.
+
+- `Test (crdt)` 127943088027: `failure`, 227 `running` lines and 227 results, 5,444 / 1 / 87, 12,461 MB available after the tests, failing `the_ubuntu_test_legs_make_room_and_build_with_line_tables`.
+- `Test (ubuntu-latest / luajit)` 127943088542: `failure`, 227 `running` lines and 227 results, 5,444 / 1 / 87, 12,457 MB available after the tests, failing `the_ubuntu_test_legs_make_room_and_build_with_line_tables`.
+- `Test (ubuntu-latest / luajit, no crdt)` 127943088620: `failure`, 227 `running` lines and 227 results, 4,808 / 2 / 71, 19,614 MB available after the tests, failing `the_ubuntu_test_legs_make_room_and_build_with_line_tables`, `typing_goes_on_while_a_periodic_copy_syncs`.
+- `Test (ubuntu-latest / lua54)` 127943088656: `failure`, 227 `running` lines and 227 results, 5,444 / 1 / 87, 13,077 MB available after the tests, failing `the_ubuntu_test_legs_make_room_and_build_with_line_tables`.
+
+#### `CI` 42239635121: the ballast, the fix as it stands
+
+`CI` 42239635121 at `68061ce`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T15:04:34Z and completed 2026-11-06T15:43:35Z: `success`. **The ballast leg**: `success` on all four, `disk: room: freed 30602 MB, 9500 to 40102 available`.
+
+Tally (e10m-d-ballast-fix): 16 = 5 + 11.
+
+Tally (e10m-d-ballast-fix-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127966204983 | success |
+| Lint (matrix) | 127966207539 | skipped |
+| Commit attribution (D9) | 127966207548 | skipped |
+| Format | 127966207630 | skipped |
+| Test (ubuntu-latest / luajit) | 127966298055 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127966298058 | success |
+| Test (ubuntu-latest / lua54) | 127966298096 | success |
+| Test (crdt) | 127966298148 | success |
+| GPU Render (headless) | 127966300085 | skipped |
+| M1 Acceptance Gates | 127966300166 | skipped |
+| M10 Perf Gates (crdt) | 127966300211 | skipped |
+| M5 Perf Gates | 127966300743 | skipped |
+| M6 Perf Gates | 127966300918 | skipped |
+| Perf budgets (debug) | 127966301194 | skipped |
+| Docs consistency | 127966301334 | skipped |
+| M4 Perf Gates | 127966301923 | skipped |
+
+Tally (e10m-d-ballast-fix-success): 5 rows of the table above with `result` = `success`.
+Tally (e10m-d-ballast-fix-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-ballast-fix-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 127966298055: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 12,456 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127966298058: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 19,614 MB available after the tests.
+- `Test (ubuntu-latest / lua54)` 127966298096: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 13,076 MB available after the tests.
+- `Test (crdt)` 127966298148: `success`, 228 `running` lines and 228 results, 5,446 / 0 / 87, 12,459 MB available after the tests.
+
+#### The dispatches: E10m.11, the ceiling (#409)
+
+On `e10m/ceiling-probe-45` and `e10m/ceiling-probe-60`, never merged, each 900 s slept before the test step on `Test (crdt)` and `Test (ubuntu-latest / lua54)`.
+
+#### `CI` 42248640485 at the 45-minute ceiling
+
+`CI` 42248640485 at `b015cb4`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T16:02:35Z and completed 2026-11-06T16:48:12Z: `cancelled`. Each slept leg `cancelled`, `The job has exceeded the maximum execution time of 45m0s`, no test failed. Its `Test (crdt)` also fetched at 37.3 kB/s, unforced, recorded and not counted, since the plant cut that leg too.
+
+Tally (e10m-d-ceiling-45): 16 = 3 + 2 + 11.
+
+Tally (e10m-d-ceiling-45-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127997447571 | success |
+| Lint (matrix) | 127997449189 | skipped |
+| Format | 127997450449 | skipped |
+| Commit attribution (D9) | 127997450493 | skipped |
+| Test (ubuntu-latest / lua54) | 127997556830 | cancelled |
+| Test (crdt) | 127997556838 | cancelled |
+| Test (ubuntu-latest / luajit, no crdt) | 127997556865 | success |
+| Test (ubuntu-latest / luajit) | 127997556975 | success |
+| M4 Perf Gates | 127997559782 | skipped |
+| M10 Perf Gates (crdt) | 127997559967 | skipped |
+| Docs consistency | 127997560100 | skipped |
+| M5 Perf Gates | 127997560107 | skipped |
+| Perf budgets (debug) | 127997560236 | skipped |
+| GPU Render (headless) | 127997560418 | skipped |
+| M1 Acceptance Gates | 127997560504 | skipped |
+| M6 Perf Gates | 127997561022 | skipped |
+
+Tally (e10m-d-ceiling-45-success): 3 rows of the table above with `result` = `success`.
+Tally (e10m-d-ceiling-45-cancelled): 2 rows of the table above with `result` = `cancelled`.
+Tally (e10m-d-ceiling-45-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-ceiling-45-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / lua54)` 127997556830: `cancelled`, 130 `running` lines and 129 results, 3,988 / 0 / 56, 59,372 MB available after the tests.
+- `Test (crdt)` 127997556838: `cancelled`, 93 `running` lines and 92 results, 3,373 / 0 / 53, 59,442 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127997556865: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 65,897 MB available after the tests.
+- `Test (ubuntu-latest / luajit)` 127997556975: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 58,740 MB available after the tests.
+
+#### `CI` 42248708682 at the 60-minute ceiling
+
+`CI` 42248708682 at `aded3c4`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T16:03:02Z and completed 2026-11-06T16:55:15Z: `success`. Each slept leg `success`, 51:57 and 51:15.
+
+Tally (e10m-d-ceiling-60): 16 = 5 + 11.
+
+Tally (e10m-d-ceiling-60-jobs): 16 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 127997689228 | success |
+| Commit attribution (D9) | 127997691068 | skipped |
+| Format | 127997691498 | skipped |
+| Lint (matrix) | 127997692415 | skipped |
+| Test (ubuntu-latest / luajit) | 127997787227 | success |
+| Test (crdt) | 127997787275 | success |
+| Test (ubuntu-latest / lua54) | 127997787312 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 127997787371 | success |
+| GPU Render (headless) | 127997788772 | skipped |
+| Docs consistency | 127997788938 | skipped |
+| M5 Perf Gates | 127997789105 | skipped |
+| M4 Perf Gates | 127997789305 | skipped |
+| Perf budgets (debug) | 127997789697 | skipped |
+| M10 Perf Gates (crdt) | 127997789810 | skipped |
+| M1 Acceptance Gates | 127997789916 | skipped |
+| M6 Perf Gates | 127997790382 | skipped |
+
+Tally (e10m-d-ceiling-60-success): 5 rows of the table above with `result` = `success`.
+Tally (e10m-d-ceiling-60-skipped): 11 rows of the table above with `result` = `skipped`.
+
+Tally (e10m-d-ceiling-60-legs): 4 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 127997787227: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 58,743 MB available after the tests.
+- `Test (crdt)` 127997787275: `success`, 228 `running` lines and 228 results, 5,446 / 0 / 87, 59,277 MB available after the tests.
+- `Test (ubuntu-latest / lua54)` 127997787312: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 59,364 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 127997787371: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 65,898 MB available after the tests.
+
+#### `main` at `b6d4569`, E10q's close: green
+
+`CI` 42253097447 at `b6d4569`, attempt 1 of 1, `push`, created 2026-11-06T16:31:02Z and completed 2026-11-06T16:33:11Z: `success`. The registry-push shape.
+
+Tally (main-ci-b6d4569): 15 = 6 + 9.
+
+Tally (main-ci-b6d4569-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 128013072920 | success |
+| Lint (luajit) | 128013073228 | success |
+| Format | 128013073359 | success |
+| Commit attribution (D9) | 128013073384 | success |
+| Lint (lua54) | 128013073418 | success |
+| Docs consistency | 128013170203 | success |
+| Perf budgets (debug) | 128013172500 | skipped |
+| M4 Perf Gates | 128013172506 | skipped |
+| GPU Render (headless) | 128013172667 | skipped |
+| Test (matrix) | 128013172809 | skipped |
+| M5 Perf Gates | 128013172919 | skipped |
+| M10 Perf Gates (crdt) | 128013173012 | skipped |
+| M1 Acceptance Gates | 128013173055 | skipped |
+| Test (crdt) | 128013173272 | skipped |
+| M6 Perf Gates | 128013173380 | skipped |
+
+Tally (main-ci-b6d4569-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-b6d4569-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 42253097576 at `b6d4569`, attempt 1 of 1: `success`.
+
+#### The local gates, listed and not tallied
+
+Tally (e10m-gates): 4 items in the list below.
+
+- `20261106T132738Z-489964` at `5d151c2`: five of six, the sweep 237 pairs, 5,888 / 2 / 87, on #434's and #286's selectors under load up to 33.64 and CPU pressure 36.8 beside another project's work and this session's own HLS loops, each commented.
+- `20261106T141958Z-1089611` at `d67028c`: all six ok, 5,892 / 0 / 87 at 237 pairs.
+- `20261106T154707Z-1249224` at `68c7294`: all six ok, 5,892 / 0 / 87 at 237 pairs.
+- `20261106T165808Z-1427584` at `da6d721`: all six ok, 5,892 / 0 / 87 at 237 pairs, no daemon survived.
+
+Also listed: #340's selector twice in whole-suite hand runs on this branch, commented 6688008962, and the 9 stalls of #291's row in its traced runs, commented 6688008512, all local.
+
+So, at E10m's checkpoint: PR #476 is green at its head, not merged, and it closes #276, #282, #288, #316, #328, #332, #363, #373, #374, #381, #409, #427, #461 and #474. By CI #375 moves to three and #474 enters at one. Every other count above stands, those closed by the PR among them, since a control is not an occurrence; the closes happen at the merge.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
