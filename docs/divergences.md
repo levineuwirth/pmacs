@@ -238,9 +238,18 @@ whole. Under one cap a growing register squeezes the rules.
   starts it, but never presents a token, since a grid session is minted
   none: it comes back on a fresh view and says so on its bottom row, and
   a daemon that is gone ends it, saying why. Over SSH the bridge exits 0
-  when the daemon closes its socket, so a dropped session ends the route
-  as it always has, now saying why when a frame was cut short. Removed
-  when the token family reaches grid sessions, which is a wire question.
+  when the daemon closes its socket, so what ends that route is a
+  `Goodbye` or F12 and not the exit, and by what each failure costs the
+  other frontends: a network that is down backs off with no limit,
+  costing nothing; a session that worked and was lost reconnects, its
+  one hold-up already paid; sessions in a row cut before their first
+  frame, a link past the write bound's floor, cost the bound a try and
+  stop at three. The bridge starts a daemon when it finds none, so a
+  reconnect after a crash lands on a new daemon without the old one's
+  unsaved work, and the notice says that, told by `Hello`'s
+  `uptime_secs`, as on the local route if a new daemon answers there.
+  Removed when the token family reaches grid sessions, which is a wire
+  question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon
   keeps one desktop for each kind of window that attaches to it, under
   its own identity and the kind: `desktop::frontend_session_key`, the

@@ -167,10 +167,14 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 
 The daemon writes to every frontend from one thread, so it gives each
 frame 2 s to reach a frontend and then drops that frontend, rather than
-hold the others up. A client stopped past that comes back when resumed.
-A link has to carry a frame's bytes over 2 s or it cannot receive that
-frame at all: an 8 MB snapshot needs 4 MB/s, and a 1 to 5 MB file about
-1 MB/s, so attaching to a large file over a slow link fails, saying so.
+hold the others up. A client stopped past that comes back when resumed,
+on a new view, saying why. Over SSH a lost session comes back the same
+way, and if the daemon died the far side starts a new one, without the
+old one's unsaved work, which the client says. A link has to carry a
+frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
+snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
+a large file over a slow link fails, saying so, after three tries that
+each hold the others up.
 
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),
