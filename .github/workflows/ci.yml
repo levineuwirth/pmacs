@@ -330,7 +330,7 @@ jobs:
     # past a 25-minute ceiling on all four legs at once, and the one
     # whose macOS legs now carry the crdt corpus. See the note above
     # `jobs:` for the measurements and the cold-cache diagnosis.
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       # `crdt` is a default feature, so the four platform legs test the
@@ -667,7 +667,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    timeout-minutes: 45
+    timeout-minutes: 60
     # In the job's `env`, for the arming report's sake, as in `test`.
     env:
       PMACS_REQUIRE_GPU: "1"
