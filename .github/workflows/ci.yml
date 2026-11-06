@@ -61,7 +61,8 @@ concurrency:
 # A stable-toolchain bump invalidates Swatinem's key on every leg at
 # once, and a cold macOS debug build of this workspace plus the suite is
 # the plausible way a HEALTHY run exceeds its ceiling. The test job
-# therefore gets 45 rather than 25, while everything else keeps 25
+# therefore got 45 rather than 25 (60 since #409, below), while
+# everything else keeps 25
 # against a sub-4-minute observed max, except `m6-perf-gates`, which
 # keeps its own tighter 15.
 #
@@ -78,10 +79,38 @@ concurrency:
 # a hang. Rerun, or raise this number. A single leg timing out while its
 # siblings pass is the hang case these ceilings exist to catch.
 #
+# 60, NOT 45, FOR THE TWO TEST JOBS, AND THE CAUSE IS A FETCH AND NOT A
+# HANG (#409, E10m.11, the owner's word of 2026-11-06). `main` at `9d6b7ac`
+# had `Test (ubuntu-latest / lua54)` and `Test (crdt)` cut at 45 with no
+# test failed, after `apt-get install` took 8m11s and 7m38s where it takes
+# about a minute; their test steps also ran 2:34 and 1:46 behind those legs
+# on `CI` 42209599689, which was not explained. Read from the jobs endpoint,
+# whole job:
+#
+#   * `CI` 42246213639 at `68c7294`, the Linux legs' cache cold under line
+#     tables, no slow fetch: `Test (crdt)` 37:58, Ubuntu `luajit` 33:26 and
+#     `lua54` 33:10, no crdt 30:01, macOS `luajit` 32:31 and `lua54` 22:35;
+#   * `CI` 42231835053 at `5fd9d25`, warm and before line tables: `Test
+#     (crdt)` 39:09, the Ubuntu matrix legs 37:58 and 38:00, macOS `luajit`
+#     40:33;
+#   * cold under line tables, `Test (crdt)`: 41:10 in `CI` 42225484477, and
+#     38:45 in `CI` 42239635121 with the small root's ballast and the
+#     image's toolchains removed.
+#
+# So a fetch of eight minutes put a healthy leg at the old ceiling. Shown by
+# 900 s slept before the test step on `Test (crdt)` and the `lua54` leg, not
+# committed: at 45 (`CI` 42248640485) each was cancelled at 45:19 and 45:18
+# with no test failed; at 60 (`CI` 42248708682) each finished green at 51:57
+# and 51:15. 60 sits about 19 minutes over this reading's max, and a hung leg
+# now costs 15 minutes more. Not taken: a bound on `apt-get install`, which
+# would make these legs fail sooner and pass none of them; the fetch makes slow
+# progress, and `scripts/ci-apt-update` bounds `apt-get update`, #330's stall
+# and not this one.
+#
 # This is also the gate that has to exist before the basedpyright-class
 # hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
-# never set, in the test job below. 45 still beats the 360-minute
-# default by an order of magnitude.
+# never set, in the test job below. 60 still beats the 360-minute
+# default six times over.
 #
 # CACHES ARE WRITTEN BY `main` ALONE. Every `Swatinem/rust-cache` step
 # carries `save-if: ${{ github.ref == 'refs/heads/main' }}`, so a pull
@@ -322,12 +351,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 45, not 25: this is the only job whose observed max is minutes
+    # 60, not 25: this is the only job whose observed max is minutes
     # rather than seconds, the only one a cold cache can plausibly push
     # past a 25-minute ceiling on all four legs at once, and the one
     # whose macOS legs now carry the crdt corpus. See the note above
-    # `jobs:` for the measurements and the cold-cache diagnosis.
-    timeout-minutes: 45
+    # `jobs:` for the measurements, the cold-cache diagnosis and why it
+    # is not 45 (#409).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       # `crdt` is a default feature, so the four platform legs test the
@@ -364,8 +394,9 @@ jobs:
       # `scripts/ci-free-disk` has run. Before the cache step, whose key
       # hashes `CARGO_*`, so a full-debug cache is never restored under it.
       # `split-debuginfo` measured the same size, and `Test (crdt)` ran cold
-      # in 45.8 min against this one's 41.2 and this job's ceiling of 45: one
-      # sample each, and the only figure that told them apart (E10m.7).
+      # in 45.8 min against this one's 41.2 and the ceiling of 45 this job
+      # then had: one sample each, and the only figure that told them apart
+      # (E10m.7). The ceiling has since risen (#409); the choice was not remade.
       - name: Line tables only in the dev profile (Linux)
         if: runner.os == 'Linux'
         run: echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
@@ -634,10 +665,11 @@ jobs:
   # would cost minutes to change nothing. The tool-gated code in
   # src/process.rs needs no install on this runner and is armed below.
   #
-  # The ceiling is 45, the `test` matrix's. Like every ceiling here it is
-  # a reading of OBSERVED EXECUTION (the note above `jobs:`), not a
-  # constant, so re-measure before trusting it. Read on 2026-10-21 from
-  # the jobs endpoint's start and completion times:
+  # The ceiling is 60, the `test` matrix's, and the note above `jobs:` has
+  # the reading that raised both (#409). Like every ceiling here it is a
+  # reading of OBSERVED EXECUTION, not a constant, so re-measure before
+  # trusting it. When it rose from 35 to 45, read on 2026-10-21 from the
+  # jobs endpoint's start and completion times:
   #
   #   * `main`, its last ten runs that ran the matrix (2026-10-09 to
   #     2026-10-21, `8b144da` to `828248f`): 29.4 to 34.5 min, the max
@@ -652,7 +684,7 @@ jobs:
   #     15.6 min.
   #
   # Five jobs in that window finished within a minute of 35, and one
-  # crossed it. 45 sits about ten minutes over the observed max. A
+  # crossed it. 45 sat about ten minutes over that observed max. A
   # hosted runner is slower per core than a development machine and
   # renders the GPU suites through lavapipe, and a cold cache adds a
   # full debug workspace build, a case these readings do not separate.
@@ -661,7 +693,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    timeout-minutes: 45
+    timeout-minutes: 60
     # In the job's `env`, for the arming report's sake, as in `test`.
     env:
       PMACS_REQUIRE_GPU: "1"
