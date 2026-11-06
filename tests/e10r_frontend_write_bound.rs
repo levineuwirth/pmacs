@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use pmacs::attach_reconnect::DAEMON_AGE_SLACK;
 use pmacs::daemon::WRITE_FAILURE_DRAIN;
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
 use pmacs_protocol::cell::CellSize;
@@ -551,6 +552,8 @@ fn e10r_3_the_attached_tui_stopped_past_the_bound_comes_back() {
     let mut tui = common::pty::attached_tui(daemon.socket_path(), dir.path(), &[]);
     let pid = i32::try_from(tui.process_id().expect("pid")).expect("pid");
     tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    // A daemon younger than this reads `may be a new daemon` on the way back.
+    std::thread::sleep(DAEMON_AGE_SLACK + Duration::from_secs(1));
     stop(pid);
     let dropped = || daemon_log(&daemon).contains("sent no EOF within");
     let served = serve_until(&mut other, dropped);

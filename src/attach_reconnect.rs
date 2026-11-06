@@ -81,6 +81,21 @@ pub use pmacs_protocol::reconnect::{
 /// The rest is for a `Hello` that takes longer to arrive than the last one did.
 pub const DAEMON_AGE_SLACK: Duration = Duration::from_secs(5);
 
+/// What a later `Hello` says of the daemon an earlier one came from. Ordered by how
+/// much it says, so that the strongest reading since a session last showed one is
+/// `max`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Succession {
+    /// The daemon the last `Hello` came from, as far as anything here can tell.
+    #[default]
+    Same,
+    /// Perhaps another daemon: the age says so, or cannot say, and nothing is certain.
+    /// A stalled link's `Hello` reads this way on a daemon holding all it held.
+    Maybe,
+    /// Another daemon, on no clock.
+    Certain,
+}
+
 /// What a session's `Hello` says of its daemon, and when it was read: what tells the
 /// daemon a session was on from a new one at the same address, with no wire change.
 #[derive(Clone, Copy, Debug)]
@@ -101,28 +116,38 @@ impl DaemonSeen {
         }
     }
 
-    /// Whether `later`, a `Hello` read after this one, cannot be this daemon's.
+    /// What `later`, a `Hello` read after this one, says of this one's daemon.
     ///
     /// A daemon numbers its frontends upward, so a number not past this one is another
-    /// daemon's, on no clock. That misses a new daemon only where other frontends got
-    /// there first, so a `Hello` younger than this daemon would be by then, by more
-    /// than [`DAEMON_AGE_SLACK`], says so too.
+    /// daemon's, on no clock: [`Succession::Certain`]. A number past it says nothing
+    /// by itself, since other frontends may have got to a new daemon first, so the
+    /// age is read, and it can only ever say [`Succession::Maybe`]: a `Hello` younger
+    /// than this daemon would be by then, by more than [`DAEMON_AGE_SLACK`], or a
+    /// daemon that would still be inside the slack, too young for an age to tell.
     ///
     /// What the age cannot tell, each said so a notice is not read for more than it
     /// is. Both clocks are `Instant`s, which stop while a machine sleeps, so on one
-    /// machine they agree; over SSH, a remote host that slept past the slack reads as a
-    /// new daemon, and a client that slept may read a new daemon others got to first as
-    /// the old one. A `Hello` held past the slack, by a stop or a stalled link, reads
-    /// as a new daemon. A daemon that lived less than the slack is told only by the
-    /// number.
+    /// machine they agree; over SSH, a remote host that slept past the slack reads as
+    /// `Maybe`, and a client that slept may read a new daemon others got to first as
+    /// [`Succession::Same`]. A `Hello` held past the slack, by a stop or a stalled link,
+    /// reads as `Maybe` on a daemon holding everything it held, which is why that
+    /// reading says `may be`. A new daemon others got to first, begun within the slack
+    /// of the last one's start and read when the last would be past it, reads as
+    /// `Same`: nothing here tells it from the same daemon's `Hello` held a moment.
     #[must_use]
-    pub fn is_succeeded_by(&self, later: &Self) -> bool {
+    pub fn succeeded_by(&self, later: &Self) -> Succession {
         if later.frontend_id.0 <= self.frontend_id.0 {
-            return true;
+            return Succession::Certain;
         }
         let elapsed = later.read_at.saturating_duration_since(self.read_at);
         let expected = Duration::from_secs(self.uptime_secs).saturating_add(elapsed);
-        Duration::from_secs(later.uptime_secs).saturating_add(DAEMON_AGE_SLACK) < expected
+        let younger =
+            Duration::from_secs(later.uptime_secs).saturating_add(DAEMON_AGE_SLACK) < expected;
+        if younger || expected <= DAEMON_AGE_SLACK {
+            Succession::Maybe
+        } else {
+            Succession::Same
+        }
     }
 }
 
@@ -242,11 +267,11 @@ mod tests {
     // DaemonSeen
     // -----------------------------------------------------------------
 
-    /// Is a `Hello` of `later` seconds, read `after` seconds on with a higher number,
-    /// a new daemon, after one of `first`?
-    fn new_daemon(first: u64, after: f64, later: u64) -> bool {
+    /// What a `Hello` of `later` seconds, read `after` seconds on with a higher number,
+    /// says after one of `first`.
+    fn reads(first: u64, after: f64, later: u64) -> Succession {
         let start = Instant::now();
-        DaemonSeen::new(FrontendId(5), first, start).is_succeeded_by(&DaemonSeen::new(
+        DaemonSeen::new(FrontendId(5), first, start).succeeded_by(&DaemonSeen::new(
             FrontendId(6),
             later,
             start + Duration::from_secs_f64(after),
@@ -254,53 +279,70 @@ mod tests {
     }
 
     #[test]
-    fn a_frontend_number_not_past_the_last_is_a_new_daemon_on_no_clock() {
+    fn a_frontend_number_not_past_the_last_is_certain_on_no_clock() {
         let start = Instant::now();
         for id in [2, 5] {
-            assert!(
-                DaemonSeen::new(FrontendId(5), 0, start).is_succeeded_by(&DaemonSeen::new(
+            assert_eq!(
+                DaemonSeen::new(FrontendId(5), 1_000, start).succeeded_by(&DaemonSeen::new(
                     FrontendId(id),
-                    0,
+                    1_000,
                     start
                 )),
+                Succession::Certain,
                 "{id}"
             );
         }
-        assert!(
-            !DaemonSeen::new(FrontendId(5), 0, start).is_succeeded_by(&DaemonSeen::new(
+        assert_ne!(
+            DaemonSeen::new(FrontendId(5), 1_000, start).succeeded_by(&DaemonSeen::new(
                 FrontendId(6),
-                0,
+                1_000,
                 start
             )),
+            Succession::Certain,
         );
     }
 
     #[test]
     fn a_daemon_that_went_on_is_the_same_one() {
-        assert!(!new_daemon(100, 10.0, 110));
+        assert_eq!(reads(100, 10.0, 110), Succession::Same);
         // Whole seconds, each way, the worst of what the real bridge read.
-        assert!(!new_daemon(0, 3.86, 3));
+        assert_eq!(reads(10, 3.86, 13), Succession::Same);
         // Older than expected: a client that slept, its clock stopped.
-        assert!(!new_daemon(100, 10.0, 8_000));
+        assert_eq!(reads(100, 10.0, 8_000), Succession::Same);
     }
 
     #[test]
-    fn a_daemon_younger_than_the_last_would_be_is_new() {
-        assert!(new_daemon(100, 10.0, 0));
-        // One this very session started: only the time since says so.
-        assert!(new_daemon(0, 8.0, 0));
+    fn a_younger_age_alone_is_only_maybe() {
+        assert_eq!(reads(100, 10.0, 0), Succession::Maybe);
+        // The real run: a `Hello` held 7 s by a stalled link, on the same daemon.
+        assert_eq!(reads(100, 7.5, 100), Succession::Maybe);
+    }
+
+    #[test]
+    fn an_old_daemon_inside_the_slack_is_only_maybe() {
+        // The real run: killed 2.5 s after it started, its successor's number past.
+        assert_eq!(reads(0, 3.0, 0), Succession::Maybe);
+        // The edge of it, and its first second out.
+        assert_eq!(reads(0, 5.0, 5), Succession::Maybe);
+        assert_eq!(reads(0, 6.0, 6), Succession::Same);
     }
 
     #[test]
     fn the_age_slack_is_what_a_daemon_may_fall_short_by() {
-        assert!(!new_daemon(0, 5.0, 0));
-        assert!(new_daemon(0, 5.5, 0));
+        assert_eq!(reads(100, 5.0, 100), Succession::Same);
+        assert_eq!(reads(100, 5.5, 100), Succession::Maybe);
     }
 
     #[test]
     fn a_daemons_age_past_a_duration_does_not_panic() {
-        assert!(!new_daemon(u64::MAX, 1.0, u64::MAX));
-        assert!(new_daemon(u64::MAX, 1.0, 0));
+        assert_eq!(reads(u64::MAX, 1.0, u64::MAX), Succession::Same);
+        assert_eq!(reads(u64::MAX, 1.0, 0), Succession::Maybe);
+    }
+
+    #[test]
+    fn the_strongest_reading_is_the_greatest() {
+        assert!(Succession::Same < Succession::Maybe);
+        assert!(Succession::Maybe < Succession::Certain);
     }
 
     #[test]

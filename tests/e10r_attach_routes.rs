@@ -22,9 +22,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use pmacs::attach::PMACS_TEST_SSH_BIN;
-#[cfg(feature = "crdt")]
-use pmacs::attach_reconnect::DAEMON_AGE_SLACK;
-use pmacs::attach_reconnect::{HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
+use pmacs::attach_reconnect::{DAEMON_AGE_SLACK, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 use pmacs::frontend_stream::FRAME_WRITE_BOUND;
 use pmacs_protocol::message::{
     AttachRequest, GoodbyeReason, Hello, InstanceCapabilities, InstanceIdentity, InstanceMessage,
@@ -34,7 +32,26 @@ use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{FRAME_CUT_SHORT_SENTENCE, FrontendId};
 
 use common::daemon::TestDaemon;
-use common::pty::attached_tui;
+use common::pty::{ScreenTui, attached_tui, spawn_pmacs_in_pty_tapped};
+
+/// G1's sentences, the owner's words of 2026-11-06, written out here so that a word
+/// moved in the product fails a row. The first is said for certain, the second when
+/// a `Hello` cannot tell.
+const NEW_DAEMON_NOTICE: &str = "[pmacs: new daemon; work not autosaved is gone; M-x recover-file]";
+const MAYBE_NEW_DAEMON_NOTICE: &str =
+    "[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]";
+/// The plain notices, which say nothing of a new daemon.
+const PLAIN_DAEMON_NOTICE: &str =
+    "[pmacs reconnected on a new view: the daemon closed the last one]";
+const PLAIN_LINK_NOTICE: &str = "[pmacs reconnected on a new view: the connection was lost]";
+
+/// A daemon too old for its age to fall inside the slack, for a row about what a real
+/// session on a healthy daemon reads: under it, a `Hello` reads `may be a new daemon`,
+/// which [`p6_a_hello_held_past_the_slack_on_a_real_daemon_reads_may_be`]'s neighbours
+/// state.
+fn past_the_age_slack() {
+    std::thread::sleep(DAEMON_AGE_SLACK + Duration::from_secs(1));
+}
 
 fn daemon_log(daemon: &TestDaemon) -> String {
     std::fs::read_to_string(format!("{}.stderr.log", daemon.socket_path().display()))
@@ -58,6 +75,7 @@ fn a_lone_attached_tui_stopped_past_the_bound_comes_back() {
     let pid =
         nix::unistd::Pid::from_raw(i32::try_from(tui.process_id().expect("pid")).expect("pid"));
     tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    past_the_age_slack();
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
     let dropped = || daemon_log(&daemon).contains("sent no EOF within");
     let deadline = Instant::now() + Duration::from_mins(2);
@@ -189,6 +207,7 @@ fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
     let socket = daemon.socket_path().to_str().expect("utf-8").to_owned();
     let mut shell = under_a_shell(&["--attach", "--socket", &socket], dir.path(), &go, &[]);
     shell.wait_for_output("*scratch*", Duration::from_secs(30));
+    past_the_age_slack();
     stop_the_shells_child_until_dropped(&shell, &daemon);
     std::fs::write(&go, b"").expect("say go");
     shell.wait_for_output("reconnected on a new view", Duration::from_secs(20));
@@ -212,8 +231,10 @@ struct StandInDaemon {
 }
 
 impl StandInDaemon {
+    /// One daemon's `Hello`s: numbers going up, on a daemon too old for its age to fall
+    /// inside the slack, so what a session reads of it is what the row's bytes say.
     fn serve(session: impl Fn(usize, &mut UnixStream) + Send + 'static) -> Self {
-        Self::serve_saying(|n| (u64::try_from(n).expect("n"), 0), session)
+        Self::serve_saying(|n| (u64::try_from(n).expect("n"), 1_000), session)
     }
 
     /// [`Self::serve`], its `Hello` saying `identity(n)`, a frontend number and an
@@ -334,15 +355,13 @@ fn e10r_3_a_first_frame_starts_the_local_routes_count_again() {
     assert!(said.contains("reconnected on a new view"), "{said:?}");
 }
 
-/// A new daemon answering the local route's socket, younger than the last would be
-/// by now and past its frontend number, as one is when others got there first, is
-/// said on the bottom row, since it has none of the last one's unsaved work. A daemon
-/// restarted on its socket is how this route meets one: with nobody there it ends
-/// instead. The stand-in's `Goodbye` ends it.
+/// A daemon restarted on its socket is how the local route meets a new one: with
+/// nobody there it ends instead. A number not past the last says so for certain, in
+/// the first of the owner's sentences. The stand-in's `Goodbye` ends it.
 #[test]
-fn e10r_3_a_new_daemon_on_the_local_routes_socket_says_the_old_ones_work_is_gone() {
+fn e10r_3_a_new_daemon_on_the_local_routes_socket_says_so_for_certain() {
     let daemon = StandInDaemon::serve_saying(
-        |n| if n == 1 { (2, 1_000) } else { (9, 0) },
+        |n| if n == 1 { (2, 1_000) } else { (2, 0) },
         |n, stream| {
             first_frame(stream);
             if n == 2 {
@@ -531,7 +550,7 @@ impl BridgedSsh {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\necho x >> '{count}'\nPMACS_ATTACH_PROTOCOL_FD=2 exec '{pmacs}' --daemon-attach --socket '{socket}'\n",
+                "#!/bin/sh\necho $$ >> '{count}'\nPMACS_ATTACH_PROTOCOL_FD=2 exec '{pmacs}' --daemon-attach --socket '{socket}'\n",
                 count = dir.path().join("count").display(),
                 pmacs = env!("CARGO_BIN_EXE_pmacs"),
                 socket = socket.display(),
@@ -550,6 +569,11 @@ impl BridgedSsh {
 
     /// A real TUI through the bridge, the backoff scaled to `scale_ms`.
     fn attach(&self, scale_ms: &str) -> common::pty::PmacsPty {
+        self.spawn(scale_ms, 80)
+    }
+
+    /// [`Self::attach`], `cols` wide.
+    fn spawn(&self, scale_ms: &str, cols: u16) -> common::pty::PmacsPty {
         let home = self.dir.path();
         let script = home.join("ssh");
         common::pty::spawn_pmacs_in_pty(
@@ -557,17 +581,102 @@ impl BridgedSsh {
             &[
                 ("HOME", home),
                 ("XDG_CONFIG_HOME", home),
+                ("PMACS_STATE_HOME", home),
+                (PMACS_TEST_SSH_BIN, &script),
+                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
+            ],
+            24,
+            cols,
+        )
+    }
+
+    /// [`Self::attach`], its screen modelled from what it writes.
+    fn attach_screen(&self, scale_ms: &str) -> ScreenTui {
+        let home = self.dir.path();
+        let script = home.join("ssh");
+        let (pty, tap) = spawn_pmacs_in_pty_tapped(
+            &["--attach", "farhost"],
+            &[
+                ("HOME", home),
+                ("XDG_CONFIG_HOME", home),
+                ("PMACS_STATE_HOME", home),
                 (PMACS_TEST_SSH_BIN, &script),
                 (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
             ],
             24,
             80,
+        );
+        ScreenTui::new(pty, tap, 24, 80)
+    }
+
+    /// The real route with no daemon of the row's own: the socket is in the stand-in's
+    /// directory, 0700, the bridge starts every daemon on it, and each reads `init_lua`
+    /// from that directory and keeps its state there, as a host's daemons do.
+    fn starting_its_own_daemons(init_lua: &str) -> (Self, StartedByTheBridge) {
+        let holder = tempfile::TempDir::new().expect("tempdir");
+        std::fs::set_permissions(
+            holder.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )
+        .expect("chmod");
+        let socket = holder.path().join("d.sock");
+        let ssh = Self::new(&socket);
+        let config = ssh.dir.path().join("pmacs");
+        std::fs::create_dir_all(&config).expect("the config directory");
+        std::fs::write(config.join("init.lua"), init_lua).expect("init.lua");
+        let mut lockfile = socket.as_os_str().to_os_string();
+        lockfile.push(".lock");
+        (
+            ssh,
+            StartedByTheBridge {
+                lockfile: lockfile.into(),
+                _holder: Some(holder),
+            },
+        )
+    }
+
+    /// Whatever pid each invocation so far wrote, in order.
+    fn pids(&self) -> Vec<i32> {
+        std::fs::read_to_string(self.dir.path().join("count"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    }
+
+    /// A stand-in like [`Self::new`] whose second invocation on passes on what its
+    /// bridge says only after `hold` seconds, as a stalled link does: what the daemon
+    /// says first is written at once and read that much later.
+    fn holding_later_sessions(socket: &Path, hold: u32) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let count = dir.path().join("count");
+        let script = dir.path().join("ssh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+echo $$ >> '{count}'
+export PMACS_ATTACH_PROTOCOL_FD=2
+if [ "$(wc -l < '{count}')" -ge 2 ]; then
+  {{ '{pmacs}' --daemon-attach --socket '{socket}' 2>&1 >/dev/null; }} | {{ sleep {hold}; cat; }} >&2
+else
+  exec '{pmacs}' --daemon-attach --socket '{socket}'
+fi
+"#,
+                count = count.display(),
+                pmacs = env!("CARGO_BIN_EXE_pmacs"),
+                socket = socket.display(),
+            ),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        Self { dir }
     }
 }
 
-/// A `Hello` with the next frontend number, as one daemon's are, so that sessions
-/// built in order are the same daemon's.
+/// A `Hello` with the next frontend number and an age past the slack, as one old
+/// daemon's are, so that sessions built in order are the same daemon's.
 fn hello_frame() -> Vec<u8> {
     static NEXT: AtomicU64 = AtomicU64::new(2);
     let mut bytes = Vec::new();
@@ -580,7 +689,7 @@ fn hello_frame() -> Vec<u8> {
                 pmacs_version: "0.0.0-test".to_owned(),
                 build_hash: None,
                 instance_name: Some("stand-in".to_owned()),
-                uptime_secs: 0,
+                uptime_secs: 1_000,
                 working_directory: "/tmp".to_owned(),
             },
             instance_capabilities: InstanceCapabilities::default(),
@@ -691,6 +800,7 @@ fn e10r_remote_a_tui_brought_back_by_a_shells_fg_is_on_a_fresh_view_and_hears_it
         &[(PMACS_TEST_SSH_BIN, &script)],
     );
     shell.wait_for_output("*scratch*", Duration::from_secs(30));
+    past_the_age_slack();
     stop_the_shells_child_until_dropped(&shell, &daemon);
     std::fs::write(&go, b"").expect("say go");
     shell.wait_for_output("reconnected on a new view", Duration::from_secs(30));
@@ -706,12 +816,12 @@ fn e10r_remote_a_tui_brought_back_by_a_shells_fg_is_on_a_fresh_view_and_hears_it
     assert_eq!(ssh.invocations(), 2, "and nothing tried again");
 }
 
-const NEW_DAEMON_NOTICE: &str = "reconnected to a new daemon: the old one's unsaved work is gone";
-
 /// A daemon the bridge started, which nothing here spawned: its lockfile names it,
 /// and it is gone when this is.
 struct StartedByTheBridge {
     lockfile: std::path::PathBuf,
+    /// The directory the socket is in, for a route with no daemon of the row's own.
+    _holder: Option<tempfile::TempDir>,
 }
 
 impl StartedByTheBridge {
@@ -721,6 +831,24 @@ impl StartedByTheBridge {
             .trim()
             .parse()
             .ok()
+    }
+
+    /// `SIGKILL` the one running now, once its lockfile names one.
+    fn kill_the_one_running(&self) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(pid) = self.pid()
+                && nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                )
+                .is_ok()
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "no daemon to kill");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -739,17 +867,17 @@ impl Drop for StartedByTheBridge {
 }
 
 /// F9's second witness: a daemon killed under the TUI, over the real bridge. The next
-/// bridge finds nobody and starts a new daemon, without the old one's unsaved work, so
-/// the notice says that, and a key typed after that is the new daemon's to answer. At
-/// `b25e779` the bridge's exit 0 ended it, status 0, saying nothing of the kind. The
-/// kill comes as soon as the session is up, which `uptime_secs` alone cannot tell (a
-/// real run read the plain notice here): the new daemon's first frontend number is
-/// what says so.
+/// bridge finds nobody and starts a new daemon, so the notice says that for certain,
+/// and a key typed after that is the new daemon's to answer. At `b25e779` the bridge's
+/// exit 0 ended it, status 0, saying nothing of the kind. The kill comes as soon as
+/// the session is up, which `uptime_secs` alone cannot tell (a real run read the plain
+/// notice here): the new daemon's first frontend number is what says so.
 #[test]
-fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_the_old_ones_work_is_gone() {
+fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_so_for_certain() {
     let mut daemon = TestDaemon::spawn();
     let started = StartedByTheBridge {
         lockfile: daemon.lockfile_path(),
+        _holder: None,
     };
     let first = started.pid().expect("the daemon's lockfile");
     let ssh = BridgedSsh::new(daemon.socket_path());
@@ -780,16 +908,18 @@ fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_the_old_ones_work_
 }
 
 /// Where other frontends got to the new daemon first, this one's number is past its
-/// last, so only `uptime_secs` says what happened: two real TUIs through the real
-/// bridge on a daemon that lived past the slack, one reattached quickly and the other
-/// at a scale that leaves time for connections of the row's own to take the numbers
-/// past its last. Two frontends, so a build with CRDT.
+/// last, so only `uptime_secs` says what happened, and it can say only that this may
+/// be a new daemon: two real TUIs through the real bridge on a daemon that lived past
+/// the slack, one reattached quickly, which reads the first sentence, and the other at
+/// a scale that leaves time for connections of the row's own to take the numbers past
+/// its last. Two frontends, so a build with CRDT.
 #[cfg(feature = "crdt")]
 #[test]
-fn e10r_remote_a_new_daemon_another_frontend_reached_first_is_told_by_its_uptime() {
+fn e10r_remote_a_new_daemon_another_frontend_reached_first_may_be_one_by_its_uptime() {
     let mut daemon = TestDaemon::spawn();
     let started = StartedByTheBridge {
         lockfile: daemon.lockfile_path(),
+        _holder: None,
     };
     let socket = daemon.socket_path().to_path_buf();
     let ssh = BridgedSsh::new(&socket);
@@ -809,7 +939,7 @@ fn e10r_remote_a_new_daemon_another_frontend_reached_first_is_told_by_its_uptime
         let mut stream = UnixStream::connect(socket.as_path()).expect("the new daemon");
         let _: Hello = read_message(&mut stream).expect("its Hello");
     }
-    late.wait_for_output(NEW_DAEMON_NOTICE, Duration::from_mins(1));
+    late.wait_for_output(MAYBE_NEW_DAEMON_NOTICE, Duration::from_mins(1));
     for tui in [&mut late, &mut quick] {
         tui.write_input(b"\x1b[24~").expect("F12");
         let status = tui
@@ -1109,4 +1239,323 @@ fn e10r_3_ctrl_c_in_the_local_routes_wait_ends_it() {
         .expect("C-c ends the wait");
     assert!(status.success(), "{status:?}");
     assert_eq!(daemon.connections(), 1, "and nothing tried again");
+}
+
+// ---------------------------------------------------------------------------
+// E10r review 1's probes, committed as witnesses, and G1's sentences
+// ---------------------------------------------------------------------------
+
+/// `M-x`, then `name`, then a return: a command by name, which no chord can race (#470).
+fn run_command(tui: &mut ScreenTui, name: &str) {
+    let limit = Duration::from_secs(30);
+    tui.write(b"\x1bx");
+    tui.wait_for(limit, "the M-x prompt", &|t| t.bottom_row().contains("M-x"));
+    tui.write(name.as_bytes());
+    tui.write(b"\r");
+}
+
+/// **Review 1's Medium 1, its `p1` and `p3_autosave`:** a file typed into and not saved,
+/// a recovery copy of it on disk, its daemon killed. The notice does not call that work
+/// gone, and the positive control: the new daemon's `M-x recover-file` brings it back.
+/// At `5fd9d25` the notice read `the old one's unsaved work is gone`.
+#[test]
+fn p1_the_notice_does_not_call_what_autosave_holds_gone() {
+    const WORK: &str = "UNSAVEDWORK";
+    let note = tempfile::TempDir::new().expect("tempdir");
+    let file = note.path().join("notes.txt");
+    std::fs::write(&file, "one\n").expect("write the file");
+    let typed = note.path().join("typed");
+    let init = format!(
+        "pmacs.autosave.interval_ms(1000)\nlocal b = pmacs.buffer.find_or_open({file:?})\nlocal typed = io.open({typed:?})\nif typed then typed:close() else\n  io.open({typed:?}, 'w'):close()\n  b:insert(0, '{WORK}\\n')\nend\n",
+        file = file.display().to_string(),
+        typed = typed.display().to_string(),
+    );
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons(&init);
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*") || t.screen_contains("notes.txt")
+    });
+    // The precondition: the work is in a recovery copy, and not in the file.
+    let copies = ssh.dir.path().join("pmacs/autosave");
+    let held = || {
+        std::fs::read_dir(&copies).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                std::fs::read(entry.path())
+                    .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(WORK))
+            })
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !held() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(held(), "a recovery copy holds the work");
+    assert_eq!(std::fs::read_to_string(&file).expect("the file"), "one\n");
+    started.kill_the_one_running();
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row().contains("reconnected") || t.bottom_row().contains("new daemon")
+    });
+    let said = tui.bottom_row();
+    assert!(
+        !said.contains("unsaved work is gone"),
+        "it told the user the work is gone with a recovery copy on disk: {said:?}"
+    );
+    assert_eq!(said, NEW_DAEMON_NOTICE);
+    // What that sentence sends the user to, once the notice has stood.
+    std::thread::sleep(Duration::from_secs(6));
+    run_command(&mut tui, "editor.switch-buffer");
+    tui.wait_for(Duration::from_secs(30), "the switch prompt", &|t| {
+        t.bottom_row().contains("witch")
+    });
+    tui.write(b"notes.txt\r");
+    tui.wait_for(Duration::from_secs(30), "the file, as saved", &|t| {
+        t.screen_contains("notes.txt") && t.screen_contains("one")
+    });
+    assert!(
+        !tui.screen_contains(WORK),
+        "the new daemon does not hold it yet"
+    );
+    run_command(&mut tui, "recover-file");
+    tui.wait_for(Duration::from_secs(30), "recover-file's question", &|t| {
+        t.bottom_row().contains("Recover from autosave")
+    });
+    tui.write(b"yes\r");
+    tui.wait_for(Duration::from_secs(30), "the work, brought back", &|t| {
+        t.screen_contains(WORK)
+    });
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// A `Hello` past the last number and younger than the last daemon would be is only
+/// `may be`, through either route, since a stalled link's reads the same. The stand-in's
+/// `Goodbye` ends each. At `5fd9d25` this read the categorical sentence.
+#[test]
+fn g1_a_number_past_the_last_and_an_age_short_reads_may_be_on_either_route() {
+    let saying = |n| if n == 1 { (2, 1_000) } else { (9, 0) };
+    let session = |n: usize, stream: &mut UnixStream| {
+        first_frame(stream);
+        if n == 2 {
+            std::thread::sleep(Duration::from_millis(500));
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+            )
+            .expect("Goodbye");
+        }
+    };
+    let local = StandInDaemon::serve_saying(saying, session);
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &local.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
+
+    let remote = StandInDaemon::serve_saying(saying, session);
+    let ssh = BridgedSsh::new(&remote.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
+}
+
+/// **Review 1's Low 1, `p7_silent`'s sequence, deterministically:** a daemon killed young
+/// under two TUIs, the second to come back reading a number past its last on a daemon
+/// too young for an age to tell. At `5fd9d25` that read the plain notice on a new daemon,
+/// 6 of 6 rounds. The real two TUIs are in the round's note.
+#[test]
+fn p7_a_number_past_the_last_on_a_daemon_too_young_to_tell_reads_may_be() {
+    let daemon = StandInDaemon::serve_saying(
+        |n| (u64::try_from(n).expect("n") + 1, 0),
+        |n, stream| {
+            first_frame(stream);
+            if n == 2 {
+                std::thread::sleep(Duration::from_millis(500));
+                write_message(
+                    stream,
+                    &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+                )
+                .expect("Goodbye");
+            }
+        },
+    );
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
+    assert!(!said.contains(PLAIN_DAEMON_NOTICE), "{said:?}");
+}
+
+/// A TUI stopped, its daemon killed at `age`, a new one started by hand on the socket
+/// with a connection of the row's own there first, then resumed: `p19_local`'s sequence.
+fn p19_local_route_after(age: Duration) -> String {
+    let mut daemon = TestDaemon::spawn();
+    let socket = daemon.socket_path().to_path_buf();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &socket,
+        dir.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let pid =
+        nix::unistd::Pid::from_raw(i32::try_from(tui.process_id().expect("pid")).expect("pid"));
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    std::thread::sleep(age);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL");
+    daemon.wait_for_exit().expect("the daemon is gone");
+    let mut second = common::daemon::spawn_daemon_process(&socket);
+    common::daemon::wait_for_socket_or_exit(&socket, second.child(), Duration::from_secs(30))
+        .expect("the new daemon");
+    // The readiness wait took a number, and this takes one more: past the TUI's last.
+    let mut stream = UnixStream::connect(&socket).expect("the new daemon");
+    let _: Hello = read_message(&mut stream).expect("its Hello");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    tui.wait_for_output("[pmacs", Duration::from_secs(30));
+    tui.wait_for_output("]", Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(300));
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let _ = tui.wait_for_exit(Duration::from_secs(10));
+    said
+}
+
+/// **Review 1's Low 1, `p19_local`:** an old daemon of 8 s and a new one another
+/// connection reached first, on the local route: its age says only `may be`. At
+/// `5fd9d25` this was the categorical sentence.
+#[test]
+fn p19_the_local_route_onto_a_new_daemon_others_reached_first_reads_may_be() {
+    let said = p19_local_route_after(Duration::from_secs(8));
+    assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
+    assert!(!said.contains("reconnected on a new view"), "{said:?}");
+}
+
+/// **Review 1's Medium 2, `p6_false_alarm`:** a real daemon never touched, the link
+/// killed, the next session's first bytes held 7 s, a stalled link. The `Hello` reads
+/// younger than the daemon would be, so the notice says `may be`, and the work is there
+/// when the sentence's `C-x b` looks. At `5fd9d25` this called the work gone.
+#[test]
+fn p6_a_hello_held_past_the_slack_on_a_real_daemon_reads_may_be() {
+    const WORK: &str = "UNSAVEDWORK";
+    let note = tempfile::TempDir::new().expect("tempdir");
+    let file = note.path().join("notes.txt");
+    std::fs::write(&file, "one\n").expect("write the file");
+    let daemon = TestDaemon::spawn_with_config(&format!(
+        "local b = pmacs.buffer.find_or_open({:?})\nb:insert(0, '{WORK}\\n')\n",
+        file.display().to_string()
+    ));
+    let before = std::fs::read_to_string(daemon.lockfile_path()).expect("the lockfile");
+    let ssh = BridgedSsh::holding_later_sessions(daemon.socket_path(), 7);
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*") || t.screen_contains("notes.txt")
+    });
+    let first = ssh.pids()[0];
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(first),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row().contains("new daemon") || t.bottom_row().contains("reconnected")
+    });
+    assert_eq!(tui.bottom_row(), MAYBE_NEW_DAEMON_NOTICE);
+    assert_eq!(
+        std::fs::read_to_string(daemon.lockfile_path()).expect("the lockfile"),
+        before,
+        "the same daemon"
+    );
+    std::thread::sleep(Duration::from_secs(6));
+    run_command(&mut tui, "editor.switch-buffer");
+    tui.wait_for(Duration::from_secs(30), "the switch prompt", &|t| {
+        t.bottom_row().contains("witch")
+    });
+    tui.write(b"notes.txt\r");
+    tui.wait_for(Duration::from_secs(30), "the work, still there", &|t| {
+        t.screen_contains(WORK)
+    });
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(15)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// The same with a hold of 1 s, on a daemon past the slack: nothing says this is another
+/// daemon, and the notice stays plain.
+#[test]
+fn p6_a_hello_held_a_moment_on_a_real_daemon_stays_plain() {
+    let daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::holding_later_sessions(daemon.socket_path(), 1);
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    past_the_age_slack();
+    let first = ssh.pids()[0];
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(first),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row().contains("reconnected")
+    });
+    assert_eq!(tui.bottom_row(), PLAIN_LINK_NOTICE);
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(15)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// **Review 1's Low 7:** on a narrow pane each sentence takes its short form, so the
+/// clause that matters is not cut, where at `5fd9d25` a 40-column pane lost it.
+#[test]
+fn p4_a_narrow_pane_still_reads_what_is_gone() {
+    let read = |saying: fn(usize) -> (u64, u64), cols: u16| {
+        let daemon = StandInDaemon::serve_saying(saying, |_, stream| {
+            first_frame(stream);
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let ssh = BridgedSsh::new(&daemon.socket());
+        let mut tui = ssh.spawn("1", cols);
+        tui.wait_for_output("[", Duration::from_secs(20));
+        tui.wait_for_output("]", Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(200));
+        let said = String::from_utf8_lossy(&tui.output()).into_owned();
+        tui.write_input(b"\x1b[24~").expect("F12");
+        let _ = tui.wait_for_exit(Duration::from_secs(10));
+        said
+    };
+    let certain = |n: usize| if n == 1 { (2, 1_000) } else { (2, 0) };
+    let maybe = |n: usize| if n == 1 { (2, 1_000) } else { (9, 0) };
+    let said = read(certain, 40);
+    assert!(
+        said.contains("[new daemon; work not autosaved is gone]"),
+        "cut at 40 columns the clause is lost: {said:?}"
+    );
+    let said = read(maybe, 30);
+    assert!(said.contains("[this may be a new daemon]"), "{said:?}");
 }

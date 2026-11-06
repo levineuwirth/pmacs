@@ -169,8 +169,12 @@ The daemon writes to every frontend from one thread, so it gives each
 frame 2 s to reach a frontend and then drops that frontend, rather than
 hold the others up. A client stopped past that comes back when resumed,
 on a new view, saying why. Over SSH a lost session comes back the same
-way, and if the daemon died the far side starts a new one, without the
-old one's unsaved work, which the client says. A link has to carry a
+way, and if the daemon died the far side starts a new one, which holds
+what autosave kept and nothing else. The client says
+`[pmacs: new daemon; work not autosaved is gone; M-x recover-file]` when
+it is certain, and
+`[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`
+when it cannot tell. A link has to carry a
 frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
 snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
 a large file over a slow link fails, saying so, after three tries that

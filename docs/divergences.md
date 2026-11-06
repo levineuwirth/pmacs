@@ -245,10 +245,17 @@ whole. Under one cap a growing register squeezes the rules.
   one hold-up already paid; sessions in a row cut before their first
   frame, a link past the write bound's floor, cost the bound a try and
   stop at three. The bridge starts a daemon when it finds none, so a
-  reconnect after a crash lands on a new daemon without the old one's
-  unsaved work, and the notice says that, told by `Hello`'s frontend
-  number and `uptime_secs`, as on the local route if a new daemon
-  answers there.
+  reconnect after a crash lands on a new daemon, which holds what
+  autosave kept and nothing else. A `Hello` whose frontend number is not
+  past the last is another daemon's for certain, and the notice says
+  `[pmacs: new daemon; work not autosaved is gone; M-x recover-file]`.
+  One past it says that only by `uptime_secs`, and cannot be told from a
+  stalled link's: younger than the last daemon would be by now, or with
+  that daemon's age inside the age's slack, it says
+  `[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`.
+  A pane too narrow for those reads `[new daemon; work not autosaved is
+  gone]` or `[this may be a new daemon]`. The local route says the same
+  if a new daemon answers there.
   Removed when the token family reaches grid sessions, which is a wire
   question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon

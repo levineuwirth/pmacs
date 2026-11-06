@@ -33,8 +33,9 @@
 //! of banners. A session comes back on a fresh view, not its own, and says why:
 //! a grid session is minted no token (`docs/divergences.md`). A daemon that is
 //! gone ends the local route, saying why once the alternate screen is left; the
-//! SSH route's bridge starts a new one, without the old one's unsaved work, and
-//! the notice says that, told by `Hello` ([`DaemonSeen`]) on either route.
+//! SSH route's bridge starts a new one, which holds only what autosave kept, and the
+//! notice says that when `Hello` tells it for certain and that it may be so when
+//! `Hello` cannot ([`DaemonSeen`]), on either route.
 //! [`HANDSHAKE_RETRY_CAP`] sessions in a row
 //! that end before their first frame stop either route, so neither can spin. A
 //! frame cut short is the daemon's bound, and the frontend says so
@@ -66,7 +67,8 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::attach_reconnect::{
-    BackoffSchedule, DaemonSeen, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
+    BackoffSchedule, DaemonSeen, HANDSHAKE_RETRY_CAP, ReconnectVerdict, Succession,
+    classify_for_reconnect,
 };
 use crate::cell::CellSize;
 use crate::frontend::{Event, Frontend, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -510,19 +512,58 @@ const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
 /// the daemon: the bridge exits 0 when the daemon closes its socket.
 const NOTICE_FRESH_VIEW_LINK: &str = "[pmacs reconnected on a new view: the connection was lost]";
 
-/// On the bottom row of a session on a daemon that is not the last session's.
-const NOTICE_NEW_DAEMON: &str =
-    "[pmacs reconnected to a new daemon: the old one's unsaved work is gone]";
+/// On the bottom row of a session on a daemon `Hello` says for certain is not the
+/// last session's. The owner's words, ruled 2026-11-06: a modified file buffer's copy
+/// is what the next daemon offers, and `autosave.interval-ms` is how old it may be.
+const NOTICE_NEW_DAEMON: Notice = Notice {
+    wide: "[pmacs: new daemon; work not autosaved is gone; M-x recover-file]",
+    narrow: Some("[new daemon; work not autosaved is gone]"),
+};
+
+/// On the bottom row of a session on a daemon `Hello` cannot tell from the last
+/// session's. The owner's words, ruled 2026-11-06: a daemon read this way may hold
+/// everything, so this tells the user where to look and calls nothing gone.
+const NOTICE_MAYBE_NEW_DAEMON: Notice = Notice {
+    wide: "[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]",
+    narrow: Some("[this may be a new daemon]"),
+};
+
+/// What goes on a new session's bottom row, and what goes there on a pane too narrow
+/// for it, so a sentence is not cut before the clause that matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Notice {
+    wide: &'static str,
+    narrow: Option<&'static str>,
+}
+
+impl Notice {
+    /// A notice with one form, which a narrow pane cuts.
+    const fn plain(text: &'static str) -> Self {
+        Self {
+            wide: text,
+            narrow: None,
+        }
+    }
+
+    /// The form that fits a pane `cols` wide.
+    fn fitting(self, cols: u32) -> &'static str {
+        let fits = u32::try_from(self.wide.chars().count()).is_ok_and(|width| width <= cols);
+        match self.narrow {
+            Some(narrow) if !fits => narrow,
+            _ => self.wide,
+        }
+    }
+}
 
 /// What a route keeps between sessions, to say why a new one is a new view.
 #[derive(Debug, Default)]
 struct SessionMemory {
     /// What the last session's `Hello` said of its daemon.
     seen: Option<DaemonSeen>,
-    /// A `Hello` came from a daemon that is not the one before it, and no session
-    /// on it has yet reached the first frame that puts this on screen. It outlasts a
-    /// session lost before that, whose successor's `Hello` is the new daemon's own.
-    new_daemon: bool,
+    /// The strongest thing a `Hello` has said of a new daemon since a session on one
+    /// reached the first frame that puts it on screen. It outlasts a session lost
+    /// before that, whose successor's `Hello` is the new daemon's own.
+    succession: Succession,
     /// Why the last session was lost.
     why: Option<&'static str>,
 }
@@ -539,8 +580,8 @@ impl SessionMemory {
 
     fn heard_at(&mut self, id: FrontendId, uptime_secs: u64, at: Instant) {
         let seen = DaemonSeen::new(id, uptime_secs, at);
-        if self.seen.is_some_and(|last| last.is_succeeded_by(&seen)) {
-            self.new_daemon = true;
+        if let Some(last) = self.seen {
+            self.succession = self.succession.max(last.succeeded_by(&seen));
         }
         self.seen = Some(seen);
     }
@@ -548,17 +589,17 @@ impl SessionMemory {
     /// A session was lost, for the reason `why` says of it.
     fn lost(&mut self, bootstrapped: bool, why: &'static str) {
         if bootstrapped {
-            self.new_daemon = false;
+            self.succession = Succession::Same;
         }
         self.why = Some(why);
     }
 
     /// What the next session puts on its bottom row.
-    fn notice(&self) -> Option<&'static str> {
-        if self.new_daemon {
-            Some(NOTICE_NEW_DAEMON)
-        } else {
-            self.why
+    fn notice(&self) -> Option<Notice> {
+        match self.succession {
+            Succession::Certain => Some(NOTICE_NEW_DAEMON),
+            Succession::Maybe => Some(NOTICE_MAYBE_NEW_DAEMON),
+            Succession::Same => self.why.map(Notice::plain),
         }
     }
 }
@@ -966,7 +1007,7 @@ pub(crate) fn run_attach_pair(
     io: AttachIo,
     frontend: &mut dyn AttachPumpFrontend,
     assigned_id: FrontendId,
-    notice: Option<&str>,
+    notice: Option<Notice>,
 ) -> Result<PumpEnd, AttachError> {
     let mut notice = notice;
     let mut notice_up = false;
@@ -1130,7 +1171,7 @@ pub(crate) fn run_attach_pair(
             {
                 bootstrapped = true;
                 if let Some(text) = notice.take() {
-                    let _ = frontend.show_notice(text);
+                    let _ = frontend.show_notice(text.fitting(frontend.size().cols));
                     notice_up = true;
                 }
             }
@@ -2223,7 +2264,7 @@ fn run_pump_and_reap(
     frontend: &mut Frontend,
     assigned_frontend_id: FrontendId,
     loss: &mut Option<SessionLoss>,
-    notice: Option<&str>,
+    notice: Option<Notice>,
 ) -> Result<(), AttachError> {
     let pid = child.id();
     let io = AttachIo {
@@ -3315,30 +3356,67 @@ mod tests {
         ));
     }
 
-    /// A new daemon is said until a session reaches the first frame that shows it,
-    /// and not after.
+    /// What a `Hello` says of a new daemon is said until a session reaches the first
+    /// frame that shows it, and not after, and the stronger of two readings stands.
     #[test]
     fn a_new_daemon_is_said_until_a_first_frame_shows_it() {
         let start = Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
+        let plain = Some(Notice::plain(NOTICE_FRESH_VIEW));
         let mut memory = SessionMemory::default();
         memory.heard_at(FrontendId(5), 1_000, at(0));
         assert_eq!(memory.notice(), None, "nothing was lost");
         memory.lost(true, NOTICE_FRESH_VIEW);
         memory.heard_at(FrontendId(6), 1_010, at(10));
-        assert_eq!(memory.notice(), Some(NOTICE_FRESH_VIEW), "the same daemon");
+        assert_eq!(memory.notice(), plain, "the same daemon");
         memory.lost(true, NOTICE_FRESH_VIEW);
         memory.heard_at(FrontendId(7), 0, at(20));
-        assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
-        // Lost before its first frame: the next session's Hello is the new daemon's
-        // own, and says nothing new, and the user has still not been told.
+        assert_eq!(memory.notice(), Some(NOTICE_MAYBE_NEW_DAEMON), "younger");
+        // Lost before its first frame: the user has still not been told.
         memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
         memory.heard_at(FrontendId(8), 1, at(21));
+        assert_eq!(memory.notice(), Some(NOTICE_MAYBE_NEW_DAEMON));
+        // A number not past the last says more, and goes on being said.
+        memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
+        memory.heard_at(FrontendId(2), 0, at(22));
+        assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON), "certain");
+        memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
+        memory.heard_at(FrontendId(3), 1, at(23));
         assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
         // Told, so a later loss on that daemon says only its own reason.
         memory.lost(true, NOTICE_FRESH_VIEW);
-        memory.heard_at(FrontendId(9), 11, at(31));
-        assert_eq!(memory.notice(), Some(NOTICE_FRESH_VIEW));
+        memory.heard_at(FrontendId(4), 11, at(33));
+        assert_eq!(memory.notice(), plain);
+    }
+
+    /// The owner's words, each at the width it was ruled for, so a sentence is not cut
+    /// before the clause that matters.
+    #[test]
+    fn a_notice_takes_the_form_that_fits() {
+        let first = "[pmacs: new daemon; work not autosaved is gone; M-x recover-file]";
+        let second = "[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]";
+        let first_cols = u32::try_from(first.len()).expect("cols");
+        let second_cols = u32::try_from(second.len()).expect("cols");
+        assert_eq!(NOTICE_NEW_DAEMON.fitting(first_cols), first);
+        assert_eq!(
+            NOTICE_NEW_DAEMON.fitting(first_cols - 1),
+            "[new daemon; work not autosaved is gone]"
+        );
+        assert_eq!(
+            NOTICE_NEW_DAEMON.fitting(40).len(),
+            40,
+            "ruled at 40 columns"
+        );
+        assert_eq!(NOTICE_MAYBE_NEW_DAEMON.fitting(second_cols), second);
+        assert_eq!(
+            NOTICE_MAYBE_NEW_DAEMON.fitting(second_cols - 1),
+            "[this may be a new daemon]"
+        );
+        assert_eq!(
+            Notice::plain(NOTICE_FRESH_VIEW).fitting(10),
+            NOTICE_FRESH_VIEW,
+            "one form, which the row then cuts"
+        );
     }
 
     /// What the next session says of a lost one.
