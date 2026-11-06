@@ -161,6 +161,19 @@ pub fn spawn_pmacs_in_pty_under(
     spawn_tapped(wrapper, args, envs, rows, cols, None)
 }
 
+/// `program` and its arguments in a fresh PTY with no pmacs on its command line: a real
+/// shell, say, into which a row types a command as a user does. Its `envs` are as
+/// [`spawn_pmacs_in_pty`]'s, and what it runs is the row's to name.
+#[cfg(target_os = "linux")]
+pub fn spawn_shell_in_pty(
+    program: &[&str],
+    envs: &[(&str, &Path)],
+    rows: u16,
+    cols: u16,
+) -> PmacsPty {
+    spawn_program(program, envs, rows, cols, None)
+}
+
 /// What pmacs wrote to its terminal, one read of the master at a time,
 /// each stamped with the instant the reader thread had it: the second
 /// half of [`spawn_pmacs_in_pty_tapped`]. A row timing what reaches the
@@ -189,6 +202,20 @@ fn spawn_tapped(
     cols: u16,
     tap: Option<std::sync::mpsc::Sender<(Instant, Vec<u8>)>>,
 ) -> PmacsPty {
+    let pmacs = env!("CARGO_BIN_EXE_pmacs");
+    let mut program: Vec<&str> = wrapper.to_vec();
+    program.push(pmacs);
+    program.extend_from_slice(args);
+    spawn_program(&program, envs, rows, cols, tap)
+}
+
+fn spawn_program(
+    program: &[&str],
+    envs: &[(&str, &Path)],
+    rows: u16,
+    cols: u16,
+    tap: Option<std::sync::mpsc::Sender<(Instant, Vec<u8>)>>,
+) -> PmacsPty {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -199,19 +226,9 @@ fn spawn_tapped(
         })
         .expect("openpty");
 
-    let pmacs = env!("CARGO_BIN_EXE_pmacs");
-    let mut cmd = match wrapper.split_first() {
-        Some((program, rest)) => {
-            let mut cmd = CommandBuilder::new(program);
-            for arg in rest {
-                cmd.arg(arg);
-            }
-            cmd.arg(pmacs);
-            cmd
-        }
-        None => CommandBuilder::new(pmacs),
-    };
-    for arg in args {
+    let (first, rest) = program.split_first().expect("a program to run");
+    let mut cmd = CommandBuilder::new(first);
+    for arg in rest {
         cmd.arg(arg);
     }
     // Backfill any of the five storage variables the caller did not set

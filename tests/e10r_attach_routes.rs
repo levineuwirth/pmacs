@@ -816,7 +816,6 @@ fn e10r_remote_an_ssh_failing_after_a_cut_stops_at_the_cap_saying_why() {
 /// the top of `*scratch*` that moves every row a window shows. A stopped frontend's
 /// pipe and socket then fill in seconds, where an idle tick's small frames took 53.6 s
 /// to fill the pipe a bridge writes to first (read once at `b25e779`).
-#[cfg(target_os = "linux")]
 const KEEPS_WRITING: &str = r#"
 local count = 0
 pmacs.async(function()
@@ -2193,5 +2192,142 @@ fn p9_f12_ends_it_within_the_bound_past_an_ssh_that_outlasts_the_kick() {
         took < Duration::from_secs(8),
         "F12 took {} ms, against a stated bound of about 5 s",
         took.as_millis()
+    );
+}
+
+/// A real interactive shell in a PTY, with nothing of a user's in it, that a row types
+/// into; `None` where it is not installed, which a CI runner's may not be.
+#[cfg(target_os = "linux")]
+fn interactive_shell(
+    shell: &[&str],
+    dir: &Path,
+    envs: &[(&str, &Path)],
+) -> Option<common::pty::PmacsPty> {
+    let found = std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {}", shell[0])])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !found {
+        eprintln!("skipped: no {} on this machine", shell[0]);
+        return None;
+    }
+    let mut all: Vec<(&str, &Path)> = vec![("HOME", dir), ("XDG_CONFIG_HOME", dir)];
+    all.extend_from_slice(envs);
+    Some(common::pty::spawn_shell_in_pty(shell, &all, 24, 80))
+}
+
+/// **Review 1's `p1_fg`, what it found holding, as guards:** a TUI stopped past the bound
+/// and brought back by a real shell's `fg`, on either route: on a fresh view, its notice
+/// saying why, and a key typed after that arrives. `fg` hands a job's modes back as the
+/// shell has them, which differs by shell, so a row under `bash` is not this row. `fish`
+/// is the owner's login shell.
+#[cfg(target_os = "linux")]
+fn fg_comes_back_under(shell: &[&str]) {
+    let pmacs = env!("CARGO_BIN_EXE_pmacs");
+    let local = |socket: &Path| format!("'{pmacs}' --attach --socket '{}'\r", socket.display());
+    for remote in [false, true] {
+        let daemon = TestDaemon::spawn_with_config(KEEPS_WRITING);
+        let socket = daemon.socket_path();
+        let ssh = BridgedSsh::new(socket);
+        let script = ssh.dir.path().join("ssh");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let Some(mut pane) = interactive_shell(shell, dir.path(), &[(PMACS_TEST_SSH_BIN, &script)])
+        else {
+            return;
+        };
+        let line = if remote {
+            format!("'{pmacs}' --attach farhost\r")
+        } else {
+            local(socket)
+        };
+        pane.write_input(line.as_bytes()).expect("the command");
+        pane.wait_for_output("*scratch*", Duration::from_secs(30));
+        past_the_age_slack();
+        stop_the_shells_child_until_dropped(&pane, &daemon);
+        pane.write_input(b"fg\r").expect("fg");
+        pane.wait_for_output("reconnected on a new view", Duration::from_secs(30));
+        pane.write_input(b"\x1bx").expect("M-x");
+        pane.wait_for_output("M-x", Duration::from_secs(10));
+        pane.write_input(b"\x07").expect("C-g");
+        pane.write_input(b"\x1b[24~").expect("F12");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p1_fg_under_fish_comes_back_on_either_route() {
+    fg_comes_back_under(&["fish", "--no-config", "--private"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p1_fg_under_zsh_comes_back_on_either_route() {
+    fg_comes_back_under(&["zsh", "-f", "-i"]);
+}
+
+/// **Review 1's Low 2, its `p8_stop`, as ruled:** a TUI stopped past the bound hears no
+/// `Goodbye`, so after `pmacs --daemon --stop` its `fg` starts a new daemon that keeps
+/// running over the remote route, saying so, and ends the local one, saying why. The owner
+/// accepted this on 2026-11-06, so this pins what the documents state. A guard.
+#[test]
+fn p8_a_stop_a_stopped_tui_did_not_hear_starts_a_daemon_over_the_remote_route_alone() {
+    let stopped_past_the_bound = |daemon: &TestDaemon, tui: &common::pty::PmacsPty| {
+        let pid =
+            nix::unistd::Pid::from_raw(i32::try_from(tui.process_id().expect("pid")).expect("pid"));
+        tui.wait_for_output("*scratch*", Duration::from_secs(30));
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
+        let deadline = Instant::now() + Duration::from_mins(2);
+        while !daemon_log(daemon).contains("sent no EOF within") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            daemon_log(daemon).contains("sent no EOF within"),
+            "{}",
+            daemon_log(daemon)
+        );
+        pid
+    };
+
+    let mut daemon = TestDaemon::spawn_with_config(KEEPS_WRITING);
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        daemon.socket_path(),
+        dir.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let pid = stopped_past_the_bound(&daemon, &tui);
+    stop_the_daemon(&daemon, dir.path());
+    daemon.wait_for_exit().expect("the daemon is gone");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the local route ends");
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(said.contains("is gone"), "{said:?}");
+
+    let mut daemon = TestDaemon::spawn_with_config(KEEPS_WRITING);
+    let started = StartedByTheBridge {
+        lockfile: daemon.lockfile_path(),
+        _holder: None,
+    };
+    let first = started.pid().expect("the daemon's lockfile");
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("1");
+    let pid = stopped_past_the_bound(&daemon, &tui);
+    stop_the_daemon(&daemon, dir.path());
+    daemon.wait_for_exit().expect("the daemon is gone");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    tui.wait_for_output(NEW_DAEMON_NOTICE, Duration::from_secs(30));
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("F12 ends the session");
+    assert!(status.success(), "{status:?}");
+    let second = started.pid().expect("the new daemon's lockfile");
+    assert_ne!(second, first, "a daemon of its own");
+    assert!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(second), None).is_ok(),
+        "it keeps running"
     );
 }
