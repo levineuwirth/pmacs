@@ -312,8 +312,12 @@ fn worker(args: &[String]) -> Result<ExitCode, String> {
         match exercised {
             Ok(parses) => {
                 let micros = started.elapsed().as_micros();
-                writeln!(out, "E {parses} {micros} {}", peak_rss_kb("self"))
-                    .map_err(|e| e.to_string())?;
+                writeln!(
+                    out,
+                    "E {parses} {micros} {}",
+                    proc_status_kb("self", "VmHWM:")
+                )
+                .map_err(|e| e.to_string())?;
             }
             // The parse never returned inside its deadline and was
             // cancelled; the parent files it as a hang. The worker is
@@ -674,20 +678,10 @@ fn walk(tree: &tree_sitter::Tree) -> usize {
     }
 }
 
-/// `VmHWM` in kB for `/proc/<who>/status`, or 0 where there is none.
-fn peak_rss_kb(who: &str) -> u64 {
-    proc_status_kb(who, "VmHWM:")
-}
-
+/// The figure `key` names in `/proc/<who>/status`, through the worker
+/// crate's one reader, in the kB the reports print; 0 where there is none.
 fn proc_status_kb(who: &str, key: &str) -> u64 {
-    std::fs::read_to_string(format!("/proc/{who}/status"))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix(key))
-                .and_then(|v| v.split_whitespace().next()?.parse().ok())
-        })
-        .unwrap_or(0)
+    pmacs_parse_unit::proc_status_bytes(who, key).unwrap_or(0) / 1024
 }
 
 // -------------------------------------------------------------------
