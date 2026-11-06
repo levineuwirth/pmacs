@@ -17,6 +17,11 @@ on:
   # U9's test-binary concurrency control, R7's gate conditions --- need
   # their own changes, and CI does not invoke `scripts/gate` at all.
   workflow_dispatch:
+    # E10m.7's probe branch only, never merged: the ballast, and each half of the fix taken away.
+    inputs:
+      ballast_available_mb:
+        description: leave this many MB available on / before the room step (empty for none)
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,7 +42,7 @@ env:
 # ambiguous about a commit that has already landed — the one place this
 # saving is not worth having.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job carries `timeout-minutes`. Without one a job inherits
@@ -158,6 +163,7 @@ jobs:
           fi
 
   fmt:
+    if: github.event_name != 'workflow_dispatch'
     name: Format
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -183,6 +189,7 @@ jobs:
   # `fetch-depth: 0` is required: the check excludes everything
   # reachable from the D9 epoch, and the epoch has to be in the clone.
   attribution:
+    if: github.event_name != 'workflow_dispatch'
     name: Commit attribution (D9)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -211,6 +218,7 @@ jobs:
           fi
 
   clippy:
+    if: github.event_name != 'workflow_dispatch'
     name: Lint (${{ matrix.lua }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -265,7 +273,7 @@ jobs:
     name: Docs consistency
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'false'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'false'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -283,7 +291,7 @@ jobs:
     name: GPU Render (headless)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -327,7 +335,7 @@ jobs:
     # past a 25-minute ceiling on all four legs at once, and the one
     # whose macOS legs now carry the crdt corpus. See the note above
     # `jobs:` for the measurements and the cold-cache diagnosis.
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       # `crdt` is a default feature, so the four platform legs test the
@@ -336,7 +344,7 @@ jobs:
       # fifth leg keeps the non-crdt build a checked configuration; it
       # is the only leg whose name carries a suffix.
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         lua: [luajit, lua54]
         crdt: [",crdt"]
         include:
@@ -415,6 +423,18 @@ jobs:
                          yaml-language-server@1.15.0
       # Room on a small root (#328): `scripts/ci-free-disk` says why, and
       # removes nothing on a roomy one.
+      - name: E10m probe, the ballast
+        env:
+          PROBE_BALLAST: ${{ inputs.ballast_available_mb }}
+        run: |
+          scripts/ci-disk "probe, before the ballast" target
+          echo "probe: CARGO_PROFILE_DEV_DEBUG=[$CARGO_PROFILE_DEV_DEBUG]"
+          if [ -n "$PROBE_BALLAST" ]; then
+            avail=$(df -Pk / | awk 'NR==2 { print int($4 / 1024) }')
+            over=$((avail - PROBE_BALLAST))
+            if [ "$over" -gt 0 ]; then sudo fallocate -l "${over}M" /e10m-ballast; fi
+            scripts/ci-disk "probe, after the ballast" target
+          fi
       - name: Make room on a small root (Linux)
         if: runner.os == 'Linux'
         run: scripts/ci-free-disk 45000
@@ -661,7 +681,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    timeout-minutes: 45
+    timeout-minutes: 75
     # In the job's `env`, for the arming report's sake, as in `test`.
     env:
       PMACS_REQUIRE_GPU: "1"
@@ -689,6 +709,18 @@ jobs:
         run: vulkaninfo --summary || true
       # Room on a small root, and the disk around the build and after the
       # tests, as on the `test` legs (#328, #331).
+      - name: E10m probe, the ballast
+        env:
+          PROBE_BALLAST: ${{ inputs.ballast_available_mb }}
+        run: |
+          scripts/ci-disk "probe, before the ballast" target
+          echo "probe: CARGO_PROFILE_DEV_DEBUG=[$CARGO_PROFILE_DEV_DEBUG]"
+          if [ -n "$PROBE_BALLAST" ]; then
+            avail=$(df -Pk / | awk 'NR==2 { print int($4 / 1024) }')
+            over=$((avail - PROBE_BALLAST))
+            if [ "$over" -gt 0 ]; then sudo fallocate -l "${over}M" /e10m-ballast; fi
+            scripts/ci-disk "probe, after the ballast" target
+          fi
       - name: Make room on a small root
         run: scripts/ci-free-disk 45000
       - name: Disk before the workspace build
@@ -737,7 +769,7 @@ jobs:
     name: M1 Acceptance Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -752,7 +784,7 @@ jobs:
     name: M4 Perf Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -775,7 +807,7 @@ jobs:
     name: M5 Perf Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -802,7 +834,7 @@ jobs:
     name: M6 Perf Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -860,7 +892,7 @@ jobs:
     name: M10 Perf Gates (crdt)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -885,7 +917,7 @@ jobs:
     name: Perf budgets (debug)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
