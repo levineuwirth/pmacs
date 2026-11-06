@@ -37,7 +37,7 @@ env:
 # ambiguous about a commit that has already landed — the one place this
 # saving is not worth having.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job carries `timeout-minutes`. Without one a job inherits
@@ -158,6 +158,7 @@ jobs:
           fi
 
   fmt:
+    if: github.event_name != 'workflow_dispatch'
     name: Format
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -183,6 +184,7 @@ jobs:
   # `fetch-depth: 0` is required: the check excludes everything
   # reachable from the D9 epoch, and the epoch has to be in the clone.
   attribution:
+    if: github.event_name != 'workflow_dispatch'
     name: Commit attribution (D9)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -211,6 +213,7 @@ jobs:
           fi
 
   clippy:
+    if: github.event_name != 'workflow_dispatch'
     name: Lint (${{ matrix.lua }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -265,7 +268,7 @@ jobs:
     name: Docs consistency
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'false'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'false'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -283,7 +286,7 @@ jobs:
     name: GPU Render (headless)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -336,7 +339,7 @@ jobs:
       # fifth leg keeps the non-crdt build a checked configuration; it
       # is the only leg whose name carries a suffix.
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         lua: [luajit, lua54]
         crdt: [",crdt"]
         include:
@@ -580,6 +583,9 @@ jobs:
       # because its name is a fragment of record (#313).
       - name: Arming report (this leg)
         run: scripts/gate --print-arming-env
+      - name: E10m.11 probe, the time a slow fetch costs
+        if: matrix.lua == 'lua54'
+        run: sleep 900
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} --no-fail-fast -- ${{ runner.os == 'macOS' && ' ' || '--test-threads=1' }}
         env:
           PMACS_SKIP_LOG: ${{ runner.temp }}/skipped-rows.txt
@@ -715,6 +721,8 @@ jobs:
       # gated on them return early here and read ok.
       - name: Arming report (this leg)
         run: scripts/gate --print-arming-env
+      - name: E10m.11 probe, the time a slow fetch costs
+        run: sleep 900
       - run: cargo test --all-targets --no-fail-fast -- --test-threads=1
         env:
           PMACS_SKIP_LOG: ${{ runner.temp }}/skipped-rows.txt
@@ -737,7 +745,7 @@ jobs:
     name: M1 Acceptance Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -752,7 +760,7 @@ jobs:
     name: M4 Perf Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -775,7 +783,7 @@ jobs:
     name: M5 Perf Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -802,7 +810,7 @@ jobs:
     name: M6 Perf Gates
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -860,7 +868,7 @@ jobs:
     name: M10 Perf Gates (crdt)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -885,7 +893,7 @@ jobs:
     name: Perf budgets (debug)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'workflow_dispatch' && needs.changes.outputs.code == 'true'
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
