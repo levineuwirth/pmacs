@@ -358,6 +358,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Line tables, not full debug info, on the Ubuntu legs (#328): a
+      # crdt leg's target ends at about 27 GB where it reached 52, with every
+      # row's result unchanged, and a small root holds that once
+      # `scripts/ci-free-disk` has run. Before the cache step, whose key
+      # hashes `CARGO_*`, so a full-debug cache is never restored under it.
+      # `split-debuginfo` measured the same size, and `Test (crdt)` ran cold
+      # in 45.8 min against this one's 41.2 and this job's ceiling of 45: one
+      # sample each, and the only figure that told them apart (E10m.7).
+      - name: Line tables only in the dev profile (Linux)
+        if: runner.os == 'Linux'
+        run: echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -402,6 +413,11 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           npm install -g vscode-langservers-extracted@4.10.0 \
                          yaml-language-server@1.15.0
+      # Room on a small root (#328): `scripts/ci-free-disk` says why, and
+      # removes nothing on a roomy one.
+      - name: Make room on a small root (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/ci-free-disk 45000
       # The disk before and after the build and after the tests, so the
       # next linker SIGBUS (#328) or `No space left on device` (#331)
       # arrives with its figure; `scripts/ci-disk` says why. Linux only:
@@ -651,6 +667,8 @@ jobs:
       PMACS_REQUIRE_GPU: "1"
       PMACS_REQUIRE_SETSID: "1"
       PMACS_REQUIRE_BASH: "1"
+      # As on the `test` job's Ubuntu legs, whose note says why (#328).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -669,8 +687,10 @@ jobs:
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: vulkaninfo --summary || true
-      # The disk around the build and after the tests, as on the `test`
-      # legs (#328, #331).
+      # Room on a small root, and the disk around the build and after the
+      # tests, as on the `test` legs (#328, #331).
+      - name: Make room on a small root
+        run: scripts/ci-free-disk 45000
       - name: Disk before the workspace build
         run: scripts/ci-disk "before the workspace build" target
       # Default features, which are `luajit,crdt`. --workspace, not the
