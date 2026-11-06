@@ -270,7 +270,15 @@ whole. Under one cap a growing register squeezes the rules.
   know a remote socket's path, so it names the file under
   `$XDG_RUNTIME_DIR` as the far side would resolve it. A session of 30 s
   or more starts the count again, and a `may be` neither counts nor
-  starts it again, so a slow link cannot stop the route.
+  starts it again, so a slow link cannot stop the route. A daemon stopped
+  on purpose says `Goodbye`, which ends the route and starts nothing, but
+  only a live TUI hears it. A TUI stopped past the bound, then `pmacs
+  --daemon --stop`, then `fg`, finds its session lost with no `Goodbye`:
+  over this route a new daemon starts and keeps running, and the notice
+  says so; the local route finds no socket and ends. Accepted by the
+  owner, 2026-11-06, since a missing socket does not prove a stop: the
+  default socket sits in `$XDG_RUNTIME_DIR`, which a host may remove when
+  its last session ends.
   Removed when the token family reaches grid sessions, which is a wire
   question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon

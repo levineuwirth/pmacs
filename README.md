@@ -179,7 +179,10 @@ the terminal, for a passphrase if it asks: `C-c` ends the attempt and the
 session, `F12` does nothing, and after 120 s the attempt is killed and the
 next one comes. Three new daemons in a row that each lasted under 30 s
 stop it, naming the file beside the socket on the far side where the last
-one's stderr went. A link has to carry a
+one's stderr went. `pmacs --daemon --stop` ends a TUI that hears it and
+starts nothing; a TUI stopped past the 2 s when it ran hears nothing, so
+when resumed over SSH it starts a new daemon, which keeps running and says
+so, and on a local socket it ends. A link has to carry a
 frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
 snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
 a large file over a slow link fails, saying so, after three tries that
