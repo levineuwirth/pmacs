@@ -81,6 +81,46 @@ pub use pmacs_protocol::reconnect::{
 /// The rest is for a `Hello` that takes longer to arrive than the last one did.
 pub const DAEMON_AGE_SLACK: Duration = Duration::from_secs(5);
 
+/// A session on a new daemon that lived less than this, on the client's clock, counts
+/// toward [`DyingDaemons`]: `autosave.interval-ms`'s default, so a shorter session has
+/// autosaved nothing, and one of this or more has shown the daemon can live.
+pub const DYING_SESSION_FLOOR: Duration = Duration::from_secs(30);
+
+/// New daemons in a row that each died young, which the remote route stops at
+/// [`HANDSHAKE_RETRY_CAP`] (the owner's ruling, 2026-11-06): each is an `ssh` login, its
+/// `init.lua` run again, and no reason on any screen, at 50 a minute with no end.
+///
+/// Only a daemon told for certain counts ([`Succession::Certain`]), and a reading of
+/// [`Succession::Maybe`] neither counts nor resets, whatever its length, so a slow link
+/// cannot stop the route. Otherwise a session of [`DYING_SESSION_FLOOR`] or more resets
+/// the count; and that is all that resets it, the row naming nothing else, so a short
+/// session on the same daemon between two young ones leaves it where it stands. A
+/// network that is down loses no session, so it counts nothing and goes on.
+#[derive(Debug, Default)]
+pub struct DyingDaemons {
+    in_a_row: u32,
+}
+
+impl DyingDaemons {
+    /// A session that read `reading` was lost after `lived`. Whether the route should
+    /// stop.
+    pub fn session_lost(&mut self, reading: Succession, lived: Duration) -> bool {
+        match reading {
+            Succession::Maybe => {}
+            _ if lived >= DYING_SESSION_FLOOR => self.in_a_row = 0,
+            Succession::Certain => self.in_a_row = self.in_a_row.saturating_add(1),
+            Succession::Same => {}
+        }
+        self.in_a_row >= HANDSHAKE_RETRY_CAP
+    }
+
+    /// How many in a row.
+    #[must_use]
+    pub fn in_a_row(&self) -> u32 {
+        self.in_a_row
+    }
+}
+
 /// What a later `Hello` says of the daemon an earlier one came from. Ordered by how
 /// much it says, so that the strongest reading since a session last showed one is
 /// `max`.
@@ -114,6 +154,12 @@ impl DaemonSeen {
             uptime_secs,
             read_at,
         }
+    }
+
+    /// How long since this `Hello` was read, on the client's clock.
+    #[must_use]
+    pub fn age(&self) -> Duration {
+        self.read_at.elapsed()
     }
 
     /// What `later`, a `Hello` read after this one, says of this one's daemon.
@@ -333,6 +379,41 @@ mod tests {
     fn the_age_slack_is_what_a_daemon_may_fall_short_by() {
         assert_eq!(reads(100, 5.0, 100), Succession::Same);
         assert_eq!(reads(100, 5.5, 100), Succession::Maybe);
+    }
+
+    /// The owner's ruling, each clause of it.
+    #[test]
+    fn new_daemons_in_a_row_stop_the_route_as_ruled() {
+        let short = Duration::from_secs(1);
+        assert_eq!(DYING_SESSION_FLOOR, Duration::from_secs(30));
+        assert_eq!(HANDSHAKE_RETRY_CAP, 3);
+
+        let mut dying = DyingDaemons::default();
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(dying.session_lost(Succession::Certain, short), "3 in a row");
+
+        // A session of the floor or more resets the count, and is not itself one.
+        let mut dying = DyingDaemons::default();
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Certain, DYING_SESSION_FLOOR));
+        assert_eq!(dying.in_a_row(), 0);
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Same, DYING_SESSION_FLOOR));
+        assert_eq!(dying.in_a_row(), 0, "a long session on the same daemon too");
+
+        // The second sentence neither counts nor resets, long or short.
+        let mut dying = DyingDaemons::default();
+        assert!(!dying.session_lost(Succession::Certain, short));
+        for lived in [short, DYING_SESSION_FLOOR, short, short, short] {
+            assert!(!dying.session_lost(Succession::Maybe, lived));
+        }
+        assert_eq!(dying.in_a_row(), 1);
+
+        // A short session on the same daemon does neither: nothing resets but the floor.
+        assert!(!dying.session_lost(Succession::Same, short));
+        assert_eq!(dying.in_a_row(), 1);
     }
 
     #[test]

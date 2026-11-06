@@ -70,7 +70,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::attach_reconnect::{
-    BackoffSchedule, DaemonSeen, HANDSHAKE_RETRY_CAP, ReconnectVerdict, Succession,
+    BackoffSchedule, DaemonSeen, DyingDaemons, HANDSHAKE_RETRY_CAP, ReconnectVerdict, Succession,
     classify_for_reconnect,
 };
 use crate::cell::CellSize;
@@ -233,6 +233,17 @@ pub enum AttachError {
         /// How long it waited.
         after: Duration,
     },
+    /// [`HANDSHAKE_RETRY_CAP`] new daemons in a row each died young on the far side, so
+    /// the remote route stopped trying ([`DyingDaemons`]).
+    NewDaemonsKeepDying {
+        /// The host, as the route was given it.
+        host: String,
+        /// What the client knows of where the last one's stderr is. It does not know a
+        /// remote socket's real path, which only the far side's environment says.
+        stderr: String,
+        /// How many in a row.
+        attempts: u32,
+    },
     /// [`HANDSHAKE_RETRY_CAP`] sessions in a row ended before their first
     /// frame, so the route stopped trying.
     SessionsDropped {
@@ -244,6 +255,8 @@ pub enum AttachError {
 }
 
 impl std::fmt::Display for AttachError {
+    // One arm a variant, each a sentence a user reads, with nothing shared to pull out.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "attach I/O error: {e}"),
@@ -337,6 +350,16 @@ impl std::fmt::Display for AttachError {
                 "the far side did not say hello within {} s",
                 after.as_secs()
             ),
+            Self::NewDaemonsKeepDying {
+                host,
+                stderr,
+                attempts,
+            } => write!(
+                f,
+                "a new daemon on {host} died {attempts} times in a row, each session lasting \
+                 under 30 s, so this one has stopped trying; the last one's stderr is on \
+                 {host} at {stderr}"
+            ),
             Self::SessionsDropped {
                 attempts,
                 cut_short: true,
@@ -369,6 +392,7 @@ impl std::error::Error for AttachError {
             | Self::DaemonGone { .. }
             | Self::ReconnectCancelled
             | Self::ReconnectHelloTimedOut { .. }
+            | Self::NewDaemonsKeepDying { .. }
             | Self::SessionsDropped { .. } => None,
         }
     }
@@ -605,6 +629,8 @@ impl Notice {
 struct SessionMemory {
     /// What the last session's `Hello` said of its daemon.
     seen: Option<DaemonSeen>,
+    /// What the last session's own `Hello` read.
+    reading: Succession,
     /// The strongest thing a `Hello` has said of a new daemon since a session on one
     /// reached the first frame that puts it on screen. It outlasts a session lost
     /// before that, whose successor's `Hello` is the new daemon's own.
@@ -625,9 +651,10 @@ impl SessionMemory {
 
     fn heard_at(&mut self, id: FrontendId, uptime_secs: u64, at: Instant) {
         let seen = DaemonSeen::new(id, uptime_secs, at);
-        if let Some(last) = self.seen {
-            self.succession = self.succession.max(last.succeeded_by(&seen));
-        }
+        self.reading = self
+            .seen
+            .map_or(Succession::Same, |last| last.succeeded_by(&seen));
+        self.succession = self.succession.max(self.reading);
         self.seen = Some(seen);
     }
 
@@ -637,6 +664,11 @@ impl SessionMemory {
             self.succession = Succession::Same;
         }
         self.why = Some(why);
+    }
+
+    /// How long since the last session's `Hello`: how long it lived, when it is lost.
+    fn session_lived(&self) -> Duration {
+        self.seen.map_or(Duration::ZERO, |seen| seen.age())
     }
 
     /// What the next session puts on its bottom row.
@@ -1933,6 +1965,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     let mut handshake_attempts: u32 = 0;
     let mut unbootstrapped: u32 = 0;
     let mut memory = SessionMemory::default();
+    let mut dying = DyingDaemons::default();
     let mut iteration: u32 = 0;
 
     let result: Result<(), AttachError> = loop {
@@ -1965,10 +1998,19 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
             &mut loss,
             &mut memory,
         );
+        let mut keeps_dying = false;
         if let Some(lost) = loss {
             memory.lost(lost.bootstrapped, lost.notice(&verdict));
+            keeps_dying = dying.session_lost(memory.reading, memory.session_lived());
         }
-        let verdict = remote_verdict(verdict, loss, &mut unbootstrapped);
+        let verdict = match remote_verdict(verdict, loss, &mut unbootstrapped) {
+            ReconnectVerdict::Reconnect { .. } if keeps_dying => {
+                ReconnectVerdict::ExitProtocolError {
+                    error: new_daemons_keep_dying(&target, dying.in_a_row()),
+                }
+            }
+            verdict => verdict,
+        };
 
         match verdict {
             ReconnectVerdict::ExitClean => {
@@ -2037,6 +2079,28 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     drop(frontend_slot);
 
     result
+}
+
+/// What the remote route says when new daemons keep dying, naming what it knows: the
+/// host, and the socket's name, or that it is the default, under the far side's runtime
+/// directory, whose real path no message says and no wire change is taken to learn.
+fn new_daemons_keep_dying(target: &AttachTarget, attempts: u32) -> AttachError {
+    let (host, instance) = match target {
+        AttachTarget::Ssh {
+            host,
+            instance_name,
+            ..
+        } => (host.as_str(), instance_name.as_deref()),
+        _ => ("the far side", None),
+    };
+    let runtime = std::path::Path::new("$XDG_RUNTIME_DIR");
+    let socket = crate::socket_path::resolve_socket_path_with_runtime(instance, runtime);
+    let stderr = pmacs_protocol::socket_file::daemon_stderr_path(&socket);
+    AttachError::NewDaemonsKeepDying {
+        host: host.to_owned(),
+        stderr: stderr.display().to_string(),
+        attempts,
+    }
 }
 
 /// What a session that got as far as its pump and lost its channel came to, for

@@ -177,7 +177,9 @@ it is certain, and
 when it cannot tell. While a reconnect waits on the far side, `ssh` has
 the terminal, for a passphrase if it asks: `C-c` ends the attempt and the
 session, `F12` does nothing, and after 120 s the attempt is killed and the
-next one comes. A link has to carry a
+next one comes. Three new daemons in a row that each lasted under 30 s
+stop it, naming the file beside the socket on the far side where the last
+one's stderr went. A link has to carry a
 frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
 snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
 a large file over a slow link fails, saying so, after three tries that

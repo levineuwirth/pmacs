@@ -262,7 +262,15 @@ whole. Under one cap a growing register squeezes the rules.
   0; `F12` does nothing, its bytes going to whatever is reading the
   terminal, a prompt if there is one, and what nothing read goes with
   the wait. At 120 s `ssh` is killed and that is a failed attempt on the
-  schedule, with no limit.
+  schedule, with no limit. The route stops after three new daemons in a
+  row told for certain whose sessions each lived under 30 s on the
+  client's clock, `autosave.interval-ms`'s default, saying so, naming the
+  host and where the last one's stderr is: a daemon the bridge starts
+  keeps it beside its socket, as the window's does. The client does not
+  know a remote socket's path, so it names the file under
+  `$XDG_RUNTIME_DIR` as the far side would resolve it. A session of 30 s
+  or more starts the count again, and a `may be` neither counts nor
+  starts it again, so a slow link cannot stop the route.
   Removed when the token family reaches grid sessions, which is a wire
   question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon

@@ -1903,3 +1903,131 @@ fn g3_f12_in_the_wait_ends_nothing_and_what_was_typed_goes_with_the_wait() {
         .expect("F12 ends it");
     assert!(status.success(), "{status:?}");
 }
+
+/// A daemon that dies after each first frame, as a stand-in's `Hello`s and sessions read:
+/// `identity(n)`, and a first frame, and closed.
+fn serving_first_frames(identity: fn(usize) -> (u64, u64)) -> StandInDaemon {
+    StandInDaemon::serve_saying(identity, |_, stream| {
+        first_frame(stream);
+        std::thread::sleep(Duration::from_millis(50));
+    })
+}
+
+/// **Review 1's Medium 5, its `p3`:** each session gets its first frame and is lost, each
+/// `Hello` a new daemon's for certain. The route stops after three, saying so, naming the
+/// host and where the stderr is. At `5fd9d25` it never stopped, 50 a minute.
+#[test]
+fn p3_new_daemons_that_keep_dying_stop_the_route() {
+    let daemon = serving_first_frames(|_| (2, 0));
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let ended = tui.wait_for_exit(Duration::from_secs(10));
+    let status = ended.unwrap_or_else(|| {
+        panic!(
+            "it never stopped: {} new daemons in 10 s",
+            daemon.connections()
+        )
+    });
+    assert!(!status.success(), "{status:?}");
+    assert_eq!(
+        daemon.connections(),
+        1 + usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap"),
+        "the first, and as many new ones as the cap"
+    );
+    let said = tui.after_the_alternate_screen();
+    for needle in [
+        "a new daemon on farhost died 3 times in a row",
+        "under 30 s",
+        "$XDG_RUNTIME_DIR/pmacs/default.sock.stderr",
+    ] {
+        assert!(said.contains(needle), "{needle:?} in {said:?}");
+    }
+}
+
+/// A session of 30 s or more resets the count, so a daemon that lived that long is not
+/// one of three in a row. A guard, at the real floor, with what comes after it stopping
+/// at three again: without the reset it stops at the third connection after the first.
+#[test]
+fn g4_a_session_past_the_floor_starts_the_count_again() {
+    let daemon = StandInDaemon::serve_saying(
+        |_| (2, 0),
+        |n, stream| {
+            first_frame(stream);
+            std::thread::sleep(if n == 3 {
+                Duration::from_secs(31)
+            } else {
+                Duration::from_millis(50)
+            });
+        },
+    );
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_mins(2))
+        .unwrap_or_else(|| panic!("it never stopped: {}", daemon.connections()));
+    assert!(!status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), 6, "1, 2 and 3 long, then 4, 5 and 6");
+}
+
+/// A reading of the second sentence neither counts nor resets: certain, may be, certain,
+/// certain stops at the third certain one. A guard; a `may be` that counted would stop a
+/// connection sooner and one that reset would go on.
+#[test]
+fn g4_a_may_be_neither_counts_nor_resets() {
+    let daemon = serving_first_frames(|n| if n == 3 { (3, 0) } else { (2, 0) });
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {}", daemon.connections()));
+    assert!(!status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), 5);
+}
+
+/// So a link that keeps being lost onto a daemon it cannot tell from a new one does not
+/// stop the route, however often: a guard, past the cap's worth, its last `Goodbye`
+/// ending it with status 0.
+#[test]
+fn g4_a_slow_link_reading_only_may_be_does_not_stop_the_route() {
+    let last = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 3;
+    let daemon = StandInDaemon::serve_saying(
+        |n| (u64::try_from(n).expect("n") + 1, 0),
+        move |n, stream| {
+            first_frame(stream);
+            if n == last {
+                write_message(
+                    stream,
+                    &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+                )
+                .expect("Goodbye");
+            }
+        },
+    );
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it went on: {}", daemon.connections()));
+    assert!(status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), last);
+}
+
+/// A daemon the bridge starts keeps its stderr in a file beside the socket, as the
+/// window's route does, so what a daemon said before it died can be read. A planted line
+/// stands in for a panic in this row; a real one is in the round's note, by a plant. At
+/// `5fd9d25` it went to `/dev/null`.
+#[test]
+fn g4_a_daemon_the_bridge_starts_keeps_its_stderr_beside_its_socket() {
+    let (ssh, started) =
+        BridgedSsh::starting_its_own_daemons("io.stderr:write('PLANTED DAEMON WORDS\\n')\n");
+    let mut tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    let path = started.lockfile.with_extension("stderr");
+    let said = std::fs::read_to_string(&path).expect("the stderr file beside the socket");
+    assert!(said.contains("PLANTED DAEMON WORDS"), "{said:?}");
+    tui.write_input(b"\x1b[24~").expect("F12");
+    assert!(
+        tui.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}

@@ -163,16 +163,7 @@ pub enum ManagedAttachError {
     },
 }
 
-/// Where a daemon this frontend spawns writes its stderr (E2.4): beside
-/// the socket, so it lives in the runtime directory the socket already
-/// proved writable and dies with it. Before this the stream went to
-/// `/dev/null`, and a daemon-side attach failure was undiagnosable from
-/// `pmacs --gpu`.
-pub fn daemon_stderr_path(socket_path: &Path) -> PathBuf {
-    let mut name = socket_path.as_os_str().to_os_string();
-    name.push(".stderr");
-    PathBuf::from(name)
-}
+pub use pmacs_protocol::socket_file::daemon_stderr_path;
 
 impl std::fmt::Display for ManagedAttachError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
