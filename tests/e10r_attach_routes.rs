@@ -2,13 +2,14 @@
 //!
 //! Since E10r the daemon drops a frontend that does not take a frame within
 //! `pmacs::frontend_stream::FRAME_WRITE_BOUND`. These rows are what the attached
-//! TUI's two routes do about it, the owner's rulings of 2026-11-05: the local one
-//! comes back on a fresh view, or ends saying why if the daemon is gone; the
-//! remote one stops. They need one frontend and no CRDT, so unlike
+//! TUI's two routes do about it, the owner's rulings of 2026-11-05 and 2026-11-06:
+//! each comes back on a fresh view and says why, the local one ending, saying why,
+//! if the daemon is gone, and the remote one stopping if its sessions keep being
+//! cut before their first frame. They need one frontend and no CRDT, so unlike
 //! `tests/e10r_frontend_write_bound.rs`, which holds the rows about the other
-//! frontends, a build without CRDT runs them. Most stand in for the daemon or
-//! for `ssh`, since what a frontend is told is the whole of the input here; the
-//! first runs on a real daemon.
+//! frontends, a build without CRDT runs them. Most stand in for the daemon or for
+//! `ssh`, since what a frontend is told is the whole of the input here; the remote
+//! route's run the real `--daemon-attach` bridge where it decides ([`BridgedSsh`]).
 
 mod common;
 
@@ -447,6 +448,55 @@ impl StandInSsh {
     }
 }
 
+/// A stand-in for `ssh` that runs the real `--daemon-attach` bridge over the pipes
+/// the attach gave it, on the attach's own channel (stderr, the default). What it
+/// leaves out is `ssh` itself and the network; every byte goes through the bridge.
+struct BridgedSsh {
+    dir: tempfile::TempDir,
+}
+
+impl BridgedSsh {
+    fn new(socket: &Path) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let script = dir.path().join("ssh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho x >> '{count}'\nPMACS_ATTACH_PROTOCOL_FD=2 exec '{pmacs}' --daemon-attach --socket '{socket}'\n",
+                count = dir.path().join("count").display(),
+                pmacs = env!("CARGO_BIN_EXE_pmacs"),
+                socket = socket.display(),
+            ),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        Self { dir }
+    }
+
+    fn invocations(&self) -> usize {
+        std::fs::read_to_string(self.dir.path().join("count"))
+            .map_or(0, |count| count.lines().count())
+    }
+
+    /// A real TUI through the bridge, the backoff scaled to `scale_ms`.
+    fn attach(&self, scale_ms: &str) -> common::pty::PmacsPty {
+        let home = self.dir.path();
+        let script = home.join("ssh");
+        common::pty::spawn_pmacs_in_pty(
+            &["--attach", "farhost"],
+            &[
+                ("HOME", home),
+                ("XDG_CONFIG_HOME", home),
+                (PMACS_TEST_SSH_BIN, &script),
+                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
+            ],
+            24,
+            80,
+        )
+    }
+}
+
 fn hello_frame() -> Vec<u8> {
     let mut bytes = Vec::new();
     write_message(
@@ -510,7 +560,8 @@ fn cut_bytes() -> Vec<u8> {
 /// An `ssh` that exits with a failure after a frame cut short in the bootstrap
 /// is a reconnect, which at `8c46d9f` went on for ever. It stops at the cap with
 /// the floor's sentence, so a route past the floor holds the others up only so
-/// many times.
+/// many times. [`e10r_remote_sessions_cut_before_their_first_frame_stop_at_the_cap_saying_why`]
+/// is the same through the real bridge, which exits 0.
 #[test]
 fn e10r_remote_an_ssh_failing_after_a_cut_stops_at_the_cap_saying_why() {
     let ssh = StandInSsh::new(&[session_with(&cut_bytes(), 1)]);
@@ -527,41 +578,164 @@ fn e10r_remote_an_ssh_failing_after_a_cut_stops_at_the_cap_saying_why() {
     assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
 }
 
-/// The real bridge exits 0 when the daemon closes its socket, so a session the
-/// daemon dropped has always ended this route at once, with status 0 and nothing
-/// said: one hold-up, and no reason. It stops the same way, now saying why.
+/// A link past the floor, through the real bridge, which exits 0 when the daemon
+/// closes its socket: each session reaches the daemon and is cut before its first
+/// frame, which costs the others the bound on every try, so they stop at the cap,
+/// saying why. Until the ruling of 2026-11-06 the route stopped at the first.
 #[test]
-fn e10r_remote_the_bridges_own_end_after_a_cut_stops_at_once_saying_why() {
-    let ssh = StandInSsh::new(&[session_with(&cut_bytes(), 0)]);
-    let mut tui = ssh.attach();
+fn e10r_remote_sessions_cut_before_their_first_frame_stop_at_the_cap_saying_why() {
+    let daemon = StandInDaemon::serve(|_, stream| part_of_a_frame(stream));
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
     let status = tui
-        .wait_for_exit(Duration::from_secs(10))
-        .expect("it stops");
-    assert_eq!(ssh.invocations(), 1, "and does not try again");
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} sessions", daemon.connections()));
+    assert_eq!(
+        daemon.connections(),
+        usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap"),
+        "as many sessions as the cap, and no more"
+    );
     assert!(!status.success(), "{status:?}");
     let said = tui.after_the_alternate_screen();
     assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
 }
 
+/// A session that worked and was then lost comes back through the real bridge, on a
+/// fresh view, saying the daemon closed the last one. Until the ruling of 2026-11-06
+/// the bridge's exit 0 ended the route. The stand-in's `Goodbye` ends it, status 0.
+#[test]
+fn e10r_remote_a_lost_session_comes_back_through_the_bridge_saying_why() {
+    let daemon = StandInDaemon::serve(|n, stream| {
+        first_frame(stream);
+        if n == 2 {
+            std::thread::sleep(Duration::from_millis(500));
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+            )
+            .expect("Goodbye");
+        }
+    });
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it went on: {} sessions", daemon.connections()));
+    assert!(status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), 2);
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(
+        said.contains("reconnected on a new view: the daemon closed the last one"),
+        "{said:?}"
+    );
+}
+
+/// The same when the frame in flight was cut short, the bound's own case: its notice
+/// says so.
+#[test]
+fn e10r_remote_a_session_cut_after_its_first_frame_comes_back_saying_the_bound_is_why() {
+    let daemon = StandInDaemon::serve(|n, stream| {
+        first_frame(stream);
+        if n == 1 {
+            part_of_a_frame(stream);
+        } else {
+            std::thread::sleep(Duration::from_millis(500));
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+            )
+            .expect("Goodbye");
+        }
+    });
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), 2);
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(
+        said.contains("reconnected on a new view: a frame did not arrive within 2 s"),
+        "{said:?}"
+    );
+}
+
+/// An `ssh` that failed says the connection was lost, which is all it knows; the
+/// bridge exits 0 when the daemon is what closed. The stand-in's `Goodbye` ends it.
+#[test]
+fn e10r_remote_an_ssh_that_failed_comes_back_saying_the_connection_was_lost() {
+    let mut last = frame_bytes();
+    last.extend_from_slice(&goodbye_bytes());
+    let ssh = StandInSsh::new(&[session_with(&frame_bytes(), 255), session_with(&last, 0)]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), 2);
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(
+        said.contains("reconnected on a new view: the connection was lost"),
+        "{said:?}"
+    );
+}
+
+/// F12 through the real bridge onto a real daemon ends the route, status 0, with no
+/// second `ssh`, so a deliberate stop starts nothing. A guard of F9's.
+#[test]
+fn e10r_remote_f12_through_the_bridge_ends_it_and_starts_nothing() {
+    let mut daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("F12 ends the session");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), 1, "and nothing tried again");
+    assert!(daemon.is_alive(), "the daemon goes on");
+}
+
+/// A daemon stopped on purpose says `Goodbye`, which through the real bridge ends the
+/// route, status 0, with no second `ssh`, so it is not started again. A guard of F9's.
+#[test]
+fn e10r_remote_a_daemon_stopped_on_purpose_ends_it_and_is_not_started_again() {
+    let mut daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("SIGTERM");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the Goodbye ends the session");
+    assert!(status.success(), "{status:?}");
+    daemon.wait_for_exit().expect("the daemon is gone");
+    assert_eq!(ssh.invocations(), 1, "and nothing tried again");
+}
+
 /// A session that reached its first frame starts the count again: an `ssh` that
 /// keeps failing after one keeps its reconnects, as it always has. The last
-/// session's clean end says so where it can be read.
+/// session's `Goodbye` ends it.
 #[test]
 fn e10r_remote_a_first_frame_starts_the_count_again() {
     let failures = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 2;
     let mut sessions: Vec<RemoteSession> = (0..failures)
         .map(|_| session_with(&frame_bytes(), 1))
         .collect();
-    sessions.push(session_with(&frame_bytes(), 0));
+    sessions.push(session_with(&goodbye_bytes(), 0));
     let ssh = StandInSsh::new(&sessions);
     let mut tui = ssh.attach();
     let status = tui
         .wait_for_exit(Duration::from_secs(20))
-        .expect("the clean end ends it");
+        .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), failures + 1);
-    let said = tui.after_the_alternate_screen();
-    assert!(said.contains("instance closed connection"), "{said:?}");
 }
 
 /// A network that is down reaches no `Hello` and counts nothing: past the cap's
@@ -574,12 +748,12 @@ fn e10r_remote_a_network_that_is_down_keeps_reconnecting() {
         bytes: Vec::new(),
         then: "exit 255".to_owned(),
     }));
-    sessions.push(session_with(&frame_bytes(), 0));
+    sessions.push(session_with(&goodbye_bytes(), 0));
     let ssh = StandInSsh::new(&sessions);
     let mut tui = ssh.attach();
     let status = tui
         .wait_for_exit(Duration::from_secs(20))
-        .expect("the network comes back and the clean end ends it");
+        .expect("the network comes back and the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), down + 2);
 }

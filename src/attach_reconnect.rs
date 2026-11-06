@@ -35,8 +35,10 @@
 //!   (initial connect, Hello / `AttachRequest` exchange). Bounded by
 //!   [`HANDSHAKE_RETRY_CAP`] so a permanently misconfigured target
 //!   doesn't loop forever.
-//! * [`ReconnectVerdict::ExitClean`] — user pressed F12; the session
-//!   ended on purpose. No reconnect.
+//! * [`ReconnectVerdict::ExitClean`] — F12 or the daemon's `Goodbye`; the
+//!   session ended on purpose. No reconnect. The bridge's clean exit alone is
+//!   not this: it is also what the daemon closing its socket looks like, and
+//!   `attach::remote_verdict` makes that a reconnect.
 //! * [`ReconnectVerdict::ExitProtocolError`] — version skew, transport
 //!   corruption, terminal failure. Retry will not help.
 //! * [`ReconnectVerdict::ExitPolicy`] — v0.1-policy rejection
@@ -99,8 +101,9 @@ pub enum ReconnectVerdict {
         /// final give-up message can summarize the full sequence.
         error: AttachError,
     },
-    /// User-initiated clean detach (F12 → Detach → daemon Goodbye →
-    /// SSH child exit 0). No reconnect, no error to surface.
+    /// The attempt's channel ended with no error, which the outer loop reads
+    /// beside how the session ended: on purpose (F12 → Detach, or the daemon's
+    /// `Goodbye`), no reconnect and no error to surface; lost, a reconnect.
     ExitClean,
     /// Protocol-permanent error: version mismatch, transport
     /// corruption, terminal failure. Retry will not help; surface to

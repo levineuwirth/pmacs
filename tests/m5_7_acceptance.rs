@@ -40,9 +40,10 @@
 //! 7. **Mid-session daemon crash** — when the daemon is SIGKILL'd
 //!    mid-session, the bridge sees socket EOF, the two `std::io::copy`
 //!    loops return, and the bridge exits 0. The frontend side
-//!    (real `pmacs --attach`) sees the SSH child exit 0 and returns
-//!    `Ok(())`, not telling a clean Goodbye from a daemon crash, unless
-//!    the crash cut a frame short, which it reports (E10r). Tested as
+//!    (real `pmacs --attach`) sees the SSH child exit 0 with no `Goodbye`,
+//!    which since E10r is a lost session, and attaches again: the new
+//!    bridge finds no daemon and starts one, and the frontend says so
+//!    (`tests/e10r_attach_routes.rs`). The bridge's half is tested as
 //!    [`daemon_attach_handles_daemon_crash_as_clean_eof`].
 //!
 //! # Why the `pmacs --attach` side is exercised only at the spawn /
@@ -529,11 +530,10 @@ fn daemon_attach_handles_daemon_crash_as_clean_eof() {
     // returns, kick_handle.shutdown wakes the stdin thread, and
     // the bridge exits 0.
     //
-    // From the `pmacs --attach` side, this is indistinguishable from
-    // a clean detach: the SSH child exits 0, classify_ssh_exit
-    // returns Ok. v0.1 accepts this — it's a known limitation that
-    // a daemon crash and a clean detach produce the same client
-    // exit. Future work may add a heartbeat or terminating frame.
+    // By its exit alone the `pmacs --attach` side cannot tell this from
+    // a clean detach: the SSH child exits 0, classify_ssh_exit returns
+    // Ok. What tells it is that no `Goodbye` came, which since E10r makes
+    // this a lost session (`tests/e10r_attach_routes.rs`).
     let mut daemon = TestDaemon::spawn();
     let isolated_home = daemon.socket_path.parent().unwrap();
 

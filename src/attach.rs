@@ -28,13 +28,14 @@
 //!
 //! The daemon says `Goodbye` when it means to end a session. A socket that
 //! ends without one was lost, which since E10r is what a frontend that stopped
-//! reading past the daemon's bound finds when it is resumed, so the local route
-//! attaches again ([`run_attach`]), on the SSH route's schedule and banners. It
-//! comes back on a fresh view, not its own: a grid session is minted no token
-//! (`docs/divergences.md`). A daemon that is gone ends it, saying why once the
-//! alternate screen is left; so do [`HANDSHAKE_RETRY_CAP`] sessions in a row
-//! that end before their first frame, so the route cannot spin. A frame cut
-//! short is the daemon's bound, and the frontend says so
+//! reading past the daemon's bound finds when it is resumed, so both routes
+//! attach again ([`run_attach`], [`run_attach_ssh`]), on one schedule and one set
+//! of banners. A session comes back on a fresh view, not its own, and says why:
+//! a grid session is minted no token (`docs/divergences.md`). A daemon that is
+//! gone ends the local route, saying why once the alternate screen is left; the
+//! SSH route's bridge starts a new one. [`HANDSHAKE_RETRY_CAP`] sessions in a row
+//! that end before their first frame stop either route, so neither can spin. A
+//! frame cut short is the daemon's bound, and the frontend says so
 //! ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]): no `Goodbye` can follow a
 //! part-written frame.
 //!
@@ -205,10 +206,6 @@ pub enum AttachError {
         /// What the connect found.
         found: &'static str,
     },
-    /// A session's frame was cut short, where nothing says to try again:
-    /// the SSH route's bridge ended as it does when the daemon closes its
-    /// socket. Says [`FRAME_CUT_SHORT_SENTENCE`].
-    FrameCutShort,
     /// [`HANDSHAKE_RETRY_CAP`] sessions in a row ended before their first
     /// frame, so the route stopped trying.
     SessionsDropped {
@@ -307,7 +304,6 @@ impl std::fmt::Display for AttachError {
                  and attach",
                 socket.display()
             ),
-            Self::FrameCutShort => write!(f, "{FRAME_CUT_SHORT_SENTENCE}"),
             Self::SessionsDropped {
                 attempts,
                 cut_short: true,
@@ -338,7 +334,6 @@ impl std::error::Error for AttachError {
             | Self::Rejected(_)
             | Self::SshChildExited { .. }
             | Self::DaemonGone { .. }
-            | Self::FrameCutShort
             | Self::SessionsDropped { .. } => None,
         }
     }
@@ -508,6 +503,10 @@ const NOTICE_FRESH_VIEW: &str = "[pmacs reconnected on a new view: the daemon cl
 /// daemon's bound, in what a terminal's bottom row has room for.
 const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
     "[pmacs reconnected on a new view: a frame did not arrive within 2 s]";
+
+/// [`NOTICE_FRESH_VIEW`] when the SSH route's `ssh` failed, which says nothing of
+/// the daemon: the bridge exits 0 when the daemon closes its socket.
+const NOTICE_FRESH_VIEW_LINK: &str = "[pmacs reconnected on a new view: the connection was lost]";
 
 /// Connect to the daemon at `socket_path` and run the attach client.
 ///
@@ -1747,7 +1746,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     let mut backoff = BackoffSchedule::new();
     let mut handshake_attempts: u32 = 0;
     let mut unbootstrapped: u32 = 0;
-    let mut closed_with_no_goodbye = false;
+    let mut notice: Option<&'static str> = None;
     let mut iteration: u32 = 0;
 
     let result: Result<(), AttachError> = loop {
@@ -1779,7 +1778,11 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
             &target,
             initial_handshake_complete,
             &mut loss,
+            notice,
         );
+        if let Some(lost) = loss {
+            notice = Some(lost.notice(&verdict));
+        }
         let verdict = remote_verdict(verdict, loss, &mut unbootstrapped);
 
         match verdict {
@@ -1787,7 +1790,6 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 if let Some(f) = frontend_slot.as_mut() {
                     let _ = f.clear_status_overlay();
                 }
-                closed_with_no_goodbye = loss.is_some();
                 break Ok(());
             }
             ReconnectVerdict::ExitProtocolError { error }
@@ -1843,15 +1845,12 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     // Tear down raw mode (if engaged) before main.rs's eprintln.
     drop(frontend_slot);
 
-    if closed_with_no_goodbye && result.is_ok() {
-        eprintln!("pmacs: instance closed connection");
-    }
     result
 }
 
-/// What a session that got as far as its pump came to, for
-/// [`remote_verdict`]; `None` for one that never did, such as a network that
-/// is down.
+/// What a session that got as far as its pump and lost its channel came to, for
+/// [`remote_verdict`]; `None` for one that never did, such as a network that is
+/// down, and for one that ended on purpose.
 #[derive(Clone, Copy, Debug)]
 struct SessionLoss {
     /// Whether its first frame arrived.
@@ -1860,18 +1859,33 @@ struct SessionLoss {
     cut_short: bool,
 }
 
-/// E10r fix round 1 --- what a lost session makes of the SSH route's verdict,
-/// so a route past the link's floor cannot hold the other frontends up on every
-/// try, as each attach it starts does for the daemon's bound.
+impl SessionLoss {
+    /// What the next session says of this one, given `verdict`, the attempt's
+    /// own: the bridge's clean exit is the daemon closing its socket, and
+    /// anything else an `ssh` that failed.
+    fn notice(self, verdict: &ReconnectVerdict) -> &'static str {
+        if self.cut_short {
+            NOTICE_FRESH_VIEW_CUT_SHORT
+        } else if matches!(verdict, ReconnectVerdict::ExitClean) {
+            NOTICE_FRESH_VIEW
+        } else {
+            NOTICE_FRESH_VIEW_LINK
+        }
+    }
+}
+
+/// E10r, the owner's ruling of 2026-11-06 --- what a lost session makes of the
+/// SSH route's verdict, by what each failure costs the other frontends.
 ///
-/// The real bridge exits 0 when the daemon closes its socket (`run_bridge_connected`),
-/// so a session the daemon dropped reads [`ReconnectVerdict::ExitClean`] and has
-/// always ended the route, after one hold-up; what it lacked was a reason. A frame
-/// cut short gives it one. An `ssh` that exits otherwise is a
-/// [`ReconnectVerdict::Reconnect`], unbounded, and sessions in a row that end that
-/// way before their first frame stop at [`HANDSHAKE_RETRY_CAP`]. A first frame
-/// starts the count again, and a network that is down reaches no pump and counts
-/// nothing, so it keeps reconnecting.
+/// The real bridge exits 0 when the daemon closes its socket
+/// (`run_bridge_connected`), so a session that was lost and an end the frontend
+/// meant read alike by the exit, and only `loss` tells them: `None` is a `Goodbye`
+/// or F12, which end the route, or a daemon never reached, which costs nobody
+/// anything and keeps backing off with no limit. A session that had its first
+/// frame and was then lost has paid its one hold-up, so it reconnects, whatever
+/// its end. A session cut before its first frame, a link past the floor, costs the
+/// others the bound on every try, and backoff alone would be 2 s in every 32 with
+/// no end, so sessions in a row ending that way stop at [`HANDSHAKE_RETRY_CAP`].
 fn remote_verdict(
     verdict: ReconnectVerdict,
     loss: Option<SessionLoss>,
@@ -1886,20 +1900,20 @@ fn remote_verdict(
         *unbootstrapped = unbootstrapped.saturating_add(1);
     }
     match verdict {
-        ReconnectVerdict::ExitClean if loss.cut_short => ReconnectVerdict::ExitProtocolError {
-            error: AttachError::FrameCutShort,
+        permanent @ (ReconnectVerdict::ExitProtocolError { .. }
+        | ReconnectVerdict::ExitPolicy { .. }) => permanent,
+        _ if *unbootstrapped >= HANDSHAKE_RETRY_CAP => ReconnectVerdict::ExitProtocolError {
+            error: AttachError::SessionsDropped {
+                attempts: *unbootstrapped,
+                cut_short: loss.cut_short,
+            },
         },
-        ReconnectVerdict::Reconnect { .. } | ReconnectVerdict::ReconnectHandshake { .. }
-            if *unbootstrapped >= HANDSHAKE_RETRY_CAP =>
-        {
-            ReconnectVerdict::ExitProtocolError {
-                error: AttachError::SessionsDropped {
-                    attempts: *unbootstrapped,
-                    cut_short: loss.cut_short,
-                },
-            }
+        ReconnectVerdict::ExitClean => ReconnectVerdict::Reconnect {
+            error: AttachError::Transport(TransportError::Eof),
+        },
+        ReconnectVerdict::Reconnect { error } | ReconnectVerdict::ReconnectHandshake { error } => {
+            ReconnectVerdict::Reconnect { error }
         }
-        other => other,
     }
 }
 
@@ -2049,8 +2063,9 @@ fn attempt_session(
     target: &AttachTarget,
     initial_handshake_complete: bool,
     loss: &mut Option<SessionLoss>,
+    notice: Option<&str>,
 ) -> ReconnectVerdict {
-    let raw_result = run_one_session(frontend_slot, target, loss);
+    let raw_result = run_one_session(frontend_slot, target, loss, notice);
     match raw_result {
         Ok(()) => ReconnectVerdict::ExitClean,
         Err(error) => classify_for_reconnect(error, initial_handshake_complete),
@@ -2134,6 +2149,7 @@ fn run_pump_and_reap(
     frontend: &mut Frontend,
     assigned_frontend_id: FrontendId,
     loss: &mut Option<SessionLoss>,
+    notice: Option<&str>,
 ) -> Result<(), AttachError> {
     let pid = child.id();
     let io = AttachIo {
@@ -2141,7 +2157,7 @@ fn run_pump_and_reap(
         writer: Box::new(child_stdin),
         kick: ssh_kick(pid),
     };
-    let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, None);
+    let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, notice);
     let over = matches!(pump_end, Ok(PumpEnd::Over));
     let pump_result = pump_end.and_then(|end| match end {
         PumpEnd::Over => Ok(()),
@@ -2185,6 +2201,7 @@ fn run_one_session(
     frontend_slot: &mut Option<Frontend>,
     target: &AttachTarget,
     loss: &mut Option<SessionLoss>,
+    notice: Option<&str>,
 ) -> Result<(), AttachError> {
     let mut cmd = build_ssh_command(target).expect("target shape pre-validated by caller");
     cmd.stdin(Stdio::piped())
@@ -2336,6 +2353,7 @@ fn run_one_session(
         frontend,
         hello.assigned_frontend_id,
         loss,
+        notice,
     )
 }
 
@@ -3124,7 +3142,7 @@ mod tests {
         );
     }
 
-    /// E10r fix round 1: the SSH route's stops, one verdict at a time.
+    /// The SSH route's stops, one verdict at a time.
     #[test]
     fn a_lost_session_decides_the_remote_verdict() {
         let lost = |bootstrapped, cut_short| {
@@ -3136,37 +3154,56 @@ mod tests {
         let reconnect = || ReconnectVerdict::Reconnect {
             error: AttachError::Io(io::Error::other("ssh exited 1")),
         };
-        // The bridge's own end after a cut stops at once, saying why.
-        let mut count = 0;
-        assert!(matches!(
-            remote_verdict(ReconnectVerdict::ExitClean, lost(true, true), &mut count),
-            ReconnectVerdict::ExitProtocolError {
-                error: AttachError::FrameCutShort
-            }
-        ));
-        // Its end at a frame's boundary stays clean.
-        let mut count = 0;
-        assert!(matches!(
-            remote_verdict(ReconnectVerdict::ExitClean, lost(true, false), &mut count),
-            ReconnectVerdict::ExitClean
-        ));
-        // An ssh that exits otherwise goes on until the cap...
-        let mut count = 0;
-        for _ in 1..HANDSHAKE_RETRY_CAP {
+        // A session that worked and was lost reconnects, whatever its end: the
+        // bridge's own, with a frame cut short or at a frame's boundary...
+        for cut_short in [true, false] {
+            let mut count = 0;
             assert!(matches!(
-                remote_verdict(reconnect(), lost(false, true), &mut count),
+                remote_verdict(
+                    ReconnectVerdict::ExitClean,
+                    lost(true, cut_short),
+                    &mut count
+                ),
                 ReconnectVerdict::Reconnect { .. }
             ));
         }
+        // ...and an ssh that failed, on the attempt whose first handshake it was.
+        let mut count = 0;
         assert!(matches!(
-            remote_verdict(reconnect(), lost(false, true), &mut count),
-            ReconnectVerdict::ExitProtocolError {
-                error: AttachError::SessionsDropped {
-                    attempts: HANDSHAKE_RETRY_CAP,
-                    cut_short: true,
-                }
-            }
+            remote_verdict(
+                ReconnectVerdict::ReconnectHandshake {
+                    error: AttachError::Io(io::Error::other("ssh exited 1")),
+                },
+                lost(true, false),
+                &mut count
+            ),
+            ReconnectVerdict::Reconnect { .. }
         ));
+        // Sessions cut before their first frame go on until the cap, by either end...
+        for last in [
+            ReconnectVerdict::ExitClean,
+            ReconnectVerdict::ReconnectHandshake {
+                error: AttachError::Io(io::Error::other("ssh exited 1")),
+            },
+            reconnect(),
+        ] {
+            let mut count = 0;
+            for _ in 1..HANDSHAKE_RETRY_CAP {
+                assert!(matches!(
+                    remote_verdict(ReconnectVerdict::ExitClean, lost(false, true), &mut count),
+                    ReconnectVerdict::Reconnect { .. }
+                ));
+            }
+            assert!(matches!(
+                remote_verdict(last, lost(false, true), &mut count),
+                ReconnectVerdict::ExitProtocolError {
+                    error: AttachError::SessionsDropped {
+                        attempts: HANDSHAKE_RETRY_CAP,
+                        cut_short: true,
+                    }
+                }
+            ));
+        }
         // ...a first frame starts the count again...
         let mut count = HANDSHAKE_RETRY_CAP - 1;
         assert!(matches!(
@@ -3180,6 +3217,46 @@ mod tests {
             remote_verdict(reconnect(), None, &mut count),
             ReconnectVerdict::Reconnect { .. }
         ));
+        // A session that ended on purpose lost nothing, and ends the route.
+        let mut count = 0;
+        assert!(matches!(
+            remote_verdict(ReconnectVerdict::ExitClean, None, &mut count),
+            ReconnectVerdict::ExitClean
+        ));
+        // What cannot be retried stops, whatever the session reached.
+        let mut count = 0;
+        assert!(matches!(
+            remote_verdict(
+                ReconnectVerdict::ExitProtocolError {
+                    error: AttachError::Terminal(io::Error::other("crossterm broke")),
+                },
+                lost(true, false),
+                &mut count
+            ),
+            ReconnectVerdict::ExitProtocolError {
+                error: AttachError::Terminal(_)
+            }
+        ));
+    }
+
+    /// What the next session says of a lost one.
+    #[test]
+    fn a_lost_session_says_why_on_the_next_one() {
+        let lost = |cut_short| SessionLoss {
+            bootstrapped: true,
+            cut_short,
+        };
+        let failed = ReconnectVerdict::Reconnect {
+            error: AttachError::Io(io::Error::other("ssh exited 255")),
+        };
+        assert_eq!(
+            lost(false).notice(&ReconnectVerdict::ExitClean),
+            NOTICE_FRESH_VIEW
+        );
+        assert_eq!(lost(false).notice(&failed), NOTICE_FRESH_VIEW_LINK);
+        for verdict in [ReconnectVerdict::ExitClean, failed] {
+            assert_eq!(lost(true).notice(&verdict), NOTICE_FRESH_VIEW_CUT_SHORT);
+        }
     }
 
     #[test]

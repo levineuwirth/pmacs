@@ -35,11 +35,11 @@
 //!
 //! 4. **SSH dies mid-pump → reconnect succeeds.** Counter-aware fake
 //!    SSH that completes the handshake on every call but exits
-//!    non-zero on calls 1–2 and exits 0 on call 3; pmacs reconnects
-//!    and exits clean. A daemon dying is not this case: the real
-//!    bridge exits 0 when its socket closes
+//!    non-zero on calls 1–2 and says `Goodbye` on call 3; pmacs reconnects
+//!    and exits clean. A daemon dying reconnects too: the real bridge
+//!    exits 0 when its socket closes
 //!    (`m5_7_acceptance::daemon_attach_handles_daemon_crash_as_clean_eof`),
-//!    which ends the route and does not reconnect
+//!    which with no `Goodbye` is a lost session
 //!    (`tests/e10r_attach_routes.rs`).
 //! 5. **Ctrl-C during reconnect sleep → clean exit.** Fake SSH whose
 //!    first call completes handshake then exits non-zero; pmacs
@@ -350,6 +350,18 @@ fn encode_hello_frame() -> Vec<u8> {
     buf
 }
 
+/// Build the wire-format bytes for a `Goodbye` frame, which is what ends the
+/// route on purpose: since E10r an `ssh` that exits 0 with none is a lost session.
+fn encode_goodbye_frame() -> Vec<u8> {
+    let mut buf = Vec::new();
+    pmacs::transport::write_message(
+        &mut buf,
+        &pmacs::protocol::InstanceMessage::Goodbye(pmacs::protocol::GoodbyeReason::ShuttingDown),
+    )
+    .expect("encode Goodbye");
+    buf
+}
+
 /// Write a counter-aware fake SSH that delivers a real `Hello` frame
 /// and exits with a per-call code. The script:
 ///
@@ -357,9 +369,9 @@ fn encode_hello_frame() -> Vec<u8> {
 /// 2. Writes the precomputed Hello frame to its stdout.
 /// 3. Sleeps `keepalive_ms` so pmacs has time to write `AttachRequest`
 ///    and run `Frontend::new` before the pipe closes.
-/// 4. Exits with the code at index `count - 1` in `exit_codes`. After
-///    the list is exhausted, exits with the last code (so e.g.
-///    `[1, 1, 0]` → fail twice, then succeed forever).
+/// 4. Exits with the code at index `count - 1` in `exit_codes`, a code of 0
+///    saying `Goodbye` first. After the list is exhausted, exits with the
+///    last code (so e.g. `[1, 1, 0]` → fail twice, then end for good).
 fn write_session_reconnect_fake_ssh(
     dir: &Path,
     counter: &Path,
@@ -368,14 +380,23 @@ fn write_session_reconnect_fake_ssh(
     exit_codes: &[i32],
 ) -> PathBuf {
     let script = dir.join("fake-ssh-session.sh");
+    let goodbye_path = dir.join("goodbye.bin");
+    fs::write(&goodbye_path, encode_goodbye_frame()).expect("write goodbye.bin");
+    let arm = |code: i32| {
+        if code == 0 {
+            format!("cat {}; exit 0", shell_quote(&goodbye_path))
+        } else {
+            format!("exit {code}")
+        }
+    };
     // Build a shell `case` body dispatching on counter value.
     let mut case_body = String::new();
     for (i, code) in exit_codes.iter().enumerate() {
         let n = i + 1;
-        let _ = writeln!(case_body, "{n}) exit {code} ;;");
+        let _ = writeln!(case_body, "{n}) {} ;;", arm(*code));
     }
     let last = exit_codes.last().copied().unwrap_or(0);
-    let _ = writeln!(case_body, "*) exit {last} ;;");
+    let _ = writeln!(case_body, "*) {} ;;", arm(last));
 
     let seconds = f64::from(keepalive_ms) / 1000.0;
     let body = format!(
@@ -441,18 +462,15 @@ fn setup_pty_fixture(keepalive_ms: u32, exit_codes: &[i32]) -> PtyFixture {
 
 /// The session-reconnect path of the loop, exercised end-to-end:
 /// the fake SSH delivers a valid `Hello` on every call, lets pmacs
-/// reach the pump, then exits non-zero on calls 1–2 and exits 0 on
-/// call 3. With `Frontend::new` succeeding (real PTY), each pump
-/// returns `Ok(())` (reader EOF on SSH stdout), the child's exit
-/// code controls classification: non-zero → `SshChildExited` →
-/// `Reconnect` (transient, frontend up); zero → `ExitClean` → loop
-/// breaks `Ok(())`.
+/// reach the pump, then exits non-zero on calls 1–2 and says `Goodbye`
+/// on call 3. With `Frontend::new` succeeding (real PTY), each of the
+/// first two pumps ends in reader EOF on SSH stdout and the child's
+/// non-zero exit → `SshChildExited` → `Reconnect` (transient, frontend
+/// up); the `Goodbye` → `ExitClean` → loop breaks `Ok(())`.
 ///
 /// Asserts pmacs exits 0 and the counter file shows exactly 3
-/// invocations. The "daemon dies mid-pump" case is covered by this
-/// test as well: from pmacs's view, both manifest as the SSH child
-/// exiting non-zero (a daemon death cascades through the bridge to
-/// SSH stdout EOF + bridge exit + SSH exit).
+/// invocations. A daemon dying mid-pump is `tests/e10r_attach_routes.rs`:
+/// the real bridge exits 0 for that, not non-zero.
 #[test]
 fn ssh_dies_mid_pump_then_reconnect_succeeds() {
     // 100ms keepalive lets pmacs finish handshake + Frontend::new
