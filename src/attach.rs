@@ -1797,13 +1797,14 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 break Err(error);
             }
             ReconnectVerdict::Reconnect { error: _last_error } => {
-                // Mid-session disconnect: indefinite retry. The
-                // backoff schedule is intentionally NOT reset between
-                // failed attempts — it walks the curve and plateaus
-                // at 30s, matching mosh. Reset on a sustained
-                // re-pump is a v0.3 refinement (we'd need a
-                // "pump_ran_for_at_least_N_seconds" signal that
-                // doesn't exist yet).
+                // Mid-session disconnect: indefinite retry. The backoff
+                // schedule walks the curve across failed attempts and
+                // plateaus at 30s, matching mosh, and starts again after a
+                // session that reached its first frame, as the local route's
+                // does: that loss is an event of its own.
+                if loss.is_some_and(|lost| lost.bootstrapped) {
+                    backoff.reset();
+                }
                 let delay = backoff.next_delay();
                 match sleep_with_countdown(frontend_slot.as_mut(), delay) {
                     SleepOutcome::Cancelled => break Ok(()),

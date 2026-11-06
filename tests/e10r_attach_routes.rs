@@ -432,6 +432,10 @@ impl StandInSsh {
     }
 
     fn attach(&self) -> common::pty::PmacsPty {
+        self.attach_scaled("1")
+    }
+
+    fn attach_scaled(&self, scale_ms: &str) -> common::pty::PmacsPty {
         let home = self.dir.path();
         let script = home.join("ssh");
         common::pty::spawn_pmacs_in_pty(
@@ -440,7 +444,7 @@ impl StandInSsh {
                 ("HOME", home),
                 ("XDG_CONFIG_HOME", home),
                 (PMACS_TEST_SSH_BIN, &script),
-                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1")),
+                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
             ],
             24,
             80,
@@ -659,6 +663,62 @@ fn e10r_remote_a_session_cut_after_its_first_frame_comes_back_saying_the_bound_i
         said.contains("reconnected on a new view: a frame did not arrive within 2 s"),
         "{said:?}"
     );
+}
+
+/// A second loss after a session that reached its first frame waits the schedule's
+/// first delay, not its next, as the local route's does: each such loss is an event
+/// of its own. The countdown says each wait, so this needs no clock: at a scale of
+/// 1 s the first delay reads `in 1s` and the second, were the schedule walking on,
+/// `in 2s`, and later ones more. Through the real bridge.
+#[test]
+fn e10r_remote_a_loss_after_a_first_frame_waits_the_schedules_first_delay() {
+    let daemon = StandInDaemon::serve(|n, stream| {
+        first_frame(stream);
+        if n == 4 {
+            std::thread::sleep(Duration::from_millis(200));
+            write_message(
+                stream,
+                &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown),
+            )
+            .expect("Goodbye");
+        }
+    });
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let mut tui = ssh.attach("1000");
+    let status = tui
+        .wait_for_exit(Duration::from_mins(1))
+        .unwrap_or_else(|| panic!("it went on: {} sessions", daemon.connections()));
+    assert!(status.success(), "{status:?}");
+    assert_eq!(daemon.connections(), 4);
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(said.contains("reconnecting in 1s"), "{said:?}");
+    assert!(
+        !said.contains("reconnecting in 2s"),
+        "a second loss waited the schedule's next delay: {said:?}"
+    );
+}
+
+/// A failed attempt does not start the schedule again: a network that stays down
+/// walks the curve, as it does at `b25e779`. A guard. Three failed attempts after
+/// the loss read `in 1s`, `in 2s` and `in 4s` at a scale of 1 s.
+#[test]
+fn e10r_remote_a_network_that_stays_down_walks_the_schedule() {
+    let down = 3;
+    let mut sessions = vec![session_with(&frame_bytes(), 1)];
+    sessions.extend((0..down).map(|_| RemoteSession {
+        bytes: Vec::new(),
+        then: "exit 255".to_owned(),
+    }));
+    sessions.push(session_with(&goodbye_bytes(), 0));
+    let ssh = StandInSsh::new(&sessions);
+    let mut tui = ssh.attach_scaled("1000");
+    let status = tui
+        .wait_for_exit(Duration::from_mins(1))
+        .expect("the network comes back and the Goodbye ends it");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(ssh.invocations(), down + 2);
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(said.contains("reconnecting in 4s"), "{said:?}");
 }
 
 /// An `ssh` that failed says the connection was lost, which is all it knows; the
