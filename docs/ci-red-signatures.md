@@ -212,7 +212,10 @@ under the owner's ruling of 2026-10-20 (recorded at E9's close, below):
   failed; 13 ignored`, the other failure #377's, at `e7c8fd5` (E9's tip)
 
 The panic now sits at `src/daemon_attach.rs:859:9`; the line moves and
-the issue says so.
+the issue says so. `CI` 42376057780 at `ae25b0d`, on `Test (macos-latest /
+lua54)`, failed this selector with neither fragment, `should not have hit
+the timeout; took 24.102990125s` at `:864:9`, listed on the issue and not
+counted.
 
 ### The poll cadence on the hosted macOS runners, measured (E4's opening, run 34484377105)
 
@@ -15176,6 +15179,105 @@ Tally (e10m-addition-local): 4 items in the list below.
 
 So, at the addition: PR #476 is green at its head, not merged, and it closes #276, #282, #288, #291, #316, #328, #332, #340, #363, #373, #374, #381, #409, #427, #461 and #474. Neither new commit adds a CI occurrence and no count moves: #291's seventeen and #340's samples are local and stand, and #479 and #480, filed at this round, have no CI occurrence and no row. A SIGBUS or `No space left on device` on a real small root under E10m.7's fix reopens #328.
 
+### E10m's second addition: PR #476 red at `ae25b0d` on one macOS leg, `main` green at `50e609a`
+
+Recorded 2026-11-07 at E10m's second addition (roadmap §E10m, E10m.5 and E10m.13), at the owner's rulings of that day. Every run was read from the jobs endpoint by conclusion, and every test leg named through its own log, fetched with escape sequences allowed and stripped. Nothing was rerun.
+
+**A row is renamed.** `e7e_haskell_acceptance::e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error` is `e7e_hls_attaches_in_a_cabal_project_and_reports_a_type_error` from `ae25b0d`, its error going in as one key; the entries above keep the old name. **No CI leg has HLS**, so that row returns early on all six and CI says nothing of it: its evidence is the laptop's, listed below and not tallied.
+
+#### PR #476 at `ae25b0d`, the head: red at attempt 1, not rerun
+
+`CI` 42376057780 at `ae25b0d`, attempt 1 of 1, `pull_request`, created 2026-11-07T13:14:37Z and completed 2026-11-07T13:51:38Z: `failure`. The merge `b038319` into `50e609a`. **One red leg, in code this PR does not touch:** `Test (macos-latest / lua54)` 128413797343, `--lib`, `2333 passed; 2 failed; 14 ignored`, `finished in 75.05s`: `daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once`, `initial terminal bell timed out`, U19's second occurrence, filed as #484; and `daemon_attach::tests::ensure_running_invokes_spawner_then_waits_for_socket_to_appear`, `should not have hit the timeout; took 24.102990125s`, #264's selector and neither of its fragments, listed there and not counted. No test in that binary ended for 24.106 s, 13:20:33.084 to 13:20:57.189, and both ended within 0.4 s after it; the same binary shows gaps of 17.42 s and 7.61 s, and the green macOS leg of this run a largest gap of 4.87 s. That is read from when tests ended and is not a cause, and no object shared by the two rows is demonstrated, so it widens neither. The leg's later steps, `cargo test --doc` and `-p pmacs-protocol`, did not run after the failure, which is the 2 pairs and 54 tests it reads below the green macOS leg. `m6_5_repl_spawns_fish`, `_zsh`, `_bash` and `_lua` read `ok` on all six, no occurrence of #254 here. `WouldBlock` and `Bus error` in none.
+
+Tally (pr-476-ci-ae25b0d): 19 = 17 + 1 + 1.
+
+Tally (pr-476-ci-ae25b0d-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128413757385 | success |
+| Changed paths | 128413757542 | success |
+| Lint (luajit) | 128413757618 | success |
+| Commit attribution (D9) | 128413757626 | success |
+| Lint (lua54) | 128413757688 | success |
+| M6 Perf Gates | 128413797329 | success |
+| Test (macos-latest / lua54) | 128413797343 | failure |
+| M1 Acceptance Gates | 128413797346 | success |
+| M4 Perf Gates | 128413797352 | success |
+| Test (ubuntu-latest / luajit) | 128413797354 | success |
+| Perf budgets (debug) | 128413797358 | success |
+| GPU Render (headless) | 128413797374 | success |
+| Test (crdt) | 128413797387 | success |
+| M5 Perf Gates | 128413797392 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128413797399 | success |
+| Test (ubuntu-latest / lua54) | 128413797407 | success |
+| Test (macos-latest / luajit) | 128413797432 | success |
+| M10 Perf Gates (crdt) | 128413797438 | success |
+| Docs consistency | 128413798823 | skipped |
+
+Tally (pr-476-ci-ae25b0d-success): 17 rows of the table above with `result` = `success`.
+Tally (pr-476-ci-ae25b0d-failure): 1 row of the table above with `result` = `failure`.
+Tally (pr-476-ci-ae25b0d-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-476-ci-ae25b0d-legs): 6 items in the list below.
+
+- `Test (macos-latest / lua54)` 128413797343: `failure`, 228 `running` lines and 228 results, 5,388 / 2 / 79, failing `daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once`, `daemon_attach::tests::ensure_running_invokes_spawner_then_waits_for_socket_to_appear`.
+- `Test (ubuntu-latest / luajit)` 128413797354: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 58,742 MB available after the tests.
+- `Test (crdt)` 128413797387: `success`, 228 `running` lines and 228 results, 5,446 / 0 / 87, 59,277 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 128413797399: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 65,896 MB available after the tests.
+- `Test (ubuntu-latest / lua54)` 128413797407: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 59,365 MB available after the tests.
+- `Test (macos-latest / luajit)` 128413797432: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+
+`Grammar fuzz` 42376057720 at `ae25b0d`, attempt 1 of 1: `success`, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`.
+
+Tally (pr-476-fuzz-ae25b0d): 2 = 2 + 0.
+
+#### `main` at `50e609a`, E10m's addition's registry commit: green
+
+`CI` 42319782673 at `50e609a`, attempt 1 of 1, `push`, created 2026-11-07T00:41:49Z and completed 2026-11-07T00:44:00Z: `success`. The registry-push shape. `CI` 42318729049 and `Grammar fuzz` 42318729094 at `c68e92d` are already recorded at `50e609a`, above.
+
+Tally (main-ci-50e609a): 15 = 6 + 9.
+
+Tally (main-ci-50e609a-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 128241259838 | success |
+| Lint (luajit) | 128241260094 | success |
+| Lint (lua54) | 128241260130 | success |
+| Commit attribution (D9) | 128241260238 | success |
+| Format | 128241261045 | success |
+| Docs consistency | 128241309681 | success |
+| Test (crdt) | 128241310930 | skipped |
+| M4 Perf Gates | 128241311142 | skipped |
+| M1 Acceptance Gates | 128241311169 | skipped |
+| M10 Perf Gates (crdt) | 128241311280 | skipped |
+| Test (matrix) | 128241311511 | skipped |
+| GPU Render (headless) | 128241311740 | skipped |
+| M6 Perf Gates | 128241311826 | skipped |
+| Perf budgets (debug) | 128241312003 | skipped |
+| M5 Perf Gates | 128241312149 | skipped |
+
+Tally (main-ci-50e609a-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-50e609a-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 42319782664 at `50e609a`, attempt 1 of 1: `success`.
+
+Tally (main-fuzz-50e609a): 2 = 2 + 0.
+
+#### The local record, listed and not tallied
+
+Tally (e10m-addition2-local): 6 items in the list below.
+
+- `20261107T130036Z-1155213` at `ae25b0d`, `scripts/gate`: all six ok, 5,892 / 0 / 87 at 237 pairs, no daemon survived.
+- E10m.5's row on its own blob, no relay and no plant: 100 of 100 on real HLS 2.4.0.0; 39 of 40 on HLS 2.15.0.0, the red `the store holds no error 30 s after the publish at version 2 that held it; store []; publishes [v2:error v1:0]`, #479's shape.
+- E10m.13's control at `5ada636`, a stand-in through `PMACS_TEST_FISH`, no source plant: discarding the queued line fails `m6_5_repl_spawns_fish` with #254's fragments 5 of 200 on fish 4.9.3 and 3 of 200 on the legs' 3.7.0. A stand-in that never prints passes 156 of 160, the row reading the terminal's echo of its own line.
+- The real shell's first start through that row, a fresh `HOME` each run, reds with both fragments: fish 3.7.0 71 of 200 and 34 of 100 on one contended core; fish 4.9.3 2 of 200 and 22 of 100; zsh 1 of 60; bash and lua 0 of 60. In the reds traced, fish read the line and wrote its answer and the REPL's history does not hold it (#482).
+- The row's fix as written, a plant not committed: red on fish 13 of 13 and zsh 10 of 10, so not landed and `Closes #254` not taken; with #482's change, also a plant, every shell passes.
+- A control shows one way, and none of the above is the cause of any of #254's five occurrences; no tally of #254 moves.
+
+So, at the second addition: PR #476 is red at its head on one leg it does not touch, not merged, not rerun, and it closes #276, #282, #288, #291, #316, #328, #332, #340, #363, #373, #374, #381, #409, #427, #461 and #474. #254 stays open. Filed: #482, the REPL's CR LF; #483, fish 4.9.3's start; #484, U19. Neither new commit adds a row to the sweep's count, so 5,892 / 0 / 87 stands.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
@@ -15351,7 +15453,7 @@ names a report that does not exist.
 | selector | `--lib daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once` |
 | job | local (Linux), the workspace sweep of `scripts/gate` (step `07-sweep` of the eight-stage gate of the time) |
 | required fragments | `initial terminal bell timed out` |
-| occurrences | one: 2026-08-31, gate log `20260831T174104Z-3438184`, `src/daemon.rs:5296`, `1988 passed; 2 failed` --- the same run as U16's second occurrence, recorded separately because the selectors and fragments differ. It passed in all three stages of the next gate run, at `ea786a2` (log `20260831T174716Z-3535694`): non-reproduction and nothing more |
+| occurrences | two, filed as #484. 2026-08-31, gate log `20260831T174104Z-3438184`, `src/daemon.rs:5296`, `1988 passed; 2 failed` --- the same run as U16's second occurrence, recorded separately because the selectors and fragments differ. It passed in all three stages of the next gate run, at `ea786a2` (log `20260831T174716Z-3535694`): non-reproduction and nothing more. 2026-11-07, `CI` 42376057780 on PR #476 at `ae25b0d`, `Test (macos-latest / lua54)` 128413797343, `src/daemon.rs:6853:13`, `2333 passed; 2 failed`, inside a 24.1 s window in which no test of the binary ended; not rerun |
 | candidate mechanism | a 5-second poll over `bell_count(buffer_id) != Some(1)` with `tick_processes()` and a 10 ms sleep per turn. Whether the bell never arrived or arrived late the loop cannot tell apart, and the panic carries no elapsed value, so this occurrence's margin is unrecoverable. Unresolved |
 | retirement | diagnosis. The loop reporting its elapsed time, poll count and last-observed count would be a step toward it and is not a closer --- R5's lesson and U8's. Never a green rerun |
 
