@@ -314,6 +314,7 @@ where
 /// rather than wait for a daemon that has already refused. A file that cannot be opened
 /// ([`pmacs_protocol::socket_file::open_daemon_stderr`], a link there included) falls back
 /// to the null device rather than refusing the spawn: the daemon matters more than its log.
+/// It is appended to, so a crash's words outlast the reconnect that starts the next daemon.
 fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
     let exe = std::env::current_exe().map_err(|source| BridgeError::SpawnFailed {
         exe: PathBuf::from("<current_exe unavailable>"),
@@ -326,7 +327,7 @@ fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
     ));
     crate::socket_path::ensure_runtime_subdir(socket_path)
         .map_err(BridgeError::RefusedDirectory)?;
-    let stderr = pmacs_protocol::socket_file::open_daemon_stderr(socket_path)
+    let stderr = pmacs_protocol::socket_file::open_daemon_stderr(socket_path, "the bridge")
         .map_or_else(|_| Stdio::null(), Stdio::from);
     Command::new(&exe)
         .arg("--daemon")

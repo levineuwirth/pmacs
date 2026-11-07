@@ -183,7 +183,8 @@ session, `F12` does nothing, and after 120 s the attempt is killed and the
 next one comes. Three new daemons in a row that each lasted under 30 s
 stop it, as do three sessions in a row the daemon closed before their first
 frame, each naming the file beside the socket on the far side where the last
-one's stderr went. `pmacs --daemon --stop` ends a TUI that hears it and
+one's stderr went: it holds every daemon started there, each under a line saying
+when and by whom, and past 1 MiB it moves to `.stderr.1`. `pmacs --daemon --stop` ends a TUI that hears it and
 starts nothing; a TUI stopped past the 2 s when it ran hears nothing, so
 when resumed over SSH it starts a new daemon, which keeps running and says
 so, and on a local socket it ends. A link has to carry a

@@ -3343,3 +3343,130 @@ fn h8_an_ssh_failing_after_its_hello_leaves_its_words_in_the_sentence() {
         "{said:?}"
     );
 }
+
+/// **Review 2's Low 6, its `p26`, as ruled:** the file was truncated at each start, so a single
+/// crash's words were gone about a second after the kill, the reconnect's daemon standing in
+/// it, kept only where three in a row stopped the route. It is appended to, under a line at
+/// each start saying when and by whom. At `ac57354`, before H9, it holds one daemon's line.
+#[test]
+fn h9_a_crashed_daemons_words_outlast_the_reconnect_after_it() {
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons(
+        "io.stderr:write('MARK a daemon of this row\\n')\nio.stderr:flush()\n",
+    );
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    let path = started.lockfile.with_extension("stderr");
+    let first = started.kill_the_one_running();
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row() == NEW_DAEMON_NOTICE
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let held = loop {
+        let held = std::fs::read_to_string(&path).unwrap_or_default();
+        if held.matches("MARK").count() >= 2 || Instant::now() >= deadline {
+            break held;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(
+        held.matches("MARK a daemon of this row").count(),
+        2,
+        "the killed daemon's words and its successor's: {held}"
+    );
+    assert_eq!(
+        held.matches("a daemon started by the bridge, pid ").count(),
+        2,
+        "a line at each start: {held}"
+    );
+    assert!(
+        held.find(&format!(
+            "pmacs: daemon listening on {}",
+            started.lockfile.with_extension("").display()
+        ))
+        .is_some(),
+        "{held}"
+    );
+    assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(first), None).is_err());
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// Two bridges starting a daemon together on one socket, as two TUIs reconnecting together
+/// do: the file keeps both starts' lines whole and nothing of either is lost to a truncation
+/// at the other's start.
+#[test]
+fn h9_two_bridges_starting_together_keep_every_line_whole() {
+    let runtime = tempfile::TempDir::new().expect("tempdir");
+    // Not under the runtime directory, whose `pmacs/` is the socket's and must be 0700.
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let config = home.path().join("pmacs");
+    std::fs::create_dir_all(&config).expect("the config directory");
+    std::fs::write(
+        config.join("init.lua"),
+        "io.stderr:write('MARK a daemon of this row\\n')\nio.stderr:flush()\n",
+    )
+    .expect("init.lua");
+    let started = StartedByTheBridge {
+        lockfile: runtime.path().join("pmacs/default.sock.lock"),
+        _holder: None,
+    };
+    let bridges: Vec<_> = (0..2)
+        .map(|_| {
+            let runtime = runtime.path().to_path_buf();
+            let home = home.path().to_path_buf();
+            std::thread::spawn(move || {
+                let mut bridge = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs"))
+                    .arg("--daemon-attach")
+                    .env("XDG_RUNTIME_DIR", &runtime)
+                    .env("HOME", &home)
+                    .env("XDG_CONFIG_HOME", &home)
+                    .env("PMACS_STATE_HOME", &home)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("a bridge");
+                let mut from = bridge.stdout.take().expect("its stdout");
+                let heard = read_message::<Hello>(&mut from).is_ok();
+                drop(bridge.stdin.take());
+                let _ = bridge.kill();
+                let _ = bridge.wait();
+                heard
+            })
+        })
+        .collect();
+    let heard = bridges
+        .into_iter()
+        .map(|bridge| bridge.join().expect("the bridge's thread"))
+        .filter(|heard| *heard)
+        .count();
+    let held = std::fs::read(runtime.path().join("pmacs/default.sock.stderr")).expect("the file");
+    assert!(
+        heard >= 1,
+        "neither bridge reached a daemon: {}",
+        String::from_utf8_lossy(&held)
+    );
+    assert!(!held.contains(&0), "a truncation left a hole: {held:?}");
+    let held = String::from_utf8(held).expect("text");
+    let starts = held.matches("a daemon started by the bridge, pid ").count();
+    assert!((1..=2).contains(&starts), "{held}");
+    for line in held
+        .lines()
+        .filter(|line| line.contains("a daemon started by"))
+    {
+        assert!(
+            line.starts_with("--- ") && line.ends_with(" ---"),
+            "a start's line is whole: {held}"
+        );
+    }
+    assert!(
+        held.contains("MARK a daemon of this row"),
+        "the daemon that won kept its words: {held}"
+    );
+    drop(started);
+}

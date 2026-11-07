@@ -266,7 +266,9 @@ whole. Under one cap a growing register squeezes the rules.
   row told for certain whose sessions each lived under 30 s on the
   client's clock, `autosave.interval-ms`'s default, saying so, naming the
   host and where the last one's stderr is: a daemon the bridge starts
-  keeps it beside its socket, as the window's does. The client does not
+  keeps it beside its socket, as the window's does, appended to under a
+  line at each start saying when and by whom, so that one crash's words
+  outlast the reconnect after it, and moved to `.stderr.1` past 1 MiB. The client does not
   know a remote socket's path, so it names the file under that host's
   `$XDG_RUNTIME_DIR`, or `/tmp/pmacs-<uid>` where that is unset, as the far
   side would resolve it, and the host with the user where the route was

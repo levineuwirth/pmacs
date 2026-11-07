@@ -838,7 +838,7 @@ fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Chil
     // E2.4 — stderr goes to a file the failure message names. A file
     // that cannot be opened, a link there included, falls back to the null
     // device rather than refusing the spawn: the daemon matters more than its log.
-    let stderr = match open_daemon_stderr(socket_path) {
+    let stderr = match open_daemon_stderr(socket_path, "a window") {
         Ok(file) => Stdio::from(file),
         Err(_) => Stdio::null(),
     };
@@ -2135,7 +2135,13 @@ mod tests {
             "the failure names the stderr file: {message}"
         );
         let captured = std::fs::read_to_string(&log).expect("the stderr file exists");
-        assert_eq!(captured, "fake daemon: refusing to start\n");
+        let lines: Vec<&str> = captured.lines().collect();
+        assert_eq!(lines.len(), 2, "{captured}");
+        assert!(
+            lines[0].contains("a daemon started by a window"),
+            "{captured}"
+        );
+        assert_eq!(lines[1], "fake daemon: refusing to start");
         assert!(
             matches!(error, ManagedAttachError::StartupTimeout { .. }),
             "{error:?}"
@@ -2166,7 +2172,8 @@ mod tests {
         let mut child = spawn_daemon(&executable, &socket).expect("spawn");
         child.wait().expect("wait");
         let log = daemon_stderr_path(&socket);
-        assert_eq!(std::fs::read_to_string(&log).expect("the file"), "words\n");
+        let captured = std::fs::read_to_string(&log).expect("the file");
+        assert!(captured.ends_with("---\nwords\n"), "{captured}");
         let mode = std::fs::metadata(&log).expect("stat").permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
 
