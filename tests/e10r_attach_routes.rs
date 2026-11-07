@@ -3175,3 +3175,171 @@ fn h7_a_user_on_the_route_is_kept_in_the_sentence() {
         "{said:?}"
     );
 }
+
+/// **#477, the owner's ruling of 2026-11-07, its first witness:** a host with no `pmacs` on
+/// its `PATH`. The protocol rides `ssh`'s stderr, so the shell's complaint was read as a
+/// frame's length, past the cap, and the user read `frame length 1650553704`, the bytes
+/// `bash`, with the exit 127 that names the cause never reached. At `94e38f4` it says that.
+#[test]
+fn h8_a_far_side_with_no_pmacs_reads_its_words_and_its_127() {
+    let ssh = StandInSsh::new(&[RemoteSession {
+        bytes: b"bash: line 1: pmacs: command not found\n".to_vec(),
+        then: "exit 127".to_owned(),
+    }]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
+    assert!(!status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(!said.contains("frame length"), "{said:?}");
+    assert!(
+        said.contains(
+            "pmacs: the far side said: bash: line 1: pmacs: command not found; SSH session \
+             exited 127 (command not found on remote)"
+        ),
+        "{said:?}"
+    );
+}
+
+/// **H1 and H8 together, `p20`'s table at the head:** a first attach whose far side's
+/// directory the daemon refuses reads the daemon's own sentence, which the bridge now says
+/// at once, and not `frame length 1886216547`, the bytes `pmac`. No file is made there.
+#[test]
+fn h8_a_refused_directory_on_a_first_attach_reads_the_daemons_sentence() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let runtime = tempfile::TempDir::new().expect("tempdir");
+    let holder = runtime.path().join("pmacs");
+    std::fs::create_dir(&holder).expect("the directory");
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let ssh = BridgedSsh::on_the_default_socket_of(runtime.path());
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(30))
+        .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
+    assert!(!status.success(), "{status:?}");
+    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(!said.contains("frame length"), "{said:?}");
+    assert!(
+        said.contains(&format!(
+            "pmacs: the far side said: pmacs: directory {} is too permissive (mode 0o755); \
+             expected mode 0700 or stricter; SSH session exited 1",
+            holder.display()
+        )),
+        "{said:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&holder).expect("the directory").count(),
+        0,
+        "no file in a directory the daemon refuses"
+    );
+}
+
+/// **Review 2's Low 5, its `p21`:** a session up, then its far side's directory turned to
+/// one the daemon refuses and the daemon killed. The route cannot reach a daemon, which costs
+/// nobody anything, so it backs off with no limit as F9 rules, and its countdown now says
+/// why, where it named nothing for as long as it went on. At `94e38f4` the banner is plain.
+#[test]
+fn h8_a_refused_directory_on_a_reconnect_says_so_in_the_countdown() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let runtime = tempfile::TempDir::new().expect("tempdir");
+    let holder = runtime.path().join("pmacs");
+    let ssh = BridgedSsh::on_the_default_socket_of(runtime.path());
+    let started = StartedByTheBridge {
+        lockfile: holder.join("default.sock.lock"),
+        _holder: None,
+    };
+    let mut tui = ssh.spawn("300", 250);
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    started.kill_the_one_running();
+    let sentence = format!(
+        "pmacs: directory {} is too permissive (mode 0o755); expected mode 0700 or stricter",
+        holder.display()
+    );
+    tui.wait_for_output(&sentence, Duration::from_mins(1));
+    // At this scale the delays are 0.3, 0.6, 1.2, 2.4 and 4.8 s, so a countdown from 5 s is
+    // the wait after the fourth attempt that failed, one past the cap.
+    tui.wait_for_output(
+        &format!("[{sentence} — reconnecting in 5s — Ctrl-C to exit]"),
+        Duration::from_mins(1),
+    );
+    assert!(
+        tui.wait_for_exit(Duration::from_millis(100)).is_none(),
+        "a daemon that cannot be reached does not stop the route"
+    );
+    tui.write_input(b"\x03").expect("C-c");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("C-c in the wait ends it");
+    assert!(status.success(), "{status:?}");
+}
+
+/// A far side's bytes reach a terminal with no control character in them, on a first attach
+/// and in a reconnect's countdown, so an escape sequence there cannot retitle a window or
+/// paint the screen.
+#[test]
+fn h8_a_far_sides_escape_sequence_reaches_no_terminal() {
+    const EVIL: &[u8] = b"\x1b]0;pwned\x07\x1b[31mred words\x1b[0m\n";
+    let ssh = StandInSsh::new(&[RemoteSession {
+        bytes: EVIL.to_vec(),
+        then: "exit 1".to_owned(),
+    }]);
+    let mut tui = ssh.attach();
+    tui.wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
+    let said = tui.output();
+    assert!(
+        String::from_utf8_lossy(&said).contains("red words"),
+        "the words: {:?}",
+        String::from_utf8_lossy(&said)
+    );
+    assert!(
+        !said.contains(&0x1b) && !said.contains(&0x07),
+        "a control character reached the terminal: {:?}",
+        String::from_utf8_lossy(&said)
+    );
+
+    let ssh = StandInSsh::new(&[
+        session_with(&frame_bytes(), 255),
+        RemoteSession {
+            bytes: EVIL.to_vec(),
+            then: "exit 1".to_owned(),
+        },
+    ]);
+    let mut tui = ssh.attach_scaled("2000");
+    tui.wait_for_output("red words", Duration::from_secs(30));
+    let said = tui.output();
+    assert!(
+        !said.windows(9).any(|w| w == b"\x1b]0;pwned"),
+        "the escape reached the terminal: {:?}",
+        String::from_utf8_lossy(&said)
+    );
+    tui.write_input(b"\x03").expect("C-c");
+    let _ = tui.wait_for_exit(Duration::from_secs(10));
+}
+
+/// H7's `with the far side's last words by H8`: an `ssh` that fails after its `Hello` with
+/// words on its stderr, which is the protocol's channel, leaves them in the sentence that
+/// stops the route.
+#[test]
+fn h8_an_ssh_failing_after_its_hello_leaves_its_words_in_the_sentence() {
+    let ssh = StandInSsh::new(&[session_with(
+        b"Connection to farhost closed by remote host.\r\n",
+        255,
+    )]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(
+        said.contains(
+            "pmacs: ssh to farhost ended 3 times in a row before a first frame (status 255), so \
+             this client has stopped trying; it last said: Connection to farhost closed by \
+             remote host."
+        ),
+        "{said:?}"
+    );
+}

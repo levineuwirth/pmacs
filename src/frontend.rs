@@ -872,15 +872,18 @@ fn emit_status_overlay<W: Write>(w: &mut W, size: CellSize, text: &str) -> io::R
 
     let mut painted: usize = 0;
     for c in text.chars() {
-        if painted >= cols {
-            break;
-        }
         // Sanitize controls so a stray newline / CR / ESC in the
         // banner text cannot scroll the screen or inject SGR
         // sequences. Mirrors the defense in `emit_span`.
         let printable = if c.is_control() { ' ' } else { c };
+        // Counted by what it takes on the row, since a far side's words may hold a
+        // wide character, and one past the edge would wrap the bottom row and scroll.
+        let width = unicode_width::UnicodeWidthChar::width(printable).unwrap_or(0);
+        if painted + width > cols {
+            break;
+        }
         write!(w, "{printable}")?;
-        painted += 1;
+        painted += width;
     }
     for _ in painted..cols {
         write!(w, " ")?;
@@ -1362,6 +1365,23 @@ mod tests {
         // Each control char became a single space, so the painted text
         // is "a b c d".
         assert!(s.contains("a b c d"), "expected sanitized run in {s:?}");
+    }
+
+    /// E10r's H8: a far side's words may hold wide characters, and the row is filled by what
+    /// each takes on it, so a banner never runs past the edge, which on the bottom row would
+    /// wrap and scroll the screen.
+    #[test]
+    fn status_overlay_counts_a_wide_character_as_what_it_takes() {
+        let size = CellSize::new(4, 5);
+        let mut out = Vec::new();
+        emit_status_overlay(&mut out, size, "字字字").unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert_eq!(
+            s.matches('字').count(),
+            2,
+            "two take the five columns but one: {s:?}"
+        );
+        assert_eq!(s.matches(' ').count(), 1, "and the last is padding: {s:?}");
     }
 
     #[test]

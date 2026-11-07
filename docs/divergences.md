@@ -276,7 +276,12 @@ whole. Under one cap a growing register squeezes the rules.
   likely left its reason there; where `ssh` exited otherwise no daemon was
   involved, and the sentence says how `ssh` ended and names no file. The
   local route starts no daemon, so its sentence names none, and a frame
-  cut short says the bound. A session of
+  cut short says the bound. The protocol rides `ssh`'s stderr, so a frame's
+  length past the cap is text from the far side: its words and how `ssh`
+  ended are shown, control characters stripped, on a first attach and in a
+  reconnect's countdown, clipped to the pane, and an `ssh` that ends before
+  a first frame leaves its last words in the sentence that stops it. A
+  session of
   30 s or more starts the count again, and a `may be` neither counts nor
   starts it again, so a slow link cannot stop the route. A daemon stopped
   on purpose says `Goodbye`, which ends the route and starts nothing, but

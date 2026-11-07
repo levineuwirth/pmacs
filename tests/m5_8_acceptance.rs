@@ -266,12 +266,12 @@ fn backoff_scaling_observable_in_wall_clock_runtime() {
 /// repeatedly": the user sees SSH's actual error message in their
 /// scrollback, not just pmacs's terminal Transport-EOF wrapper.
 ///
-/// (The give-up wrapper itself is the [`pmacs::attach::AttachError`]
-/// from the LAST attempt — typically a Transport error because
-/// `read_message` returns EOF before `child.wait` would observe a
-/// non-zero exit. Including the captured tail in that message is a
-/// possible UX improvement but distinct from the contract this test
-/// guards.)
+/// The give-up wrapper itself is the [`pmacs::attach::AttachError`]
+/// from the LAST attempt. Until E10r's fix round 3 it was a Transport
+/// error, `read_message` returning EOF before `child.wait` observed a
+/// non-zero exit; since then a `Hello` that does not come waits on the
+/// child's exit, so it is that exit with the captured tail, and the
+/// marker is in it once more after the three live copies (#477).
 #[test]
 fn ssh_stderr_from_handshake_attempts_reaches_user() {
     let tmp = TempDir::new().expect("tempdir");
@@ -300,19 +300,21 @@ fn ssh_stderr_from_handshake_attempts_reaches_user() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // The marker should appear once per failed handshake attempt
-    // (live tee, not buffered behind the give-up message).
-    let marker_count = stderr.matches(stderr_line).count();
+    // (live tee, not buffered behind the give-up message), before it.
+    let (live, give_up) = stderr
+        .rsplit_once("pmacs:")
+        .expect("pmacs's give-up message after the SSH stderr");
+    let marker_count = live.matches(stderr_line).count();
     let expected_count = HANDSHAKE_RETRY_CAP as usize;
     assert_eq!(
         marker_count, expected_count,
         "expected {expected_count} occurrences of {stderr_line:?} in \
          stderr (one per handshake attempt); got {marker_count} in: {stderr}"
     );
-    // Pmacs's final give-up message follows the marker copies.
+    // And the give-up message says what the last one's ssh said.
     assert!(
-        stderr.contains("pmacs:"),
-        "expected pmacs's give-up message after the SSH stderr; \
-         got: {stderr}"
+        give_up.contains(stderr_line),
+        "the give-up message names the far side's last words: {stderr}"
     );
 }
 

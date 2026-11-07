@@ -163,7 +163,10 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 
 `pmacs --attach` also understands `ssh:user@host/instance`,
 `local:/path.sock`, and bare hostnames (treated as SSH). See
-`pmacs --help` for the full matrix.
+`pmacs --help` for the full matrix. The protocol rides `ssh`'s stderr, so
+what the far side says there, a shell with no `pmacs` to run, `ssh` itself
+or the bridge's own error, is shown as the far side's words with how `ssh`
+ended, control characters stripped, and a reconnect's countdown says them.
 
 The daemon writes to every frontend from one thread, so it gives each
 frame 2 s to reach a frontend and then drops that frontend, rather than
