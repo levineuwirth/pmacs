@@ -371,6 +371,85 @@ fn m6_4_line_level_ansi_updates_history_in_place() {
     "#);
 }
 
+/// What the history holds after `bytes` through `h:append_output`, with no
+/// process, for each row of a table, and the rows that read otherwise.
+fn history_table_misses(rows: &[(&str, &str)]) -> Vec<String> {
+    use std::fmt::Write as _;
+    let lua_literal = |s: &str| {
+        let mut literal = String::from("\"");
+        for b in s.bytes() {
+            write!(literal, "\\{b:03}").expect("a String takes the write");
+        }
+        literal.push('"');
+        literal
+    };
+    rows.iter()
+        .filter_map(|&(bytes, want)| {
+            let got: mlua::String = run_returning(&format!(
+                r#"
+                local h = pmacs.repl.create({{ name = "*test*" }})
+                h:append_output({})
+                return h:buffer_id():slice(0, h:history_end())
+                "#,
+                lua_literal(bytes),
+            ));
+            let got = got.to_string_lossy();
+            (got != want).then(|| format!("{bytes:?} reads {got:?}, not {want:?}"))
+        })
+        .collect()
+}
+
+/// An LF moves to the next line, and a CR before it leaves the line standing:
+/// `src/ansi.rs` hands the LF over as text, and written at `_output_pos` after a
+/// CR it overwrote the line it ends. fish turns `OPOST|ONLCR` back on before it
+/// runs a command (the trampoline's `stty raw` had turned them off), so its
+/// answers arrive CR LF and did not stay.
+#[test]
+fn m6_4_an_lf_after_a_cr_moves_and_does_not_overwrite() {
+    let misses = history_table_misses(&[
+        ("hello-pmacs\r\n", "hello-pmacs\n"),
+        ("one\r\ntwo\r\n", "one\ntwo\n"),
+        ("abc\rX\n", "Xbc\n"),
+        ("abc\rX\nY\n", "Xbc\nY\n"),
+        ("abc\r\n\r\ndef", "abc\n\ndef"),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// What the row above does not change: a CR still overwrites what it comes
+/// back over, and an LF at the history's end still appends.
+#[test]
+fn m6_4_a_cr_still_overwrites_and_an_lf_at_the_end_still_appends() {
+    let misses = history_table_misses(&[
+        ("abc\rX", "Xbc"),
+        ("abc\rXYZW\n", "XYZW\n"),
+        ("abc\n\rX", "abc\nX"),
+        ("hello-pmacs\n", "hello-pmacs\n"),
+        ("one\ntwo\n", "one\ntwo\n"),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A CR finds its line's start by looking back in a window that doubles from
+/// 256 bytes: lines either side of that window, and one with no line before it.
+#[test]
+fn m6_4_a_cr_finds_its_line_at_any_length() {
+    let rows: Vec<(String, String)> = [1, 255, 256, 257, 600, 5000]
+        .into_iter()
+        .flat_map(|len| {
+            let line = "y".repeat(len);
+            let rest = &line[1..];
+            [
+                (format!("head\n{line}\rZ"), format!("head\nZ{rest}")),
+                (format!("{line}\rZ"), format!("Z{rest}")),
+            ]
+        })
+        .collect();
+    let rows: Vec<(&str, &str)> = rows.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let misses = history_table_misses(&rows);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
 #[test]
 fn m6_4_alt_screen_suppresses_history_writes() {
     // Bytes between alt-screen-enter and alt-screen-exit do not land
