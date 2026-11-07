@@ -301,9 +301,11 @@ where
 /// stdout is reserved for the bridge's protocol traffic, as our stderr may be. Its
 /// stderr goes to a file beside the socket, as the window's route keeps it
 /// ([`pmacs_protocol::socket_file::daemon_stderr_path`]), since a panic is otherwise
-/// never read, and the remote route's sentence when daemons keep dying names it. A
-/// file that cannot be created falls back to the null device rather than refusing the
-/// spawn: the daemon matters more than its log.
+/// never read, and the remote route's sentences when daemons keep dying name it. The
+/// directory is made here, since the file comes before the daemon that would make it: a
+/// host's first attach finds none. A directory the daemon would refuse it refuses, saying
+/// so in that file. A file that cannot be created falls back to the null device rather
+/// than refusing the spawn: the daemon matters more than its log.
 fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
     let exe = std::env::current_exe().map_err(|source| BridgeError::SpawnFailed {
         exe: PathBuf::from("<current_exe unavailable>"),
@@ -314,6 +316,7 @@ fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
         exe.display(),
         socket_path.display()
     ));
+    let _ = crate::socket_path::ensure_runtime_subdir(socket_path);
     let stderr =
         std::fs::File::create(pmacs_protocol::socket_file::daemon_stderr_path(socket_path))
             .map_or_else(|_| Stdio::null(), Stdio::from);

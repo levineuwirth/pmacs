@@ -2165,6 +2165,47 @@ fn g4_a_daemon_the_bridge_starts_keeps_its_stderr_beside_its_socket() {
     );
 }
 
+/// The first daemon on a runtime directory with nothing of pmacs's in it, which is a host's
+/// first attach: the bridge opened the daemon's stderr before the daemon made the directory
+/// that file goes in, so that daemon's words went to the null device, and only a later
+/// daemon's reached the file. Typing the owner's real-host step found it, its `tail` reading
+/// `No such file`. At `fe8b2a3` the file is not there.
+#[test]
+fn g4_the_first_daemon_on_a_fresh_runtime_directory_keeps_its_stderr_too() {
+    let runtime = tempfile::TempDir::new().expect("tempdir");
+    let holder = runtime.path().join("pmacs");
+    let ssh = BridgedSsh::on_the_default_socket_of(runtime.path());
+    let config = ssh.dir.path().join("pmacs");
+    std::fs::create_dir_all(&config).expect("the config directory");
+    std::fs::write(
+        config.join("init.lua"),
+        "io.stderr:write('PLANTED DAEMON WORDS\\n')\n",
+    )
+    .expect("init.lua");
+    assert!(!holder.exists(), "the row needs no directory there");
+    let _started = StartedByTheBridge {
+        lockfile: holder.join("default.sock.lock"),
+        _holder: None,
+    };
+    let mut tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    let path = holder.join("default.sock.stderr");
+    let said = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the first daemon's stderr, {}: {e}", path.display()));
+    assert!(said.contains("PLANTED DAEMON WORDS"), "{said:?}");
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&holder)
+            .expect("the directory")
+            .permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o700, "as the daemon would make it");
+    tui.write_input(b"\x1b[24~").expect("F12");
+    assert!(
+        tui.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
 /// `pmacs --daemon --stop`, as a user runs it. A build with no CRDT refuses that second
 /// frontend while a TUI is attached, saying so, so there the row stops it by `SIGTERM`,
 /// which says the same `Goodbye`.
