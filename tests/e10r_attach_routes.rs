@@ -393,7 +393,7 @@ fn e10r_3_a_first_frame_starts_the_local_routes_count_again() {
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(daemon.connections(), sessions);
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains("reconnected on a new view"), "{said:?}");
 }
 
@@ -426,7 +426,7 @@ fn e10r_3_a_new_daemon_on_the_local_routes_socket_says_so_for_certain() {
         .wait_for_exit(Duration::from_secs(20))
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains(NEW_DAEMON_NOTICE), "{said:?}");
 }
 
@@ -491,7 +491,7 @@ fn e10r_floor_a_session_that_comes_back_after_a_cut_says_the_bound_is_why() {
         .wait_for_exit(Duration::from_secs(20))
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(
         said.contains("reconnected on a new view: a frame did not arrive within 2 s"),
         "{said:?}"
@@ -983,6 +983,10 @@ impl Drop for StartedByTheBridge {
 /// exit 0 ended it, status 0, saying nothing of the kind. The kill comes as soon as
 /// the session is up, which `uptime_secs` alone cannot tell (a real run read the plain
 /// notice here): the new daemon's first frontend number is what says so.
+///
+/// The sentence holds the words `M-x`, so a needle reading all the terminal was given can
+/// not tell the answer from the notice, which is how this row came to pass with the key
+/// never sent (review 2's Low 2): it reads the bottom row, past the floor.
 #[test]
 fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_so_for_certain() {
     let mut daemon = TestDaemon::spawn();
@@ -992,26 +996,34 @@ fn e10r_remote_a_daemon_killed_comes_back_on_a_new_one_saying_so_for_certain() {
     };
     let first = started.pid().expect("the daemon's lockfile");
     let ssh = BridgedSsh::new(daemon.socket_path());
-    let mut tui = ssh.attach("500");
-    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    let mut tui = ssh.attach_screen("500");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
         nix::sys::signal::Signal::SIGKILL,
     )
     .expect("SIGKILL");
     daemon.wait_for_exit().expect("the daemon is gone");
-    tui.wait_for_output(NEW_DAEMON_NOTICE, Duration::from_mins(1));
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row() == NEW_DAEMON_NOTICE
+    });
     assert_eq!(ssh.invocations(), 2, "one new session");
     assert_ne!(
         started.pid().expect("the new daemon's lockfile"),
         first,
         "a daemon of its own"
     );
-    tui.write_input(b"\x1bx").expect("M-x");
-    tui.wait_for_output("M-x", Duration::from_secs(10));
-    tui.write_input(b"\x07").expect("C-g");
-    tui.write_input(b"\x1b[24~").expect("F12");
+    std::thread::sleep(NOTICE_STANDS + Duration::from_secs(1));
+    tui.write(b"\x1bx");
+    tui.wait_for(Duration::from_secs(10), "the new daemon's M-x", &|t| {
+        t.bottom_row().starts_with("M-x")
+    });
+    tui.write(b"\x07");
+    tui.write(b"\x1b[24~");
     let status = tui
+        .pty
         .wait_for_exit(Duration::from_secs(10))
         .expect("F12 ends the session");
     assert!(status.success(), "{status:?}");
@@ -1110,7 +1122,7 @@ fn e10r_remote_a_lost_session_comes_back_through_the_bridge_saying_why() {
         .unwrap_or_else(|| panic!("it went on: {} sessions", daemon.connections()));
     assert!(status.success(), "{status:?}");
     assert_eq!(daemon.connections(), 2);
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(
         said.contains("reconnected on a new view: the daemon closed the last one"),
         "{said:?}"
@@ -1141,7 +1153,7 @@ fn e10r_remote_a_session_cut_after_its_first_frame_comes_back_saying_the_bound_i
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(daemon.connections(), 2);
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(
         said.contains("reconnected on a new view: a frame did not arrive within 2 s"),
         "{said:?}"
@@ -1173,7 +1185,7 @@ fn e10r_remote_a_loss_after_a_first_frame_waits_the_schedules_first_delay() {
         .unwrap_or_else(|| panic!("it went on: {} sessions", daemon.connections()));
     assert!(status.success(), "{status:?}");
     assert_eq!(daemon.connections(), 4);
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains("reconnecting in 1s"), "{said:?}");
     assert!(
         !said.contains("reconnecting in 2s"),
@@ -1200,7 +1212,7 @@ fn e10r_remote_a_network_that_stays_down_walks_the_schedule() {
         .expect("the network comes back and the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), down + 2);
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains("reconnecting in 4s"), "{said:?}");
 }
 
@@ -1217,7 +1229,7 @@ fn e10r_remote_an_ssh_that_failed_comes_back_saying_the_connection_was_lost() {
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), 2);
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(
         said.contains("reconnected on a new view: the connection was lost"),
         "{said:?}"
@@ -1364,7 +1376,9 @@ fn e10r_3_ctrl_c_in_the_local_routes_wait_ends_it() {
 fn run_command(tui: &mut ScreenTui, name: &str) {
     let limit = Duration::from_secs(30);
     tui.write(b"\x1bx");
-    tui.wait_for(limit, "the M-x prompt", &|t| t.bottom_row().contains("M-x"));
+    tui.wait_for(limit, "the M-x prompt", &|t| {
+        t.bottom_row().starts_with("M-x")
+    });
     tui.write(name.as_bytes());
     tui.write(b"\r");
 }
@@ -1390,13 +1404,19 @@ fn p1_the_notice_does_not_call_what_autosave_holds_gone() {
     tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
         t.screen_contains("*scratch*") || t.screen_contains("notes.txt")
     });
-    // The precondition: the work is in a recovery copy, and not in the file.
+    // The precondition: the work is in a recovery copy, and not in the file. A copy is
+    // staged in a temporary file beside its key and renamed over it later, so that file
+    // holding it is not yet a copy: killed there, `recover-file` finds none (review 2).
     let copies = ssh.dir.path().join("pmacs/autosave");
     let held = || {
         std::fs::read_dir(&copies).is_ok_and(|entries| {
             entries.flatten().any(|entry| {
-                std::fs::read(entry.path())
-                    .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(WORK))
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pmacs-tmp.")
+                    && std::fs::read(entry.path())
+                        .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(WORK))
             })
         })
     };
@@ -1473,7 +1493,7 @@ fn g1_a_number_past_the_last_and_an_age_short_reads_may_be_on_either_route() {
         .wait_for_exit(Duration::from_secs(20))
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
 
     let remote = StandInDaemon::serve_saying(saying, session);
@@ -1483,7 +1503,7 @@ fn g1_a_number_past_the_last_and_an_age_short_reads_may_be_on_either_route() {
         .wait_for_exit(Duration::from_secs(20))
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
 }
 
@@ -1513,7 +1533,7 @@ fn p7_a_number_past_the_last_on_a_daemon_too_young_to_tell_reads_may_be() {
         .wait_for_exit(Duration::from_secs(20))
         .expect("the Goodbye ends it");
     assert!(status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(said.contains(MAYBE_NEW_DAEMON_NOTICE), "{said:?}");
     assert!(!said.contains(PLAIN_DAEMON_NOTICE), "{said:?}");
 }
@@ -3191,7 +3211,7 @@ fn h8_a_far_side_with_no_pmacs_reads_its_words_and_its_127() {
         .wait_for_exit(Duration::from_secs(20))
         .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
     assert!(!status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(!said.contains("frame length"), "{said:?}");
     assert!(
         said.contains(
@@ -3218,7 +3238,7 @@ fn h8_a_refused_directory_on_a_first_attach_reads_the_daemons_sentence() {
         .wait_for_exit(Duration::from_secs(30))
         .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
     assert!(!status.success(), "{status:?}");
-    let said = String::from_utf8_lossy(&tui.output()).into_owned();
+    let said = String::from_utf8_lossy(&tui.output_once_exited()).into_owned();
     assert!(!said.contains("frame length"), "{said:?}");
     assert!(
         said.contains(&format!(
@@ -3288,7 +3308,7 @@ fn h8_a_far_sides_escape_sequence_reaches_no_terminal() {
     let mut tui = ssh.attach();
     tui.wait_for_exit(Duration::from_secs(20))
         .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
-    let said = tui.output();
+    let said = tui.output_once_exited();
     assert!(
         String::from_utf8_lossy(&said).contains("red words"),
         "the words: {:?}",
@@ -3469,4 +3489,150 @@ fn h9_two_bridges_starting_together_keep_every_line_whole() {
         "the daemon that won kept its words: {held}"
     );
     drop(started);
+}
+
+/// Everything the terminal was given up to now, for a row asking which of two modes it was
+/// last told: the last place `on` comes against the last place `off` does.
+fn last_told_off(tui: &common::pty::PmacsPty, on: &[u8], off: &[u8]) -> bool {
+    let output = tui.output();
+    let last = |needle: &[u8]| output.windows(needle.len()).rposition(|w| w == needle);
+    match (last(on), last(off)) {
+        (Some(on), Some(off)) => off > on,
+        (None, _) => true,
+        (Some(_), None) => false,
+    }
+}
+
+/// Whether the terminal comes to have been last told `off`, or `on` where `off` is false,
+/// within a limit: what pmacs wrote is read on a thread of the row's own, which may be behind.
+fn comes_to_be_told(
+    tui: &common::pty::PmacsPty,
+    (on, off): (&[u8], &[u8]),
+    told_off: bool,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if last_told_off(tui, on, off) == told_off {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The real route with a far side that asks on the terminal, the link just killed: a TUI
+/// in the wait, with `prologue` before the stand-in's question.
+fn in_the_wait_for_a_passphrase(
+    socket: &Path,
+    prologue: &str,
+) -> (BridgedSsh, common::pty::PmacsPty) {
+    let ssh = BridgedSsh::asking_on_the_terminal(socket, prologue);
+    let tui = ssh.attach("1");
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(ssh.pids()[0]),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    ssh.wait_until_asking();
+    (ssh, tui)
+}
+
+/// **Review 2's Low 8, its `mouse-on`:** while the wait lends the terminal, it reports no
+/// mouse and brackets no paste, since a moved mouse would type into a passphrase, and both
+/// come back with the session. Three clauses of G3 flipped no row at `b11d25a`; this is one.
+#[test]
+fn h10_the_wait_turns_off_mouse_reporting_and_bracketed_paste() {
+    const MOUSE: (&[u8], &[u8]) = (b"\x1b[?1000h", b"\x1b[?1000l");
+    const PASTE: (&[u8], &[u8]) = (b"\x1b[?2004h", b"\x1b[?2004l");
+    let daemon = TestDaemon::spawn();
+    let (_ssh, mut tui) = in_the_wait_for_a_passphrase(daemon.socket_path(), ":");
+    assert!(
+        comes_to_be_told(&tui, MOUSE, true),
+        "a moved mouse types into the prompt"
+    );
+    assert!(
+        comes_to_be_told(&tui, PASTE, true),
+        "a paste carries its brackets into the prompt"
+    );
+    tui.write_input(b"s3cret\r").expect("the passphrase");
+    tui.wait_for_output("reconnected", Duration::from_secs(30));
+    assert!(
+        comes_to_be_told(&tui, MOUSE, false),
+        "the mouse comes back with the session"
+    );
+    assert!(
+        comes_to_be_told(&tui, PASTE, false),
+        "and so does the paste"
+    );
+    tui.write_input(b"\x1b[24~").expect("F12");
+    assert!(
+        tui.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// **Review 2's Low 8, its `no-sigquit`:** `C-\` is a signal in the wait as `C-c` is, and it
+/// ends the route the same way, status 0, with the alternate screen left and the `ssh` gone,
+/// where its default would end the process with a core on the alternate screen.
+#[test]
+fn h10_ctrl_backslash_at_a_prompt_ends_the_route_and_no_worse() {
+    let daemon = TestDaemon::spawn();
+    let (ssh, mut tui) = in_the_wait_for_a_passphrase(daemon.socket_path(), "trap '' QUIT");
+    tui.write_input(b"\x1c").expect("C-\\");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("C-\\ at the prompt ends the route");
+    assert!(status.success(), "{status:?}");
+    assert!(gone(ssh.pids()[1]), "the ssh went with it");
+    assert_eq!(ssh.invocations(), 2, "and nothing tried again");
+    tui.after_the_alternate_screen();
+}
+
+/// **Review 2's Low 8, its `lent-modes`:** a prompt turns echo off and the far side is killed
+/// at it, so the terminal is left with echo off. The wait puts back the modes it lent,
+/// or the user's shell inherits a terminal that echoes nothing when the TUI ends. `stty`
+/// reads the terminal after pmacs, as that shell would. The wrapper survives the `C-c`.
+#[test]
+fn h10_a_prompt_killed_with_echo_off_leaves_the_terminal_as_the_wait_lent_it() {
+    let daemon = TestDaemon::spawn();
+    let ssh = BridgedSsh::asking_on_the_terminal(daemon.socket_path(), "stty -echo < /dev/tty");
+    let home = ssh.dir.path();
+    let script = home.join("ssh");
+    let modes = home.join("modes");
+    let mut tui = common::pty::spawn_pmacs_in_pty_under(
+        &[
+            "sh",
+            "-c",
+            "trap : INT; \"$0\" \"$@\"; stty -a > \"$E10R_MODES\"",
+        ],
+        &["--attach", "farhost"],
+        &[
+            ("HOME", home),
+            ("XDG_CONFIG_HOME", home),
+            ("PMACS_STATE_HOME", home),
+            ("E10R_MODES", &modes),
+            (PMACS_TEST_SSH_BIN, &script),
+            (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1")),
+        ],
+        24,
+        80,
+    );
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(ssh.pids()[0]),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL the link");
+    ssh.wait_until_asking();
+    tui.write_input(b"\x03").expect("C-c");
+    tui.wait_for_exit(Duration::from_secs(10))
+        .expect("C-c at the prompt ends the route");
+    let read = std::fs::read_to_string(&modes).expect("what stty read");
+    assert!(
+        read.split_whitespace().any(|word| word == "echo"),
+        "the terminal is left echoing nothing: {read}"
+    );
 }

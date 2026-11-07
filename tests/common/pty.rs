@@ -29,7 +29,7 @@ use portable_pty::{CommandBuilder, PtySize};
 pub struct PmacsPty {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
-    _reader_thread: thread::JoinHandle<()>,
+    reader_thread: thread::JoinHandle<()>,
     output: Arc<Mutex<Vec<u8>>>,
     master: Box<dyn portable_pty::MasterPty + Send>,
 }
@@ -98,10 +98,23 @@ impl PmacsPty {
         }
     }
 
+    /// Everything pmacs wrote, for a row that has seen the child exit: the reader thread may
+    /// not have the last of it yet, so this waits for that thread to reach the terminal's
+    /// end, under a limit, since something the child left behind may hold the terminal open
+    /// past it (#485). [`Self::output`] is what has been read so far.
+    pub fn output_once_exited(&self) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.reader_thread.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.output()
+    }
+
     /// What pmacs wrote after it last left the alternate screen: what its user
-    /// is left looking at, which is where a reason has to be to be read.
+    /// is left looking at, which is where a reason has to be to be read. A row calls
+    /// this having seen the child exit, so it reads [`Self::output_once_exited`].
     pub fn after_the_alternate_screen(&self) -> String {
-        let output = self.output();
+        let output = self.output_once_exited();
         let leave = b"\x1b[?1049l";
         let at = output
             .windows(leave.len())
@@ -288,7 +301,7 @@ fn spawn_program(
     PmacsPty {
         child,
         writer,
-        _reader_thread: reader_thread,
+        reader_thread,
         output,
         master: pair.master,
     }
