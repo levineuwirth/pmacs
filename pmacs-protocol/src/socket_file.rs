@@ -55,6 +55,24 @@ pub fn daemon_stderr_path(socket_path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// Open [`daemon_stderr_path`] for a daemon about to start, on the bridge's route and the
+/// window's: mode 0600, which also tightens a file an earlier version left wider, and
+/// following no link, since a link planted there would otherwise have its target
+/// truncated. A caller falls back to the null device on an error: the daemon matters
+/// more than its log.
+pub fn open_daemon_stderr(socket_path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(daemon_stderr_path(socket_path))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
 /// Classify `error`, returned by a connect to `path`, by what is at
 /// `path`. A symlink is examined as itself, not followed: a link at a
 /// socket path is left alone by every caller.
@@ -164,6 +182,32 @@ mod tests {
             classify_connect_failure(&absent, &refused()),
             ConnectFailure::Missing
         ));
+    }
+
+    #[test]
+    fn the_stderr_file_is_private_and_a_link_there_is_not_followed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("stderr");
+        let socket = scratch.0.join("d.sock");
+        let path = daemon_stderr_path(&socket);
+        drop(open_daemon_stderr(&socket).expect("a fresh file"));
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+
+        // A file an earlier version left readable is tightened.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        drop(open_daemon_stderr(&socket).expect("the file again"));
+        assert_eq!(mode(&path), 0o600);
+
+        std::fs::remove_file(&path).expect("remove it");
+        let victim = scratch.0.join("victim");
+        std::fs::write(&victim, "the victim's own\n").expect("the victim");
+        std::os::unix::fs::symlink(&victim, &path).expect("the link");
+        assert!(open_daemon_stderr(&socket).is_err(), "it followed the link");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("the victim"),
+            "the victim's own\n"
+        );
     }
 
     #[test]

@@ -17,7 +17,6 @@
 //! redraw.
 
 use std::collections::VecDeque;
-use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
@@ -163,7 +162,7 @@ pub enum ManagedAttachError {
     },
 }
 
-pub use pmacs_protocol::socket_file::daemon_stderr_path;
+pub use pmacs_protocol::socket_file::{daemon_stderr_path, open_daemon_stderr};
 
 impl std::fmt::Display for ManagedAttachError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -837,9 +836,9 @@ pub fn connect_managed_with_target_and_sink(
 fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Child> {
     let mut command = Command::new(daemon_executable);
     // E2.4 — stderr goes to a file the failure message names. A file
-    // that cannot be created falls back to the null device rather than
-    // refusing the spawn: the daemon matters more than its log.
-    let stderr = match fs::File::create(daemon_stderr_path(socket_path)) {
+    // that cannot be opened, a link there included, falls back to the null
+    // device rather than refusing the spawn: the daemon matters more than its log.
+    let stderr = match open_daemon_stderr(socket_path) {
         Ok(file) => Stdio::from(file),
         Err(_) => Stdio::null(),
     };
@@ -2140,6 +2139,49 @@ mod tests {
         assert!(
             matches!(error, ManagedAttachError::StartupTimeout { .. }),
             "{error:?}"
+        );
+    }
+
+    /// E10r's H1: the window's route opens that file as the bridge's does: at 0600, and
+    /// a link planted there is not followed, its target keeping its bytes, the daemon
+    /// starting all the same with its words going nowhere.
+    #[test]
+    fn a_spawned_daemons_stderr_is_private_and_follows_no_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executable = dir.path().join("fake-daemon");
+        let ran = dir.path().join("ran");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho words >&2\n: > '{}'\n",
+                ran.as_path().display()
+            ),
+        )
+        .expect("write fake daemon");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let socket = dir.path().join("plain.sock");
+        let mut child = spawn_daemon(&executable, &socket).expect("spawn");
+        child.wait().expect("wait");
+        let log = daemon_stderr_path(&socket);
+        assert_eq!(std::fs::read_to_string(&log).expect("the file"), "words\n");
+        let mode = std::fs::metadata(&log).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        std::fs::remove_file(&ran).expect("reset");
+        let socket = dir.path().join("linked.sock");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "the victim's own\n").expect("the victim");
+        std::os::unix::fs::symlink(&victim, daemon_stderr_path(&socket)).expect("the link");
+        let mut child = spawn_daemon(&executable, &socket).expect("spawn");
+        child.wait().expect("wait");
+        assert!(ran.exists(), "the daemon started all the same");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("the victim"),
+            "the victim's own\n",
+            "the window's route wrote through a link"
         );
     }
 }

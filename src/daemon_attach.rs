@@ -104,6 +104,9 @@ pub enum BridgeError {
     },
     /// Generic I/O error while bridging bytes (clone, shutdown).
     Io(std::io::Error),
+    /// The directory the socket would be in is one a daemon refuses, so none was
+    /// started. In the check's own words, which are the daemon's.
+    RefusedDirectory(crate::socket_path::SocketPathError),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -131,6 +134,7 @@ impl std::fmt::Display for BridgeError {
                 socket.display(),
             ),
             Self::Io(e) => write!(f, "bridge I/O error: {e}"),
+            Self::RefusedDirectory(e) => write!(f, "{e}"),
         }
     }
 }
@@ -142,6 +146,7 @@ impl std::error::Error for BridgeError {
                 Some(source)
             }
             Self::AutoStartTimeout { .. } => None,
+            Self::RefusedDirectory(e) => Some(e),
         }
     }
 }
@@ -303,9 +308,12 @@ where
 /// ([`pmacs_protocol::socket_file::daemon_stderr_path`]), since a panic is otherwise
 /// never read, and the remote route's sentences when daemons keep dying name it. The
 /// directory is made here, since the file comes before the daemon that would make it: a
-/// host's first attach finds none. A directory the daemon would refuse it refuses, saying
-/// so in that file. A file that cannot be created falls back to the null device rather
-/// than refusing the spawn: the daemon matters more than its log.
+/// host's first attach finds none. The check is the daemon's, and its answer decides: a
+/// directory it refuses gets no file and no daemon, since others may write there and a
+/// link planted in it would be followed, and the bridge returns its sentence at once
+/// rather than wait for a daemon that has already refused. A file that cannot be opened
+/// ([`pmacs_protocol::socket_file::open_daemon_stderr`], a link there included) falls back
+/// to the null device rather than refusing the spawn: the daemon matters more than its log.
 fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
     let exe = std::env::current_exe().map_err(|source| BridgeError::SpawnFailed {
         exe: PathBuf::from("<current_exe unavailable>"),
@@ -316,10 +324,10 @@ fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
         exe.display(),
         socket_path.display()
     ));
-    let _ = crate::socket_path::ensure_runtime_subdir(socket_path);
-    let stderr =
-        std::fs::File::create(pmacs_protocol::socket_file::daemon_stderr_path(socket_path))
-            .map_or_else(|_| Stdio::null(), Stdio::from);
+    crate::socket_path::ensure_runtime_subdir(socket_path)
+        .map_err(BridgeError::RefusedDirectory)?;
+    let stderr = pmacs_protocol::socket_file::open_daemon_stderr(socket_path)
+        .map_or_else(|_| Stdio::null(), Stdio::from);
     Command::new(&exe)
         .arg("--daemon")
         .arg("--socket")

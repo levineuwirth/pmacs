@@ -2506,3 +2506,118 @@ fn p8_a_stop_a_stopped_tui_did_not_hear_starts_a_daemon_over_the_remote_route_al
         "it keeps running"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E10r review 2's probes, committed as witnesses, and fix round 3's rows
+// ---------------------------------------------------------------------------
+
+/// **Review 2's Medium 1, its `p20`:** the bridge ran the daemon's directory check, ignored
+/// what it said, and created the stderr file in a directory the daemon refuses. `File::create`
+/// follows a link, so in a directory others may write, which is what the check exists for, a
+/// link another user planted was opened and truncated. Its answer now decides: no file and no
+/// daemon, and the check's own sentence at once, where the bridge polled 5 s and said it had
+/// not bound. At `b11d25a` the victim holds the daemon's refusal.
+#[test]
+fn r2_a_bridge_follows_no_link_in_a_directory_the_daemon_refuses() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let runtime = tempfile::TempDir::new().expect("tempdir");
+    let holder = runtime.path().join("pmacs");
+    std::fs::create_dir(&holder).expect("the directory");
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let victim = runtime.path().join("victim.txt");
+    std::fs::write(&victim, "the victim's own contents\n").expect("the victim");
+    std::os::unix::fs::symlink(&victim, holder.join("default.sock.stderr")).expect("the link");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs"))
+        .arg("--daemon-attach")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("HOME", runtime.path())
+        .env("XDG_CONFIG_HOME", runtime.path())
+        .env("PMACS_STATE_HOME", runtime.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the bridge");
+    assert!(
+        !output.status.success(),
+        "the daemon refuses that directory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("the victim"),
+        "the victim's own contents\n",
+        "the bridge wrote through a link in a directory the daemon refuses"
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        said.trim_end(),
+        format!(
+            "pmacs: directory {} is too permissive (mode 0o777); expected mode 0700 or stricter",
+            holder.display()
+        ),
+        "the check's own sentence, at once, and not a wait for a daemon that refused"
+    );
+    assert!(
+        std::fs::symlink_metadata(holder.join("default.sock.stderr"))
+            .expect("the link")
+            .file_type()
+            .is_symlink(),
+        "and it is left as it was"
+    );
+}
+
+/// A bridge on `runtime`'s default socket, its daemon's `Hello` read over a pipe and then
+/// the bridge ended, so that a row can read what its start left behind.
+fn a_bridge_started_a_daemon_on(runtime: &Path) -> StartedByTheBridge {
+    let started = StartedByTheBridge {
+        lockfile: runtime.join("pmacs/default.sock.lock"),
+        _holder: None,
+    };
+    let mut bridge = std::process::Command::new(env!("CARGO_BIN_EXE_pmacs"))
+        .arg("--daemon-attach")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("HOME", runtime)
+        .env("XDG_CONFIG_HOME", runtime)
+        .env("PMACS_STATE_HOME", runtime)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the bridge");
+    let mut from = bridge.stdout.take().expect("its stdout");
+    let _: Hello = read_message(&mut from).expect("the daemon's Hello");
+    drop(bridge.stdin.take());
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+    started
+}
+
+/// In a directory the check accepts, a link at the stderr file is not followed either, and
+/// the daemon starts all the same, its words going nowhere: the daemon matters more than its
+/// log. And the file a daemon does keep is its user's alone. The window's route has its own
+/// row, `a_spawned_daemons_stderr_is_private_and_follows_no_link`, in `pmacs-gpu`.
+#[test]
+fn h1_an_accepted_directory_follows_no_link_either_and_its_file_is_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let runtime = tempfile::TempDir::new().expect("tempdir");
+    let holder = runtime.path().join("pmacs");
+    std::fs::create_dir(&holder).expect("the directory");
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let victim = runtime.path().join("victim.txt");
+    std::fs::write(&victim, "the victim's own contents\n").expect("the victim");
+    let stderr = holder.join("default.sock.stderr");
+    std::os::unix::fs::symlink(&victim, &stderr).expect("the link");
+    let started = a_bridge_started_a_daemon_on(runtime.path());
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("the victim"),
+        "the victim's own contents\n",
+        "the bridge wrote through a link"
+    );
+    drop(started);
+
+    std::fs::remove_file(&stderr).expect("remove the link");
+    let started = a_bridge_started_a_daemon_on(runtime.path());
+    let mode = std::fs::metadata(&stderr)
+        .expect("the file")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    drop(started);
+}

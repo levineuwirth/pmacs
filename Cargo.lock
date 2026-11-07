@@ -2657,6 +2657,7 @@ dependencies = [
 name = "pmacs-protocol"
 version = "1.1.0"
 dependencies = [
+ "libc",
  "postcard",
  "serde",
  "thiserror 2.0.18",
