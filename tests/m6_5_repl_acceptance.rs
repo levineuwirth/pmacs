@@ -115,10 +115,56 @@ fn run_with_pump(setup_chunk: &str, predicate_chunk: &str, timeout_ms: u64) {
         assert!(
             Instant::now() < deadline,
             "pump predicate did not become true within {timeout_ms}ms; \
-             chunk:\n{predicate_chunk}"
+             chunk:\n{predicate_chunk}\nlast seen: {}",
+            last_seen(&editor)
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// What the row saw last, for a timeout's text: the process's status, what
+/// the row's chunk had sent (`_G.typed` and its like), and the history and
+/// input region as text. So a process that never ran, one that ran and printed
+/// nothing, and one that printed and never answered a line read differently.
+fn last_seen(editor: &EditorState) -> String {
+    let read = || -> mlua::Result<String> {
+        let seen: mlua::Table = editor
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                local h = _G.h
+                local status = h._proc_id and pmacs.process.status(h._proc_id)
+                local words = {}
+                if status then
+                  for _, k in ipairs { "kind", "pid", "outcome", "code", "signal", "error" } do
+                    if status[k] ~= nil then words[#words + 1] = k .. "=" .. tostring(status[k]) end
+                  end
+                end
+                local sent = {}
+                for _, k in ipairs { "typed", "submitted", "eof_sent", "sigint_sent" } do
+                  if _G[k] ~= nil then sent[#sent + 1] = k .. "=" .. tostring(_G[k]) end
+                end
+                return {
+                  status = #words > 0 and table.concat(words, " ") or "none",
+                  sent = table.concat(sent, " "),
+                  history = h:buffer_id():slice(0, h:history_end()),
+                  input = h:input_text(),
+                }
+                "#,
+            )
+            .eval()?;
+        let status: String = seen.get("status")?;
+        let sent: String = seen.get("sent")?;
+        let history: mlua::String = seen.get("history")?;
+        let input: mlua::String = seen.get("input")?;
+        Ok(format!(
+            "status {status}; {sent}; history {:?}; input {:?}",
+            history.to_string_lossy(),
+            input.to_string_lossy(),
+        ))
+    };
+    read().unwrap_or_else(|err| format!("unreadable: {err}"))
 }
 
 // ---------------------------------------------------------------------------
