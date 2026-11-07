@@ -7,9 +7,9 @@
 //! server row runs against the real HLS inside a cabal project and is
 //! gated by `PMACS_REQUIRE_HLS`.
 //!
-//! The server row types its error through the production key dispatch,
-//! because a Lua `buf:insert` outside a command reaches no server until
-//! the next keystroke.
+//! The server row puts its error in as one key, `C-y`, through the
+//! production key dispatch, because a Lua `buf:insert` outside a command
+//! reaches no server until the next keystroke.
 //!
 //! E7g unshipped the grammar and E7h restored it; the last row says what
 //! holds it now.
@@ -506,23 +506,18 @@ fn e7e_the_haskell_root_is_the_innermost_project_marker() {
     assert_eq!(resolve_root(&s, &file), None);
 }
 
-fn press(s: &mut EditorState, code: KeyCode) {
+/// `text` goes in at point as one key, `C-y`, the kill ring holding it.
+fn yank(s: &mut EditorState, text: &str) {
+    exec(s, &format!("pmacs.editor.clipboard_set({text:?})"));
     s.dispatch_key(
         FrontendId::LOCAL,
         KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         },
     );
-}
-
-fn type_line(s: &mut EditorState, text: &str) {
-    for ch in text.chars() {
-        press(s, KeyCode::Char(ch));
-    }
-    press(s, KeyCode::Enter);
 }
 
 fn buffer_text(s: &EditorState) -> String {
@@ -573,8 +568,119 @@ fn cabal_init_fixture(pin: Option<&str>) -> (PathBuf, PathBuf, PathBuf) {
     (top, dir, file)
 }
 
+/// The server's own words the row reads, recorded from before the file
+/// opens: the mode line reads `LSP:ready` both before setup's progress begins
+/// and after it ends, and the store keeps only the last publish.
+fn record_server_notifications(s: &EditorState) {
+    exec(
+        s,
+        r#"
+        e7e_setup = { begun = 0, ended = 0, tokens = {} }
+        e7e_publishes = {}
+        pmacs.lsp.on_notification("$/progress", function(_, p)
+          local value, token = p.value, tostring(p.token)
+          if value.kind == "begin" and type(value.title) == "string"
+              and value.title:find("^Setting up") then
+            e7e_setup.tokens[token] = true
+            e7e_setup.begun = e7e_setup.begun + 1
+          elseif value.kind == "end" and e7e_setup.tokens[token] then
+            e7e_setup.tokens[token] = nil
+            e7e_setup.ended = e7e_setup.ended + 1
+          end
+        end)
+        pmacs.lsp.on_notification("textDocument/publishDiagnostics", function(_, p)
+          local holds = false
+          for _, d in ipairs(p.diagnostics) do
+            if d.severity == 1 and d.message:find("Couldn't match", 1, true) then
+              holds = true
+            end
+          end
+          e7e_publishes[#e7e_publishes + 1] = {
+            uri = p.uri,
+            version = type(p.version) == "number" and p.version or -1,
+            count = #p.diagnostics,
+            holds = holds,
+          }
+        end)
+        "#,
+    );
+}
+
+/// Setup's progress has begun and every token it began on has ended.
+fn setup_ended(s: &EditorState) -> bool {
+    eval(
+        s,
+        "return e7e_setup.begun > 0 and e7e_setup.ended == e7e_setup.begun",
+    )
+}
+
+/// One `textDocument/publishDiagnostics` for the row's document, as the
+/// server sent it.
+struct Publish {
+    version: i64,
+    count: i64,
+    holds_error: bool,
+}
+
+/// The publishes in the order they came: `v24:error`, `v15:1`, `v25:0`.
+fn shown(publishes: &[Publish]) -> String {
+    publishes
+        .iter()
+        .map(|p| {
+            if p.holds_error {
+                format!("v{}:error", p.version)
+            } else {
+                format!("v{}:{}", p.version, p.count)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The row's document's publishes so far, in the order they came.
+fn publishes(s: &EditorState) -> Vec<Publish> {
+    let rows: Vec<mlua::Table> = eval(
+        s,
+        "local rec = pmacs.lsp.active_attachment()
+         local out = {}
+         for _, p in ipairs(e7e_publishes) do
+           if rec and p.uri == rec.uri then out[#out + 1] = p end
+         end
+         return out",
+    );
+    rows.into_iter()
+        .map(|p| Publish {
+            version: p.get("version").unwrap(),
+            count: p.get("count").unwrap(),
+            holds_error: p.get("holds").unwrap(),
+        })
+        .collect()
+}
+
+/// The bounds on setup's progress ending and on the publish after the key,
+/// which a passing run meets in about 10 s and well under 1 s.
+const SETUP_BOUND_SECS: u64 = 120;
+const PUBLISH_BOUND_SECS: u64 = 120;
+/// How long the row reads on past a publish it waited for: a server's answer
+/// can be several, up to 190 ms apart in the traces, and the last is the one
+/// that stands.
+const ANSWER_WATCH: Duration = Duration::from_millis(500);
+/// The bound on the store and the status row holding what a publish held: a
+/// publish for an older version can empty them, and one after it restores it.
+const STORE_BOUND_SECS: u64 = 30;
+
+/// Ticks through [`ANSWER_WATCH`].
+fn read_on(s: &mut EditorState) {
+    let from = Instant::now();
+    while from.elapsed() < ANSWER_WATCH {
+        tick(s);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
-fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
+#[allow(clippy::too_many_lines)] // one user's path, from attach to the status row
+fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_type_error() {
     for tool in ["haskell-language-server-wrapper", "cabal", "ghc"] {
         if !on_path(tool) {
             support::skip_or_fail(tool, "PMACS_REQUIRE_HLS");
@@ -600,6 +706,7 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
         Some(canonical(&dir)),
         "the Haskell root is the `.cabal` file's directory"
     );
+    record_server_notifications(&s);
     open(&s, &file);
     let mut s = s;
     eprintln!("E7E with-compiler {pin:?}");
@@ -622,26 +729,78 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
         "the modeline settles on LSP:ready; trace {trace:?}"
     );
 
-    // A type error typed at the end of the file.
-    let len: i64 = eval(&s, "return pmacs.window.buffer():len()");
-    exec(&s, &format!("pmacs.editor.goto_byte({len})"));
-    type_line(&mut s, "oops :: Int");
-    type_line(&mut s, "oops = True");
-    let text = buffer_text(&s);
+    // Setup's progress ends before the edit. An edit typed while the server
+    // sets up can leave it holding the right document and publishing nothing,
+    // however many keys follow: #291's trace, and #480 is the user's case.
     assert!(
-        text.ends_with("oops :: Int\noops = True\n"),
-        "typed: {text:?}"
+        wait(&mut s, SETUP_BOUND_SECS, |s| {
+            note(s, &mut trace);
+            setup_ended(s) && lsp_segment(s).as_deref() == Some("LSP:ready")
+        }),
+        "setup's progress ends within {SETUP_BOUND_SECS} s; trace {trace:?}"
     );
 
-    let mut seen = Vec::new();
+    // A type error at the end of the file, as one key. Typed key by key it
+    // reaches the server as a burst of versions, each word's completion request
+    // flushing the edit so far, and the row does not cover what a server does
+    // with a burst: its silence is #480's and an older version's list #479's.
+    let len: i64 = eval(&s, "return pmacs.window.buffer():len()");
+    exec(&s, &format!("pmacs.editor.goto_byte({len})"));
+    yank(&mut s, "oops :: Int\noops = True");
+    let text = buffer_text(&s);
     assert!(
-        wait(&mut s, 120, |s| {
-            note(s, &mut trace);
-            seen = diagnostics(s);
-            seen.iter()
-                .any(|d| d.0 == "error" && d.5.contains("Couldn't match"))
-        }),
-        "HLS reports the type error; store {seen:?}; trace {trace:?}"
+        text.ends_with("oops :: Int\noops = True"),
+        "the error went in: {text:?}"
+    );
+    let version: i64 = eval(&s, "return pmacs.lsp.active_attachment().version");
+
+    // The server's answer to that text is a publish at that version. One
+    // without the error fails here: no key is typed to bring it back, and
+    // nothing is sent again.
+    let at_version = |s: &EditorState| -> Vec<bool> {
+        publishes(s)
+            .iter()
+            .filter(|p| p.version == version)
+            .map(|p| p.holds_error)
+            .collect()
+    };
+    let published = wait(&mut s, PUBLISH_BOUND_SECS, |s| {
+        note(s, &mut trace);
+        !at_version(s).is_empty()
+    });
+    assert!(
+        published,
+        "HLS never published at the buffer's version {version} within \
+         {PUBLISH_BOUND_SECS} s; publishes [{}]; trace {trace:?}",
+        shown(&publishes(&s))
+    );
+    read_on(&mut s);
+    let answers = at_version(&s);
+    assert!(
+        answers.iter().all(|holds| *holds),
+        "HLS published at the buffer's version {version} without the error{}; \
+         publishes [{}]; trace {trace:?}",
+        if answers[0] {
+            ", after one that held it"
+        } else {
+            ""
+        },
+        shown(&publishes(&s))
+    );
+
+    // The store has it, against the text that publish was computed for.
+    let mut seen = Vec::new();
+    let stored = wait(&mut s, STORE_BOUND_SECS, |s| {
+        note(s, &mut trace);
+        seen = diagnostics(s);
+        seen.iter()
+            .any(|d| d.0 == "error" && d.5.contains("Couldn't match"))
+    });
+    assert!(
+        stored,
+        "the store holds no error {STORE_BOUND_SECS} s after the publish at version \
+         {version} that held it; store {seen:?}; publishes [{}]; trace {trace:?}",
+        shown(&publishes(&s))
     );
     let err = seen
         .iter()
@@ -652,13 +811,12 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
         "E7E diagnostic {err:?} after {} ms; trace {trace:?}",
         t0.elapsed().as_millis()
     );
-    // The component loaded: the typed error is the only one, so no
+    // The component loaded: the row's error is the only one, so no
     // cradle error (a bare-`ghc` fallback, a GHC mismatch) sits on line 0.
     let errors: Vec<_> = seen.iter().filter(|d| d.0 == "error").collect();
-    assert_eq!(errors, vec![&err], "the typed error is the only error");
+    assert_eq!(errors, vec![&err], "the row's error is the only error");
 
-    // Placed on the text it names: E7c carries the range to the current
-    // text, and it covers `True`.
+    // Placed on the text it names: it covers `True`.
     let line = text.lines().nth(usize::try_from(err.1).unwrap()).unwrap();
     let covered = &line[usize::try_from(err.2).unwrap()..usize::try_from(err.4).unwrap()];
     assert_eq!(
@@ -670,11 +828,16 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
     // And E7d's diagnostic at point reads it on the grid's status row.
     let at = i64::try_from(text.find("oops = True").unwrap() + "oops = ".len()).unwrap();
     exec(&s, &format!("pmacs.editor.goto_byte({at})"));
-    tick(&mut s);
-    let status = status_row(&s);
+    let mut status = String::new();
+    let named = wait(&mut s, STORE_BOUND_SECS, |s| {
+        status = status_row(s);
+        status.contains("error:") && status.contains("Couldn't match")
+    });
     assert!(
-        status.contains("error:") && status.contains("Couldn't match"),
-        "the status row names the error at point: {status:?}"
+        named,
+        "the status row names the error at point: {status:?}; store {:?}; publishes [{}]",
+        diagnostics(&s),
+        shown(&publishes(&s))
     );
     assert!(
         wait(&mut s, 60, |s| lsp_segment(s).as_deref()
