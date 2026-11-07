@@ -286,41 +286,97 @@ pub enum AttachError {
         /// Whether the last of them ended with a frame cut short.
         cut_short: bool,
         /// Where a daemon that closed them keeps its stderr, for a remote route whose
-        /// last session ended at a frame's boundary: the bridge starts a daemon where it
-        /// finds none, and one that dies this young has likely left its reason there.
-        /// The local route starts no daemon, and a frame cut short is the daemon's
-        /// bound, so neither names one.
+        /// last session ended at a frame's boundary with `ssh` exiting 0: the bridge starts
+        /// a daemon where it finds none, and one that dies this young has likely left its
+        /// reason there. The local route starts no daemon, and a frame cut short is the
+        /// daemon's bound, so neither names one.
         far_side: Option<FarSideStderr>,
     },
+    /// [`HANDSHAKE_RETRY_CAP`] sessions in a row ended before their first frame with `ssh`
+    /// exiting other than 0, so no daemon can be said to have done anything and no file
+    /// is named.
+    SshEndedBeforeFirstFrame {
+        /// The host, as the route was given it.
+        host: String,
+        /// How many in a row.
+        attempts: u32,
+        /// How the last `ssh` ended.
+        exit: SshExit,
+    },
+}
+
+/// How a session's `ssh` ended. The bridge exits 0 when its daemon closes the socket, so
+/// anything else says the connection failed and says nothing of a daemon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SshExit {
+    /// It exited 0, or its exit could not be read.
+    #[default]
+    Clean,
+    /// It exited with this status.
+    Code(i32),
+    /// A signal ended it.
+    Signal,
+}
+
+impl SshExit {
+    fn of(status: Option<std::process::ExitStatus>) -> Self {
+        match status {
+            Some(status) if !status.success() => status.code().map_or(Self::Signal, Self::Code),
+            _ => Self::Clean,
+        }
+    }
+}
+
+impl std::fmt::Display for SshExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Clean => write!(f, "status 0"),
+            Self::Code(code) => write!(f, "status {code}"),
+            Self::Signal => write!(f, "a signal"),
+        }
+    }
+}
+
+/// The host a remote route names, with the user where the route was given one, since
+/// `ssh` to the bare host may read another user's directory.
+fn route_host(target: &AttachTarget) -> String {
+    match target {
+        AttachTarget::Ssh {
+            host,
+            user: Some(user),
+            ..
+        } => format!("{user}@{host}"),
+        AttachTarget::Ssh { host, .. } => host.clone(),
+        _ => "the far side".to_owned(),
+    }
 }
 
 /// Where a daemon the remote route's bridge started keeps its stderr, as the client can
 /// say it: the host, and the socket's name, or that it is the default, under the far
 /// side's runtime directory, whose real path no message says and no wire change is taken
-/// to learn.
+/// to learn. A word a user will paste is not a variable their own shell would expand, so
+/// the sentence says whose it is.
 #[derive(Debug)]
 pub struct FarSideStderr {
-    /// The host, as the route was given it.
+    /// The host, with the user where the route was given one.
     host: String,
-    /// The file, as the far side would resolve it.
+    /// The file, under the far side's runtime directory.
     path: String,
 }
 
 impl FarSideStderr {
     fn of(target: &AttachTarget) -> Self {
-        let (host, instance) = match target {
-            AttachTarget::Ssh {
-                host,
-                instance_name,
-                ..
-            } => (host.as_str(), instance_name.as_deref()),
-            _ => ("the far side", None),
+        let instance = match target {
+            AttachTarget::Ssh { instance_name, .. } => instance_name.as_deref(),
+            _ => None,
         };
-        let runtime = std::path::Path::new("$XDG_RUNTIME_DIR");
-        let socket = crate::socket_path::resolve_socket_path_with_runtime(instance, runtime);
+        let socket = crate::socket_path::resolve_socket_path_with_runtime(
+            instance,
+            std::path::Path::new(""),
+        );
         let path = pmacs_protocol::socket_file::daemon_stderr_path(&socket);
         Self {
-            host: host.to_owned(),
+            host: route_host(target),
             path: path.display().to_string(),
         }
     }
@@ -328,10 +384,14 @@ impl FarSideStderr {
 
 impl std::fmt::Display for FarSideStderr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.path.starts_with('/') {
+            // A path given for the socket is the far side's own.
+            return write!(f, "{}", self.path);
+        }
         write!(
             f,
-            "the last one's stderr is on {} at {}",
-            self.host, self.path
+            "{} under that host's $XDG_RUNTIME_DIR, or /tmp/pmacs-<uid> where that is unset",
+            self.path
         )
     }
 }
@@ -435,7 +495,8 @@ impl std::fmt::Display for AttachError {
             Self::NewDaemonsKeepDying { stderr, attempts } => write!(
                 f,
                 "a new daemon on {host} died {attempts} times in a row, each session lasting \
-                 under 30 s, so this one has stopped trying; {stderr}",
+                 under 30 s, so this client has stopped trying; the last one's stderr is in \
+                 {stderr}",
                 host = stderr.host,
             ),
             Self::SessionsDropped {
@@ -450,17 +511,32 @@ impl std::fmt::Display for AttachError {
             Self::SessionsDropped {
                 attempts,
                 cut_short: false,
-                far_side,
-            } => {
-                write!(
-                    f,
-                    "the daemon closed {attempts} sessions in a row before their first frame, \
-                     so this one has stopped trying"
-                )?;
-                far_side
-                    .as_ref()
-                    .map_or(Ok(()), |stderr| write!(f, "; {stderr}"))
-            }
+                far_side: None,
+            } => write!(
+                f,
+                "the daemon closed {attempts} sessions in a row before their first frame, so \
+                 this one has stopped trying"
+            ),
+            Self::SessionsDropped {
+                attempts,
+                cut_short: false,
+                far_side: Some(stderr),
+            } => write!(
+                f,
+                "the daemon on {host} closed {attempts} sessions in a row before their first \
+                 frame, so this client has stopped trying; if pmacs started it, its stderr is in \
+                 {stderr}",
+                host = stderr.host,
+            ),
+            Self::SshEndedBeforeFirstFrame {
+                host,
+                attempts,
+                exit,
+            } => write!(
+                f,
+                "ssh to {host} ended {attempts} times in a row before a first frame ({exit}), so \
+                 this client has stopped trying"
+            ),
         }
     }
 }
@@ -478,7 +554,8 @@ impl std::error::Error for AttachError {
             | Self::ReconnectCancelled
             | Self::ReconnectHelloTimedOut { .. }
             | Self::NewDaemonsKeepDying { .. }
-            | Self::SessionsDropped { .. } => None,
+            | Self::SessionsDropped { .. }
+            | Self::SshEndedBeforeFirstFrame { .. } => None,
         }
     }
 }
@@ -2583,6 +2660,8 @@ struct SessionLoss {
     cut_short: bool,
     /// Whether the notice it had, if it had one, stood its floor.
     notice_stood: bool,
+    /// How its `ssh` ended.
+    exit: SshExit,
 }
 
 impl SessionLoss {
@@ -2611,8 +2690,10 @@ impl SessionLoss {
 /// frame and was then lost has paid its one hold-up, so it reconnects, whatever
 /// its end. A session cut before its first frame, a link past the floor, costs the
 /// others the bound on every try, and backoff alone would be 2 s in every 32 with
-/// no end, so sessions in a row ending that way stop at [`HANDSHAKE_RETRY_CAP`], and one
-/// that ended at a frame's boundary, as a daemon that died does, says where its stderr is.
+/// no end, so sessions in a row ending that way stop at [`HANDSHAKE_RETRY_CAP`]. The last
+/// one says which: a frame cut short is the bound, an `ssh` that exited 0 is a daemon that
+/// closed its socket, as one that died does, and that names where its stderr is, and any
+/// other exit is `ssh`'s own, with no daemon to name.
 fn remote_verdict(
     verdict: ReconnectVerdict,
     loss: Option<SessionLoss>,
@@ -2631,10 +2712,18 @@ fn remote_verdict(
         permanent @ (ReconnectVerdict::ExitProtocolError { .. }
         | ReconnectVerdict::ExitPolicy { .. }) => permanent,
         _ if *unbootstrapped >= HANDSHAKE_RETRY_CAP => ReconnectVerdict::ExitProtocolError {
-            error: AttachError::SessionsDropped {
-                attempts: *unbootstrapped,
-                cut_short: loss.cut_short,
-                far_side: (!loss.cut_short).then(|| FarSideStderr::of(target)),
+            error: if loss.cut_short || loss.exit == SshExit::Clean {
+                AttachError::SessionsDropped {
+                    attempts: *unbootstrapped,
+                    cut_short: loss.cut_short,
+                    far_side: (!loss.cut_short).then(|| FarSideStderr::of(target)),
+                }
+            } else {
+                AttachError::SshEndedBeforeFirstFrame {
+                    host: route_host(target),
+                    attempts: *unbootstrapped,
+                    exit: loss.exit,
+                }
             },
         },
         ReconnectVerdict::ExitClean => ReconnectVerdict::Reconnect {
@@ -2905,6 +2994,7 @@ fn run_pump_and_reap(
                 bootstrapped: lost.bootstrapped,
                 cut_short: lost.cut_short,
                 notice_stood: lost.notice_stood,
+                exit: SshExit::Clean,
             });
             lost.write_error.map_or(Ok(()), Err)
         }
@@ -2916,6 +3006,9 @@ fn run_pump_and_reap(
     // The kick's SIGKILL bounds this wait, the child being this process's own.
     let exit_status = child.wait().ok();
     reaped.store(true, Ordering::SeqCst);
+    if let Some(loss) = ended.loss.as_mut() {
+        loss.exit = SshExit::of(exit_status);
+    }
     let _ = join_within(stderr_handle, SSH_TERM_GRACE);
     // A session ended on purpose has ended, whatever `ssh` says after it: its exit is
     // read and ignored, since an `ssh` slower to leave than the kick's watchdog exits
@@ -4504,6 +4597,7 @@ mod tests {
                 bootstrapped,
                 cut_short,
                 notice_stood: true,
+                exit: SshExit::Clean,
             })
         };
         let reconnect = || ReconnectVerdict::Reconnect {
@@ -4607,12 +4701,12 @@ mod tests {
     /// and the file as the socket's name decides it.
     #[test]
     fn the_older_cap_names_the_far_sides_stderr_by_how_the_last_session_ended() {
-        let on = |instance_name: Option<&str>| AttachTarget::Ssh {
+        let on = |user: Option<&str>, instance_name: Option<&str>| AttachTarget::Ssh {
             host: "farhost".to_owned(),
-            user: None,
+            user: user.map(str::to_owned),
             instance_name: instance_name.map(str::to_owned),
         };
-        let stopped_by = |cut_short, target: &AttachTarget| {
+        let stopped_by = |cut_short, exit, target: &AttachTarget| {
             let mut count = HANDSHAKE_RETRY_CAP - 1;
             let ReconnectVerdict::ExitProtocolError { error } = remote_verdict(
                 ReconnectVerdict::ExitClean,
@@ -4620,6 +4714,7 @@ mod tests {
                     bootstrapped: false,
                     cut_short,
                     notice_stood: true,
+                    exit,
                 }),
                 &mut count,
                 target,
@@ -4628,23 +4723,67 @@ mod tests {
             };
             error.to_string()
         };
+        // The owner's words, ruled 2026-11-07, but for the host, the instance and the count.
         assert_eq!(
-            stopped_by(false, &on(None)),
-            "the daemon closed 3 sessions in a row before their first frame, so this one has \
-             stopped trying; the last one's stderr is on farhost at \
-             $XDG_RUNTIME_DIR/pmacs/default.sock.stderr"
+            stopped_by(false, SshExit::Clean, &on(Some("someone"), Some("n"))),
+            "the daemon on someone@farhost closed 3 sessions in a row before their first \
+             frame, so this client has stopped trying; if pmacs started it, its stderr is in \
+             pmacs/n.sock.stderr under that host's $XDG_RUNTIME_DIR, or /tmp/pmacs-<uid> \
+             where that is unset"
+        );
+        assert_eq!(
+            stopped_by(false, SshExit::Code(255), &on(Some("someone"), None)),
+            "ssh to someone@farhost ended 3 times in a row before a first frame (status 255), \
+             so this client has stopped trying"
         );
         assert!(
-            stopped_by(false, &on(Some("e10r-pass")))
-                .ends_with(" at $XDG_RUNTIME_DIR/pmacs/e10r-pass.sock.stderr"),
+            stopped_by(false, SshExit::Clean, &on(None, None)).starts_with(
+                "the daemon on farhost closed 3 sessions in a row before their first frame"
+            ),
+            "the user only where the route was given it"
         );
         assert!(
-            stopped_by(false, &on(Some("/srv/d.sock"))).ends_with(" at /srv/d.sock.stderr"),
+            stopped_by(false, SshExit::Clean, &on(None, None))
+                .ends_with(" is in pmacs/default.sock.stderr under that host's $XDG_RUNTIME_DIR, or /tmp/pmacs-<uid> where that is unset"),
+        );
+        assert!(
+            stopped_by(false, SshExit::Clean, &on(None, Some("/srv/d.sock")))
+                .ends_with(" is in /srv/d.sock.stderr"),
             "a path is the far side's own"
         );
-        let cut = stopped_by(true, &on(None));
-        assert!(cut.starts_with(FRAME_CUT_SHORT_SENTENCE), "{cut}");
-        assert!(!cut.contains("stderr"), "the bound's, not a death: {cut}");
+        let signalled = stopped_by(false, SshExit::Signal, &on(None, None));
+        assert!(signalled.contains("(a signal)"), "{signalled}");
+        assert!(
+            !signalled.contains("stderr") && !signalled.contains("daemon"),
+            "no daemon was involved: {signalled}"
+        );
+        for exit in [SshExit::Clean, SshExit::Code(255)] {
+            let cut = stopped_by(true, exit, &on(None, None));
+            assert!(cut.starts_with(FRAME_CUT_SHORT_SENTENCE), "{cut}");
+            assert!(!cut.contains("stderr"), "the bound's, not a death: {cut}");
+        }
+    }
+
+    /// The new-daemons cap takes `this client` and the same words for where, its `the last
+    /// one's` standing, since its subject is a new daemon.
+    #[test]
+    fn the_new_daemons_cap_reads_as_ruled() {
+        let target = AttachTarget::Ssh {
+            host: "farhost".to_owned(),
+            user: Some("someone".to_owned()),
+            instance_name: Some("n".to_owned()),
+        };
+        assert_eq!(
+            AttachError::NewDaemonsKeepDying {
+                stderr: FarSideStderr::of(&target),
+                attempts: 3,
+            }
+            .to_string(),
+            "a new daemon on someone@farhost died 3 times in a row, each session lasting under \
+             30 s, so this client has stopped trying; the last one's stderr is in \
+             pmacs/n.sock.stderr under that host's $XDG_RUNTIME_DIR, or /tmp/pmacs-<uid> \
+             where that is unset"
+        );
     }
 
     /// What a `Hello` says of a new daemon is said until a session reaches the first
@@ -4722,6 +4861,7 @@ mod tests {
             bootstrapped: true,
             cut_short,
             notice_stood: true,
+            exit: SshExit::Clean,
         };
         let failed = ReconnectVerdict::Reconnect {
             error: AttachError::Io(io::Error::other("ssh exited 255")),

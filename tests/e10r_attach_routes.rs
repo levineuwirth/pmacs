@@ -1999,8 +1999,9 @@ fn p3_new_daemons_that_keep_dying_stop_the_route() {
     let said = tui.after_the_alternate_screen();
     for needle in [
         "a new daemon on farhost died 3 times in a row",
-        "under 30 s",
-        "$XDG_RUNTIME_DIR/pmacs/default.sock.stderr",
+        "under 30 s, so this client has stopped trying",
+        "the last one's stderr is in pmacs/default.sock.stderr under that host's \
+         $XDG_RUNTIME_DIR, or /tmp/pmacs-<uid> where that is unset",
     ] {
         assert!(said.contains(needle), "{needle:?} in {said:?}");
     }
@@ -2038,18 +2039,19 @@ fn g11_sessions_closed_before_their_first_frame_name_the_far_sides_stderr() {
     let said = tui.after_the_alternate_screen();
     assert!(
         said.contains(
-            "the daemon closed 3 sessions in a row before their first frame, so this one has \
-             stopped trying; the last one's stderr is on farhost at \
-             $XDG_RUNTIME_DIR/pmacs/default.sock.stderr"
+            "the daemon on farhost closed 3 sessions in a row before their first frame, so \
+             this client has stopped trying; if pmacs started it, its stderr is in \
+             pmacs/default.sock.stderr under that host's $XDG_RUNTIME_DIR, or \
+             /tmp/pmacs-<uid> where that is unset"
         ),
         "{said:?}"
     );
     let named = said
         .split_whitespace()
-        .find(|word| word.starts_with("$XDG_RUNTIME_DIR/"))
-        .expect("the sentence names a path");
-    let path = named.replacen("$XDG_RUNTIME_DIR", &runtime.display().to_string(), 1);
-    let kept = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        .find(|word| word.starts_with("pmacs/"))
+        .expect("the sentence names a file");
+    let path = runtime.join(named);
+    let kept = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     assert!(kept.contains("PLANTED DAEMON WORDS"), "{kept:?}");
 }
 
@@ -3114,4 +3116,62 @@ fn h6_a_second_loss_past_the_floor_does_not_say_it_again() {
     assert_eq!(tui.bottom_row(), PLAIN_LINK_NOTICE, "{}", tui.describe());
     tui.write(b"\x1b[24~");
     let _ = tui.pty.wait_for_exit(Duration::from_secs(10));
+}
+
+/// **Review 2's Low 3, its `p24_g11`, the owner's words:** an `ssh` that fails after its
+/// `Hello`, three times, names no file and no daemon, since none was involved, and says how
+/// `ssh` ended. At `b11d25a` it read `the daemon closed 3 sessions ... the last one's stderr
+/// is on farhost at ...`, false twice.
+#[test]
+fn h7_ssh_failing_after_a_hello_names_no_file_and_no_daemon() {
+    let ssh = StandInSsh::new(&[session_with(&[], 255)]);
+    let mut tui = ssh.attach();
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} attempts", ssh.invocations()));
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(
+        said.contains(
+            "pmacs: ssh to farhost ended 3 times in a row before a first frame (status 255), so \
+             this client has stopped trying"
+        ),
+        "{said:?}"
+    );
+    assert!(!said.contains("stderr"), "{said:?}");
+    assert!(!said.contains("daemon"), "{said:?}");
+}
+
+/// **Review 2's Low 3:** `ssh:someone@farhost/n` keeps the user, since `ssh farhost` may
+/// read another user's directory, and names the instance's file.
+#[test]
+fn h7_a_user_on_the_route_is_kept_in_the_sentence() {
+    let daemon = StandInDaemon::serve(|_, _| {});
+    let ssh = BridgedSsh::new(&daemon.socket());
+    let home = ssh.dir.path();
+    let script = home.join("ssh");
+    let mut tui = common::pty::spawn_pmacs_in_pty(
+        &["--attach", "ssh:someone@farhost/n"],
+        &[
+            ("HOME", home),
+            ("XDG_CONFIG_HOME", home),
+            (PMACS_TEST_SSH_BIN, &script),
+            (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1")),
+        ],
+        24,
+        80,
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} sessions", daemon.connections()));
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(
+        said.contains("the daemon on someone@farhost closed 3 sessions in a row"),
+        "{said:?}"
+    );
+    assert!(
+        said.contains("its stderr is in pmacs/n.sock.stderr under"),
+        "{said:?}"
+    );
 }
