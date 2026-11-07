@@ -30,8 +30,7 @@
 //!   marker is `"\n[<basename(argv[0])> exited with code N]\n"`.
 
 use pmacs::editor::EditorState;
-use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -100,6 +99,17 @@ fn run_with_pump(setup_chunk: &str, predicate_chunk: &str, timeout_ms: u64) {
         .lua_host
         .eval(Some("@m6_5_setup"), setup_chunk)
         .expect("setup chunk runs");
+    assert!(
+        pump_until(&mut editor, predicate_chunk, timeout_ms),
+        "pump predicate did not become true within {timeout_ms}ms; \
+         chunk:\n{predicate_chunk}\nlast seen: {}",
+        last_seen(&editor)
+    );
+}
+
+/// Drive `tick_processes` until `predicate_chunk` returns truthy, or answer
+/// that it did not within `timeout_ms`.
+fn pump_until(editor: &mut EditorState, predicate_chunk: &str, timeout_ms: u64) -> bool {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         editor.tick_processes();
@@ -110,14 +120,11 @@ fn run_with_pump(setup_chunk: &str, predicate_chunk: &str, timeout_ms: u64) {
             .eval()
             .expect("predicate chunk runs");
         if truthy {
-            return;
+            return true;
         }
-        assert!(
-            Instant::now() < deadline,
-            "pump predicate did not become true within {timeout_ms}ms; \
-             chunk:\n{predicate_chunk}\nlast seen: {}",
-            last_seen(&editor)
-        );
+        if Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -422,50 +429,73 @@ fn m6_5_exit_marker_uses_basename_with_leading_newline() {
 // Stage 5: multi-shell acceptance (acceptance bullet 1)
 // ---------------------------------------------------------------------------
 
-/// Run a single command (`echo hello-pmacs`) through a freshly-spawned
-/// shell and verify the output appears in history. The shell exits
-/// itself via the same EOF byte the C-d binding sends, so we don't
-/// need to wire up `exit` per-shell. Predicate gates first on
-/// running-state (process must have started before we type) and then
-/// on history matching the expected output.
-fn run_shell_smoke_test(shell_path: &std::path::Path, argv_extra: &[&str]) {
-    let mut argv_lua = String::new();
-    write!(&mut argv_lua, r#""{}""#, shell_path.display()).unwrap();
-    for a in argv_extra {
-        write!(&mut argv_lua, r#", "{a}""#).unwrap();
-    }
-    let setup = format!(
-        r"
-            _G.h = pmacs.repl.spawn {{ argv = {{ {argv_lua} }} }}
-            _G.typed = false
-        ",
+/// What the shells' rows look for in history. No line a row types holds it, so
+/// only the line's answer can show it: a terminal's echo, a line editor's redraw
+/// and a failed command's text all show the line.
+const ANSWER: &str = "hello-pmacs";
+/// The line the three shells' rows type.
+const SHELL_LINE: &str = r"printf 'hello-%s\n' pmacs";
+/// The bound on the answer once the line is typed, for the three shells.
+const SHELL_ANSWER_MS: u64 = 15_000;
+/// The bound on a shell's first output. fish 4.9.3 spends 10 s of its start on
+/// a query this terminal does not answer (#483).
+const FIRST_OUTPUT_MS: u64 = 30_000;
+
+/// Run one line through a freshly-spawned shell and read its answer in history.
+///
+/// It waits for the shell's first output before it types. Typed the moment the
+/// process reports `running`, the line nearly always beat the trampoline's
+/// `stty raw -echo` (`src/process.rs`), and the terminal's echo of it passed for
+/// an answer: a stand-in that never prints passed 156 of 160 runs. Each wait has
+/// its own bound, and a timeout names what it waited for.
+fn run_shell_line(shell: &Path, argv_extra: &[&str], line: &str, answer_ms: u64) {
+    let _guard = pump_test_guard();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
+    let argv = std::iter::once(shell.display().to_string())
+        .chain(argv_extra.iter().map(ToString::to_string))
+        .map(|arg| format!("{arg:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    editor
+        .lua_host
+        .eval(
+            Some("@m6_5_setup"),
+            &format!("_G.h = pmacs.repl.spawn {{ argv = {{ {argv} }} }}\n_G.typed = false"),
+        )
+        .expect("setup chunk runs");
+
+    assert!(
+        pump_until(
+            &mut editor,
+            "return _G.h:buffer_id():len() > 0",
+            FIRST_OUTPUT_MS
+        ),
+        "the shell's first output did not come within {FIRST_OUTPUT_MS}ms, so nothing was typed; \
+         last seen: {}",
+        last_seen(&editor)
     );
-    run_with_pump(
-        &setup,
-        r#"
-            local h = _G.h
-            if not _G.typed then
-              local status = pmacs.process.status(h._proc_id)
-              if status and status.kind == "running" then
-                -- Type the smoke command into the input region and
-                -- submit. After-tick will drain the shell's echo and
-                -- the command's output into history.
-                h:buffer_id():insert(h:prompt_end(), "echo hello-pmacs")
-                pmacs.command.invoke("pmacs.repl.submit-current")
-                _G.typed = true
-              end
-              return false
-            end
-            local buf = h:buffer_id()
-            local history = buf:slice(0, h:history_end())
-            return history:find("hello-pmacs", 1, true) ~= nil
-        "#,
-        // 15s timeout absorbs the slowest-shell case (fish under
-        // heavy parallel load); none of the four shells is normally
-        // anywhere near that, but the test must not flake when 5
-        // shell tests + the SIGINT test all start their PTY children
-        // in the same cargo-test thread pool.
-        15_000,
+
+    editor
+        .lua_host
+        .eval(
+            Some("@m6_5_type"),
+            &format!(
+                "_G.h:buffer_id():insert(_G.h:prompt_end(), {line:?})\n\
+                 pmacs.command.invoke(\"pmacs.repl.submit-current\")\n\
+                 _G.typed = true"
+            ),
+        )
+        .expect("the line goes in");
+
+    let answered = format!(
+        "local h = _G.h\n\
+         return h:buffer_id():slice(0, h:history_end()):find({ANSWER:?}, 1, true) ~= nil"
+    );
+    assert!(
+        pump_until(&mut editor, &answered, answer_ms),
+        "the answer {ANSWER:?} to the line {line:?} did not come within {answer_ms}ms; \
+         last seen: {}",
+        last_seen(&editor)
     );
 }
 
@@ -477,7 +507,7 @@ fn m6_5_repl_spawns_bash() {
         support::skip_or_fail_overridable("bash", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_BASH");
         return;
     };
-    run_shell_smoke_test(&bash, &["-i"]);
+    run_shell_line(&bash, &["-i"], SHELL_LINE, SHELL_ANSWER_MS);
 }
 
 /// Zsh. Skip if not installed.
@@ -487,7 +517,9 @@ fn m6_5_repl_spawns_zsh() {
         support::skip_or_fail_overridable("zsh", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_ZSH");
         return;
     };
-    run_shell_smoke_test(&zsh, &["-i"]);
+    // `-f`, no startup files: in a `HOME` with none, `zsh-newuser-install` would
+    // take the line's first key, and `-f` holds whatever a `HOME` has.
+    run_shell_line(&zsh, &["-f", "-i"], SHELL_LINE, SHELL_ANSWER_MS);
 }
 
 /// Fish. Historically the most fussy of the four about TTY setup;
@@ -498,7 +530,7 @@ fn m6_5_repl_spawns_fish() {
         support::skip_or_fail_overridable("fish", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_FISH");
         return;
     };
-    run_shell_smoke_test(&fish, &["-i"]);
+    run_shell_line(&fish, &["-i"], SHELL_LINE, SHELL_ANSWER_MS);
 }
 
 /// Lua REPL. Skip if no standalone Lua interpreter is installed.
@@ -514,32 +546,7 @@ fn m6_5_repl_spawns_lua() {
         );
         return;
     };
-    let setup = format!(
-        r#"
-            _G.h = pmacs.repl.spawn {{ argv = {{ "{lua}", "-i" }} }}
-            _G.typed = false
-        "#,
-        lua = lua.display(),
-    );
-    run_with_pump(
-        &setup,
-        r#"
-            local h = _G.h
-            if not _G.typed then
-              local status = pmacs.process.status(h._proc_id)
-              if status and status.kind == "running" then
-                h:buffer_id():insert(h:prompt_end(), "print('hello-pmacs')")
-                pmacs.command.invoke("pmacs.repl.submit-current")
-                _G.typed = true
-              end
-              return false
-            end
-            local buf = h:buffer_id()
-            local history = buf:slice(0, h:history_end())
-            return history:find("hello-pmacs", 1, true) ~= nil
-        "#,
-        10_000,
-    );
+    run_shell_line(&lua, &["-i"], "print('hello-' .. 'pmacs')", 10_000);
 }
 
 // ---------------------------------------------------------------------------
