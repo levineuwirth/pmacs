@@ -1682,8 +1682,8 @@ fn staying_off(tui: &mut ScreenTui, up: &dyn Fn(&ScreenTui) -> bool) -> bool {
 }
 
 /// **Review 1's Medium 3, `p4_typing`:** keys every 200 ms across a daemon's death, each
-/// reaching the new daemon under the notice, which comes off only at the first key after
-/// it has stood its floor. At `5fd9d25` it stood 128 ms, one key's gap.
+/// reaching the new daemon under the notice, which comes off only once it has stood its
+/// floor. At `5fd9d25` it stood 128 ms, one key's gap.
 #[test]
 fn p4_the_notice_stands_its_floor_under_typing_and_the_keys_reach_the_daemon() {
     let (ssh, started) = BridgedSsh::starting_its_own_daemons("");
@@ -2949,4 +2949,169 @@ fn h2_past_the_cap_further_input_is_dropped_saying_so() {
         tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
         "F12 ends it"
     );
+}
+
+/// **Review 2's Low 1, its `p22`, as ruled:** the notice names `M-x` and `C-x b`, a user who
+/// presses one at once has a prompt under the notice, and past the floor nothing showed it
+/// until another key. A key having arrived during the floor, the notice comes off by itself
+/// at its end. At `b11d25a` the notice is still up with no key, however long.
+#[test]
+fn r2_a_prompt_opened_under_the_notice_shows_once_the_floor_is_past_with_no_key() {
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons("");
+    let mut tui = ssh.attach_screen("1");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    started.kill_the_one_running();
+    let up = |t: &ScreenTui| t.bottom_row() == NEW_DAEMON_NOTICE;
+    tui.wait_for(Duration::from_mins(1), "the notice", &up);
+    tui.write(b"\x1bx");
+    tui.wait_for(
+        NOTICE_STANDS + Duration::from_secs(5),
+        "the prompt, with no key after it",
+        &|t| t.bottom_row().starts_with("M-x"),
+    );
+    tui.write(b"\x07");
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// The ruling's other half, changing the review's rule: with no key during the floor the
+/// notice stands until one comes, whatever frames take its row, so `work not autosaved is
+/// gone` is not cleared on a terminal nobody is at. A daemon of the row's own sends a frame
+/// on the bottom row past the floor: the notice is painted over it, and the first key
+/// takes it off, what the frame put there coming back.
+#[test]
+fn h6_with_no_key_the_notice_stands_past_its_floor_whatever_frames_take_its_row() {
+    const WORDS: &str = "A FRAME ON THE BOTTOM ROW";
+    let daemon = StandInDaemon::serve_saying(
+        |n| if n == 1 { (2, 1_000) } else { (2, 0) },
+        |n, stream| {
+            first_frame(stream);
+            if n == 1 {
+                return;
+            }
+            std::thread::sleep(NOTICE_STANDS + Duration::from_secs(1));
+            let cells = WORDS
+                .chars()
+                .map(|c| pmacs_protocol::cell::Cell {
+                    glyph: pmacs_protocol::cell::Glyph::Char(c),
+                    ..pmacs_protocol::cell::Cell::default()
+                })
+                .collect();
+            write_message(
+                stream,
+                &InstanceMessage::CellDelta {
+                    spans: vec![pmacs_protocol::cell::DiffSpan {
+                        start: pmacs_protocol::cell::CellCoord::new(23, 0),
+                        cells,
+                    }],
+                    full_grid: false,
+                },
+            )
+            .expect("the frame");
+            std::thread::sleep(Duration::from_secs(30));
+        },
+    );
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_screen(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let up = |t: &ScreenTui| t.bottom_row() == NEW_DAEMON_NOTICE;
+    tui.wait_for(Duration::from_secs(30), "the notice", &up);
+    let shown = Instant::now();
+    let until = shown + NOTICE_STANDS + Duration::from_secs(3);
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        if tui.watch_for(left, &|t| !up(t)).is_some() {
+            assert!(
+                !staying_off(&mut tui, &up),
+                "with no key it came off {} ms on: {}",
+                shown.elapsed().as_millis(),
+                tui.describe()
+            );
+        }
+    }
+    assert!(up(&tui), "{}", tui.describe());
+    tui.write(b"q");
+    tui.wait_for(Duration::from_secs(10), "what the frame put there", &|t| {
+        t.bottom_row().starts_with(WORDS)
+    });
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// **Review 2's Low 4, its `p23`:** the first sentence stands 5 s by G2's ruling, and a link
+/// lost inside those 5 s handed the next session the plain reading, the news forgotten once
+/// a first frame had put it up, however briefly. A flapping link around a crash is when this
+/// happens. At `b11d25a` the second sentence or a plain one replaces it inside a second, and
+/// nothing again says work is gone. The scale leaves the countdown on screen to read.
+#[test]
+fn r2_a_second_loss_inside_the_floor_keeps_the_first_sentence() {
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons("");
+    let mut tui = ssh.attach_screen("300");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    started.kill_the_one_running();
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row() == NEW_DAEMON_NOTICE
+    });
+    let last = *ssh.pids().last().expect("the second session's stand-in");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(last),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("the link");
+    tui.wait_for(Duration::from_secs(20), "the banner", &|t| {
+        t.bottom_row().contains("disconnected") || t.bottom_row().contains("reconnecting")
+    });
+    tui.wait_for(Duration::from_secs(20), "a notice again", &|t| {
+        let row = t.bottom_row();
+        row.starts_with("[pmacs reconnected") || row.starts_with("[pmacs: new daemon")
+    });
+    assert_eq!(tui.bottom_row(), NEW_DAEMON_NOTICE, "{}", tui.describe());
+    tui.write(b"\x1b[24~");
+    let _ = tui.pty.wait_for_exit(Duration::from_secs(10));
+}
+
+/// A second loss past the floor is news the user has had: the next session reads as what it
+/// is. A guard on the ruling's reach.
+#[test]
+fn h6_a_second_loss_past_the_floor_does_not_say_it_again() {
+    let (ssh, started) = BridgedSsh::starting_its_own_daemons("");
+    let mut tui = ssh.attach_screen("300");
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    past_the_age_slack();
+    started.kill_the_one_running();
+    tui.wait_for(Duration::from_mins(1), "the notice", &|t| {
+        t.bottom_row() == NEW_DAEMON_NOTICE
+    });
+    // Past the slack too, so that the age has nothing to hedge about.
+    std::thread::sleep(NOTICE_STANDS + DAEMON_AGE_SLACK + Duration::from_secs(1));
+    let last = *ssh.pids().last().expect("the second session's stand-in");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(last),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("the link");
+    tui.wait_for(Duration::from_secs(20), "the banner", &|t| {
+        t.bottom_row().contains("disconnected") || t.bottom_row().contains("reconnecting")
+    });
+    tui.wait_for(Duration::from_secs(20), "a notice again", &|t| {
+        let row = t.bottom_row();
+        row.starts_with("[pmacs reconnected") || row.starts_with("[pmacs: new daemon")
+    });
+    assert_eq!(tui.bottom_row(), PLAIN_LINK_NOTICE, "{}", tui.describe());
+    tui.write(b"\x1b[24~");
+    let _ = tui.pty.wait_for_exit(Duration::from_secs(10));
 }

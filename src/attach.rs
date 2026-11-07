@@ -650,7 +650,10 @@ const LOCAL_RECONNECT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a notice stands whatever is typed under it: a user typing when a link
 /// drops is the likeliest to be at the keyboard, and at 5 keys a second it stood for
 /// 128 ms when any key took it off (review 1, ruled 2026-11-06). Keys reach the daemon
-/// under it, and it comes off at the first one after this.
+/// under it. If any arrived during this it comes off by itself at the end of it, so that
+/// a prompt the sentence sent them to shows; if none did it stands until one does,
+/// whatever frames take its row, so that it is not cleared on a terminal nobody is at
+/// (review 2, ruled 2026-11-07).
 const NOTICE_FLOOR: Duration = Duration::from_secs(5);
 
 /// On the bottom row of a session that replaced a lost one, for [`NOTICE_FLOOR`] and
@@ -758,9 +761,12 @@ impl SessionMemory {
         self.seen = Some(seen);
     }
 
-    /// A session was lost, for the reason `why` says of it.
-    fn lost(&mut self, bootstrapped: bool, why: &'static str) {
-        if bootstrapped {
+    /// A session was lost, for the reason `why` says of it. `told` is whether what a
+    /// `Hello` said has been on screen for its floor: a first frame has put it up and it
+    /// has stood. Until then it is kept for the next session, so a link lost inside the
+    /// floor does not take the one sentence that says work is gone.
+    fn lost(&mut self, told: bool, why: &'static str) {
+        if told {
             self.succession = Succession::Same;
         }
         self.why = Some(why);
@@ -917,7 +923,7 @@ fn run_local_sessions(
             PumpEnd::Lost(lost) => lost,
         };
         memory.lost(
-            lost.bootstrapped,
+            lost.bootstrapped && lost.notice_stood,
             if lost.cut_short {
                 NOTICE_FRESH_VIEW_CUT_SHORT
             } else {
@@ -1341,19 +1347,63 @@ fn run_writer(mut writer: Box<dyn Write + Send>, shared: &(Mutex<WriteQueue>, Co
 /// other comes back, if it has not stood its floor or no key has come.
 #[derive(Debug, Default)]
 struct BottomRow {
-    /// A new session's notice, and when it went up.
-    standing: Option<(Notice, Instant)>,
+    /// A new session's notice.
+    standing: Option<StandingNotice>,
     /// That writes are not moving.
     stalled: Option<Notice>,
     /// What is on the row now.
     painted: Option<&'static str>,
 }
 
+/// A new session's notice on the bottom row.
+#[derive(Clone, Copy, Debug)]
+struct StandingNotice {
+    notice: Notice,
+    since: Instant,
+    /// A key arrived during its floor.
+    keyed: bool,
+}
+
+impl StandingNotice {
+    fn new(notice: Notice) -> Self {
+        Self {
+            notice,
+            since: Instant::now(),
+            keyed: false,
+        }
+    }
+
+    fn stood(&self) -> bool {
+        self.since.elapsed() >= NOTICE_FLOOR
+    }
+}
+
 impl BottomRow {
     fn wanted(&self, cols: u32) -> Option<&'static str> {
         self.stalled
-            .or(self.standing.map(|(notice, _)| notice))
+            .or(self.standing.map(|standing| standing.notice))
             .map(|notice| notice.fitting(cols))
+    }
+
+    /// A key arrived: the notice comes off if it has stood its floor, and if not, it now
+    /// comes off by itself when it has.
+    fn key_arrived(&mut self) {
+        if let Some(standing) = self.standing.as_mut() {
+            standing.keyed = true;
+        }
+        self.time_passed();
+    }
+
+    /// Take the notice off if a key arrived during its floor and the floor is over.
+    fn time_passed(&mut self) {
+        if self.standing.is_some_and(|s| s.keyed && s.stood()) {
+            self.standing = None;
+        }
+    }
+
+    /// Whether the notice, if there was one, has stood its floor.
+    fn notice_stood(&self) -> bool {
+        self.standing.is_none_or(|standing| standing.stood())
     }
 
     /// What the writer says: up once its bytes have sat still for [`WRITE_STALL_NOTICE`]
@@ -1406,6 +1456,8 @@ pub(crate) struct LostSession {
     pub write_error: Option<AttachError>,
     /// Whether the reader's last read ended partway through a frame.
     pub cut_short: bool,
+    /// Whether the notice it had, if it had one, stood its floor.
+    pub notice_stood: bool,
 }
 
 /// Bidirectional pump: forward local input to the writer, apply
@@ -1429,8 +1481,9 @@ pub(crate) struct LostSession {
 /// # Tear-down contract
 ///
 /// `notice`, if any, goes on the bottom row over the session's first frame. It stands
-/// [`NOTICE_FLOOR`] whatever is typed, painted again over a frame that takes that row,
-/// and comes off at the first key after that, what the frames left there coming back.
+/// [`NOTICE_FLOOR`] whatever is typed, painted again over a frame that takes that row.
+/// If a key arrived during that it comes off by itself at the end of it, and if none did
+/// it stands until one does, what the frames left there coming back either way.
 ///
 /// On any exit path — clean Goodbye, reader EOF, F12 detach, IO
 /// error, or terminal error — `io.kick` fires and the reader and writer
@@ -1499,6 +1552,7 @@ pub(crate) fn run_attach_pair(
                 bootstrapped,
                 write_error: Some(error),
                 cut_short: false,
+                notice_stood: true,
             })),
             other => Err(other),
         };
@@ -1616,7 +1670,7 @@ pub(crate) fn run_attach_pair(
                 if framed {
                     bootstrapped = true;
                     if let Some(first) = notice.take() {
-                        bottom.standing = Some((first, Instant::now()));
+                        bottom.standing = Some(StandingNotice::new(first));
                         takes_row = true;
                     }
                 }
@@ -1640,6 +1694,7 @@ pub(crate) fn run_attach_pair(
                     bootstrapped,
                     write_error: None,
                     cut_short: false,
+                    notice_stood: true,
                 }));
             }
             if let Some(error) = writer.take_failure() {
@@ -1649,6 +1704,7 @@ pub(crate) fn run_attach_pair(
                 );
             }
             bottom.writer_says(&writer.state());
+            bottom.time_passed();
             if let Err(e) = bottom.settle(frontend) {
                 return Err(AttachError::Terminal(e));
             }
@@ -1661,12 +1717,8 @@ pub(crate) fn run_attach_pair(
                 continue;
             };
 
-            if matches!(ev, Event::Key(_))
-                && bottom
-                    .standing
-                    .is_some_and(|(_, since)| since.elapsed() >= NOTICE_FLOOR)
-            {
-                bottom.standing = None;
+            if matches!(ev, Event::Key(_)) {
+                bottom.key_arrived();
                 let _ = bottom.settle(frontend);
             }
 
@@ -1869,8 +1921,13 @@ pub(crate) fn run_attach_pair(
     )
     .unwrap_or(false);
 
+    let notice_stood = bottom.notice_stood();
     result.map(|end| match end {
-        PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
+        PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession {
+            cut_short,
+            notice_stood,
+            ..lost
+        }),
         over @ PumpEnd::Over(_) => over,
     })
 }
@@ -2418,7 +2475,10 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
         let loss = ended.loss;
         let mut keeps_dying = false;
         if let Some(lost) = loss {
-            memory.lost(lost.bootstrapped, lost.notice(&verdict));
+            memory.lost(
+                lost.bootstrapped && lost.notice_stood,
+                lost.notice(&verdict),
+            );
             keeps_dying = dying.session_lost(memory.reading, memory.session_lived());
         }
         let verdict = match remote_verdict(verdict, loss, &mut unbootstrapped, &target) {
@@ -2521,6 +2581,8 @@ struct SessionLoss {
     bootstrapped: bool,
     /// Whether the channel ended partway through a frame.
     cut_short: bool,
+    /// Whether the notice it had, if it had one, stood its floor.
+    notice_stood: bool,
 }
 
 impl SessionLoss {
@@ -2842,6 +2904,7 @@ fn run_pump_and_reap(
             ended.loss = Some(SessionLoss {
                 bootstrapped: lost.bootstrapped,
                 cut_short: lost.cut_short,
+                notice_stood: lost.notice_stood,
             });
             lost.write_error.map_or(Ok(()), Err)
         }
@@ -3512,6 +3575,7 @@ mod tests {
                 bootstrapped: false,
                 write_error: None,
                 cut_short: false,
+                notice_stood: true,
             })
         ));
         assert!(matches!(
@@ -3520,6 +3584,7 @@ mod tests {
                 bootstrapped: false,
                 write_error: None,
                 cut_short: false,
+                notice_stood: true,
             })
         ));
         assert!(matches!(
@@ -3528,6 +3593,7 @@ mod tests {
                 bootstrapped: false,
                 write_error: None,
                 cut_short: true,
+                notice_stood: true,
             })
         ));
         assert!(matches!(
@@ -3543,6 +3609,7 @@ mod tests {
                 bootstrapped: true,
                 write_error: None,
                 cut_short: false,
+                notice_stood: true,
             })
         ));
     }
@@ -4091,6 +4158,7 @@ mod tests {
                     bootstrapped: false,
                     write_error: Some(AttachError::Transport(TransportError::Io(_))),
                     cut_short: false,
+                    notice_stood: true,
                 })
             ),
             "{end:?}"
@@ -4332,12 +4400,61 @@ mod tests {
         }
     }
 
+    /// The floor as ruled: a key during it takes the notice off at its end, one after it
+    /// at once, and with none it stands however long, however many frames take its row.
+    #[test]
+    fn a_notice_comes_off_by_itself_only_if_a_key_arrived_during_its_floor() {
+        let long_ago = Instant::now()
+            .checked_sub(NOTICE_FLOOR)
+            .expect("an instant that long ago");
+        let standing = |since, keyed| {
+            Some(StandingNotice {
+                notice: NOTICE_NEW_DAEMON,
+                since,
+                keyed,
+            })
+        };
+        let mut bottom = BottomRow {
+            standing: standing(long_ago, false),
+            ..BottomRow::default()
+        };
+        bottom.time_passed();
+        assert!(
+            bottom.standing.is_some(),
+            "no key: it stands past its floor"
+        );
+        assert!(bottom.notice_stood());
+        bottom.key_arrived();
+        assert!(bottom.standing.is_none(), "the first key after its floor");
+
+        let mut bottom = BottomRow {
+            standing: standing(Instant::now(), false),
+            ..BottomRow::default()
+        };
+        assert!(!bottom.notice_stood());
+        bottom.key_arrived();
+        assert!(bottom.standing.is_some(), "a key inside its floor");
+        assert!(bottom.standing.is_some_and(|s| s.keyed));
+        assert!(!bottom.notice_stood());
+
+        let mut bottom = BottomRow {
+            standing: standing(long_ago, true),
+            ..BottomRow::default()
+        };
+        bottom.time_passed();
+        assert!(
+            bottom.standing.is_none(),
+            "its floor over, a key having come"
+        );
+        assert!(bottom.notice_stood());
+    }
+
     /// How the sentences sit: the writer's stands over a new session's notice while it
     /// lasts, latched until the queue drains, and the other comes back if it still stands.
     #[test]
     fn the_writers_sentence_stands_over_a_notice_and_gives_it_back() {
         let mut bottom = BottomRow {
-            standing: Some((NOTICE_NEW_DAEMON, Instant::now())),
+            standing: Some(StandingNotice::new(NOTICE_NEW_DAEMON)),
             ..BottomRow::default()
         };
         let mut frontend = ScriptedFrontend::default();
@@ -4386,6 +4503,7 @@ mod tests {
             Some(SessionLoss {
                 bootstrapped,
                 cut_short,
+                notice_stood: true,
             })
         };
         let reconnect = || ReconnectVerdict::Reconnect {
@@ -4501,6 +4619,7 @@ mod tests {
                 Some(SessionLoss {
                     bootstrapped: false,
                     cut_short,
+                    notice_stood: true,
                 }),
                 &mut count,
                 target,
@@ -4602,6 +4721,7 @@ mod tests {
         let lost = |cut_short| SessionLoss {
             bootstrapped: true,
             cut_short,
+            notice_stood: true,
         };
         let failed = ReconnectVerdict::Reconnect {
             error: AttachError::Io(io::Error::other("ssh exited 255")),
