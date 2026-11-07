@@ -283,6 +283,18 @@ whole. Under one cap a growing register squeezes the rules.
   owner, 2026-11-06, since a missing socket does not prove a stop: the
   default socket sits in `$XDG_RUNTIME_DIR`, which a host may remove when
   its last session ends.
+  A TUI's pump writes to neither route's transport itself: frames are
+  encoded on it and written, in order, by one thread, so `F12` is read
+  whatever the socket is doing, and what is typed at a daemon that has
+  stopped answering is queued. After 2 s with a write not moving the bottom
+  row reads `[pmacs: the daemon is not answering; F12 detaches]`, over a
+  reconnect's notice, which comes back if it still stands when this goes;
+  past 16 MiB queued further input but a resize is dropped and it reads
+  `[pmacs: the daemon is not answering; keys dropped; F12 detaches]`; a pane
+  too narrow for those reads `[not answering; F12 detaches]` or `[keys
+  dropped; F12 detaches]`. Each is off when the queue has drained. `F12`'s end
+  closes the writer, kicks a write still blocked, and joins within the about
+  5 s a deliberate end is held to.
   Removed when the token family reaches grid sessions, which is a wire
   question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon

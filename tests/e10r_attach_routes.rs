@@ -46,6 +46,8 @@ const PLAIN_DAEMON_NOTICE: &str =
 const PLAIN_LINK_NOTICE: &str = "[pmacs reconnected on a new view: the connection was lost]";
 /// How long a notice stands whatever is typed under it, by G2's ruling.
 const NOTICE_STANDS: Duration = Duration::from_secs(5);
+/// How long a write goes without moving before the bottom row says so, by H2's ruling.
+const WRITE_STALL: Duration = Duration::from_secs(2);
 
 /// A daemon too old for its age to fall inside the slack, for a row about what a real
 /// session on a healthy daemon reads: under it, a `Hello` reads `may be a new daemon`,
@@ -2620,4 +2622,331 @@ fn h1_an_accepted_directory_follows_no_link_either_and_its_file_is_private() {
         .mode();
     assert_eq!(mode & 0o777, 0o600);
     drop(started);
+}
+
+/// How many keys fill each route's transport with its daemon stopped, at about 64 B a frame:
+/// a local socket's buffer took 200 small frames, and a remote route's, its pipe behind it,
+/// 4,100 (review 2's `p30`, on Linux). Either is short of what the terminal's own buffer
+/// holds past that, so a client that stopped reading leaves a row's write to return.
+const KEYS_PAST_A_LOCAL_SOCKET: usize = 600;
+const KEYS_PAST_A_REMOTE_ROUTE: usize = 6_000;
+
+/// `keys` as a person's fast typing reaches a terminal: thirty bursts over about a second.
+fn type_in_bursts(tui: &mut common::pty::PmacsPty, keys: &[u8]) {
+    for burst in keys.chunks(keys.len().div_ceil(30)) {
+        tui.write_input(burst).expect("keys");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// Numbered words making up `keys` keys, so that a key lost or out of order reads as one.
+fn numbered_keys(keys: usize) -> Vec<u8> {
+    let mut typed = String::with_capacity(keys + 6);
+    let mut n = 0;
+    while typed.len() < keys {
+        n += 1;
+        write!(typed, "{n:05} ").expect("write to a String");
+    }
+    typed.into_bytes()
+}
+
+/// A daemon's `SIGSTOP`, standing in for a runaway command: it stops reading its socket.
+fn stop_answering(daemon: &TestDaemon) -> nix::unistd::Pid {
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid"));
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
+    pid
+}
+
+/// `F12` at a TUI whose daemon stopped answering, after `typed`: it ends, status 0, whatever
+/// the write is doing, within `within`.
+fn f12_leaves_a_daemon_that_stopped(
+    tui: &mut common::pty::PmacsPty,
+    daemon: &TestDaemon,
+    within: Duration,
+    typed: impl FnOnce(&mut common::pty::PmacsPty),
+) {
+    tui.wait_for_output("*scratch*", Duration::from_secs(30));
+    let pid = stop_answering(daemon);
+    typed(tui);
+    std::thread::sleep(Duration::from_secs(1));
+    let pressed = Instant::now();
+    tui.write_input(b"\x1b[24~").expect("F12");
+    let ended = tui.wait_for_exit(Duration::from_secs(20));
+    let took = pressed.elapsed();
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    let status =
+        ended.expect("F12 is not read while the client is blocked in a write to a stopped daemon");
+    assert!(status.success(), "{status:?}");
+    assert!(
+        took < within,
+        "F12 took {} ms, against {} ms",
+        took.as_millis(),
+        within.as_millis()
+    );
+}
+
+/// How long `F12` takes past a blocked write on the local route: the writer's grace, and
+/// then the kick's `shutdown` wakes it at once, where without that it would be left behind at
+/// the 5 s deadline. Generous for a loaded machine, and short of that deadline.
+const F12_LOCALLY: Duration = Duration::from_secs(4);
+/// The same on the remote route, whose kick waits a second before its `SIGTERM` and up to 3 s
+/// more before its `SIGKILL`: about 5 s is the bound stated for a deliberate end.
+const F12_REMOTELY: Duration = Duration::from_secs(8);
+
+/// **Review 2's Medium 2, its `p30`:** a daemon that has stopped answering and a user who
+/// keeps typing: the client's one thread filled the socket and sat in the write, so `F12`
+/// was never read. At `b11d25a` only the daemon's coming back, or a signal from another
+/// terminal, ends it.
+#[test]
+fn r2_f12_ends_a_tui_blocked_writing_to_a_stopped_daemon() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(daemon.socket_path(), home.path(), &[]);
+    f12_leaves_a_daemon_that_stopped(&mut tui, &daemon, F12_LOCALLY, |tui| {
+        type_in_bursts(tui, &[b'a'; KEYS_PAST_A_LOCAL_SOCKET]);
+    });
+}
+
+/// The same over the remote route, past the bridge's pipe as well as its socket.
+#[test]
+fn r2_f12_ends_a_tui_blocked_writing_over_the_remote_route() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("1");
+    f12_leaves_a_daemon_that_stopped(&mut tui, &daemon, F12_REMOTELY, |tui| {
+        type_in_bursts(tui, &[b'a'; KEYS_PAST_A_REMOTE_ROUTE]);
+    });
+}
+
+/// A paste of a mebibyte in the terminal's brackets, past what a socket's buffer and a
+/// bridge's pipe hold together.
+fn a_large_paste() -> Vec<u8> {
+    let mut paste = b"\x1b[200~".to_vec();
+    paste.extend(std::iter::repeat_n(b'x', 1024 * 1024));
+    paste.extend_from_slice(b"\x1b[201~");
+    paste
+}
+
+/// One paste past the socket's buffer is enough to put the client in that write, and `F12`
+/// is read past it. At `b11d25a` it is not, by the same reading.
+#[test]
+fn h2_a_paste_past_the_sockets_buffer_at_a_stopped_daemon_leaves_f12_read() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(daemon.socket_path(), home.path(), &[]);
+    f12_leaves_a_daemon_that_stopped(&mut tui, &daemon, F12_LOCALLY, |tui| {
+        tui.write_input(&a_large_paste()).expect("the paste");
+    });
+}
+
+/// The same over the remote route.
+#[test]
+fn h2_a_paste_over_the_remote_route_at_a_stopped_daemon_leaves_f12_read() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("1");
+    f12_leaves_a_daemon_that_stopped(&mut tui, &daemon, F12_REMOTELY, |tui| {
+        tui.write_input(&a_large_paste()).expect("the paste");
+    });
+}
+
+/// An `init.lua` that keeps `out` holding what `*scratch*` holds, so that a row reads what
+/// reached the daemon, in order, with no key of its own and no screen in the way.
+fn mirroring_scratch_to(out: &Path) -> String {
+    format!(
+        r#"
+pmacs.async(function()
+  while true do
+    pmacs.workers.sleep(100):await()
+    for _, b in ipairs(pmacs.buffer.list()) do
+      if b:name() == "*scratch*" then
+        local f = io.open({out:?} .. ".tmp", "w")
+        f:write(b:slice(0, b:len()))
+        f:close()
+        os.rename({out:?} .. ".tmp", {out:?})
+      end
+    end
+  end
+end)
+"#,
+        out = out.display().to_string()
+    )
+}
+
+/// Wait for `out` to end with `tail`, for a row reading [`mirroring_scratch_to`].
+fn read_once_it_ends_with(out: &Path, tail: &str, limit: Duration) -> String {
+    let deadline = Instant::now() + limit;
+    loop {
+        let said = std::fs::read_to_string(out).unwrap_or_default();
+        if said.ends_with(tail) {
+            return said;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "what reached the daemon does not end with {tail:?}: {} bytes, ending {:?}",
+            said.len(),
+            &said[said.len().saturating_sub(60)..]
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What the writer's thread must not cost: every key typed at a stopped daemon, past what
+/// the transport holds, arrives once it resumes, in order, on either route. At `b11d25a` the
+/// local leg passes and the remote leg reads 4,824 of its 6,000, every time, the client
+/// answering keys typed after: with nothing reading the terminal while the client sat in its
+/// write, what the terminal could not hold was gone.
+#[test]
+fn h2_every_key_queued_at_a_stopped_daemon_arrives_in_order_once_it_resumes() {
+    let keys_arrive = |tui: &mut common::pty::PmacsPty, daemon: &TestDaemon, out: &Path, n| {
+        tui.wait_for_output("*scratch*", Duration::from_secs(30));
+        let pid = stop_answering(daemon);
+        let typed = numbered_keys(n);
+        type_in_bursts(tui, &typed);
+        std::thread::sleep(Duration::from_millis(500));
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+        let typed = String::from_utf8(typed).expect("digits");
+        let said = read_once_it_ends_with(out, &typed, Duration::from_mins(2));
+        assert_eq!(said, typed, "every key, once, in order");
+        tui.write_input(b"\x1b[24~").expect("F12");
+        let status = tui
+            .wait_for_exit(Duration::from_secs(10))
+            .expect("F12 ends it");
+        assert!(status.success(), "{status:?}");
+    };
+
+    let note = tempfile::TempDir::new().expect("tempdir");
+    let out = note.path().join("local");
+    let daemon = TestDaemon::spawn_with_config(&mirroring_scratch_to(&out));
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(daemon.socket_path(), home.path(), &[]);
+    keys_arrive(&mut tui, &daemon, &out, KEYS_PAST_A_LOCAL_SOCKET);
+
+    let out = note.path().join("remote");
+    let daemon = TestDaemon::spawn_with_config(&mirroring_scratch_to(&out));
+    let ssh = BridgedSsh::new(daemon.socket_path());
+    let mut tui = ssh.attach("1");
+    keys_arrive(&mut tui, &daemon, &out, KEYS_PAST_A_REMOTE_ROUTE);
+}
+
+/// A TUI on `socket` with its screen modelled, `envs` beside its home.
+fn attached_screen(socket: &Path, home: &Path, envs: &[(&str, &Path)]) -> ScreenTui {
+    let mut all: Vec<(&str, &Path)> = vec![("HOME", home), ("XDG_CONFIG_HOME", home)];
+    all.extend_from_slice(envs);
+    let (pty, tap) = spawn_pmacs_in_pty_tapped(
+        &["--attach", "--socket", socket.to_str().expect("utf-8")],
+        &all,
+        24,
+        80,
+    );
+    ScreenTui::new(pty, tap, 24, 80)
+}
+
+/// The owner's words, ruled 2026-11-07, written out so that a word moved in the product
+/// fails a row.
+const NOT_ANSWERING_NOTICE: &str = "[pmacs: the daemon is not answering; F12 detaches]";
+const KEYS_DROPPED_NOTICE: &str =
+    "[pmacs: the daemon is not answering; keys dropped; F12 detaches]";
+
+/// A write that stops moving says so 2 s on, and what it covered comes back when the queue
+/// has drained. A few keys fit the socket and say nothing, so the row types past it.
+#[test]
+fn h2_the_notice_is_up_within_its_2_s_and_off_after_the_drain() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_screen(daemon.socket_path(), home.path(), &[]);
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    let before = tui.bottom_row();
+    let pid = stop_answering(&daemon);
+    let up = |t: &ScreenTui| t.bottom_row() == NOT_ANSWERING_NOTICE;
+    let typing = Instant::now();
+    for burst in [b'a'; KEYS_PAST_A_LOCAL_SOCKET].chunks(20) {
+        tui.write(burst);
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(
+            tui.watch_for(Duration::ZERO, &up).is_none() || typing.elapsed() >= WRITE_STALL,
+            "up before a write had been pending its 2 s: {} ms",
+            typing.elapsed().as_millis()
+        );
+    }
+    let shown = tui.wait_for(Duration::from_secs(20), "the notice", &up);
+    assert!(
+        shown.saturating_duration_since(typing) >= WRITE_STALL,
+        "up before a write had been pending its 2 s: {} ms",
+        shown.saturating_duration_since(typing).as_millis()
+    );
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    tui.wait_for(
+        Duration::from_secs(30),
+        "the row, the queue drained",
+        &|t| !up(t),
+    );
+    assert!(staying_off(&mut tui, &up), "{}", tui.describe());
+    assert_ne!(tui.bottom_row(), KEYS_DROPPED_NOTICE);
+    assert!(
+        !tui.bottom_row().contains("answering"),
+        "what it covered, {before:?}, comes back: {}",
+        tui.describe()
+    );
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// Past the cap further input is dropped, and the row says so; what got in before it still
+/// arrives, in order, with nothing out of place, and the row goes when it has. The cap
+/// itself is a frame's 16 MiB, which is `a_write_queue_holds_at_least_one_largest_frame`'s;
+/// here a test's knob stands in for typing that many keys.
+#[test]
+fn h2_past_the_cap_further_input_is_dropped_saying_so() {
+    let note = tempfile::TempDir::new().expect("tempdir");
+    let out = note.path().join("out");
+    let daemon = TestDaemon::spawn_with_config(&mirroring_scratch_to(&out));
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_screen(
+        daemon.socket_path(),
+        home.path(),
+        &[(pmacs::attach::PMACS_TEST_WRITE_QUEUE_CAP, Path::new("4096"))],
+    );
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    let pid = stop_answering(&daemon);
+    let typed = numbered_keys(KEYS_PAST_A_LOCAL_SOCKET * 4);
+    for burst in typed.chunks(40) {
+        tui.write(burst);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let dropped = |t: &ScreenTui| t.bottom_row() == KEYS_DROPPED_NOTICE;
+    tui.wait_for(Duration::from_secs(20), "the notice", &dropped);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    tui.wait_for(
+        Duration::from_secs(30),
+        "the row, the queue drained",
+        &|t| !dropped(t),
+    );
+    // The row is up until the queue has drained, so what got in is there or nearly.
+    std::thread::sleep(Duration::from_secs(1));
+    let said = std::fs::read_to_string(&out).unwrap_or_default();
+    let typed = String::from_utf8(typed).expect("digits");
+    assert!(
+        said.len() < typed.len(),
+        "the cap dropped nothing: {} of {} bytes",
+        said.len(),
+        typed.len()
+    );
+    assert!(!said.is_empty(), "nothing arrived");
+    assert!(
+        typed.starts_with(&said),
+        "what arrived is what was typed first, in order, with no hole: {said:?}"
+    );
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
 }

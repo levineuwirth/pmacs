@@ -191,6 +191,16 @@ each hold the others up about 2 s, about 6 s of the 10 it takes in a
 release build. Clients stopped together add, since the daemon writes to
 each in turn: three stopped reading hold the others about 6 s, once.
 
+A TUI never waits on its daemon to read a key. What is typed at a daemon
+that has stopped answering is queued, in order, and arrives when it answers
+again, and `F12` ends the TUI within about 5 s whatever the daemon is doing.
+A few keys fit the socket and say nothing. Past that, after 2 s with a write
+not moving the bottom row says
+`[pmacs: the daemon is not answering; F12 detaches]`, and past 16 MiB queued
+further input is dropped and it says
+`[pmacs: the daemon is not answering; keys dropped; F12 detaches]`. Either
+goes when the queue has drained.
+
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),
 loaded after the builtin runtime so plain assignments override

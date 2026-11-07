@@ -59,7 +59,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, Condvar, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -82,7 +82,9 @@ use crate::protocol::{
     AttachRequest, AttachTarget, FrontendCapabilities, FrontendEvent, FrontendId, GoodbyeReason,
     Hello, InstanceMessage, PROTOCOL_VERSION,
 };
-use crate::transport::{FRAME_CUT_SHORT_SENTENCE, TransportError, read_message, write_message};
+use crate::transport::{
+    FRAME_CUT_SHORT_SENTENCE, MAX_FRAME_BYTES, TransportError, read_message, write_message,
+};
 
 /// Environment variable that overrides the SSH binary used by
 /// [`run_attach_ssh`]. Test-flavored — production users do not set
@@ -169,10 +171,34 @@ const SSH_KICK_WATCHDOG: Duration = Duration::from_secs(1);
 /// dies on the SIGTERM; a wrapper around one, or anything else in its place, may not.
 const SSH_KILL_AFTER_TERM: Duration = Duration::from_secs(3);
 
-/// How long the pump waits for its reader after the kick, which outlasts the kick's
-/// SIGKILL, since something that `ssh` left behind may hold the pipe open past it. So
-/// a deliberate end holds a raw terminal for at most this.
-const READER_JOIN_DEADLINE: Duration = Duration::from_secs(5);
+/// How long the pump waits for its reader and its writer once a session is ending, which
+/// outlasts the kick's SIGKILL, since something that `ssh` left behind may hold the pipes
+/// open past it. So a deliberate end holds a raw terminal for at most this, a write blocked
+/// on a daemon that has stopped answering included.
+const WIND_DOWN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long the writer has to finish what is queued and close its half before the kick.
+/// A healthy transport takes it at once, which is what lets the bridge's clean exit come
+/// before the kick; only a write that is not moving outlasts this, and the kick is what
+/// wakes that.
+const WRITER_CLOSE_GRACE: Duration = Duration::from_millis(500);
+
+/// How long a write goes without moving before the bottom row says the daemon has stopped
+/// answering (the owner's ruling of 2026-11-07).
+const WRITE_STALL_NOTICE: Duration = Duration::from_secs(2);
+
+/// How many bytes wait for the transport before further input is dropped: one largest
+/// frame, so a paste as large as a frame can be takes an empty queue (the owner's ruling of
+/// 2026-11-07). A frame is taken while the queue is under this, so it holds at most twice
+/// this.
+const WRITE_QUEUE_CAP: usize = MAX_FRAME_BYTES;
+
+/// A test's override of [`WRITE_QUEUE_CAP`], in bytes.
+pub const PMACS_TEST_WRITE_QUEUE_CAP: &str = "PMACS_TEST_WRITE_QUEUE_CAP";
+
+/// How much the writer gives the transport between looks at the clock, so a large frame
+/// going out slowly reads as moving and only one that has stopped reads as stalled.
+const WRITE_CHUNK: usize = 64 * 1024;
 
 /// How long a reconnect over SSH waits for its `Hello` before it kills `ssh` and that
 /// is one failed attempt on the schedule, a daemon that cannot be reached, which backs
@@ -504,16 +530,16 @@ pub(crate) struct AttachIo {
     /// blocking reads of `InstanceMessage` frames until the channel
     /// disconnects or the underlying transport closes.
     pub reader: Box<dyn Read + Send>,
-    /// Writer half. Stays on the main thread, used for outbound
-    /// `FrontendEvent` writes.
-    pub writer: Box<dyn Write>,
-    /// Force the reader thread to exit promptly, by any means
-    /// necessary.
+    /// Writer half. Moved into the writer thread ([`FrameWriter`]), so that a write
+    /// that blocks holds nothing that reads the terminal.
+    pub writer: Box<dyn Write + Send>,
+    /// Force the reader and writer threads to exit promptly, by any
+    /// means necessary.
     ///
     /// Called by the main thread after the message loop has decided
-    /// to terminate, immediately before joining the reader thread.
-    /// The reader thread is presumed to be blocked on a read; this
-    /// wakes it.
+    /// to terminate, immediately before joining them. The reader
+    /// thread is presumed to be blocked on a read, and the writer may
+    /// be blocked on a write; this wakes them.
     ///
     /// Implementations may be destructive. Callers do not distinguish
     /// — by the time the kick runs, the pump has already decided to
@@ -639,6 +665,21 @@ const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
 /// [`NOTICE_FRESH_VIEW`] when the SSH route's `ssh` failed, which says nothing of
 /// the daemon: the bridge exits 0 when the daemon closes its socket.
 const NOTICE_FRESH_VIEW_LINK: &str = "[pmacs reconnected on a new view: the connection was lost]";
+
+/// On the bottom row, over anything else, while writes to the daemon are not moving. The
+/// owner's words, ruled 2026-11-07: keys typed meanwhile are queued, in order, and `F12`
+/// is always read.
+const NOTICE_NOT_ANSWERING: Notice = Notice {
+    wide: "[pmacs: the daemon is not answering; F12 detaches]",
+    narrow: Some("[not answering; F12 detaches]"),
+};
+
+/// [`NOTICE_NOT_ANSWERING`] once input has been dropped at [`WRITE_QUEUE_CAP`]. The owner's
+/// words, ruled 2026-11-07.
+const NOTICE_KEYS_DROPPED: Notice = Notice {
+    wide: "[pmacs: the daemon is not answering; keys dropped; F12 detaches]",
+    narrow: Some("[keys dropped; F12 detaches]"),
+};
 
 /// On the bottom row of a session on a daemon `Hello` says for certain is not the
 /// last session's. The owner's words, ruled 2026-11-06: a modified file buffer's copy
@@ -1099,6 +1140,251 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
+/// What the pump and its writer share.
+#[derive(Debug)]
+struct WriteQueue {
+    frames: VecDeque<Vec<u8>>,
+    /// Bytes not yet given to the transport, those of the frame in hand included.
+    bytes: usize,
+    /// The writer has a frame in hand.
+    writing: bool,
+    /// When the bytes last moved, or the queue last stopped being empty.
+    moved_at: Instant,
+    /// Input has been dropped at the cap since the queue last drained.
+    dropped: bool,
+    /// What a write failed with: the writer has stopped, and whatever was queued goes
+    /// with the session.
+    failure: Option<io::Error>,
+    /// How far the writer's end has come.
+    end: WriterEnd,
+}
+
+/// How far a [`FrameWriter`]'s end has come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriterEnd {
+    /// More may come.
+    Open,
+    /// Nothing more comes: the writer ends when the queue does.
+    Closing,
+    /// It has ended and closed its half of the transport.
+    Closed,
+}
+
+/// Frames to the daemon, encoded on the pump and written in order by one thread on either
+/// route, so that the thread reading the terminal never waits on the transport: `F12` is
+/// read whatever the socket is doing (E10r's review 2, ruled 2026-11-07). Until then the
+/// pump wrote them itself, and a user typing at a daemon that had stopped answering could
+/// not leave: 200 keys filled a local socket and 4,100 a remote route's, and then nothing
+/// read `F12` or `C-c`.
+///
+/// A bounded write was the other way, and it would have ended the session whenever a long
+/// command outlasted the bound under typing, with one form for a socket and another for
+/// `ssh`'s pipe.
+struct FrameWriter {
+    shared: Arc<(Mutex<WriteQueue>, Condvar)>,
+    thread: thread::JoinHandle<()>,
+    cap: usize,
+}
+
+/// What the pump reads of the writer on each turn.
+struct WriterState {
+    /// Something is queued or in hand.
+    pending: bool,
+    /// How long since those bytes last moved.
+    still_for: Duration,
+    /// Input has been dropped since the queue last drained.
+    dropped: bool,
+}
+
+impl FrameWriter {
+    fn spawn(writer: Box<dyn Write + Send>) -> Self {
+        let shared = Arc::new((
+            Mutex::new(WriteQueue {
+                frames: VecDeque::new(),
+                bytes: 0,
+                writing: false,
+                moved_at: Instant::now(),
+                dropped: false,
+                failure: None,
+                end: WriterEnd::Open,
+            }),
+            Condvar::new(),
+        ));
+        let for_thread = Arc::clone(&shared);
+        let thread = thread::spawn(move || run_writer(writer, &for_thread));
+        let cap = std::env::var(PMACS_TEST_WRITE_QUEUE_CAP)
+            .ok()
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or(WRITE_QUEUE_CAP);
+        Self {
+            shared,
+            thread,
+            cap,
+        }
+    }
+
+    fn queue(&self) -> std::sync::MutexGuard<'_, WriteQueue> {
+        self.shared.0.lock().expect("the writer's queue")
+    }
+
+    /// Queue one encoded frame, or several, for the writer. Nothing happens for none,
+    /// which is what a key's release encodes to.
+    fn push(&self, frame: Vec<u8>) {
+        if frame.is_empty() {
+            return;
+        }
+        let mut queue = self.queue();
+        if queue.frames.is_empty() && !queue.writing {
+            queue.moved_at = Instant::now();
+        }
+        queue.bytes = queue.bytes.saturating_add(frame.len());
+        queue.frames.push_back(frame);
+        self.shared.1.notify_all();
+    }
+
+    /// Encode `event` here on the pump, so a frame too large says so where the session
+    /// decides what that means, and queue it.
+    fn send(&self, event: &FrontendEvent) -> Result<(), AttachError> {
+        let mut frame = Vec::new();
+        write_message(&mut frame, event)?;
+        self.push(frame);
+        Ok(())
+    }
+
+    /// Whether further input is dropped.
+    fn full(&self) -> bool {
+        self.queue().bytes >= self.cap
+    }
+
+    /// Some input was dropped at the cap.
+    fn input_dropped(&self) {
+        self.queue().dropped = true;
+    }
+
+    fn take_failure(&self) -> Option<io::Error> {
+        self.queue().failure.take()
+    }
+
+    fn state(&self) -> WriterState {
+        let queue = self.queue();
+        WriterState {
+            pending: queue.writing || !queue.frames.is_empty(),
+            still_for: queue.moved_at.elapsed(),
+            dropped: queue.dropped,
+        }
+    }
+
+    /// Nothing more comes, so the writer finishes what is queued and closes its half of
+    /// the transport, which on the SSH route is what starts the bridge's clean exit.
+    /// Returns when it has, or after `grace` with a write that is not moving, which the
+    /// kick wakes.
+    fn close_within(&self, grace: Duration) {
+        let deadline = Instant::now() + grace;
+        let mut queue = self.queue();
+        queue.end = WriterEnd::Closing;
+        self.shared.1.notify_all();
+        while queue.end != WriterEnd::Closed {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            queue = self
+                .shared
+                .1
+                .wait_timeout(queue, left)
+                .expect("the writer's queue")
+                .0;
+        }
+    }
+}
+
+/// The writer's thread: each frame in the order it came, until the queue is closed and
+/// empty or a write fails, and its half of the transport closes as it ends.
+fn run_writer(mut writer: Box<dyn Write + Send>, shared: &(Mutex<WriteQueue>, Condvar)) {
+    let (queue, wake) = shared;
+    'frames: loop {
+        let frame = {
+            let mut held = queue.lock().expect("the writer's queue");
+            loop {
+                if let Some(frame) = held.frames.pop_front() {
+                    held.writing = true;
+                    break frame;
+                }
+                held.writing = false;
+                held.dropped = false;
+                if held.end == WriterEnd::Closing {
+                    break 'frames;
+                }
+                held = wake.wait(held).expect("the writer's queue");
+            }
+        };
+        for chunk in frame.chunks(WRITE_CHUNK) {
+            let written = writer.write_all(chunk).and_then(|()| writer.flush());
+            let mut held = queue.lock().expect("the writer's queue");
+            if let Err(error) = written {
+                held.failure = Some(error);
+                held.writing = false;
+                break 'frames;
+            }
+            held.bytes = held.bytes.saturating_sub(chunk.len());
+            held.moved_at = Instant::now();
+        }
+    }
+    drop(writer);
+    queue.lock().expect("the writer's queue").end = WriterEnd::Closed;
+    wake.notify_all();
+}
+
+/// What stands over the frames on a terminal's bottom row: a new session's notice, for
+/// [`NOTICE_FLOOR`] and until the next key, and over it, while it lasts, that the daemon has
+/// stopped answering, which is the sentence that says how to leave. When that one goes the
+/// other comes back, if it has not stood its floor or no key has come.
+#[derive(Debug, Default)]
+struct BottomRow {
+    /// A new session's notice, and when it went up.
+    standing: Option<(Notice, Instant)>,
+    /// That writes are not moving.
+    stalled: Option<Notice>,
+    /// What is on the row now.
+    painted: Option<&'static str>,
+}
+
+impl BottomRow {
+    fn wanted(&self, cols: u32) -> Option<&'static str> {
+        self.stalled
+            .or(self.standing.map(|(notice, _)| notice))
+            .map(|notice| notice.fitting(cols))
+    }
+
+    /// What the writer says: up once its bytes have sat still for [`WRITE_STALL_NOTICE`]
+    /// or input has been dropped, and off only when its queue has drained.
+    fn writer_says(&mut self, state: &WriterState) {
+        self.stalled = if !state.pending {
+            None
+        } else if state.dropped {
+            Some(NOTICE_KEYS_DROPPED)
+        } else if state.still_for >= WRITE_STALL_NOTICE {
+            Some(NOTICE_NOT_ANSWERING)
+        } else {
+            self.stalled
+        };
+    }
+
+    /// Make the row what it should be, if it is not.
+    fn settle(&mut self, frontend: &mut dyn AttachPumpFrontend) -> io::Result<()> {
+        let wanted = self.wanted(frontend.size().cols);
+        if wanted == self.painted {
+            return Ok(());
+        }
+        match wanted {
+            Some(text) => frontend.present_under_notice(&[], text)?,
+            None => frontend.clear_notice()?,
+        }
+        self.painted = wanted;
+        Ok(())
+    }
+}
+
 /// How an attach pump ended, when it did not end on an error of its own.
 #[derive(Debug)]
 pub(crate) enum PumpEnd {
@@ -1126,8 +1412,10 @@ pub(crate) struct LostSession {
 /// instance messages to the terminal.
 ///
 /// Threading: a background thread reads instance messages from the
-/// reader half and forwards them on a channel. The main thread polls
-/// the terminal for input, drains the channel, and renders.
+/// reader half and forwards them on a channel, and another writes the
+/// frames this one encodes ([`FrameWriter`]). The main thread polls the
+/// terminal for input, drains the channel, and renders, and waits on
+/// neither transport, so `F12` is always read.
 ///
 /// # Preconditions
 ///
@@ -1145,10 +1433,10 @@ pub(crate) struct LostSession {
 /// and comes off at the first key after that, what the frames left there coming back.
 ///
 /// On any exit path — clean Goodbye, reader EOF, F12 detach, IO
-/// error, or terminal error — `io.kick` fires and `reader_handle`
-/// is joined before this function returns. The closure-and-call
-/// wind-down pattern guarantees this regardless of which `return`
-/// the loop takes.
+/// error, or terminal error — `io.kick` fires and the reader and writer
+/// threads are joined, within [`WIND_DOWN_DEADLINE`], before this function
+/// returns. The closure-and-call wind-down pattern guarantees this
+/// regardless of which `return` the loop takes.
 // M10.10 grew this function with optimistic-apply orchestration +
 // BufferSnapshot/CursorByte/CrdtOp routing in the message-drain
 // loop. The 146-line size is intentionally cohesive: the closure
@@ -1166,16 +1454,17 @@ pub(crate) fn run_attach_pair(
     notice: Option<Notice>,
 ) -> Result<PumpEnd, AttachError> {
     let mut notice = notice;
-    let mut standing: Option<(Notice, Instant)> = None;
+    let mut bottom = BottomRow::default();
     let mut bootstrapped = false;
     let AttachIo {
         reader,
-        mut writer,
+        writer,
         kick,
     } = io;
 
     let (tx, rx) = mpsc::channel::<InstanceMessage>();
     let reader_handle = thread::spawn(move || run_reader(reader, tx));
+    let writer = FrameWriter::spawn(writer);
 
     // T M10.10: per-session CRDT replica state. Bootstrapped by
     // `InstanceMessage::BufferSnapshot` messages routed in the
@@ -1202,8 +1491,9 @@ pub(crate) fn run_attach_pair(
     // the wind-down.
     let result: Result<PumpEnd, AttachError> = (|| {
         // A write that fails on the socket is the same loss as its EOF, and may
-        // come first. Anything else a write says (a paste past the frame) is
-        // not, and ends the session as it says.
+        // come first, which the writer's thread says on the pump's next turn. Anything
+        // else a frame says (a paste past its limit, encoded here) is not, and ends the
+        // session as it says.
         let lost_or_failed = |error: AttachError, bootstrapped: bool| match error {
             AttachError::Transport(TransportError::Io(_)) => Ok(PumpEnd::Lost(LostSession {
                 bootstrapped,
@@ -1318,26 +1608,22 @@ pub(crate) fn run_attach_pair(
             }
             if !batch.is_empty() {
                 // The session's first frame puts up the notice, and a frame that takes
-                // the bottom row while it stands has it painted again.
+                // the bottom row while something stands there has it painted again.
                 let framed = batch
                     .iter()
                     .any(|message| matches!(message, InstanceMessage::CellDelta { .. }));
-                let mut over = if framed {
-                    standing.filter(|_| takes_bottom_row(&batch, frontend.size()))
-                } else {
-                    None
-                };
+                let mut takes_row = framed && takes_bottom_row(&batch, frontend.size());
                 if framed {
                     bootstrapped = true;
                     if let Some(first) = notice.take() {
-                        let shown = (first, Instant::now());
-                        standing = Some(shown);
-                        over = Some(shown);
+                        bottom.standing = Some((first, Instant::now()));
+                        takes_row = true;
                     }
                 }
+                let over = bottom.wanted(frontend.size().cols).filter(|_| takes_row);
                 let presented = match over {
-                    Some((up, _)) => {
-                        let text = up.fitting(frontend.size().cols);
+                    Some(text) => {
+                        bottom.painted = Some(text);
                         frontend.present_under_notice(&batch, text)
                     }
                     None => frontend.present_messages(&batch),
@@ -1356,6 +1642,16 @@ pub(crate) fn run_attach_pair(
                     cut_short: false,
                 }));
             }
+            if let Some(error) = writer.take_failure() {
+                return lost_or_failed(
+                    AttachError::Transport(TransportError::Io(error)),
+                    bootstrapped,
+                );
+            }
+            bottom.writer_says(&writer.state());
+            if let Err(e) = bottom.settle(frontend) {
+                return Err(AttachError::Terminal(e));
+            }
 
             let event = match frontend.poll_event(Duration::from_millis(50)) {
                 Ok(opt) => opt,
@@ -1366,15 +1662,27 @@ pub(crate) fn run_attach_pair(
             };
 
             if matches!(ev, Event::Key(_))
-                && standing.is_some_and(|(_, since)| since.elapsed() >= NOTICE_FLOOR)
+                && bottom
+                    .standing
+                    .is_some_and(|(_, since)| since.elapsed() >= NOTICE_FLOOR)
             {
-                let _ = frontend.clear_notice();
-                standing = None;
+                bottom.standing = None;
+                let _ = bottom.settle(frontend);
             }
 
             if is_detach_key(&ev) {
-                let _ = write_message(&mut writer, &FrontendEvent::Detach(assigned_id));
+                // Behind whatever is queued, and it may never go: the wind-down's kick is
+                // what ends a write that is not moving.
+                let _ = writer.send(&FrontendEvent::Detach(assigned_id));
                 return Ok(PumpEnd::Over(None));
+            }
+
+            // Past the cap further input goes nowhere, before the optimistic path has
+            // applied it to the mirror. A resize is not input: it is what the daemon next
+            // paints to, and it is small.
+            if writer.full() && !matches!(ev, Event::Resize(..)) {
+                writer.input_dropped();
+                continue;
             }
 
             // T M10.10 Day 3 step 3b — text-input optimistic-apply
@@ -1438,8 +1746,8 @@ pub(crate) fn run_attach_pair(
                         assigned_id,
                         pmacs_key,
                     );
-                    if let Err(e) = write_message(&mut writer, &frontend_event) {
-                        return lost_or_failed(AttachError::from(e), bootstrapped);
+                    if let Err(e) = writer.send(&frontend_event) {
+                        return lost_or_failed(e, bootstrapped);
                     }
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command
@@ -1496,10 +1804,12 @@ pub(crate) fn run_attach_pair(
             #[cfg(not(feature = "crdt"))]
             let optimistic_handled = false;
 
-            if !optimistic_handled
-                && let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size())
-            {
-                return lost_or_failed(e, bootstrapped);
+            if !optimistic_handled {
+                let mut frame = Vec::new();
+                if let Err(e) = forward_event(&mut frame, &ev, assigned_id, frontend.size()) {
+                    return lost_or_failed(e, bootstrapped);
+                }
+                writer.push(frame);
             }
             // Post-audit-round-6 F30 — `forward_event` (success
             // path) may write a Mouse / Paste / Resize /
@@ -1521,29 +1831,43 @@ pub(crate) fn run_attach_pair(
 
     // Wind down. The order matters:
     //
-    // 1. `drop(writer)` — close our side of the protocol stream. For
-    //    transports where the writer is the only handle to that
-    //    half (SSH `ChildStdin`), this triggers an EOF cascade that
-    //    ends with the reader thread seeing EOF naturally. For the
-    //    local-socket transport, dropping one of three `UnixStream`
-    //    clones is a no-op (other clones keep the FD alive); the
-    //    reader needs `kick` to wake.
+    // 1. `close_within` — the writer finishes what is queued, `Detach`
+    //    included, and drops its half of the protocol stream, on its
+    //    own thread, where this used to be a `drop(writer)` here. For
+    //    transports where the writer is the only handle to that half
+    //    (SSH `ChildStdin`), this triggers an EOF cascade that ends with
+    //    the reader thread seeing EOF naturally. For the local-socket
+    //    transport, dropping one of three `UnixStream` clones is a no-op
+    //    (other clones keep the FD alive); the reader needs `kick` to
+    //    wake. Only a write that is not moving outlasts the grace.
     //
-    // 2. `kick()` — wake the reader thread, by any means necessary
-    //    (per the kick contract). For local-socket: `shutdown(Both)`.
-    //    For SSH: a watchdog that SIGTERMs the child if the EOF
-    //    cascade hasn't reached the reader within the watchdog's
-    //    grace period.
+    // 2. `kick()` — wake the reader thread, and a writer still in a
+    //    write, by any means necessary (per the kick contract). For
+    //    local-socket: `shutdown(Both)`. For SSH: a watchdog that
+    //    SIGTERMs the child if the EOF cascade hasn't reached the reader
+    //    within the watchdog's grace period, and SIGKILLs one that
+    //    outlasts that, which closes the pipe the writer is blocked on.
     //
-    // 3. `join` — wait for the reader thread to exit.
+    // 3. `join` — wait for both threads to exit, up to the one deadline,
+    //    past which something `ssh` left behind holds a pipe and they are
+    //    left behind.
     //
-    // The drop-before-kick ordering is what lets SSH's clean-detach
+    // The close-before-kick ordering is what lets SSH's clean-detach
     // path produce exit code 0: writer close starts the cascade,
     // kick is best-effort backup, the cascade typically completes
     // before kick has any effect.
-    drop(writer);
+    let deadline = Instant::now() + WIND_DOWN_DEADLINE;
+    writer.close_within(WRITER_CLOSE_GRACE);
     kick();
-    let cut_short = join_within(reader_handle, READER_JOIN_DEADLINE).unwrap_or(false);
+    let _ = join_within(
+        writer.thread,
+        deadline.saturating_duration_since(Instant::now()),
+    );
+    let cut_short = join_within(
+        reader_handle,
+        deadline.saturating_duration_since(Instant::now()),
+    )
+    .unwrap_or(false);
 
     result.map(|end| match end {
         PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
@@ -1982,8 +2306,8 @@ fn spawn_stderr_tee(
 /// fails (ESRCH because the child already exited, EPERM in some
 /// container scenarios), the error is dropped. A child that outlasts it has a
 /// SIGKILL [`SSH_KILL_AFTER_TERM`] later, and `reaped` says it is gone before either,
-/// so neither reaches a pid that may be another process's by then. The reader thread
-/// ends by the cascade or the signal, or is left behind at [`READER_JOIN_DEADLINE`].
+/// so neither reaches a pid that may be another process's by then. The reader and writer
+/// threads end by the cascade or the signal, or are left behind at [`WIND_DOWN_DEADLINE`].
 fn ssh_kick(child_pid: u32, reaped: Arc<AtomicBool>) -> Box<dyn FnOnce() + Send> {
     Box::new(move || {
         thread::spawn(move || {
@@ -3680,6 +4004,374 @@ mod tests {
             msg.contains("PATH"),
             "spawn failure must hint at PATH: {msg}",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // E10r fix round 3, H2 --- the writer's thread
+    // -----------------------------------------------------------------
+
+    /// A frontend with a script of events, which records what stands on its bottom row.
+    #[derive(Default)]
+    struct ScriptedFrontend {
+        events: VecDeque<Event>,
+        row: Vec<Option<String>>,
+    }
+
+    impl AttachPumpFrontend for ScriptedFrontend {
+        fn present_messages(&mut self, _msgs: &[InstanceMessage]) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>> {
+            let event = self.events.pop_front();
+            if event.is_none() {
+                thread::sleep(timeout.min(Duration::from_millis(5)));
+            }
+            Ok(event)
+        }
+        fn size(&self) -> CellSize {
+            CellSize::new(24, 80)
+        }
+        fn present_under_notice(
+            &mut self,
+            _msgs: &[InstanceMessage],
+            text: &str,
+        ) -> std::io::Result<()> {
+            self.row.push(Some(text.to_owned()));
+            Ok(())
+        }
+        fn clear_notice(&mut self) -> std::io::Result<()> {
+            self.row.push(None);
+            Ok(())
+        }
+    }
+
+    fn press(code: KeyCode) -> Event {
+        use crossterm::event::{KeyEvent as CtKey, KeyEventState, KeyModifiers as CtMods};
+        Event::Key(CtKey {
+            code,
+            modifiers: CtMods::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        })
+    }
+
+    /// A writer that fails every write, as a socket gone does.
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What must not move: a failed write still reaches `lost_or_failed` by way of the
+    /// pump, a lost session carrying its error, and it now does so from another thread.
+    #[test]
+    fn a_failed_write_is_a_lost_session_by_way_of_the_pump() {
+        let (daemon_side, frontend_side) = UnixStream::pair().expect("pair");
+        // A pump that never hears of the failure ends here, read as a loss with no error.
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(10));
+            drop(daemon_side);
+        });
+        let io = AttachIo {
+            writer: Box::new(BrokenWriter),
+            ..build_local_socket_io(frontend_side).expect("io")
+        };
+        let mut frontend = ScriptedFrontend::default();
+        frontend.events.push_back(press(KeyCode::Char('a')));
+        let end = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None).expect("no error");
+        assert!(
+            matches!(
+                end,
+                PumpEnd::Lost(LostSession {
+                    bootstrapped: false,
+                    write_error: Some(AttachError::Transport(TransportError::Io(_))),
+                    cut_short: false,
+                })
+            ),
+            "{end:?}"
+        );
+    }
+
+    /// What must not move: a paste past a frame's limit is not a lost socket. It ends the
+    /// session as it says, encoded on the pump, with nothing written.
+    #[test]
+    fn a_paste_past_a_frame_ends_the_session_as_it_says() {
+        let (_daemon_side, frontend_side) = UnixStream::pair().expect("pair");
+        let io = build_local_socket_io(frontend_side).expect("io");
+        let mut frontend = ScriptedFrontend::default();
+        frontend
+            .events
+            .push_back(Event::Paste("x".repeat(MAX_FRAME_BYTES + 1)));
+        let error = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None)
+            .expect_err("a paste past the frame");
+        assert!(
+            matches!(
+                error,
+                AttachError::Transport(TransportError::FrameTooLarge { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// What a [`RecordingWriter`] saw, and when it went.
+    #[derive(Default)]
+    struct WriterRecord {
+        bytes: Vec<u8>,
+        dropped: bool,
+    }
+
+    /// A writer that keeps what it is given and says when it is dropped.
+    struct RecordingWriter(Arc<Mutex<WriterRecord>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("record").bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for RecordingWriter {
+        fn drop(&mut self) {
+            self.0.lock().expect("record").dropped = true;
+        }
+    }
+
+    /// What must not move, the function's primary correctness invariant: `F12` writes its
+    /// `Detach`, and the writer is dropped, which is what starts the SSH route's clean
+    /// detach, before the kick.
+    #[test]
+    fn detach_is_written_and_the_writer_dropped_before_the_kick() {
+        let (_daemon_side, frontend_side) = UnixStream::pair().expect("pair");
+        let reader = frontend_side.try_clone().expect("reader");
+        let record = Arc::new(Mutex::new(WriterRecord::default()));
+        let at_the_kick = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&at_the_kick);
+        let read_at_the_kick = Arc::clone(&record);
+        let io = AttachIo {
+            reader: Box::new(reader),
+            writer: Box::new(RecordingWriter(Arc::clone(&record))),
+            kick: Box::new(move || {
+                let record = read_at_the_kick.lock().expect("record");
+                *seen.lock().expect("seen") = Some((record.dropped, record.bytes.clone()));
+                let _ = frontend_side.shutdown(Shutdown::Both);
+            }),
+        };
+        let mut frontend = ScriptedFrontend::default();
+        frontend.events.push_back(press(KeyCode::F(12)));
+        let end = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None).expect("no error");
+        assert!(matches!(end, PumpEnd::Over(None)), "{end:?}");
+        let (dropped, bytes) = at_the_kick
+            .lock()
+            .expect("seen")
+            .take()
+            .expect("the kick fired");
+        assert!(dropped, "the writer was still open at the kick");
+        let said: FrontendEvent = read_message(&mut bytes.as_slice()).expect("a frame");
+        assert!(matches!(said, FrontendEvent::Detach(_)), "{said:?}");
+    }
+
+    /// A writer that blocks until told, as a write into a full socket does, keeping what it
+    /// is given from then on.
+    struct HeldWriter {
+        released: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        record: Arc<Mutex<WriterRecord>>,
+    }
+
+    impl Write for HeldWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let (released, wake) = &*self.released;
+            let mut free = released.lock().expect("released");
+            while !*free {
+                free = wake.wait(free).expect("released");
+            }
+            self.record
+                .lock()
+                .expect("record")
+                .bytes
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    type Release = Arc<(Mutex<bool>, std::sync::Condvar)>;
+
+    fn release(released: &Release) {
+        *released.0.lock().expect("released") = true;
+        released.1.notify_all();
+    }
+
+    /// A write that never returns holds nothing that reads the terminal, and the kick wakes
+    /// it: `F12` ends the pump past it, within the wind-down, and the frames it held come
+    /// after in the order they were sent.
+    #[test]
+    fn a_write_that_blocks_holds_no_key_and_the_kick_wakes_it() {
+        let (_daemon_side, frontend_side) = UnixStream::pair().expect("pair");
+        let reader = frontend_side.try_clone().expect("reader");
+        let released: Release = Arc::default();
+        let record = Arc::new(Mutex::new(WriterRecord::default()));
+        let kicked = Arc::clone(&released);
+        let io = AttachIo {
+            reader: Box::new(reader),
+            writer: Box::new(HeldWriter {
+                released: Arc::clone(&released),
+                record: Arc::clone(&record),
+            }),
+            kick: Box::new(move || {
+                let _ = frontend_side.shutdown(Shutdown::Both);
+                release(&kicked);
+            }),
+        };
+        let mut frontend = ScriptedFrontend::default();
+        frontend.events.extend([
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+            press(KeyCode::F(12)),
+        ]);
+        let start = Instant::now();
+        let end = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None).expect("no error");
+        assert!(matches!(end, PumpEnd::Over(None)), "{end:?}");
+        assert!(
+            start.elapsed() < WIND_DOWN_DEADLINE,
+            "{:?}",
+            start.elapsed()
+        );
+        let bytes = record.lock().expect("record").bytes.clone();
+        let mut left = bytes.as_slice();
+        let mut said = Vec::new();
+        while !left.is_empty() {
+            said.push(read_message::<FrontendEvent>(&mut left).expect("a whole frame"));
+        }
+        assert!(
+            matches!(
+                said.as_slice(),
+                [
+                    FrontendEvent::Key(_),
+                    FrontendEvent::Key(_),
+                    FrontendEvent::Detach(_)
+                ]
+            ),
+            "in the order they were sent: {said:?}"
+        );
+    }
+
+    /// How the writer says how it stands: nothing pending until a frame is, still only
+    /// while it is, full at its cap, and each of those gone when the queue drains.
+    #[test]
+    fn the_writer_says_how_it_stands() {
+        let released: Release = Arc::default();
+        let record = Arc::new(Mutex::new(WriterRecord::default()));
+        let mut writer = FrameWriter::spawn(Box::new(HeldWriter {
+            released: Arc::clone(&released),
+            record: Arc::clone(&record),
+        }));
+        writer.cap = 8;
+        assert!(!writer.state().pending);
+        assert!(!writer.full());
+        writer.push(Vec::new());
+        assert!(
+            !writer.state().pending,
+            "a key's release encodes to nothing"
+        );
+        writer.push(vec![1; 4]);
+        assert!(writer.state().pending);
+        assert!(!writer.full(), "under the cap a frame is taken");
+        writer.push(vec![2; 100]);
+        assert!(writer.full(), "at the cap further input is not");
+        writer.input_dropped();
+        assert!(writer.state().dropped);
+        release(&released);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while writer.state().pending && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let state = writer.state();
+        assert!(!state.pending, "the queue drained");
+        assert!(!state.dropped, "and what it said goes with it");
+        assert!(!writer.full());
+        writer.close_within(Duration::from_secs(10));
+        writer.thread.join().expect("the thread");
+        let record = record.lock().expect("record");
+        assert_eq!(record.bytes.len(), 104, "every byte, in order");
+        assert!(record.bytes[..4].iter().all(|b| *b == 1));
+    }
+
+    /// The owner's ruling: at least one largest frame, or a paste as large as a frame can
+    /// be would be dropped at an empty queue.
+    #[test]
+    fn a_write_queue_holds_at_least_one_largest_frame() {
+        assert_eq!(WRITE_QUEUE_CAP, MAX_FRAME_BYTES);
+        assert_eq!(WRITE_STALL_NOTICE, Duration::from_secs(2));
+    }
+
+    /// The owner's words, character for character, and a narrow pane's that keep `F12`.
+    #[test]
+    fn a_daemon_not_answering_reads_as_ruled_at_every_width() {
+        assert_eq!(
+            NOTICE_NOT_ANSWERING.fitting(80),
+            "[pmacs: the daemon is not answering; F12 detaches]"
+        );
+        assert_eq!(
+            NOTICE_KEYS_DROPPED.fitting(80),
+            "[pmacs: the daemon is not answering; keys dropped; F12 detaches]"
+        );
+        for notice in [NOTICE_NOT_ANSWERING, NOTICE_KEYS_DROPPED] {
+            let narrow = notice.fitting(30);
+            assert!(narrow.contains("F12"), "{narrow}");
+            assert!(narrow.chars().count() <= 30, "{narrow}");
+        }
+    }
+
+    /// How the sentences sit: the writer's stands over a new session's notice while it
+    /// lasts, latched until the queue drains, and the other comes back if it still stands.
+    #[test]
+    fn the_writers_sentence_stands_over_a_notice_and_gives_it_back() {
+        let mut bottom = BottomRow {
+            standing: Some((NOTICE_NEW_DAEMON, Instant::now())),
+            ..BottomRow::default()
+        };
+        let mut frontend = ScriptedFrontend::default();
+        bottom.settle(&mut frontend).expect("settle");
+        let pending = |still_for, dropped| WriterState {
+            pending: true,
+            still_for,
+            dropped,
+        };
+        bottom.writer_says(&pending(Duration::from_secs(1), false));
+        bottom.settle(&mut frontend).expect("settle");
+        bottom.writer_says(&pending(WRITE_STALL_NOTICE, false));
+        bottom.settle(&mut frontend).expect("settle");
+        // Moving again and not yet drained: it stays, as ruled.
+        bottom.writer_says(&pending(Duration::ZERO, false));
+        bottom.settle(&mut frontend).expect("settle");
+        bottom.writer_says(&pending(Duration::ZERO, true));
+        bottom.settle(&mut frontend).expect("settle");
+        bottom.writer_says(&WriterState {
+            pending: false,
+            still_for: Duration::ZERO,
+            dropped: false,
+        });
+        bottom.settle(&mut frontend).expect("settle");
+        bottom.standing = None;
+        bottom.settle(&mut frontend).expect("settle");
+        let expect: Vec<Option<String>> = vec![
+            Some(NOTICE_NEW_DAEMON.wide.to_owned()),
+            Some(NOTICE_NOT_ANSWERING.wide.to_owned()),
+            Some(NOTICE_KEYS_DROPPED.wide.to_owned()),
+            Some(NOTICE_NEW_DAEMON.wide.to_owned()),
+            None,
+        ];
+        assert_eq!(frontend.row, expect);
     }
 
     /// The SSH route's stops, one verdict at a time.
