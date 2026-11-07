@@ -178,7 +178,8 @@ when it cannot tell. While a reconnect waits on the far side, `ssh` has
 the terminal, for a passphrase if it asks: `C-c` ends the attempt and the
 session, `F12` does nothing, and after 120 s the attempt is killed and the
 next one comes. Three new daemons in a row that each lasted under 30 s
-stop it, naming the file beside the socket on the far side where the last
+stop it, as do three sessions in a row the daemon closed before their first
+frame, each naming the file beside the socket on the far side where the last
 one's stderr went. `pmacs --daemon --stop` ends a TUI that hears it and
 starts nothing; a TUI stopped past the 2 s when it ran hears nothing, so
 when resumed over SSH it starts a new daemon, which keeps running and says

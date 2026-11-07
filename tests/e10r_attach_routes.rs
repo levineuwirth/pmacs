@@ -230,6 +230,7 @@ fn e10r_3_a_tui_brought_back_by_a_shells_fg_hears_its_keys() {
 struct StandInDaemon {
     connections: Arc<AtomicUsize>,
     dir: tempfile::TempDir,
+    socket: std::path::PathBuf,
 }
 
 impl StandInDaemon {
@@ -246,8 +247,37 @@ impl StandInDaemon {
         session: impl Fn(usize, &mut UnixStream) + Send + 'static,
     ) -> Self {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("d.sock"))
-            .expect("bind the stand-in's socket");
+        let socket = dir.path().join("d.sock");
+        Self::serve_on(dir, socket, identity, session)
+    }
+
+    /// [`Self::serve`] on the default socket of a far side whose `XDG_RUNTIME_DIR` is
+    /// [`Self::runtime_dir`], where a bridge given no `--socket` looks.
+    fn serve_as_the_far_sides_default(
+        session: impl Fn(usize, &mut UnixStream) + Send + 'static,
+    ) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let holder = dir.path().join("pmacs");
+        std::fs::create_dir(&holder).expect("the runtime's directory");
+        std::fs::set_permissions(&holder, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .expect("chmod");
+        let socket = holder.join("default.sock");
+        Self::serve_on(
+            dir,
+            socket,
+            |n| (u64::try_from(n).expect("n"), 1_000),
+            session,
+        )
+    }
+
+    fn serve_on(
+        dir: tempfile::TempDir,
+        socket: std::path::PathBuf,
+        identity: impl Fn(usize) -> (u64, u64) + Send + 'static,
+        session: impl Fn(usize, &mut UnixStream) + Send + 'static,
+    ) -> Self {
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("bind the stand-in's socket");
         let connections = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&connections);
         std::thread::spawn(move || {
@@ -277,11 +307,19 @@ impl StandInDaemon {
                 // wrote one.
             }
         });
-        Self { connections, dir }
+        Self {
+            connections,
+            dir,
+            socket,
+        }
     }
 
     fn socket(&self) -> std::path::PathBuf {
-        self.dir.path().join("d.sock")
+        self.socket.clone()
+    }
+
+    fn runtime_dir(&self) -> &Path {
+        self.dir.path()
     }
 
     fn connections(&self) -> usize {
@@ -568,6 +606,25 @@ impl BridgedSsh {
     fn invocations(&self) -> usize {
         std::fs::read_to_string(self.dir.path().join("count"))
             .map_or(0, |count| count.lines().count())
+    }
+
+    /// A stand-in whose bridge is given no `--socket`, on a far side whose
+    /// `XDG_RUNTIME_DIR` is `runtime`, as `ssh <host> pmacs --daemon-attach` is.
+    fn on_the_default_socket_of(runtime: &Path) -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let script = dir.path().join("ssh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nXDG_RUNTIME_DIR='{runtime}' PMACS_ATTACH_PROTOCOL_FD=2 exec '{pmacs}' --daemon-attach\n",
+                runtime = runtime.display(),
+                pmacs = env!("CARGO_BIN_EXE_pmacs"),
+            ),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        Self { dir }
     }
 
     /// A real TUI through the bridge, the backoff scaled to `scale_ms`.
@@ -1022,6 +1079,10 @@ fn e10r_remote_sessions_cut_before_their_first_frame_stop_at_the_cap_saying_why(
     assert!(!status.success(), "{status:?}");
     let said = tui.after_the_alternate_screen();
     assert!(said.contains(FRAME_CUT_SHORT_SENTENCE), "{said:?}");
+    assert!(
+        !said.contains("stderr"),
+        "the daemon's bound, not its death, so G11's clause is not here: {said:?}"
+    );
 }
 
 /// A session that worked and was then lost comes back through the real bridge, on a
@@ -1941,6 +2002,79 @@ fn p3_new_daemons_that_keep_dying_stop_the_route() {
     ] {
         assert!(said.contains(needle), "{needle:?} in {said:?}");
     }
+}
+
+/// **G11, the owner's ruling of 2026-11-07:** a far side whose daemon goes before each
+/// first frame stops at the older cap, not at `p3`'s, and a daemon that dies that young has
+/// likely left its reason in the file the bridge keeps, so the sentence names it, in `p3`'s
+/// words. The row follows the sentence. The real bridge, given no `--socket`, finds the
+/// stand-in on the default socket of its own `XDG_RUNTIME_DIR`, which the client cannot
+/// know and names by the variable, and the path with the variable filled in holds a
+/// planted line, the stand-in having no stderr of its own to keep; `g4_a_daemon_the_bridge`
+/// reads a real daemon's, and this round's note a real death's. At `d832d69` the sentence
+/// stopped at `stopped trying`.
+#[test]
+fn g11_sessions_closed_before_their_first_frame_name_the_far_sides_stderr() {
+    let daemon = StandInDaemon::serve_as_the_far_sides_default(|_, _| {});
+    let runtime = daemon.runtime_dir();
+    std::fs::write(
+        runtime.join("pmacs/default.sock.stderr"),
+        "PLANTED DAEMON WORDS\n",
+    )
+    .expect("plant the line");
+    let ssh = BridgedSsh::on_the_default_socket_of(runtime);
+    let mut tui = ssh.attach("1");
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("it never stopped: {} sessions", daemon.connections()));
+    assert!(!status.success(), "{status:?}");
+    assert_eq!(
+        daemon.connections(),
+        usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap"),
+        "as many sessions as the cap, and no more"
+    );
+    let said = tui.after_the_alternate_screen();
+    assert!(
+        said.contains(
+            "the daemon closed 3 sessions in a row before their first frame, so this one has \
+             stopped trying; the last one's stderr is on farhost at \
+             $XDG_RUNTIME_DIR/pmacs/default.sock.stderr"
+        ),
+        "{said:?}"
+    );
+    let named = said
+        .split_whitespace()
+        .find(|word| word.starts_with("$XDG_RUNTIME_DIR/"))
+        .expect("the sentence names a path");
+    let path = named.replacen("$XDG_RUNTIME_DIR", &runtime.display().to_string(), 1);
+    let kept = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    assert!(kept.contains("PLANTED DAEMON WORDS"), "{kept:?}");
+}
+
+/// The local route starts no daemon, so its sentence names no file: a guard, whole, on what
+/// the same stand-in's sessions read there.
+#[test]
+fn g11_the_local_routes_sentence_stays() {
+    let daemon = StandInDaemon::serve(|_, _| {});
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_tui(
+        &daemon.socket(),
+        home.path(),
+        &[(PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1"))],
+    );
+    let status = tui
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the route stops");
+    assert!(!status.success(), "{status:?}");
+    let said = tui.after_the_alternate_screen();
+    assert!(
+        said.contains(
+            "the daemon closed 3 sessions in a row before their first frame, so this one has \
+             stopped trying"
+        ),
+        "{said:?}"
+    );
+    assert!(!said.contains("stderr"), "{said:?}");
 }
 
 /// A session of 30 s or more resets the count, so a daemon that lived that long is not

@@ -268,8 +268,12 @@ whole. Under one cap a growing register squeezes the rules.
   host and where the last one's stderr is: a daemon the bridge starts
   keeps it beside its socket, as the window's does. The client does not
   know a remote socket's path, so it names the file under
-  `$XDG_RUNTIME_DIR` as the far side would resolve it. A session of 30 s
-  or more starts the count again, and a `may be` neither counts nor
+  `$XDG_RUNTIME_DIR` as the far side would resolve it. Three sessions in a
+  row closed before their first frame stop it too, and on this route their
+  sentence names the same file, a daemon that dies that young having
+  likely left its reason there; the local route starts no daemon, so its
+  sentence names none, and a frame cut short says the bound. A session of
+  30 s or more starts the count again, and a `may be` neither counts nor
   starts it again, so a slow link cannot stop the route. A daemon stopped
   on purpose says `Goodbye`, which ends the route and starts nothing, but
   only a live TUI hears it. A TUI stopped past the bound, then `pmacs
