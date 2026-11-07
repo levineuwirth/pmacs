@@ -280,9 +280,11 @@ whole. Under one cap a growing register squeezes the rules.
   --daemon --stop`, then `fg`, finds its session lost with no `Goodbye`:
   over this route a new daemon starts and keeps running, and the notice
   says so; the local route finds no socket and ends. Accepted by the
-  owner, 2026-11-06, since a missing socket does not prove a stop: the
-  default socket sits in `$XDG_RUNTIME_DIR`, which a host may remove when
-  its last session ends.
+  owner, 2026-11-06, since a missing socket does not prove a stop: by
+  `logind`'s source, read and not run, a daemon the bridge started keeps
+  its session's scope and so `$XDG_RUNTIME_DIR` alive while it lives, and
+  at `KillUserProcesses=yes` that scope and the daemon go together, with
+  no stop anyone asked for.
   A TUI's pump writes to neither route's transport itself: frames are
   encoded on it and written, in order, by one thread, so `F12` is read
   whatever the socket is doing, and what is typed at a daemon that has
