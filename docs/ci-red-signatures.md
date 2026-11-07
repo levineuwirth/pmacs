@@ -15082,6 +15082,100 @@ print `ignored, wall-clock budget` in this same log. Against a measured
 3.8× dispersion on one machine on one day, that is D12's budget rule
 applied unevenly.
 
+### E10m's addition: PR #476 green at `c0df6fa`, `main` green at `c68e92d`
+
+Recorded 2026-11-07 at E10m's addition (roadmap §E10m, E10m.5 and E10m.12), at the owner's rulings on C10m. Every run was read from the jobs endpoint by conclusion, and every test leg named through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Each table is generated from the API. Nothing was rerun, and no run here is red.
+
+**No CI leg has HLS**, so E10m.5's row returns early on all six and CI says nothing of it, as it said nothing of #291: its evidence is the laptop's, listed below and not tallied.
+
+#### PR #476 at `c0df6fa`, the head: green at attempt 1
+
+`CI` 42315693411 at `c0df6fa`, attempt 1 of 1, `pull_request`, created 2026-11-07T00:02:04Z and completed 2026-11-07T00:38:23Z: `success`. The merge `0925754` into `225ac85`. E10m.12's row `ok` on all six; `WouldBlock` and `Bus error` in none.
+
+Tally (pr-476-ci-c0df6fa): 19 = 18 + 1.
+
+Tally (pr-476-ci-c0df6fa-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 128227601881 | success |
+| Lint (lua54) | 128227602168 | success |
+| Changed paths | 128227602180 | success |
+| Lint (luajit) | 128227602196 | success |
+| Format | 128227602243 | success |
+| M4 Perf Gates | 128227666070 | success |
+| M10 Perf Gates (crdt) | 128227666086 | success |
+| Test (macos-latest / luajit) | 128227666092 | success |
+| Perf budgets (debug) | 128227666103 | success |
+| GPU Render (headless) | 128227666121 | success |
+| Test (macos-latest / lua54) | 128227666133 | success |
+| M1 Acceptance Gates | 128227666142 | success |
+| Test (ubuntu-latest / lua54) | 128227666146 | success |
+| Test (ubuntu-latest / luajit) | 128227666160 | success |
+| Test (crdt) | 128227666169 | success |
+| M6 Perf Gates | 128227666283 | success |
+| M5 Perf Gates | 128227666294 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128227666313 | success |
+| Docs consistency | 128227667657 | skipped |
+
+Tally (pr-476-ci-c0df6fa-success): 18 rows of the table above with `result` = `success`.
+Tally (pr-476-ci-c0df6fa-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-476-ci-c0df6fa-legs): 6 items in the list below.
+
+- `Test (macos-latest / luajit)` 128227666092: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+- `Test (macos-latest / lua54)` 128227666133: `success`, 230 `running` lines and 230 results, 5,444 / 0 / 79.
+- `Test (ubuntu-latest / lua54)` 128227666146: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 59,363 MB available after the tests.
+- `Test (ubuntu-latest / luajit)` 128227666160: `success`, 229 `running` lines and 229 results, 5,499 / 0 / 87, 58,739 MB available after the tests.
+- `Test (crdt)` 128227666169: `success`, 228 `running` lines and 228 results, 5,446 / 0 / 87, 59,277 MB available after the tests.
+- `Test (ubuntu-latest / luajit, no crdt)` 128227666313: `success`, 229 `running` lines and 229 results, 4,864 / 0 / 71, 65,895 MB available after the tests.
+
+`Grammar fuzz` 42315693410 at `c0df6fa`, attempt 1 of 1: `success`, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`, jobs 128227601832 (`Grammar fuzz (asan-strict)`) and 128227602185 (`Grammar fuzz`).
+
+Tally (pr-476-fuzz-c0df6fa): 2 = 2 + 0.
+
+#### `main` at `c68e92d`, E10r fix round 2's registry commit: green
+
+`CI` 42318729049 at `c68e92d`, attempt 1 of 1, `push`, created 2026-11-07T00:31:21Z and completed 2026-11-07T00:33:35Z: `success`. The registry-push shape.
+
+Tally (main-ci-c68e92d): 15 = 6 + 9.
+
+Tally (main-ci-c68e92d-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128237770496 | success |
+| Lint (luajit) | 128237770750 | success |
+| Changed paths | 128237770801 | success |
+| Lint (lua54) | 128237770838 | success |
+| Commit attribution (D9) | 128237770951 | success |
+| Docs consistency | 128237823062 | success |
+| M5 Perf Gates | 128237824229 | skipped |
+| M4 Perf Gates | 128237824285 | skipped |
+| Perf budgets (debug) | 128237824342 | skipped |
+| Test (crdt) | 128237824366 | skipped |
+| GPU Render (headless) | 128237824412 | skipped |
+| M10 Perf Gates (crdt) | 128237824463 | skipped |
+| M1 Acceptance Gates | 128237824651 | skipped |
+| M6 Perf Gates | 128237824985 | skipped |
+| Test (matrix) | 128237825415 | skipped |
+
+Tally (main-ci-c68e92d-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-c68e92d-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 42318729094 at `c68e92d`, attempt 1 of 1: `success`.
+
+#### The local record, listed and not tallied
+
+Tally (e10m-addition-local): 4 items in the list below.
+
+- `20261106T234845Z-4073797` at `c0df6fa`, `scripts/gate`: all six ok, 5,892 / 0 / 87 at 237 pairs, no daemon survived.
+- E10m.5's row, real HLS 2.4.0.0 through a relay plant: 97 of 100, the 3 reading `HLS never answered the text before the last key`, on #480; on HLS 2.15.0.0, 38 of 40, the 2 reading `the modeline returns to LSP:ready`. Beside the row as written: stalls in 9 of 43 and 11 of 30 on 2.4.0.0, 1 of 43 on 2.15.0.0, each with no publish for 120 s.
+- E10m.12's controls on the row at `da6d721`: the settle held gives `the warm parse installed`, with `busy=false` where an attempt line prints, 6 of 6, and the parse's start held gives it with the issue's `busy=true`, 6 of 6 alone and in the suite `10 passed; 1 failed; 0 ignored`, 3 of 3; a forced control is a named run and not an occurrence, under E10m.6.
+- The fixed row and the suite: 11 passed 3 of 3 under that hold and 8 of 8 with none.
+
+So, at the addition: PR #476 is green at its head, not merged, and it closes #276, #282, #288, #291, #316, #328, #332, #340, #363, #373, #374, #381, #409, #427, #461 and #474. Neither new commit adds a CI occurrence and no count moves: #291's seventeen and #340's samples are local and stand, and #479 and #480, filed at this round, have no CI occurrence and no row. A SIGBUS or `No space left on device` on a real small root under E10m.7's fix reopens #328.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
