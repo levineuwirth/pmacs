@@ -13385,6 +13385,121 @@ Also listed: #340's selector twice in whole-suite hand runs on this branch, comm
 
 So, at E10m's checkpoint: PR #476 is green at its head, not merged, and it closes #276, #282, #288, #316, #328, #332, #363, #373, #374, #381, #409, #427, #461 and #474. By CI #375 moves to three and #474 enters at one. Every other count above stands, those closed by the PR among them, since a control is not an occurrence; the closes happen at the merge.
 
+### E10r fix round 2: PR #462 red at `d832d69` on #254's fourth and fifth and #461's second, `main` green at `225ac85`
+
+Recorded 2026-11-07 at E10r's fix round 2 (roadmap §E10r, G1 to G10, #390), which leaves `main` where E10m's registry
+commit left it. Every run was read from the jobs endpoint by conclusion, and every test leg of PR #462's run through
+its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line.
+Every run id and job id below was searched for in this file before it was written, and none was here. Nothing was
+rerun by this session. `CI` 42263748600 and `Grammar fuzz` 42263748559 at `225ac85` are the runs E10m's registry commit
+left for the next one.
+
+#### `main` at `225ac85`, E10m's registry commit: green
+
+`CI` 42263748600 at `225ac85`, attempt 1 of 1, `push`, created 2026-11-06T17:40:16Z and completed 17:42:23Z (the API's
+`updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-225ac85): 15 = 6 + 9.
+
+Tally (main-ci-225ac85-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128050122589 | success |
+| Lint (lua54) | 128050122920 | success |
+| Changed paths | 128050122926 | success |
+| Lint (luajit) | 128050123165 | success |
+| Commit attribution (D9) | 128050123280 | success |
+| Docs consistency | 128050226941 | success |
+| Test (matrix) | 128050227894 | skipped |
+| Perf budgets (debug) | 128050228142 | skipped |
+| M4 Perf Gates | 128050228265 | skipped |
+| GPU Render (headless) | 128050228599 | skipped |
+| M10 Perf Gates (crdt) | 128050228656 | skipped |
+| M1 Acceptance Gates | 128050228980 | skipped |
+| M6 Perf Gates | 128050229249 | skipped |
+| Test (crdt) | 128050229323 | skipped |
+| M5 Perf Gates | 128050229747 | skipped |
+
+Tally (main-ci-225ac85-success): 6 rows of the table above with `result` = `success`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test (matrix)`.
+`Grammar fuzz` 42263748559 at `225ac85`, attempt 1 of 1, `success`: `Grammar fuzz` 128050122333 and `Grammar fuzz
+(asan-strict)` 128050121811.
+
+#### PR #462 at `d832d69`: red on two intermittents, three failures on two legs, none rerun
+
+`CI` 42311759164 on the merge `6d63889` of `d832d69` into `225ac85`, attempt 1 of 1, `pull_request`, created
+2026-11-06T23:25:04Z and completed 2026-11-07T00:08:47Z: `failure`.
+
+Tally (pr-462-ci-d832d69): 19 = 16 + 1 + 2.
+
+Tally (pr-462-ci-d832d69-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128214638035 | success |
+| Lint (luajit) | 128214638285 | success |
+| Commit attribution (D9) | 128214638314 | success |
+| Lint (lua54) | 128214638321 | success |
+| Changed paths | 128214638407 | success |
+| Test (crdt) | 128214703640 | success |
+| GPU Render (headless) | 128214703707 | success |
+| M10 Perf Gates (crdt) | 128214703710 | success |
+| M4 Perf Gates | 128214703715 | success |
+| M5 Perf Gates | 128214703719 | success |
+| M6 Perf Gates | 128214703728 | success |
+| Perf budgets (debug) | 128214703735 | success |
+| Test (ubuntu-latest / luajit) | 128214703773 | failure |
+| Test (macos-latest / luajit) | 128214703782 | success |
+| Test (ubuntu-latest / lua54) | 128214703829 | failure |
+| Test (macos-latest / lua54) | 128214703838 | success |
+| M1 Acceptance Gates | 128214703851 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128214704682 | success |
+| Docs consistency | 128214705096 | skipped |
+
+Tally (pr-462-ci-d832d69-success): 16 rows of the table above with `result` = `success`.
+
+Tally (pr-462-ci-d832d69-failure): 2 rows of the table above with `result` = `failure`.
+
+Skipped: `Docs consistency` 128214705096. Paired by their own logs: `Test (crdt)` 230 pairs, 5,541 / 0 / 87; no crdt 231,
+4,947 / 0 / 71; `macos-latest / luajit` and `macos-latest / lua54` 232 each, 5,537 / 0 / 79; `GPU Render (headless)` 1
+pair, 395 / 0 / 0; `WouldBlock` and `Bus error` in none; and the two below.
+
+- `Test (ubuntu-latest / luajit)` 128214703773, a required check, 2026-11-06T23:25:18Z to 2026-11-07T00:05:43Z, 229 pairs,
+  5,539 / 1 / 87: **#254's fourth.** `m6_5_repl_spawns_fish`, `pump predicate did not become true within 15000ms; chunk:`
+  at `tests/m6_5_repl_acceptance.rs:115:9`, the chunk beginning `local h = _G.h` and polling
+  `pmacs.process.status(h._proc_id)` for `status.kind == "running"`, both of the issue's fragments, `test result: FAILED.
+  10 passed; 1 failed`, `finished in 20.04s`. Commented, 6699590628.
+- `Test (ubuntu-latest / lua54)` 128214703829, a required check, 2026-11-06T23:25:44Z to 2026-11-07T00:08:47Z, 229 pairs,
+  5,538 / 2 / 87: **#254's fifth**, the same fragments, `finished in 20.14s`; and **#461's second**, in another suite's
+  copy, `worker_shutdown_acceptance`'s: `ready::tests::readiness_is_a_served_hello_not_a_connect` at
+  `tests/common/ready.rs:423:9`, `a daemon serving on /tmp/.tmpUvLKAg/late.sock`, `deadline: 10s`, `elapsed:
+  10.00014667s`, `polls: 469`, `last: "connect: Connection refused (os error 111)"`, `5 passed; 1 failed`. The sixth
+  selector of E10m.9's row, counted on #461 since that row is one test in every copy; this merge does not hold E10m.9's
+  fix, PR #476 being open. Commented, 6699590887.
+
+On the third leg with fish, no crdt 128214704682, `m6_5_repl_spawns_fish` is `ok`, the suite in 5.07 s. Two legs at once is
+new for #254, and this head adds a row running fish to the job, about 25 minutes before, under its own `HOME` and
+`XDG_CONFIG_HOME`: by reading it shares no file with that row, and that does not exclude it, which the comment says.
+`tests/common/ready.rs`, `tests/m6_5_repl_acceptance.rs` and `tests/worker_shutdown_acceptance.rs` have no diff in the
+PR. This phase's rows read `ok` by name on every leg where they run.
+
+`Grammar fuzz` 42311758960 at `d832d69`, attempt 1 of 1, `success`, `run=true`: `Grammar fuzz` 128214637052, `exit 0, its
+parse worker's replay exit 0`, 966 inputs, 943 answered, 23 contained, 0 crashed; `Grammar fuzz (asan-strict)`
+128214637417, the same, 962, 947, 15, 0.
+
+#### The local gates, listed and not tallied (D38)
+
+Two `scripts/gate --protocol --perf` runs at the head `d832d69`, on the laptop at `nice -n 19` and six jobs.
+`20261106T225231Z-3551396`, the sampler's 1-minute load 0.71 to 11.65: `06-sweep` green, `07-sweep-luajit` 5,319 / 1 / 67
+on #291's every fragment, commented 6698414826; `perf` held. **`20261106T232459Z-3873404`, load 0.62 to 7.21: all nine
+stages ok**, 5,969 / 0 / 81 and luajit 5,320 / 0 / 67, each at 238 pairs, every budget held, no daemon survived.
+
+So, at E10r's fix round 2: `main` is green at `225ac85`, and PR #462 is red at its head on required checks, on
+intermittents with open issues, on rows the branch changes nothing under, not rerun. By CI #254 moves to five and #461 to
+two. Every other count above stands.
+
 ### `main` after E7h: run 37018782385 at `a013d46`, and it is GREEN
 
 Read on 2026-10-02 at E7i.0 from the jobs endpoint and all six test
