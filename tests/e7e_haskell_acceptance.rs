@@ -7,9 +7,9 @@
 //! server row runs against the real HLS inside a cabal project and is
 //! gated by `PMACS_REQUIRE_HLS`.
 //!
-//! The server row types its error through the production key dispatch,
-//! because a Lua `buf:insert` outside a command reaches no server until
-//! the next keystroke.
+//! The server row puts its error in as one key, `C-y`, through the
+//! production key dispatch, because a Lua `buf:insert` outside a command
+//! reaches no server until the next keystroke.
 //!
 //! E7g unshipped the grammar and E7h restored it; the last row says what
 //! holds it now.
@@ -506,29 +506,18 @@ fn e7e_the_haskell_root_is_the_innermost_project_marker() {
     assert_eq!(resolve_root(&s, &file), None);
 }
 
-fn press(s: &mut EditorState, code: KeyCode) {
+/// `text` goes in at point as one key, `C-y`, the kill ring holding it.
+fn yank(s: &mut EditorState, text: &str) {
+    exec(s, &format!("pmacs.editor.clipboard_set({text:?})"));
     s.dispatch_key(
         FrontendId::LOCAL,
         KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         },
     );
-}
-
-fn type_text(s: &mut EditorState, text: &str) {
-    for ch in text.chars() {
-        press(
-            s,
-            if ch == '\n' {
-                KeyCode::Enter
-            } else {
-                KeyCode::Char(ch)
-            },
-        );
-    }
 }
 
 fn buffer_text(s: &EditorState) -> String {
@@ -600,13 +589,10 @@ fn record_server_notifications(s: &EditorState) {
           end
         end)
         pmacs.lsp.on_notification("textDocument/publishDiagnostics", function(_, p)
-          local holds, before_last = false, false
+          local holds = false
           for _, d in ipairs(p.diagnostics) do
             if d.severity == 1 and d.message:find("Couldn't match", 1, true) then
               holds = true
-            end
-            if d.message:find("not in scope: Tru", 1, true) then
-              before_last = true
             end
           end
           e7e_publishes[#e7e_publishes + 1] = {
@@ -614,7 +600,6 @@ fn record_server_notifications(s: &EditorState) {
             version = type(p.version) == "number" and p.version or -1,
             count = #p.diagnostics,
             holds = holds,
-            before_last = before_last,
           }
         end)
         "#,
@@ -635,8 +620,6 @@ struct Publish {
     version: i64,
     count: i64,
     holds_error: bool,
-    /// It answers the text up to the last key, whatever version it names.
-    before_last: bool,
 }
 
 /// The publishes in the order they came: `v24:error`, `v15:1`, `v25:0`.
@@ -670,12 +653,11 @@ fn publishes(s: &EditorState) -> Vec<Publish> {
             version: p.get("version").unwrap(),
             count: p.get("count").unwrap(),
             holds_error: p.get("holds").unwrap(),
-            before_last: p.get("before_last").unwrap(),
         })
         .collect()
 }
 
-/// The bounds on setup's progress ending and on the publish after typing,
+/// The bounds on setup's progress ending and on the publish after the key,
 /// which a passing run meets in about 10 s and well under 1 s.
 const SETUP_BOUND_SECS: u64 = 120;
 const PUBLISH_BOUND_SECS: u64 = 120;
@@ -698,7 +680,7 @@ fn read_on(s: &mut EditorState) {
 
 #[test]
 #[allow(clippy::too_many_lines)] // one user's path, from attach to the status row
-fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
+fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_type_error() {
     for tool in ["haskell-language-server-wrapper", "cabal", "ghc"] {
         if !on_path(tool) {
             support::skip_or_fail(tool, "PMACS_REQUIRE_HLS");
@@ -747,10 +729,9 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
         "the modeline settles on LSP:ready; trace {trace:?}"
     );
 
-    // Setup's progress ends before a key is typed. An edit typed while the
-    // server sets up can leave it holding the right document and publishing
-    // nothing, however many keys follow: #291's trace, and #480 is the
-    // user's case.
+    // Setup's progress ends before the edit. An edit typed while the server
+    // sets up can leave it holding the right document and publishing nothing,
+    // however many keys follow: #291's trace, and #480 is the user's case.
     assert!(
         wait(&mut s, SETUP_BOUND_SECS, |s| {
             note(s, &mut trace);
@@ -759,37 +740,23 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
         "setup's progress ends within {SETUP_BOUND_SECS} s; trace {trace:?}"
     );
 
-    // A type error typed at the end of the file: all but its last key, then
-    // that key alone once the server has answered the rest. Every key at once
-    // drew no publish at the buffer's version in 13 of 100 traced runs, the
-    // error named a version short or the last key never answered, and an
-    // empty list for an older version in 54 (#479). A newline after the error
-    // drew none, or an empty list beside it, in 6 of 8, and a range published
-    // before it is carried past the text it names (#475).
+    // A type error at the end of the file, as one key. Typed key by key it
+    // reaches the server as a burst of versions, each word's completion request
+    // flushing the edit so far, and the row does not cover what a server does
+    // with a burst: its silence is #480's and an older version's list #479's.
     let len: i64 = eval(&s, "return pmacs.window.buffer():len()");
     exec(&s, &format!("pmacs.editor.goto_byte({len})"));
-    type_text(&mut s, "oops :: Int\noops = Tru");
-    let answered = wait(&mut s, PUBLISH_BOUND_SECS, |s| {
-        note(s, &mut trace);
-        publishes(s).iter().any(|p| p.before_last)
-    });
-    assert!(
-        answered,
-        "HLS never answered the text before the last key within {PUBLISH_BOUND_SECS} s; \
-         publishes [{}]; trace {trace:?}",
-        shown(&publishes(&s))
-    );
-    read_on(&mut s);
-    press(&mut s, KeyCode::Char('e'));
+    yank(&mut s, "oops :: Int\noops = True");
     let text = buffer_text(&s);
     assert!(
         text.ends_with("oops :: Int\noops = True"),
-        "typed: {text:?}"
+        "the error went in: {text:?}"
     );
     let version: i64 = eval(&s, "return pmacs.lsp.active_attachment().version");
 
     // The server's answer to that text is a publish at that version. One
-    // without the error fails here: no key is typed to bring it back.
+    // without the error fails here: no key is typed to bring it back, and
+    // nothing is sent again.
     let at_version = |s: &EditorState| -> Vec<bool> {
         publishes(s)
             .iter()
@@ -844,10 +811,10 @@ fn e7e_hls_attaches_in_a_cabal_project_and_reports_a_typed_type_error() {
         "E7E diagnostic {err:?} after {} ms; trace {trace:?}",
         t0.elapsed().as_millis()
     );
-    // The component loaded: the typed error is the only one, so no
+    // The component loaded: the row's error is the only one, so no
     // cradle error (a bare-`ghc` fallback, a GHC mismatch) sits on line 0.
     let errors: Vec<_> = seen.iter().filter(|d| d.0 == "error").collect();
-    assert_eq!(errors, vec![&err], "the typed error is the only error");
+    assert_eq!(errors, vec![&err], "the row's error is the only error");
 
     // Placed on the text it names: it covers `True`.
     let line = text.lines().nth(usize::try_from(err.1).unwrap()).unwrap();
