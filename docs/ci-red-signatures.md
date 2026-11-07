@@ -15378,6 +15378,202 @@ Tally (pr-462-fuzz-b11d25a): 2 = 2 + 0.
 
 So, at E10r fix round 2's addition: `main` is green at `2f4d26f`, and PR #462 is red at its head on four required checks, on intermittents with open issues whose suites have no diff in the PR, not rerun. By CI #254 moves to eight and #432 to one, with the difference in its fragments said. #461 stays at two. Every other count above stands.
 
+### E10m's third addition: PR #476 green at `f2667df`, two fish probes listed and not counted, `main` green at `a46dc58`
+
+Recorded 2026-11-07 at E10m's third addition (roadmap §E10m, E10m.13 as amended and E10m.14), at the owner's rulings of that day. Every run was read from the jobs endpoint by conclusion, and every test leg through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in this file before it was written, and none was here. Nothing was rerun. `CI` 42379269529 and `Grammar fuzz` 42379269510 at `2f4d26f` are recorded above, at E10r fix round 2's addition, and not again here.
+
+**The owner struck #432's second fragment**, 2026-11-07 (6709195754 on the issue): it recorded what else failed in one sample and could match only a repeat of that sample's company. So the red recorded above at `CI` 42378200901, `Test (macos-latest / lua54)` 128420110809, with #432's selector and its first fragment, is #432's second occurrence and its first on CI.
+
+**The REPL rows read otherwise from `f2667df`.** `m6_5_repl_spawns_fish`, `_zsh`, `_bash` and `_lua` no longer time out at `pump predicate did not become true within 15000ms; chunk:`. A red now names its wait: `the shell's first output did not come within 30000ms, so nothing was typed; last seen:`, or `the answer "hello-pmacs" to the line … did not come within 15000ms; last seen:`, Lua's at 10000ms. #254's entries above keep the old text. From `189d304` the REPL's history keeps a line a CR LF ends (#482).
+
+#### `main` at `a46dc58`, E10r fix round 2's addition's registry commit: green
+
+`CI` 42383566620 at `a46dc58`, attempt 1 of 1, `push`, created 2026-11-07T14:51:38Z and completed 14:53:58Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-a46dc58): 15 = 6 + 9.
+
+Tally (main-ci-a46dc58-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 128436095020 | success |
+| Format | 128436095138 | success |
+| Lint (lua54) | 128436095167 | success |
+| Lint (luajit) | 128436095175 | success |
+| Commit attribution (D9) | 128436095193 | success |
+| Docs consistency | 128436138799 | success |
+| Test (crdt) | 128436139759 | skipped |
+| GPU Render (headless) | 128436139831 | skipped |
+| M6 Perf Gates | 128436139890 | skipped |
+| Perf budgets (debug) | 128436139954 | skipped |
+| M1 Acceptance Gates | 128436140101 | skipped |
+| M4 Perf Gates | 128436140140 | skipped |
+| Test (matrix) | 128436140212 | skipped |
+| M5 Perf Gates | 128436140417 | skipped |
+| M10 Perf Gates (crdt) | 128436140538 | skipped |
+
+Tally (main-ci-a46dc58-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-a46dc58-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 42383566505 at `a46dc58`, attempt 1 of 1, `success`: `Grammar fuzz` 128436094428 and `Grammar fuzz (asan-strict)` 128436094313.
+
+Tally (main-fuzz-a46dc58): 2 = 2 + 0.
+
+#### Two probes on a runner, dispatched, no PR: listed, not counted (E10m.6)
+
+E10m.13's (d): each a signed merge on a branch of its own, kept to E10m's merge and then deleted, `CI` alone dispatched (`gh workflow run CI --ref`). **A probe is a named run and not an occurrence**, so neither moves any count: the first's three fish reds are not #254's ninth to eleventh, and its macOS red is not a row's first.
+
+`CI` 42389211327 on `e10m/fish-probe-1` at `15185ce`, the merge of `ae25b0d` and PR #462's `b11d25a`, no fix, attempt 1 of 1, `workflow_dispatch`, created 2026-11-07T16:01:47Z and completed 16:41:53Z: `failure`.
+
+Tally (e10m-d-fish-probe-1): 19 = 14 + 4 + 1.
+
+Tally (e10m-d-fish-probe-1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128453025186 | success |
+| Commit attribution (D9) | 128453025250 | success |
+| Changed paths | 128453025286 | success |
+| Lint (lua54) | 128453025302 | success |
+| Lint (luajit) | 128453025390 | success |
+| M1 Acceptance Gates | 128453067434 | success |
+| M5 Perf Gates | 128453067438 | success |
+| M4 Perf Gates | 128453067476 | success |
+| GPU Render (headless) | 128453067482 | success |
+| Test (crdt) | 128453067498 | success |
+| Perf budgets (debug) | 128453067506 | success |
+| Test (ubuntu-latest / luajit) | 128453067515 | failure |
+| Test (macos-latest / lua54) | 128453067516 | success |
+| Test (ubuntu-latest / lua54) | 128453067526 | failure |
+| Test (ubuntu-latest / luajit, no crdt) | 128453067563 | failure |
+| M10 Perf Gates (crdt) | 128453067582 | success |
+| M6 Perf Gates | 128453067584 | success |
+| Test (macos-latest / luajit) | 128453067657 | failure |
+| Docs consistency | 128453069187 | skipped |
+
+Tally (e10m-d-fish-probe-1-success): 14 rows of the table above with `result` = `success`.
+
+Tally (e10m-d-fish-probe-1-failure): 4 rows of the table above with `result` = `failure`.
+
+Tally (e10m-d-fish-probe-1-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (e10m-d-fish-probe-1-legs): 6 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 128453067515: `failure`, 229 pairs, 5,545 / 1 / 87, 58,564 MB available after the tests. `m6_5_repl_spawns_fish`, `pump predicate did not become true within 15000ms; chunk:`, and `5ada636`'s text, `last seen: status kind=running pid=…; typed=true; history "\nwarning: Could not set up terminal.\nwarning: TERM environment variable not set.\nwarning: Using fallback terminal type 'xterm-256color'.\n\n\n\n\nrunner@… ~> "; input ""`. `p1_fg_under_fish_comes_back_on_either_route` `ok` 22 minutes earlier.
+- `Test (ubuntu-latest / lua54)` 128453067526: `failure`, 229 pairs, 5,545 / 1 / 87, 59,192 MB available. The same row and text, `p1_fg…` `ok` 23 minutes earlier.
+- `Test (ubuntu-latest / luajit, no crdt)` 128453067563: `failure`, 229 pairs, 4,896 / 1 / 71, 65,798 MB available. The same row and text, `p1_fg…` `ok` 19 minutes earlier.
+- `Test (macos-latest / luajit)` 128453067657: `failure`, 230 pairs, 5,486 / 1 / 79. PR #462's `p19_the_local_route_onto_a_new_daemon_others_reached_first_reads_may_be`, `tests/e10r_attach_routes.rs:1563:5`, no fish in it, reported on #462 (6710069689).
+- `Test (crdt)` 128453067498: `success`, 230 pairs, 5,547 / 0 / 87, 59,120 MB available; fish, zsh and lua skipped, not on `PATH`.
+- `Test (macos-latest / lua54)` 128453067516: `success`, 232 pairs, 5,543 / 0 / 79; fish and lua skipped.
+
+Each fish leg reads `Setting up fish (3.7.0-1)`, and the row is its only failure. The legs have no `TERM`, so fish warns and falls back, and its first output is that warning. Commented, 6710065385 on #254.
+
+`CI` 42414492064 on `e10m/fish-probe-2` at `c10b423`, the merge of `f2667df` and PR #462's head of that moment, `b11d25a` still, attempt 1 of 1, `workflow_dispatch`, created 2026-11-07T21:09:25Z and completed 21:51:11Z: `success`.
+
+Tally (e10m-d-fish-probe-2): 19 = 18 + 1.
+
+Tally (e10m-d-fish-probe-2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128529527782 | success |
+| Changed paths | 128529527953 | success |
+| Commit attribution (D9) | 128529527975 | success |
+| Lint (luajit) | 128529527990 | success |
+| Lint (lua54) | 128529528004 | success |
+| M4 Perf Gates | 128529574047 | success |
+| GPU Render (headless) | 128529574070 | success |
+| M5 Perf Gates | 128529574086 | success |
+| M1 Acceptance Gates | 128529574119 | success |
+| Test (crdt) | 128529574120 | success |
+| M10 Perf Gates (crdt) | 128529574140 | success |
+| Test (macos-latest / lua54) | 128529574178 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128529574184 | success |
+| Test (ubuntu-latest / luajit) | 128529574185 | success |
+| M6 Perf Gates | 128529574196 | success |
+| Perf budgets (debug) | 128529574198 | success |
+| Test (macos-latest / luajit) | 128529574202 | success |
+| Test (ubuntu-latest / lua54) | 128529574245 | success |
+| Docs consistency | 128529575767 | skipped |
+
+Tally (e10m-d-fish-probe-2-success): 18 rows of the table above with `result` = `success`.
+
+Tally (e10m-d-fish-probe-2-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (e10m-d-fish-probe-2-legs): 6 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 128529574185: `success`, 231 pairs, 5,605 / 0 / 87, 58,584 MB available after the tests. `m6_5_repl_spawns_fish` `ok` at 21:48:09, `p1_fg_under_fish_comes_back_on_either_route` `ok` at 21:24:26.
+- `Test (ubuntu-latest / lua54)` 128529574245: `success`, 231 pairs, 5,605 / 0 / 87, 59,214 MB available. Fish's row `ok` at 21:48:36, `p1_fg…` at 21:24:58.
+- `Test (ubuntu-latest / luajit, no crdt)` 128529574184: `success`, 231 pairs, 4,956 / 0 / 71, 65,817 MB available. Fish's row `ok` at 21:41:11, `p1_fg…` at 21:22:42.
+- `Test (crdt)` 128529574120: `success`, 230 pairs, 5,550 / 0 / 87, 59,120 MB available; fish, zsh and lua skipped.
+- `Test (macos-latest / lua54)` 128529574178: `success`, 232 pairs, 5,546 / 0 / 79; fish and lua skipped.
+- `Test (macos-latest / luajit)` 128529574202: `success`, 232 pairs, 5,546 / 0 / 79; fish and lua skipped.
+
+On each fish leg `Setting up fish (3.7.0-1)` and `Setting up zsh (5.9-6ubuntu2)`, the four shells' rows `ok`, the suite `11 passed` in about 5.1 s, and no skip naming a shell's row. One pair of runs; nothing here read a runner's page cache, which stays a candidate for #254's cluster on #462's heads and the cause of no occurrence. Commented, 6713514962 on #254.
+
+#### PR #476 at `f2667df`, the head: green at attempt 1
+
+`CI` 42417969019 at `f2667df`, attempt 1 of 1, `pull_request`, created 2026-11-07T21:53:09Z and completed 22:31:09Z: `success`. The merge `6f5390d` of `f2667df` into `a46dc58`.
+
+Tally (pr-476-ci-f2667df): 19 = 18 + 1.
+
+Tally (pr-476-ci-f2667df-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 128540049827 | success |
+| Commit attribution (D9) | 128540049962 | success |
+| Format | 128540050075 | success |
+| Lint (lua54) | 128540050078 | success |
+| Lint (luajit) | 128540050112 | success |
+| Test (crdt) | 128540084362 | success |
+| M1 Acceptance Gates | 128540084406 | success |
+| M5 Perf Gates | 128540084425 | success |
+| M10 Perf Gates (crdt) | 128540084447 | success |
+| M6 Perf Gates | 128540084492 | success |
+| M4 Perf Gates | 128540084497 | success |
+| Perf budgets (debug) | 128540084521 | success |
+| Test (macos-latest / lua54) | 128540084524 | success |
+| Test (macos-latest / luajit) | 128540084526 | success |
+| Test (ubuntu-latest / lua54) | 128540084564 | success |
+| GPU Render (headless) | 128540084598 | success |
+| Test (ubuntu-latest / luajit) | 128540084602 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128540084656 | success |
+| Docs consistency | 128540085709 | skipped |
+
+Tally (pr-476-ci-f2667df-success): 18 rows of the table above with `result` = `success`.
+
+Tally (pr-476-ci-f2667df-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-476-ci-f2667df-legs): 7 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 128540084602: `success`, 229 pairs, 5,502 / 0 / 87, 58,738 MB available after the tests. `m6_5_repl_spawns_fish` `ok` at 22:23:47.
+- `Test (ubuntu-latest / lua54)` 128540084564: `success`, 229 pairs, 5,502 / 0 / 87, 59,360 MB available. Fish's row `ok` at 22:24:47.
+- `Test (ubuntu-latest / luajit, no crdt)` 128540084656: `success`, 229 pairs, 4,867 / 0 / 71, 65,895 MB available. Fish's row `ok` at 22:17:35.
+- `Test (crdt)` 128540084362: `success`, 228 pairs, 5,449 / 0 / 87, 59,279 MB available; fish, zsh and lua skipped, not on `PATH`.
+- `Test (macos-latest / lua54)` 128540084524: `success`, 230 pairs, 5,447 / 0 / 79; fish and lua skipped.
+- `Test (macos-latest / luajit)` 128540084526: `success`, 230 pairs, 5,447 / 0 / 79; fish and lua skipped.
+- `GPU Render (headless)` 128540084598: `success`, 1 pair, 394 / 0 / 0.
+
+On the three Ubuntu matrix legs `Setting up fish (3.7.0-1)` and `Setting up zsh (5.9-6ubuntu2)`, the four shells' rows `ok` and no skip naming one; the leg's own skip list names the rows a leg skipped, whose `ok` says nothing. #482's three rows and E10m.5's row read `ok` on all six, the last returning early with no HLS. `WouldBlock` and `Bus error` in none. Each leg counts three rows more than `ae25b0d`'s green legs did, #482's table.
+
+`Grammar fuzz` 42417969036 at `f2667df`, attempt 1 of 1, `success`, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`: `Grammar fuzz` 128540049986 and `Grammar fuzz (asan-strict)` 128540049936.
+
+Tally (pr-476-fuzz-f2667df): 2 = 2 + 0.
+
+#### The local record, listed and not tallied
+
+Tally (e10m-addition3-local): 5 items in the list below.
+
+- `20261107T210932Z-253112` at `f2667df`, `scripts/gate --perf`: all seven stages ok, 5,895 / 0 / 87 at 237 pairs, every budget held, no daemon survived.
+- #482's table at `189d304`: all five rows that change fail under `ae25b0d`'s Lua and pass with the change, and the rows that stay pass at both. `m6_4`, `m6_7` and `m6_8` pass on `luajit` and on `lua54,crdt` by hand.
+- E10m.13's witnesses on the kept binary of `f2667df`, each its own message: a stand-in that echoes and never answers fails the answer's wait, which `ae25b0d`'s row passes 3 of 3; one that never prints fails the first wait; a line lost after the first output fails the answer's wait; the discard and hold stand-ins pass.
+- The real shells through that row, a fresh `HOME` and every XDG root each run, `TERM` unset and set: fish 3.7.0 400 of 400 each way, alternating evicted and read in; fish 4.9.3 5 of 5; zsh and bash 100 of 100; lua 30 of 30; on one contended core 100 of 100 on each fish each way, the slowest 43.73 s against the two waits' 45 s.
+- A control shows one way, and none of the above is the cause of any of #254's eight occurrences; no tally of #254 moves.
+
+So, at the third addition: `main` is green at `a46dc58`, and PR #476 is green at its head `f2667df`, not merged, closing #254 and #482 with the sixteen before. #486 is filed, the REPL dropping cursor motion. The two probes are runs and not occurrences, and #432 is at two on the owner's striking of its second fragment.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
