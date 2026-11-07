@@ -215,7 +215,9 @@ whole. Under one cap a growing register squeezes the rules.
   (`pmacs_protocol::reconnect`, E9.2), presenting the token of its last
   session so the daemon starts the new socket on the view it retained
   (E9.1); after thirty failed attempts, about twelve minutes, it stops
-  and the band says to close the window. An attempt succeeds only at the
+  and the band says to close the window, and after three sessions in a
+  row cut short before their token, the write bound's floor (E10r), it
+  stops sooner and says that. An attempt succeeds only at the
   daemon's `SessionToken` on the new socket: until then nothing is sent
   on it and what the daemon writes is held. The daemon closes, with
   nothing written, a socket presenting the token of a session it still
@@ -232,10 +234,57 @@ whole. Under one cap a growing register squeezes the rules.
   hear its `Detach` on: the view stays retained for
   `session.view-retention-secs` and holds `daemon.idle-exit-secs`'s
   clock that long. The local grid attach (`pmacs --attach` on a socket)
-  does neither: it exits when the daemon's socket closes, as it always
-  has, and never presents a token, since a grid session is minted none.
-  Removed when the local attach reconnects on the same schedule and the
-  token family reaches grid sessions.
+  reconnects on the same schedule since E10r, with no `Goodbye` as what
+  starts it, but never presents a token, since a grid session is minted
+  none: it comes back on a fresh view and says so on its bottom row, and
+  a daemon that is gone ends it, saying why. Over SSH the bridge exits 0
+  when the daemon closes its socket, so what ends that route is a
+  `Goodbye` or F12 and not the exit, and by what each failure costs the
+  other frontends: a network that is down backs off with no limit,
+  costing nothing; a session that worked and was lost reconnects, its
+  one hold-up already paid; sessions in a row cut before their first
+  frame, a link past the write bound's floor, cost the bound a try and
+  stop at three. The bridge starts a daemon when it finds none, so a
+  reconnect after a crash lands on a new daemon, which holds what
+  autosave kept and nothing else. A `Hello` whose frontend number is not
+  past the last is another daemon's for certain, and the notice says
+  `[pmacs: new daemon; work not autosaved is gone; M-x recover-file]`.
+  One past it says that only by `uptime_secs`, and cannot be told from a
+  stalled link's: younger than the last daemon would be by now, or with
+  that daemon's age inside the age's slack, it says
+  `[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`.
+  A pane too narrow for those reads `[new daemon; work not autosaved is
+  gone]` or `[this may be a new daemon]`. The local route says the same
+  if a new daemon answers there. A reconnect over SSH may be asked for a
+  passphrase, since `ssh` runs with no `BatchMode`, so its wait for
+  `Hello` lends the terminal, as a shell would give it, and reads no key:
+  `C-c` is a signal there, which ends the route and `ssh` with it, status
+  0; `F12` does nothing, its bytes going to whatever is reading the
+  terminal, a prompt if there is one, and what nothing read goes with
+  the wait. At 120 s `ssh` is killed and that is a failed attempt on the
+  schedule, with no limit. The route stops after three new daemons in a
+  row told for certain whose sessions each lived under 30 s on the
+  client's clock, `autosave.interval-ms`'s default, saying so, naming the
+  host and where the last one's stderr is: a daemon the bridge starts
+  keeps it beside its socket, as the window's does. The client does not
+  know a remote socket's path, so it names the file under
+  `$XDG_RUNTIME_DIR` as the far side would resolve it. Three sessions in a
+  row closed before their first frame stop it too, and on this route their
+  sentence names the same file, a daemon that dies that young having
+  likely left its reason there; the local route starts no daemon, so its
+  sentence names none, and a frame cut short says the bound. A session of
+  30 s or more starts the count again, and a `may be` neither counts nor
+  starts it again, so a slow link cannot stop the route. A daemon stopped
+  on purpose says `Goodbye`, which ends the route and starts nothing, but
+  only a live TUI hears it. A TUI stopped past the bound, then `pmacs
+  --daemon --stop`, then `fg`, finds its session lost with no `Goodbye`:
+  over this route a new daemon starts and keeps running, and the notice
+  says so; the local route finds no socket and ends. Accepted by the
+  owner, 2026-11-06, since a missing socket does not prove a stop: the
+  default socket sits in `$XDG_RUNTIME_DIR`, which a host may remove when
+  its last session ends.
+  Removed when the token family reaches grid sessions, which is a wire
+  question.
 - **Restore, keyed by daemon and frontend kind (E10, D16).** A daemon
   keeps one desktop for each kind of window that attaches to it, under
   its own identity and the kind: `desktop::frontend_session_key`, the

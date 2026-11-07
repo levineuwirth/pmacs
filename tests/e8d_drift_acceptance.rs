@@ -728,9 +728,9 @@ end)
             // Since E9's fix round 4 the teardown is the drain's, at its
             // deadline, this peer sending no EOF. Meanwhile `live` is read
             // as a frontend reads, a cursor a tick: a socket left to fill
-            // blocks the dispatcher's write to it (the daemon writes a
-            // frontend with no timeout), and with it the loop the
-            // deadline is read on. Every replica is written its cursor
+            // holds the dispatcher's write to it, up to `FRAME_WRITE_BOUND`
+            // since E10r and with no bound before it, and with it the loop
+            // the deadline is read on. Every replica is written its cursor
             // each tick, so `broken`'s next write fails without a key.
             let deadline = Instant::now() + Duration::from_secs(5);
             while detaches_of(&daemon, broken_fid) == 0 && Instant::now() < deadline {

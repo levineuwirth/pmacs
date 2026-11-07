@@ -24,6 +24,29 @@
 //! between F12 and "just close the terminal" is up to the user;
 //! both result in the same daemon-side cleanup.
 //!
+//! # A socket that ends with no `Goodbye`
+//!
+//! The daemon says `Goodbye` when it means to end a session. A socket that
+//! ends without one was lost, which since E10r is what a frontend that stopped
+//! reading past the daemon's bound finds when it is resumed, so both routes
+//! attach again ([`run_attach`], [`run_attach_ssh`]), on one schedule and one set
+//! of banners. A session comes back on a fresh view, not its own, and says why:
+//! a grid session is minted no token (`docs/divergences.md`). A daemon that is
+//! gone ends the local route, saying why once the alternate screen is left; the
+//! SSH route's bridge starts a new one, which holds only what autosave kept, and the
+//! notice says that when `Hello` tells it for certain and that it may be so when
+//! `Hello` cannot ([`DaemonSeen`]), on either route.
+//! [`HANDSHAKE_RETRY_CAP`] sessions in a row
+//! that end before their first frame stop either route, so neither can spin, the
+//! remote route's sentence naming where a daemon it started keeps its stderr
+//! ([`FarSideStderr`]). A
+//! reconnect over SSH may be asked for a passphrase, so its wait for `Hello` lends the
+//! terminal and reads no key: `C-c` is a signal there and ends the route, and `F12`
+//! does nothing ([`RECONNECT_HELLO_DEADLINE`]). A
+//! frame cut short is the daemon's bound, and the frontend says so
+//! ([`crate::transport::FRAME_CUT_SHORT_SENTENCE`]): no `Goodbye` can follow a
+//! part-written frame.
+//!
 //! The F12 choice is tentative for v0.1; it conflicts with any user
 //! keybind on F12, which we accept because F12 is rarely bound. A
 //! later release will make it configurable.
@@ -31,6 +54,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -44,8 +68,12 @@ use std::time::Duration;
 
 use std::time::Instant;
 
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+
 use crate::attach_reconnect::{
-    BackoffSchedule, HANDSHAKE_RETRY_CAP, ReconnectVerdict, classify_for_reconnect,
+    BackoffSchedule, DaemonSeen, DyingDaemons, HANDSHAKE_RETRY_CAP, ReconnectVerdict, Succession,
+    classify_for_reconnect,
 };
 use crate::cell::CellSize;
 use crate::frontend::{Event, Frontend, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -54,7 +82,7 @@ use crate::protocol::{
     AttachRequest, AttachTarget, FrontendCapabilities, FrontendEvent, FrontendId, GoodbyeReason,
     Hello, InstanceMessage, PROTOCOL_VERSION,
 };
-use crate::transport::{TransportError, read_message, write_message};
+use crate::transport::{FRAME_CUT_SHORT_SENTENCE, TransportError, read_message, write_message};
 
 /// Environment variable that overrides the SSH binary used by
 /// [`run_attach_ssh`]. Test-flavored — production users do not set
@@ -137,6 +165,28 @@ const SSH_STDERR_TAIL_CAP: usize = 4096;
 /// already-exited child.
 const SSH_KICK_WATCHDOG: Duration = Duration::from_secs(1);
 
+/// How long an `ssh` has after the kick's SIGTERM before it has a SIGKILL. A real `ssh`
+/// dies on the SIGTERM; a wrapper around one, or anything else in its place, may not.
+const SSH_KILL_AFTER_TERM: Duration = Duration::from_secs(3);
+
+/// How long the pump waits for its reader after the kick, which outlasts the kick's
+/// SIGKILL, since something that `ssh` left behind may hold the pipe open past it. So
+/// a deliberate end holds a raw terminal for at most this.
+const READER_JOIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long a reconnect over SSH waits for its `Hello` before it kills `ssh` and that
+/// is one failed attempt on the schedule, a daemon that cannot be reached, which backs
+/// off with no limit. 120 s by the owner's ruling of 2026-11-06, since `ssh` runs with no
+/// `BatchMode` and may be asking for a passphrase: a shorter wait kills someone typing.
+const RECONNECT_HELLO_DEADLINE: Duration = Duration::from_mins(2);
+
+/// A test's override of [`RECONNECT_HELLO_DEADLINE`], in milliseconds.
+pub const PMACS_TEST_RECONNECT_HELLO_MS: &str = "PMACS_TEST_RECONNECT_HELLO_MS";
+
+/// How long `ssh` has to leave after a `SIGTERM` this client gave it during a handshake
+/// before it has a `SIGKILL`. A stand-in that ignores one must not hold the route.
+const SSH_TERM_GRACE: Duration = Duration::from_secs(1);
+
 /// Errors that abort the attach client.
 #[derive(Debug)]
 pub enum AttachError {
@@ -179,9 +229,90 @@ pub enum AttachError {
         /// them in their terminal scrollback).
         stderr_tail: String,
     },
+    /// The daemon an attached session was on is gone: its socket refused
+    /// the connect, or is not there.
+    DaemonGone {
+        /// The socket the session was attached to.
+        socket: PathBuf,
+        /// What the connect found.
+        found: &'static str,
+    },
+    /// `C-c` in a reconnect's wait for `Hello`, which ends the route with nothing to say.
+    ReconnectCancelled,
+    /// A reconnect's `Hello` did not come within [`RECONNECT_HELLO_DEADLINE`].
+    ReconnectHelloTimedOut {
+        /// How long it waited.
+        after: Duration,
+    },
+    /// [`HANDSHAKE_RETRY_CAP`] new daemons in a row each died young on the far side, so
+    /// the remote route stopped trying ([`DyingDaemons`]).
+    NewDaemonsKeepDying {
+        /// What the client knows of where the last one's stderr is.
+        stderr: FarSideStderr,
+        /// How many in a row.
+        attempts: u32,
+    },
+    /// [`HANDSHAKE_RETRY_CAP`] sessions in a row ended before their first
+    /// frame, so the route stopped trying.
+    SessionsDropped {
+        /// How many in a row.
+        attempts: u32,
+        /// Whether the last of them ended with a frame cut short.
+        cut_short: bool,
+        /// Where a daemon that closed them keeps its stderr, for a remote route whose
+        /// last session ended at a frame's boundary: the bridge starts a daemon where it
+        /// finds none, and one that dies this young has likely left its reason there.
+        /// The local route starts no daemon, and a frame cut short is the daemon's
+        /// bound, so neither names one.
+        far_side: Option<FarSideStderr>,
+    },
+}
+
+/// Where a daemon the remote route's bridge started keeps its stderr, as the client can
+/// say it: the host, and the socket's name, or that it is the default, under the far
+/// side's runtime directory, whose real path no message says and no wire change is taken
+/// to learn.
+#[derive(Debug)]
+pub struct FarSideStderr {
+    /// The host, as the route was given it.
+    host: String,
+    /// The file, as the far side would resolve it.
+    path: String,
+}
+
+impl FarSideStderr {
+    fn of(target: &AttachTarget) -> Self {
+        let (host, instance) = match target {
+            AttachTarget::Ssh {
+                host,
+                instance_name,
+                ..
+            } => (host.as_str(), instance_name.as_deref()),
+            _ => ("the far side", None),
+        };
+        let runtime = std::path::Path::new("$XDG_RUNTIME_DIR");
+        let socket = crate::socket_path::resolve_socket_path_with_runtime(instance, runtime);
+        let path = pmacs_protocol::socket_file::daemon_stderr_path(&socket);
+        Self {
+            host: host.to_owned(),
+            path: path.display().to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for FarSideStderr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the last one's stderr is on {} at {}",
+            self.host, self.path
+        )
+    }
 }
 
 impl std::fmt::Display for AttachError {
+    // One arm a variant, each a sentence a user reads, with nothing shared to pull out.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "attach I/O error: {e}"),
@@ -263,6 +394,47 @@ impl std::fmt::Display for AttachError {
                     ),
                 }
             }
+            Self::DaemonGone { socket, found } => write!(
+                f,
+                "the daemon at {} is gone ({found}), so this session has ended; start it again \
+                 and attach",
+                socket.display()
+            ),
+            Self::ReconnectCancelled => write!(f, "the reconnect was cancelled"),
+            Self::ReconnectHelloTimedOut { after } => write!(
+                f,
+                "the far side did not say hello within {} s",
+                after.as_secs()
+            ),
+            Self::NewDaemonsKeepDying { stderr, attempts } => write!(
+                f,
+                "a new daemon on {host} died {attempts} times in a row, each session lasting \
+                 under 30 s, so this one has stopped trying; {stderr}",
+                host = stderr.host,
+            ),
+            Self::SessionsDropped {
+                attempts,
+                cut_short: true,
+                ..
+            } => write!(
+                f,
+                "{FRAME_CUT_SHORT_SENTENCE}; stopped after {attempts} sessions in a row ended \
+                 this way"
+            ),
+            Self::SessionsDropped {
+                attempts,
+                cut_short: false,
+                far_side,
+            } => {
+                write!(
+                    f,
+                    "the daemon closed {attempts} sessions in a row before their first frame, \
+                     so this one has stopped trying"
+                )?;
+                far_side
+                    .as_ref()
+                    .map_or(Ok(()), |stderr| write!(f, "; {stderr}"))
+            }
         }
     }
 }
@@ -273,7 +445,14 @@ impl std::error::Error for AttachError {
             Self::Io(e) | Self::Terminal(e) => Some(e),
             Self::Transport(e) => Some(e),
             Self::SshSpawnFailed { source, .. } => Some(source),
-            Self::VersionMismatch { .. } | Self::Rejected(_) | Self::SshChildExited { .. } => None,
+            Self::VersionMismatch { .. }
+            | Self::Rejected(_)
+            | Self::SshChildExited { .. }
+            | Self::DaemonGone { .. }
+            | Self::ReconnectCancelled
+            | Self::ReconnectHelloTimedOut { .. }
+            | Self::NewDaemonsKeepDying { .. }
+            | Self::SessionsDropped { .. } => None,
         }
     }
 }
@@ -362,6 +541,21 @@ pub(crate) trait AttachPumpFrontend {
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
     fn size(&self) -> CellSize;
 
+    /// [`Self::present_messages`] with `text` standing on the bottom row, over what
+    /// the frames put there. A test's stub has no screen, so by default it only presents.
+    fn present_under_notice(
+        &mut self,
+        msgs: &[InstanceMessage],
+        _text: &str,
+    ) -> std::io::Result<()> {
+        self.present_messages(msgs)
+    }
+
+    /// Take a notice off the bottom row, leaving what the frames put there.
+    fn clear_notice(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// T M10.10 Day 3 step 5 Path β — paint an optimistic insert
     /// at the terminal's current cursor position. Used when the
     /// optimistic-apply orchestrator landed a `CrdtOp` AND the
@@ -402,6 +596,16 @@ impl AttachPumpFrontend for Frontend {
     fn size(&self) -> CellSize {
         Frontend::size(self)
     }
+    fn present_under_notice(
+        &mut self,
+        msgs: &[InstanceMessage],
+        text: &str,
+    ) -> std::io::Result<()> {
+        Frontend::present_under_notice(self, msgs, text)
+    }
+    fn clear_notice(&mut self) -> std::io::Result<()> {
+        Frontend::clear_notice(self)
+    }
     #[cfg(feature = "crdt")]
     fn paint_optimistic_insert(&mut self, c: char) -> std::io::Result<()> {
         Frontend::paint_optimistic_insert(self, c)
@@ -412,10 +616,136 @@ impl AttachPumpFrontend for Frontend {
     }
 }
 
+/// How long a new session of the local route waits for its `Hello`. A
+/// daemon that takes the connect and says nothing costs an attempt, not the
+/// terminal, whose keys nothing reads during a handshake.
+const LOCAL_RECONNECT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a notice stands whatever is typed under it: a user typing when a link
+/// drops is the likeliest to be at the keyboard, and at 5 keys a second it stood for
+/// 128 ms when any key took it off (review 1, ruled 2026-11-06). Keys reach the daemon
+/// under it, and it comes off at the first one after this.
+const NOTICE_FLOOR: Duration = Duration::from_secs(5);
+
+/// On the bottom row of a session that replaced a lost one, for [`NOTICE_FLOOR`] and
+/// until the next key: the view is fresh, so the user is told why the buffer changed.
+const NOTICE_FRESH_VIEW: &str = "[pmacs reconnected on a new view: the daemon closed the last one]";
+
+/// [`NOTICE_FRESH_VIEW`] when the last one ended with a frame cut short: the
+/// daemon's bound, in what a terminal's bottom row has room for.
+const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
+    "[pmacs reconnected on a new view: a frame did not arrive within 2 s]";
+
+/// [`NOTICE_FRESH_VIEW`] when the SSH route's `ssh` failed, which says nothing of
+/// the daemon: the bridge exits 0 when the daemon closes its socket.
+const NOTICE_FRESH_VIEW_LINK: &str = "[pmacs reconnected on a new view: the connection was lost]";
+
+/// On the bottom row of a session on a daemon `Hello` says for certain is not the
+/// last session's. The owner's words, ruled 2026-11-06: a modified file buffer's copy
+/// is what the next daemon offers, and `autosave.interval-ms` is how old it may be.
+const NOTICE_NEW_DAEMON: Notice = Notice {
+    wide: "[pmacs: new daemon; work not autosaved is gone; M-x recover-file]",
+    narrow: Some("[new daemon; work not autosaved is gone]"),
+};
+
+/// On the bottom row of a session on a daemon `Hello` cannot tell from the last
+/// session's. The owner's words, ruled 2026-11-06: a daemon read this way may hold
+/// everything, so this tells the user where to look and calls nothing gone.
+const NOTICE_MAYBE_NEW_DAEMON: Notice = Notice {
+    wide: "[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]",
+    narrow: Some("[this may be a new daemon]"),
+};
+
+/// What goes on a new session's bottom row, and what goes there on a pane too narrow
+/// for it, so a sentence is not cut before the clause that matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Notice {
+    wide: &'static str,
+    narrow: Option<&'static str>,
+}
+
+impl Notice {
+    /// A notice with one form, which a narrow pane cuts.
+    const fn plain(text: &'static str) -> Self {
+        Self {
+            wide: text,
+            narrow: None,
+        }
+    }
+
+    /// The form that fits a pane `cols` wide.
+    fn fitting(self, cols: u32) -> &'static str {
+        let fits = u32::try_from(self.wide.chars().count()).is_ok_and(|width| width <= cols);
+        match self.narrow {
+            Some(narrow) if !fits => narrow,
+            _ => self.wide,
+        }
+    }
+}
+
+/// What a route keeps between sessions, to say why a new one is a new view.
+#[derive(Debug, Default)]
+struct SessionMemory {
+    /// What the last session's `Hello` said of its daemon.
+    seen: Option<DaemonSeen>,
+    /// What the last session's own `Hello` read.
+    reading: Succession,
+    /// The strongest thing a `Hello` has said of a new daemon since a session on one
+    /// reached the first frame that puts it on screen. It outlasts a session lost
+    /// before that, whose successor's `Hello` is the new daemon's own.
+    succession: Succession,
+    /// Why the last session was lost.
+    why: Option<&'static str>,
+}
+
+impl SessionMemory {
+    /// A session's `Hello` said this.
+    fn heard(&mut self, hello: &Hello) {
+        self.heard_at(
+            hello.assigned_frontend_id,
+            hello.instance_identity.uptime_secs,
+            Instant::now(),
+        );
+    }
+
+    fn heard_at(&mut self, id: FrontendId, uptime_secs: u64, at: Instant) {
+        let seen = DaemonSeen::new(id, uptime_secs, at);
+        self.reading = self
+            .seen
+            .map_or(Succession::Same, |last| last.succeeded_by(&seen));
+        self.succession = self.succession.max(self.reading);
+        self.seen = Some(seen);
+    }
+
+    /// A session was lost, for the reason `why` says of it.
+    fn lost(&mut self, bootstrapped: bool, why: &'static str) {
+        if bootstrapped {
+            self.succession = Succession::Same;
+        }
+        self.why = Some(why);
+    }
+
+    /// How long since the last session's `Hello`: how long it lived, when it is lost.
+    fn session_lived(&self) -> Duration {
+        self.seen.map_or(Duration::ZERO, |seen| seen.age())
+    }
+
+    /// What the next session puts on its bottom row.
+    fn notice(&self) -> Option<Notice> {
+        match self.succession {
+            Succession::Certain => Some(NOTICE_NEW_DAEMON),
+            Succession::Maybe => Some(NOTICE_MAYBE_NEW_DAEMON),
+            Succession::Same => self.why.map(Notice::plain),
+        }
+    }
+}
+
 /// Connect to the daemon at `socket_path` and run the attach client.
 ///
-/// Returns when the daemon disconnects (clean detach, instance
-/// shutdown, version mismatch, etc.) or when the user presses F12.
+/// Returns when the session ends on purpose (F12, or the daemon's `Goodbye`),
+/// or when it cannot go on: the daemon is gone, or sessions keep ending before
+/// their first frame. A socket that ends with no `Goodbye` while the daemon is
+/// there is attached again, on a fresh view.
 // Owned `PathBuf` lets callers hand the result of
 // `resolve_socket_path` straight in; clippy's pedantic
 // pass-by-value is wrong for this entry point.
@@ -427,7 +757,56 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // raw mode engages. If the daemon refuses the attach (version
     // mismatch, malformed Hello, EOF), the error message reaches a
     // normal terminal — `Frontend::new` hasn't taken over yet.
-    let hello: Hello = read_message(&mut stream)?;
+    let hello = read_local_hello(&mut stream)?;
+    print_attach_info(&hello);
+    let mut memory = SessionMemory::default();
+    memory.heard(&hello);
+
+    let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
+    let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
+    write_attach_request(&mut stream, &hello, initial_size)?;
+
+    // Take over the terminal. Frontend's Drop tears it down.
+    let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
+
+    let io = build_local_socket_io(stream)?;
+    let result = run_local_sessions(
+        &socket_path,
+        io,
+        hello.assigned_frontend_id,
+        &mut frontend,
+        &mut memory,
+    );
+
+    // Frontend drops here; raw mode + alternate screen + mouse capture
+    // all torn down before we return, so what the caller prints of the
+    // result lands on the terminal the user is left with.
+    drop(frontend);
+
+    said_goodbye(result?)
+}
+
+/// What a daemon's `Goodbye` said, once the alternate screen is left and it can be read,
+/// where the pump could only have written it to the screen it was leaving. A refusal is
+/// an error, which ends the process saying so. A frontend's own quit (`Detached`) and
+/// its own `F12` (`None`) say nothing to whoever did them.
+fn said_goodbye(reason: Option<GoodbyeReason>) -> Result<(), AttachError> {
+    match reason {
+        None | Some(GoodbyeReason::Detached) => Ok(()),
+        Some(GoodbyeReason::ShuttingDown) => {
+            eprintln!(
+                "pmacs: instance disconnected: {:?}",
+                GoodbyeReason::ShuttingDown
+            );
+            Ok(())
+        }
+        Some(refused) => Err(AttachError::Rejected(refused)),
+    }
+}
+
+/// Read a daemon's `Hello` and check its version.
+fn read_local_hello(stream: &mut UnixStream) -> Result<Hello, AttachError> {
+    let hello: Hello = read_message(stream)?;
     // T M10.5: relaxed from strict equality to range membership per
     // `§sec:m10-backward-compat`. A v1.0 frontend accepts a Hello
     // from a v0.1 daemon (protocol_version=1) and downgrades its own
@@ -440,11 +819,15 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
             client: PROTOCOL_VERSION,
         });
     }
-    print_attach_info(&hello);
+    Ok(hello)
+}
 
-    let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
-    let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
-
+/// Answer `hello` with this frontend's `AttachRequest`.
+fn write_attach_request(
+    stream: &mut UnixStream,
+    hello: &Hello,
+    initial_size: CellSize,
+) -> Result<(), AttachError> {
     // T M10.5: match the server's protocol version so a v1.0 frontend
     // connecting to a v0.1 daemon advertises protocol_version=1 in
     // its AttachRequest (the v0.1 daemon's strict-equality check will
@@ -462,19 +845,103 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
         frontend_capabilities: build_capabilities(),
         initial_size,
     };
-    write_message(&mut stream, &req)?;
+    write_message(stream, &req)?;
+    Ok(())
+}
 
-    // Take over the terminal. Frontend's Drop tears it down.
-    let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
+/// The local route's sessions, one after another for as long as each is lost
+/// and the daemon is there.
+///
+/// The schedule starts again after a session that reached its first frame, and
+/// so does the count of those that did not, which [`HANDSHAKE_RETRY_CAP`]
+/// bounds so a daemon that drops every new session in its bootstrap holds
+/// nobody up for long and this route cannot spin. Unlike the SSH route's, a
+/// schedule here restarts: a loss is an event of its own on a local socket, not
+/// a network that may stay down, and it starts from a daemon known to be there.
+fn run_local_sessions(
+    socket_path: &std::path::Path,
+    first: AttachIo,
+    first_id: FrontendId,
+    frontend: &mut Frontend,
+    memory: &mut SessionMemory,
+) -> Result<Option<GoodbyeReason>, AttachError> {
+    let mut schedule = BackoffSchedule::new();
+    let mut unbootstrapped: u32 = 0;
+    let mut session = (first, first_id);
+    let mut cut_short;
+    loop {
+        let (io, id) = session;
+        let lost = match run_attach_pair(io, frontend, id, memory.notice())? {
+            PumpEnd::Over(reason) => return Ok(reason),
+            PumpEnd::Lost(lost) => lost,
+        };
+        memory.lost(
+            lost.bootstrapped,
+            if lost.cut_short {
+                NOTICE_FRESH_VIEW_CUT_SHORT
+            } else {
+                NOTICE_FRESH_VIEW
+            },
+        );
+        if lost.bootstrapped {
+            schedule.reset();
+            unbootstrapped = 0;
+        } else {
+            unbootstrapped = unbootstrapped.saturating_add(1);
+        }
+        cut_short = lost.cut_short;
+        // A loss is usually a stop, and a stop may have left the terminal cooked.
+        let _ = frontend.retake_terminal();
+        session = loop {
+            if unbootstrapped >= HANDSHAKE_RETRY_CAP {
+                return Err(AttachError::SessionsDropped {
+                    attempts: unbootstrapped,
+                    cut_short,
+                    far_side: None,
+                });
+            }
+            let delay = schedule.next_delay();
+            match sleep_with_countdown(Some(&mut *frontend), delay) {
+                SleepOutcome::Cancelled => return Ok(None),
+                SleepOutcome::Elapsed => {}
+            }
+            let _ = frontend.draw_status_overlay(banner_session_reconnect());
+            match connect_again(socket_path, frontend.size(), memory) {
+                Ok(next) => break next,
+                Err(
+                    error @ (AttachError::DaemonGone { .. } | AttachError::VersionMismatch { .. }),
+                ) => return Err(error),
+                Err(_) => unbootstrapped = unbootstrapped.saturating_add(1),
+            }
+        };
+    }
+}
 
-    let io = build_local_socket_io(stream)?;
-    let result = run_attach_pair(io, &mut frontend, hello.assigned_frontend_id);
-
-    // Frontend drops here; raw mode + alternate screen + mouse capture
-    // all torn down before we return.
-    drop(frontend);
-
-    result
+/// One new session on the local route's socket: its connect and handshake.
+fn connect_again(
+    socket_path: &std::path::Path,
+    size: CellSize,
+    memory: &mut SessionMemory,
+) -> Result<(AttachIo, FrontendId), AttachError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        use pmacs_protocol::{ConnectFailure, classify_connect_failure};
+        let found = match classify_connect_failure(socket_path, &error) {
+            ConnectFailure::Missing => "no socket is there",
+            ConnectFailure::Stale => "its socket refused the connection",
+            ConnectFailure::NotASocket => "what is there is not a socket",
+            ConnectFailure::Other | ConnectFailure::Inspect(_) => return AttachError::Io(error),
+        };
+        AttachError::DaemonGone {
+            socket: socket_path.to_path_buf(),
+            found,
+        }
+    })?;
+    stream.set_read_timeout(Some(LOCAL_RECONNECT_HELLO_TIMEOUT))?;
+    let hello = read_local_hello(&mut stream)?;
+    memory.heard(&hello);
+    stream.set_read_timeout(None)?;
+    write_attach_request(&mut stream, &hello, size)?;
+    Ok((build_local_socket_io(stream)?, hello.assigned_frontend_id))
 }
 
 /// Build an [`AttachIo`] for a connected `UnixStream`.
@@ -485,7 +952,6 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
 /// case the caller propagates the error before raw mode engages.
 fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error> {
     let reader = stream.try_clone()?;
-    reader.set_nonblocking(true)?;
     let kick_handle = stream.try_clone()?;
     let kicked = Arc::new(AtomicBool::new(false));
     let reader_kicked = Arc::clone(&kicked);
@@ -502,28 +968,35 @@ fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error>
     })
 }
 
-/// Non-blocking poll-based reader with a kick flag.
+/// A reader that waits in `poll` with a kick flag.
+///
+/// The socket stays blocking and is read only once `poll` says it holds
+/// something, so data is taken as it arrives. Until E10r this was a
+/// non-blocking read with a 10 ms sleep between tries, which had two
+/// costs: a frame larger than the socket's buffer arrived a bufferful per
+/// sleep, about 30 MB/s, so a healthy TUI held the daemon's dispatcher for
+/// 630 ms on a 16.5 MB frame where the GPU's reader took 5 ms; and
+/// `O_NONBLOCK` is shared across clones, so the writer was non-blocking
+/// too, and a paste larger than the socket's buffer failed with `EAGAIN`
+/// and ended the session.
 ///
 /// # Wake semantics
 ///
 /// This reader has two cooperating wake paths, only one of which is
 /// load-bearing:
 ///
-/// 1. **Atomic flag (correctness):** the reader runs a non-blocking
-///    poll loop with a 10ms sleep between iterations. After the kick
-///    sets `kicked`, the next loop iteration observes it and returns
-///    `Ok(0)`. Worst-case wake latency is one poll cycle (~10ms).
-///    This path is platform-independent and is the mechanism the
-///    caller relies on for correctness.
+/// 1. **Atomic flag (correctness):** `poll` waits at most 10 ms. After
+///    the kick sets `kicked`, the first wait that times out observes it
+///    and returns `Ok(0)`. Worst-case wake latency is one poll cycle
+///    (~10ms). This path is platform-independent and is the mechanism
+///    the caller relies on for correctness.
 ///
 /// 2. **`shutdown(Both)` on a sibling clone (best-effort speedup):**
-///    if the reader happens to be inside `self.stream.read()` when
-///    the kick fires, and the platform honors cross-clone shutdown
-///    wakes, the read returns `Ok(0)` immediately and the loop
-///    skips its sleep. This path is **not** load-bearing — Unix
-///    socket cross-clone shutdown semantics are not portably
-///    guaranteed, and any wake it provides is a bonus on top of
-///    path 1.
+///    if the platform honors cross-clone shutdown wakes, `poll` returns
+///    at once and the read returns `Ok(0)`. This path is **not**
+///    load-bearing — Unix socket cross-clone shutdown semantics are not
+///    portably guaranteed, and any wake it provides is a bonus on top
+///    of path 1.
 ///
 /// In other words: the atomic flag wakes the reader; the shutdown
 /// just shaves up to ~10ms off the wake when the platform plays
@@ -538,19 +1011,15 @@ struct KickAwareUnixReader {
 impl Read for KickAwareUnixReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            match self.stream.read(buf) {
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
+            let mut fds = [PollFd::new(self.stream.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut fds, PollTimeout::from(10u16)) {
+                Ok(0) | Err(Errno::EINTR) => {
                     if self.kicked.load(Ordering::SeqCst) {
                         return Ok(0);
                     }
-                    thread::sleep(Duration::from_millis(10));
                 }
-                other => return other,
+                Ok(_) => return self.stream.read(buf),
+                Err(errno) => return Err(errno.into()),
             }
         }
     }
@@ -630,6 +1099,29 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
+/// How an attach pump ended, when it did not end on an error of its own.
+#[derive(Debug)]
+pub(crate) enum PumpEnd {
+    /// The session ended on purpose: the daemon's `Goodbye`, with its reason, or F12.
+    Over(Option<GoodbyeReason>),
+    /// The socket ended with no `Goodbye`.
+    Lost(LostSession),
+}
+
+/// What a lost session reached, for the loop deciding what comes next.
+#[derive(Debug)]
+pub(crate) struct LostSession {
+    /// Whether its first frame arrived. A grid session's bootstrap is its
+    /// snapshots and nothing marks its end, so the first `CellDelta`, which
+    /// the first tick after the bootstrap writes, is what says so.
+    pub bootstrapped: bool,
+    /// The write that found the socket gone, when one did before the reader
+    /// saw its end: a key typed while the frontend was stopped, say.
+    pub write_error: Option<AttachError>,
+    /// Whether the reader's last read ended partway through a frame.
+    pub cut_short: bool,
+}
+
 /// Bidirectional pump: forward local input to the writer, apply
 /// instance messages to the terminal.
 ///
@@ -647,6 +1139,10 @@ fn format_uptime(secs: u64) -> String {
 /// while pump errors happen behind raw mode.
 ///
 /// # Tear-down contract
+///
+/// `notice`, if any, goes on the bottom row over the session's first frame. It stands
+/// [`NOTICE_FLOOR`] whatever is typed, painted again over a frame that takes that row,
+/// and comes off at the first key after that, what the frames left there coming back.
 ///
 /// On any exit path — clean Goodbye, reader EOF, F12 detach, IO
 /// error, or terminal error — `io.kick` fires and `reader_handle`
@@ -667,7 +1163,11 @@ pub(crate) fn run_attach_pair(
     io: AttachIo,
     frontend: &mut dyn AttachPumpFrontend,
     assigned_id: FrontendId,
-) -> Result<(), AttachError> {
+    notice: Option<Notice>,
+) -> Result<PumpEnd, AttachError> {
+    let mut notice = notice;
+    let mut standing: Option<(Notice, Instant)> = None;
+    let mut bootstrapped = false;
     let AttachIo {
         reader,
         mut writer,
@@ -700,7 +1200,18 @@ pub(crate) fn run_attach_pair(
     // through to `kick()` and `reader_handle.join()` below. Without
     // this wrapping a writer-side IO error inside the loop would skip
     // the wind-down.
-    let result: Result<(), AttachError> = (|| {
+    let result: Result<PumpEnd, AttachError> = (|| {
+        // A write that fails on the socket is the same loss as its EOF, and may
+        // come first. Anything else a write says (a paste past the frame) is
+        // not, and ends the session as it says.
+        let lost_or_failed = |error: AttachError, bootstrapped: bool| match error {
+            AttachError::Transport(TransportError::Io(_)) => Ok(PumpEnd::Lost(LostSession {
+                bootstrapped,
+                write_error: Some(error),
+                cut_short: false,
+            })),
+            other => Err(other),
+        };
         loop {
             // Drain instance messages. Goodbye exits immediately;
             // BufferSnapshot routes to the mirror; other messages are
@@ -805,20 +1316,45 @@ pub(crate) fn run_attach_pair(
                     }
                 }
             }
-            if !batch.is_empty()
-                && let Err(e) = frontend.present_messages(&batch)
-            {
-                return Err(AttachError::Terminal(e));
+            if !batch.is_empty() {
+                // The session's first frame puts up the notice, and a frame that takes
+                // the bottom row while it stands has it painted again.
+                let framed = batch
+                    .iter()
+                    .any(|message| matches!(message, InstanceMessage::CellDelta { .. }));
+                let mut over = if framed {
+                    standing.filter(|_| takes_bottom_row(&batch, frontend.size()))
+                } else {
+                    None
+                };
+                if framed {
+                    bootstrapped = true;
+                    if let Some(first) = notice.take() {
+                        let shown = (first, Instant::now());
+                        standing = Some(shown);
+                        over = Some(shown);
+                    }
+                }
+                let presented = match over {
+                    Some((up, _)) => {
+                        let text = up.fitting(frontend.size().cols);
+                        frontend.present_under_notice(&batch, text)
+                    }
+                    None => frontend.present_messages(&batch),
+                };
+                if let Err(e) = presented {
+                    return Err(AttachError::Terminal(e));
+                }
             }
             if let Some(reason) = goodbye {
-                // Stderr buffered behind raw mode; surfaces after
-                // Frontend's Drop runs.
-                eprintln!("pmacs: instance disconnected: {reason:?}");
-                return Ok(());
+                return Ok(PumpEnd::Over(Some(reason)));
             }
             if reader_eof {
-                eprintln!("pmacs: instance closed connection");
-                return Ok(());
+                return Ok(PumpEnd::Lost(LostSession {
+                    bootstrapped,
+                    write_error: None,
+                    cut_short: false,
+                }));
             }
 
             let event = match frontend.poll_event(Duration::from_millis(50)) {
@@ -829,9 +1365,16 @@ pub(crate) fn run_attach_pair(
                 continue;
             };
 
+            if matches!(ev, Event::Key(_))
+                && standing.is_some_and(|(_, since)| since.elapsed() >= NOTICE_FLOOR)
+            {
+                let _ = frontend.clear_notice();
+                standing = None;
+            }
+
             if is_detach_key(&ev) {
                 let _ = write_message(&mut writer, &FrontendEvent::Detach(assigned_id));
-                return Ok(());
+                return Ok(PumpEnd::Over(None));
             }
 
             // T M10.10 Day 3 step 3b — text-input optimistic-apply
@@ -896,8 +1439,7 @@ pub(crate) fn run_attach_pair(
                         pmacs_key,
                     );
                     if let Err(e) = write_message(&mut writer, &frontend_event) {
-                        eprintln!("pmacs: write keystroke failed: {e}");
-                        return Err(AttachError::from(e));
+                        return lost_or_failed(AttachError::from(e), bootstrapped);
                     }
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command
@@ -957,9 +1499,7 @@ pub(crate) fn run_attach_pair(
             if !optimistic_handled
                 && let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size())
             {
-                // Likely a broken pipe — instance went away.
-                eprintln!("pmacs: {e}");
-                return Err(e);
+                return lost_or_failed(e, bootstrapped);
             }
             // Post-audit-round-6 F30 — `forward_event` (success
             // path) may write a Mouse / Paste / Resize /
@@ -1003,9 +1543,26 @@ pub(crate) fn run_attach_pair(
     // before kick has any effect.
     drop(writer);
     kick();
-    let _ = reader_handle.join();
+    let cut_short = join_within(reader_handle, READER_JOIN_DEADLINE).unwrap_or(false);
 
-    result
+    result.map(|end| match end {
+        PumpEnd::Lost(lost) => PumpEnd::Lost(LostSession { cut_short, ..lost }),
+        over @ PumpEnd::Over(_) => over,
+    })
+}
+
+/// Whether a batch paints on a terminal's bottom row, as a resync always may.
+fn takes_bottom_row(batch: &[InstanceMessage], size: CellSize) -> bool {
+    let bottom = size.rows.saturating_sub(1);
+    batch.iter().any(|message| match message {
+        InstanceMessage::CellDelta { spans, full_grid } => {
+            *full_grid
+                || spans
+                    .iter()
+                    .any(|span| span.start.row == bottom && !span.cells.is_empty())
+        }
+        _ => false,
+    })
 }
 
 /// F12 is the v0.1 detach key. Any modifier combination triggers
@@ -1084,16 +1641,20 @@ fn forward_event<W: Write>(
 // Generic over any `Read + Send` so the same loop drives a
 // `UnixStream` clone (local-socket transport) or a `ChildStdout`
 // (SSH transport, M5.7e) without per-transport branching.
+//
+// Returns whether the socket ended partway through a frame, which the channel's
+// close cannot say.
 #[allow(clippy::needless_pass_by_value)]
-fn run_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<InstanceMessage>) {
+fn run_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<InstanceMessage>) -> bool {
     loop {
         match read_message::<InstanceMessage>(&mut reader) {
             Ok(msg) => {
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
             }
-            Err(_) => return,
+            Err(TransportError::CutShort) => return true,
+            Err(_) => return false,
         }
     }
 }
@@ -1419,18 +1980,36 @@ fn spawn_stderr_tee(
 ///
 /// Per the kick contract, this is best-effort: if SIGTERM itself
 /// fails (ESRCH because the child already exited, EPERM in some
-/// container scenarios), the error is dropped. The reader thread
-/// will exit either way (cascade or signal).
-fn ssh_kick(child_pid: u32) -> Box<dyn FnOnce() + Send> {
+/// container scenarios), the error is dropped. A child that outlasts it has a
+/// SIGKILL [`SSH_KILL_AFTER_TERM`] later, and `reaped` says it is gone before either,
+/// so neither reaches a pid that may be another process's by then. The reader thread
+/// ends by the cascade or the signal, or is left behind at [`READER_JOIN_DEADLINE`].
+fn ssh_kick(child_pid: u32, reaped: Arc<AtomicBool>) -> Box<dyn FnOnce() + Send> {
     Box::new(move || {
         thread::spawn(move || {
-            thread::sleep(SSH_KICK_WATCHDOG);
+            let reaped_within = |within: Duration| {
+                let deadline = Instant::now() + within;
+                while Instant::now() < deadline {
+                    if reaped.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                reaped.load(Ordering::SeqCst)
+            };
             // Cast to nix's `Pid` (an `i32` newtype). On Linux the
             // PID space fits in `i32`; the cast is lossless for any
             // real process ID.
             #[allow(clippy::cast_possible_wrap)]
             let pid = nix::unistd::Pid::from_raw(child_pid as i32);
+            if reaped_within(SSH_KICK_WATCHDOG) {
+                return;
+            }
             let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+            if reaped_within(SSH_KILL_AFTER_TERM) {
+                return;
+            }
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
         });
     })
 }
@@ -1477,9 +2056,12 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     let mut frontend_slot: Option<Frontend> = None;
     let mut backoff = BackoffSchedule::new();
     let mut handshake_attempts: u32 = 0;
+    let mut unbootstrapped: u32 = 0;
+    let mut memory = SessionMemory::default();
+    let mut dying = DyingDaemons::default();
     let mut iteration: u32 = 0;
 
-    let result: Result<(), AttachError> = loop {
+    let result: Result<Option<GoodbyeReason>, AttachError> = loop {
         // Pre-attempt overlay (skipped on the very first iteration —
         // no Frontend yet, and "reconnecting" would lie about state).
         // The chosen banner depends on whether we're reconnecting
@@ -1487,8 +2069,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
         // first handshake (Frontend never came up).
         if iteration > 0 {
             if let Some(f) = frontend_slot.as_mut() {
-                let banner = banner_session_reconnect();
-                let _ = f.draw_status_overlay(banner);
+                let _ = f.draw_status_overlay(banner_remote_reconnect());
             } else {
                 // Slot is None and we're past iteration 0 — only
                 // reachable through `ReconnectHandshake`. Show the
@@ -1502,30 +2083,60 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
         }
 
         let initial_handshake_complete = frontend_slot.is_some();
-        let verdict = attempt_session(&mut frontend_slot, &target, initial_handshake_complete);
+        let mut ended = SessionEnded::default();
+        let verdict = attempt_session(
+            &mut frontend_slot,
+            &target,
+            initial_handshake_complete,
+            &mut ended,
+            &mut memory,
+        );
+        let loss = ended.loss;
+        let mut keeps_dying = false;
+        if let Some(lost) = loss {
+            memory.lost(lost.bootstrapped, lost.notice(&verdict));
+            keeps_dying = dying.session_lost(memory.reading, memory.session_lived());
+        }
+        let verdict = match remote_verdict(verdict, loss, &mut unbootstrapped, &target) {
+            ReconnectVerdict::Reconnect { .. } if keeps_dying => {
+                ReconnectVerdict::ExitProtocolError {
+                    error: AttachError::NewDaemonsKeepDying {
+                        stderr: FarSideStderr::of(&target),
+                        attempts: dying.in_a_row(),
+                    },
+                }
+            }
+            verdict => verdict,
+        };
 
         match verdict {
             ReconnectVerdict::ExitClean => {
                 if let Some(f) = frontend_slot.as_mut() {
                     let _ = f.clear_status_overlay();
                 }
-                break Ok(());
+                break Ok(ended.goodbye);
             }
             ReconnectVerdict::ExitProtocolError { error }
             | ReconnectVerdict::ExitPolicy { error } => {
                 break Err(error);
             }
             ReconnectVerdict::Reconnect { error: _last_error } => {
-                // Mid-session disconnect: indefinite retry. The
-                // backoff schedule is intentionally NOT reset between
-                // failed attempts — it walks the curve and plateaus
-                // at 30s, matching mosh. Reset on a sustained
-                // re-pump is a v0.3 refinement (we'd need a
-                // "pump_ran_for_at_least_N_seconds" signal that
-                // doesn't exist yet).
+                // Mid-session disconnect: indefinite retry. The backoff
+                // schedule walks the curve across failed attempts and
+                // plateaus at 30s, matching mosh, and starts again after a
+                // session that reached its first frame, as the local route's
+                // does: that loss is an event of its own.
+                if loss.is_some_and(|lost| lost.bootstrapped) {
+                    backoff.reset();
+                }
+                // A loss is usually a stop, and a stop may have left the
+                // terminal cooked, as on the local route.
+                if let (Some(_), Some(f)) = (loss, frontend_slot.as_mut()) {
+                    let _ = f.retake_terminal();
+                }
                 let delay = backoff.next_delay();
                 match sleep_with_countdown(frontend_slot.as_mut(), delay) {
-                    SleepOutcome::Cancelled => break Ok(()),
+                    SleepOutcome::Cancelled => break Ok(None),
                     SleepOutcome::Elapsed => {}
                 }
             }
@@ -1552,7 +2163,7 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
                 }
                 let delay = backoff.next_delay();
                 match sleep_with_countdown(frontend_slot.as_mut(), delay) {
-                    SleepOutcome::Cancelled => break Ok(()),
+                    SleepOutcome::Cancelled => break Ok(None),
                     SleepOutcome::Elapsed => {}
                 }
             }
@@ -1564,7 +2175,89 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
     // Tear down raw mode (if engaged) before main.rs's eprintln.
     drop(frontend_slot);
 
-    result
+    said_goodbye(result?)
+}
+
+/// How a session that reached its pump ended, for the loop deciding what comes next.
+#[derive(Debug, Default)]
+struct SessionEnded {
+    /// It was lost, and what it had reached; `None` for one that never got as far, and
+    /// for one that ended on purpose.
+    loss: Option<SessionLoss>,
+    /// What its daemon's `Goodbye` said.
+    goodbye: Option<GoodbyeReason>,
+}
+
+/// What a session that got as far as its pump and lost its channel came to, for
+/// [`remote_verdict`]; `None` for one that never did, such as a network that is
+/// down, and for one that ended on purpose.
+#[derive(Clone, Copy, Debug)]
+struct SessionLoss {
+    /// Whether its first frame arrived.
+    bootstrapped: bool,
+    /// Whether the channel ended partway through a frame.
+    cut_short: bool,
+}
+
+impl SessionLoss {
+    /// What the next session says of this one, given `verdict`, the attempt's
+    /// own: the bridge's clean exit is the daemon closing its socket, and
+    /// anything else an `ssh` that failed.
+    fn notice(self, verdict: &ReconnectVerdict) -> &'static str {
+        if self.cut_short {
+            NOTICE_FRESH_VIEW_CUT_SHORT
+        } else if matches!(verdict, ReconnectVerdict::ExitClean) {
+            NOTICE_FRESH_VIEW
+        } else {
+            NOTICE_FRESH_VIEW_LINK
+        }
+    }
+}
+
+/// E10r, the owner's ruling of 2026-11-06 --- what a lost session makes of the
+/// SSH route's verdict, by what each failure costs the other frontends.
+///
+/// The real bridge exits 0 when the daemon closes its socket
+/// (`run_bridge_connected`), so a session that was lost and an end the frontend
+/// meant read alike by the exit, and only `loss` tells them: `None` is a `Goodbye`
+/// or F12, which end the route, or a daemon never reached, which costs nobody
+/// anything and keeps backing off with no limit. A session that had its first
+/// frame and was then lost has paid its one hold-up, so it reconnects, whatever
+/// its end. A session cut before its first frame, a link past the floor, costs the
+/// others the bound on every try, and backoff alone would be 2 s in every 32 with
+/// no end, so sessions in a row ending that way stop at [`HANDSHAKE_RETRY_CAP`], and one
+/// that ended at a frame's boundary, as a daemon that died does, says where its stderr is.
+fn remote_verdict(
+    verdict: ReconnectVerdict,
+    loss: Option<SessionLoss>,
+    unbootstrapped: &mut u32,
+    target: &AttachTarget,
+) -> ReconnectVerdict {
+    let Some(loss) = loss else {
+        return verdict;
+    };
+    if loss.bootstrapped {
+        *unbootstrapped = 0;
+    } else {
+        *unbootstrapped = unbootstrapped.saturating_add(1);
+    }
+    match verdict {
+        permanent @ (ReconnectVerdict::ExitProtocolError { .. }
+        | ReconnectVerdict::ExitPolicy { .. }) => permanent,
+        _ if *unbootstrapped >= HANDSHAKE_RETRY_CAP => ReconnectVerdict::ExitProtocolError {
+            error: AttachError::SessionsDropped {
+                attempts: *unbootstrapped,
+                cut_short: loss.cut_short,
+                far_side: (!loss.cut_short).then(|| FarSideStderr::of(target)),
+            },
+        },
+        ReconnectVerdict::ExitClean => ReconnectVerdict::Reconnect {
+            error: AttachError::Transport(TransportError::Eof),
+        },
+        ReconnectVerdict::Reconnect { error } | ReconnectVerdict::ReconnectHandshake { error } => {
+            ReconnectVerdict::Reconnect { error }
+        }
+    }
 }
 
 /// Banner painted while a session-reconnect attempt is in flight.
@@ -1574,6 +2267,12 @@ pub fn run_attach_ssh(target: AttachTarget) -> Result<(), AttachError> {
 /// No counter — session reconnects are unbounded.
 fn banner_session_reconnect() -> &'static str {
     "[pmacs reconnecting...]"
+}
+
+/// [`banner_session_reconnect`] on the SSH route, whose wait lends the terminal, so
+/// `C-c` reaches it as a signal and `F12` reaches nothing.
+fn banner_remote_reconnect() -> &'static str {
+    "[pmacs reconnecting... Ctrl-C to exit]"
 }
 
 /// Banner painted while a handshake-reconnect attempt is in flight.
@@ -1712,8 +2411,10 @@ fn attempt_session(
     frontend_slot: &mut Option<Frontend>,
     target: &AttachTarget,
     initial_handshake_complete: bool,
+    ended: &mut SessionEnded,
+    memory: &mut SessionMemory,
 ) -> ReconnectVerdict {
-    let raw_result = run_one_session(frontend_slot, target);
+    let raw_result = run_one_session(frontend_slot, target, ended, memory);
     match raw_result {
         Ok(()) => ReconnectVerdict::ExitClean,
         Err(error) => classify_for_reconnect(error, initial_handshake_complete),
@@ -1793,46 +2494,168 @@ fn spawn_hello_watchdog() -> Arc<AtomicBool> {
 fn run_pump_and_reap(
     mut child: Child,
     child_stdin: std::process::ChildStdin,
-    protocol_reader: Box<dyn Read + Send>,
-    stderr_handle: thread::JoinHandle<()>,
-    stderr_tail: &Arc<Mutex<VecDeque<u8>>>,
+    (protocol_reader, stderr_handle, stderr_tail): ProtocolChannel,
     frontend: &mut Frontend,
     assigned_frontend_id: FrontendId,
+    ended: &mut SessionEnded,
+    notice: Option<Notice>,
 ) -> Result<(), AttachError> {
     let pid = child.id();
+    let reaped = Arc::new(AtomicBool::new(false));
     let io = AttachIo {
         reader: protocol_reader,
         writer: Box::new(child_stdin),
-        kick: ssh_kick(pid),
+        kick: ssh_kick(pid, Arc::clone(&reaped)),
     };
-    let pump_result = run_attach_pair(io, frontend, assigned_frontend_id);
+    let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, notice);
+    let over = matches!(pump_end, Ok(PumpEnd::Over(_)));
+    let pump_result = pump_end.and_then(|end| match end {
+        PumpEnd::Over(reason) => {
+            ended.goodbye = reason;
+            Ok(())
+        }
+        PumpEnd::Lost(lost) => {
+            ended.loss = Some(SessionLoss {
+                bootstrapped: lost.bootstrapped,
+                cut_short: lost.cut_short,
+            });
+            lost.write_error.map_or(Ok(()), Err)
+        }
+    });
     attach_debug(format!(
         "attach pump exited: {:?}",
         pump_result.as_ref().err()
     ));
+    // The kick's SIGKILL bounds this wait, the child being this process's own.
     let exit_status = child.wait().ok();
-    let _ = stderr_handle.join();
-    let stderr_text = drain_stderr_tail(stderr_tail);
+    reaped.store(true, Ordering::SeqCst);
+    let _ = join_within(stderr_handle, SSH_TERM_GRACE);
+    // A session ended on purpose has ended, whatever `ssh` says after it: its exit is
+    // read and ignored, since an `ssh` slower to leave than the kick's watchdog exits
+    // on its SIGTERM, and this does not return before it does.
+    if over {
+        return Ok(());
+    }
+    let stderr_text = drain_stderr_tail(&stderr_tail);
     classify_ssh_exit(pump_result, exit_status, stderr_text)
 }
 
-/// Body of [`attempt_session`] expressed in raw `AttachError` so the
-/// caller can fold the result through [`classify_for_reconnect`].
-/// Splitting this out keeps the IO path linear and tests-friendly:
-/// `attempt_session` is just classify + dispatch.
-// The protocol-channel, Hello-watchdog, and pump-and-reap phases are
-// already factored out (`open_protocol_channel`, `spawn_hello_watchdog`,
-// `run_pump_and_reap`). What remains is a linear Hello/AttachRequest
-// handshake whose several early-return error paths each need ownership
-// of `child` + the stderr handles to tear down via
-// `handshake_error_with_child`; extracting it further would fragment
-// that error-ownership flow rather than clarify it. Same precedent as
-// the `#[allow(clippy::too_many_lines)]` on `run_attach_pair` above.
-#[allow(clippy::too_many_lines)]
-fn run_one_session(
-    frontend_slot: &mut Option<Frontend>,
+/// A session's `ssh`, its channels, and the `Hello` it said.
+struct OpenSession {
+    child: Child,
+    child_stdin: std::process::ChildStdin,
+    channel: ProtocolChannel,
+    hello: Hello,
+}
+
+/// What `C-c` and `C-\` do while a reconnect waits for its `Hello`: with the terminal
+/// lent they are signals, to this process and to `ssh` beside it. The handlers are
+/// installed once and stay, so outside a wait they take the default action, as a signal
+/// from elsewhere did before this existed; raw mode raises none from the keyboard.
+struct HelloWaitSignals {
+    pressed: Arc<AtomicBool>,
+    outside_a_wait: Arc<AtomicBool>,
+}
+
+impl HelloWaitSignals {
+    /// The signals, armed for one wait.
+    fn armed() -> std::io::Result<&'static Self> {
+        use signal_hook::consts::{SIGINT, SIGQUIT};
+        use signal_hook::flag::{register, register_conditional_default};
+        static SIGNALS: OnceLock<Result<HelloWaitSignals, std::io::ErrorKind>> = OnceLock::new();
+        let signals = SIGNALS.get_or_init(|| {
+            let signals = Self {
+                pressed: Arc::new(AtomicBool::new(false)),
+                outside_a_wait: Arc::new(AtomicBool::new(true)),
+            };
+            for signal in [SIGINT, SIGQUIT] {
+                register_conditional_default(signal, Arc::clone(&signals.outside_a_wait))
+                    .and_then(|_| register(signal, Arc::clone(&signals.pressed)))
+                    .map_err(|error| error.kind())?;
+            }
+            Ok(signals)
+        });
+        let signals = signals
+            .as_ref()
+            .map_err(|kind| std::io::Error::from(*kind))?;
+        signals.pressed.store(false, Ordering::SeqCst);
+        signals.outside_a_wait.store(false, Ordering::SeqCst);
+        Ok(signals)
+    }
+
+    fn pressed(&self) -> bool {
+        self.pressed.load(Ordering::SeqCst)
+    }
+
+    /// The wait is over. Whether one was pressed in it.
+    fn disarm(&self) -> bool {
+        self.outside_a_wait.store(true, Ordering::SeqCst);
+        self.pressed()
+    }
+}
+
+/// How a reconnect's wait for `Hello` came out.
+enum HelloWait {
+    Heard(Hello, Box<dyn Read + Send>),
+    Failed(TransportError),
+    Cancelled,
+    TimedOut(Duration),
+}
+
+/// The deadline, or what a test set in its place.
+fn reconnect_hello_deadline() -> Duration {
+    std::env::var(PMACS_TEST_RECONNECT_HELLO_MS)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(RECONNECT_HELLO_DEADLINE, Duration::from_millis)
+}
+
+/// Wait for a reconnect's `Hello`, reading no key: the terminal is lent, and a byte
+/// taken from it could be a passphrase's. The read is on a thread of its own, which is
+/// left behind if it never returns, since something `ssh` started may hold the pipe.
+fn wait_for_hello(mut reader: Box<dyn Read + Send>, signals: &HelloWaitSignals) -> HelloWait {
+    const TICK: Duration = Duration::from_millis(20);
+    let after = reconnect_hello_deadline();
+    let deadline = Instant::now() + after;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let said = read_message::<Hello>(&mut reader);
+        let _ = tx.send((said, reader));
+    });
+    loop {
+        if signals.pressed() {
+            return HelloWait::Cancelled;
+        }
+        match rx.recv_timeout(TICK) {
+            Ok((Ok(hello), reader)) => return HelloWait::Heard(hello, reader),
+            Ok((Err(error), _)) => {
+                // `ssh` dying of the same `C-c` may be heard first.
+                thread::sleep(TICK);
+                return if signals.pressed() {
+                    HelloWait::Cancelled
+                } else {
+                    HelloWait::Failed(error)
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return HelloWait::TimedOut(after);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return HelloWait::Failed(TransportError::Eof);
+            }
+        }
+    }
+}
+
+/// Spawn `ssh` and hear its `Hello`. The first attempt (`signals` is `None`) reads it on
+/// a cooked terminal, where `C-c` ends the process and a failure reaches the user
+/// directly. A reconnect has lent the terminal, and waits with a deadline.
+fn open_session(
     target: &AttachTarget,
-) -> Result<(), AttachError> {
+    signals: Option<&HelloWaitSignals>,
+) -> Result<OpenSession, AttachError> {
     let mut cmd = build_ssh_command(target).expect("target shape pre-validated by caller");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1850,7 +2673,7 @@ fn run_one_session(
         .stdout
         .take()
         .expect("Stdio::piped on stdout guarantees a handle");
-    let mut child_stdin = child
+    let child_stdin = child
         .stdin
         .take()
         .expect("Stdio::piped on stdin guarantees a handle");
@@ -1864,35 +2687,102 @@ fn run_one_session(
         child_stdout,
         child_stderr,
         protocol_over_stderr,
-        frontend_slot.is_none(),
+        signals.is_none(),
     );
 
+    attach_debug("waiting for Hello from remote daemon bridge");
+    let hello_wait_done = spawn_hello_watchdog();
+    let heard = match signals {
+        None => read_message(&mut protocol_reader)
+            .map_err(AttachError::from)
+            .map(|hello: Hello| (hello, protocol_reader)),
+        Some(signals) => match wait_for_hello(protocol_reader, signals) {
+            HelloWait::Heard(hello, reader) => Ok((hello, reader)),
+            HelloWait::Failed(error) => Err(error.into()),
+            HelloWait::Cancelled => Err(AttachError::ReconnectCancelled),
+            HelloWait::TimedOut(after) => Err(AttachError::ReconnectHelloTimedOut { after }),
+        },
+    };
+    hello_wait_done.store(true, Ordering::SeqCst);
+    let (hello, protocol_reader) = match heard {
+        Ok(heard) => heard,
+        Err(error) => {
+            attach_debug(format!("failed reading Hello: {error}"));
+            return Err(handshake_error_with_child(
+                child,
+                stderr_handle,
+                stderr_tail,
+                error,
+            ));
+        }
+    };
+    attach_debug(format!(
+        "received Hello: protocol_version={}, assigned_frontend_id={}",
+        hello.protocol_version, hello.assigned_frontend_id.0
+    ));
+    Ok(OpenSession {
+        child,
+        child_stdin,
+        channel: (protocol_reader, stderr_handle, stderr_tail),
+        hello,
+    })
+}
+
+/// [`open_session`] on a reconnect: the terminal lent for the wait and taken back after
+/// it, whatever came of it, so the schedule's wait reads its `C-c` from a raw terminal.
+fn reopen_session(
+    frontend: &mut Frontend,
+    target: &AttachTarget,
+) -> Result<OpenSession, AttachError> {
+    let signals = HelloWaitSignals::armed().map_err(AttachError::Terminal)?;
+    if let Err(error) = frontend.lend_terminal() {
+        signals.disarm();
+        return Err(AttachError::Terminal(error));
+    }
+    let opened = open_session(target, Some(signals));
+    let back = frontend.take_terminal_back();
+    let pressed = signals.disarm();
+    let opened = match (opened, pressed) {
+        // Pressed as the `Hello` arrived.
+        (Ok(open), true) => {
+            let (_, stderr_handle, stderr_tail) = open.channel;
+            Err(handshake_error_with_child(
+                open.child,
+                stderr_handle,
+                stderr_tail,
+                AttachError::ReconnectCancelled,
+            ))
+        }
+        (opened, _) => opened,
+    };
+    back.map_err(AttachError::Terminal).and(opened)
+}
+
+/// Body of [`attempt_session`] expressed in raw `AttachError` so the
+/// caller can fold the result through [`classify_for_reconnect`].
+/// Splitting this out keeps the IO path linear and tests-friendly:
+/// `attempt_session` is just classify + dispatch.
+fn run_one_session(
+    frontend_slot: &mut Option<Frontend>,
+    target: &AttachTarget,
+    ended: &mut SessionEnded,
+    memory: &mut SessionMemory,
+) -> Result<(), AttachError> {
     // Hello / AttachRequest handshake. On the FIRST attempt
     // (`frontend_slot` is `None`) raw mode is not engaged yet, so
     // failures here reach a cooked terminal via main.rs's eprintln.
     // On reconnect (`Some`) the Frontend is up and the M5.8c
     // overlay communicates state; handshake errors here are bubbled
     // up so the M5.8d loop can decide whether to retry.
-    attach_debug("waiting for Hello from remote daemon bridge");
-    let hello_wait_done = spawn_hello_watchdog();
-    let hello: Hello = match read_message(&mut protocol_reader) {
-        Ok(h) => h,
-        Err(e) => {
-            hello_wait_done.store(true, Ordering::SeqCst);
-            attach_debug(format!("failed reading Hello: {e}"));
-            return Err(handshake_error_with_child(
-                child,
-                stderr_handle,
-                stderr_tail,
-                e.into(),
-            ));
-        }
+    let OpenSession {
+        child,
+        mut child_stdin,
+        channel: (protocol_reader, stderr_handle, stderr_tail),
+        hello,
+    } = match frontend_slot.as_mut() {
+        None => open_session(target, None)?,
+        Some(frontend) => reopen_session(frontend, target)?,
     };
-    hello_wait_done.store(true, Ordering::SeqCst);
-    attach_debug(format!(
-        "received Hello: protocol_version={}, assigned_frontend_id={}",
-        hello.protocol_version, hello.assigned_frontend_id.0
-    ));
     // T M10.5: relaxed to range membership per
     // `§sec:m10-backward-compat`. Symmetric with the local-socket
     // attach path above.
@@ -1907,6 +2797,8 @@ fn run_one_session(
             },
         ));
     }
+
+    memory.heard(&hello);
 
     // Determine initial_size. On reconnect, use the Frontend's
     // already-known size (it tracks resizes). On first attempt, query
@@ -1979,11 +2871,11 @@ fn run_one_session(
     run_pump_and_reap(
         child,
         child_stdin,
-        protocol_reader,
-        stderr_handle,
-        &stderr_tail,
+        (protocol_reader, stderr_handle, stderr_tail),
         frontend,
         hello.assigned_frontend_id,
+        ended,
+        memory.notice(),
     )
 }
 
@@ -1998,16 +2890,34 @@ fn handshake_error_with_child(
     original_error: AttachError,
 ) -> AttachError {
     // Best-effort tear-down of the child. SIGTERM unsticks any read
-    // it might be doing on its end of our broken handshake; wait
-    // reaps. Errors are ignored — if the child has already exited
-    // (e.g., remote `pmacs` not on PATH), `kill` returns ESRCH and
-    // we move on.
+    // it might be doing on its end of our broken handshake, and one that
+    // outlasts it has a SIGKILL. Errors are ignored — if the child has
+    // already exited (e.g., remote `pmacs` not on PATH), `kill` returns
+    // ESRCH and we move on. Something it started may hold its stderr open
+    // past it, so the tee is not waited for without a limit.
     #[allow(clippy::cast_possible_wrap)]
     let pid = nix::unistd::Pid::from_raw(child.id() as i32);
     let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+    let deadline = Instant::now() + SSH_TERM_GRACE;
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let _ = child.kill();
     let _ = child.wait();
-    let _ = stderr_handle.join();
+    let _ = join_within(stderr_handle, SSH_TERM_GRACE);
     original_error
+}
+
+/// Join `handle` if it finishes within `within`, and leave it running if it does not.
+fn join_within<T>(handle: thread::JoinHandle<T>, within: Duration) -> Option<T> {
+    let deadline = Instant::now() + within;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    handle.join().ok()
 }
 
 /// Drain the stderr tail ring buffer into an owned `String`,
@@ -2240,7 +3150,7 @@ mod tests {
         });
 
         let mut frontend = FakeFrontend::default();
-        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL);
+        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None);
 
         daemon.join().expect("daemon thread");
 
@@ -2250,6 +3160,103 @@ mod tests {
             frontend.presented[0],
             InstanceMessage::Cursor(None)
         ));
+    }
+
+    /// E10r fix round 1: the pump tells a session that ended on purpose from
+    /// one whose socket ended, and says whether a lost one reached its first
+    /// frame, which is what the routes decide on.
+    #[test]
+    fn the_pump_tells_a_goodbye_from_a_lost_socket() {
+        let run = |write: fn(&mut UnixStream)| {
+            let (mut daemon_side, frontend_side) = UnixStream::pair().expect("pair");
+            let io = build_local_socket_io(frontend_side).expect("io");
+            write(&mut daemon_side);
+            drop(daemon_side);
+            let mut frontend = FakeFrontend::default();
+            run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None).expect("no error")
+        };
+        assert!(matches!(
+            run(
+                |w| write_message(w, &InstanceMessage::Goodbye(GoodbyeReason::ShuttingDown))
+                    .expect("write")
+            ),
+            PumpEnd::Over(Some(GoodbyeReason::ShuttingDown))
+        ));
+        assert!(matches!(
+            run(|_| {}),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: false,
+                write_error: None,
+                cut_short: false,
+            })
+        ));
+        assert!(matches!(
+            run(|w| write_message(w, &InstanceMessage::Cursor(None)).expect("write")),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: false,
+                write_error: None,
+                cut_short: false,
+            })
+        ));
+        assert!(matches!(
+            run(|w| w.write_all(&100u32.to_be_bytes()).expect("write")),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: false,
+                write_error: None,
+                cut_short: true,
+            })
+        ));
+        assert!(matches!(
+            run(|w| write_message(
+                w,
+                &InstanceMessage::CellDelta {
+                    spans: Vec::new(),
+                    full_grid: true,
+                },
+            )
+            .expect("write")),
+            PumpEnd::Lost(LostSession {
+                bootstrapped: true,
+                write_error: None,
+                cut_short: false,
+            })
+        ));
+    }
+
+    /// E10r fix round 1: what a connect finds decides whether the local route
+    /// goes on. A daemon that is gone ends it; so does a path that is not a
+    /// socket; the error says which.
+    #[test]
+    fn a_connect_that_finds_no_daemon_is_a_daemon_gone() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let size = CellSize::new(24, 80);
+        let missing = dir.path().join("missing.sock");
+        match connect_again(&missing, size, &mut SessionMemory::default()) {
+            Err(AttachError::DaemonGone { socket, found }) => {
+                assert_eq!(socket, missing);
+                assert_eq!(found, "no socket is there");
+            }
+            other => panic!("expected DaemonGone: {:?}", other.err()),
+        }
+        let stale = dir.path().join("stale.sock");
+        let Some(listener) = bind_or_skip(&stale) else {
+            return;
+        };
+        drop(listener);
+        match connect_again(&stale, size, &mut SessionMemory::default()) {
+            Err(AttachError::DaemonGone { found, .. }) => {
+                assert_eq!(found, "its socket refused the connection");
+            }
+            other => panic!("expected DaemonGone: {:?}", other.err()),
+        }
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"not a socket").expect("write");
+        match connect_again(&file, size, &mut SessionMemory::default()) {
+            Err(AttachError::DaemonGone { found, .. }) => {
+                assert_eq!(found, "what is there is not a socket");
+            }
+            other => panic!("expected DaemonGone: {:?}", other.err()),
+        }
     }
 
     #[test]
@@ -2268,7 +3275,7 @@ mod tests {
         });
 
         let mut frontend = FakeFrontend::default();
-        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL);
+        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None);
 
         daemon.join().expect("daemon thread");
 
@@ -2299,7 +3306,7 @@ mod tests {
             presented: Vec::new(),
             present_returns_error: true,
         };
-        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL);
+        let result = run_attach_pair(io, &mut frontend, FrontendId::LOCAL, None);
 
         daemon.join().expect("daemon thread");
 
@@ -2675,6 +3682,248 @@ mod tests {
         );
     }
 
+    /// The SSH route's stops, one verdict at a time.
+    #[test]
+    fn a_lost_session_decides_the_remote_verdict() {
+        let target = AttachTarget::Ssh {
+            host: "farhost".to_owned(),
+            user: None,
+            instance_name: None,
+        };
+        let lost = |bootstrapped, cut_short| {
+            Some(SessionLoss {
+                bootstrapped,
+                cut_short,
+            })
+        };
+        let reconnect = || ReconnectVerdict::Reconnect {
+            error: AttachError::Io(io::Error::other("ssh exited 1")),
+        };
+        // A session that worked and was lost reconnects, whatever its end: the
+        // bridge's own, with a frame cut short or at a frame's boundary...
+        for cut_short in [true, false] {
+            let mut count = 0;
+            assert!(matches!(
+                remote_verdict(
+                    ReconnectVerdict::ExitClean,
+                    lost(true, cut_short),
+                    &mut count,
+                    &target
+                ),
+                ReconnectVerdict::Reconnect { .. }
+            ));
+        }
+        // ...and an ssh that failed, on the attempt whose first handshake it was.
+        let mut count = 0;
+        assert!(matches!(
+            remote_verdict(
+                ReconnectVerdict::ReconnectHandshake {
+                    error: AttachError::Io(io::Error::other("ssh exited 1")),
+                },
+                lost(true, false),
+                &mut count,
+                &target
+            ),
+            ReconnectVerdict::Reconnect { .. }
+        ));
+        // Sessions cut before their first frame go on until the cap, by either end...
+        for last in [
+            ReconnectVerdict::ExitClean,
+            ReconnectVerdict::ReconnectHandshake {
+                error: AttachError::Io(io::Error::other("ssh exited 1")),
+            },
+            reconnect(),
+        ] {
+            let mut count = 0;
+            for _ in 1..HANDSHAKE_RETRY_CAP {
+                assert!(matches!(
+                    remote_verdict(
+                        ReconnectVerdict::ExitClean,
+                        lost(false, true),
+                        &mut count,
+                        &target
+                    ),
+                    ReconnectVerdict::Reconnect { .. }
+                ));
+            }
+            assert!(matches!(
+                remote_verdict(last, lost(false, true), &mut count, &target),
+                ReconnectVerdict::ExitProtocolError {
+                    error: AttachError::SessionsDropped {
+                        attempts: HANDSHAKE_RETRY_CAP,
+                        cut_short: true,
+                        far_side: None,
+                    }
+                }
+            ));
+        }
+        // ...a first frame starts the count again...
+        let mut count = HANDSHAKE_RETRY_CAP - 1;
+        assert!(matches!(
+            remote_verdict(reconnect(), lost(true, true), &mut count, &target),
+            ReconnectVerdict::Reconnect { .. }
+        ));
+        assert_eq!(count, 0);
+        // ...and a network that is down reaches no pump and counts nothing.
+        let mut count = HANDSHAKE_RETRY_CAP;
+        assert!(matches!(
+            remote_verdict(reconnect(), None, &mut count, &target),
+            ReconnectVerdict::Reconnect { .. }
+        ));
+        // A session that ended on purpose lost nothing, and ends the route.
+        let mut count = 0;
+        assert!(matches!(
+            remote_verdict(ReconnectVerdict::ExitClean, None, &mut count, &target),
+            ReconnectVerdict::ExitClean
+        ));
+        // What cannot be retried stops, whatever the session reached.
+        let mut count = 0;
+        assert!(matches!(
+            remote_verdict(
+                ReconnectVerdict::ExitProtocolError {
+                    error: AttachError::Terminal(io::Error::other("crossterm broke")),
+                },
+                lost(true, false),
+                &mut count,
+                &target
+            ),
+            ReconnectVerdict::ExitProtocolError {
+                error: AttachError::Terminal(_)
+            }
+        ));
+    }
+
+    /// The older cap's two sentences on the remote route, by how the last session ended,
+    /// and the file as the socket's name decides it.
+    #[test]
+    fn the_older_cap_names_the_far_sides_stderr_by_how_the_last_session_ended() {
+        let on = |instance_name: Option<&str>| AttachTarget::Ssh {
+            host: "farhost".to_owned(),
+            user: None,
+            instance_name: instance_name.map(str::to_owned),
+        };
+        let stopped_by = |cut_short, target: &AttachTarget| {
+            let mut count = HANDSHAKE_RETRY_CAP - 1;
+            let ReconnectVerdict::ExitProtocolError { error } = remote_verdict(
+                ReconnectVerdict::ExitClean,
+                Some(SessionLoss {
+                    bootstrapped: false,
+                    cut_short,
+                }),
+                &mut count,
+                target,
+            ) else {
+                panic!("it stops at the cap");
+            };
+            error.to_string()
+        };
+        assert_eq!(
+            stopped_by(false, &on(None)),
+            "the daemon closed 3 sessions in a row before their first frame, so this one has \
+             stopped trying; the last one's stderr is on farhost at \
+             $XDG_RUNTIME_DIR/pmacs/default.sock.stderr"
+        );
+        assert!(
+            stopped_by(false, &on(Some("e10r-pass")))
+                .ends_with(" at $XDG_RUNTIME_DIR/pmacs/e10r-pass.sock.stderr"),
+        );
+        assert!(
+            stopped_by(false, &on(Some("/srv/d.sock"))).ends_with(" at /srv/d.sock.stderr"),
+            "a path is the far side's own"
+        );
+        let cut = stopped_by(true, &on(None));
+        assert!(cut.starts_with(FRAME_CUT_SHORT_SENTENCE), "{cut}");
+        assert!(!cut.contains("stderr"), "the bound's, not a death: {cut}");
+    }
+
+    /// What a `Hello` says of a new daemon is said until a session reaches the first
+    /// frame that shows it, and not after, and the stronger of two readings stands.
+    #[test]
+    fn a_new_daemon_is_said_until_a_first_frame_shows_it() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let plain = Some(Notice::plain(NOTICE_FRESH_VIEW));
+        let mut memory = SessionMemory::default();
+        memory.heard_at(FrontendId(5), 1_000, at(0));
+        assert_eq!(memory.notice(), None, "nothing was lost");
+        memory.lost(true, NOTICE_FRESH_VIEW);
+        memory.heard_at(FrontendId(6), 1_010, at(10));
+        assert_eq!(memory.notice(), plain, "the same daemon");
+        memory.lost(true, NOTICE_FRESH_VIEW);
+        memory.heard_at(FrontendId(7), 0, at(20));
+        assert_eq!(memory.notice(), Some(NOTICE_MAYBE_NEW_DAEMON), "younger");
+        // Lost before its first frame: the user has still not been told.
+        memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
+        memory.heard_at(FrontendId(8), 1, at(21));
+        assert_eq!(memory.notice(), Some(NOTICE_MAYBE_NEW_DAEMON));
+        // A number not past the last says more, and goes on being said.
+        memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
+        memory.heard_at(FrontendId(2), 0, at(22));
+        assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON), "certain");
+        memory.lost(false, NOTICE_FRESH_VIEW_CUT_SHORT);
+        memory.heard_at(FrontendId(3), 1, at(23));
+        assert_eq!(memory.notice(), Some(NOTICE_NEW_DAEMON));
+        // Told, so a later loss on that daemon says only its own reason.
+        memory.lost(true, NOTICE_FRESH_VIEW);
+        memory.heard_at(FrontendId(4), 11, at(33));
+        assert_eq!(memory.notice(), plain);
+    }
+
+    /// The owner's words, each at the width it was ruled for, so a sentence is not cut
+    /// before the clause that matters.
+    #[test]
+    fn the_notice_stands_five_seconds_as_ruled() {
+        assert_eq!(NOTICE_FLOOR, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_notice_takes_the_form_that_fits() {
+        let first = "[pmacs: new daemon; work not autosaved is gone; M-x recover-file]";
+        let second = "[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]";
+        let first_cols = u32::try_from(first.len()).expect("cols");
+        let second_cols = u32::try_from(second.len()).expect("cols");
+        assert_eq!(NOTICE_NEW_DAEMON.fitting(first_cols), first);
+        assert_eq!(
+            NOTICE_NEW_DAEMON.fitting(first_cols - 1),
+            "[new daemon; work not autosaved is gone]"
+        );
+        assert_eq!(
+            NOTICE_NEW_DAEMON.fitting(40).len(),
+            40,
+            "ruled at 40 columns"
+        );
+        assert_eq!(NOTICE_MAYBE_NEW_DAEMON.fitting(second_cols), second);
+        assert_eq!(
+            NOTICE_MAYBE_NEW_DAEMON.fitting(second_cols - 1),
+            "[this may be a new daemon]"
+        );
+        assert_eq!(
+            Notice::plain(NOTICE_FRESH_VIEW).fitting(10),
+            NOTICE_FRESH_VIEW,
+            "one form, which the row then cuts"
+        );
+    }
+
+    /// What the next session says of a lost one.
+    #[test]
+    fn a_lost_session_says_why_on_the_next_one() {
+        let lost = |cut_short| SessionLoss {
+            bootstrapped: true,
+            cut_short,
+        };
+        let failed = ReconnectVerdict::Reconnect {
+            error: AttachError::Io(io::Error::other("ssh exited 255")),
+        };
+        assert_eq!(
+            lost(false).notice(&ReconnectVerdict::ExitClean),
+            NOTICE_FRESH_VIEW
+        );
+        assert_eq!(lost(false).notice(&failed), NOTICE_FRESH_VIEW_LINK);
+        for verdict in [ReconnectVerdict::ExitClean, failed] {
+            assert_eq!(lost(true).notice(&verdict), NOTICE_FRESH_VIEW_CUT_SHORT);
+        }
+    }
+
     #[test]
     fn classify_ssh_exit_zero_yields_ok() {
         // Synthesize an ExitStatus(0) via std's no-op subprocess
@@ -2732,6 +3981,15 @@ mod tests {
     #[test]
     fn banner_session_reconnect_is_static_text() {
         assert_eq!(banner_session_reconnect(), "[pmacs reconnecting...]");
+        assert_eq!(
+            banner_remote_reconnect(),
+            "[pmacs reconnecting... Ctrl-C to exit]"
+        );
+    }
+
+    #[test]
+    fn a_reconnects_hello_deadline_is_120_s_as_ruled() {
+        assert_eq!(RECONNECT_HELLO_DEADLINE, Duration::from_mins(2));
     }
 
     #[test]

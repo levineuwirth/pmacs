@@ -165,6 +165,32 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 `local:/path.sock`, and bare hostnames (treated as SSH). See
 `pmacs --help` for the full matrix.
 
+The daemon writes to every frontend from one thread, so it gives each
+frame 2 s to reach a frontend and then drops that frontend, rather than
+hold the others up. A client stopped past that comes back when resumed,
+on a new view, saying why. Over SSH a lost session comes back the same
+way, and if the daemon died the far side starts a new one, which holds
+what autosave kept and nothing else. The client says
+`[pmacs: new daemon; work not autosaved is gone; M-x recover-file]` when
+it is certain, and
+`[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`
+when it cannot tell. While a reconnect waits on the far side, `ssh` has
+the terminal, for a passphrase if it asks: `C-c` ends the attempt and the
+session, `F12` does nothing, and after 120 s the attempt is killed and the
+next one comes. Three new daemons in a row that each lasted under 30 s
+stop it, as do three sessions in a row the daemon closed before their first
+frame, each naming the file beside the socket on the far side where the last
+one's stderr went. `pmacs --daemon --stop` ends a TUI that hears it and
+starts nothing; a TUI stopped past the 2 s when it ran hears nothing, so
+when resumed over SSH it starts a new daemon, which keeps running and says
+so, and on a local socket it ends. A link has to carry a
+frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
+snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
+a large file over a slow link fails, saying so, after three tries that
+each hold the others up about 2 s, about 6 s of the 10 it takes in a
+release build. Clients stopped together add, since the daemon writes to
+each in turn: three stopped reading hold the others about 6 s, once.
+
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),
 loaded after the builtin runtime so plain assignments override

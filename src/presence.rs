@@ -52,7 +52,6 @@
 
 use std::collections::HashMap;
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -61,13 +60,14 @@ use pmacs_protocol::SessionToken;
 
 use crate::buffer::BufferId;
 use crate::cell::CellSize;
+use crate::frontend_stream::FrontendStream;
 use crate::instance_render::RenderState;
 use crate::protocol::{
     FrontendId, GoodbyeReason, InstanceMessage, NegotiatedCapabilities, SelectionSnapshot,
 };
 use crate::rope::Position;
 use crate::semantic_render::SemanticRenderState;
-use crate::transport::{TransportError, write_message};
+use crate::transport::TransportError;
 
 /// T M10.7 — per-session daemon-internal state.
 ///
@@ -169,7 +169,8 @@ pub struct Session {
     /// A `semantic_render` session's projection (T M11.2): its declared
     /// viewport and the per-buffer emission baselines.
     pub semantic: Option<SemanticRenderState>,
-    /// The write half of the session's socket. Taken out when a write
+    /// The write half of the session's socket, each frame written
+    /// within a bound (E10r). Taken out when a write
     /// to it fails on the socket (E9 fix round 4), so nothing is written
     /// to it again while its input drains. Private to this module (E10d
     /// review 1's Low 2): the daemon reaches it only through
@@ -178,7 +179,7 @@ pub struct Session {
     /// [`SessionRegistry::install_stream`] and
     /// [`SessionRegistry::shut_stream`], none of which hands it out, so
     /// a write to an attached session past the path does not compile.
-    stream: Option<UnixStream>,
+    stream: Option<FrontendStream>,
     /// The cell size the session last declared, at attach or by
     /// `Resize`.
     pub term_size: Option<CellSize>,
@@ -281,7 +282,7 @@ pub struct RetainedView {
 #[derive(Debug)]
 struct Drain {
     since: Instant,
-    socket: UnixStream,
+    socket: FrontendStream,
 }
 
 /// One source frontend's presence at a tick boundary.
@@ -392,7 +393,7 @@ impl SessionRegistry {
     /// reader's EOF or once [`Self::drains_past`] names it. Held only
     /// for a registered session, as the departure flag is; anything
     /// else has its socket shut at once.
-    fn begin_drain(&mut self, frontend_id: FrontendId, socket: UnixStream, now: Instant) {
+    fn begin_drain(&mut self, frontend_id: FrontendId, socket: FrontendStream, now: Instant) {
         if self.sessions.contains_key(&frontend_id) {
             self.drains
                 .insert(frontend_id, Drain { since: now, socket });
@@ -535,7 +536,7 @@ impl SessionRegistry {
         else {
             return SessionWrite::NoStream;
         };
-        match write_message(stream, message) {
+        match stream.write_message(message) {
             Ok(()) => SessionWrite::Written,
             Err(error @ TransportError::Io(_)) => {
                 if let Some(stream) = self
@@ -561,14 +562,14 @@ impl SessionRegistry {
             .get_mut(&frontend_id)
             .and_then(|session| session.stream.as_mut())
         {
-            let _ = write_message(stream, &InstanceMessage::Goodbye(reason));
+            let _ = stream.write_message(&InstanceMessage::Goodbye(reason));
         }
     }
 
     /// Install the write half of `frontend_id`'s socket once its
     /// bootstrap has written all it writes; for an id with no registered
     /// session the socket is shut both ways at once.
-    pub fn install_stream(&mut self, frontend_id: FrontendId, stream: UnixStream) {
+    pub fn install_stream(&mut self, frontend_id: FrontendId, stream: FrontendStream) {
         match self.sessions.get_mut(&frontend_id) {
             Some(session) => session.stream = Some(stream),
             None => {

@@ -44,6 +44,17 @@ pub enum ConnectFailure {
     Inspect(io::Error),
 }
 
+/// Where a daemon a frontend or a bridge starts writes its stderr: beside the socket,
+/// so it lives in the runtime directory the socket already proved writable and dies
+/// with it. Before E2.4 the window's stream went to `/dev/null`, and before E10r's fix
+/// round 2 the bridge's did, so a daemon that died said nothing to anyone.
+#[must_use]
+pub fn daemon_stderr_path(socket_path: &Path) -> std::path::PathBuf {
+    let mut name = socket_path.as_os_str().to_os_string();
+    name.push(".stderr");
+    std::path::PathBuf::from(name)
+}
+
 /// Classify `error`, returned by a connect to `path`, by what is at
 /// `path`. A symlink is examined as itself, not followed: a link at a
 /// socket path is left alone by every caller.

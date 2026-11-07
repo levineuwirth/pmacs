@@ -28,15 +28,17 @@
 //! The verdict tells the loop what to do next:
 //!
 //! * [`ReconnectVerdict::Reconnect`] — mid-session disconnect, full
-//!   exponential backoff, indefinite retries. The user has a working
-//!   session somewhere on the remote and we're going to get them back
-//!   to it.
+//!   exponential backoff, indefinite retries unless the route's own counts stop it
+//!   ([`DyingDaemons`], `attach::remote_verdict`). A grid session is minted no token,
+//!   so the next one is on a fresh view of what the daemon holds, not the last one's.
 //! * [`ReconnectVerdict::ReconnectHandshake`] — pre-session failure
 //!   (initial connect, Hello / `AttachRequest` exchange). Bounded by
 //!   [`HANDSHAKE_RETRY_CAP`] so a permanently misconfigured target
 //!   doesn't loop forever.
-//! * [`ReconnectVerdict::ExitClean`] — user pressed F12; the session
-//!   ended on purpose. No reconnect.
+//! * [`ReconnectVerdict::ExitClean`] — F12 or the daemon's `Goodbye`; the
+//!   session ended on purpose. No reconnect. The bridge's clean exit alone is
+//!   not this: it is also what the daemon closing its socket looks like, and
+//!   `attach::remote_verdict` makes that a reconnect.
 //! * [`ReconnectVerdict::ExitProtocolError`] — version skew, transport
 //!   corruption, terminal failure. Retry will not help.
 //! * [`ReconnectVerdict::ExitPolicy`] — v0.1-policy rejection
@@ -57,23 +59,143 @@
 //! handshake, three quick attempts is courtesy and after that we owe
 //! you a clear failure message.
 
+use std::time::{Duration, Instant};
+
 use crate::attach::AttachError;
-use crate::protocol::GoodbyeReason;
+use crate::protocol::{FrontendId, GoodbyeReason};
 
-/// Maximum number of pre-success handshake retries before the outer
-/// loop converts [`ReconnectVerdict::ReconnectHandshake`] into a
-/// give-up error.
+/// The backoff schedule, its test override and the cap, shared with
+/// `pmacs-gpu` through the protocol crate (the GPU never depends on `pmacs`);
+/// re-exported so this module's callers keep their paths. The cap is also the
+/// maximum number of pre-success handshake retries before the outer loop
+/// converts [`ReconnectVerdict::ReconnectHandshake`] into a give-up error, the
+/// handshake-failure tail (stderr from each attempt) folded into that error for
+/// diagnostic purposes.
+pub use pmacs_protocol::reconnect::{
+    BackoffSchedule, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS,
+};
+
+/// How far a `Hello`'s age may fall short of the age the last daemon would have
+/// reached by now and still be that daemon. Read on the real bridge at `b25e779`,
+/// 15 connects over 97 s: 0.01 to 0.86 s short, since `uptime_secs` is whole seconds.
+/// The rest is for a `Hello` that takes longer to arrive than the last one did.
+pub const DAEMON_AGE_SLACK: Duration = Duration::from_secs(5);
+
+/// A session on a new daemon that lived less than this, on the client's clock, counts
+/// toward [`DyingDaemons`]: `autosave.interval-ms`'s default, so a shorter session has
+/// autosaved nothing, and one of this or more has shown the daemon can live.
+pub const DYING_SESSION_FLOOR: Duration = Duration::from_secs(30);
+
+/// New daemons in a row that each died young, which the remote route stops at
+/// [`HANDSHAKE_RETRY_CAP`] (the owner's ruling, 2026-11-06): each is an `ssh` login, its
+/// `init.lua` run again, and no reason on any screen, at 50 a minute with no end.
 ///
-/// Sized for "DNS hiccup + SSH agent re-prompt + retry-with-fresh-key"
-/// scenarios without letting permanent misconfiguration loop forever.
-/// The handshake-failure tail (stderr from each attempt) is folded
-/// into the give-up error for diagnostic purposes.
-pub const HANDSHAKE_RETRY_CAP: u32 = 3;
+/// Only a daemon told for certain counts ([`Succession::Certain`]), and a reading of
+/// [`Succession::Maybe`] neither counts nor resets, whatever its length, so a slow link
+/// cannot stop the route. Otherwise a session of [`DYING_SESSION_FLOOR`] or more resets
+/// the count; and that is all that resets it, the row naming nothing else, so a short
+/// session on the same daemon between two young ones leaves it where it stands. A
+/// network that is down loses no session, so it counts nothing and goes on.
+#[derive(Debug, Default)]
+pub struct DyingDaemons {
+    in_a_row: u32,
+}
 
-/// The backoff schedule and its test override, shared with `pmacs-gpu`
-/// through the protocol crate since E9.2 (the GPU never depends on
-/// `pmacs`); re-exported so this module's callers keep their paths.
-pub use pmacs_protocol::reconnect::{BackoffSchedule, PMACS_TEST_BACKOFF_SCALE_MS};
+impl DyingDaemons {
+    /// A session that read `reading` was lost after `lived`. Whether the route should
+    /// stop.
+    pub fn session_lost(&mut self, reading: Succession, lived: Duration) -> bool {
+        match reading {
+            Succession::Maybe => {}
+            _ if lived >= DYING_SESSION_FLOOR => self.in_a_row = 0,
+            Succession::Certain => self.in_a_row = self.in_a_row.saturating_add(1),
+            Succession::Same => {}
+        }
+        self.in_a_row >= HANDSHAKE_RETRY_CAP
+    }
+
+    /// How many in a row.
+    #[must_use]
+    pub fn in_a_row(&self) -> u32 {
+        self.in_a_row
+    }
+}
+
+/// What a later `Hello` says of the daemon an earlier one came from. Ordered by how
+/// much it says, so that the strongest reading since a session last showed one is
+/// `max`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Succession {
+    /// The daemon the last `Hello` came from, as far as anything here can tell.
+    #[default]
+    Same,
+    /// Perhaps another daemon: the age says so, or cannot say, and nothing is certain.
+    /// A stalled link's `Hello` reads this way on a daemon holding all it held.
+    Maybe,
+    /// Another daemon, on no clock.
+    Certain,
+}
+
+/// What a session's `Hello` says of its daemon, and when it was read: what tells the
+/// daemon a session was on from a new one at the same address, with no wire change.
+#[derive(Clone, Copy, Debug)]
+pub struct DaemonSeen {
+    frontend_id: FrontendId,
+    uptime_secs: u64,
+    read_at: Instant,
+}
+
+impl DaemonSeen {
+    /// A `Hello`'s `assigned_frontend_id` and `uptime_secs`, read at `read_at`.
+    #[must_use]
+    pub fn new(frontend_id: FrontendId, uptime_secs: u64, read_at: Instant) -> Self {
+        Self {
+            frontend_id,
+            uptime_secs,
+            read_at,
+        }
+    }
+
+    /// How long since this `Hello` was read, on the client's clock.
+    #[must_use]
+    pub fn age(&self) -> Duration {
+        self.read_at.elapsed()
+    }
+
+    /// What `later`, a `Hello` read after this one, says of this one's daemon.
+    ///
+    /// A daemon numbers its frontends upward, so a number not past this one is another
+    /// daemon's, on no clock: [`Succession::Certain`]. A number past it says nothing
+    /// by itself, since other frontends may have got to a new daemon first, so the
+    /// age is read, and it can only ever say [`Succession::Maybe`]: a `Hello` younger
+    /// than this daemon would be by then, by more than [`DAEMON_AGE_SLACK`], or a
+    /// daemon that would still be inside the slack, too young for an age to tell.
+    ///
+    /// What the age cannot tell, each said so a notice is not read for more than it
+    /// is. Both clocks are `Instant`s, which stop while a machine sleeps, so on one
+    /// machine they agree; over SSH, a remote host that slept past the slack reads as
+    /// `Maybe`, and a client that slept may read a new daemon others got to first as
+    /// [`Succession::Same`]. A `Hello` held past the slack, by a stop or a stalled link,
+    /// reads as `Maybe` on a daemon holding everything it held, which is why that
+    /// reading says `may be`. A new daemon others got to first, begun within the slack
+    /// of the last one's start and read when the last would be past it, reads as
+    /// `Same`: nothing here tells it from the same daemon's `Hello` held a moment.
+    #[must_use]
+    pub fn succeeded_by(&self, later: &Self) -> Succession {
+        if later.frontend_id.0 <= self.frontend_id.0 {
+            return Succession::Certain;
+        }
+        let elapsed = later.read_at.saturating_duration_since(self.read_at);
+        let expected = Duration::from_secs(self.uptime_secs).saturating_add(elapsed);
+        let younger =
+            Duration::from_secs(later.uptime_secs).saturating_add(DAEMON_AGE_SLACK) < expected;
+        if younger || expected <= DAEMON_AGE_SLACK {
+            Succession::Maybe
+        } else {
+            Succession::Same
+        }
+    }
+}
 
 /// What the outer reconnect loop should do after a session attempt
 /// returns.
@@ -103,8 +225,9 @@ pub enum ReconnectVerdict {
         /// final give-up message can summarize the full sequence.
         error: AttachError,
     },
-    /// User-initiated clean detach (F12 → Detach → daemon Goodbye →
-    /// SSH child exit 0). No reconnect, no error to surface.
+    /// The attempt's channel ended with no error, which the outer loop reads
+    /// beside how the session ended: on purpose (F12 → Detach, or the daemon's
+    /// `Goodbye`), no reconnect and no error to surface; lost, a reconnect.
     ExitClean,
     /// Protocol-permanent error: version mismatch, transport
     /// corruption, terminal failure. Retry will not help; surface to
@@ -159,6 +282,8 @@ pub fn classify_for_reconnect(
         AttachError::Rejected(GoodbyeReason::AlreadyAttached) => {
             ReconnectVerdict::ExitPolicy { error }
         }
+        // `C-c` in a reconnect's wait: the user ended it, and there is nothing to say.
+        AttachError::ReconnectCancelled => ReconnectVerdict::ExitClean,
         // Everything else — daemon shutting down, broken pipes,
         // transport / decode errors, SSH child exits / spawn
         // failures — is transient. The cap depends on whether we've
@@ -184,6 +309,123 @@ mod tests {
 
     fn io_err() -> AttachError {
         AttachError::Io(io::Error::other("test transient io error"))
+    }
+
+    // -----------------------------------------------------------------
+    // DaemonSeen
+    // -----------------------------------------------------------------
+
+    /// What a `Hello` of `later` seconds, read `after` seconds on with a higher number,
+    /// says after one of `first`.
+    fn reads(first: u64, after: f64, later: u64) -> Succession {
+        let start = Instant::now();
+        DaemonSeen::new(FrontendId(5), first, start).succeeded_by(&DaemonSeen::new(
+            FrontendId(6),
+            later,
+            start + Duration::from_secs_f64(after),
+        ))
+    }
+
+    #[test]
+    fn a_frontend_number_not_past_the_last_is_certain_on_no_clock() {
+        let start = Instant::now();
+        for id in [2, 5] {
+            assert_eq!(
+                DaemonSeen::new(FrontendId(5), 1_000, start).succeeded_by(&DaemonSeen::new(
+                    FrontendId(id),
+                    1_000,
+                    start
+                )),
+                Succession::Certain,
+                "{id}"
+            );
+        }
+        assert_ne!(
+            DaemonSeen::new(FrontendId(5), 1_000, start).succeeded_by(&DaemonSeen::new(
+                FrontendId(6),
+                1_000,
+                start
+            )),
+            Succession::Certain,
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_went_on_is_the_same_one() {
+        assert_eq!(reads(100, 10.0, 110), Succession::Same);
+        // Whole seconds, each way, the worst of what the real bridge read.
+        assert_eq!(reads(10, 3.86, 13), Succession::Same);
+        // Older than expected: a client that slept, its clock stopped.
+        assert_eq!(reads(100, 10.0, 8_000), Succession::Same);
+    }
+
+    #[test]
+    fn a_younger_age_alone_is_only_maybe() {
+        assert_eq!(reads(100, 10.0, 0), Succession::Maybe);
+        // The real run: a `Hello` held 7 s by a stalled link, on the same daemon.
+        assert_eq!(reads(100, 7.5, 100), Succession::Maybe);
+    }
+
+    #[test]
+    fn an_old_daemon_inside_the_slack_is_only_maybe() {
+        // The real run: killed 2.5 s after it started, its successor's number past.
+        assert_eq!(reads(0, 3.0, 0), Succession::Maybe);
+        // The edge of it, and its first second out.
+        assert_eq!(reads(0, 5.0, 5), Succession::Maybe);
+        assert_eq!(reads(0, 6.0, 6), Succession::Same);
+    }
+
+    #[test]
+    fn the_age_slack_is_what_a_daemon_may_fall_short_by() {
+        assert_eq!(reads(100, 5.0, 100), Succession::Same);
+        assert_eq!(reads(100, 5.5, 100), Succession::Maybe);
+    }
+
+    /// The owner's ruling, each clause of it.
+    #[test]
+    fn new_daemons_in_a_row_stop_the_route_as_ruled() {
+        let short = Duration::from_secs(1);
+        assert_eq!(DYING_SESSION_FLOOR, Duration::from_secs(30));
+        assert_eq!(HANDSHAKE_RETRY_CAP, 3);
+
+        let mut dying = DyingDaemons::default();
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(dying.session_lost(Succession::Certain, short), "3 in a row");
+
+        // A session of the floor or more resets the count, and is not itself one.
+        let mut dying = DyingDaemons::default();
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Certain, DYING_SESSION_FLOOR));
+        assert_eq!(dying.in_a_row(), 0);
+        assert!(!dying.session_lost(Succession::Certain, short));
+        assert!(!dying.session_lost(Succession::Same, DYING_SESSION_FLOOR));
+        assert_eq!(dying.in_a_row(), 0, "a long session on the same daemon too");
+
+        // The second sentence neither counts nor resets, long or short.
+        let mut dying = DyingDaemons::default();
+        assert!(!dying.session_lost(Succession::Certain, short));
+        for lived in [short, DYING_SESSION_FLOOR, short, short, short] {
+            assert!(!dying.session_lost(Succession::Maybe, lived));
+        }
+        assert_eq!(dying.in_a_row(), 1);
+
+        // A short session on the same daemon does neither: nothing resets but the floor.
+        assert!(!dying.session_lost(Succession::Same, short));
+        assert_eq!(dying.in_a_row(), 1);
+    }
+
+    #[test]
+    fn a_daemons_age_past_a_duration_does_not_panic() {
+        assert_eq!(reads(u64::MAX, 1.0, u64::MAX), Succession::Same);
+        assert_eq!(reads(u64::MAX, 1.0, 0), Succession::Maybe);
+    }
+
+    #[test]
+    fn the_strongest_reading_is_the_greatest() {
+        assert!(Succession::Same < Succession::Maybe);
+        assert!(Succession::Maybe < Succession::Certain);
     }
 
     #[test]
@@ -254,6 +496,23 @@ mod tests {
             ReconnectVerdict::Reconnect { .. } => {}
             other => panic!("expected Reconnect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_cancelled_reconnect_is_a_clean_end_and_a_silent_one_is_another_attempt() {
+        assert!(matches!(
+            classify_for_reconnect(AttachError::ReconnectCancelled, true),
+            ReconnectVerdict::ExitClean
+        ));
+        assert!(matches!(
+            classify_for_reconnect(
+                AttachError::ReconnectHelloTimedOut {
+                    after: Duration::from_mins(2)
+                },
+                true
+            ),
+            ReconnectVerdict::Reconnect { .. }
+        ));
     }
 
     #[test]

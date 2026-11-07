@@ -873,15 +873,17 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         (hello, stream)
     }
 
-    /// Pump one stream until `want` returns a value, or time out.
+    /// Pump one session's queue until `want` returns a value, or time out. A
+    /// thread reads each socket, so the wait on one holds nothing up on the
+    /// other and neither is dropped (#390, E10r).
     fn pump<T>(
-        stream: &mut UnixStream,
+        reads: &std::sync::mpsc::Receiver<InstanceMessage>,
         what: &str,
         mut want: impl FnMut(&InstanceMessage) -> Option<T>,
     ) -> T {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if let Ok(msg) = read_message::<InstanceMessage>(stream)
+            if let Ok(msg) = reads.recv_timeout(Duration::from_millis(100))
                 && let Some(found) = want(&msg)
             {
                 return found;
@@ -908,14 +910,16 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
     // first snapshot is its only guaranteed broadcast — if B were not
     // yet a registered recipient, that broadcast would reach nobody and
     // A's presence would sit unchanged (and unsent) forever after.
-    let (_hello_b, mut b) = attach(&daemon, false);
+    let (_hello_b, b) = attach(&daemon, false);
+    let reads_b = common::wire::queue_from_here(&b);
     // A is the semantic frontend that will open a terminal; B is the
     // peer whose document view would keep painting A's stale caret.
     let (hello_a, mut a) = attach(&daemon, true);
+    let reads_a = common::wire::queue_from_here(&a);
     let a_id = hello_a.assigned_frontend_id;
 
     // A declares a byte viewport so it is a live semantic session.
-    let document = pump(&mut a, "A's first BufferSnapshot", |msg| match msg {
+    let document = pump(&reads_a, "A's first BufferSnapshot", |msg| match msg {
         InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
         _ => None,
     });
@@ -932,7 +936,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
 
     // B sees A in the document. Without this the later assertion could
     // pass vacuously against a peer that never had presence at all.
-    let seen_in_document = pump(&mut b, "A's presence in the document", |msg| match msg {
+    let seen_in_document = pump(&reads_b, "A's presence in the document", |msg| match msg {
         InstanceMessage::PresenceUpdate {
             frontend_id,
             buffer_id,
@@ -953,7 +957,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         }),
     )
     .expect("A opens a terminal");
-    let terminal = pump(&mut a, "A's terminal BufferSnapshot", |msg| match msg {
+    let terminal = pump(&reads_a, "A's terminal BufferSnapshot", |msg| match msg {
         InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id != document => {
             Some(*buffer_id)
         }
@@ -969,7 +973,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
     )
     .expect("A declares terminal cells");
     // A really is in terminal mode once a frame arrives.
-    let framed = pump(&mut a, "A's first TerminalFrame", |msg| match msg {
+    let framed = pump(&reads_a, "A's first TerminalFrame", |msg| match msg {
         InstanceMessage::TerminalFrame(frame) => Some(frame.buffer_id),
         _ => None,
     });
@@ -977,7 +981,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
 
     // The finding: B must learn that A left the document.
     let seen_after = pump(
-        &mut b,
+        &reads_b,
         "A's presence leaving the document",
         |msg| match msg {
             InstanceMessage::PresenceUpdate {

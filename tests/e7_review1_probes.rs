@@ -687,12 +687,23 @@ mod gpu_route {
 
     struct Replica {
         stream: std::os::unix::net::UnixStream,
+        /// What a thread reads off the socket from the attach on, so a replica this
+        /// row is not looking at holds nothing up and is not dropped (#390, E10r).
+        rx: std::sync::mpsc::Receiver<InstanceMessage>,
         state: CrdtState,
         fid: FrontendId,
         buffer_id: pmacs::buffer::BufferId,
         popup_rows: usize,
         popup_anchor: Option<u64>,
         cursor: Option<u64>,
+    }
+
+    /// The reader thread holds a clone of the socket, so dropping the stream
+    /// alone would leave the daemon's session attached.
+    impl Drop for Replica {
+        fn drop(&mut self) {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     fn attach_replica(daemon: &TestDaemon) -> Replica {
@@ -709,8 +720,11 @@ mod gpu_route {
         };
         let state = CrdtState::new(fid.0).expect("CrdtState::new");
         state.import_snapshot(&snap).expect("import_snapshot");
+        stream.set_read_timeout(None).expect("blocking reads");
+        let rx = super::common::wire::read_into_queue(&stream);
         Replica {
             stream,
+            rx,
             state,
             fid,
             buffer_id,
@@ -776,11 +790,10 @@ mod gpu_route {
                 replica.cursor
             );
             let remaining = deadline.saturating_duration_since(Instant::now());
-            replica
-                .stream
-                .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
-                .ok();
-            match read_message::<InstanceMessage>(&mut replica.stream) {
+            match replica
+                .rx
+                .recv_timeout(remaining.min(Duration::from_millis(100)))
+            {
                 Ok(InstanceMessage::CrdtOp { buffer_id: b, op }) if b == replica.buffer_id => {
                     let _ = replica.state.import_updates(&op.bytes);
                 }

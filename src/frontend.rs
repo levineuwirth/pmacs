@@ -65,7 +65,7 @@ use crossterm::{
     },
 };
 
-use crate::cell::{CellSize, Color, DiffSpan, Glyph, Style};
+use crate::cell::{Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style};
 use crate::protocol::{InstanceMessage, InstanceSignal};
 
 // Re-export the input event types so callers don't depend on crossterm
@@ -145,6 +145,14 @@ pub struct Frontend {
     /// frame is already painted at most at this depth, and the
     /// reduction changes nothing.
     depth: crate::color_depth::ColorDepth,
+    /// E10r: what the frames have put on the bottom row, so that a notice standing
+    /// over it can come off and leave it as they left it. A frame only says what
+    /// changed, so nothing else would ever repaint it.
+    status_row: Vec<Cell>,
+    /// E10r: the terminal's modes while it is lent, read when [`Self::lend_terminal`]
+    /// left raw mode: what [`Self::take_terminal_back`] returns to first, whatever a
+    /// prompt that was killed left behind, so they are what an exit restores.
+    lent_modes: Option<nix::sys::termios::Termios>,
 }
 
 impl Frontend {
@@ -167,6 +175,8 @@ impl Frontend {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::detect_env(),
+            status_row: vec![Cell::default(); size.cols as usize],
+            lent_modes: None,
         };
         // Best-effort sequence of init steps. Each step that succeeds
         // is recorded so teardown can skip steps that never ran.
@@ -331,6 +341,7 @@ impl Frontend {
     pub fn apply_message(&mut self, msg: &InstanceMessage) -> io::Result<()> {
         match msg {
             InstanceMessage::CellDelta { spans, full_grid } => {
+                keep_status_row(&mut self.status_row, self.size, spans, *full_grid);
                 write_frame(&mut self.out, spans, *full_grid, self.depth)?;
             }
             InstanceMessage::Cursor(state) => match state {
@@ -527,6 +538,122 @@ impl Frontend {
         self.out.flush()
     }
 
+    /// Present `msgs` with `text` standing on the bottom row over what they put there,
+    /// in one update so nothing shows between them, leaving the cursor and its
+    /// visibility where the frames left them, so that typing under it goes where it
+    /// would have.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    pub fn present_under_notice(&mut self, msgs: &[InstanceMessage], text: &str) -> io::Result<()> {
+        queue!(self.out, BeginSynchronizedUpdate)?;
+        for m in msgs {
+            self.apply_message(m)?;
+        }
+        queue!(self.out, cursor::SavePosition)?;
+        emit_status_overlay(&mut self.out, self.size, text)?;
+        queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// Take a notice off the bottom row and put back what the frames left there.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    pub fn clear_notice(&mut self) -> io::Result<()> {
+        queue!(self.out, BeginSynchronizedUpdate, cursor::SavePosition)?;
+        let row = DiffSpan {
+            start: CellCoord {
+                row: self.size.rows.saturating_sub(1),
+                col: 0,
+            },
+            cells: self.status_row.clone(),
+        };
+        write_frame(&mut self.out, std::slice::from_ref(&row), false, self.depth)?;
+        queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// Lend the terminal to whatever may ask it something, for a wait in which this
+    /// process reads no key: `ssh`'s passphrase prompt, on a reconnect.
+    ///
+    /// It is left as a shell would give it: raw mode off, so a prompt has its line
+    /// editing and `Enter`, and `C-c` is a signal and not a byte; mouse reporting and
+    /// bracketed paste off, or a moved mouse types into the prompt; the keyboard's
+    /// flags popped, or `C-c` arrives as an escape sequence and raises nothing. The
+    /// cursor shows on the row above the banner, where a prompt can be read. A
+    /// resync repaints all of it.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if a write or a mode change fails.
+    pub fn lend_terminal(&mut self) -> io::Result<()> {
+        if self.keyboard_enhancement {
+            queue!(self.out, PopKeyboardEnhancementFlags)?;
+        }
+        queue!(
+            self.out,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            MoveTo(0, self.size.rows.saturating_sub(2) as u16),
+            Clear(ClearType::CurrentLine),
+            cursor::Show,
+        )?;
+        self.out.flush()?;
+        disable_raw_mode()?;
+        self.lent_modes = nix::sys::termios::tcgetattr(io::stdin()).ok();
+        Ok(())
+    }
+
+    /// Take the terminal back after [`Self::lend_terminal`]. What was typed that nothing
+    /// read goes with the wait, so it does not land on the view a session comes back to.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if the terminal refuses a mode or a write to
+    /// it fails.
+    pub fn take_terminal_back(&mut self) -> io::Result<()> {
+        use nix::sys::termios::{FlushArg, SetArg, tcflush, tcsetattr};
+        if let Some(modes) = self.lent_modes.take() {
+            let _ = tcsetattr(io::stdin(), SetArg::TCSANOW, &modes);
+        }
+        let _ = tcflush(io::stdin(), FlushArg::TCIFLUSH);
+        self.retake_terminal()?;
+        queue!(self.out, cursor::Hide)?;
+        self.out.flush()
+    }
+
+    /// Take the terminal's modes back after something else had it.
+    ///
+    /// A client stopped under an interactive shell gives the shell the
+    /// terminal, and `fg` does not always hand it back as it found it: under
+    /// `bash` it comes back canonical, so no key reaches this process until a
+    /// newline, and the bracketed paste and mouse the shell's line editor may
+    /// have turned off stay off. So raw mode is left and entered again (entering
+    /// alone is a no-op while crossterm believes it is on), and the modes
+    /// [`Self::new`] set are set again. The alternate screen is not: no shell
+    /// leaves it, and entering it clears what is there.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if the terminal refuses a mode or a
+    /// write to it fails.
+    pub fn retake_terminal(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        enable_raw_mode()?;
+        self.raw_mode = true;
+        queue!(self.out, EnableBracketedPaste, EnableMouseCapture)?;
+        self.bracketed_paste = true;
+        self.mouse = true;
+        if self.keyboard_enhancement {
+            queue!(
+                self.out,
+                PopKeyboardEnhancementFlags,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            )?;
+        }
+        self.out.flush()
+    }
+
     /// Wait for the next input event, up to `timeout`.
     ///
     /// Returns `Ok(None)` on timeout, `Ok(Some(event))` on event,
@@ -556,6 +683,8 @@ impl Frontend {
 
     fn handle_resize(&mut self, new_size: CellSize) {
         self.size = new_size;
+        // A resync follows a resize, and says what the new bottom row holds.
+        self.status_row = vec![Cell::default(); new_size.cols as usize];
         // Cell-buffer reallocation lives on
         // [`crate::instance_render::RenderState`] now (T M5.2). The
         // run loop is responsible for forwarding the new size there;
@@ -644,6 +773,20 @@ fn write_frame<W: Write>(
         emit_cell_delta(w, &crate::color_depth::reduce_spans_to_16(spans), full_grid)
     } else {
         emit_cell_delta(w, spans, full_grid)
+    }
+}
+
+/// Note what one frame puts on the bottom row in `row`, a terminal's width of cells.
+fn keep_status_row(row: &mut [Cell], size: CellSize, spans: &[DiffSpan], full_grid: bool) {
+    if full_grid {
+        row.fill(Cell::default());
+    }
+    let bottom = size.rows.saturating_sub(1);
+    for span in spans.iter().filter(|span| span.start.row == bottom) {
+        let from = span.start.col as usize;
+        for (slot, cell) in row.iter_mut().skip(from).zip(&span.cells) {
+            slot.clone_from(cell);
+        }
     }
 }
 
@@ -889,6 +1032,8 @@ mod tests {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: Vec::new(),
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::ThemeFacts {
             faces: vec![pmacs_protocol::ThemeFace {
@@ -914,6 +1059,8 @@ mod tests {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: Vec::new(),
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::FontFacts {
             family: Some("Iosevka".into()),
@@ -933,6 +1080,8 @@ mod tests {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: Vec::new(),
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::StatuslineSegments {
             buffer_id: crate::buffer::BufferId::from_raw(7),
@@ -1257,6 +1406,40 @@ mod tests {
         assert_eq!(s.matches(' ').count(), 8);
         // No reverse attribute.
         assert!(!s.contains("\x1b[7m"), "unexpected reverse attr in {s:?}");
+    }
+
+    /// What a frame puts on the bottom row is kept, cell by cell, and a resync blanks
+    /// what it does not name, so a notice's coming off restores what is true.
+    #[test]
+    fn the_bottom_row_is_kept_through_a_frame_and_a_resync() {
+        let size = CellSize::new(3, 4);
+        let cells = |text: &str| -> Vec<Cell> {
+            text.chars()
+                .map(|c| Cell {
+                    glyph: Glyph::Char(c),
+                    ..Cell::default()
+                })
+                .collect()
+        };
+        let at = |row, col, text: &str| DiffSpan {
+            start: CellCoord { row, col },
+            cells: cells(text),
+        };
+        let shown = |row: &[Cell]| -> String {
+            row.iter()
+                .map(|cell| match cell.glyph {
+                    Glyph::Char(c) => c,
+                    _ => '.',
+                })
+                .collect()
+        };
+        let mut row = vec![Cell::default(); 4];
+        keep_status_row(&mut row, size, &[at(2, 1, "ab"), at(1, 0, "zzzz")], false);
+        assert_eq!(shown(&row), " ab ");
+        keep_status_row(&mut row, size, &[at(2, 2, "cdefg")], false);
+        assert_eq!(shown(&row), " acd", "past the width is not kept");
+        keep_status_row(&mut row, size, &[at(2, 3, "x")], true);
+        assert_eq!(shown(&row), "   x");
     }
 
     #[test]

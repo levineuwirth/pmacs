@@ -84,7 +84,7 @@ pub use popup::{
     MAX_POPUP_LINE_BYTES, MAX_POPUP_LINES, MAX_POPUP_TEXT_BYTES, POPUP_MIN_VERSION,
     PopupActiveRange, PopupFrame, PopupFrameError, PopupKind, PopupPayload, place_popup,
 };
-pub use reconnect::{BackoffSchedule, PMACS_TEST_BACKOFF_SCALE_MS};
+pub use reconnect::{BackoffSchedule, HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 pub use session::{SESSION_MIN_VERSION, SESSION_TOKEN_BYTES, SessionToken};
 pub use socket_file::{ConnectFailure, classify_connect_failure};
 pub use terminal::{
@@ -92,7 +92,9 @@ pub use terminal::{
     MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,
     TerminalFrameError, TerminalProcessState, TerminalSelectionSpan,
 };
-pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};
+pub use transport::{
+    FRAME_CUT_SHORT_SENTENCE, MAX_FRAME_BYTES, TransportError, read_message, write_message,
+};
 pub use wire_grid::{
     MAX_WIRE_GRID_GLYPH_BYTES, MAX_WIRE_GRID_GRAPHEME_BYTES, WireGridError, WireGridLimits,
     checked_area, validate_wire_grid,
