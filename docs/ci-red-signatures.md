@@ -15936,6 +15936,71 @@ Tally (e10r-fixes4-local): 3 items in the list below.
 
 So, at E10r fix round 4: `main` is green at `faf3956`, and PR #462 is red at its head on three required checks: #254 on two of the three legs with fish, whose suite has no diff in the PR, and #494's macOS leg, an instrument of this phase's own suite; none rerun and nothing merged. By CI #254 moves to fifteen and #494 is filed at one. The local samples are listed, not tallied. Every other count above stands.
 
+### E10w checkpoint: PR #497's fold-tail fix, three local gates short of green
+
+Recorded 2026-11-08 at `f4c1252`, branch `e10w/fold-tail`, base `1630b35`.
+The patch changes one fold-tail condition and four painted, interactive regression rows.
+The last code-bearing base remains `9d6b7ac`; its CI 42219030761, including attempt 2's
+#282 in job 127989471260, is recorded above. No rerun was requested here.
+
+CI run 42519060377 and Grammar fuzz 42519060332 are both in progress at attempt 1 (API read 2026-11-08 20:48 UTC). CI has 16 successful jobs, one skipped and two still running; both fuzz arms are running. No rerun requested.
+
+| Run | Job | Name | State at 20:48 UTC |
+|---|---|---|---|
+| 42519060377 | 128848333876 | Changed paths | success |
+| 42519060377 | 128848333997 | Lint (lua54) | success |
+| 42519060377 | 128848334012 | Commit attribution (D9) | success |
+| 42519060377 | 128848334058 | Format | success |
+| 42519060377 | 128848334132 | Lint (luajit) | success |
+| 42519060377 | 128848383089 | M4 Perf Gates | success |
+| 42519060377 | 128848383121 | M6 Perf Gates | success |
+| 42519060377 | 128848383150 | Test (crdt) | in_progress |
+| 42519060377 | 128848383151 | M10 Perf Gates (crdt) | success |
+| 42519060377 | 128848383169 | Test (macos-latest / lua54) | success |
+| 42519060377 | 128848383177 | GPU Render (headless) | success |
+| 42519060377 | 128848383180 | M5 Perf Gates | success |
+| 42519060377 | 128848383187 | M1 Acceptance Gates | success |
+| 42519060377 | 128848383188 | Perf budgets (debug) | success |
+| 42519060377 | 128848383227 | Test (ubuntu-latest / lua54) | in_progress |
+| 42519060377 | 128848383234 | Test (macos-latest / luajit) | success |
+| 42519060377 | 128848383236 | Test (ubuntu-latest / luajit) | success |
+| 42519060377 | 128848383283 | Test (ubuntu-latest / luajit, no crdt) | success |
+| 42519060377 | 128848384640 | Docs consistency | skipped |
+| 42519060332 | 128848333579 | Grammar fuzz (asan-strict) | in_progress |
+| 42519060332 | 128848333753 | Grammar fuzz | in_progress |
+
+The local default gates all passed five of six stages: fmt, clippy, doc, build and
+diff-check; the sweep failed. Every `running` line pairs with a result line, 237 each;
+no daemon survived by the gate's environ check. Nice 19, six build jobs, pressure
+samplers beside the runs; these are not quiet performance measurements.
+
+| Gate | Passed / failed / ignored | Sampler readings | 1-minute load range |
+|---|---:|---:|---:|
+| `20261108T193723Z-2986537` | 5,891 / 3 / 87 | 37 | 5.09–31.91 |
+| `20261108T201104Z-3218092` | 5,892 / 2 / 87 | 28 | 4.39–24.65 |
+| `20261108T203342Z-3407852` | 5,890 / 4 / 87 | 28 | 10.96–22.92 |
+
+- `20261108T193723Z-2986537`: #495's two color rows under inherited `NO_COLOR=1`,
+  independently reproduced with the same binary (set: 0 / 2, unset: 2 / 0), commented
+  6726640369; `m6_5_repl_spawns_zsh`, #254's recorded sibling selector with both pump
+  timeout fragments, commented 6726540881.
+- `20261108T201104Z-3218092`, `NO_COLOR` unset: #340's selector and `the warm parse
+  installed`, without the required attempt trace, not a full signature match,
+  commented 6726640182; #434 with both required fragments, commented 6726651044.
+- `20261108T203342Z-3407852`, `NO_COLOR` unset: #316 on kill 2 with `busy=true`,
+  `tree=true`, `unit=pid_`, `death=killed`, modified-buffer mode line and `parse:killed`,
+  under its template reading, commented 6726854958; #391's selector, `slow=0`,
+  `hangs=0`, `unconfirmed=1`, 22 / 1 / 2, but an allocation `one input grew RSS by over
+  64 MB` rather than the required hang, not a full match, commented 6726854825;
+  #434 again with both fragments, commented 6726901231; #498 filed for
+  `e9_review2_a_fresh_attach_with_scratch_killed_lands_on_a_buffer_that_arrived`,
+  `timed out waiting for the SessionToken; the daemon wrote []`, 12 / 1 / 0 in 23.59 s.
+
+Logs: `/home/jeans/build/pmacs-gate-targets/pmacs-e10w-319e63a3/gate-logs/<gate>/`;
+samplers `/tmp/pmacs-e10w-pressure-<UTC timestamp>.log`. The full gate requirement
+is unmet, and PR #497 stays draft. The checkpoint names that blocker under the
+resume's overrun provision. Local samples are listed, not tallied; no CI count moves.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
