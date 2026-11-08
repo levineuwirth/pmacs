@@ -537,10 +537,12 @@ impl StandInSsh {
         let counter = dir.path().join("count");
         std::fs::write(&counter, "0").expect("seed the counter");
         let script = dir.path().join("ssh");
+        // Each invocation's pid first, before anything a deadline could cut short.
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nn=$(cat '{counter}')\nn=$((n+1))\necho $n > '{counter}'\ncase $n in\n{cases}esac\n",
+                "#!/bin/sh\necho $$ >> '{pids}'\nn=$(cat '{counter}')\nn=$((n+1))\necho $n > '{counter}'\ncase $n in\n{cases}esac\n",
+                pids = dir.path().join("pids").display(),
                 counter = counter.display(),
             ),
         )
@@ -556,6 +558,15 @@ impl StandInSsh {
             .trim()
             .parse()
             .expect("a count")
+    }
+
+    /// Each invocation's pid, in order, written at its first line.
+    fn pids(&self) -> Vec<i32> {
+        std::fs::read_to_string(self.dir.path().join("pids"))
+            .unwrap_or_default()
+            .lines()
+            .map(|pid| pid.trim().parse().expect("a pid"))
+            .collect()
     }
 
     fn attach(&self) -> common::pty::PmacsPty {
@@ -1964,13 +1975,23 @@ fn g3_ctrl_c_at_a_prompt_ends_the_route_and_the_ssh() {
 /// A stand-in that never speaks is killed at the deadline, shortened here, and that is a
 /// failed attempt on the schedule: more of them than the cap, and the route goes on until
 /// a far side answers, whose `Goodbye` ends it. At `5fd9d25` the first of them held it.
+///
+/// Each far side's pid is the one its first line wrote, beside the count, and not one its
+/// session wrote after `cat` and `sleep 0.1`: on CI's macOS `lua54` leg three of four
+/// silent ones were killed at the 300 ms deadline before they wrote it (#494, `CI`
+/// 42502787348), so the row read one pid where it started four. A silent session held 1 s
+/// before it does anything, past the deadline, fails the old row and passes this one. A
+/// stand-in killed after that line and before its count's plays its session again at the
+/// next attempt, so there are at least as many far sides as sessions counted, never fewer:
+/// a local gate's sweep read 8 for 6 (`20261108T214419Z-3811328`), and the row reads every
+/// one of them gone.
 #[test]
 fn g3_a_far_side_that_never_speaks_is_killed_at_the_deadline_with_no_limit() {
     let silent = usize::try_from(HANDSHAKE_RETRY_CAP).expect("cap") + 1;
     let mut sessions = vec![worked_then_failed()];
     sessions.extend((0..silent).map(|_| RemoteSession {
         bytes: Vec::new(),
-        then: "echo $$ >> \"$(dirname \"$0\")/silent\"; exec sleep 300".to_owned(),
+        then: "exec sleep 300".to_owned(),
     }));
     sessions.push(session_with(&goodbye_bytes(), 0));
     let ssh = StandInSsh::new(&sessions);
@@ -1980,14 +2001,16 @@ fn g3_a_far_side_that_never_speaks_is_killed_at_the_deadline_with_no_limit() {
         .unwrap_or_else(|| panic!("it held: {} attempts", ssh.invocations()));
     assert!(status.success(), "{status:?}");
     assert_eq!(ssh.invocations(), silent + 2);
-    let pids = std::fs::read_to_string(ssh.dir.path().join("silent")).expect("the pids");
-    let pids: Vec<i32> = pids
-        .lines()
-        .map(|pid| pid.parse().expect("a pid"))
-        .collect();
-    assert_eq!(pids.len(), silent);
-    for pid in pids {
-        assert!(gone(pid), "{pid} was killed at the deadline");
+    let pids = ssh.pids();
+    assert!(
+        pids.len() >= silent + 2,
+        "a pid for each far side: {pids:?}"
+    );
+    for &pid in &pids {
+        assert!(
+            gone(pid),
+            "{pid} is gone, a silent one killed at the deadline"
+        );
     }
 }
 
