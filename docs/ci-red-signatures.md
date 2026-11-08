@@ -15943,9 +15943,9 @@ The patch changes one fold-tail condition and four painted, interactive regressi
 The last code-bearing base remains `9d6b7ac`; its CI 42219030761, including attempt 2's
 #282 in job 127989471260, is recorded above. No rerun was requested here.
 
-CI run 42519060377 and Grammar fuzz 42519060332 are both in progress at attempt 1 (API read 2026-11-08 20:48 UTC). CI has 16 successful jobs, one skipped and two still running; both fuzz arms are running. No rerun requested.
+CI run 42519060377 and Grammar fuzz 42519060332 both completed successfully at attempt 1 (closing API read 2026-11-08 21:32 UTC). CI has 18 successful jobs and one skipped; both fuzz arms succeeded. No rerun requested.
 
-| Run | Job | Name | State at 20:48 UTC |
+| Run | Job | Name | State at 21:32 UTC |
 |---|---|---|---|
 | 42519060377 | 128848333876 | Changed paths | success |
 | 42519060377 | 128848333997 | Lint (lua54) | success |
@@ -15954,20 +15954,20 @@ CI run 42519060377 and Grammar fuzz 42519060332 are both in progress at attempt 
 | 42519060377 | 128848334132 | Lint (luajit) | success |
 | 42519060377 | 128848383089 | M4 Perf Gates | success |
 | 42519060377 | 128848383121 | M6 Perf Gates | success |
-| 42519060377 | 128848383150 | Test (crdt) | in_progress |
+| 42519060377 | 128848383150 | Test (crdt) | success |
 | 42519060377 | 128848383151 | M10 Perf Gates (crdt) | success |
 | 42519060377 | 128848383169 | Test (macos-latest / lua54) | success |
 | 42519060377 | 128848383177 | GPU Render (headless) | success |
 | 42519060377 | 128848383180 | M5 Perf Gates | success |
 | 42519060377 | 128848383187 | M1 Acceptance Gates | success |
 | 42519060377 | 128848383188 | Perf budgets (debug) | success |
-| 42519060377 | 128848383227 | Test (ubuntu-latest / lua54) | in_progress |
+| 42519060377 | 128848383227 | Test (ubuntu-latest / lua54) | success |
 | 42519060377 | 128848383234 | Test (macos-latest / luajit) | success |
 | 42519060377 | 128848383236 | Test (ubuntu-latest / luajit) | success |
 | 42519060377 | 128848383283 | Test (ubuntu-latest / luajit, no crdt) | success |
 | 42519060377 | 128848384640 | Docs consistency | skipped |
-| 42519060332 | 128848333579 | Grammar fuzz (asan-strict) | in_progress |
-| 42519060332 | 128848333753 | Grammar fuzz | in_progress |
+| 42519060332 | 128848333579 | Grammar fuzz (asan-strict) | success |
+| 42519060332 | 128848333753 | Grammar fuzz | success |
 
 The local default gates all passed five of six stages: fmt, clippy, doc, build and
 diff-check; the sweep failed. Every `running` line pairs with a result line, 237 each;
