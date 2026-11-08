@@ -198,12 +198,14 @@ each in turn: three stopped reading hold the others about 6 s, once.
 A TUI never waits on its daemon to read a key. What is typed at a daemon
 that has stopped answering is queued, in order, and arrives when it answers
 again, and `F12` ends the TUI within about 5 s whatever the daemon is doing.
-A few keys fit the socket and say nothing. Past that, after 2 s with a write
-not moving the bottom row says
-`[pmacs: the daemon is not answering; F12 detaches]`, and past 16 MiB queued
-further input is dropped and it says
-`[pmacs: the daemon is not answering; keys dropped; F12 detaches]`. Either
-goes when the queue has drained.
+A key, a paste or a click that nothing from the daemon follows for 2 s
+makes the bottom row say
+`[pmacs: the daemon is not answering; F12 detaches]`, until the daemon's
+next frame. A daemon busy past 2 s after a key, opening a large file
+say, reads the same, and the sentence goes when it is done. Past 16 MiB
+queued further input is dropped and it says
+`[pmacs: the daemon is not answering; keys dropped; F12 detaches]`, until
+the queue has drained.
 
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),

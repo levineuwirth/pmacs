@@ -46,8 +46,9 @@ const PLAIN_DAEMON_NOTICE: &str =
 const PLAIN_LINK_NOTICE: &str = "[pmacs reconnected on a new view: the connection was lost]";
 /// How long a notice stands whatever is typed under it, by G2's ruling.
 const NOTICE_STANDS: Duration = Duration::from_secs(5);
-/// How long a write goes without moving before the bottom row says so, by H2's ruling.
-const WRITE_STALL: Duration = Duration::from_secs(2);
+/// How long a key goes with no frame after it before the bottom row says the daemon is not
+/// answering, by H2's ruling and J1's trigger.
+const NO_ANSWER: Duration = Duration::from_secs(2);
 
 /// A daemon too old for its age to fall inside the slack, for a row about what a real
 /// session on a healthy daemon reads: under it, a `Hello` reads `may be a new daemon`,
@@ -2915,10 +2916,11 @@ const NOT_ANSWERING_NOTICE: &str = "[pmacs: the daemon is not answering; F12 det
 const KEYS_DROPPED_NOTICE: &str =
     "[pmacs: the daemon is not answering; keys dropped; F12 detaches]";
 
-/// A write that stops moving says so 2 s on, and what it covered comes back when the queue
-/// has drained. A few keys fit the socket and say nothing, so the row types past it.
+/// Typing at a daemon that has stopped says so 2 s after the first key, and what it covered
+/// comes back once the daemon answers again, here past what the socket holds, so that the
+/// queue drains as well (H2's row, its trigger J1's: E10r's review 3, ruled 2026-11-08).
 #[test]
-fn h2_the_notice_is_up_within_its_2_s_and_off_after_the_drain() {
+fn h2_the_notice_is_up_2_s_after_the_first_key_and_off_once_the_daemon_answers() {
     let daemon = TestDaemon::spawn_with_config("");
     let home = tempfile::TempDir::new().expect("tempdir");
     let mut tui = attached_screen(daemon.socket_path(), home.path(), &[]);
@@ -2933,15 +2935,15 @@ fn h2_the_notice_is_up_within_its_2_s_and_off_after_the_drain() {
         tui.write(burst);
         std::thread::sleep(Duration::from_millis(30));
         assert!(
-            tui.watch_for(Duration::ZERO, &up).is_none() || typing.elapsed() >= WRITE_STALL,
-            "up before a write had been pending its 2 s: {} ms",
+            tui.watch_for(Duration::ZERO, &up).is_none() || typing.elapsed() >= NO_ANSWER,
+            "up before a key had waited its 2 s: {} ms",
             typing.elapsed().as_millis()
         );
     }
     let shown = tui.wait_for(Duration::from_secs(20), "the notice", &up);
     assert!(
-        shown.saturating_duration_since(typing) >= WRITE_STALL,
-        "up before a write had been pending its 2 s: {} ms",
+        shown.saturating_duration_since(typing) >= NO_ANSWER,
+        "up before a key had waited its 2 s: {} ms",
         shown.saturating_duration_since(typing).as_millis()
     );
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
@@ -2962,6 +2964,158 @@ fn h2_the_notice_is_up_within_its_2_s_and_off_after_the_drain() {
         tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
         "F12 ends it"
     );
+}
+
+/// A route a J1 row runs on: the local socket, or the real bridge behind a stand-in for `ssh`.
+#[derive(Clone, Copy, Debug)]
+enum Route {
+    Local,
+    Remote,
+}
+
+/// `row` on `route`, a TUI with its screen modelled on a daemon of the row's own.
+fn on_route(route: Route, row: impl FnOnce(&str, &mut ScreenTui, &TestDaemon)) {
+    let daemon = TestDaemon::spawn_with_config("");
+    let home = tempfile::TempDir::new().expect("tempdir");
+    match route {
+        Route::Local => {
+            let mut tui = attached_screen(daemon.socket_path(), home.path(), &[]);
+            row("local", &mut tui, &daemon);
+        }
+        Route::Remote => {
+            let ssh = BridgedSsh::new(daemon.socket_path());
+            let mut tui = ssh.attach_screen("1");
+            row("remote", &mut tui, &daemon);
+        }
+    }
+}
+
+/// `row` on the local route and then the remote one.
+fn each_route(row: impl Fn(&str, &mut ScreenTui, &TestDaemon)) {
+    on_route(Route::Local, &row);
+    on_route(Route::Remote, &row);
+}
+
+/// How long J1's sentence may take after the first key with no answer: its 2 s, the pump's
+/// turn and the screen's read, with room for a loaded machine.
+const NOT_ANSWERING_WITHIN: Duration = Duration::from_secs(6);
+
+/// `typed`, a key or two at a time, at a daemon that has stopped answering, and nothing
+/// after: the bottom row says so within [`NOT_ANSWERING_WITHIN`] of the first and no sooner
+/// than 2 s, nothing the daemon would paint having come, and once it answers the sentence
+/// goes and `F12` ends the TUI. At `e111983` it is blank 10 s on, on either route.
+fn not_answering_after(
+    route: &str,
+    tui: &mut ScreenTui,
+    daemon: &TestDaemon,
+    typed: &[&[u8]],
+    unpainted: &str,
+) {
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    let pid = stop_answering(daemon);
+    // Frames already on their way are read before the first key goes.
+    std::thread::sleep(Duration::from_millis(300));
+    let first = Instant::now();
+    for keys in typed {
+        tui.write(keys);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let up = |t: &ScreenTui| t.bottom_row() == NOT_ANSWERING_NOTICE;
+    let shown = tui.watch_for(Duration::from_secs(10), &up);
+    let waited = shown.map(|at| at.saturating_duration_since(first));
+    let screen = tui.describe();
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    let waited = waited.unwrap_or_else(|| {
+        panic!("{route}: the bottom row does not say the daemon is not answering 10 s on; {screen}")
+    });
+    assert!(
+        waited >= NO_ANSWER && waited < NOT_ANSWERING_WITHIN,
+        "{route}: the sentence {} ms after the first key",
+        waited.as_millis()
+    );
+    assert!(
+        !screen.contains(unpainted),
+        "{route}: {unpainted:?} painted by a daemon that was stopped: {screen}"
+    );
+    tui.wait_for(
+        Duration::from_secs(20),
+        "the sentence gone once the daemon answers",
+        &|t| !up(t),
+    );
+    tui.write(b"\x07");
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "{route}: F12 ends it"
+    );
+}
+
+/// **Review 3's Medium 1, `p40`'s first row, as ruled 2026-11-08:** a word typed at a daemon
+/// that has stopped answering, and then waiting, as a user does when nothing happens. A few
+/// keys fit the transport, so at `e111983`, which waited for it to be full, nothing is said.
+#[test]
+fn j1_a_word_at_a_daemon_that_stopped_says_it_is_not_answering_locally() {
+    on_route(Route::Local, |route, tui, daemon| {
+        not_answering_after(route, tui, daemon, &[b"hello"], "hello");
+    });
+}
+
+/// The same over the remote route, the bridge's pipe and socket holding the word.
+#[test]
+fn j1_a_word_at_a_daemon_that_stopped_says_it_is_not_answering_over_the_remote_route() {
+    on_route(Route::Remote, |route, tui, daemon| {
+        not_answering_after(route, tui, daemon, &[b"hello"], "hello");
+    });
+}
+
+/// `p40`'s second row: `C-x b` alone, which only the daemon answers, its prompt not shown.
+#[test]
+fn j1_c_x_b_alone_at_a_daemon_that_stopped_says_it_is_not_answering_locally() {
+    on_route(Route::Local, |route, tui, daemon| {
+        not_answering_after(route, tui, daemon, &[b"\x18", b"b"], "Switch to buffer");
+    });
+}
+
+/// The same over the remote route.
+#[test]
+fn j1_c_x_b_alone_at_a_daemon_that_stopped_says_it_is_not_answering_over_the_remote_route() {
+    on_route(Route::Remote, |route, tui, daemon| {
+        not_answering_after(route, tui, daemon, &[b"\x18", b"b"], "Switch to buffer");
+    });
+}
+
+/// The guard: a healthy daemon typed at for 6 s, a key every 100 ms, a command among them,
+/// and 3 s after, never says it is not answering, its frames answering every key.
+#[test]
+fn j1_keys_at_a_healthy_daemon_raise_no_sentence_on_either_route() {
+    each_route(|route, tui, _daemon| {
+        tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+            t.screen_contains("*scratch*")
+        });
+        let up = |t: &ScreenTui| t.bottom_row().contains("not answering");
+        let keys = b"healthy daemons answer\x7f\x7f\x7f\x18b\x07typing on, and on, and on";
+        for key in keys.iter().cycle().take(60) {
+            tui.write(std::slice::from_ref(key));
+            assert!(
+                tui.watch_for(Duration::from_millis(100), &up).is_none(),
+                "{route}: said with the daemon answering: {}",
+                tui.describe()
+            );
+        }
+        assert!(
+            tui.watch_for(Duration::from_secs(3), &up).is_none(),
+            "{route}: said with the daemon answering: {}",
+            tui.describe()
+        );
+        tui.write(b"\x07");
+        tui.write(b"\x1b[24~");
+        assert!(
+            tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+            "{route}: F12 ends it"
+        );
+    });
 }
 
 /// Past the cap further input is dropped, and the row says so; what got in before it still

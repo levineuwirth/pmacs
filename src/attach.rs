@@ -183,9 +183,12 @@ const WIND_DOWN_DEADLINE: Duration = Duration::from_secs(5);
 /// wakes that.
 const WRITER_CLOSE_GRACE: Duration = Duration::from_millis(500);
 
-/// How long a write goes without moving before the bottom row says the daemon has stopped
-/// answering (the owner's ruling of 2026-11-07).
-const WRITE_STALL_NOTICE: Duration = Duration::from_secs(2);
+/// How long a key goes with no frame read from the daemon after it before the bottom row
+/// says the daemon is not answering (the owner's rulings of 2026-11-07 and, on E10r's
+/// review 3, of 2026-11-08). An idle daemon writes an attached TUI about 185 frames a second
+/// and a stopped one none, so this is a daemon that has stopped or is busy past it, on
+/// either route and whatever the transport's buffers hold.
+const NO_ANSWER_NOTICE: Duration = Duration::from_secs(2);
 
 /// How many bytes wait for the transport before further input is dropped: one largest
 /// frame, so a paste as large as a frame can be takes an empty queue (the owner's ruling of
@@ -196,8 +199,8 @@ const WRITE_QUEUE_CAP: usize = MAX_FRAME_BYTES;
 /// A test's override of [`WRITE_QUEUE_CAP`], in bytes.
 pub const PMACS_TEST_WRITE_QUEUE_CAP: &str = "PMACS_TEST_WRITE_QUEUE_CAP";
 
-/// How much the writer gives the transport between looks at the clock, so a large frame
-/// going out slowly reads as moving and only one that has stopped reads as stalled.
+/// How much the writer gives the transport at a time, so that the queue's count, which the
+/// cap reads, falls while a large frame goes out and not only once it has gone.
 const WRITE_CHUNK: usize = 64 * 1024;
 
 /// How long a reconnect over SSH waits for its `Hello` before it kills `ssh` and that
@@ -811,9 +814,10 @@ const NOTICE_FRESH_VIEW_CUT_SHORT: &str =
 /// the daemon: the bridge exits 0 when the daemon closes its socket.
 const NOTICE_FRESH_VIEW_LINK: &str = "[pmacs reconnected on a new view: the connection was lost]";
 
-/// On the bottom row, over anything else, while writes to the daemon are not moving. The
-/// owner's words, ruled 2026-11-07: keys typed meanwhile are queued, in order, and `F12`
-/// is always read.
+/// On the bottom row, over anything else, once a key has had no frame from the daemon
+/// after it for [`NO_ANSWER_NOTICE`], and off at the next frame read. The owner's words,
+/// ruled 2026-11-07, and their trigger, ruled 2026-11-08: keys typed meanwhile are queued,
+/// in order, and `F12` is always read.
 const NOTICE_NOT_ANSWERING: Notice = Notice {
     wide: "[pmacs: the daemon is not answering; F12 detaches]",
     narrow: Some("[not answering; F12 detaches]"),
@@ -1296,8 +1300,6 @@ struct WriteQueue {
     bytes: usize,
     /// The writer has a frame in hand.
     writing: bool,
-    /// When the bytes last moved, or the queue last stopped being empty.
-    moved_at: Instant,
     /// Input has been dropped at the cap since the queue last drained.
     dropped: bool,
     /// What a write failed with: the writer has stopped, and whatever was queued goes
@@ -1338,8 +1340,6 @@ struct FrameWriter {
 struct WriterState {
     /// Something is queued or in hand.
     pending: bool,
-    /// How long since those bytes last moved.
-    still_for: Duration,
     /// Input has been dropped since the queue last drained.
     dropped: bool,
 }
@@ -1351,7 +1351,6 @@ impl FrameWriter {
                 frames: VecDeque::new(),
                 bytes: 0,
                 writing: false,
-                moved_at: Instant::now(),
                 dropped: false,
                 failure: None,
                 end: WriterEnd::Open,
@@ -1382,9 +1381,6 @@ impl FrameWriter {
             return;
         }
         let mut queue = self.queue();
-        if queue.frames.is_empty() && !queue.writing {
-            queue.moved_at = Instant::now();
-        }
         queue.bytes = queue.bytes.saturating_add(frame.len());
         queue.frames.push_back(frame);
         self.shared.1.notify_all();
@@ -1417,7 +1413,6 @@ impl FrameWriter {
         let queue = self.queue();
         WriterState {
             pending: queue.writing || !queue.frames.is_empty(),
-            still_for: queue.moved_at.elapsed(),
             dropped: queue.dropped,
         }
     }
@@ -1475,7 +1470,6 @@ fn run_writer(mut writer: Box<dyn Write + Send>, shared: &(Mutex<WriteQueue>, Co
                 break 'frames;
             }
             held.bytes = held.bytes.saturating_sub(chunk.len());
-            held.moved_at = Instant::now();
         }
     }
     drop(writer);
@@ -1483,15 +1477,56 @@ fn run_writer(mut writer: Box<dyn Write + Send>, shared: &(Mutex<WriteQueue>, Co
     wake.notify_all();
 }
 
+/// Whether the daemon answers what this client sends it, read by its frames (E10r's review
+/// 3, ruled 2026-11-08): an idle daemon writes an attached TUI about 185 frames a second and a
+/// stopped one none, so a key with no frame read after it for [`NO_ANSWER_NOTICE`] is a
+/// daemon not answering, on either route, where the transport's being full of unsent keys,
+/// the trigger before it, came only after 337 keys locally and about 110,000 behind `ssh`'s
+/// window. A frame already on its way when a key goes answers it all the same, so a single
+/// key that starts a long hold may say nothing until the next key, and a frame reads as an
+/// answer whatever it holds: if a daemon ever stops writing frames while idle (#457), each
+/// input must still have one after it, or this reads a quiet daemon as one not answering.
+#[derive(Debug)]
+struct Answers {
+    /// When the reader last read a frame, set on its thread.
+    last_frame: Arc<Mutex<Instant>>,
+    /// When the first input went that no frame has been read after.
+    unanswered_since: Option<Instant>,
+}
+
+impl Answers {
+    fn new() -> Self {
+        Self {
+            last_frame: Arc::new(Mutex::new(Instant::now())),
+            unanswered_since: None,
+        }
+    }
+
+    /// Input is about to go to the daemon: a key, or a paste.
+    fn input_sent(&mut self) {
+        self.unanswered_since.get_or_insert_with(Instant::now);
+    }
+
+    /// How long the oldest input with no frame read after it has waited, if one has.
+    fn unanswered_for(&mut self) -> Option<Duration> {
+        let since = self.unanswered_since?;
+        if *self.last_frame.lock().expect("the last frame's time") > since {
+            self.unanswered_since = None;
+            return None;
+        }
+        Some(since.elapsed())
+    }
+}
+
 /// What stands over the frames on a terminal's bottom row: a new session's notice, for
-/// [`NOTICE_FLOOR`] and until the next key, and over it, while it lasts, that the daemon has
-/// stopped answering, which is the sentence that says how to leave. When that one goes the
+/// [`NOTICE_FLOOR`] and until the next key, and over it, while it lasts, that the daemon is
+/// not answering, which is the sentence that says how to leave. When that one goes the
 /// other comes back, if it has not stood its floor or no key has come.
 #[derive(Debug, Default)]
 struct BottomRow {
     /// A new session's notice.
     standing: Option<StandingNotice>,
-    /// That writes are not moving.
+    /// That the daemon is not answering, and whether keys are being dropped.
     stalled: Option<Notice>,
     /// What is on the row now.
     painted: Option<&'static str>,
@@ -1548,17 +1583,16 @@ impl BottomRow {
         self.standing.is_none_or(|standing| standing.stood())
     }
 
-    /// What the writer says: up once its bytes have sat still for [`WRITE_STALL_NOTICE`]
-    /// or input has been dropped, and off only when its queue has drained.
-    fn writer_says(&mut self, state: &WriterState) {
-        self.stalled = if !state.pending {
-            None
-        } else if state.dropped {
+    /// Whether the daemon is answering: input dropped at the cap says so until the queue
+    /// has drained, and otherwise a key [`NO_ANSWER_NOTICE`] old with no frame read after it
+    /// says the daemon is not answering, until the next frame.
+    fn daemon_says(&mut self, writer: &WriterState, unanswered_for: Option<Duration>) {
+        self.stalled = if writer.pending && writer.dropped {
             Some(NOTICE_KEYS_DROPPED)
-        } else if state.still_for >= WRITE_STALL_NOTICE {
+        } else if unanswered_for.is_some_and(|waited| waited >= NO_ANSWER_NOTICE) {
             Some(NOTICE_NOT_ANSWERING)
         } else {
-            self.stalled
+            None
         };
     }
 
@@ -1662,7 +1696,10 @@ pub(crate) fn run_attach_pair(
     let (tx, rx) = mpsc::channel::<InstanceMessage>();
     let far_side_text = Arc::new(Mutex::new(Vec::new()));
     let text_for_reader = Arc::clone(&far_side_text);
-    let reader_handle = thread::spawn(move || run_reader(reader, tx, &text_for_reader));
+    let mut answers = Answers::new();
+    let frame_for_reader = Arc::clone(&answers.last_frame);
+    let reader_handle =
+        thread::spawn(move || run_reader(reader, tx, &text_for_reader, &frame_for_reader));
     let writer = FrameWriter::spawn(writer);
 
     // T M10.10: per-session CRDT replica state. Bootstrapped by
@@ -1851,7 +1888,7 @@ pub(crate) fn run_attach_pair(
                     bootstrapped,
                 );
             }
-            bottom.writer_says(&writer.state());
+            bottom.daemon_says(&writer.state(), answers.unanswered_for());
             bottom.time_passed();
             if let Err(e) = bottom.settle(frontend) {
                 return Err(AttachError::Terminal(e));
@@ -1883,6 +1920,9 @@ pub(crate) fn run_attach_pair(
             if writer.full() && !matches!(ev, Event::Resize(..)) {
                 writer.input_dropped();
                 continue;
+            }
+            if is_typed(&ev) {
+                answers.input_sent();
             }
 
             // T M10.10 Day 3 step 3b — text-input optimistic-apply
@@ -2096,6 +2136,22 @@ fn takes_bottom_row(batch: &[InstanceMessage], size: CellSize) -> bool {
     })
 }
 
+/// Whether `ev` is something typed, pasted or clicked, which a user waits on an answer to:
+/// the input [`Answers`] reads. A key's release is nothing sent, and a mouse's motion or
+/// release, a focus change or a resize is not something a user waits on.
+fn is_typed(ev: &Event) -> bool {
+    use crossterm::event::MouseEventKind;
+    match ev {
+        Event::Key(key) => matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat),
+        Event::Paste(_) => true,
+        Event::Mouse(mouse) => !matches!(
+            mouse.kind,
+            MouseEventKind::Moved | MouseEventKind::Up(_) | MouseEventKind::Drag(_)
+        ),
+        Event::Resize(..) | Event::FocusGained | Event::FocusLost => false,
+    }
+}
+
 /// F12 is the v0.1 detach key. Any modifier combination triggers
 /// detach so users with sticky modifier keys can still exit.
 fn is_detach_key(ev: &Event) -> bool {
@@ -2184,10 +2240,14 @@ fn run_reader(
     mut reader: Box<dyn Read + Send>,
     tx: mpsc::Sender<InstanceMessage>,
     text: &Mutex<Vec<u8>>,
+    last_frame: &Mutex<Instant>,
 ) -> bool {
     loop {
         match read_message::<InstanceMessage>(&mut reader) {
             Ok(msg) => {
+                // Here and not where the pump drains it, since frames the daemon wrote
+                // before it read a key wait in the channel behind it and answer nothing.
+                *last_frame.lock().expect("the last frame's time") = Instant::now();
                 if tx.send(msg).is_err() {
                     return false;
                 }
@@ -4070,7 +4130,9 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<InstanceMessage>();
         let no_text = Arc::new(Mutex::new(Vec::new()));
-        let reader_handle = thread::spawn(move || run_reader(signaling_reader, tx, &no_text));
+        let no_frame = Mutex::new(Instant::now());
+        let reader_handle =
+            thread::spawn(move || run_reader(signaling_reader, tx, &no_text, &no_frame));
 
         // Wait for the reader to enter its read call. Bounded so a
         // never-spawning reader fails the test instead of hanging.
@@ -4644,8 +4706,8 @@ mod tests {
         );
     }
 
-    /// How the writer says how it stands: nothing pending until a frame is, still only
-    /// while it is, full at its cap, and each of those gone when the queue drains.
+    /// How the writer says how it stands: nothing pending until a frame is, full at its
+    /// cap, and each of those gone when the queue drains.
     #[test]
     fn the_writer_says_how_it_stands() {
         let released: Release = Arc::default();
@@ -4690,7 +4752,7 @@ mod tests {
     #[test]
     fn a_write_queue_holds_at_least_one_largest_frame() {
         assert_eq!(WRITE_QUEUE_CAP, MAX_FRAME_BYTES);
-        assert_eq!(WRITE_STALL_NOTICE, Duration::from_secs(2));
+        assert_eq!(NO_ANSWER_NOTICE, Duration::from_secs(2));
     }
 
     /// The owner's words, character for character, and a narrow pane's that keep `F12`.
@@ -4760,35 +4822,34 @@ mod tests {
         assert!(bottom.notice_stood());
     }
 
-    /// How the sentences sit: the writer's stands over a new session's notice while it
-    /// lasts, latched until the queue drains, and the other comes back if it still stands.
+    /// How the sentences sit: `not answering` stands over a new session's notice from a
+    /// key's 2 s with no frame until the next frame, `keys dropped` over both until the queue
+    /// drains, and the notice comes back if it still stands. The writer's own movement
+    /// says nothing: a full transport with frames still coming is a daemon answering.
     #[test]
-    fn the_writers_sentence_stands_over_a_notice_and_gives_it_back() {
+    fn the_daemons_sentences_stand_over_a_notice_and_give_it_back() {
         let mut bottom = BottomRow {
             standing: Some(StandingNotice::new(NOTICE_NEW_DAEMON)),
             ..BottomRow::default()
         };
         let mut frontend = ScriptedFrontend::default();
         bottom.settle(&mut frontend).expect("settle");
-        let pending = |still_for, dropped| WriterState {
-            pending: true,
-            still_for,
-            dropped,
-        };
-        bottom.writer_says(&pending(Duration::from_secs(1), false));
+        let writer = |pending, dropped| WriterState { pending, dropped };
+        bottom.daemon_says(&writer(true, false), Some(Duration::from_secs(1)));
         bottom.settle(&mut frontend).expect("settle");
-        bottom.writer_says(&pending(WRITE_STALL_NOTICE, false));
+        bottom.daemon_says(&writer(true, false), Some(NO_ANSWER_NOTICE));
         bottom.settle(&mut frontend).expect("settle");
-        // Moving again and not yet drained: it stays, as ruled.
-        bottom.writer_says(&pending(Duration::ZERO, false));
+        bottom.daemon_says(&writer(true, true), Some(NO_ANSWER_NOTICE));
         bottom.settle(&mut frontend).expect("settle");
-        bottom.writer_says(&pending(Duration::ZERO, true));
+        // A frame read with the queue not yet drained: `keys dropped` stays, as ruled.
+        bottom.daemon_says(&writer(true, true), None);
         bottom.settle(&mut frontend).expect("settle");
-        bottom.writer_says(&WriterState {
-            pending: false,
-            still_for: Duration::ZERO,
-            dropped: false,
-        });
+        bottom.daemon_says(&writer(false, false), None);
+        bottom.settle(&mut frontend).expect("settle");
+        bottom.daemon_says(&writer(true, false), Some(NO_ANSWER_NOTICE));
+        bottom.settle(&mut frontend).expect("settle");
+        // The next frame takes it off, the queue still holding what it held.
+        bottom.daemon_says(&writer(true, false), None);
         bottom.settle(&mut frontend).expect("settle");
         bottom.standing = None;
         bottom.settle(&mut frontend).expect("settle");
@@ -4797,9 +4858,65 @@ mod tests {
             Some(NOTICE_NOT_ANSWERING.wide.to_owned()),
             Some(NOTICE_KEYS_DROPPED.wide.to_owned()),
             Some(NOTICE_NEW_DAEMON.wide.to_owned()),
+            Some(NOTICE_NOT_ANSWERING.wide.to_owned()),
+            Some(NOTICE_NEW_DAEMON.wide.to_owned()),
             None,
         ];
         assert_eq!(frontend.row, expect);
+    }
+
+    /// A key starts the clock and the first frame read after it stops it; a frame read
+    /// before it answers nothing, and keys after the first do not move the clock on.
+    #[test]
+    fn a_key_waits_for_the_first_frame_read_after_it() {
+        let mut answers = Answers::new();
+        assert_eq!(answers.unanswered_for(), None, "nothing sent");
+        *answers.last_frame.lock().expect("time") = Instant::now();
+        thread::sleep(Duration::from_millis(5));
+        answers.input_sent();
+        let first = answers.unanswered_since.expect("the key's time");
+        assert!(
+            answers.unanswered_for().is_some(),
+            "a frame read before the key answers nothing"
+        );
+        thread::sleep(Duration::from_millis(5));
+        answers.input_sent();
+        assert_eq!(answers.unanswered_since, Some(first), "the oldest key's");
+        thread::sleep(Duration::from_millis(5));
+        assert!(
+            answers
+                .unanswered_for()
+                .is_some_and(|waited| waited >= Duration::from_millis(10))
+        );
+        *answers.last_frame.lock().expect("time") = Instant::now();
+        assert_eq!(answers.unanswered_for(), None, "a frame read after it");
+        assert_eq!(answers.unanswered_since, None);
+    }
+
+    /// What starts the clock: a key pressed or held, a paste, a click or a wheel; not a
+    /// release, a mouse's motion, a focus change or a resize.
+    #[test]
+    fn what_a_user_waits_on_is_what_is_typed_pasted_or_clicked() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert!(is_typed(&press(KeyCode::Char('a'))));
+        assert!(is_typed(&Event::Paste("x".to_owned())));
+        assert!(is_typed(&mouse(MouseEventKind::Down(MouseButton::Left))));
+        assert!(is_typed(&mouse(MouseEventKind::ScrollDown)));
+        assert!(!is_typed(&Event::Key(release)));
+        assert!(!is_typed(&mouse(MouseEventKind::Moved)));
+        assert!(!is_typed(&mouse(MouseEventKind::Up(MouseButton::Left))));
+        assert!(!is_typed(&Event::FocusLost));
+        assert!(!is_typed(&Event::Resize(80, 24)));
     }
 
     /// What a far side says reaches a terminal as one line of text: its last with text and
