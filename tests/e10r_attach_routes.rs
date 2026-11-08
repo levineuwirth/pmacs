@@ -2671,10 +2671,11 @@ fn h1_an_accepted_directory_follows_no_link_either_and_its_file_is_private() {
     drop(started);
 }
 
-/// How many keys fill each route's transport with its daemon stopped, at about 64 B a frame:
-/// a local socket's buffer took 200 small frames, and a remote route's, its pipe behind it,
-/// 4,100 (review 2's `p30`, on Linux). Either is short of what the terminal's own buffer
-/// holds past that, so a client that stopped reading leaves a row's write to return.
+/// How many keys fill each route's transport with its daemon stopped, a key being a frame of
+/// 19 B (review 3's `p49`, the TUI's own writes under `strace`): a local socket's buffer took
+/// 200 of them, and a remote route's, its pipe behind it, 4,100 (review 2's `p30`, on Linux).
+/// Either is short of what the terminal's own buffer holds past that, so a client that
+/// stopped reading leaves a row's write to return.
 const KEYS_PAST_A_LOCAL_SOCKET: usize = 600;
 const KEYS_PAST_A_REMOTE_ROUTE: usize = 6_000;
 

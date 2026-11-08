@@ -62,9 +62,12 @@ pub const DAEMON_STDERR_CAP: u64 = 1024 * 1024;
 
 /// Open [`daemon_stderr_path`] for a daemon `who` is about to start, on the bridge's route
 /// and the window's: mode 0600, which also tightens a file an earlier version left wider,
-/// and following no link, since a link planted there would otherwise be written through.
-/// A caller falls back to the null device on an error: the daemon matters more than its
-/// log.
+/// and following no link at the file itself, since a link planted there would otherwise be
+/// written through. `O_NOFOLLOW` reads the last component alone, so a link at a directory
+/// above it, `pmacs/` say, is followed: under `$XDG_RUNTIME_DIR` only the user can make
+/// one, and under `/tmp/pmacs-<uid>`, where another local user can be first, that is
+/// #481's and #488's (E10r's review 3). A caller falls back to the null device on an
+/// error: the daemon matters more than its log.
 ///
 /// It is appended to, under a line saying when and by whom, so that one crash's words
 /// outlast the reconnect that starts the next daemon, and two starting together keep every
