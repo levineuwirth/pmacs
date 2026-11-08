@@ -2148,6 +2148,25 @@ mod tests {
         );
     }
 
+    /// [`spawn_daemon`] of a script this row has just written. Another test's fork in this
+    /// process can hold the script's write descriptor open until its child execs, and the
+    /// spawn then reads `ETXTBSY` (a local gate, `20261108T000503Z-1210505`), so it is tried
+    /// again while that lasts.
+    fn spawn_written_daemon(executable: &Path, socket: &Path) -> Child {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match spawn_daemon(executable, socket) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                spawned => return spawned.expect("spawn"),
+            }
+        }
+    }
+
     /// E10r's H1: the window's route opens that file as the bridge's does: at 0600, and
     /// a link planted there is not followed, its target keeping its bytes, the daemon
     /// starting all the same with its words going nowhere.
@@ -2169,7 +2188,7 @@ mod tests {
             .expect("chmod");
 
         let socket = dir.path().join("plain.sock");
-        let mut child = spawn_daemon(&executable, &socket).expect("spawn");
+        let mut child = spawn_written_daemon(&executable, &socket);
         child.wait().expect("wait");
         let log = daemon_stderr_path(&socket);
         let captured = std::fs::read_to_string(&log).expect("the file");
@@ -2182,7 +2201,7 @@ mod tests {
         let victim = dir.path().join("victim");
         std::fs::write(&victim, "the victim's own\n").expect("the victim");
         std::os::unix::fs::symlink(&victim, daemon_stderr_path(&socket)).expect("the link");
-        let mut child = spawn_daemon(&executable, &socket).expect("spawn");
+        let mut child = spawn_written_daemon(&executable, &socket);
         child.wait().expect("wait");
         assert!(ran.exists(), "the daemon started all the same");
         assert_eq!(
