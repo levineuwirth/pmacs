@@ -250,6 +250,86 @@ fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
 // 1. Collapse (framing acceptance 1)
 // ---------------------------------------------------------------------------
 
+/// #384: invoke the interactive command over the real worker's tree and
+/// read the painted rows. A nested expression's closer belongs to the
+/// indentation/keyword body's hidden text, not to the body's delimiter.
+fn assert_command_fold_rows(lang: &str, source: &str, inside: &str, expected: &[&str]) {
+    for command in ["fold.close", "fold.close-all"] {
+        let mut s = editor();
+        let id = active_id(&s);
+        seed(&s, id, source);
+        exec(
+            &s,
+            &format!("assert(pmacs.parse._parse_now(pmacs.window.buffer(), {lang:?}))"),
+        );
+        let before = text_rows(&paint(&s));
+        for line in source.lines() {
+            assert!(
+                before.iter().any(|row| row == line),
+                "fixture visible: {before:?}"
+            );
+        }
+        set_cursor(&s, source.find(inside).expect("cursor in body") as u64);
+        alt(&mut s, 'x');
+        type_str(&mut s, command);
+        press(&mut s, KeyCode::Enter);
+        let rows = text_rows(&paint(&s));
+        assert_eq!(
+            &rows[..expected.len()],
+            expected,
+            "{lang} {command}: {rows:?}"
+        );
+        assert!(
+            rows[expected.len()..].iter().all(String::is_empty),
+            "no stray tail: {rows:?}"
+        );
+        alt(&mut s, 'x');
+        type_str(&mut s, "fold.open-all");
+        press(&mut s, KeyCode::Enter);
+        assert_eq!(text_rows(&paint(&s)), before, "opening restores every line");
+    }
+}
+
+#[test]
+fn issue384_python_function_hides_its_final_call_closer() {
+    assert_command_fold_rows(
+        "python",
+        "def f():\n    x = foo(\n        1,\n    )\nafter = 2\n",
+        "x =",
+        &["def f(): …", "after = 2"],
+    );
+}
+
+#[test]
+fn issue384_python_class_hides_its_final_dict_closer() {
+    assert_command_fold_rows(
+        "python",
+        "class C:\n    x = {\n        'a': 1,\n    }\nafter = 2\n",
+        "x =",
+        &["class C: …", "after = 2"],
+    );
+}
+
+#[test]
+fn issue384_lua_function_hides_its_final_table_closer() {
+    assert_command_fold_rows(
+        "lua",
+        "function f()\n    local x = {\n        a = 1,\n    }\nend\nafter = 2\n",
+        "local x",
+        &["function f() …", "end", "after = 2"],
+    );
+}
+
+#[test]
+fn issue384_rust_keeps_its_own_body_closer() {
+    assert_command_fold_rows(
+        "rust",
+        "fn f() {\n    let x = [\n        1,\n    ];\n}\nconst AFTER: i32 = 2;\n",
+        "let x",
+        &["fn f() { …", "}", "const AFTER: i32 = 2;"],
+    );
+}
+
 #[test]
 fn collapse_omits_hidden_lines_and_shifts_rows_up() {
     let (s, _id) = seeded();

@@ -176,9 +176,10 @@ fn fold_from_node(n: Node<'_>, source: &[u8], line_offsets: &[u32]) -> Option<(u
         b_start_row
     };
 
-    // Tail: a closing-delimiter line stays visible (`} else {`); a
-    // delimiter-less body hides through its last line.
-    let last_hidden_row = if line_starts_with_closer(source, line_offsets, b_end_row) {
+    // Tail: a delimited body's closing line stays visible (`} else {`).
+    // A delimiter-less body hides through its last line, even when a
+    // nested expression ends there with a closing bracket (#384).
+    let last_hidden_row = if is_brace && line_starts_with_closer(source, line_offsets, b_end_row) {
         if b_end_row == 0 {
             return None;
         }
