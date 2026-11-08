@@ -2813,6 +2813,27 @@ fn read_once_it_ends_with(out: &Path, tail: &str, limit: Duration) -> String {
     }
 }
 
+/// What `out` holds once it has held something and not changed for a second, for a row
+/// reading [`mirroring_scratch_to`] with no needle to wait for.
+fn read_once_it_settles(out: &Path, limit: Duration) -> String {
+    let deadline = Instant::now() + limit;
+    let mut last = String::new();
+    let mut since = Instant::now();
+    loop {
+        let said = std::fs::read_to_string(out).unwrap_or_default();
+        if said != last {
+            last = said;
+            since = Instant::now();
+        } else if !last.is_empty() && since.elapsed() >= Duration::from_secs(1) {
+            return last;
+        }
+        if Instant::now() >= deadline {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// What the writer's thread must not cost: every key typed at a stopped daemon, past what
 /// the transport holds, arrives once it resumes, in order, on either route. At `b11d25a` the
 /// local leg passes and the remote leg reads 4,824 of its 6,000, every time, the client
@@ -2951,9 +2972,10 @@ fn h2_past_the_cap_further_input_is_dropped_saying_so() {
         "the row, the queue drained",
         &|t| !dropped(t),
     );
-    // The row is up until the queue has drained, so what got in is there or nearly.
-    std::thread::sleep(Duration::from_secs(1));
-    let said = std::fs::read_to_string(&out).unwrap_or_default();
+    // The row goes when the queue has gone to the socket, not when the daemon has read it,
+    // so what reached the daemon is read once it has stopped growing: on CI's macOS legs a
+    // second after the row went it was not yet there (`CI` 42424177774).
+    let said = read_once_it_settles(&out, Duration::from_mins(1));
     let typed = String::from_utf8(typed).expect("digits");
     assert!(
         said.len() < typed.len(),
