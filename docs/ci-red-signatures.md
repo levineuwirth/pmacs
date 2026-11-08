@@ -15834,6 +15834,108 @@ Tally (e10m-f1-local): 5 items in the list below.
 - E10m.13's witnesses and loops at `5373c48`, a fresh `HOME` each run, `TERM` unset and set: fish 3.7.0 400 of 400 each way, alternating evicted and read in; fish 4.9.3 5 of 5; zsh and bash 100 of 100; lua 30 of 30; on one contended core 20 of 20 on each fish each way; each stand-in by its own message.
 - K4's budget by `scripts/bite HEAD^ builtin/packages/repl/init.lua`: `f2667df`'s Lua at ratios 12.30 and 6.50 against a bound of 3, the head 1.33 and 1.33; two plants in K4's own look-back, each flipping its row; `m6_4`, `m6_7` and `m6_8` on `lua54,crdt` by hand.
 
+### E10r fix round 4: PR #462 red at `6375147` on #254's fourteenth and fifteenth and on #494's first, `main` green at `faf3956`
+
+Recorded 2026-11-08 at E10r fix round 4 (roadmap §E10r, J1 to J7), which leaves `main` where E10m's fix round 1 left it. Every run was read from the jobs endpoint by conclusion, and every test leg of PR #462's run through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in this file before it was written, and none was in it.
+
+#### `main` at `faf3956`, E10m's fix round 1's registry commit: green
+
+`CI` 42497149891 at `faf3956`, attempt 1 of 1, `push`, created 2026-11-08T15:54:22Z and completed 15:56:39Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-faf3956): 15 = 6 + 9.
+
+Tally (main-ci-faf3956-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 128781836659 | success |
+| Changed paths | 128781836875 | success |
+| Lint (lua54) | 128781836922 | success |
+| Format | 128781836965 | success |
+| Lint (luajit) | 128781837005 | success |
+| Docs consistency | 128781876623 | success |
+| Test (crdt) | 128781877520 | skipped |
+| GPU Render (headless) | 128781877554 | skipped |
+| Perf budgets (debug) | 128781877643 | skipped |
+| M6 Perf Gates | 128781877649 | skipped |
+| M1 Acceptance Gates | 128781877833 | skipped |
+| M5 Perf Gates | 128781877940 | skipped |
+| Test (matrix) | 128781878333 | skipped |
+| M10 Perf Gates (crdt) | 128781878471 | skipped |
+| M4 Perf Gates | 128781878577 | skipped |
+
+Tally (main-ci-faf3956-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-faf3956-skipped): 9 rows of the table above with `result` = `skipped`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test (matrix)`. `Grammar fuzz` 42497149888 at `faf3956`, attempt 1 of 1, `success`: `Grammar fuzz` 128781836866 and `Grammar fuzz (asan-strict)` 128781837095.
+
+Tally (main-fuzz-faf3956): 2 = 2 + 0.
+
+#### PR #462 at `6375147`, the head: red on #254's fourteenth and fifteenth and on #494's first, none rerun
+
+`CI` 42502787348 on the merge `840b819` of `6375147` into `faf3956`, attempt 1 of 1, `pull_request`, created 2026-11-08T17:00:58Z and completed 17:45:06Z: `failure`. All three red legs are required checks. The head is `e111983` and five commits, fix round 4's: the attached TUI's `not answering` sentence on a key with no frame after it (`9d15647`), a far side's words drawn as a terminal draws them (`dad4bf5`), the bottom row painted again after a resize (`fb248c7`), two records (`4a9d3d4`), and E2.4's window row spawning its script with a retry (`6375147`).
+
+Tally (pr-462-ci-6375147): 19 = 15 + 1 + 3.
+
+Tally (pr-462-ci-6375147-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 128798942862 | success |
+| Lint (lua54) | 128798942929 | success |
+| Lint (luajit) | 128798942946 | success |
+| Changed paths | 128798943107 | success |
+| Format | 128798943120 | success |
+| GPU Render (headless) | 128798999601 | success |
+| M5 Perf Gates | 128798999615 | success |
+| M1 Acceptance Gates | 128798999633 | success |
+| Perf budgets (debug) | 128798999646 | success |
+| M10 Perf Gates (crdt) | 128798999655 | success |
+| Test (ubuntu-latest / lua54) | 128798999670 | failure |
+| M4 Perf Gates | 128798999692 | success |
+| Test (crdt) | 128798999694 | success |
+| M6 Perf Gates | 128798999706 | success |
+| Test (ubuntu-latest / luajit) | 128798999708 | success |
+| Test (macos-latest / lua54) | 128798999709 | failure |
+| Test (macos-latest / luajit) | 128798999737 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128798999850 | failure |
+| Docs consistency | 128799001268 | skipped |
+
+Tally (pr-462-ci-6375147-success): 15 rows of the table above with `result` = `success`.
+
+Tally (pr-462-ci-6375147-failure): 3 rows of the table above with `result` = `failure`.
+
+Tally (pr-462-ci-6375147-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` 128799001268 is skipped, the push changing code. `WouldBlock` and `Bus error` are in no test leg's log.
+
+Tally (pr-462-ci-6375147-legs): 7 items in the list below.
+
+- `Test (ubuntu-latest / lua54)` 128798999670: `failure`, 229 pairs, 5,595 / 1 / 87, 33,108 MB available after the tests. **#254's fourteenth.** `m6_5_repl_spawns_fish`, `pump predicate did not become true within 15000ms; chunk:` at `tests/m6_5_repl_acceptance.rs:115:9`, the chunk beginning `local h = _G.h` and polling `pmacs.process.status(h._proc_id)`, both of the issue's fragments, `test result: FAILED. 10 passed; 1 failed`, `finished in 20.01s`, the leg's only failure.
+- `Test (ubuntu-latest / luajit, no crdt)` 128798999850: `failure`, 229 pairs, 4,946 / 1 / 71, 52,191 MB available. **#254's fifteenth**, the same fragments, `finished in 19.94s`, the leg's only failure.
+- `Test (macos-latest / lua54)` 128798999709: `failure`, 230 pairs, 5,536 / 1 / 79. In `tests/e10r_attach_routes.rs`, this phase's own suite, `g3_a_far_side_that_never_speaks_is_killed_at_the_deadline_with_no_limit`: `assertion `left == right` failed`, `left: 1`, `right: 4`, at the row's count of its silent far sides' pids, its count of attempts having held, and `test result: FAILED. 85 passed; 1 failed; 0 ignored`, `finished in 141.05s`, the leg's only failure. No row or issue named the selector: **#494, filed, its first occurrence.** Its candidate mechanism, from reading and a forced control (the issue): a stand-in killed at the shortened 300 ms deadline before its first line ran writes no pid, so the row's instrument reads fewer pids than attempts on a slow runner; the row passed on both macOS legs at `e111983`.
+- `Test (ubuntu-latest / luajit)` 128798999708: `success`, 231 pairs, 5,656 / 0 / 87, 32,569 MB available. `m6_5_repl_spawns_fish` `ok` on this leg with fish: non-reproduction and nothing more.
+- `Test (crdt)` 128798999694: `success`, 230 pairs, 5,597 / 0 / 87, 33,437 MB available.
+- `Test (macos-latest / luajit)` 128798999737: `success`, 232 pairs, 5,597 / 0 / 79.
+- `GPU Render (headless)` 128798999601: `success`, 1 pair, 396 / 0 / 0, E2.4's window row and H1's `ok`.
+
+Commented, 6725096544 on #254. The three Ubuntu matrix legs each read `Setting up fish (3.7.0-1)`; `Test (crdt)` and both macOS legs skip the row and read it `ok`. This merge does not hold E10m's fix, PR #476 being open, so the two reds carry the pump's old text. The round's seven rows whose names begin `j1_` or `j3_` read `ok` on all six test legs, its seven unit rows likewise, and fix round 3's rows whose names begin `h` or `r2_` 45 with CRDT and 33 without.
+
+`Grammar fuzz` 42502787334 at `6375147`, attempt 1 of 1, `success`, `run=true` with `reason=Cargo.lock changed`: `Grammar fuzz` 128798943085, `exit 0, its parse worker's replay exit 0`, 965 inputs, 945 answered, 20 contained, 0 crashed; `Grammar fuzz (asan-strict)` 128798942877, the same, 964, 946, 18, 0.
+
+Tally (pr-462-fuzz-6375147): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10r-fixes4-local): 3 items in the list below.
+
+- `20261108T155718Z-880759` at `6375147`, `scripts/gate --protocol --perf`, on the laptop at `nice -n 19` and six jobs, the sampler's 1-minute load 7.80 to 29.17, another project's processes at 100% beside it: seven of nine. `06-sweep` 6,026 / 4 / 81 at 238 pairs: #316 under its template reading (`kill 3`, `" +*`, `9 passed; 2 failed; 0 ignored`), commented 6724392667; `e7i_review3_a_deadline_that_cuts_only_layers_keeps_its_current_spans`, `the warm parse installed` with no attempt-trace line, #340's selector and message and not its fragments, commented 6724393140; `pmacs-gpu`'s caret-inside row, 44 pixels at x = 102–103, y = 16–37, #304 under its template reading (`395 passed; 1 failed`), commented 6724393343; `e7_review1_a_late_answer_past_the_default_bound_never_touches_an_edited_buffer`, `gives up before the answer: 2.238143351s`, `10 passed; 1 failed`, #364 under its template reading, commented 6724393543. `07-sweep-luajit` 5,380 / 1 / 67 at 238 pairs: #291 with every fragment, commented 6724392955. Every budget held, no daemon survived.
+- `20261108T163320Z-1340316` at `6375147`, the same command, load 7.11 to 28.03: six of nine. `06-sweep` 6,029 / 1 / 81: #367 with every fragment (`grew past 64 MiB (by watch)`, no overshoot, `28 passed; 1 failed`), commented 6724393753. `07-sweep-luajit` 5,378 / 3 / 67: #364 with every fragment (`1.383940899s`, `9 passed; 1 failed; 0 ignored`), #340's selector without its trace, and #316 at `kill 2` under its template reading, on the comments above. `perf`: `e7h_budget_cancellation_lands_within_a_millisecond`, `worst overshoot 3.254236ms` against 1 ms, beside other work, a measurement; `scripts/perf-budgets` again held every budget, in a window `quiet-run` refused (other work 38.8%). No daemon survived.
+- `20261108T170246Z-1742178` at `6375147`, the same command, load 9.43 to 26.70: eight of nine. `06-sweep` 6,029 / 1 / 81: #342 with every fragment (`built-in defaults still parse under a non-table container`, `left: 0`, `right: 1`, `74 passed; 1 failed; 0 ignored`), commented 6724701703. `07-sweep-luajit` 5,381 / 0 / 67, every budget held, no daemon survived.
+
+So, at E10r fix round 4: `main` is green at `faf3956`, and PR #462 is red at its head on three required checks: #254 on two of the three legs with fish, whose suite has no diff in the PR, and #494's macOS leg, an instrument of this phase's own suite; none rerun and nothing merged. By CI #254 moves to fifteen and #494 is filed at one. The local samples are listed, not tallied. Every other count above stands.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
