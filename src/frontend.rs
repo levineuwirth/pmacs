@@ -72,6 +72,12 @@ use crate::protocol::{InstanceMessage, InstanceSignal};
 // directly. M2's keymap will translate these into normalized commands.
 pub use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 
+/// U+FE0F, VARIATION SELECTOR-16: after a symbol it asks for its emoji
+/// presentation, two columns wide where the symbol alone is one, which is
+/// not how a character at a time is counted. The bottom row's overlay does
+/// not paint it, nor does a far side's line in a reconnect's countdown.
+pub(crate) const EMOJI_PRESENTATION: char = '\u{FE0F}';
+
 // ---------------------------------------------------------------------------
 // Panic hook
 // ---------------------------------------------------------------------------
@@ -851,11 +857,14 @@ fn emit_span<W: Write>(w: &mut W, span: &DiffSpan) -> io::Result<()> {
 /// flush). A zero-area terminal is a no-op so the function is safe
 /// to call before the first resize in unusual init paths.
 ///
-/// Truncation is by `char` count, which equals column count for
-/// the v0.1 banner texts (ASCII + em-dash). A terminal narrow
-/// enough to truncate the message is already showing the user
-/// "something is wrong"; precision wide-char width accounting
-/// would be ceremony with no user-visible improvement at v0.1.
+/// Truncation is by the columns each character takes, since a far side's
+/// words reach this row in a reconnect's countdown, and a character past
+/// the edge would wrap the bottom row and scroll the screen. U+FE0F
+/// ([`EMOJI_PRESENTATION`]) is not painted: after a symbol counted one
+/// column wide it asks for an emoji two wide, which tmux's default and most
+/// terminals draw, so with it the row ran a column past its end for each
+/// (E10r's review 3, ruled 2026-11-08). Without it the symbol is drawn as
+/// text, one column, as it is counted.
 fn emit_status_overlay<W: Write>(w: &mut W, size: CellSize, text: &str) -> io::Result<()> {
     let cols = size.cols as usize;
     if cols == 0 || size.rows == 0 {
@@ -871,7 +880,7 @@ fn emit_status_overlay<W: Write>(w: &mut W, size: CellSize, text: &str) -> io::R
     )?;
 
     let mut painted: usize = 0;
-    for c in text.chars() {
+    for c in text.chars().filter(|c| *c != EMOJI_PRESENTATION) {
         // Sanitize controls so a stray newline / CR / ESC in the
         // banner text cannot scroll the screen or inject SGR
         // sequences. Mirrors the defense in `emit_span`.
@@ -1382,6 +1391,19 @@ mod tests {
             "two take the five columns but one: {s:?}"
         );
         assert_eq!(s.matches(' ').count(), 1, "and the last is padding: {s:?}");
+    }
+
+    /// E10r's review 3, Low 1: U+FE0F is not painted, since with it a symbol counted one
+    /// column is drawn two, and a row of them ran past the bottom row's end. Without it the
+    /// symbols fill the row as counted. At `e111983` each `⚠` is followed by U+FE0F.
+    #[test]
+    fn status_overlay_paints_no_emoji_presentation() {
+        let size = CellSize::new(4, 10);
+        let mut out = Vec::new();
+        emit_status_overlay(&mut out, size, &"⚠\u{FE0F}".repeat(20)).unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains(EMOJI_PRESENTATION), "{s:?}");
+        assert_eq!(s.matches('⚠').count(), 10, "ten columns, one each: {s:?}");
     }
 
     #[test]

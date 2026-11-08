@@ -606,11 +606,27 @@ fn write_ssh_exit(
 /// How much of a far side's line reaches a terminal.
 const FAR_SIDE_LINE_CHARS: usize = 200;
 
+/// Whether `c` is a bidirectional control: an override or an isolate a far side left open
+/// would reorder what a terminal that does bidi draws after it, pmacs's own words included,
+/// so these go with the controls (E10r's review 3, ruled 2026-11-08).
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// What of a far side's text never reaches a terminal: a control, C0 or C1, or a
+/// bidirectional one.
+fn unshown(c: char) -> bool {
+    c.is_control() || is_bidi_control(c)
+}
+
 /// One line of what a far side said, fit to reach a terminal: its last line with text and
 /// no control character, since what follows a far side's text may be a frame's bytes, or
 /// failing that its last line with them stripped, and the end of it if it is long.
 /// A far side's bytes are not to reach a terminal as they came: an escape sequence in them
-/// could rewrite the screen or the window's title.
+/// could rewrite the screen or the window's title, and a bidirectional override reorder it.
 fn far_side_line(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let has_text = |line: &&str| !line.trim().is_empty();
@@ -618,14 +634,14 @@ fn far_side_line(bytes: &[u8]) -> String {
         has_text(line)
             && !line
                 .chars()
-                .any(|c| c.is_control() || c == char::REPLACEMENT_CHARACTER)
+                .any(|c| unshown(c) || c == char::REPLACEMENT_CHARACTER)
     };
     let line = text
         .lines()
         .rfind(clean)
         .or_else(|| text.lines().rfind(has_text))
         .unwrap_or("");
-    let kept: Vec<char> = line.trim().chars().filter(|c| !c.is_control()).collect();
+    let kept: Vec<char> = line.trim().chars().filter(|c| !unshown(*c)).collect();
     let from = kept.len().saturating_sub(FAR_SIDE_LINE_CHARS);
     let tail: String = kept[from..].iter().collect();
     if from == 0 {
@@ -2961,10 +2977,10 @@ fn banner_disconnected_countdown(remaining: Duration) -> String {
 }
 
 /// [`banner_disconnected_countdown`] saying why, on a pane `cols` wide: the far side's
-/// `words` first, clipped so that the countdown stays on the pane. A pane too narrow for any
-/// of them has the banner alone.
+/// `words` first, fit by [`fit_far_side_words`] so that the countdown stays on the pane. A
+/// pane too narrow for any of them has the banner alone.
 fn banner_countdown(remaining: Duration, words: Option<&str>, cols: u32) -> String {
-    use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+    use unicode_width::UnicodeWidthStr as _;
     let plain = banner_disconnected_countdown(remaining);
     let Some(words) = words else {
         return plain;
@@ -2975,16 +2991,50 @@ fn banner_countdown(remaining: Duration, words: Option<&str>, cols: u32) -> Stri
     if room < 8 {
         return plain;
     }
-    let mut clipped = String::new();
-    let mut used = 0;
-    for c in words.chars() {
-        used += c.width().unwrap_or(0);
-        if used > room {
+    format!("[{}{tail}", fit_far_side_words(words, room))
+}
+
+/// A far side's `words` in `room` columns of a bottom row, measured as a terminal draws
+/// them (E10r's review 3, ruled 2026-11-08). U+FE0F goes first, since after a symbol whose
+/// width is one it asks for an emoji two columns wide, which tmux's default and most
+/// terminals draw, so a banner counted one column short ran past the row's end and
+/// scrolled the screen at each second of a countdown (`crate::frontend` paints with it
+/// gone too). Words too long for the room keep the clause before their first `;` or `(`,
+/// where the reason is and before its detail, and of that as much of its end as fits: so
+/// a directory the daemon refuses still reads `is too permissive` at 80 columns, where
+/// keeping the start kept the path and lost the reason.
+fn fit_far_side_words(words: &str, room: usize) -> String {
+    use unicode_width::UnicodeWidthChar as _;
+    const CUT: &str = "...";
+    let width = |text: &str| -> usize { text.chars().map(|c| c.width().unwrap_or(0)).sum() };
+    let words: String = words
+        .chars()
+        .filter(|c| *c != crate::frontend::EMOJI_PRESENTATION)
+        .collect();
+    if width(&words) <= room {
+        return words;
+    }
+    let clause = words
+        .split([';', '('])
+        .next()
+        .map(str::trim_end)
+        .filter(|clause| !clause.is_empty())
+        .unwrap_or(&words);
+    if width(clause) <= room {
+        return clause.to_owned();
+    }
+    let mut used = CUT.len();
+    let mut kept: Vec<char> = Vec::new();
+    for c in clause.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > room {
             break;
         }
-        clipped.push(c);
+        used += w;
+        kept.push(c);
     }
-    format!("[{clipped}{tail}")
+    kept.reverse();
+    format!("{CUT}{}", kept.into_iter().collect::<String>())
 }
 
 /// Outcome of [`sleep_with_countdown`].
@@ -4971,6 +5021,80 @@ mod tests {
         // A wide character counts as what it takes on the pane.
         let wide = "字".repeat(100);
         assert!(banner_countdown(in_16, Some(&wide), 80).width() <= 80);
+    }
+
+    /// **Review 3's Low 1, its `p41b`:** a far side's emoji, a symbol and U+FE0F, which
+    /// tmux's default draws two columns wide, counted one, so the countdown ran past the row
+    /// and scrolled the screen once a second. Measured as drawn it fits, at 100 columns, by
+    /// `UnicodeWidthStr`, which counts the sequence as two; at `e111983` it is wider.
+    #[test]
+    fn a_far_sides_emoji_keeps_the_countdown_on_its_row() {
+        use unicode_width::UnicodeWidthStr as _;
+        let in_16 = Duration::from_secs(16);
+        let warning = "bash: warning: ⚠️ setlocale: LC_ALL: cannot change locale (en_US.UTF-8): \
+                       No such file or directory, and this login script carries on regardless of it";
+        for words in [
+            warning,
+            &"⚠️".repeat(60),
+            &format!("zsh: {} the end", "❤️".repeat(60)),
+        ] {
+            let banner = banner_countdown(in_16, Some(words), 100);
+            assert!(
+                banner.width() <= 100,
+                "{} columns: {banner}",
+                banner.width()
+            );
+            assert!(!banner.contains('\u{FE0F}'), "{banner}");
+            assert!(banner.ends_with("— reconnecting in 16s — Ctrl-C to exit]"));
+        }
+    }
+
+    /// **Review 3's Low 2:** a far side's bidirectional controls go with the other controls,
+    /// so an override left open cannot reorder pmacs's own words after it, on every surface
+    /// its line reaches. At `e111983` they pass.
+    #[test]
+    fn a_far_sides_bidi_controls_reach_no_terminal() {
+        let bidi = [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+        for c in bidi {
+            let line = far_side_line(format!("bash: {c}reversed words\n").as_bytes());
+            assert_eq!(line, "bash: reversed words", "U+{:04X}", u32::from(c));
+        }
+        let said = far_side_line("Permission denied\u{202E} (publickey).\n".as_bytes());
+        assert!(!said.contains('\u{202E}'), "{said:?}");
+        assert!(!format_stderr_tail_for_display("x\u{2067}y").contains('\u{2067}'));
+    }
+
+    /// **Review 3's Low 5:** H1's refusal on a host's ordinary runtime paths keeps its reason
+    /// in the countdown at 80 columns: the words keep their first clause, and of it the end.
+    /// At `e111983` the start was kept and `is too permissive` cut away.
+    #[test]
+    fn the_countdown_keeps_a_refusals_reason_at_80_columns() {
+        use unicode_width::UnicodeWidthStr as _;
+        let in_16 = Duration::from_secs(16);
+        for dir in ["/run/user/1001/pmacs", "/tmp/pmacs-1001/pmacs"] {
+            let words = format!(
+                "pmacs: directory {dir} is too permissive (mode 0o755); expected mode 0700 or \
+                 stricter"
+            );
+            let banner = banner_countdown(in_16, Some(&words), 80);
+            assert!(banner.contains("is too permissive"), "{banner}");
+            assert!(banner.width() <= 80, "{banner}");
+            let wide = banner_countdown(in_16, Some(&words), 200);
+            assert!(
+                wide.contains(&words),
+                "a pane with room reads it whole: {wide}"
+            );
+        }
+        assert_eq!(
+            fit_far_side_words(
+                "ssh: connect to host farhost port 22: Connection refused",
+                30
+            ),
+            "...port 22: Connection refused"
+        );
     }
 
     /// A far side's words and its status, in place of a frame length; 127's own sentence

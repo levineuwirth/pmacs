@@ -280,8 +280,10 @@ whole. Under one cap a growing register squeezes the rules.
   local route starts no daemon, so its sentence names none, and a frame
   cut short says the bound. The protocol rides `ssh`'s stderr, so a frame's
   length past the cap is text from the far side: its words and how `ssh`
-  ended are shown, control characters stripped, on a first attach and in a
-  reconnect's countdown, clipped to the pane, and an `ssh` that ends before
+  ended are shown, control characters and bidirectional ones stripped, on a
+  first attach and in a reconnect's countdown, measured there as a terminal
+  draws them (U+FE0F not painted) and, past the pane, cut to the end of
+  their first clause, where the reason is, and an `ssh` that ends before
   a first frame leaves its last words in the sentence that stops it. A
   session of
   30 s or more starts the count again, and a `may be` neither counts nor

@@ -166,7 +166,9 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 `pmacs --help` for the full matrix. The protocol rides `ssh`'s stderr, so
 what the far side says there, a shell with no `pmacs` to run, `ssh` itself
 or the bridge's own error, is shown as the far side's words with how `ssh`
-ended, control characters stripped, and a reconnect's countdown says them.
+ended, control characters and bidirectional ones stripped, and a
+reconnect's countdown says them, keeping on a narrow pane the end of their
+first clause, where the reason is.
 
 The daemon writes to every frontend from one thread, so it gives each
 frame 2 s to reach a frontend and then drops that frontend, rather than
