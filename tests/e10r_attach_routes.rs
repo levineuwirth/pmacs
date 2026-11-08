@@ -1553,6 +1553,14 @@ fn p19_local_route_after(age: Duration) -> String {
         nix::unistd::Pid::from_raw(i32::try_from(tui.process_id().expect("pid")).expect("pid"));
     tui.wait_for_output("*scratch*", Duration::from_secs(30));
     std::thread::sleep(age);
+    // The old daemon's last number, which the TUI's is below.
+    let old_last = {
+        let mut stream = UnixStream::connect(&socket).expect("the old daemon");
+        read_message::<Hello>(&mut stream)
+            .expect("its Hello")
+            .assigned_frontend_id
+            .0
+    };
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(daemon.pid()).expect("pid")),
@@ -1563,9 +1571,25 @@ fn p19_local_route_after(age: Duration) -> String {
     let mut second = common::daemon::spawn_daemon_process(&socket);
     common::daemon::wait_for_socket_or_exit(&socket, second.child(), Duration::from_secs(30))
         .expect("the new daemon");
-    // The readiness wait took a number, and this takes one more: past the TUI's last.
-    let mut stream = UnixStream::connect(&socket).expect("the new daemon");
-    let _: Hello = read_message(&mut stream).expect("its Hello");
+    // Past the TUI's last. A daemon numbers its frontends from its start, and by reading
+    // `wait_for_daemon` a probe that gave up on a slow boot's `Hello` still takes one when the
+    // daemon comes to accept it, so how many the old one had handed out is its boot's: on
+    // CI's macOS legs one more than the readiness wait's was not past (`CI` 42424177774),
+    // and a control taking three numbers on the old daemon first reads the same here. So
+    // numbers are taken until one is past the old daemon's last.
+    let mut taken = 0;
+    loop {
+        let mut stream = UnixStream::connect(&socket).expect("the new daemon");
+        let hello: Hello = read_message(&mut stream).expect("its Hello");
+        taken += 1;
+        if hello.assigned_frontend_id.0 > old_last {
+            break;
+        }
+        assert!(
+            taken < 100,
+            "the new daemon's numbers never passed {old_last}"
+        );
+    }
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
     tui.wait_for_output("[pmacs", Duration::from_secs(30));
     tui.wait_for_output("]", Duration::from_secs(5));
