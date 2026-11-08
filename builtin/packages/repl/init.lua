@@ -576,17 +576,25 @@ function Handle:_current_line_start()
   local h_end = history_end(self)
   local pos = self._output_pos or h_end
   if pos > h_end then pos = h_end end
-  -- Back from the position, by a window that doubles, so that a CR costs
-  -- its own line and not the whole history: a program's CR LF lines now
-  -- stay, and one CR a line over all of them would be quadratic.
-  local window = 256
-  while true do
-    local from = math.max(0, pos - window)
-    local idx = self._buf:slice(from, pos):reverse():find("\n", 1, true)
-    if idx then return pos - idx + 1 end
-    if from == 0 then return 0 end
-    window = window * 2
+  -- Back from the position over segments that double, each sliced once
+  -- and searched forward for its last LF, so a look-back costs its own
+  -- line and reads each byte of it once: a program's CR LF lines now
+  -- stay, and one CR a line over the whole history would be quadratic,
+  -- while a backspace at a long line's end pays that line once.
+  local to, size = pos, 256
+  while to > 0 do
+    local from = math.max(0, to - size)
+    local segment = self._buf:slice(from, to)
+    local last
+    local i = segment:find("\n", 1, true)
+    while i do
+      last = i
+      i = segment:find("\n", i + 1, true)
+    end
+    if last then return from + last end
+    to, size = from, size * 2
   end
+  return 0
 end
 
 function Handle:_current_line_end()
