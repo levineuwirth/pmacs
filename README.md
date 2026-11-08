@@ -167,8 +167,10 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 what the far side says there, a shell with no `pmacs` to run, `ssh` itself
 or the bridge's own error, is shown as the far side's words with how `ssh`
 ended, control characters and bidirectional ones stripped, and a
-reconnect's countdown says them, keeping on a narrow pane the end of their
-first clause, where the reason is.
+reconnect's countdown says them, keeping on a narrow pane their end, where
+the reason is, whatever punctuation they hold; pmacs's own refusals drop
+their detail first, so a directory the daemon refuses still reads `is too
+permissive`.
 
 The daemon writes to every frontend from one thread, so it gives each
 frame 2 s to reach a frontend and then drops that frontend, rather than

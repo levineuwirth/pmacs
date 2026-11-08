@@ -578,6 +578,24 @@ impl StandInSsh {
         all.extend_from_slice(envs);
         common::pty::spawn_pmacs_in_pty(&["--attach", "farhost"], &all, 24, 80)
     }
+
+    /// [`Self::attach_scaled`], `cols` wide, its screen modelled from what it writes.
+    fn attach_screen(&self, scale_ms: &str, cols: u16) -> ScreenTui {
+        let home = self.dir.path();
+        let script = home.join("ssh");
+        let (pty, tap) = spawn_pmacs_in_pty_tapped(
+            &["--attach", "farhost"],
+            &[
+                ("HOME", home),
+                ("XDG_CONFIG_HOME", home),
+                (PMACS_TEST_SSH_BIN, &script),
+                (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
+            ],
+            24,
+            cols,
+        );
+        ScreenTui::new(pty, tap, 24, cols)
+    }
 }
 
 /// A stand-in for `ssh` that runs the real `--daemon-attach` bridge over the pipes
@@ -655,6 +673,11 @@ impl BridgedSsh {
 
     /// [`Self::attach`], its screen modelled from what it writes.
     fn attach_screen(&self, scale_ms: &str) -> ScreenTui {
+        self.attach_screen_at(scale_ms, 80)
+    }
+
+    /// [`Self::attach_screen`], `cols` wide.
+    fn attach_screen_at(&self, scale_ms: &str, cols: u16) -> ScreenTui {
         let home = self.dir.path();
         let script = home.join("ssh");
         let (pty, tap) = spawn_pmacs_in_pty_tapped(
@@ -667,9 +690,9 @@ impl BridgedSsh {
                 (PMACS_TEST_BACKOFF_SCALE_MS, Path::new(scale_ms)),
             ],
             24,
-            80,
+            cols,
         );
-        ScreenTui::new(pty, tap, 24, 80)
+        ScreenTui::new(pty, tap, 24, cols)
     }
 
     /// The real route with no daemon of the row's own: the socket is in the stand-in's
@@ -3644,6 +3667,106 @@ fn h8_a_refused_directory_on_a_reconnect_says_so_in_the_countdown() {
         .wait_for_exit(Duration::from_secs(10))
         .expect("C-c in the wait ends it");
     assert!(status.success(), "{status:?}");
+}
+
+/// The countdown on the bottom row once it says `reason`, read from the modelled screen
+/// within 30 s: the far side's words fit to the pane with the countdown after them on the
+/// same row, which a banner past the row's end would not leave.
+fn countdown_saying(tui: &mut ScreenTui, reason: &str, cols: u16) -> String {
+    let says = |t: &ScreenTui| {
+        let row = t.bottom_row();
+        row.starts_with('[') && row.contains(" — reconnecting in ") && row.contains(reason)
+    };
+    let shown = tui.watch_for(Duration::from_secs(30), &says);
+    let row = tui.bottom_row();
+    assert!(
+        shown.is_some(),
+        "at {cols} columns the countdown does not say {reason:?} 30 s on: {row:?}; {}",
+        tui.describe()
+    );
+    assert!(
+        row.ends_with(" — Ctrl-C to exit]"),
+        "{cols} columns: {row:?}"
+    );
+    eprintln!("at {cols} columns: {row}");
+    row
+}
+
+/// `C-c` in a countdown's wait ends the route, status 0.
+fn ctrl_c_ends_the_wait(tui: &mut ScreenTui) {
+    tui.write(b"\x03");
+    let status = tui
+        .pty
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("C-c in the wait ends it");
+    assert!(status.success(), "{status:?}");
+}
+
+/// **Review 4's Low 1, its `r4_real_h1.py`, as ruled 2026-11-08:** H1's refusal, the
+/// bridge's own, on a far side whose runtime directory's path holds `(` and `;`, in a
+/// reconnect's countdown at 80 and 100 columns. Cut at the first `;` or `(` at `6375147`,
+/// it read the path's start and not why (`[... directory /home/.../real-h1/ — reconnecting
+/// in 2s — Ctrl-C to exit]`); it keeps `is too permissive`.
+#[test]
+fn l1_a_refused_directory_below_a_parenthesis_keeps_its_reason_in_the_countdown() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for cols in [80, 100] {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let runtime = tmp.path().join("(t);x");
+        std::fs::create_dir(&runtime).expect("the runtime directory");
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let holder = runtime.join("pmacs");
+        let ssh = BridgedSsh::on_the_default_socket_of(&runtime);
+        let started = StartedByTheBridge {
+            lockfile: holder.join("default.sock.lock"),
+            _holder: None,
+        };
+        let mut tui = ssh.attach_screen_at("1000", cols);
+        tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+            t.screen_contains("*scratch*")
+        });
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        started.kill_the_one_running();
+        let row = countdown_saying(&mut tui, "is too permissive", cols);
+        assert!(row.contains("pmacs"), "{cols} columns: {row:?}");
+        ctrl_c_ends_the_wait(&mut tui);
+    }
+}
+
+/// **Review 4's Low 1, its `r4_overlay.py`, as ruled:** far sides whose reason is not their
+/// first clause, at 80 and 100 columns: a login script's words before the shell's refusal,
+/// and `ssh`'s own two sentences. At `6375147` the first read `login profile loaded` at both
+/// widths and the publickey refusal lost `(publickey).` at 80; `ssh`'s `Connection refused`,
+/// holding neither `;` nor `(`, read its reason there too, and stands as a guard.
+#[test]
+fn l1_a_far_sides_reason_is_kept_in_the_countdown_whatever_clause_it_is() {
+    for (words, reason) in [
+        (
+            "login profile loaded; bash: /usr/local/bin/pmacs: Permission denied",
+            "Permission denied",
+        ),
+        (
+            "pmacspass@vps: Permission denied (publickey).",
+            "Permission denied (publickey).",
+        ),
+        (
+            "ssh: connect to host farhost port 22: Connection refused",
+            "Connection refused",
+        ),
+    ] {
+        for cols in [80, 100] {
+            let ssh = StandInSsh::new(&[
+                session_with(&frame_bytes(), 255),
+                RemoteSession {
+                    bytes: format!("{words}\n").into_bytes(),
+                    then: "exit 255".to_owned(),
+                },
+            ]);
+            let mut tui = ssh.attach_screen("1000", cols);
+            countdown_saying(&mut tui, reason, cols);
+            ctrl_c_ends_the_wait(&mut tui);
+        }
+    }
 }
 
 /// A far side's bytes reach a terminal with no control character in them, on a first attach

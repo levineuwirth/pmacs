@@ -3005,15 +3005,51 @@ fn banner_countdown(remaining: Duration, words: Option<&str>, cols: u32) -> Stri
     format!("[{}{tail}", fit_far_side_words(words, room))
 }
 
+/// What follows the reason in pmacs's own refusals, as a far side prints them: each is the
+/// start of the detail and the end of the sentence, read from the sentence's end, so that a
+/// path's own punctuation is never taken for where the detail starts. First
+/// [`crate::socket_path::SocketPathError::DirectoryTooPermissive`]'s mode and what it
+/// expects, the refusal the owner's ruling names; then the bridge's own sentences
+/// ([`crate::daemon_attach::BridgeError`]), whose reason comes before what to do about it.
+const OWN_REFUSALS_DETAIL: &[(&str, &str)] = &[
+    (" (mode 0o", "); expected mode 0700 or stricter"),
+    ("; start one first with `pmacs --daemon` and try again", ""),
+    ("; verify the pmacs binary is on PATH and executable", ""),
+    (
+        "; run `pmacs --daemon --socket ",
+        "` directly to see startup errors",
+    ),
+];
+
+/// `words` without their detail, if they are one of pmacs's own refusals
+/// ([`OWN_REFUSALS_DETAIL`]): a directory the daemon refuses reads up to `is too
+/// permissive`, and the bridge's sentences up to their reason.
+fn own_refusals_reason(words: &str) -> Option<&str> {
+    OWN_REFUSALS_DETAIL.iter().find_map(|(detail, end)| {
+        let before_end = words.strip_suffix(end)?;
+        let at = before_end.rfind(detail)?;
+        // A detail with no end of its own is the whole of what follows the reason.
+        if end.is_empty() && at + detail.len() != before_end.len() {
+            return None;
+        }
+        Some(before_end[..at].trim_end()).filter(|reason| !reason.is_empty())
+    })
+}
+
 /// A far side's `words` in `room` columns of a bottom row, measured as a terminal draws
 /// them (E10r's review 3, ruled 2026-11-08). U+FE0F goes first, since after a symbol whose
 /// width is one it asks for an emoji two columns wide, which tmux's default and most
 /// terminals draw, so a banner counted one column short ran past the row's end and
 /// scrolled the screen at each second of a countdown (`crate::frontend` paints with it
-/// gone too). Words too long for the room keep the clause before their first `;` or `(`,
-/// where the reason is and before its detail, and of that as much of its end as fits: so
-/// a directory the daemon refuses still reads `is too permissive` at 80 columns, where
-/// keeping the start kept the path and lost the reason.
+/// gone too). Words that fit are shown whole. Words too long for the room keep their end,
+/// where a reason is (`... port 22: Connection refused`, `...: Permission denied
+/// (publickey).`), so that their last clause is kept, and no punctuation is taken for a
+/// boundary, since a path or a far side's own text may hold any (review 4, ruled
+/// 2026-11-08): cutting at the first `;` or `(` lost the reason of a directory below
+/// `(team)` and of `login profile loaded; bash: ...: Permission denied`. pmacs's own
+/// refusals first lose their detail ([`own_refusals_reason`]), so a directory the daemon
+/// refuses still reads `is too permissive` at 80 columns, where its end alone is its mode
+/// and what it expects.
 fn fit_far_side_words(words: &str, room: usize) -> String {
     use unicode_width::UnicodeWidthChar as _;
     const CUT: &str = "...";
@@ -3025,18 +3061,13 @@ fn fit_far_side_words(words: &str, room: usize) -> String {
     if width(&words) <= room {
         return words;
     }
-    let clause = words
-        .split([';', '('])
-        .next()
-        .map(str::trim_end)
-        .filter(|clause| !clause.is_empty())
-        .unwrap_or(&words);
-    if width(clause) <= room {
-        return clause.to_owned();
+    let words = own_refusals_reason(&words).unwrap_or(&words);
+    if width(words) <= room {
+        return words.to_owned();
     }
     let mut used = CUT.len();
     let mut kept: Vec<char> = Vec::new();
-    for c in clause.chars().rev() {
+    for c in words.chars().rev() {
         let w = c.width().unwrap_or(0);
         if used + w > room {
             break;
@@ -5078,27 +5109,71 @@ mod tests {
         assert!(!format_stderr_tail_for_display("x\u{2067}y").contains('\u{2067}'));
     }
 
-    /// **Review 3's Low 5:** H1's refusal on a host's ordinary runtime paths keeps its reason
-    /// in the countdown at 80 columns: the words keep their first clause, and of it the end.
-    /// At `e111983` the start was kept and `is too permissive` cut away.
+    /// **Review 3's Low 5 and review 4's Low 1, as ruled 2026-11-08:** the countdown keeps
+    /// the reason at 80 and 100 columns, whatever punctuation a path or a far side's text
+    /// holds: H1's refusal on a host's two runtime paths and on directories below `(team)`
+    /// and `a;b`, keeping `too permissive`; a far side whose reason is its later clause,
+    /// keeping `Permission denied`; and `ssh`'s own sentences. At `6375147`, which cut at the
+    /// first `;` or `(`, the directories below `(team)` and `a;b` read their path's start,
+    /// the later clause read `login profile loaded`, and `(publickey).` went at 80 columns;
+    /// the runtime paths and `Connection refused` held there too. At `e111983` the start was
+    /// kept, and the runtime paths lost their reason.
     #[test]
-    fn the_countdown_keeps_a_refusals_reason_at_80_columns() {
+    fn the_countdown_keeps_the_reason_at_80_and_100_columns() {
         use unicode_width::UnicodeWidthStr as _;
-        let in_16 = Duration::from_secs(16);
-        for dir in ["/run/user/1001/pmacs", "/tmp/pmacs-1001/pmacs"] {
-            let words = format!(
+        let refusal = |dir: &str| {
+            format!(
                 "pmacs: directory {dir} is too permissive (mode 0o755); expected mode 0700 or \
                  stricter"
-            );
-            let banner = banner_countdown(in_16, Some(&words), 80);
-            assert!(banner.contains("is too permissive"), "{banner}");
-            assert!(banner.width() <= 80, "{banner}");
-            let wide = banner_countdown(in_16, Some(&words), 200);
+            )
+        };
+        let cases = [
+            (refusal("/run/user/1001/pmacs"), "is too permissive"),
+            (refusal("/tmp/pmacs-1001/pmacs"), "is too permissive"),
+            (refusal("/home/someone/(team)/pmacs"), "is too permissive"),
+            (refusal("/home/someone/a;b/pmacs"), "is too permissive"),
+            (
+                refusal("/home/jeans/build/e10r/r4review/roots/real-h1/(team)/pmacs"),
+                "is too permissive",
+            ),
+            (
+                "login profile loaded; bash: /usr/local/bin/pmacs: Permission denied".to_owned(),
+                "Permission denied",
+            ),
+            (
+                "ssh: connect to host farhost port 22: Connection refused".to_owned(),
+                "Connection refused",
+            ),
+            (
+                "pmacspass@vps: Permission denied (publickey).".to_owned(),
+                "Permission denied (publickey).",
+            ),
+        ];
+        for (words, reason) in &cases {
+            for cols in [80, 100] {
+                for wait in [Duration::from_secs(16), Duration::from_secs(2)] {
+                    let banner = banner_countdown(wait, Some(words), cols);
+                    assert!(banner.contains(reason), "{cols} columns: {banner}");
+                    assert!(
+                        banner.width() <= cols as usize,
+                        "{} columns, at {cols}: {banner}",
+                        banner.width()
+                    );
+                    assert!(banner.ends_with(" — Ctrl-C to exit]"), "{banner}");
+                    eprintln!("{cols}: {banner}");
+                }
+            }
+            let wide = banner_countdown(Duration::from_secs(16), Some(words), 200);
             assert!(
-                wide.contains(&words),
+                wide.contains(words.as_str()),
                 "a pane with room reads it whole: {wide}"
             );
         }
+        // A refusal that fits without its mode and what it expects keeps its start.
+        assert_eq!(
+            fit_far_side_words(&refusal("/run/user/1001/pmacs"), 59),
+            "pmacs: directory /run/user/1001/pmacs is too permissive"
+        );
         assert_eq!(
             fit_far_side_words(
                 "ssh: connect to host farhost port 22: Connection refused",
@@ -5106,6 +5181,69 @@ mod tests {
             ),
             "...port 22: Connection refused"
         );
+    }
+
+    /// pmacs's own refusals are told by the words their `Display` writes, as the bridge
+    /// prints them on the far side, so that one reworded there fails here rather than losing
+    /// its reason on a narrow pane; each loses its detail alone, whatever its path holds, and
+    /// keeps its reason at 80 columns. A far side's other words are not one of them.
+    #[test]
+    fn pmacs_own_refusals_lose_only_their_detail() {
+        use crate::daemon_attach::BridgeError;
+        use crate::socket_path::SocketPathError;
+        let dir = std::path::PathBuf::from("/run/user/1001/(team);x/pmacs");
+        let socket = dir.join("default.sock");
+        let cases = [
+            (
+                BridgeError::RefusedDirectory(SocketPathError::DirectoryTooPermissive {
+                    path: dir,
+                    mode: 0o755,
+                }),
+                "directory /run/user/1001/(team);x/pmacs is too permissive",
+                "is too permissive",
+            ),
+            (
+                BridgeError::Connect {
+                    socket: socket.clone(),
+                    source: std::io::Error::other("Connection refused (os error 111)"),
+                },
+                "could not connect to daemon at /run/user/1001/(team);x/pmacs/default.sock: \
+                 Connection refused (os error 111)",
+                "Connection refused (os error 111)",
+            ),
+            (
+                BridgeError::SpawnFailed {
+                    exe: "/usr/local/bin/pmacs".into(),
+                    source: std::io::Error::other("No such file or directory (os error 2)"),
+                },
+                "could not spawn daemon (/usr/local/bin/pmacs): No such file or directory (os \
+                 error 2)",
+                "file or directory (os error 2)",
+            ),
+            (
+                BridgeError::AutoStartTimeout {
+                    socket,
+                    after: Duration::from_secs(5),
+                },
+                "auto-started daemon did not bind /run/user/1001/(team);x/pmacs/default.sock \
+                 within 5.0s",
+                "within 5.0s",
+            ),
+        ];
+        for (error, reason, kept) in cases {
+            let said = format!("pmacs: {error}");
+            let reason = format!("pmacs: {reason}");
+            assert_eq!(own_refusals_reason(&said), Some(reason.as_str()), "{said}");
+            let banner = banner_countdown(Duration::from_secs(16), Some(&said), 80);
+            assert!(banner.contains(kept), "{banner}");
+        }
+        for words in [
+            "bash: line 1: pmacs: command not found",
+            "login profile loaded; bash: /usr/local/bin/pmacs: Permission denied",
+            "pmacspass@vps: Permission denied (publickey).",
+        ] {
+            assert_eq!(own_refusals_reason(words), None, "{words}");
+        }
     }
 
     /// A far side's words and its status, in place of a frame length; 127's own sentence
