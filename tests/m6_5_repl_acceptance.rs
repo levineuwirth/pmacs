@@ -429,17 +429,41 @@ fn m6_5_exit_marker_uses_basename_with_leading_newline() {
 // Stage 5: multi-shell acceptance (acceptance bullet 1)
 // ---------------------------------------------------------------------------
 
-/// What the shells' rows look for in history. No line a row types holds it, so
-/// only the line's answer can show it: a terminal's echo, a line editor's redraw
-/// and a failed command's text all show the line.
-const ANSWER: &str = "hello-pmacs";
+/// What the rows look for in history. It holds a character no line a row types
+/// holds (each of its letters is upper case, and no line has one of them), so
+/// no arrangement of a line's cells spells it, and only the line's answer can
+/// show it. A terminal's echo, a line editor's redraw and a failed command's
+/// text all show the line, and a redraw does not show it whole: the REPL drops
+/// a cursor motion (#486), so a redraw that moves over cells it leaves writes
+/// its fragments side by side. `m6_5_each_rows_answer_holds_a_character_its_line_lacks`
+/// holds the four rows to that.
+const ANSWER: &str = "HELLO-PMACS";
 /// The line the three shells' rows type.
-const SHELL_LINE: &str = r"printf 'hello-%s\n' pmacs";
+const SHELL_LINE: &str = r"printf 'hello-%s\n' pmacs | tr a-z A-Z";
+/// The line Lua's row types.
+const LUA_LINE: &str = "print(('hello-pmacs'):upper())";
 /// The bound on the answer once the line is typed, for the three shells.
 const SHELL_ANSWER_MS: u64 = 15_000;
+/// The bound on Lua's answer once its line is typed.
+const LUA_ANSWER_MS: u64 = 10_000;
 /// The bound on a shell's first output. fish 4.9.3 spends 10 s of its start on
 /// a query this terminal does not answer (#483).
 const FIRST_OUTPUT_MS: u64 = 30_000;
+
+/// Which of a row's two waits ended without what it waited for.
+#[derive(Debug, PartialEq, Eq)]
+enum ShellLineWait {
+    FirstOutput,
+    Answer,
+}
+
+/// A wait that ended without what it waited for: which, the history as the row
+/// last read it, and the row's message.
+struct ShellLineMiss {
+    wait: ShellLineWait,
+    history: String,
+    message: String,
+}
 
 /// Run one line through a freshly-spawned shell and read its answer in history.
 ///
@@ -449,6 +473,18 @@ const FIRST_OUTPUT_MS: u64 = 30_000;
 /// an answer: a stand-in that never prints passed 156 of 160 runs. Each wait has
 /// its own bound, and a timeout names what it waited for.
 fn run_shell_line(shell: &Path, argv_extra: &[&str], line: &str, answer_ms: u64) {
+    if let Err(miss) = shell_line(shell, argv_extra, line, answer_ms) {
+        panic!("{}", miss.message);
+    }
+}
+
+/// [`run_shell_line`]'s two waits, answering which one missed.
+fn shell_line(
+    shell: &Path,
+    argv_extra: &[&str],
+    line: &str,
+    answer_ms: u64,
+) -> Result<(), ShellLineMiss> {
     let _guard = pump_test_guard();
     let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     let argv = std::iter::once(shell.display().to_string())
@@ -464,16 +500,21 @@ fn run_shell_line(shell: &Path, argv_extra: &[&str], line: &str, answer_ms: u64)
         )
         .expect("setup chunk runs");
 
-    assert!(
-        pump_until(
-            &mut editor,
-            "return _G.h:buffer_id():len() > 0",
-            FIRST_OUTPUT_MS
-        ),
-        "the shell's first output did not come within {FIRST_OUTPUT_MS}ms, so nothing was typed; \
-         last seen: {}",
-        last_seen(&editor)
-    );
+    if !pump_until(
+        &mut editor,
+        "return _G.h:buffer_id():len() > 0",
+        FIRST_OUTPUT_MS,
+    ) {
+        return Err(ShellLineMiss {
+            wait: ShellLineWait::FirstOutput,
+            history: history_text(&editor),
+            message: format!(
+                "the shell's first output did not come within {FIRST_OUTPUT_MS}ms, so nothing \
+                 was typed; last seen: {}",
+                last_seen(&editor)
+            ),
+        });
+    }
 
     editor
         .lua_host
@@ -491,11 +532,85 @@ fn run_shell_line(shell: &Path, argv_extra: &[&str], line: &str, answer_ms: u64)
         "local h = _G.h\n\
          return h:buffer_id():slice(0, h:history_end()):find({ANSWER:?}, 1, true) ~= nil"
     );
+    if !pump_until(&mut editor, &answered, answer_ms) {
+        return Err(ShellLineMiss {
+            wait: ShellLineWait::Answer,
+            history: history_text(&editor),
+            message: format!(
+                "the answer {ANSWER:?} to the line {line:?} did not come within {answer_ms}ms; \
+                 last seen: {}",
+                last_seen(&editor)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The handle's history as text.
+fn history_text(editor: &EditorState) -> String {
+    let read = || -> mlua::Result<String> {
+        let history: mlua::String = editor
+            .lua_host
+            .lua()
+            .load("local h = _G.h\nreturn h:buffer_id():slice(0, h:history_end())")
+            .eval()?;
+        Ok(history.to_string_lossy())
+    };
+    read().unwrap_or_else(|err| format!("unreadable: {err}"))
+}
+
+/// Each row's answer holds a character its line does not, so no echo, redraw or
+/// failed command of the line can spell it (see [`ANSWER`]).
+#[test]
+fn m6_5_each_rows_answer_holds_a_character_its_line_lacks() {
+    for (row, line) in [("the three shells", SHELL_LINE), ("lua", LUA_LINE)] {
+        let lacking: String = ANSWER.chars().filter(|c| !line.contains(*c)).collect();
+        assert!(
+            !lacking.is_empty(),
+            "{row}: every character of the answer {ANSWER:?} is in the line {line:?}, so the \
+             line's cells could spell it with no answer"
+        );
+    }
+}
+
+/// A stand-in that reads the typed line, redraws it with a cursor motion over
+/// the cells between `hello-` and `pmacs`, as a line editor's repaint does when
+/// it skips cells it leaves, and never runs it. The REPL drops the motion
+/// (#486), so the fragments land side by side and history spells `hello-pmacs`;
+/// the rows' answer is not met, and the answer's wait is the one that fails.
+#[test]
+fn m6_5_a_spliced_redraw_that_never_answers_fails_the_answer_wait() {
+    let dir = tempfile::tempdir().expect("a directory for the stand-in");
+    let standin = dir.path().join("splice-sh");
+    std::fs::write(
+        &standin,
+        "#!/bin/sh\n\
+         printf 'standin$ '\n\
+         IFS= read -r line\n\
+         head=${line%%\\%s*}\n\
+         tail=${line#*\\' }\n\
+         printf '%s\\033[6C%s\\r\\n' \"$head\" \"$tail\"\n\
+         printf 'standin$ '\n\
+         exec sleep 60\n",
+    )
+    .expect("the stand-in is written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is executable");
+    }
+    let miss = shell_line(&standin, &[], SHELL_LINE, 3_000)
+        .expect_err("a stand-in that never answered met the rows' answer");
+    assert_eq!(
+        miss.wait,
+        ShellLineWait::Answer,
+        "the stand-in's redraw should come and the answer should not; {}",
+        miss.message
+    );
     assert!(
-        pump_until(&mut editor, &answered, answer_ms),
-        "the answer {ANSWER:?} to the line {line:?} did not come within {answer_ms}ms; \
-         last seen: {}",
-        last_seen(&editor)
+        miss.history.contains("printf 'hello-pmacs"),
+        "the stand-in's spliced redraw did not reach history, so this row saw nothing; {}",
+        miss.message
     );
 }
 
@@ -546,7 +661,7 @@ fn m6_5_repl_spawns_lua() {
         );
         return;
     };
-    run_shell_line(&lua, &["-i"], "print('hello-' .. 'pmacs')", 10_000);
+    run_shell_line(&lua, &["-i"], LUA_LINE, LUA_ANSWER_MS);
 }
 
 // ---------------------------------------------------------------------------
