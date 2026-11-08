@@ -13002,6 +13002,8 @@ Tally (e10m-d-ballast-legs): 4 items in the list below.
 - `Test (ubuntu-latest / luajit)` 127917463399: `failure`, 0 `running` lines and 0 results, 0 / 0 / 0, 163 MB available after the tests, `signal 7` 0 and `No space left on device` 4 times.
 - `Test (ubuntu-latest / luajit, no crdt)` 127917463437: `failure`, its log gone (`BlobNotFound`).
 
+**Read again at E10m's fix round 1, 2026-11-08 (review 1's Low 2): two of these legs carry #450's fragments, and this run is a forced control of #450 as well as of #328.** `Test (ubuntu-latest / lua54)` 127917463361 holds all three: the check run's annotation `System.IO.IOException: No space left on device : '/home/runner/actions-runner/cached/2.338.2/_diag/Worker_20261106-132539-utc.log'` with `GitHub.Runner.Worker.Worker.RunAsync` in its stack, the logs endpoint's `HTTP/1.1 404 The specified blob does not exist.`, and its test step, 15, `in_progress` with no conclusion and every later step `pending`. `Test (ubuntu-latest / luajit, no crdt)` 127917463437, #450's own leg, holds two, the same annotation and the same 404; its test step concluded `failure`. Under E10m.6 a forced control is a named run and not an occurrence, so #450 stays at one. It shows one way and not the cause of #450's occurrence, whose disk figures were in the log it lost. The fix's ballast, `CI` 42239635121 below, is `success` on both legs. Commented 6720827747 on #450. PR #476 closes #450 at its merge, the owner's ruling of 2026-11-08, with #328's reopen condition: a SIGBUS, a `No space left on device` or a lost log on a real small root under this fix reopens it.
+
 #### `CI` 42225484477: `line-tables-only`, no ballast
 
 `CI` 42225484477 at `4672d6f`, attempt 1 of 1, `workflow_dispatch`, created 2026-11-06T13:26:15Z and completed 2026-11-06T14:07:42Z: `success`. The figure the fix takes: `Test (crdt)`'s target 26,799 MB at the end of its tests.
@@ -15729,6 +15731,108 @@ Tally (e10r-fixes3-local): 3 items in the list below.
 - `20261108T003444Z-1441284` at `e111983`, the same command, load 0.44 to 5.74: all nine stages ok, 6,017 / 0 / 81 and luajit 5,368 / 0 / 67, each at 238 pairs, every budget held, no daemon survived.
 
 So, at E10r fix round 3: `main` is green at `812d628`, and PR #462 is red at its head on three required checks, #254's legs with fish, whose suite has no diff in the PR, not rerun and not merged. By CI #254 moves to thirteen, and #489 and #490 are filed at one each, rows of the round's own whose instruments changed on the branch. #250 is listed, not tallied. Every other count above stands.
+
+### E10m's fix round 1: PR #476 green at `5373c48`, #450's fragments read under E10m.7's base ballast, `main` green at `928e3dc`
+
+Recorded 2026-11-08 at E10m's fix round 1 (roadmap §E10m, K1 to K5), on the owner's rulings of that day on E10m's review 1. Every run was read from the jobs endpoint by conclusion, and every test leg through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in this file before it was written, and none was here. Nothing was rerun.
+
+**#450 under E10m.7's base ballast**: read again beside `CI` 42225370681's section above, a forced control and not an occurrence, so #450 stays at one and no count moves.
+
+**The REPL rows read otherwise from `49ed692`.** They type `printf 'hello-%s\n' pmacs | tr a-z A-Z`, and Lua's row `print(('hello-pmacs'):upper())`, and look for `HELLO-PMACS`, so a red at the answer's wait now reads `the answer "HELLO-PMACS" to the line "printf 'hello-%s\\n' pmacs | tr a-z A-Z" did not come within 15000ms; last seen:`, Lua's at 10000ms. The first-output wait's words are unchanged. #254's entries above keep the older texts. From `5373c48` the REPL's look-back for a CR, a backspace or an erase reads its line once, and `scripts/perf-budgets` lists `m6_4_a_backspace_at_a_long_lines_end_stays_within_the_bases_order`.
+
+#### `main` at `928e3dc`, E10r fix round 3's registry commit: green
+
+`CI` 42437256306 at `928e3dc`, attempt 1 of 1, `push`, created 2026-11-08T02:08:44Z and completed 02:11:12Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-928e3dc): 15 = 6 + 9.
+
+Tally (main-ci-928e3dc-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 128598658582 | success |
+| Format | 128598658689 | success |
+| Lint (luajit) | 128598658697 | success |
+| Commit attribution (D9) | 128598658762 | success |
+| Lint (lua54) | 128598658768 | success |
+| Docs consistency | 128598689888 | success |
+| Test (matrix) | 128598690740 | skipped |
+| M4 Perf Gates | 128598690868 | skipped |
+| Perf budgets (debug) | 128598690869 | skipped |
+| M5 Perf Gates | 128598691116 | skipped |
+| M10 Perf Gates (crdt) | 128598691158 | skipped |
+| Test (crdt) | 128598691166 | skipped |
+| M6 Perf Gates | 128598691182 | skipped |
+| M1 Acceptance Gates | 128598691197 | skipped |
+| GPU Render (headless) | 128598691269 | skipped |
+
+Tally (main-ci-928e3dc-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-928e3dc-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 42437256288 at `928e3dc`, attempt 1 of 1, `success`: `Grammar fuzz` 128598658659 and `Grammar fuzz (asan-strict)` 128598658477.
+
+Tally (main-fuzz-928e3dc): 2 = 2 + 0.
+
+#### PR #476 at `5373c48`, the head: green at attempt 1
+
+`CI` 42484346660 at `5373c48`, attempt 1 of 1, `pull_request`, created 2026-11-08T13:18:45Z and completed 13:57:27Z: `success`. The merge `ca9a6f6` of `5373c48` into `928e3dc`.
+
+Tally (pr-476-ci-5373c48): 19 = 18 + 1.
+
+Tally (pr-476-ci-5373c48-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 128742851370 | success |
+| Lint (lua54) | 128742851562 | success |
+| Changed paths | 128742851577 | success |
+| Commit attribution (D9) | 128742851587 | success |
+| Lint (luajit) | 128742851648 | success |
+| M1 Acceptance Gates | 128742895979 | success |
+| M5 Perf Gates | 128742896022 | success |
+| M6 Perf Gates | 128742896035 | success |
+| Test (macos-latest / lua54) | 128742896049 | success |
+| GPU Render (headless) | 128742896051 | success |
+| M4 Perf Gates | 128742896052 | success |
+| Test (crdt) | 128742896063 | success |
+| M10 Perf Gates (crdt) | 128742896086 | success |
+| Perf budgets (debug) | 128742896092 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 128742896147 | success |
+| Test (ubuntu-latest / lua54) | 128742896157 | success |
+| Test (ubuntu-latest / luajit) | 128742896164 | success |
+| Test (macos-latest / luajit) | 128742896194 | success |
+| Docs consistency | 128742897674 | skipped |
+
+Tally (pr-476-ci-5373c48-success): 18 rows of the table above with `result` = `success`.
+
+Tally (pr-476-ci-5373c48-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-476-ci-5373c48-legs): 7 items in the list below.
+
+- `Test (ubuntu-latest / luajit)` 128742896164: `success`, 229 pairs, 5,510 / 0 / 88, 58,739 MB available after the tests. `m6_5_repl_spawns_fish` `ok` at 13:51:54.
+- `Test (ubuntu-latest / lua54)` 128742896157: `success`, 229 pairs, 5,510 / 0 / 88, 59,364 MB available. Fish's row `ok` at 13:52:02.
+- `Test (ubuntu-latest / luajit, no crdt)` 128742896147: `success`, 229 pairs, 4,875 / 0 / 72, 65,896 MB available. Fish's row `ok` at 13:46:23.
+- `Test (crdt)` 128742896063: `success`, 228 pairs, 5,457 / 0 / 88, 59,280 MB available; fish, zsh and lua skipped, not on `PATH`.
+- `Test (macos-latest / lua54)` 128742896049: `success`, 230 pairs, 5,455 / 0 / 80; fish and lua skipped.
+- `Test (macos-latest / luajit)` 128742896194: `success`, 230 pairs, 5,455 / 0 / 80; fish and lua skipped.
+- `GPU Render (headless)` 128742896051: `success`, 1 pair, 394 / 0 / 0.
+
+On the three Ubuntu matrix legs `Setting up fish (3.7.0-1)`, the four shells' rows `ok` and none in the leg's list of rows that returned without running; that list names the rows each other leg skipped, whose `ok` says nothing. The round's eight new rows read `ok` on all six test legs, and its budget `ignored` on each, as a budget is in the sweep. `M6 Perf Gates` 128742896035: `running 5 tests`, `5 passed; 0 failed`, RSS delta 159.0 MiB against 200, cancel p99 13.651 ms against 100, ingest 143.4 MiB/s against CI's threshold of 64, navigation p99 40.45 µs, search p99 165.204 µs. `Perf budgets (debug)` 128742896092: `every budget ran and held`, 32 budgets, `m6_4_a_backspace_at_a_long_lines_end_stays_within_the_bases_order ... ok` among them.
+
+`Grammar fuzz` 42484346708 at `5373c48`, attempt 1 of 1, `success`, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`: `Grammar fuzz` 128742851262 and `Grammar fuzz (asan-strict)` 128742851479.
+
+Tally (pr-476-fuzz-5373c48): 2 = 2 + 0.
+
+#### The local record, listed and not tallied
+
+Tally (e10m-f1-local): 5 items in the list below.
+
+- `20261108T131826Z-4015246` at `5373c48`, `scripts/gate --perf`: every stage ok but the sweep, 5,901 / 2 / 88 at 237 pairs, its two reds `e10d_fixes1_an_op_past_the_frame_ends_nothing`, filed as #492, and `r1_p5_the_watch_s_limit_does_not_move_with_the_parent`, a sample of #367's second fragment under another selector, commented there. The sweep spanned a 66-minute laptop suspend, 13:32:40Z to 14:39:06Z, and the sampler read the 1-minute load at most 35.04 and CPU pressure avg60 at most 45.13, another project's tests beside it. No daemon survived.
+- `20261108T145132Z-87711` at `5373c48`, `scripts/gate --perf`: every stage ok but `perf`, the sweep 5,903 / 0 / 88 at 237 pairs; in `perf`, `e10k_typing_at_the_end_of_a_large_buffer_attached` red, a key's p95 40.3 ms against 25, the 1-minute load at most 58.55 and CPU pressure avg60 at most 60.13 beside it, every other budget holding, `m6_4_a_backspace_at_a_long_lines_end_stays_within_the_bases_order` among them. A measurement beside other work under D43. No daemon survived.
+- K1's two witnesses with `f2667df`'s line and needle put back: both red, each by its own message; at `49ed692` both green.
+- E10m.13's witnesses and loops at `5373c48`, a fresh `HOME` each run, `TERM` unset and set: fish 3.7.0 400 of 400 each way, alternating evicted and read in; fish 4.9.3 5 of 5; zsh and bash 100 of 100; lua 30 of 30; on one contended core 20 of 20 on each fish each way; each stand-in by its own message.
+- K4's budget by `scripts/bite HEAD^ builtin/packages/repl/init.lua`: `f2667df`'s Lua at ratios 12.30 and 6.50 against a bound of 3, the head 1.33 and 1.33; two plants in K4's own look-back, each flipping its row; `m6_4`, `m6_7` and `m6_8` on `lua54,crdt` by hand.
 
 ## Live rows
 
