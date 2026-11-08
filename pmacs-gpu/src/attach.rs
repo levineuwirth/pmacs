@@ -2100,7 +2100,11 @@ mod tests {
     /// and a startup failure's message names the file, so what the
     /// daemon printed before dying can be read. The "daemon" here is a
     /// shell that prints one line and exits, which is exactly the shape
-    /// a real daemon refusing its socket has.
+    /// a real daemon refusing its socket has. It is a script this row
+    /// has just written, so its spawn is [`spawn_written_daemon`]'s,
+    /// which tries again while another test's fork holds it busy (#250,
+    /// E10r's review 3): each try writes a start line, so the row reads
+    /// the last one and what follows it.
     #[test]
     fn a_spawned_daemons_stderr_is_captured_beside_the_socket() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2120,7 +2124,7 @@ mod tests {
             &socket,
             &executable,
             |path| UnixStream::connect(path),
-            spawn_daemon,
+            |executable, socket| Ok(spawn_written_daemon(executable, socket)),
             Duration::from_millis(300),
             Duration::from_millis(20),
             None,
@@ -2136,12 +2140,15 @@ mod tests {
         );
         let captured = std::fs::read_to_string(&log).expect("the stderr file exists");
         let lines: Vec<&str> = captured.lines().collect();
-        assert_eq!(lines.len(), 2, "{captured}");
-        assert!(
-            lines[0].contains("a daemon started by a window"),
+        let last_start = lines
+            .iter()
+            .rposition(|line| line.contains("a daemon started by a window"))
+            .unwrap_or_else(|| panic!("no start line: {captured}"));
+        assert_eq!(
+            &lines[last_start + 1..],
+            ["fake daemon: refusing to start"],
             "{captured}"
         );
-        assert_eq!(lines[1], "fake daemon: refusing to start");
         assert!(
             matches!(error, ManagedAttachError::StartupTimeout { .. }),
             "{error:?}"
