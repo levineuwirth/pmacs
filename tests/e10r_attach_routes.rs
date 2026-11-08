@@ -3142,13 +3142,48 @@ fn j1_keys_at_a_healthy_daemon_raise_no_sentence_on_either_route() {
     });
 }
 
-/// **Review 3's Low 3, its `p48`:** the terminal resized under the sentence, taller, shorter,
-/// narrower. The row was painted only when what it wanted changed, a resize changed nothing
-/// it wanted, and a stopped daemon paints nothing, so at `e111983` the sentence was left on
-/// an upper row or gone, the bottom row blank, until a pane narrow enough for the short form.
-/// A mebibyte pasted brings the sentence up there as here.
+/// What a resize to `cols` leaves of `before`, the screen a stopped daemon last painted,
+/// read whole: every row above the bottom one is what the daemon left there, cut to the
+/// pane, or blank where a resize added it, and the sentence stands on the bottom row and
+/// on no other.
+fn the_screen_is_what_the_daemon_left_but_the_bottom_row(
+    tui: &ScreenTui,
+    before: &[String],
+    cols: usize,
+    wanted: &str,
+) {
+    let rows = tui.rows();
+    let (bottom, above) = rows.split_last().expect("a screen");
+    assert_eq!(bottom.trim_end(), wanted, "{}", tui.describe());
+    for (i, row) in above.iter().enumerate() {
+        let left: String = before
+            .get(i)
+            .map_or_else(String::new, |row| row.chars().take(cols).collect());
+        assert_eq!(
+            row.trim_end(),
+            left.trim_end(),
+            "row {}, of {} at {cols} columns, is not what the daemon left there; {}",
+            i + 1,
+            rows.len(),
+            tui.describe()
+        );
+    }
+}
+
+/// **Review 3's Low 3, its `p48`, and review 4's Low 2, its `r4_overlay.py`:** the terminal
+/// resized under the sentence, taller twice, narrower, narrower than the sentence and
+/// shorter, the screen read whole each time. The row was painted only when what it wanted
+/// changed, a resize changed nothing it wanted, and a stopped daemon paints nothing, so at
+/// `e111983` the sentence was left on an upper row or gone, the bottom row blank, until a
+/// pane narrow enough for the short form. At `6375147` it stood on the bottom row, and on
+/// each row that had been the bottom one, a copy for each growth: 24 and 30 at 30 rows, 24,
+/// 30 and 35 at 35. Now one stands, on the bottom row, and the rows it left hold what the
+/// daemon left there. `M-x`, which only the daemon answers and the client paints nothing
+/// for, brings it up; `C-x b`'s `b` may be painted at the caret by the optimistic path at a
+/// daemon that has not said `C-x` is pending (#470), which would change a row of its own.
 #[test]
 fn j3_a_resize_leaves_the_sentence_on_the_bottom_row() {
+    const NARROW: &str = "[not answering; F12 detaches]";
     let daemon = TestDaemon::spawn_with_config("");
     let home = tempfile::TempDir::new().expect("tempdir");
     let mut tui = attached_screen(daemon.socket_path(), home.path(), &[]);
@@ -3156,21 +3191,34 @@ fn j3_a_resize_leaves_the_sentence_on_the_bottom_row() {
         t.screen_contains("*scratch*")
     });
     let pid = stop_answering(&daemon);
-    tui.write(&a_large_paste());
+    // Frames already on their way are read before the first key goes.
+    let _ = tui.watch_for(Duration::from_millis(500), &|_| false);
+    let before = tui.rows();
+    tui.write(b"\x1bx");
     tui.wait_for(Duration::from_secs(20), "the sentence", &|t| {
         t.bottom_row() == NOT_ANSWERING_NOTICE
     });
+    the_screen_is_what_the_daemon_left_but_the_bottom_row(&tui, &before, 80, NOT_ANSWERING_NOTICE);
     for (rows, cols, wanted) in [
         (30, 80, NOT_ANSWERING_NOTICE),
-        (20, 80, NOT_ANSWERING_NOTICE),
-        (20, 70, NOT_ANSWERING_NOTICE),
-        (20, 40, "[not answering; F12 detaches]"),
+        (35, 80, NOT_ANSWERING_NOTICE),
+        (35, 70, NOT_ANSWERING_NOTICE),
+        (35, 40, NARROW),
+        (20, 40, NARROW),
     ] {
         tui.resize(rows, cols);
         tui.wait_for(
             Duration::from_secs(5),
             &format!("the sentence on the bottom row at {cols}x{rows}"),
             &|t| t.bottom_row() == wanted,
+        );
+        // What the put-back and the paint after it wrote is all read.
+        let _ = tui.watch_for(Duration::from_millis(300), &|_| false);
+        the_screen_is_what_the_daemon_left_but_the_bottom_row(
+            &tui,
+            &before,
+            usize::from(cols),
+            wanted,
         );
     }
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
@@ -3184,6 +3232,40 @@ fn j3_a_resize_leaves_the_sentence_on_the_bottom_row() {
         tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
         "F12 ends it"
     );
+}
+
+/// L2's fault in a reconnect's countdown, found by reading it: the banner stood on the old
+/// bottom row of a pane that grew, and was painted on the new one only at the next second,
+/// so at `6375147` the pane showed it twice for as long as the wait lasted. Now it is moved
+/// at once, and the row it left holds what the last session's frames left there, here a
+/// blank screen.
+#[test]
+fn l2_a_resize_in_a_countdown_leaves_the_banner_on_the_bottom_row_alone() {
+    let ssh = StandInSsh::new(&[session_with(&frame_bytes(), 255)]);
+    let mut tui = ssh.attach_screen("10000", 80);
+    let counting = |t: &ScreenTui| t.bottom_row().contains(" — reconnecting in ");
+    tui.wait_for(Duration::from_secs(30), "the countdown", &counting);
+    let before = tui.rows();
+    let blank_but_the_bottom = before[..before.len() - 1]
+        .iter()
+        .all(|row| row.trim().is_empty());
+    assert!(blank_but_the_bottom, "{}", tui.describe());
+    tui.resize(30, 80);
+    tui.wait_for(
+        Duration::from_secs(5),
+        "the countdown on the bottom row at 80x30",
+        &|t| counting(t) && t.rows().len() == 30,
+    );
+    let _ = tui.watch_for(Duration::from_millis(300), &|_| false);
+    let rows = tui.rows();
+    let banners: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.contains("reconnecting in"))
+        .map(|(i, _)| i + 1)
+        .collect();
+    assert_eq!(banners, vec![30], "{}", tui.describe());
+    ctrl_c_ends_the_wait(&mut tui);
 }
 
 /// A stand-in for `ssh` on a slow link: one process, as `ssh` is, running the real bridge on

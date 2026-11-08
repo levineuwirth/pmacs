@@ -743,6 +743,12 @@ pub(crate) trait AttachPumpFrontend {
         Ok(())
     }
 
+    /// After a resize, put back what the frames left on the row a notice stood on, if that
+    /// row is still on the pane above the new bottom one.
+    fn put_back_the_old_bottom_row(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// T M10.10 Day 3 step 5 Path β — paint an optimistic insert
     /// at the terminal's current cursor position. Used when the
     /// optimistic-apply orchestrator landed a `CrdtOp` AND the
@@ -792,6 +798,9 @@ impl AttachPumpFrontend for Frontend {
     }
     fn clear_notice(&mut self) -> std::io::Result<()> {
         Frontend::clear_notice(self)
+    }
+    fn put_back_the_old_bottom_row(&mut self) -> std::io::Result<()> {
+        Frontend::put_back_the_old_bottom_row(self)
     }
     #[cfg(feature = "crdt")]
     fn paint_optimistic_insert(&mut self, c: char) -> std::io::Result<()> {
@@ -1614,9 +1623,14 @@ impl BottomRow {
 
     /// The pane was resized: what was painted is on another row now, or gone, and a daemon
     /// that is not answering paints nothing there, so the row is painted again as if blank
-    /// (E10r's review 3, ruled 2026-11-08).
-    fn resized(&mut self) {
-        self.painted = None;
+    /// (E10r's review 3, ruled 2026-11-08), and a notice that stood on the old bottom row
+    /// is taken off it, what the frames left there put back, so that one stands, on the
+    /// bottom row (review 4, ruled 2026-11-08).
+    fn resized(&mut self, frontend: &mut dyn AttachPumpFrontend) -> io::Result<()> {
+        if self.painted.take().is_some() {
+            frontend.put_back_the_old_bottom_row()?;
+        }
+        Ok(())
     }
 
     /// Make the row what it should be, if it is not.
@@ -1930,7 +1944,7 @@ pub(crate) fn run_attach_pair(
                 let _ = bottom.settle(frontend);
             }
             if matches!(ev, Event::Resize(..)) {
-                bottom.resized();
+                let _ = bottom.resized(frontend);
                 let _ = bottom.settle(frontend);
             }
 
@@ -3097,10 +3111,11 @@ enum SleepOutcome {
 /// Uses [`Frontend::poll_event`] as the wait primitive so the loop
 /// can react to Ctrl-C immediately (raw mode delivers Ctrl-C as a
 /// `KeyEvent`, not as `SIGINT` — terminal `ISIG` is disabled by
-/// `enable_raw_mode`). Other events (resize, mouse, F-keys) are
-/// drained but ignored; resize updates `Frontend::size` as a side
-/// effect of `poll_event`, which is the exact behavior the next
-/// `attempt_session` needs for its `initial_size`.
+/// `enable_raw_mode`). Other events (mouse, F-keys) are drained but
+/// ignored; a resize updates `Frontend::size` as a side effect of
+/// `poll_event`, which is the exact behavior the next `attempt_session`
+/// needs for its `initial_size`, and moves the banner to the new bottom
+/// row, taking it off the old one.
 ///
 /// If `frontend` is `None` (handshake-reconnect with no Frontend up
 /// yet), the function falls back to a plain `thread::sleep` and
@@ -3152,6 +3167,13 @@ fn sleep_with_countdown(
                 ..
             }))) if modifiers.contains(KeyModifiers::CONTROL) => {
                 return SleepOutcome::Cancelled;
+            }
+            // The banner stood on the old bottom row, which a terminal that grows keeps where
+            // it was: what the last frames left there goes back, and the banner is painted at
+            // once on the new bottom row, so that one stands (review 4, ruled 2026-11-08).
+            Ok(Some(Event::Resize(..))) => {
+                let _ = f.put_back_the_old_bottom_row();
+                last_painted_secs = None;
             }
             Ok(_) | Err(_) => {
                 // Any other event (resize, mouse, key) → drain and

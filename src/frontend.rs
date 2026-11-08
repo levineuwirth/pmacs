@@ -155,6 +155,9 @@ pub struct Frontend {
     /// over it can come off and leave it as they left it. A frame only says what
     /// changed, so nothing else would ever repaint it.
     status_row: Vec<Cell>,
+    /// E10r: the row that was the bottom one before the last resize, and what the
+    /// frames had left on it then, for [`Self::put_back_the_old_bottom_row`].
+    old_bottom_row: Option<(u32, Vec<Cell>)>,
     /// E10r: the terminal's modes while it is lent, read when [`Self::lend_terminal`]
     /// left raw mode: what [`Self::take_terminal_back`] returns to first, whatever a
     /// prompt that was killed left behind, so they are what an exit restores.
@@ -182,6 +185,7 @@ impl Frontend {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::detect_env(),
             status_row: vec![Cell::default(); size.cols as usize],
+            old_bottom_row: None,
             lent_modes: None,
         };
         // Best-effort sequence of init steps. Each step that succeeds
@@ -580,6 +584,41 @@ impl Frontend {
         self.out.flush()
     }
 
+    /// After a resize, put back on the row that was the bottom one what the frames left
+    /// there, for an overlay that stood over it: a terminal keeps an alternate screen's
+    /// rows where they were as it grows, so a notice would stay on that row above the new
+    /// bottom one, and a daemon that does not answer paints nothing over it (E10r's review
+    /// 4, ruled 2026-11-08). Cut to the pane's width, as a terminal cuts it. A row that is
+    /// now the bottom one, or past it, is not written: a terminal that shrinks either cuts
+    /// the rows below or scrolls the screen up, which this cannot tell, and either way the
+    /// old row is gone or is the new bottom row, which the overlay is painted on again.
+    /// Rows a resize added were never painted by the daemon, and are blank, as the
+    /// terminal adds them, until it paints them.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    pub fn put_back_the_old_bottom_row(&mut self) -> io::Result<()> {
+        let Some((row, cells)) = self.old_bottom_row.take() else {
+            return Ok(());
+        };
+        if row + 1 >= self.size.rows {
+            return Ok(());
+        }
+        let span = DiffSpan {
+            start: CellCoord { row, col: 0 },
+            cells: cut_to_width(cells, self.size.cols as usize),
+        };
+        queue!(self.out, BeginSynchronizedUpdate, cursor::SavePosition)?;
+        write_frame(
+            &mut self.out,
+            std::slice::from_ref(&span),
+            false,
+            self.depth,
+        )?;
+        queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
     /// Lend the terminal to whatever may ask it something, for a wait in which this
     /// process reads no key: `ssh`'s passphrase prompt, on a reconnect.
     ///
@@ -688,9 +727,14 @@ impl Frontend {
     }
 
     fn handle_resize(&mut self, new_size: CellSize) {
+        // A resync follows a resize, and says what the new bottom row holds; what the old
+        // one held is kept for an overlay that stood over it to be taken off.
+        let old_row = std::mem::replace(
+            &mut self.status_row,
+            vec![Cell::default(); new_size.cols as usize],
+        );
+        self.old_bottom_row = Some((self.size.rows.saturating_sub(1), old_row));
         self.size = new_size;
-        // A resync follows a resize, and says what the new bottom row holds.
-        self.status_row = vec![Cell::default(); new_size.cols as usize];
         // Cell-buffer reallocation lives on
         // [`crate::instance_render::RenderState`] now (T M5.2). The
         // run loop is responsible for forwarding the new size there;
@@ -780,6 +824,19 @@ fn write_frame<W: Write>(
     } else {
         emit_cell_delta(w, spans, full_grid)
     }
+}
+
+/// `cells` cut to `cols`, a wide character the cut halves left blank, so that it cannot
+/// wrap onto the next row.
+fn cut_to_width(mut cells: Vec<Cell>, cols: usize) -> Vec<Cell> {
+    if cells.len() > cols {
+        let halved = matches!(cells[cols].glyph, Glyph::Continuation);
+        cells.truncate(cols);
+        if halved && let Some(last) = cells.last_mut() {
+            *last = Cell::default();
+        }
+    }
+    cells
 }
 
 /// Note what one frame puts on the bottom row in `row`, a terminal's width of cells.
@@ -1045,6 +1102,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            old_bottom_row: None,
             lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::ThemeFacts {
@@ -1072,6 +1130,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            old_bottom_row: None,
             lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::FontFacts {
@@ -1093,6 +1152,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            old_bottom_row: None,
             lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::StatuslineSegments {
@@ -1482,6 +1542,30 @@ mod tests {
         assert_eq!(shown(&row), " acd", "past the width is not kept");
         keep_status_row(&mut row, size, &[at(2, 3, "x")], true);
         assert_eq!(shown(&row), "   x");
+    }
+
+    /// The old bottom row put back after a resize is cut to the pane as a terminal cuts
+    /// it, and a wide character the cut halves goes blank rather than wrap.
+    #[test]
+    fn an_old_bottom_row_is_cut_to_the_pane_and_halves_no_character() {
+        let cell = |c| Cell {
+            glyph: Glyph::Char(c),
+            ..Cell::default()
+        };
+        let continuation = Cell {
+            glyph: Glyph::Continuation,
+            ..Cell::default()
+        };
+        let row = vec![cell('a'), cell('字'), continuation, cell('b')];
+        let glyphs = |cells: &[Cell]| -> Vec<Glyph> {
+            cells.iter().map(|cell| cell.glyph.clone()).collect()
+        };
+        assert_eq!(
+            glyphs(&cut_to_width(row.clone(), 2)),
+            vec![Glyph::Char('a'), Cell::default().glyph]
+        );
+        assert_eq!(glyphs(&cut_to_width(row.clone(), 3)), glyphs(&row[..3]));
+        assert_eq!(glyphs(&cut_to_width(row.clone(), 9)), glyphs(&row));
     }
 
     #[test]
