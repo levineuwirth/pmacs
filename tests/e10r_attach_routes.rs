@@ -3118,6 +3118,156 @@ fn j1_keys_at_a_healthy_daemon_raise_no_sentence_on_either_route() {
     });
 }
 
+/// **Review 3's Low 3, its `p48`:** the terminal resized under the sentence, taller, shorter,
+/// narrower. The row was painted only when what it wanted changed, a resize changed nothing
+/// it wanted, and a stopped daemon paints nothing, so at `e111983` the sentence was left on
+/// an upper row or gone, the bottom row blank, until a pane narrow enough for the short form.
+/// A mebibyte pasted brings the sentence up there as here.
+#[test]
+fn j3_a_resize_leaves_the_sentence_on_the_bottom_row() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let home = tempfile::TempDir::new().expect("tempdir");
+    let mut tui = attached_screen(daemon.socket_path(), home.path(), &[]);
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    let pid = stop_answering(&daemon);
+    tui.write(&a_large_paste());
+    tui.wait_for(Duration::from_secs(20), "the sentence", &|t| {
+        t.bottom_row() == NOT_ANSWERING_NOTICE
+    });
+    for (rows, cols, wanted) in [
+        (30, 80, NOT_ANSWERING_NOTICE),
+        (20, 80, NOT_ANSWERING_NOTICE),
+        (20, 70, NOT_ANSWERING_NOTICE),
+        (20, 40, "[not answering; F12 detaches]"),
+    ] {
+        tui.resize(rows, cols);
+        tui.wait_for(
+            Duration::from_secs(5),
+            &format!("the sentence on the bottom row at {cols}x{rows}"),
+            &|t| t.bottom_row() == wanted,
+        );
+    }
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+    tui.wait_for(
+        Duration::from_secs(30),
+        "the sentence gone once the daemon answers",
+        &|t| !t.bottom_row().contains("answering"),
+    );
+    tui.write(b"\x1b[24~");
+    assert!(
+        tui.pty.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "F12 ends it"
+    );
+}
+
+/// A stand-in for `ssh` on a slow link: one process, as `ssh` is, running the real bridge on
+/// `socket` and passing on what the client writes at `rate` bytes a second, the bridge's
+/// words coming back as they come, and counting in `moved` what it has passed on (review
+/// 3's `ssh_throttle.py`). No `ssh` and no network.
+fn throttled_ssh(
+    dir: &Path,
+    socket: &Path,
+    rate: usize,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let script = dir.join("ssh");
+    let moved = dir.join("moved");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/usr/bin/python3
+import os, subprocess, sys, threading, time
+env = dict(os.environ, PMACS_ATTACH_PROTOCOL_FD="2")
+child = subprocess.Popen(["{pmacs}", "--daemon-attach", "--socket", "{socket}"], env=env,
+                         stdin=subprocess.PIPE, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+def down():
+    sent, due = 0, time.time()
+    while True:
+        data = os.read(0, 2048)
+        if not data:
+            break
+        child.stdin.write(data); child.stdin.flush(); sent += len(data)
+        with open("{moved}", "w") as f:
+            f.write(str(sent))
+        due = max(due, time.time()) + len(data) / {rate}
+        if due > time.time():
+            time.sleep(due - time.time())
+    child.stdin.close()
+def up():
+    while True:
+        data = os.read(child.stderr.fileno(), 65536)
+        if not data:
+            break
+        os.write(2, data)
+threading.Thread(target=down, daemon=True).start()
+u = threading.Thread(target=up, daemon=True)
+u.start()
+code = child.wait()
+u.join(2)
+sys.exit(code)
+"#,
+            pmacs = env!("CARGO_BIN_EXE_pmacs"),
+            socket = socket.display(),
+            moved = moved.display(),
+        ),
+    )
+    .expect("write the stand-in");
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    (script, moved)
+}
+
+/// **Review 3's Low 4, its `p47`:** a mebibyte pasted over a link of 16 KiB/s, the daemon
+/// answering throughout. At `e111983` the writer marked a move as each 64 KiB went, which
+/// took 4 s, so the bottom row said the daemon was not answering 2.9 s in while the bytes
+/// moved. Now a frame read is what answers, and the frames come.
+#[test]
+fn j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon() {
+    let daemon = TestDaemon::spawn_with_config("");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (script, moved) = throttled_ssh(dir.path(), daemon.socket_path(), 16 * 1024);
+    let home = dir.path();
+    let (pty, tap) = spawn_pmacs_in_pty_tapped(
+        &["--attach", "farhost"],
+        &[
+            ("HOME", home),
+            ("XDG_CONFIG_HOME", home),
+            ("PMACS_STATE_HOME", home),
+            (PMACS_TEST_SSH_BIN, &script),
+            (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1")),
+        ],
+        24,
+        80,
+    );
+    let mut tui = ScreenTui::new(pty, tap, 24, 80);
+    tui.wait_for(Duration::from_secs(30), "the first frame", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    let passed = || {
+        std::fs::read_to_string(&moved)
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    tui.write(&a_large_paste());
+    std::thread::sleep(Duration::from_secs(1));
+    let before = passed();
+    let up = |t: &ScreenTui| t.bottom_row().contains("not answering");
+    assert!(
+        tui.watch_for(Duration::from_secs(15), &up).is_none(),
+        "said with the daemon answering and the link moving: {}",
+        tui.describe()
+    );
+    let after = passed();
+    assert!(
+        after > before + 64 * 1024 && after < 1024 * 1024,
+        "a slow link that moved: {before} then {after} bytes"
+    );
+    tui.write(b"\x1b[24~");
+    assert!(tui.pty.wait_for_exit(F12_REMOTELY).is_some(), "F12 ends it");
+}
+
 /// Past the cap further input is dropped, and the row says so; what got in before it still
 /// arrives, in order, with nothing out of place, and the row goes when it has. The cap
 /// itself is a frame's 16 MiB, which is `a_write_queue_holds_at_least_one_largest_frame`'s;

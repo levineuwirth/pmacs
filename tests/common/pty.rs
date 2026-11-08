@@ -424,6 +424,16 @@ impl ScreenTui {
         self.pty.write_input(bytes).expect("write to the PTY");
     }
 
+    /// Resize the PTY, as a user resizing the terminal does, and the modelled screen with
+    /// it, after reading for 200 ms what the TUI wrote at the old size.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let _ = self.watch_for(Duration::from_millis(200), &|_| false);
+        self.screen
+            .resize(CellSize::new(rows.into(), cols.into()))
+            .expect("a valid size");
+        self.pty.resize(rows, cols).expect("resize the PTY");
+    }
+
     /// Read until `done` holds; the arrival of the read that made it
     /// hold. Panics after `limit`.
     pub fn wait_for(

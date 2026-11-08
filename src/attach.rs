@@ -1612,6 +1612,13 @@ impl BottomRow {
         };
     }
 
+    /// The pane was resized: what was painted is on another row now, or gone, and a daemon
+    /// that is not answering paints nothing there, so the row is painted again as if blank
+    /// (E10r's review 3, ruled 2026-11-08).
+    fn resized(&mut self) {
+        self.painted = None;
+    }
+
     /// Make the row what it should be, if it is not.
     fn settle(&mut self, frontend: &mut dyn AttachPumpFrontend) -> io::Result<()> {
         let wanted = self.wanted(frontend.size().cols);
@@ -1920,6 +1927,10 @@ pub(crate) fn run_attach_pair(
 
             if matches!(ev, Event::Key(_)) {
                 bottom.key_arrived();
+                let _ = bottom.settle(frontend);
+            }
+            if matches!(ev, Event::Resize(..)) {
+                bottom.resized();
                 let _ = bottom.settle(frontend);
             }
 
