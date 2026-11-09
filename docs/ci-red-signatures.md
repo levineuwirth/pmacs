@@ -16263,6 +16263,47 @@ which is a scope reading, not a causal exclusion. No tally is changed. GitHub's
 failed required check blocks the merge; the owner's disposition is needed before
 merging over it. No product change or fresh local full gate was made in this check.
 
+### E10x requested CRDT rerun: attempt 2 succeeds
+
+Recorded 2026-11-09 after the owner requested a rerun of the failed job.
+CI 42588282118 attempt 2 completed successfully at 10:29 UTC, at unchanged
+head `202e0be`. Only `Test (crdt)` was rerun; the other job results below are
+carried forward by GitHub. The original failure in job 129063414878 remains
+recorded above. This pass establishes non-reproduction, not a GPU fix.
+
+| Job | ID | Result |
+|---|---|---|
+| Test (crdt) | 129091008228 | success |
+| Lint (lua54) | 129091009298 | success |
+| Changed paths | 129091009770 | success |
+| M5 Perf Gates | 129091010667 | success |
+| Lint (luajit) | 129091010690 | success |
+| Test (ubuntu-latest / luajit) | 129091010699 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 129091010735 | success |
+| M10 Perf Gates (crdt) | 129091010932 | success |
+| Test (macos-latest / lua54) | 129091011628 | success |
+| Docs consistency | 129091026907 | skipped |
+| M6 Perf Gates | 129091043545 | success |
+| M4 Perf Gates | 129091049543 | success |
+| Test (macos-latest / luajit) | 129091052757 | success |
+| Test (ubuntu-latest / lua54) | 129091058515 | success |
+| Commit attribution (D9) | 129091058547 | success |
+| Perf budgets (debug) | 129091061929 | success |
+| GPU Render (headless) | 129091066369 | success |
+| Format | 129091066778 | success |
+| M1 Acceptance Gates | 129091073872 | success |
+
+The rerun job 129091008228 has 229 result lines: 5,449 passed, 0 failed,
+87 ignored. The original GPU selector and all five issue336 query-selection
+rows passed. Grammar fuzz 42588281689 remains successful at attempt 1, jobs
+129063300150 and 129063300250; neither arm was rerun. No tally moves.
+The log is `/tmp/pmacs499-crdt-rerun.log`; the durable job link is
+`https://github.com/levineuwirth/pmacs/actions/runs/42588282118/job/129091008228`.
+
+E10m merged as `a04aab2` while this rerun was running. That does not alter the
+merge commit tested by this rerun. Its main-branch diff has no overlap with
+this PR's two fuzz-selection files; no new full local gate is claimed here.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
