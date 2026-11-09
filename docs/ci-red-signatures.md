@@ -16214,6 +16214,55 @@ selection source. Removing rename expansion or reverting to quoted line paths
 fails its corresponding control; restored source and binary pass all five rows.
 No local failure or new CI occurrence is recorded for this phase; no tally moves.
 
+### E10x merge check: PR #499 blocked by a GPU switch-buffer variant
+
+Recorded 2026-11-09 at the owner's request to merge #499, head `202e0be` unchanged.
+Closing API read 09:45 UTC: CI 42588282118, attempt 1, failure, 17 success / 1 failure /
+1 skipped; Grammar fuzz 42588281689, attempt 1, success, both arms. No rerun taken.
+This supersedes the pending status recorded at the checkpoint, without changing its
+local validation. The merge has not been taken.
+
+| Run | Job | Name | Result |
+|---|---|---|---|
+| 42588282118 | 129063301002 | Lint (luajit) | success |
+| 42588282118 | 129063301460 | Lint (lua54) | success |
+| 42588282118 | 129063301464 | Changed paths | success |
+| 42588282118 | 129063301491 | Commit attribution (D9) | success |
+| 42588282118 | 129063301503 | Format | success |
+| 42588282118 | 129063414790 | M6 Perf Gates | success |
+| 42588282118 | 129063414808 | M1 Acceptance Gates | success |
+| 42588282118 | 129063414814 | M5 Perf Gates | success |
+| 42588282118 | 129063414835 | M4 Perf Gates | success |
+| 42588282118 | 129063414876 | Perf budgets (debug) | success |
+| 42588282118 | 129063414878 | Test (crdt) | failure |
+| 42588282118 | 129063414904 | Test (macos-latest / luajit) | success |
+| 42588282118 | 129063414918 | GPU Render (headless) | success |
+| 42588282118 | 129063414928 | Test (ubuntu-latest / luajit) | success |
+| 42588282118 | 129063414963 | Test (macos-latest / lua54) | success |
+| 42588282118 | 129063414981 | M10 Perf Gates (crdt) | success |
+| 42588282118 | 129063415014 | Test (ubuntu-latest / lua54) | success |
+| 42588282118 | 129063415025 | Test (ubuntu-latest / luajit, no crdt) | success |
+| 42588282118 | 129063416866 | Docs consistency | skipped |
+| 42588281689 | 129063300150 | Grammar fuzz (asan-strict) | success |
+| 42588281689 | 129063300250 | Grammar fuzz | success |
+
+`Test (crdt)` 129063414878 has one failure in 228 paired running/result lines,
+5,447 passed / 1 failed / 87 ignored:
+`e8b_switch_buffer_acceptance::e8b_fr1_the_gpu_reaches_a_dired_buffer_by_its_own_name_and_keeps_d18_s_four`,
+the first `start-where` assertion at line 628, expected `"WHERE editor.rs"` and read
+`"WHERE notes.txt"`; `9 passed; 1 failed; 0 ignored`, 79.32 s. All five new
+query-selection rows pass in this job. The downloaded log is `/tmp/pmacs499-crdt.log`;
+the durable job link is `https://github.com/levineuwirth/pmacs/actions/runs/42588282118/job/129063414878`.
+
+This is related to #420's selector and first-band failure, but its required left
+value is `WHERE dired.lua`, not `WHERE notes.txt`. The variant is commented there
+(6736983827); it is not asserted to match every fragment and does not move #420's
+literal-signature tally. A shared bootstrap-viewport mechanism is an inference,
+not measured here. The branch touches the selection CLI and its new tests only,
+which is a scope reading, not a causal exclusion. No tally is changed. GitHub's
+failed required check blocks the merge; the owner's disposition is needed before
+merging over it. No product change or fresh local full gate was made in this check.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
