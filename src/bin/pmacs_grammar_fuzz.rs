@@ -3236,8 +3236,19 @@ fn changed(args: &[String]) -> Result<ExitCode, String> {
         &std::fs::read_to_string("fuzz/corpora.tsv")
             .map_err(|e| format!("fuzz/corpora.tsv: {e}"))?,
     );
-    let vendored: BTreeSet<String> = git_text(&["diff", "--name-only", since, "--", "vendor/"])?
-        .lines()
+    // Expand renames into both paths and keep Git from quoting filenames.
+    let changed_paths = git_text(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        since,
+        "--",
+        "vendor/",
+        "builtin/queries/",
+    ])?;
+    let vendored: BTreeSet<String> = changed_paths
+        .split('\0')
         .filter_map(|p| {
             p.strip_prefix("vendor/")?
                 .split('/')
@@ -3245,7 +3256,20 @@ fn changed(args: &[String]) -> Result<ExitCode, String> {
                 .map(str::to_owned)
         })
         .collect();
-    let (all, touched) = changed_grammars(&lock_then, &lock_now, &rows_then, &rows_now, &vendored);
+    let (all, mut touched) =
+        changed_grammars(&lock_then, &lock_now, &rows_then, &rows_now, &vendored);
+    for path in changed_paths.split('\0') {
+        let Some((grammar, _)) = path
+            .strip_prefix("builtin/queries/")
+            .and_then(|p| p.split_once('/'))
+        else {
+            continue;
+        };
+        // Query overlays belong to a grammar, not every grammar in its crate.
+        if rows_now.iter().any(|(name, _, _)| name == grammar) {
+            touched.insert(grammar.to_owned());
+        }
+    }
     if all {
         println!("*");
     } else {
