@@ -179,7 +179,19 @@ fn fold_from_node(n: Node<'_>, source: &[u8], line_offsets: &[u32]) -> Option<(u
     // Tail: a delimited body's closing line stays visible (`} else {`).
     // A delimiter-less body hides through its last line, even when a
     // nested expression ends there with a closing bracket (#384).
-    let last_hidden_row = if is_brace && line_starts_with_closer(source, line_offsets, b_end_row) {
+    // Inspect the body's own token: a Rust label can precede its `{`.
+    let owns_closer = b
+        .child_count()
+        .checked_sub(1)
+        .and_then(|last| b.child(last as u32))
+        .is_some_and(|last| {
+            !last.is_named()
+                && !last.is_missing()
+                && matches!(last.kind(), "}" | "]" | ")")
+                && last.start_position().row == b_end_row
+        });
+    let last_hidden_row = if owns_closer && line_starts_with_closer(source, line_offsets, b_end_row)
+    {
         if b_end_row == 0 {
             return None;
         }

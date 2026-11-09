@@ -254,7 +254,23 @@ fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
 /// read the painted rows. A nested expression's closer belongs to the
 /// indentation/keyword body's hidden text, not to the body's delimiter.
 fn assert_command_fold_rows(lang: &str, source: &str, inside: &str, expected: &[&str]) {
-    for command in ["fold.close", "fold.close-all"] {
+    assert_fold_rows_for_commands(
+        lang,
+        source,
+        inside,
+        expected,
+        &["fold.close", "fold.close-all"],
+    );
+}
+
+fn assert_fold_rows_for_commands(
+    lang: &str,
+    source: &str,
+    inside: &str,
+    expected: &[&str],
+    commands: &[&str],
+) {
+    for command in commands {
         let mut s = editor();
         let id = active_id(&s);
         seed(&s, id, source);
@@ -327,6 +343,24 @@ fn issue384_rust_keeps_its_own_body_closer() {
         "fn f() {\n    let x = [\n        1,\n    ];\n}\nconst AFTER: i32 = 2;\n",
         "let x",
         &["fn f() { …", "}", "const AFTER: i32 = 2;"],
+    );
+}
+
+#[test]
+fn issue384_rust_labeled_block_keeps_its_own_body_closer() {
+    // close-all targets the outer function; close reaches this inner block.
+    assert_fold_rows_for_commands(
+        "rust",
+        "fn f() {\n    let v = 'a: {\n        let x = 1;\n        break 'a x;\n    };\n}\nconst AFTER: i32 = 2;\n",
+        "let x",
+        &[
+            "fn f() {",
+            "    let v = 'a: { …",
+            "    };",
+            "}",
+            "const AFTER: i32 = 2;",
+        ],
+        &["fold.close"],
     );
 }
 
