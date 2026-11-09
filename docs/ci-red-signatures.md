@@ -16304,6 +16304,86 @@ E10m merged as `a04aab2` while this rerun was running. That does not alter the
 merge commit tested by this rerun. Its main-branch diff has no overlap with
 this PR's two fuzz-selection files; no new full local gate is claimed here.
 
+### E10w fix round 1: labeled blocks own their closing token
+
+Recorded 2026-11-09 at `c5037cd`, PR #497. Fresh CI 42607798849 succeeded
+at attempt 1, 18 jobs successful and one skipped. Grammar fuzz 42607798885
+succeeded at attempt 1, both arms; final API read 2026-11-09. No CI rerun.
+The Format job's checkout log reads merge `1805d82` of this head into main
+`bd33294`, which includes E10m `a04aab2`. This supersedes the old integration
+coverage: the earlier green run 42519060377 tested the merge into `1630b35`.
+
+| Run | Job | Name | Result |
+|---|---|---|---|
+| 42607798849 | 129128098835 | Changed paths | success |
+| 42607798849 | 129128099424 | Commit attribution (D9) | success |
+| 42607798849 | 129128099451 | Lint (luajit) | success |
+| 42607798849 | 129128099483 | Lint (lua54) | success |
+| 42607798849 | 129128099497 | Format | success |
+| 42607798849 | 129128217033 | M1 Acceptance Gates | success |
+| 42607798849 | 129128217116 | Perf budgets (debug) | success |
+| 42607798849 | 129128217118 | M6 Perf Gates | success |
+| 42607798849 | 129128217190 | M10 Perf Gates (crdt) | success |
+| 42607798849 | 129128217199 | M4 Perf Gates | success |
+| 42607798849 | 129128217212 | M5 Perf Gates | success |
+| 42607798849 | 129128217264 | Test (crdt) | success |
+| 42607798849 | 129128217302 | Test (macos-latest / lua54) | success |
+| 42607798849 | 129128217370 | GPU Render (headless) | success |
+| 42607798849 | 129128217372 | Test (ubuntu-latest / luajit) | success |
+| 42607798849 | 129128217408 | Test (macos-latest / luajit) | success |
+| 42607798849 | 129128217410 | Test (ubuntu-latest / lua54) | success |
+| 42607798849 | 129128217565 | Test (ubuntu-latest / luajit, no crdt) | success |
+| 42607798849 | 129128218942 | Docs consistency | skipped |
+| 42607798885 | 129128098628 | Grammar fuzz (asan-strict) | success |
+| 42607798885 | 129128099113 | Grammar fuzz | success |
+
+The fresh CRDT job 129128217264 has 229 result lines, 5,467 passed /
+0 failed / 88 ignored; all five issue384 fold rows passed. Local targeted
+folding suites passed 21 and 53 rows. Biting the final regression set against
+`f4c1252` gave five passes at the fix and four passes plus the labeled-block
+assertion failure with the old source; the real worker was rebuilt on both
+sides and after restoration.
+
+Two local default gates at `c5037cd` each passed five of six stages. Both
+had 237 running/result pairs, 5,893 passed / 2 failed / 87 ignored, all five
+fold rows passing, and no daemon survivor. Nice 19, six build jobs,
+`NO_COLOR` unset. These samples are listed, not tallied.
+
+| Gate | Failed selectors | Sampler readings; one-minute load |
+|---|---|---|
+| `20261109T111532Z-1797954` | #498 and the #304 variant below | 33; 11.78–32.30 |
+| `20261109T113331Z-1986173` | #316 on old code and the #498 variant below | 26; 10.40–27.88 |
+
+In the first, `e9_review2_a_fresh_attach_with_scratch_killed_lands_on_a_buffer_that_arrived`
+matched both #498 fragments: `timed out waiting for the SessionToken; the daemon
+wrote []`, 12 passed / 1 failed / 0 ignored, 30.31 s. Comment 6739023766.
+The GPU `caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled`
+failed `caret-inside must render the raw source, exactly`, 393 / 1 / 0,
+38.25 s. Its two 230,400-byte arrays differ in 44 pixels at x=102–103,
+y=16–37: 43 are [233,233,240,255] versus [63,63,75,255], one is
+[234,234,240,255] versus [84,84,93,255]. This is #304's geometry; the count
+and second color pair differ from its required fragments, so no exact match
+is claimed. Comment 6739024044 records both pairs.
+
+In the second, `e7i_review3_a_worker_killed_from_outside_is_not_a_crash_and_never_stops_the_buffer`
+matched #316: kill 1, `tree=true`, a live unit, `death=killed`, the modified
+buffer's mode line and `parse:killed`, 10 / 1 / 0, 17.33 s. This branch has
+the pre-E10m test; it is not a recurrence after E10m's fix and #316 stays
+closed. Comment 6739499608. The other failure,
+`e9_review1_a_fresh_attach_onto_an_oversize_document_is_refused_visibly`,
+waited for SessionToken after receiving one `BufferSnapshot` prefix for
+BufferId(1), 15 / 1 / 0, 15.24 s. It differs from #498's selector and empty
+trace, and from #434's later refusal-status wait. Comment 6739499927 records
+it on #498 as a related token-timeout variant, without claiming a shared
+cause or an exact match. The original #498 selector passed in this retry;
+that is non-reproduction, not a fix.
+
+Logs: `/home/jeans/build/pmacs-gate-targets/pmacs-e10w-319e63a3/gate-logs/<gate>/`;
+samplers `/tmp/pmacs-e10w-pressure-20261109T111532Z.log` and
+`/tmp/pmacs-e10w-pressure-20261109T113331Z.log`. No CI tally moves.
+The full local gate remains unmet; the round checkpoints under the overrun
+provision and PR #497 remains draft. No E10r change or merge was made.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
