@@ -16168,6 +16168,52 @@ Tally (e10r-fixes5-local): 2 items in the list below.
 
 So, at E10r fix round 5: `main` is green at `7fd0388`, and PR #462 is red at its head on four required checks: #254 on all three legs with fish and #363 on macOS `lua54`, both in suites the PR has no diff in and both fixed in PR #476, open; none rerun and nothing merged. By CI #254 moves to eighteen and #363 to six. The local samples are listed, not tallied. Every other count above stands.
 
+### E10x checkpoint: PR #499 query overlays select the long fuzz run
+
+Recorded 2026-11-09 at `202e0be`, branch `e10x/query-fuzz-selection`, base `7fd0388`.
+The latest main `0d8df86` differs from that base only in the registry. The last
+code-bearing base remains `9d6b7ac`, whose CI 42219030761 attempt 2 and #282 in
+job 127989471260 are already recorded above.
+
+CI 42588282118 and Grammar fuzz 42588281689 are in progress at attempt 1, API read 2026-11-09 08:48 UTC. No rerun requested; no CI success is claimed.
+
+| Run | Job | Name | State at the API read |
+|---|---|---|---|
+| 42588282118 | 129063301002 | Lint (luajit) | in_progress |
+| 42588282118 | 129063301460 | Lint (lua54) | success |
+| 42588282118 | 129063301464 | Changed paths | success |
+| 42588282118 | 129063301491 | Commit attribution (D9) | success |
+| 42588282118 | 129063301503 | Format | success |
+| 42588282118 | 129063414790 | M6 Perf Gates | in_progress |
+| 42588282118 | 129063414808 | M1 Acceptance Gates | in_progress |
+| 42588282118 | 129063414814 | M5 Perf Gates | in_progress |
+| 42588282118 | 129063414835 | M4 Perf Gates | in_progress |
+| 42588282118 | 129063414876 | Perf budgets (debug) | in_progress |
+| 42588282118 | 129063414878 | Test (crdt) | in_progress |
+| 42588282118 | 129063414904 | Test (macos-latest / luajit) | in_progress |
+| 42588282118 | 129063414918 | GPU Render (headless) | in_progress |
+| 42588282118 | 129063414928 | Test (ubuntu-latest / luajit) | in_progress |
+| 42588282118 | 129063414963 | Test (macos-latest / lua54) | in_progress |
+| 42588282118 | 129063414981 | M10 Perf Gates (crdt) | in_progress |
+| 42588282118 | 129063415014 | Test (ubuntu-latest / lua54) | in_progress |
+| 42588282118 | 129063415025 | Test (ubuntu-latest / luajit, no crdt) | in_progress |
+| 42588282118 | 129063416866 | Docs consistency | skipped |
+| 42588281689 | 129063300150 | Grammar fuzz (asan-strict) | in_progress |
+| 42588281689 | 129063300250 | Grammar fuzz | in_progress |
+
+Default local gate `20261108T230001Z-396092` at `202e0be`: all six stages passed,
+238 paired running/result lines, 5,895 passed / 0 failed / 87 ignored; no daemon
+survived by the environ check. `NO_COLOR` unset, nice 19 and six build jobs. The
+sampler has 27 readings, one-minute load 1.10–23.47, no quiet performance claim.
+Logs: `/home/jeans/build/pmacs-gate-targets/pmacs-e10w-319e63a3/gate-logs/20261108T230001Z-396092/`;
+sampler `/tmp/pmacs-e10w-pressure-20261108T230001Z.log`.
+
+Five CLI regression rows and seven fuzz-policy rows passed separately. The base
+bite is five passes at the head, five assertion failures against `7fd0388`'s
+selection source. Removing rename expansion or reverting to quoted line paths
+fails its corresponding control; restored source and binary pass all five rows.
+No local failure or new CI occurrence is recorded for this phase; no tally moves.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
