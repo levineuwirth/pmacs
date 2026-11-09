@@ -2824,6 +2824,68 @@ fn the_ubuntu_test_legs_print_the_disk_around_the_build_and_after_the_tests() {
     }
 }
 
+/// `scripts/ci-free-disk` removes nothing at or above what a leg wants, and
+/// below it names only toolchains no leg uses; it exits 0 on anything, since a
+/// report that failed a leg would hide the shortage. `--dry-run` runs the
+/// choice and removes nothing, so this row can run anywhere.
+#[test]
+fn ci_free_disk_acts_only_below_what_a_leg_wants_and_never_fails_it() {
+    let run = |args: &[&str]| {
+        let out = Command::new(repo_root().join("scripts/ci-free-disk"))
+            .args(args)
+            .output()
+            .expect("run scripts/ci-free-disk");
+        assert!(out.status.success(), "exit {:?} for {args:?}", out.status);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(run(&[]).is_empty(), "no threshold: usage on stderr, exit 0");
+    let enough = run(&["--dry-run", "0"]);
+    assert!(
+        enough.starts_with("disk: room: ") && enough.ends_with("wanted: nothing removed\n"),
+        "at or above what is wanted it removes nothing: {enough}"
+    );
+    let short = run(&["--dry-run", "999999999"]);
+    let paths: Vec<&str> = short
+        .lines()
+        .map(|l| {
+            l.strip_prefix("disk: room: would remove ")
+                .unwrap_or_else(|| panic!("each line names a path: {l}"))
+        })
+        .collect();
+    assert!(paths.contains(&"/usr/local/lib/android"), "{paths:?}");
+    for path in &paths {
+        let lower = path.to_lowercase();
+        for used in ["node", "go", "rust", "cargo", "python", "npm", "lua", "bin"] {
+            assert!(
+                !lower.split('/').any(|part| part == used),
+                "`{path}` is a tool a test leg runs"
+            );
+        }
+    }
+}
+
+/// Both Ubuntu test jobs make room before they print the disk and build, and
+/// build with line tables, set before the cache step whose key hashes `CARGO_*`
+/// (#328): the two together are what a small root holds, neither alone (E10m.7).
+#[test]
+fn the_ubuntu_test_legs_make_room_and_build_with_line_tables() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    for job in ["test", "crdt-test"] {
+        let body = ci_job(&workflow, job);
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("`{job}` holds `{needle}`"))
+        };
+        let room = at("run: scripts/ci-free-disk 45000");
+        let before = at("scripts/ci-disk \"before the workspace build\" target");
+        assert!(room < before, "`{job}`: room first, then the figure");
+        let lines = at("line-tables-only");
+        let cache = at("uses: Swatinem/rust-cache@v2");
+        assert!(lines < cache, "`{job}`: the profile is in the cache's key");
+    }
+}
+
 /// The `test` legs build the workspace without `--all-targets`. Their test
 /// step is root-only, so the other crates' test targets built there were
 /// never run, and they were the disk: a crdt leg's target reached 84 GB of

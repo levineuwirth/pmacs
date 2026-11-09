@@ -372,11 +372,20 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
         let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = accepted.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
         let server = std::thread::spawn(move || {
             // Two connections are accepted and dropped unanswered (a
-            // bound socket whose daemon is still booting); the third is
-            // answered with a Hello.
+            // bound socket whose daemon is still booting); each one from
+            // the third on is answered with a Hello, as a daemon that has
+            // begun serving answers every connection. Answering only the
+            // third would close the listener behind it, so an answer later
+            // than the wait's read would leave every later probe refused
+            // (#374). The server ends when it is told to.
             for mut stream in listener.incoming().flatten() {
+                if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
                 let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 if n >= 3 {
                     let hello = pmacs::protocol::Hello {
@@ -399,7 +408,6 @@ mod tests {
                     // instead of as the `probed` assertion's story.
                     let _ = pmacs::transport::write_message(&mut stream, &hello);
                     let _ = stream.flush();
-                    break;
                 }
                 drop(stream);
             }
@@ -411,14 +419,13 @@ mod tests {
         let result = wait_for_daemon(&socket, &mut child, Duration::from_secs(10));
         let _ = child.kill();
         let _ = child.wait();
-        // A wait that returned early (on a connect, say) leaves the
-        // server blocked in `accept`; unblock it with connections of our
-        // own so the join below cannot hang, and read the count before
-        // they land.
+        // Whatever the wait returned, the server is in `accept` or about to
+        // be: tell it to stop, then unblock that `accept` with a connection
+        // of our own, so the join cannot hang and a failed wait reports its
+        // result. The count is read before that connection lands.
         let probed = accepted.load(std::sync::atomic::Ordering::SeqCst);
-        for _ in 0..3 {
-            let _ = std::os::unix::net::UnixStream::connect(&socket);
-        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket);
         server.join().expect("server thread");
         assert!(result.is_ok(), "{result:?}");
         assert!(

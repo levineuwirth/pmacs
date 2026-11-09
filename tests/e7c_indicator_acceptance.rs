@@ -441,17 +441,30 @@ fn e7c_fix_3_typing_after_a_save_moves_nothing_on_the_mode_line() {
     exec(&f.s, "pmacs.command.invoke('buffer.save')");
     assert!(pump_lua_flag(&mut f.s, "_G.__e7c_saved", 10), "saved");
     settle(&mut f, 3);
-    let sources: Vec<String> = eval(
-        &f.s,
-        "local rec = pmacs.lsp.active_attachment()
-         local out = {}
-         for _, d in ipairs(pmacs.diag.list(rec.uri)) do out[#out + 1] = tostring(d.source) end
-         return out",
-    );
-    assert!(
-        sources.contains(&"rustc".to_owned()),
-        "the check's diagnostic landed: {sources:?}"
-    );
+    // A save is a notification and no tracked request, so `settle` can
+    // return before the server's publish for it has been read (#288): the
+    // row waits for the unit it reads. The bound only reports.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tick(&mut f.s);
+        let frame = f.render.render_frame(&f.s);
+        f.wire.absorb(&frame);
+        let sources: Vec<String> = eval(
+            &f.s,
+            "local rec = pmacs.lsp.active_attachment()
+             local out = {}
+             for _, d in ipairs(pmacs.diag.list(rec.uri)) do out[#out + 1] = tostring(d.source) end
+             return out",
+        );
+        if sources.contains(&"rustc".to_owned()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the check's diagnostic landed: {sources:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     // The cycle held open: the suffix is on from here.
     exec(
         &f.s,
@@ -688,8 +701,22 @@ fn e7c_fix_3_a_slow_request_appears_as_its_method_and_vanishes_when_answered() {
     let mut f = open_with_fake("rename", ", PMACS_FAKE_LSP_RENAME_HOLD_MS = '1500'");
     exec(&f.s, "pmacs.editor.goto_byte(3)");
     settle(&mut f, 2);
+    // Any job past the threshold stands on the indicator, and since E7i a
+    // buffer's parse waits on a worker process, so the file's own parse can
+    // be there at this frame (#363). The row waits for it to clear rather
+    // than filter it: its base columns come from `before`, and the indicator
+    // names only the oldest job past the threshold, so a parse still running
+    // would hide the `textDocument/rename` it must name below. The bound only
+    // ends the wait: an indicator that never clears still fails here.
     let t0 = Instant::now();
-    let before = read_frame(&mut f, t0);
+    let before = loop {
+        tick(&mut f.s);
+        let frame = read_frame(&mut f, t0);
+        if activity_of(&frame).is_none() || t0.elapsed() >= Duration::from_secs(30) {
+            break frame;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
     let base = grid_columns(&before.grid);
     assert_eq!(activity_of(&before), None, "quiet before the request");
     // The command, then the new name into the minibuffer and RET: the

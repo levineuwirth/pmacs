@@ -1,0 +1,65 @@
+#!/bin/sh
+# scripts/ci-free-disk --- room for a test leg on a small root (#328).
+#
+#   scripts/ci-free-disk [--dry-run] WANTED_MB
+#
+# Below WANTED_MB available on `/`, removes the toolchains the hosted image
+# carries and this project's test legs never run, and prints what each held
+# and what the removal freed; at or above it, removes nothing and says so.
+# `--dry-run` says what it would remove and touches nothing. Every line
+# starts `disk: room: `, beside `scripts/ci-disk`'s.
+#
+# Exits 0 whatever it finds or fails to remove: a leg short of room still
+# builds, and then fails where the shortage shows.
+#
+# Why a threshold: most Ubuntu legs get a 147,718 MB root with about 84 GB
+# available, where this takes 55 to 86 s for nothing. A few get a 73,325 MB
+# root with 9.3 to 12.9 GB available, and `/tmp` and `/mnt` are on it, so the
+# target cannot move. E10m.7's dispatches: this frees 30,602 MB, and a crdt
+# leg's target ends at about 27 GB under `line-tables-only`, 52 GB without.
+set -u
+
+dry=
+if [ "${1:-}" = "--dry-run" ]; then
+    dry=1
+    shift
+fi
+[ $# -eq 1 ] || { echo "usage: scripts/ci-free-disk [--dry-run] WANTED_MB" >&2; exit 0; }
+wanted=$1
+
+available() {
+    df -Pk / 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1024 }'
+}
+
+before=$(available)
+if [ "${before:-0}" -ge "$wanted" ] 2>/dev/null; then
+    echo "disk: room: ${before} MB available, ${wanted} wanted: nothing removed"
+    exit 0
+fi
+
+# Each read from the image at E10m.7, none on a path a row needs: the legs use
+# `go`, `node`, the Rust toolchain and the distribution's own packages.
+list="/usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
+/usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/share/powershell
+/usr/lib/google-cloud-sdk /opt/microsoft /usr/local/share/chromium
+/usr/local/lib/heroku"
+# shellcheck disable=SC2086 # an unmatched glob stays as written and is skipped
+list="$list $(echo /usr/local/julia*)"
+
+if [ -n "$dry" ]; then
+    for d in $list; do
+        echo "disk: room: would remove $d"
+    done
+    exit 0
+fi
+
+echo "disk: room: ${before:-unknown} MB available, ${wanted} wanted: removing the image's unused toolchains"
+for d in $list; do
+    [ -e "$d" ] || continue
+    size=$(sudo du -sk "$d" 2>/dev/null | awk '{ printf "%d", ($1 + 1023) / 1024 }')
+    echo "disk: room: $d: ${size:-unknown} MB"
+    sudo rm -rf "$d" 2>/dev/null || echo "disk: room: could not remove $d"
+done
+after=$(available)
+echo "disk: room: freed $(( ${after:-0} - ${before:-0} )) MB, ${before:-unknown} to ${after:-unknown} available"
+exit 0

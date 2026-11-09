@@ -379,7 +379,11 @@ end
 
 -- Feed raw bytes (synthetic in M6.4, PTY in M6.5) through the ANSI
 -- parser; apply each event to the buffer. Text events land at
--- history_end (extending history and pushing prompt/input forward).
+-- _output_pos: at history_end they extend history and push prompt/input
+-- forward; after a CR or a backspace they overwrite the line, up to an
+-- LF, which moves to the next line and overwrites nothing (_emit_history).
+-- A cursor-motion sequence is parsed and dropped (#486), so what a line
+-- editor draws by moving its cursor lands where _output_pos stands.
 -- Style events update the running style. Alt-screen markers toggle
 -- suppression at the parser level (so Text events between markers
 -- never reach us).
@@ -474,6 +478,18 @@ function Handle:_emit_history(text)
   local h_end = history_end(self)
   local pos = self._output_pos or h_end
   if pos > h_end then pos = h_end end
+  -- An LF short of the history's end moves and overwrites nothing, so a
+  -- CR LF keeps the line it ends. _output_pos only ever stands on the
+  -- last line, since nothing here moves up, so the next line starts past
+  -- the LF this appends.
+  if pos < h_end then
+    local nl = text:find("\n", 1, true)
+    if nl then
+      if nl > 1 then self:_emit_history(text:sub(1, nl - 1)) end
+      self._output_pos = history_end(self)
+      return self:_emit_history(text:sub(nl))
+    end
+  end
   local overwrite_len = math.min(#text, h_end - pos)
   local insert_len = #text - overwrite_len
   with_self_write(self, function()
@@ -560,15 +576,25 @@ function Handle:_current_line_start()
   local h_end = history_end(self)
   local pos = self._output_pos or h_end
   if pos > h_end then pos = h_end end
-  local prefix = self._buf:slice(0, pos)
-  local start = 0
-  local search = 1
-  while true do
-    local idx = prefix:find("\n", search, true)
-    if not idx then return start end
-    start = idx
-    search = idx + 1
+  -- Back from the position over segments that double, each sliced once
+  -- and searched forward for its last LF, so a look-back costs its own
+  -- line and reads each byte of it once: a program's CR LF lines now
+  -- stay, and one CR a line over the whole history would be quadratic,
+  -- while a backspace at a long line's end pays that line once.
+  local to, size = pos, 256
+  while to > 0 do
+    local from = math.max(0, to - size)
+    local segment = self._buf:slice(from, to)
+    local last
+    local i = segment:find("\n", 1, true)
+    while i do
+      last = i
+      i = segment:find("\n", i + 1, true)
+    end
+    if last then return from + last end
+    to, size = from, size * 2
   end
+  return 0
 end
 
 function Handle:_current_line_end()

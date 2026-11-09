@@ -2570,10 +2570,13 @@ enum ReaderKind {
 fn spawn_reader<R: Read + Send + 'static>(
     byte_tx: Sender<ByteChunk>,
     cancel: Arc<AtomicBool>,
-    mut read: R,
+    read: R,
     kind: ReaderKind,
 ) -> JoinHandle<()> {
+    #[cfg(test)]
+    let read = reader_trace::Traced::for_next_reader(read);
     std::thread::spawn(move || {
+        let mut read = read;
         let mut buf = [0u8; BYTE_CHUNK_SIZE];
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -2603,6 +2606,93 @@ fn spawn_reader<R: Read + Send + 'static>(
             }
         }
     })
+}
+
+/// Where a [`spawn_reader`] thread has got to, for a row that must not race
+/// it. A row arms [`trace_next_reader`] before `spawn`, and the next blocking
+/// reader that thread starts carries the trace. Entering `read` is observed
+/// inside the wrapper's own `read`, so a signal there has passed the thread's
+/// cancellation check by construction; a signal that the thread merely began
+/// would still race that check.
+#[cfg(test)]
+mod reader_trace {
+    use std::cell::RefCell;
+    use std::io::{ErrorKind, Read};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// How the thread ended, by what its last `read` came to.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) enum WayOut {
+        /// Its `cancel` check returned before any `read`.
+        CancelledBeforeFirstRead,
+        /// Its last `read` returned bytes, and the next `cancel` check or a
+        /// closed channel ended it.
+        AfterBytes(usize),
+        /// Its last `read` returned `Ok(0)`.
+        Eof,
+        /// Its last `read` returned an error.
+        Error(ErrorKind),
+    }
+
+    #[derive(Default)]
+    pub(super) struct Trace {
+        /// `read`s the thread has entered; each has passed a `cancel` check.
+        pub(super) entered: AtomicUsize,
+        pub(super) way_out: Mutex<Option<WayOut>>,
+    }
+
+    thread_local! {
+        static NEXT: RefCell<Option<Arc<Trace>>> = const { RefCell::new(None) };
+    }
+
+    /// The next [`super::spawn_reader`] on this thread carries `trace`.
+    pub(super) fn trace_next_reader(trace: &Arc<Trace>) {
+        NEXT.with(|next| *next.borrow_mut() = Some(Arc::clone(trace)));
+    }
+
+    pub(super) struct Traced<R> {
+        inner: R,
+        trace: Option<Arc<Trace>>,
+        last: Option<Result<usize, ErrorKind>>,
+    }
+
+    impl<R> Traced<R> {
+        pub(super) fn for_next_reader(inner: R) -> Self {
+            Self {
+                inner,
+                trace: NEXT.with(|next| next.borrow_mut().take()),
+                last: None,
+            }
+        }
+    }
+
+    impl<R: Read> Read for Traced<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(trace) = &self.trace {
+                trace.entered.fetch_add(1, Ordering::SeqCst);
+            }
+            let result = self.inner.read(buf);
+            self.last = Some(match &result {
+                Ok(n) => Ok(*n),
+                Err(e) => Err(e.kind()),
+            });
+            result
+        }
+    }
+
+    impl<R> Drop for Traced<R> {
+        fn drop(&mut self) {
+            if let Some(trace) = &self.trace {
+                *trace.way_out.lock().expect("reader trace poisoned") = Some(match self.last {
+                    None => WayOut::CancelledBeforeFirstRead,
+                    Some(Ok(0)) => WayOut::Eof,
+                    Some(Ok(n)) => WayOut::AfterBytes(n),
+                    Some(Err(kind)) => WayOut::Error(kind),
+                });
+            }
+        }
+    }
 }
 
 /// RAII live-count for group reader threads: increments on
@@ -4868,6 +4958,26 @@ mod tests {
         let _ = drain_until(&mut sup, plain_id, Duration::from_secs(5), has_exited);
     }
 
+    /// A group of one process that ignores `SIGTERM`: an ignored disposition
+    /// survives `exec`, so the group's `SIGKILL` is the leader's own. With a
+    /// shell left waiting on a child, as macOS's kept its `sleep` where this
+    /// machine's tail-execs it, the child can die first and the shell report
+    /// it and exit 137 (#427), and the leader's event is then an exit.
+    const TERM_IGNORING_LEADER: &str = "trap '' TERM; echo ready; exec sleep 30";
+
+    /// Until the shell has said `ready`, past its `trap`: a row that went on
+    /// without it would terminate a shell that had not yet ignored `SIGTERM`.
+    /// The bound reports; it does not pace.
+    fn wait_for_term_ignoring_leader(sup: &mut ProcessSupervisor, id: ProcessId) {
+        let events = drain_until(sup, id, Duration::from_secs(30), |evs| {
+            stdout_contains(evs, b"ready")
+        });
+        assert!(
+            stdout_contains(&events, b"ready"),
+            "the group's leader said `ready` before it was terminated; events: {events:?}"
+        );
+    }
+
     #[test]
     fn terminate_group_escalates_to_sigkill_on_term_trapping_child() {
         let mut sup = ProcessSupervisor::new();
@@ -4875,14 +4985,9 @@ mod tests {
         // Readiness echo: terminating before the trap is installed
         // would let plain SIGTERM win and vacuously pass.
         let id = sup
-            .spawn(sh_group_spec(
-                "trap-test",
-                "trap '' TERM; echo ready; sleep 30",
-            ))
+            .spawn(sh_group_spec("trap-test", TERM_IGNORING_LEADER))
             .expect("spawn");
-        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
-            stdout_contains(evs, b"ready")
-        });
+        wait_for_term_ignoring_leader(&mut sup, id);
         let t0 = Instant::now();
         sup.terminate(id).expect("terminate");
         let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
@@ -4945,14 +5050,9 @@ mod tests {
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_millis(500));
         let id = sup
-            .spawn(sh_group_spec(
-                "re-term",
-                "trap '' TERM; echo ready; sleep 30",
-            ))
+            .spawn(sh_group_spec("re-term", TERM_IGNORING_LEADER))
             .expect("spawn");
-        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
-            stdout_contains(evs, b"ready")
-        });
+        wait_for_term_ignoring_leader(&mut sup, id);
         let t0 = Instant::now();
         sup.terminate(id).expect("terminate");
         // Re-terminate at half the grace window: with plain
@@ -5502,16 +5602,37 @@ mod tests {
 
         // A PTY with the parser stage: a blocking reader on the master
         // and a polling parser. The shell holds the slave, so the reader
-        // stays in `read`.
+        // stays in `read`, if it has got there and nothing wakes it. Two
+        // ways out end it before the count (#373), each shown with this
+        // assertion's message and `left: 0` under a release paused 5 ms: its
+        // `cancel` check finding the flag set before it first reached `read`,
+        // and `read` itself returning the echo of what the release's own
+        // drop of the writer sends (portable-pty writes a newline and EOF to
+        // the master), the next check then ending it. So the child turns
+        // echo off and says so, and the row waits for the reader to have
+        // read that byte and entered `read` again, past its `cancel` check.
         let mut spec = ProcessSpec::new("pty-parser", "/bin/sh", "test process");
-        spec.args = vec!["-c".into(), "exec sleep 30".into()];
+        spec.args = vec!["-c".into(), "stty -echo; printf R; exec sleep 30".into()];
         spec.mode = ProcessMode::Pty {
             rows: 24,
             cols: 80,
             mode: TerminalMode::Canonical,
         };
         spec.ansi_events = true;
+        let trace = Arc::new(reader_trace::Trace::default());
+        reader_trace::trace_next_reader(&trace);
         let pty = sup.spawn(spec).expect("spawn ansi pty");
+        let started = Instant::now();
+        while trace.entered.load(Ordering::SeqCst) < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "precondition: the master's reader read the child's byte and entered `read` \
+                 again: entered {}, its way out {:?}",
+                trace.entered.load(Ordering::SeqCst),
+                trace.way_out.lock().expect("reader trace poisoned"),
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let rt = sup
             .processes
             .get_mut(&pty)
@@ -5522,10 +5643,14 @@ mod tests {
             2,
             "precondition: the master's reader and the parser"
         );
+        let left = rt.release_readers(Instant::now());
         assert_eq!(
-            rt.release_readers(Instant::now()),
+            left,
             1,
-            "only the blocking reader on the master is left; the parser is joined"
+            "only the blocking reader on the master is left; the parser is joined: \
+             entered {}, its way out {:?}",
+            trace.entered.load(Ordering::SeqCst),
+            trace.way_out.lock().expect("reader trace poisoned"),
         );
         // `sup` drops here, and its shutdown ends both children.
     }

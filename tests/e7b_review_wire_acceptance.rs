@@ -1125,8 +1125,10 @@ fn measure_typing_on_editor_rs_with_the_server_warm() {
 /// references found at position" --- a client-caused code, the server
 /// answering rather than failing --- and the modeline stays
 /// `LSP:ready`; `*errors*` gains one line naming the method and the
-/// code, `*lsp*` logs the response, and `last_error` stays `nil` so no
-/// sticky window is armed. At review 1 the same command read
+/// code, and `last_error` stays `nil` so no sticky window is armed.
+/// `*lsp*` logs the response too, read here only as the answer arrives
+/// and asserted nowhere, since its ring can evict it (#282).
+/// At review 1 the same command read
 /// `LSP:degraded` for fifteen seconds; bitten by `scripts/bite HEAD^
 /// src/lsp_status.rs` (the label degrades) and `scripts/bite HEAD^
 /// builtin/runtime/lsp.lua` (`*errors*` gains nothing).
@@ -1155,6 +1157,7 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
     let mut status = String::new();
     for attempt in 1..=6 {
         exec(&s, "pmacs.command.invoke('lsp.rename')");
+        lsp_errors_at_the_refusal(&mut s, &cap, 3);
         let wire = watch_wire(&mut s, &cap, 3);
         eprintln!("WIRE before the rename: {before:?}");
         for line in &wire {
@@ -1171,23 +1174,29 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-    let (label, error, messages): (String, Option<String>, Vec<String>) = eval(
+    // The watch ends at a fixed time, so whatever the server began just
+    // before it can stand on the label at this read: `Cargo.lock` appearing
+    // starts a `Fetching` cycle (#474). Those states are E7b.1's and the
+    // refusal did not cause them, so they pass; any other label, `degraded`
+    // above all, stops the wait and fails below.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while lsp_segment(&s).is_some_and(|l| l == "LSP:idx" || l.starts_with("LSP:ready·"))
+        && Instant::now() < deadline
+    {
+        tick(&mut s);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (label, error): (String, Option<String>) = eval(
         &s,
         "local rec = pmacs.lsp.active_attachment()
          local st = pmacs.lsp.status_summary(rec.server)
          local err = st.last_error and (tostring(st.last_error.source) .. ': ' .. tostring(st.last_error.message)
            .. ' (code ' .. tostring(st.last_error.code) .. ')')
-         local out = {}
-         for _, m in ipairs(pmacs.lsp.recent_messages(rec.server)) do
-           if m.channel == 'error' then
-             out[#out + 1] = m.summary .. (m.detail and (' -- ' .. m.detail) or '')
-           end
-         end
-         return pmacs.lsp.modeline_label(rec.server), err, out",
+         return pmacs.lsp.modeline_label(rec.server), err",
     );
     let errors_after = s.lua_host.errors_buffer_text();
     let new_errors: Vec<&str> = errors_after[errors_before.len()..].lines().collect();
-    eprintln!("WIRE label {label:?}, last_error {error:?}, *lsp* errors {messages:?}");
+    eprintln!("WIRE label {label:?}, last_error {error:?}");
     eprintln!("WIRE *errors* gained {new_errors:?}");
     assert_eq!(
         before.as_deref(),
@@ -1196,8 +1205,13 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
     );
     // The positive control: the server did answer the request with
     // the client-caused code (read from the whole capture, since the
-    // exchange can complete before the watch takes its baseline), and
-    // `*lsp*` holds that answer.
+    // exchange can complete before the watch takes its baseline). The
+    // refusal is asserted on the ruling's own surfaces below, `*errors*`,
+    // the label and no sticky error; `*lsp*` is not one (#282, ruled
+    // 2026-11-02): it is a ring that every `$/progress` report with a
+    // message pushes into, so a cache-priming cycle after the answer
+    // evicts its line, and a bounded log's eviction takes nothing from
+    // those outcomes.
     let answered = frames(&cap.from_server)
         .iter()
         .any(|f| f["error"]["code"].as_i64() == Some(-32602));
@@ -1211,13 +1225,6 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
         "the declined rename leaves the server ready on the modeline"
     );
     assert_eq!(label, "ready");
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("response error: textDocument/prepareRename")
-                && m.contains("-32602")),
-        "*lsp* names the request and the code: {messages:?}"
-    );
     assert!(
         error.is_none(),
         "a client-caused code arms no sticky window: {error:?}"
@@ -1233,6 +1240,34 @@ fn a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors() {
         "and it names the method and the code: {:?}",
         new_errors[0]
     );
+}
+
+/// Tick until the capture holds an answer with an error, or `secs` pass,
+/// and print `*lsp*`'s error lines as they then stand. Best effort, and read
+/// by nobody's assertion: the line goes when the ring has taken 64 more
+/// messages, and a tick can bring more than that (#282).
+fn lsp_errors_at_the_refusal(s: &mut EditorState, cap: &Capture, secs: u64) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut answered = false;
+    while !answered && Instant::now() < deadline {
+        tick(s);
+        answered = frames(&cap.from_server)
+            .iter()
+            .any(|f| f["error"]["code"].is_i64());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let lines: Vec<String> = eval(
+        s,
+        "local rec = pmacs.lsp.active_attachment()
+         local out = {}
+         for _, m in ipairs(pmacs.lsp.recent_messages(rec.server)) do
+           if m.channel == 'error' then
+             out[#out + 1] = m.summary .. (m.detail and (' -- ' .. m.detail) or '')
+           end
+         end
+         return out",
+    );
+    eprintln!("WIRE an error answer on the wire: {answered}; *lsp* errors then: {lines:?}");
 }
 
 /// #279's cost, measured: the file-watch poll's tree walk over this
