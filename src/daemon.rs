@@ -2788,7 +2788,7 @@ fn handle_session_established(
     // answered in turn, so two answers reaching the dispatcher on separate
     // passes kept each other going until two reached it on one pass. That
     // grew rarer as the frontend took longer to apply a snapshot (E10t.1:
-    // never within 30 s at 10,000 + 20,000 lines in release, nor at any
+    // never within 16 s at 10,000 + 20,000 lines in release, nor at any
     // size in debug), and when it came the window stayed on whichever
     // answer came last. A semantic frontend shows one buffer, the last
     // snapshot it applied, and is sent any other when its window goes
