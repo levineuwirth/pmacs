@@ -16602,6 +16602,154 @@ Tally (pr-462-fuzz-4cd56a4-reopened): 2 = 2 + 0.
 
 So, at E10m's close: `main` is green at `0d8df86`, `c0dc1bc`, `94c43d6` and at the squash `a04aab2`, and PR #462 is green at its head `4cd56a4` on a merge holding E10m, every test leg with fish passing #254's row and every leg #494's; none rerun. E10m's nineteen issues closed with its merge, #254 at eighteen and #363 at six by CI among them; no count above changes.
 
+### E10r's close: PR #462 merged as `a7516f5`, `main` green there
+
+Recorded 2026-11-10 at E10r's merge (roadmap §E10r). Every run was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below was searched for in this file before it was written, and none was in it but `CI` 42604257347, PR #462's on the merge `df63473`, recorded under E10m's close and named below for comparison. `main`'s commits `6c26737` and `1cdaeaa` are E10x's and E10w's, and their runs are left to those phases' records; `bd33294`'s are recorded here, for the reason given under it.
+
+#### `main` at `7e4d823`, E10m's registry close: green
+
+`CI` 42684060251 at `7e4d823`, attempt 1 of 1, `push`, created 2026-11-09T19:30:53Z and completed 19:33:21Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-7e4d823): 15 = 6 + 9.
+
+Tally (main-ci-7e4d823-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 129386009878 | success |
+| Changed paths | 129386010281 | success |
+| Lint (luajit) | 129386010296 | success |
+| Commit attribution (D9) | 129386010515 | success |
+| Format | 129386010544 | success |
+| Docs consistency | 129386122486 | success |
+| M10 Perf Gates (crdt) | 129386124597 | skipped |
+| Test (crdt) | 129386125095 | skipped |
+| M1 Acceptance Gates | 129386125294 | skipped |
+| Test (matrix) | 129386125546 | skipped |
+| M4 Perf Gates | 129386125646 | skipped |
+| GPU Render (headless) | 129386126031 | skipped |
+| Perf budgets (debug) | 129386126104 | skipped |
+| M6 Perf Gates | 129386126425 | skipped |
+| M5 Perf Gates | 129386126558 | skipped |
+
+Tally (main-ci-7e4d823-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-7e4d823-skipped): 9 rows of the table above with `result` = `skipped`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test (matrix)`.
+
+`Grammar fuzz` 42684060916 at `7e4d823`, attempt 1 of 1, `success`: `Grammar fuzz` 129386015689 and `Grammar fuzz (asan-strict)` 129386016134, each `success`.
+
+Tally (main-fuzz-7e4d823): 2 = 2 + 0.
+
+#### `main` at `bd33294`, PR #499's squash: green
+
+E10m's close left these runs to E10x's record. E10r's squash message names `CI` 42604498354 and says that every run it names is recorded in this file through `7e4d823`; no commit through `a7516f5` recorded that one. It is recorded here, so the sentence holds from this commit and did not at the merge.
+
+`CI` 42604498354 at `bd33294`, attempt 1 of 1, `push`, created 2026-11-09T10:53:01Z and completed 11:29:10Z: `success`.
+
+Tally (main-ci-bd33294): 19 = 18 + 1.
+
+Tally (main-ci-bd33294-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 129116872351 | success |
+| Lint (luajit) | 129116872671 | success |
+| Lint (lua54) | 129116872702 | success |
+| Format | 129116872716 | success |
+| Commit attribution (D9) | 129116872825 | success |
+| M6 Perf Gates | 129116951793 | success |
+| GPU Render (headless) | 129116951796 | success |
+| M4 Perf Gates | 129116951821 | success |
+| Test (crdt) | 129116951884 | success |
+| Test (ubuntu-latest / lua54) | 129116951928 | success |
+| M10 Perf Gates (crdt) | 129116951965 | success |
+| M1 Acceptance Gates | 129116952021 | success |
+| Test (ubuntu-latest / luajit) | 129116952031 | success |
+| M5 Perf Gates | 129116952049 | success |
+| Test (macos-latest / lua54) | 129116952088 | success |
+| Perf budgets (debug) | 129116952094 | success |
+| Test (macos-latest / luajit) | 129116952099 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 129116952146 | success |
+| Docs consistency | 129116953882 | skipped |
+
+Tally (main-ci-bd33294-success): 18 rows of the table above with `result` = `success`.
+
+Tally (main-ci-bd33294-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, the push changing code.
+
+Tally (main-ci-bd33294-legs): 7 items in the list below.
+
+- `GPU Render (headless)` 129116951796: `success`, 1 pair, 394 / 0 / 0.
+- `Test (crdt)` 129116951884: `success`, 229 pairs, 5,462 / 0 / 88.
+- `Test (ubuntu-latest / lua54)` 129116951928: `success`, 230 pairs, 5,515 / 0 / 88, `m6_5_repl_spawns_fish` `ok` after `Setting up fish-common (3.7.0-1)`.
+- `Test (ubuntu-latest / luajit)` 129116952031: `success`, 230 pairs, 5,515 / 0 / 88, `m6_5_repl_spawns_fish` `ok` after `Setting up fish-common (3.7.0-1)`.
+- `Test (macos-latest / lua54)` 129116952088: `success`, 231 pairs, 5,460 / 0 / 80.
+- `Test (macos-latest / luajit)` 129116952099: `success`, 231 pairs, 5,460 / 0 / 80.
+- `Test (ubuntu-latest / luajit, no crdt)` 129116952146: `success`, 230 pairs, 4,880 / 0 / 72, `m6_5_repl_spawns_fish` `ok` after `Setting up fish-common (3.7.0-1)`.
+
+`Grammar fuzz` 42604498421 at `bd33294`, attempt 1 of 1, `success`: `Grammar fuzz` 129116872350 and `Grammar fuzz (asan-strict)` 129116873096, each `success`.
+
+Tally (main-fuzz-bd33294): 2 = 2 + 0.
+
+#### `main` at `a7516f5`, E10r's squash: green
+
+`a7516f5` is the owner's squash of PR #462's head `4cd56a4`, merged at 2026-11-10T18:24:54Z onto `7e4d823`, GitHub's signature valid, closing the six issues of its body, #390, #286, #458, #477, #485 and #494, each read back closed. Its tree is that of `4cd56a4` merged into `7e4d823`, read by `git merge-tree`. Its message says `main` had moved since the tested merge by registry commits and by `bd33294`: `6c26737`, `1cdaeaa` and `7e4d823` touch this file alone, and `bd33294` touches `src/bin/pmacs_grammar_fuzz.rs` and `tests/grammar_fuzz_changed_acceptance.rs`, neither of which PR #462 touches, so it holds. The tested merge, `df63473` into `a04aab2` (`CI` 42604257347), is on `a04aab2`, which does not hold `bd33294`, so the run below is the first to test E10r beside that change.
+
+`CI` 42874954765 at `a7516f5`, attempt 1 of 1, `push`, created 2026-11-10T18:24:57Z and completed 19:09:33Z: `success`.
+
+Tally (main-ci-a7516f5): 19 = 18 + 1.
+
+Tally (main-ci-a7516f5-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 130035672239 | success |
+| Lint (luajit) | 130035672654 | success |
+| Format | 130035672740 | success |
+| Commit attribution (D9) | 130035672838 | success |
+| Lint (lua54) | 130035673086 | success |
+| Test (crdt) | 130035788410 | success |
+| M1 Acceptance Gates | 130035788469 | success |
+| M10 Perf Gates (crdt) | 130035788629 | success |
+| M5 Perf Gates | 130035788665 | success |
+| M4 Perf Gates | 130035788731 | success |
+| Test (ubuntu-latest / lua54) | 130035788804 | success |
+| Test (ubuntu-latest / luajit) | 130035788848 | success |
+| Test (macos-latest / lua54) | 130035788852 | success |
+| Test (macos-latest / luajit) | 130035788890 | success |
+| M6 Perf Gates | 130035788970 | success |
+| Perf budgets (debug) | 130035788983 | success |
+| GPU Render (headless) | 130035789174 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 130035789241 | success |
+| Docs consistency | 130035791375 | skipped |
+
+Tally (main-ci-a7516f5-success): 18 rows of the table above with `result` = `success`.
+
+Tally (main-ci-a7516f5-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, the push changing code.
+
+Tally (main-ci-a7516f5-legs): 7 items in the list below.
+
+- `Test (crdt)` 130035788410: `success`, 231 pairs, 5,620 / 0 / 88.
+- `Test (ubuntu-latest / lua54)` 130035788804: `success`, 232 pairs, 5,679 / 0 / 88, `m6_5_repl_spawns_fish` `ok` after `Setting up fish-common (3.7.0-1)`.
+- `Test (ubuntu-latest / luajit)` 130035788848: `success`, 232 pairs, 5,679 / 0 / 88, `m6_5_repl_spawns_fish` `ok` after `Setting up fish-common (3.7.0-1)`.
+- `Test (macos-latest / lua54)` 130035788852: `success`, 233 pairs, 5,620 / 0 / 80.
+- `Test (macos-latest / luajit)` 130035788890: `success`, 233 pairs, 5,620 / 0 / 80.
+- `GPU Render (headless)` 130035789174: `success`, 1 pair, 396 / 0 / 0.
+- `Test (ubuntu-latest / luajit, no crdt)` 130035789241: `success`, 232 pairs, 5,030 / 0 / 72, `m6_5_repl_spawns_fish` `ok` after `Setting up fish-common (3.7.0-1)`.
+
+On all six test legs `g3_a_far_side_that_never_speaks_is_killed_at_the_deadline_with_no_limit`, #494's row, `h2_past_the_cap_further_input_is_dropped_saying_so`, #489's, and `p19_the_local_route_onto_a_new_daemon_others_reached_first_reads_may_be`, #490's, each read `ok`.
+
+`Grammar fuzz` 42874955175 at `a7516f5`, attempt 1 of 1, `success`: `Grammar fuzz` 130035674561 and `Grammar fuzz (asan-strict)` 130035674101, each `success`.
+
+Tally (main-fuzz-a7516f5): 2 = 2 + 0.
+
+So, at E10r's close: `main` is green at `7e4d823`, `bd33294` and the squash `a7516f5`, every test leg with fish passing #254's row and all six test legs at the squash passing #494's, #489's and #490's; none rerun. E10r's six issues closed with its merge, #494 among them. #489 and #490, which the squash message names open until this merge, were closed on the owner's word at 18:26:57Z and 18:26:59Z, before the run above finished, on PR #462's `CI` 42604257347; the run above reads both rows `ok` again. No count above changes.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
