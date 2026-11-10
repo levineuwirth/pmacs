@@ -2781,7 +2781,22 @@ fn handle_session_established(
     // last snapshot landed, which is the wrong-buffer return E9 exists
     // to remove. A window restored from its kind's desktop (E10.2) is
     // bootstrapped the same way, for the same reason.
-    let mut resumed_buffer = if (resumed || restored.is_some()) && opened_target.is_none() {
+    //
+    // E10t (#326) --- and so is a fresh semantic window with no target.
+    // On the sweep its answers were in flight together: each moved the
+    // window, and the tick followed the window with a snapshot that was
+    // answered in turn, so two answers reaching the dispatcher on separate
+    // passes kept each other going until two reached it on one pass. That
+    // grew rarer as the frontend took longer to apply a snapshot (E10t.1:
+    // never within 30 s at 10,000 + 20,000 lines in release, nor at any
+    // size in debug), and when it came the window stayed on whichever
+    // answer came last. A semantic frontend shows one buffer, the last
+    // snapshot it applied, and is sent any other when its window goes
+    // there; the sweep stays a grid replica's, whose mirror holds every
+    // buffer.
+    let mut window_buffer = if opened_target.is_none()
+        && (resumed || restored.is_some() || (semantic_render && crdt_replica))
+    {
         editor.core.borrow().primary_document_buffer(frontend_id)
     } else {
         None
@@ -2840,7 +2855,7 @@ fn handle_session_established(
                 .unregister_frontend_view(frontend_id);
             return;
         }
-    } else if let Some(buffer_id) = resumed_buffer {
+    } else if let Some(buffer_id) = window_buffer {
         match initial_target_snapshot(editor, buffer_id) {
             Ok(snapshot) => {
                 let message = InstanceMessage::BufferSnapshot {
@@ -2867,7 +2882,7 @@ fn handle_session_established(
                     };
                     let back_to = fallback_among_delivered(editor, buffer_id, &left_out);
                     refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
-                    resumed_buffer = None;
+                    window_buffer = None;
                 } else {
                     if snapshot.upgraded_to_crdt {
                         publish_buffer_snapshot_to_replicas(
@@ -2898,7 +2913,9 @@ fn handle_session_established(
             }
         }
     } else if crdt_replica {
-        // Legacy no-target attach remains an all-buffer replica bootstrap.
+        // A grid replica's no-target attach is the all-buffer bootstrap:
+        // its mirror holds every buffer (a semantic one takes the branch
+        // above, E10t).
         let Ok(left_out) = send_buffer_snapshots(editor, &mut write_stream) else {
             let _ = write_stream.shutdown(Shutdown::Both);
             editor
@@ -2959,7 +2976,7 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
-    if let Some(buffer_id) = resumed_buffer
+    if let Some(buffer_id) = window_buffer
         && let Some(session) = session_registry.session_mut(frontend_id)
     {
         session.last_active_buffer_sent = Some(buffer_id);

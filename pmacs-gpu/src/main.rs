@@ -1922,7 +1922,9 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// `band:<prefix>` waits up to five seconds for the status band to begin
 /// with `prefix` (a switch's or a kill's message lands a frame or more
 /// after its key, later under load); `report:<label>` writes the popup's
-/// facts under `label`; `frame:<label>` writes the composited frame,
+/// facts under `label`; `count:<label>` writes the snapshots applied so far,
+/// the buffer shown, the band's name for it and the time since attach
+/// (E10t); `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
 /// times out is reported as `step.<i>=timeout` and the script goes on.
@@ -2054,6 +2056,27 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
             "report" => {
                 if let Some(state) = app.state.as_mut() {
                     popup_probe_facts(state, arg, &mut out);
+                }
+                Ok(true)
+            }
+            "count" => {
+                // E10t: what the window shows and how many snapshots it
+                // has applied, so two counts a stated time apart say
+                // whether it settled. The name is the status band's,
+                // the daemon's word for the window's buffer.
+                if let Some(state) = app.state.as_ref() {
+                    let _ = writeln!(out, "{arg}.snapshots={}", state.snapshots_applied);
+                    let _ = writeln!(
+                        out,
+                        "{arg}.buffer={}",
+                        state.current_buffer_id.map_or(0, BufferId::raw)
+                    );
+                    let _ = writeln!(
+                        out,
+                        "{arg}.name={}",
+                        state.status_facts.as_ref().map_or("", |f| f.name.as_str())
+                    );
+                    let _ = writeln!(out, "{arg}.at_ms={}", started.elapsed().as_millis());
                 }
                 Ok(true)
             }
@@ -5114,6 +5137,10 @@ struct State {
     /// `BufferSnapshot` arrives; used as the routing key for
     /// `StyleSpans` updates (drop those for other buffers).
     current_buffer_id: Option<BufferId>,
+    /// `BufferSnapshot`s applied since the session began (E10t): the
+    /// popup probe's `count:` step reports it, so a row can tell a window
+    /// that settled from one still being sent its buffers.
+    snapshots_applied: u64,
     /// Sorted-by-`range.start` styling spans for `current_buffer_id`.
     /// Replaced wholesale on `StyleSpans { full: true, .. }`; merged
     /// per the M11.4 dirty-segment rule on `full: false` (segments'
@@ -12180,6 +12207,7 @@ impl State {
             loro_text_delta_batches: None,
             loro_text_subscription: None,
             current_buffer_id: None,
+            snapshots_applied: 0,
             current_spans: Vec::new(),
             current_decorations: Vec::new(),
             current_adornments: Vec::new(),
@@ -12909,6 +12937,7 @@ impl State {
                 self.loro_text_delta_batches = Some(text_delta_batches);
                 self.loro_text_subscription = Some(text_subscription);
                 self.current_buffer_id = Some(buffer_id);
+                self.snapshots_applied += 1;
                 // New buffer ⇒ drop any prior styling/decorations;
                 // the next StyleSpans / Decorations frame for this
                 // buffer is authoritative.

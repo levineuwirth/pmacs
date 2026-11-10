@@ -14,6 +14,12 @@
 //! (the window already showed `b.rs`) predicts a failure wherever `b.rs`
 //! selects `b.rs`. At the head `b.rs` always does (E8b.1), so a pass
 //! here could only be a `BufferSnapshot` the switch did not send.
+//!
+//! Since E10t (#326) a fresh semantic window is bootstrapped on the buffer
+//! its window shows, so the harness's first snapshot is `a.rs`'s, which the
+//! init left shown: #324's mechanism no longer arises from the bootstrap,
+//! and the replayed row switches and sees `b.rs`'s snapshot, as review 1's
+//! row meant it to.
 #![cfg(feature = "crdt")]
 
 mod common;
@@ -309,22 +315,18 @@ fn replay_once() -> Replay {
     }
 }
 
-/// PASSES at `0001946` if #324 is the whole of review 1's red: in each
-/// of six replays the window already shows `b.rs` (the first snapshot,
-/// declared), `C-x b b.rs RET` selects it, the band says `already
-/// showing`, and no `BufferSnapshot` reaches `seen`, so review 1's
-/// `snapshot_in(&seen)` fails every time. A replay that sees one is
-/// printed with the buffer and its time after `C-x b`: a snapshot the
-/// switch did not send would let that row pass with nothing switched,
-/// which is the one shape that could explain its two passes on
-/// `Test (ubuntu-latest / lua54)`.
+/// Passed from `0001946` until E10t if #324 was the whole of review 1's
+/// red: in each of six replays the window already showed `b.rs` (the first
+/// snapshot, declared), `C-x b b.rs RET` selected it, the band said
+/// `already showing`, and no `BufferSnapshot` reached `seen`, so review 1's
+/// `snapshot_in(&seen)` failed every time. Since E10t the first snapshot
+/// is the window's own, `a.rs`, so in every replay the switch is a real
+/// one: the band says `showing b.rs`, never `already showing`, and the
+/// switch's snapshot reaches `seen`, which is review 1's row passing for
+/// the reason it was written. Each replay is printed with what it saw.
 #[test]
-fn review1_s_switching_row_replayed_at_the_head_never_sees_a_snapshot() {
+fn review1_s_switching_row_replayed_since_e10t_switches_and_sees_the_snapshot() {
     let replays: Vec<Replay> = (0..6).map(|_| replay_once()).collect();
-    let passing: Vec<&Replay> = replays
-        .iter()
-        .filter(|r| !r.snapshots_in_seen.is_empty())
-        .collect();
     for r in &replays {
         eprintln!("REPLAY {r:?}");
     }
@@ -332,13 +334,13 @@ fn review1_s_switching_row_replayed_at_the_head_never_sees_a_snapshot() {
         replays.iter().all(|r| r
             .bands_in_seen
             .iter()
-            .any(|m| m.contains("already showing"))),
-        "each replay selected the buffer already shown: {replays:#?}"
+            .any(|m| m.contains("showing b.rs") && !m.contains("already showing"))),
+        "each replay switched from a.rs to b.rs: {replays:#?}"
     );
     assert!(
-        passing.is_empty(),
-        "review 1's row would have passed with nothing switched in {} of {}: {passing:#?}",
-        passing.len(),
-        replays.len()
+        replays.iter().all(|r| r.snapshots_in_seen.len() == 1
+            && r.cursor_buffers_in_seen.contains(&r.snapshots_in_seen[0].0)
+            && r.snapshots_in_seen[0].0 != r.first_declared),
+        "each replay saw the switch's one snapshot, of the buffer it switched to: {replays:#?}"
     );
 }
