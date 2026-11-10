@@ -54,9 +54,20 @@ fn read_initial_snapshot(
 /// One attached synthetic replica: stream + mirror + identity.
 struct Replica {
     stream: std::os::unix::net::UnixStream,
+    /// What a thread reads off the socket from the attach on, so a replica this
+    /// row is not looking at holds nothing up and is not dropped (#390, E10r).
+    rx: std::sync::mpsc::Receiver<pmacs::protocol::InstanceMessage>,
     state: CrdtState,
     fid: FrontendId,
     buffer_id: pmacs::buffer::BufferId,
+}
+
+/// The reader thread holds a clone of the socket, so dropping the stream
+/// alone would leave the daemon's session attached.
+impl Drop for Replica {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 fn attach_replica(daemon: &TestDaemon) -> Replica {
@@ -65,8 +76,11 @@ fn attach_replica(daemon: &TestDaemon) -> Replica {
     let (buffer_id, snap) = read_initial_snapshot(&mut stream);
     let state = CrdtState::new(fid.0).expect("CrdtState::new");
     state.import_snapshot(&snap).expect("import_snapshot");
+    stream.set_read_timeout(None).expect("blocking reads");
+    let rx = common::wire::read_into_queue(&stream);
     Replica {
         stream,
+        rx,
         state,
         fid,
         buffer_id,
@@ -159,13 +173,10 @@ fn pump_until<P: Fn(&Observed) -> bool>(
             obs.imported
         );
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        replica
-            .stream
-            .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
-            .ok();
-        match pmacs::transport::read_message::<pmacs::protocol::InstanceMessage>(
-            &mut replica.stream,
-        ) {
+        match replica
+            .rx
+            .recv_timeout(remaining.min(Duration::from_millis(100)))
+        {
             Ok(pmacs::protocol::InstanceMessage::CrdtOp { buffer_id: b, op })
                 if b == replica.buffer_id =>
             {
@@ -191,12 +202,8 @@ fn pump_until<P: Fn(&Observed) -> bool>(
 fn assert_text_stays(replica: &mut Replica, expected: &str, window: Duration) {
     let deadline = std::time::Instant::now() + window;
     while std::time::Instant::now() < deadline {
-        replica
-            .stream
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .ok();
         if let Ok(pmacs::protocol::InstanceMessage::CrdtOp { buffer_id: b, op }) =
-            pmacs::transport::read_message::<pmacs::protocol::InstanceMessage>(&mut replica.stream)
+            replica.rx.recv_timeout(Duration::from_millis(50))
             && b == replica.buffer_id
         {
             let _ = replica.state.import_updates(&op.bytes);

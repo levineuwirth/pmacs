@@ -17,7 +17,6 @@
 //! redraw.
 
 use std::collections::VecDeque;
-use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
@@ -163,16 +162,7 @@ pub enum ManagedAttachError {
     },
 }
 
-/// Where a daemon this frontend spawns writes its stderr (E2.4): beside
-/// the socket, so it lives in the runtime directory the socket already
-/// proved writable and dies with it. Before this the stream went to
-/// `/dev/null`, and a daemon-side attach failure was undiagnosable from
-/// `pmacs --gpu`.
-pub fn daemon_stderr_path(socket_path: &Path) -> PathBuf {
-    let mut name = socket_path.as_os_str().to_os_string();
-    name.push(".stderr");
-    PathBuf::from(name)
-}
+pub use pmacs_protocol::socket_file::{daemon_stderr_path, open_daemon_stderr};
 
 impl std::fmt::Display for ManagedAttachError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -846,9 +836,9 @@ pub fn connect_managed_with_target_and_sink(
 fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Child> {
     let mut command = Command::new(daemon_executable);
     // E2.4 — stderr goes to a file the failure message names. A file
-    // that cannot be created falls back to the null device rather than
-    // refusing the spawn: the daemon matters more than its log.
-    let stderr = match fs::File::create(daemon_stderr_path(socket_path)) {
+    // that cannot be opened, a link there included, falls back to the null
+    // device rather than refusing the spawn: the daemon matters more than its log.
+    let stderr = match open_daemon_stderr(socket_path, "a window") {
         Ok(file) => Stdio::from(file),
         Err(_) => Stdio::null(),
     };
@@ -2110,7 +2100,11 @@ mod tests {
     /// and a startup failure's message names the file, so what the
     /// daemon printed before dying can be read. The "daemon" here is a
     /// shell that prints one line and exits, which is exactly the shape
-    /// a real daemon refusing its socket has.
+    /// a real daemon refusing its socket has. It is a script this row
+    /// has just written, so its spawn is [`spawn_written_daemon`]'s,
+    /// which tries again while another test's fork holds it busy (#250,
+    /// E10r's review 3): each try writes a start line, so the row reads
+    /// the last one and what follows it.
     #[test]
     fn a_spawned_daemons_stderr_is_captured_beside_the_socket() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2130,7 +2124,7 @@ mod tests {
             &socket,
             &executable,
             |path| UnixStream::connect(path),
-            spawn_daemon,
+            |executable, socket| Ok(spawn_written_daemon(executable, socket)),
             Duration::from_millis(300),
             Duration::from_millis(20),
             None,
@@ -2145,10 +2139,82 @@ mod tests {
             "the failure names the stderr file: {message}"
         );
         let captured = std::fs::read_to_string(&log).expect("the stderr file exists");
-        assert_eq!(captured, "fake daemon: refusing to start\n");
+        let lines: Vec<&str> = captured.lines().collect();
+        let last_start = lines
+            .iter()
+            .rposition(|line| line.contains("a daemon started by a window"))
+            .unwrap_or_else(|| panic!("no start line: {captured}"));
+        assert_eq!(
+            &lines[last_start + 1..],
+            ["fake daemon: refusing to start"],
+            "{captured}"
+        );
         assert!(
             matches!(error, ManagedAttachError::StartupTimeout { .. }),
             "{error:?}"
+        );
+    }
+
+    /// [`spawn_daemon`] of a script this row has just written. Another test's fork in this
+    /// process can hold the script's write descriptor open until its child execs, and the
+    /// spawn then reads `ETXTBSY` (a local gate, `20261108T000503Z-1210505`), so it is tried
+    /// again while that lasts.
+    fn spawn_written_daemon(executable: &Path, socket: &Path) -> Child {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match spawn_daemon(executable, socket) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                spawned => return spawned.expect("spawn"),
+            }
+        }
+    }
+
+    /// E10r's H1: the window's route opens that file as the bridge's does: at 0600, and
+    /// a link planted there is not followed, its target keeping its bytes, the daemon
+    /// starting all the same with its words going nowhere.
+    #[test]
+    fn a_spawned_daemons_stderr_is_private_and_follows_no_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executable = dir.path().join("fake-daemon");
+        let ran = dir.path().join("ran");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho words >&2\n: > '{}'\n",
+                ran.as_path().display()
+            ),
+        )
+        .expect("write fake daemon");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let socket = dir.path().join("plain.sock");
+        let mut child = spawn_written_daemon(&executable, &socket);
+        child.wait().expect("wait");
+        let log = daemon_stderr_path(&socket);
+        let captured = std::fs::read_to_string(&log).expect("the file");
+        assert!(captured.ends_with("---\nwords\n"), "{captured}");
+        let mode = std::fs::metadata(&log).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        std::fs::remove_file(&ran).expect("reset");
+        let socket = dir.path().join("linked.sock");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "the victim's own\n").expect("the victim");
+        std::os::unix::fs::symlink(&victim, daemon_stderr_path(&socket)).expect("the link");
+        let mut child = spawn_written_daemon(&executable, &socket);
+        child.wait().expect("wait");
+        assert!(ran.exists(), "the daemon started all the same");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("the victim"),
+            "the victim's own\n",
+            "the window's route wrote through a link"
         );
     }
 }

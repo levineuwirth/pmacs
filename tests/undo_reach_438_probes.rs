@@ -50,13 +50,14 @@
 //!
 //! That needs a replica that holds nothing up while it holds an edit.
 //! The daemon writes to every session synchronously from its one
-//! dispatcher thread, with no write timeout (#390), and an idle daemon
-//! writes a grid session frames every tick, so a socket nobody reads
-//! fills inside a second: a row's thread paused for about that long
-//! stalled the daemon on a replica it was not reading, and the observer
-//! never saw the foreign edit (E10o review 2, between 500 and 750 ms in
-//! debug on the laptop). So a thread reads each replica's socket into a
-//! queue from the attach on, and the replica imports only when pumped.
+//! dispatcher thread, and an idle daemon writes a grid session frames
+//! every tick, so a socket nobody reads fills inside a second: a row's
+//! thread paused for about that long held the daemon on a replica it was
+//! not reading, and the observer never saw the foreign edit (E10o review
+//! 2, between 500 and 750 ms in debug on the laptop, when that write had
+//! no bound; since E10r it holds up to `FRAME_WRITE_BOUND` and drops the
+//! replica). So a thread reads each replica's socket into a queue from
+//! the attach on, and the replica imports only when pumped.
 //!
 //! Helpers are the acceptance suite's, copied so the probe stands
 //! alone, plus an optimistic delete and a raw update send.
@@ -1164,10 +1165,10 @@ const A_PAUSE_PAST_THE_SEND_BUFFERS: Duration = Duration::from_millis(1_500);
 /// the forced rows. Each replica's socket is read on a thread, so the
 /// pause holds up nothing, the observer sees `Z`, and the rest is #448's
 /// typed `g`: its undo and redo at its place. With a replica read only
-/// while pumped, as the suite had at `f013954`, the daemon stalls writing
-/// to one nobody reads, and this row fails on the observer's five seconds:
+/// while pumped, as the suite had at `f013954`, the daemon stalled writing
+/// to one nobody read, and this row failed on the observer's five seconds:
 /// `pump timeout waiting for the observer: the daemon applied the foreign
-/// edit`, at `abcdef`.
+/// edit`, at `abcdef`. (Since E10r such a write holds for at most its bound.)
 #[test]
 fn a_crossing_paused_before_the_observers_wait_still_crosses() {
     let daemon = TestDaemon::spawn();

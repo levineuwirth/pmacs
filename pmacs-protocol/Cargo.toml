@@ -52,3 +52,6 @@ thiserror = { workspace = true }
 # direct width table; pinned through the workspace so this crate and
 # `pmacs`'s terminal screen measure glyphs identically.
 unicode-width = { workspace = true }
+# `O_NOFOLLOW` for the daemon's stderr file (`socket_file`), a value that differs by
+# platform and that `std` does not name.
+libc = "0.2"

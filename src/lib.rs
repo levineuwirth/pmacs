@@ -92,6 +92,7 @@ pub mod fold_view;
 pub mod font_pref;
 pub mod formatting;
 pub mod frontend;
+pub mod frontend_stream;
 pub mod fs;
 mod hash;
 pub mod help;

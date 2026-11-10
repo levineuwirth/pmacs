@@ -24,7 +24,9 @@
 //!   written only at a teardown;
 //! - [`DIRECT`]: every direct `write_message(` call in `src/daemon.rs`,
 //!   each to a stream no attached session owns yet: the handshake's and
-//!   the bootstrap's.
+//!   the bootstrap's. Since E10r each is `FrontendStream::write_message`,
+//!   bounded like the path's, and [`frontend_stream_hands_out_no_writer`]
+//!   holds that: the daemon has no other way to write to a frontend.
 //!
 //! One shape is read and nothing is parsed: a line holding the needle
 //! that is not a comment and not a `use`, before the file's
@@ -212,6 +214,82 @@ fn problems(presence: &str, daemon: &str) -> Vec<String> {
     all
 }
 
+/// E10r --- what is wrong with `stream`, the text of
+/// `src/frontend_stream.rs`, and `users`, the sources that write to
+/// frontends: anything that would let a write past the bound compile.
+fn unbounded_writers(stream: &str, users: &[(&str, &str)]) -> Vec<String> {
+    let mut all = Vec::new();
+    let code = stream.split("#[cfg(test)]").next().unwrap_or(stream);
+    if code.contains("impl Write for FrontendStream") {
+        all.push(
+            "`FrontendStream` implements `Write`, so `transport::write_message` takes it \
+             with no bound"
+                .to_owned(),
+        );
+    }
+    for line in code.lines().map(str::trim_start) {
+        if line.starts_with("pub stream") || line.starts_with("pub bound") {
+            all.push(format!(
+                "`FrontendStream` declares `{line}`, which hands the socket out"
+            ));
+        }
+        if line.contains("fn ")
+            && line
+                .split_once("->")
+                .is_some_and(|(_, returned)| returned.contains("UnixStream"))
+        {
+            all.push(format!("`{line}` hands the socket out"));
+        }
+    }
+    for (file, source) in users {
+        if source
+            .lines()
+            .take_while(|line| *line != "mod tests {")
+            .any(|line| line.starts_with("use ") && line.contains("write_message"))
+        {
+            all.push(format!(
+                "{file} imports the transport's `write_message`, which writes with no bound"
+            ));
+        }
+    }
+    all
+}
+
+#[test]
+fn frontend_stream_hands_out_no_writer() {
+    let stream = source("src/frontend_stream.rs");
+    let presence = source("src/presence.rs");
+    let daemon = source("src/daemon.rs");
+    let users = [("src/presence.rs", &*presence), ("src/daemon.rs", &*daemon)];
+    let found = unbounded_writers(&stream, &users);
+    assert!(found.is_empty(), "{}", found.join("\n"));
+
+    // Its own bite, on planted lines.
+    let write = format!("{stream}\nimpl Write for FrontendStream {{}}\n");
+    let write = write.replacen("#[cfg(test)]", "", 1);
+    let found = unbounded_writers(&write, &users);
+    assert!(
+        found.iter().any(|p| p.contains("implements `Write`")),
+        "{found:?}"
+    );
+    let accessor = stream.replacen(
+        "impl AsFd for FrontendStream {",
+        "pub fn raw(&self) -> &UnixStream { &self.stream }\nimpl AsFd for FrontendStream {",
+        1,
+    );
+    let found = unbounded_writers(&accessor, &users);
+    assert!(
+        found.iter().any(|p| p.contains("hands the socket out")),
+        "{found:?}"
+    );
+    let imported = format!("use crate::transport::{{read_message, write_message}};\n{daemon}");
+    let found = unbounded_writers(&stream, &[("src/daemon.rs", &imported)]);
+    assert!(
+        found.iter().any(|p| p.contains("imports the transport's")),
+        "{found:?}"
+    );
+}
+
 #[test]
 fn every_write_to_an_attached_session_goes_through_the_one_path() {
     let problems = problems(&source("src/presence.rs"), &source("src/daemon.rs"));
@@ -303,7 +381,7 @@ fn e10d_review1_a_session_stream_handed_to_an_allowed_writer_fails_the_guard() {
     let accessor = plant(
         &presence,
         "impl SessionRegistry {",
-        "    pub fn stream_mut(&mut self, frontend_id: FrontendId) -> Option<&mut UnixStream> {\n\
+        "    pub fn stream_mut(&mut self, frontend_id: FrontendId) -> Option<&mut FrontendStream> {\n\
          \x20       self.sessions\n\
          \x20           .get_mut(&frontend_id)\n\
          \x20           .and_then(|session| session.stream.as_mut())\n\
@@ -317,18 +395,18 @@ fn e10d_review1_a_session_stream_handed_to_an_allowed_writer_fails_the_guard() {
         "an accessor handing a session's stream out fails the guard: {found:?}"
     );
 
-    let field = "    stream: Option<UnixStream>,";
+    let field = "    stream: Option<FrontendStream>,";
     assert_eq!(
         presence.matches(field).count(),
         1,
         "the field {field:?} occurs once"
     );
-    let public = presence.replacen(field, "    pub stream: Option<UnixStream>,", 1);
+    let public = presence.replacen(field, "    pub stream: Option<FrontendStream>,", 1);
     let found = problems(&public, &daemon);
     assert!(
         found
             .iter()
-            .any(|p| p.contains("declares `pub stream: Option<UnixStream>,`")),
+            .any(|p| p.contains("declares `pub stream: Option<FrontendStream>,`")),
         "a public stream field fails the guard: {found:?}"
     );
 }

@@ -65,12 +65,18 @@ use crossterm::{
     },
 };
 
-use crate::cell::{CellSize, Color, DiffSpan, Glyph, Style};
+use crate::cell::{Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style};
 use crate::protocol::{InstanceMessage, InstanceSignal};
 
 // Re-export the input event types so callers don't depend on crossterm
 // directly. M2's keymap will translate these into normalized commands.
 pub use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+
+/// U+FE0F, VARIATION SELECTOR-16: after a symbol it asks for its emoji
+/// presentation, two columns wide where the symbol alone is one, which is
+/// not how a character at a time is counted. The bottom row's overlay does
+/// not paint it, nor does a far side's line in a reconnect's countdown.
+pub(crate) const EMOJI_PRESENTATION: char = '\u{FE0F}';
 
 // ---------------------------------------------------------------------------
 // Panic hook
@@ -145,6 +151,17 @@ pub struct Frontend {
     /// frame is already painted at most at this depth, and the
     /// reduction changes nothing.
     depth: crate::color_depth::ColorDepth,
+    /// E10r: what the frames have put on the bottom row, so that a notice standing
+    /// over it can come off and leave it as they left it. A frame only says what
+    /// changed, so nothing else would ever repaint it.
+    status_row: Vec<Cell>,
+    /// E10r: the row that was the bottom one before the last resize, and what the
+    /// frames had left on it then, for [`Self::put_back_the_old_bottom_row`].
+    old_bottom_row: Option<(u32, Vec<Cell>)>,
+    /// E10r: the terminal's modes while it is lent, read when [`Self::lend_terminal`]
+    /// left raw mode: what [`Self::take_terminal_back`] returns to first, whatever a
+    /// prompt that was killed left behind, so they are what an exit restores.
+    lent_modes: Option<nix::sys::termios::Termios>,
 }
 
 impl Frontend {
@@ -167,6 +184,9 @@ impl Frontend {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::detect_env(),
+            status_row: vec![Cell::default(); size.cols as usize],
+            old_bottom_row: None,
+            lent_modes: None,
         };
         // Best-effort sequence of init steps. Each step that succeeds
         // is recorded so teardown can skip steps that never ran.
@@ -331,6 +351,7 @@ impl Frontend {
     pub fn apply_message(&mut self, msg: &InstanceMessage) -> io::Result<()> {
         match msg {
             InstanceMessage::CellDelta { spans, full_grid } => {
+                keep_status_row(&mut self.status_row, self.size, spans, *full_grid);
                 write_frame(&mut self.out, spans, *full_grid, self.depth)?;
             }
             InstanceMessage::Cursor(state) => match state {
@@ -527,6 +548,157 @@ impl Frontend {
         self.out.flush()
     }
 
+    /// Present `msgs` with `text` standing on the bottom row over what they put there,
+    /// in one update so nothing shows between them, leaving the cursor and its
+    /// visibility where the frames left them, so that typing under it goes where it
+    /// would have.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    pub fn present_under_notice(&mut self, msgs: &[InstanceMessage], text: &str) -> io::Result<()> {
+        queue!(self.out, BeginSynchronizedUpdate)?;
+        for m in msgs {
+            self.apply_message(m)?;
+        }
+        queue!(self.out, cursor::SavePosition)?;
+        emit_status_overlay(&mut self.out, self.size, text)?;
+        queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// Take a notice off the bottom row and put back what the frames left there.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    pub fn clear_notice(&mut self) -> io::Result<()> {
+        queue!(self.out, BeginSynchronizedUpdate, cursor::SavePosition)?;
+        let row = DiffSpan {
+            start: CellCoord {
+                row: self.size.rows.saturating_sub(1),
+                col: 0,
+            },
+            cells: self.status_row.clone(),
+        };
+        write_frame(&mut self.out, std::slice::from_ref(&row), false, self.depth)?;
+        queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// After a resize, put back on the row that was the bottom one what the frames left
+    /// there, for an overlay that stood over it: a terminal keeps an alternate screen's
+    /// rows where they were as it grows, so a notice would stay on that row above the new
+    /// bottom one, and a daemon that does not answer paints nothing over it (E10r's review
+    /// 4, ruled 2026-11-08). Cut to the pane's width, as a terminal cuts it. A row that is
+    /// now the bottom one, or past it, is not written: a terminal that shrinks either cuts
+    /// the rows below or scrolls the screen up, which this cannot tell, and either way the
+    /// old row is gone or is the new bottom row, which the overlay is painted on again.
+    /// Rows a resize added were never painted by the daemon, and are blank, as the
+    /// terminal adds them, until it paints them.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    pub fn put_back_the_old_bottom_row(&mut self) -> io::Result<()> {
+        let Some((row, cells)) = self.old_bottom_row.take() else {
+            return Ok(());
+        };
+        if row + 1 >= self.size.rows {
+            return Ok(());
+        }
+        let span = DiffSpan {
+            start: CellCoord { row, col: 0 },
+            cells: cut_to_width(cells, self.size.cols as usize),
+        };
+        queue!(self.out, BeginSynchronizedUpdate, cursor::SavePosition)?;
+        write_frame(
+            &mut self.out,
+            std::slice::from_ref(&span),
+            false,
+            self.depth,
+        )?;
+        queue!(self.out, cursor::RestorePosition, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// Lend the terminal to whatever may ask it something, for a wait in which this
+    /// process reads no key: `ssh`'s passphrase prompt, on a reconnect.
+    ///
+    /// It is left as a shell would give it: raw mode off, so a prompt has its line
+    /// editing and `Enter`, and `C-c` is a signal and not a byte; mouse reporting and
+    /// bracketed paste off, or a moved mouse types into the prompt; the keyboard's
+    /// flags popped, or `C-c` arrives as an escape sequence and raises nothing. The
+    /// cursor shows on the row above the banner, where a prompt can be read. A
+    /// resync repaints all of it.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if a write or a mode change fails.
+    pub fn lend_terminal(&mut self) -> io::Result<()> {
+        if self.keyboard_enhancement {
+            queue!(self.out, PopKeyboardEnhancementFlags)?;
+        }
+        queue!(
+            self.out,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            MoveTo(0, self.size.rows.saturating_sub(2) as u16),
+            Clear(ClearType::CurrentLine),
+            cursor::Show,
+        )?;
+        self.out.flush()?;
+        disable_raw_mode()?;
+        self.lent_modes = nix::sys::termios::tcgetattr(io::stdin()).ok();
+        Ok(())
+    }
+
+    /// Take the terminal back after [`Self::lend_terminal`]. What was typed that nothing
+    /// read goes with the wait, so it does not land on the view a session comes back to.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if the terminal refuses a mode or a write to
+    /// it fails.
+    pub fn take_terminal_back(&mut self) -> io::Result<()> {
+        use nix::sys::termios::{FlushArg, SetArg, tcflush, tcsetattr};
+        if let Some(modes) = self.lent_modes.take() {
+            let _ = tcsetattr(io::stdin(), SetArg::TCSANOW, &modes);
+        }
+        let _ = tcflush(io::stdin(), FlushArg::TCIFLUSH);
+        self.retake_terminal()?;
+        queue!(self.out, cursor::Hide)?;
+        self.out.flush()
+    }
+
+    /// Take the terminal's modes back after something else had it.
+    ///
+    /// A client stopped under an interactive shell gives the shell the
+    /// terminal, and `fg` does not always hand it back as it found it: under
+    /// `bash` it comes back canonical, so no key reaches this process until a
+    /// newline, and the bracketed paste and mouse the shell's line editor may
+    /// have turned off stay off. So raw mode is left and entered again (entering
+    /// alone is a no-op while crossterm believes it is on), and the modes
+    /// [`Self::new`] set are set again. The alternate screen is not: no shell
+    /// leaves it, and entering it clears what is there.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if the terminal refuses a mode or a
+    /// write to it fails.
+    pub fn retake_terminal(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        enable_raw_mode()?;
+        self.raw_mode = true;
+        queue!(self.out, EnableBracketedPaste, EnableMouseCapture)?;
+        self.bracketed_paste = true;
+        self.mouse = true;
+        if self.keyboard_enhancement {
+            queue!(
+                self.out,
+                PopKeyboardEnhancementFlags,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            )?;
+        }
+        self.out.flush()
+    }
+
     /// Wait for the next input event, up to `timeout`.
     ///
     /// Returns `Ok(None)` on timeout, `Ok(Some(event))` on event,
@@ -555,6 +727,13 @@ impl Frontend {
     }
 
     fn handle_resize(&mut self, new_size: CellSize) {
+        // A resync follows a resize, and says what the new bottom row holds; what the old
+        // one held is kept for an overlay that stood over it to be taken off.
+        let old_row = std::mem::replace(
+            &mut self.status_row,
+            vec![Cell::default(); new_size.cols as usize],
+        );
+        self.old_bottom_row = Some((self.size.rows.saturating_sub(1), old_row));
         self.size = new_size;
         // Cell-buffer reallocation lives on
         // [`crate::instance_render::RenderState`] now (T M5.2). The
@@ -647,6 +826,33 @@ fn write_frame<W: Write>(
     }
 }
 
+/// `cells` cut to `cols`, a wide character the cut halves left blank, so that it cannot
+/// wrap onto the next row.
+fn cut_to_width(mut cells: Vec<Cell>, cols: usize) -> Vec<Cell> {
+    if cells.len() > cols {
+        let halved = matches!(cells[cols].glyph, Glyph::Continuation);
+        cells.truncate(cols);
+        if halved && let Some(last) = cells.last_mut() {
+            *last = Cell::default();
+        }
+    }
+    cells
+}
+
+/// Note what one frame puts on the bottom row in `row`, a terminal's width of cells.
+fn keep_status_row(row: &mut [Cell], size: CellSize, spans: &[DiffSpan], full_grid: bool) {
+    if full_grid {
+        row.fill(Cell::default());
+    }
+    let bottom = size.rows.saturating_sub(1);
+    for span in spans.iter().filter(|span| span.start.row == bottom) {
+        let from = span.start.col as usize;
+        for (slot, cell) in row.iter_mut().skip(from).zip(&span.cells) {
+            slot.clone_from(cell);
+        }
+    }
+}
+
 fn emit_cell_delta<W: Write>(w: &mut W, spans: &[DiffSpan], full_grid: bool) -> io::Result<()> {
     if full_grid {
         queue!(
@@ -708,11 +914,14 @@ fn emit_span<W: Write>(w: &mut W, span: &DiffSpan) -> io::Result<()> {
 /// flush). A zero-area terminal is a no-op so the function is safe
 /// to call before the first resize in unusual init paths.
 ///
-/// Truncation is by `char` count, which equals column count for
-/// the v0.1 banner texts (ASCII + em-dash). A terminal narrow
-/// enough to truncate the message is already showing the user
-/// "something is wrong"; precision wide-char width accounting
-/// would be ceremony with no user-visible improvement at v0.1.
+/// Truncation is by the columns each character takes, since a far side's
+/// words reach this row in a reconnect's countdown, and a character past
+/// the edge would wrap the bottom row and scroll the screen. U+FE0F
+/// ([`EMOJI_PRESENTATION`]) is not painted: after a symbol counted one
+/// column wide it asks for an emoji two wide, which tmux's default and most
+/// terminals draw, so with it the row ran a column past its end for each
+/// (E10r's review 3, ruled 2026-11-08). Without it the symbol is drawn as
+/// text, one column, as it is counted.
 fn emit_status_overlay<W: Write>(w: &mut W, size: CellSize, text: &str) -> io::Result<()> {
     let cols = size.cols as usize;
     if cols == 0 || size.rows == 0 {
@@ -728,16 +937,19 @@ fn emit_status_overlay<W: Write>(w: &mut W, size: CellSize, text: &str) -> io::R
     )?;
 
     let mut painted: usize = 0;
-    for c in text.chars() {
-        if painted >= cols {
-            break;
-        }
+    for c in text.chars().filter(|c| *c != EMOJI_PRESENTATION) {
         // Sanitize controls so a stray newline / CR / ESC in the
         // banner text cannot scroll the screen or inject SGR
         // sequences. Mirrors the defense in `emit_span`.
         let printable = if c.is_control() { ' ' } else { c };
+        // Counted by what it takes on the row, since a far side's words may hold a
+        // wide character, and one past the edge would wrap the bottom row and scroll.
+        let width = unicode_width::UnicodeWidthChar::width(printable).unwrap_or(0);
+        if painted + width > cols {
+            break;
+        }
         write!(w, "{printable}")?;
-        painted += 1;
+        painted += width;
     }
     for _ in painted..cols {
         write!(w, " ")?;
@@ -889,6 +1101,9 @@ mod tests {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: Vec::new(),
+            old_bottom_row: None,
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::ThemeFacts {
             faces: vec![pmacs_protocol::ThemeFace {
@@ -914,6 +1129,9 @@ mod tests {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: Vec::new(),
+            old_bottom_row: None,
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::FontFacts {
             family: Some("Iosevka".into()),
@@ -933,6 +1151,9 @@ mod tests {
             mouse: false,
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: Vec::new(),
+            old_bottom_row: None,
+            lent_modes: None,
         };
         fe.apply_message(&InstanceMessage::StatuslineSegments {
             buffer_id: crate::buffer::BufferId::from_raw(7),
@@ -1215,6 +1436,36 @@ mod tests {
         assert!(s.contains("a b c d"), "expected sanitized run in {s:?}");
     }
 
+    /// E10r's H8: a far side's words may hold wide characters, and the row is filled by what
+    /// each takes on it, so a banner never runs past the edge, which on the bottom row would
+    /// wrap and scroll the screen.
+    #[test]
+    fn status_overlay_counts_a_wide_character_as_what_it_takes() {
+        let size = CellSize::new(4, 5);
+        let mut out = Vec::new();
+        emit_status_overlay(&mut out, size, "字字字").unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert_eq!(
+            s.matches('字').count(),
+            2,
+            "two take the five columns but one: {s:?}"
+        );
+        assert_eq!(s.matches(' ').count(), 1, "and the last is padding: {s:?}");
+    }
+
+    /// E10r's review 3, Low 1: U+FE0F is not painted, since with it a symbol counted one
+    /// column is drawn two, and a row of them ran past the bottom row's end. Without it the
+    /// symbols fill the row as counted. At `e111983` each `⚠` is followed by U+FE0F.
+    #[test]
+    fn status_overlay_paints_no_emoji_presentation() {
+        let size = CellSize::new(4, 10);
+        let mut out = Vec::new();
+        emit_status_overlay(&mut out, size, &"⚠\u{FE0F}".repeat(20)).unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains(EMOJI_PRESENTATION), "{s:?}");
+        assert_eq!(s.matches('⚠').count(), 10, "ten columns, one each: {s:?}");
+    }
+
     #[test]
     fn status_overlay_zero_dimensions_is_noop() {
         let mut out = Vec::new();
@@ -1257,6 +1508,64 @@ mod tests {
         assert_eq!(s.matches(' ').count(), 8);
         // No reverse attribute.
         assert!(!s.contains("\x1b[7m"), "unexpected reverse attr in {s:?}");
+    }
+
+    /// What a frame puts on the bottom row is kept, cell by cell, and a resync blanks
+    /// what it does not name, so a notice's coming off restores what is true.
+    #[test]
+    fn the_bottom_row_is_kept_through_a_frame_and_a_resync() {
+        let size = CellSize::new(3, 4);
+        let cells = |text: &str| -> Vec<Cell> {
+            text.chars()
+                .map(|c| Cell {
+                    glyph: Glyph::Char(c),
+                    ..Cell::default()
+                })
+                .collect()
+        };
+        let at = |row, col, text: &str| DiffSpan {
+            start: CellCoord { row, col },
+            cells: cells(text),
+        };
+        let shown = |row: &[Cell]| -> String {
+            row.iter()
+                .map(|cell| match cell.glyph {
+                    Glyph::Char(c) => c,
+                    _ => '.',
+                })
+                .collect()
+        };
+        let mut row = vec![Cell::default(); 4];
+        keep_status_row(&mut row, size, &[at(2, 1, "ab"), at(1, 0, "zzzz")], false);
+        assert_eq!(shown(&row), " ab ");
+        keep_status_row(&mut row, size, &[at(2, 2, "cdefg")], false);
+        assert_eq!(shown(&row), " acd", "past the width is not kept");
+        keep_status_row(&mut row, size, &[at(2, 3, "x")], true);
+        assert_eq!(shown(&row), "   x");
+    }
+
+    /// The old bottom row put back after a resize is cut to the pane as a terminal cuts
+    /// it, and a wide character the cut halves goes blank rather than wrap.
+    #[test]
+    fn an_old_bottom_row_is_cut_to_the_pane_and_halves_no_character() {
+        let cell = |c| Cell {
+            glyph: Glyph::Char(c),
+            ..Cell::default()
+        };
+        let continuation = Cell {
+            glyph: Glyph::Continuation,
+            ..Cell::default()
+        };
+        let row = vec![cell('a'), cell('字'), continuation, cell('b')];
+        let glyphs = |cells: &[Cell]| -> Vec<Glyph> {
+            cells.iter().map(|cell| cell.glyph.clone()).collect()
+        };
+        assert_eq!(
+            glyphs(&cut_to_width(row.clone(), 2)),
+            vec![Glyph::Char('a'), Cell::default().glyph]
+        );
+        assert_eq!(glyphs(&cut_to_width(row.clone(), 3)), glyphs(&row[..3]));
+        assert_eq!(glyphs(&cut_to_width(row.clone(), 9)), glyphs(&row));
     }
 
     #[test]

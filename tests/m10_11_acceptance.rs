@@ -415,6 +415,11 @@ fn spawn_pmacs_attach_in_pty(socket_path: &Path, rows: u16, cols: u16) -> PmacsP
 /// the first message isn't a `BufferSnapshot` (the daemon always
 /// emits the snapshot before any other render message for a new
 /// replica session).
+/// What a thread reads off a replica's socket once its bootstrap is read, so a
+/// wait on one replica holds nothing up on the other and neither is dropped
+/// (#390, E10r).
+type Reads = std::sync::mpsc::Receiver<InstanceMessage>;
+
 fn read_initial_snapshot(stream: &mut std::os::unix::net::UnixStream) -> (BufferId, Vec<u8>) {
     match read_message::<InstanceMessage>(stream).expect("read initial BufferSnapshot") {
         InstanceMessage::BufferSnapshot {
@@ -484,7 +489,7 @@ fn send_undo(stream: &mut std::os::unix::net::UnixStream, frontend_id: FrontendI
 }
 
 fn pump_until(
-    stream: &mut std::os::unix::net::UnixStream,
+    reads: &Reads,
     replica: &CrdtState,
     buffer_id: BufferId,
     expected: &str,
@@ -497,8 +502,7 @@ fn pump_until(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let slice = remaining.min(Duration::from_millis(100));
-        stream.set_read_timeout(Some(slice)).ok();
-        match read_message::<InstanceMessage>(stream) {
+        match reads.recv_timeout(slice) {
             Ok(InstanceMessage::CrdtOp { buffer_id: b, op }) if b == buffer_id => {
                 let _ = replica.import_updates(&op.bytes);
             }
@@ -725,10 +729,11 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
     let daemon = TestDaemon::spawn();
 
     let (hello_a, mut stream_a) = attach_multi(&daemon);
-    let (hello_b, mut stream_b) = attach_multi(&daemon);
-
     let (buffer_id, snap_a) = read_initial_snapshot(&mut stream_a);
+    let reads_a = common::wire::queue_from_here(&stream_a);
+    let (hello_b, mut stream_b) = attach_multi(&daemon);
     let (_, snap_b) = read_initial_snapshot(&mut stream_b);
+    let reads_b = common::wire::queue_from_here(&stream_b);
 
     // Bootstrap local replicas. Per M10.10, each frontend
     // maintains its own CRDT replica; the synthetic test simulates
@@ -754,7 +759,7 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
     );
 
     pump_until(
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         "AAA",
@@ -775,7 +780,7 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
     );
 
     pump_until(
-        &mut stream_a,
+        &reads_a,
         &replica_a,
         buffer_id,
         "AAABBB",
@@ -790,7 +795,7 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
     // after, stays.
     send_undo(&mut stream_a, hello_a.assigned_frontend_id);
     pump_until(
-        &mut stream_a,
+        &reads_a,
         &replica_a,
         buffer_id,
         "BBB",
@@ -798,7 +803,7 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
     )
     .expect("A converges to BBB after its own undo");
     pump_until(
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         "BBB",
@@ -808,22 +813,10 @@ fn m10_11_synthesis_two_frontends_converge_through_edits_and_undo() {
 
     // ----- Step 4: B undoes its own "BBB" through the daemon -----
     send_undo(&mut stream_b, hello_b.assigned_frontend_id);
-    pump_until(
-        &mut stream_b,
-        &replica_b,
-        buffer_id,
-        "",
-        Duration::from_secs(5),
-    )
-    .expect("B converges to empty after its own undo");
-    pump_until(
-        &mut stream_a,
-        &replica_a,
-        buffer_id,
-        "",
-        Duration::from_secs(5),
-    )
-    .expect("A converges to empty after B's undo");
+    pump_until(&reads_b, &replica_b, buffer_id, "", Duration::from_secs(5))
+        .expect("B converges to empty after its own undo");
+    pump_until(&reads_a, &replica_a, buffer_id, "", Duration::from_secs(5))
+        .expect("A converges to empty after B's undo");
 }
 
 /// Run `mutate` on a local replica, capture the resulting op via
@@ -862,9 +855,9 @@ fn send_optimistic_op_from<F>(
 /// peer-id tiebreak, not the test's to predict. The load-bearing
 /// assertion is *agreement*, not a specific string.
 fn pump_both_until_equal(
-    stream_a: &mut std::os::unix::net::UnixStream,
+    reads_a: &Reads,
     replica_a: &CrdtState,
-    stream_b: &mut std::os::unix::net::UnixStream,
+    reads_b: &Reads,
     replica_b: &CrdtState,
     buffer_id: BufferId,
     timeout: Duration,
@@ -878,12 +871,9 @@ fn pump_both_until_equal(
         if sa == sb && !sa.is_empty() {
             return Ok(sa);
         }
-        for (stream, replica) in [(&mut *stream_a, replica_a), (&mut *stream_b, replica_b)] {
-            stream
-                .set_read_timeout(Some(Duration::from_millis(50)))
-                .ok();
+        for (reads, replica) in [(reads_a, replica_a), (reads_b, replica_b)] {
             if let Ok(InstanceMessage::CrdtOp { buffer_id: b, op }) =
-                read_message::<InstanceMessage>(stream)
+                reads.recv_timeout(Duration::from_millis(50))
                 && b == buffer_id
             {
                 let _ = replica.import_updates(&op.bytes);
@@ -925,7 +915,11 @@ fn pump_both_until_equal(
 fn m10_11_q13_cat1_concurrent_same_position_inserts_converge() {
     let daemon = TestDaemon::spawn();
     let (hello_a, mut stream_a) = attach_multi(&daemon);
+    let (buffer_id, snap_a) = read_initial_snapshot(&mut stream_a);
+    let reads_a = common::wire::queue_from_here(&stream_a);
     let (hello_b, mut stream_b) = attach_multi(&daemon);
+    let (_, snap_b) = read_initial_snapshot(&mut stream_b);
+    let reads_b = common::wire::queue_from_here(&stream_b);
     // A attaches first → FrontendId(2) → peer 2; B → FrontendId(3) →
     // peer 3. Tiebreak determinism is asserted against this ordering.
     assert!(
@@ -933,8 +927,6 @@ fn m10_11_q13_cat1_concurrent_same_position_inserts_converge() {
         "A must be the lower peer id for the determinism pin to mean anything"
     );
 
-    let (buffer_id, snap_a) = read_initial_snapshot(&mut stream_a);
-    let (_, snap_b) = read_initial_snapshot(&mut stream_b);
     let replica_a = CrdtState::new(hello_a.assigned_frontend_id.0).expect("A new");
     replica_a.import_snapshot(&snap_a).expect("A import");
     let replica_b = CrdtState::new(hello_b.assigned_frontend_id.0).expect("B new");
@@ -966,9 +958,9 @@ fn m10_11_q13_cat1_concurrent_same_position_inserts_converge() {
     );
 
     let converged = pump_both_until_equal(
-        &mut stream_a,
+        &reads_a,
         &replica_a,
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         Duration::from_secs(5),
@@ -1006,17 +998,14 @@ fn m10_11_q13_cat1_concurrent_same_position_inserts_converge() {
 /// order into a replica (the synthetic frontend chooses when to
 /// integrate each op — deterministic, unlike wall-clock jitter).
 fn read_one_crdt_op(
-    stream: &mut std::os::unix::net::UnixStream,
+    reads: &Reads,
     buffer_id: BufferId,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        stream
-            .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
-            .ok();
-        match read_message::<InstanceMessage>(stream) {
+        match reads.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(InstanceMessage::CrdtOp { buffer_id: b, op }) if b == buffer_id => {
                 return Ok(op.bytes);
             }
@@ -1065,10 +1054,12 @@ fn read_one_crdt_op(
 fn m10_11_q13_cat2_undo_across_delayed_ops() {
     let daemon = TestDaemon::spawn();
     let (hello_a, mut stream_a) = attach_multi(&daemon);
-    let (hello_b, mut stream_b) = attach_multi(&daemon);
-
     let (buffer_id, snap_a) = read_initial_snapshot(&mut stream_a);
+    let reads_a = common::wire::queue_from_here(&stream_a);
+    let (hello_b, mut stream_b) = attach_multi(&daemon);
     let (_, snap_b) = read_initial_snapshot(&mut stream_b);
+    let reads_b = common::wire::queue_from_here(&stream_b);
+
     let replica_a = CrdtState::new(hello_a.assigned_frontend_id.0).expect("A new");
     replica_a.import_snapshot(&snap_a).expect("A import");
     let replica_b = CrdtState::new(hello_b.assigned_frontend_id.0).expect("B new");
@@ -1085,7 +1076,7 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
         },
     );
     let op1 =
-        read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5)).expect("B receives op1");
+        read_one_crdt_op(&reads_b, buffer_id, Duration::from_secs(5)).expect("B receives op1");
     replica_b.import_updates(&op1).expect("B import op1");
     assert_eq!(replica_b.materialize_string(), "1", "B has op1");
     send_key(
@@ -1105,7 +1096,7 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
             r.insert(1, "2").expect("A op2");
         },
     );
-    let op2_withheld = read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5))
+    let op2_withheld = read_one_crdt_op(&reads_b, buffer_id, Duration::from_secs(5))
         .expect("B receives op2 (withheld, not yet imported)");
     send_key(
         &mut stream_a,
@@ -1125,7 +1116,7 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
         },
     );
     let op3 =
-        read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5)).expect("B receives op3");
+        read_one_crdt_op(&reads_b, buffer_id, Duration::from_secs(5)).expect("B receives op3");
     replica_b
         .import_updates(&op3)
         .expect("B import op3 (op2 pending)");
@@ -1139,7 +1130,7 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
     // load-bearing property under delay).
     send_undo(&mut stream_b, hello_b.assigned_frontend_id);
     assert!(
-        read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_millis(600)).is_err(),
+        read_one_crdt_op(&reads_b, buffer_id, Duration::from_millis(600)).is_err(),
         "B has no own groups; its undo must produce no op, not reach across to A's"
     );
     assert_eq!(
@@ -1152,14 +1143,14 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
     // integrates the compensation (still pending op2).
     send_undo(&mut stream_a, hello_a.assigned_frontend_id);
     pump_until(
-        &mut stream_a,
+        &reads_a,
         &replica_a,
         buffer_id,
         "12",
         Duration::from_secs(5),
     )
     .expect("A undid op3 → 12");
-    let a_undo_bytes = read_one_crdt_op(&mut stream_b, buffer_id, Duration::from_secs(5))
+    let a_undo_bytes = read_one_crdt_op(&reads_b, buffer_id, Duration::from_secs(5))
         .expect("B receives A's compensation");
     replica_b
         .import_updates(&a_undo_bytes)
@@ -1173,9 +1164,9 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
     // Step 7: convergence. A may still need A's own broadcast echo /
     // nothing further; drain both until equal.
     let converged = pump_both_until_equal(
-        &mut stream_a,
+        &reads_a,
         &replica_a,
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         Duration::from_secs(5),
@@ -1239,10 +1230,12 @@ fn m10_11_q8_convergence_under_jitter() {
         ("PMACS_INSTANCE_LATENCY_JITTER_SEED", "12648430"),
     ]);
     let (hello_a, mut stream_a) = attach_multi(&daemon);
-    let (hello_b, mut stream_b) = attach_multi(&daemon);
-
     let (buffer_id, snap_a) = read_initial_snapshot(&mut stream_a);
+    let reads_a = common::wire::queue_from_here(&stream_a);
+    let (hello_b, mut stream_b) = attach_multi(&daemon);
     let (_, snap_b) = read_initial_snapshot(&mut stream_b);
+    let reads_b = common::wire::queue_from_here(&stream_b);
+
     let replica_a = CrdtState::new(hello_a.assigned_frontend_id.0).expect("A new");
     replica_a.import_snapshot(&snap_a).expect("A import");
     let replica_b = CrdtState::new(hello_b.assigned_frontend_id.0).expect("B new");
@@ -1307,9 +1300,9 @@ fn m10_11_q8_convergence_under_jitter() {
     // writes for both frontends. Convergence-within-timeout is the
     // assertion (Q5: no per-event budget on jitter paths).
     let converged = pump_both_until_equal(
-        &mut stream_a,
+        &reads_a,
         &replica_a,
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         Duration::from_secs(20),
@@ -1399,10 +1392,12 @@ fn m10_11_q8_convergence_under_jitter() {
 fn m10_11_q13_cat3_reattach_converges_crdt_state() {
     let daemon = TestDaemon::spawn();
     let (hello_a1, mut stream_a1) = attach_multi(&daemon);
-    let (hello_b, mut stream_b) = attach_multi(&daemon);
-
     let (buffer_id, snap_a1) = read_initial_snapshot(&mut stream_a1);
+    let reads_a1 = common::wire::queue_from_here(&stream_a1);
+    let (hello_b, mut stream_b) = attach_multi(&daemon);
     let (_, snap_b) = read_initial_snapshot(&mut stream_b);
+    let reads_b = common::wire::queue_from_here(&stream_b);
+
     let replica_a1 = CrdtState::new(hello_a1.assigned_frontend_id.0).expect("A1 new");
     replica_a1.import_snapshot(&snap_a1).expect("A1 import");
     let replica_b = CrdtState::new(hello_b.assigned_frontend_id.0).expect("B new");
@@ -1419,7 +1414,7 @@ fn m10_11_q13_cat3_reattach_converges_crdt_state() {
         },
     );
     pump_until(
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         "a1",
@@ -1427,8 +1422,12 @@ fn m10_11_q13_cat3_reattach_converges_crdt_state() {
     )
     .expect("B converges with A's pre-disconnect edit");
 
-    // A's network drops: closing the stream is the disconnect.
-    drop(stream_a1);
+    // A's network drops: closing the stream is the disconnect. Its reader
+    // holds a clone, so the socket is shut rather than dropped.
+    stream_a1
+        .shutdown(std::net::Shutdown::Both)
+        .expect("shut A's socket");
+    drop(reads_a1);
 
     // B keeps editing alone while A is gone.
     send_optimistic_op_from(
@@ -1457,6 +1456,7 @@ fn m10_11_q13_cat3_reattach_converges_crdt_state() {
     // which must reflect the converged state (A's pre-disconnect a1
     // + B's post-disconnect b1).
     let (_, snap_a2) = read_initial_snapshot(&mut stream_a2);
+    let reads_a2 = common::wire::queue_from_here(&stream_a2);
     let replica_a2 = CrdtState::new(hello_a2.assigned_frontend_id.0).expect("A2 new");
     replica_a2
         .import_snapshot(&snap_a2)
@@ -1465,9 +1465,9 @@ fn m10_11_q13_cat3_reattach_converges_crdt_state() {
     // Drain both until they agree (handles the
     // reattach-vs-B's-op-integration race the same way cat-1/2 do).
     let converged = pump_both_until_equal(
-        &mut stream_a2,
+        &reads_a2,
         &replica_a2,
-        &mut stream_b,
+        &reads_b,
         &replica_b,
         buffer_id,
         Duration::from_secs(5),

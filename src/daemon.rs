@@ -46,9 +46,10 @@
 //! - Shutdown flag set → send `Goodbye(ShuttingDown)`, return.
 //! - Editor `quit` flag set → send `Goodbye(ShuttingDown)`, propagate
 //!   shutdown to the outer accept loop.
-//! - Write fails on the socket (broken pipe), the first on any route,
-//!   since every write to an attached frontend takes one path (E10d) →
-//!   nothing more is written to that frontend; its input is still
+//! - Write fails on the socket (broken pipe, or a frame not whole within
+//!   [`crate::frontend_stream::FRAME_WRITE_BOUND`], E10r), the first on any
+//!   route, since every write to an attached frontend takes one path (E10d)
+//!   → nothing more is written to that frontend; its input is still
 //!   dispatched until its reader's EOF or [`WRITE_FAILURE_DRAIN`] from
 //!   that first failure, then it is torn down (E9 fix round 4). A
 //!   message the transport refuses before writing a byte (past the
@@ -59,7 +60,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
 use std::net::Shutdown;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -68,6 +69,7 @@ use std::time::{Duration, Instant};
 
 use crate::cell::CellSize;
 use crate::editor::EditorState;
+use crate::frontend_stream::FrontendStream;
 use crate::instance_render::RenderState;
 use crate::lockfile::{self, LockError, LockHandle};
 use crate::presence::{PresenceSnapshot, SessionRegistry, SessionWrite};
@@ -82,7 +84,7 @@ use crate::protocol::{
 use pmacs_protocol::{SESSION_MIN_VERSION, SessionToken};
 
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
-use crate::transport::{read_message, write_message};
+use crate::transport::read_message;
 
 /// Shared debug switch with the SSH attach path. When set before
 /// daemon startup, emits stderr breadcrumbs for accept/handshake
@@ -94,14 +96,14 @@ fn daemon_debug_enabled() -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn peer_uid(stream: &UnixStream) -> Option<u32> {
+fn peer_uid(stream: &FrontendStream) -> Option<u32> {
     nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
         .ok()
         .map(|cred| cred.uid())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn peer_uid(_stream: &UnixStream) -> Option<u32> {
+fn peer_uid(_stream: &FrontendStream) -> Option<u32> {
     None
 }
 
@@ -136,7 +138,7 @@ enum DispatcherEvent {
         /// Write-half of the per-attach stream. The dispatcher owns
         /// this end; the per-attach reader thread keeps the
         /// read-half via `try_clone`.
-        write_stream: UnixStream,
+        write_stream: FrontendStream,
         /// E9 (fix round 1) --- set by the reader thread the moment it
         /// reads the frontend's `FrontendEvent::Detach`, and by the
         /// dispatcher on the quit's own request: the frontend is
@@ -611,15 +613,13 @@ fn accept_loop(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                // macOS can inherit O_NONBLOCK from the listener onto
-                // accepted Unix streams. The per-attach reader loop
-                // expects blocking reads; a nonblocking stream would
-                // turn "no frontend event yet" into WouldBlock, which
-                // looks like an immediate detach before the first frame.
-                stream.set_nonblocking(false)?;
                 daemon_debug("accepted frontend socket; spawning per-attach thread");
                 let daemon_state = Arc::clone(daemon_state);
                 let tx = dispatcher_tx.clone();
+                // Non-blocking from here on, whatever the socket inherited
+                // from the listener (macOS can pass its O_NONBLOCK on), its
+                // reads waiting as a blocking socket's do.
+                let stream = FrontendStream::new(stream)?;
                 thread::spawn(move || per_attach_thread(stream, daemon_state, tx));
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -708,11 +708,11 @@ fn bounded_initial_target_error(mut message: String) -> String {
     message
 }
 
-fn send_initial_target_failure(stream: &mut UnixStream, message: impl Into<String>) {
+fn send_initial_target_failure(stream: &mut FrontendStream, message: impl Into<String>) {
     let result = InitialTargetResult::Failed {
         message: bounded_initial_target_error(message.into()),
     };
-    let _ = write_message(stream, &InstanceMessage::InitialTargetResult(result));
+    let _ = stream.write_message(&InstanceMessage::InitialTargetResult(result));
     let _ = stream.shutdown(Shutdown::Both);
 }
 
@@ -755,7 +755,7 @@ fn validate_initial_target(target: &InitialTarget) -> Result<(), String> {
     reason = "the ordered handshake and bootstrap read stay on one per-connection thread"
 )]
 fn per_attach_thread(
-    mut stream: UnixStream,
+    mut stream: FrontendStream,
     daemon_state: Arc<DaemonState>,
     dispatcher_tx: mpsc::Sender<DispatcherEvent>,
 ) {
@@ -774,7 +774,7 @@ fn per_attach_thread(
         instance_identity: daemon_state.build_identity(),
         instance_capabilities: instance_caps_for_hello.clone(),
     };
-    if let Err(e) = write_message(&mut stream, &hello) {
+    if let Err(e) = stream.write_message(&hello) {
         eprintln!("pmacs: send Hello failed: {e}");
         return;
     }
@@ -802,19 +802,16 @@ fn per_attach_thread(
     // upper half of the negotiation, and this membership test is what
     // bounds it.
     if !crate::protocol::is_supported_protocol_version(req.protocol_version) {
-        let _ = write_message(
-            &mut stream,
-            &InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch {
-                // The wire field is "the instance's `PROTOCOL_VERSION`", not
-                // the version it advertised. Since Stage 2B-3 those differ:
-                // the `Hello` baseline is a compatibility floor, and reporting
-                // it here would tell a frontend the daemon tops out at 20 when
-                // it in fact speaks 21 — the exact opposite of the upgrade
-                // diagnostic this reason exists to give.
-                server: pmacs_protocol::PROTOCOL_VERSION,
-                client: req.protocol_version,
-            }),
-        );
+        let _ = stream.write_message(&InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch {
+            // The wire field is "the instance's `PROTOCOL_VERSION`", not
+            // the version it advertised. Since Stage 2B-3 those differ:
+            // the `Hello` baseline is a compatibility floor, and reporting
+            // it here would tell a frontend the daemon tops out at 20 when
+            // it in fact speaks 21 — the exact opposite of the upgrade
+            // diagnostic this reason exists to give.
+            server: pmacs_protocol::PROTOCOL_VERSION,
+            client: req.protocol_version,
+        }));
         return;
     }
 
@@ -831,7 +828,7 @@ fn per_attach_thread(
         match crate::protocol::negotiate_capabilities(&req.frontend_capabilities, &instance_caps) {
             Ok(caps) => caps,
             Err(reason) => {
-                let _ = write_message(&mut stream, &InstanceMessage::Goodbye(reason));
+                let _ = stream.write_message(&InstanceMessage::Goodbye(reason));
                 return;
             }
         };
@@ -873,10 +870,8 @@ fn per_attach_thread(
                     "pmacs: {frontend_id:?} sent {} where its v27 Resume step was due",
                     frontend_event_name(&other)
                 );
-                let _ = write_message(
-                    &mut stream,
-                    &InstanceMessage::Goodbye(GoodbyeReason::ProtocolError),
-                );
+                let _ =
+                    stream.write_message(&InstanceMessage::Goodbye(GoodbyeReason::ProtocolError));
                 return;
             }
             Err(e) => {
@@ -894,10 +889,7 @@ fn per_attach_thread(
     } else if let Some(guard) = NonMultiSlotGuard::try_acquire(Arc::clone(&daemon_state)) {
         Some(guard)
     } else {
-        let _ = write_message(
-            &mut stream,
-            &InstanceMessage::Goodbye(GoodbyeReason::AlreadyAttached),
-        );
+        let _ = stream.write_message(&InstanceMessage::Goodbye(GoodbyeReason::AlreadyAttached));
         return;
     };
 
@@ -1476,7 +1468,8 @@ fn peer_may_send_panel_events(
 /// the session has no stream (none installed, or taken out at a failed
 /// write), the write failed, or the transport refused the message.
 ///
-/// A write that fails on the socket (`TransportError::Io`) ends the
+/// A write that fails on the socket (`TransportError::Io`, a frame past
+/// its bound among them: `FrontendStream`, E10r) ends the
 /// session's output here, whichever route it came by (the owner's
 /// ruling of 2026-10-20, a bounded drain): `what` names the write in
 /// the log line, the stream is taken out of its
@@ -1554,8 +1547,9 @@ fn write_to_session(
 /// 2. Sweeps the `SessionRegistry` for presence broadcasts;
 ///    routes them to per-recipient streams.
 /// 3. Writes outgoing messages to each frontend's write stream
-///    (synchronous — M10.8 Day 3 doesn't have per-frontend writer
-///    threads; v0.3 may add them if N attachments grow).
+///    (synchronous, each frame within
+///    [`crate::frontend_stream::FRAME_WRITE_BOUND`], E10r: a frontend that
+///    stops reading holds up the others once, for about that).
 /// 4. Ticks async / processes / LSP.
 ///
 /// Exits when the editor's `quit` flag is set, the `shutdown` flag
@@ -2594,7 +2588,7 @@ fn handle_session_established(
     initial_size: CellSize,
     initial_target: Option<InitialTarget>,
     resume: Option<SessionToken>,
-    mut write_stream: UnixStream,
+    mut write_stream: FrontendStream,
     departing: Arc<AtomicBool>,
 ) {
     // E9 fix round 3 (review 3's Medium 1, the owner's ruling of
@@ -2838,7 +2832,7 @@ fn handle_session_established(
                 session_registry,
             );
         }
-        if write_message(&mut write_stream, &snapshot_message).is_err() {
+        if write_stream.write_message(&snapshot_message).is_err() {
             let _ = write_stream.shutdown(Shutdown::Both);
             editor
                 .core
@@ -2883,7 +2877,7 @@ fn handle_session_established(
                             session_registry,
                         );
                     }
-                    if write_message(&mut write_stream, &message).is_err() {
+                    if write_stream.write_message(&message).is_err() {
                         let _ = write_stream.shutdown(Shutdown::Both);
                         editor
                             .core
@@ -2977,7 +2971,7 @@ fn handle_session_established(
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
             buffer_id: opened.buffer_id,
         });
-        if write_message(&mut write_stream, &result).is_err() {
+        if write_stream.write_message(&result).is_err() {
             let _ = write_stream.shutdown(Shutdown::Both);
             cleanup_provisional_session(editor, session_registry, frontend_id);
             return;
@@ -2988,7 +2982,9 @@ fn handle_session_established(
     // its target's snapshot and result synchronously is not handed a
     // message it did not ask for, and before the first frame.
     if let Some(token) = token
-        && write_message(&mut write_stream, &InstanceMessage::SessionToken(token)).is_err()
+        && write_stream
+            .write_message(&InstanceMessage::SessionToken(token))
+            .is_err()
     {
         let _ = write_stream.shutdown(Shutdown::Both);
         cleanup_provisional_session(editor, session_registry, frontend_id);
@@ -3918,7 +3914,7 @@ fn save_attached_desktops(editor: &EditorState, session_registry: &SessionRegist
 #[cfg(feature = "crdt")]
 fn send_buffer_snapshots(
     editor: &EditorState,
-    write_stream: &mut UnixStream,
+    write_stream: &mut FrontendStream,
 ) -> Result<Vec<(crate::buffer::BufferId, usize)>, crate::transport::TransportError> {
     let core = editor.core.borrow();
     let mut registry = core.registry.borrow_mut();
@@ -3967,7 +3963,7 @@ fn send_buffer_snapshots(
             left_out.push((buffer_id, frame_len));
             continue;
         }
-        if let Err(e) = write_message(write_stream, &msg) {
+        if let Err(e) = write_stream.write_message(&msg) {
             eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} failed: {e:?}");
             return Err(e);
         }
@@ -3986,7 +3982,7 @@ fn send_buffer_snapshots(
 )]
 fn send_buffer_snapshots(
     _editor: &EditorState,
-    _write_stream: &mut UnixStream,
+    _write_stream: &mut FrontendStream,
 ) -> Result<Vec<(crate::buffer::BufferId, usize)>, crate::transport::TransportError> {
     Ok(Vec::new())
 }
@@ -5382,6 +5378,7 @@ fn apply_event(
 mod tests {
     use super::*;
     use crate::protocol::PROTOCOL_VERSION;
+    use std::os::unix::net::UnixStream;
 
     #[test]
     fn daemon_state_starts_frontend_id_at_two() {
@@ -5519,7 +5516,7 @@ mod tests {
             (live_grid_peer, live_grid_server),
             (dead_grid_peer, dead_grid_server),
         ] {
-            registry.install_stream(peer, stream);
+            registry.install_stream(peer, FrontendStream::new(stream).expect("non-blocking"));
         }
         let published_buffer = crate::buffer::BufferId::from_raw(900);
         let message = InstanceMessage::BufferSnapshot {
@@ -5582,7 +5579,7 @@ mod tests {
             client
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .expect("delivery timeout");
-            registry.install_stream(fid, server);
+            registry.install_stream(fid, FrontendStream::new(server).expect("non-blocking"));
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: doc_buf,
                 crdt_snapshot: vec![1, 2, 3],
@@ -5600,7 +5597,7 @@ mod tests {
         // The PANEL-only buffer's snapshot must NOT be delivered.
         {
             let (server, mut client) = UnixStream::pair().expect("socketpair");
-            registry.install_stream(fid, server);
+            registry.install_stream(fid, FrontendStream::new(server).expect("non-blocking"));
             let message = InstanceMessage::BufferSnapshot {
                 buffer_id: panel_buf,
                 crdt_snapshot: vec![4, 5, 6],
@@ -5653,8 +5650,14 @@ mod tests {
         dead_client
             .shutdown(Shutdown::Read)
             .expect("the peer stops reading");
-        registry.install_stream(live, live_server);
-        registry.install_stream(dead, dead_server);
+        registry.install_stream(
+            live,
+            FrontendStream::new(live_server).expect("non-blocking"),
+        );
+        registry.install_stream(
+            dead,
+            FrontendStream::new(dead_server).expect("non-blocking"),
+        );
         let message = InstanceMessage::Signal(InstanceSignal::Bell);
 
         let mut reported = Vec::new();
@@ -6016,7 +6019,7 @@ mod tests {
                     path: target.as_os_str().as_bytes().to_vec(),
                 }),
                 resume: None,
-                write_stream,
+                write_stream: FrontendStream::new(write_stream).expect("non-blocking"),
                 departing: Arc::new(AtomicBool::new(false)),
             },
             &mut editor,
@@ -6105,7 +6108,7 @@ mod tests {
                 initial_size: CellSize::new(24, 80),
                 initial_target: None,
                 resume,
-                write_stream,
+                write_stream: FrontendStream::new(write_stream).expect("non-blocking"),
                 departing,
             };
         macro_rules! feed {
@@ -12320,7 +12323,7 @@ mod tests {
                 0,
             ),
         );
-        session_registry.install_stream(fid, server);
+        session_registry.install_stream(fid, FrontendStream::new(server).expect("non-blocking"));
         {
             let session = session_registry.session_mut(fid).expect("registered");
             session.term_size = Some(CellSize::new(24, 80));

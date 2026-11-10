@@ -163,7 +163,53 @@ pmacs-gpu --attach /absolute/path/to/pmacs.sock
 
 `pmacs --attach` also understands `ssh:user@host/instance`,
 `local:/path.sock`, and bare hostnames (treated as SSH). See
-`pmacs --help` for the full matrix.
+`pmacs --help` for the full matrix. The protocol rides `ssh`'s stderr, so
+what the far side says there, a shell with no `pmacs` to run, `ssh` itself
+or the bridge's own error, is shown as the far side's words with how `ssh`
+ended, control characters and bidirectional ones stripped, and a
+reconnect's countdown says them, keeping on a narrow pane their end, where
+the reason is, whatever punctuation they hold; pmacs's own refusals drop
+their detail first, so a directory the daemon refuses still reads `is too
+permissive`.
+
+The daemon writes to every frontend from one thread, so it gives each
+frame 2 s to reach a frontend and then drops that frontend, rather than
+hold the others up. A client stopped past that comes back when resumed,
+on a new view, saying why. Over SSH a lost session comes back the same
+way, and if the daemon died the far side starts a new one, which holds
+what autosave kept and nothing else. The client says
+`[pmacs: new daemon; work not autosaved is gone; M-x recover-file]` when
+it is certain, and
+`[pmacs reconnected: this may be a new daemon; C-x b shows what it holds]`
+when it cannot tell. While a reconnect waits on the far side, `ssh` has
+the terminal, for a passphrase if it asks: `C-c` ends the attempt and the
+session, `F12` does nothing, and after 120 s the attempt is killed and the
+next one comes. Three new daemons in a row that each lasted under 30 s
+stop it, as do three sessions in a row the daemon closed before their first
+frame, each naming the file beside the socket on the far side where the last
+one's stderr went: it holds every daemon started there, each under a line saying
+when and by whom, and past 1 MiB it moves to `.stderr.1`. `pmacs --daemon --stop` ends a TUI that hears it and
+starts nothing; a TUI stopped past the 2 s when it ran hears nothing, so
+when resumed over SSH it starts a new daemon, which keeps running and says
+so, and on a local socket it ends. A link has to carry a
+frame's bytes over 2 s or it cannot receive that frame at all: an 8 MB
+snapshot needs 4 MB/s, and a 1 to 5 MB file about 1 MB/s, so attaching to
+a large file over a slow link fails, saying so, after three tries that
+each hold the others up about 2 s, about 6 s of the 10 it takes in a
+release build. Clients stopped together add, since the daemon writes to
+each in turn: three stopped reading hold the others about 6 s, once.
+
+A TUI never waits on its daemon to read a key. What is typed at a daemon
+that has stopped answering is queued, in order, and arrives when it answers
+again, and `F12` ends the TUI within about 5 s whatever the daemon is doing.
+A key, a paste or a click that nothing from the daemon follows for 2 s
+makes the bottom row say
+`[pmacs: the daemon is not answering; F12 detaches]`, until the daemon's
+next frame. A daemon busy past 2 s after a key, opening a large file
+say, reads the same, and the sentence goes when it is done. Past 16 MiB
+queued further input is dropped and it says
+`[pmacs: the daemon is not answering; keys dropped; F12 detaches]`, until
+the queue has drained.
 
 User configuration is plain Lua at
 `$XDG_CONFIG_HOME/pmacs/init.lua` (default `~/.config/pmacs/init.lua`),
