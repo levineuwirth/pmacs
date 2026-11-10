@@ -3566,17 +3566,78 @@ struct KeypaintSession {
     app: App,
     rx: std::sync::mpsc::Receiver<AttachEvent>,
     view: wgpu::TextureView,
+    /// The texture `view` renders into, held for the session's life.
+    _target: wgpu::Texture,
     disconnect: Option<String>,
 }
 
 impl KeypaintSession {
+    /// `state` under the production `App`, attached through `client` to
+    /// `socket` (or to nothing, for a row that feeds `rx` itself), with an
+    /// offscreen target of the window's size to paint into.
+    fn new(
+        state: State,
+        client: Option<AttachClient>,
+        socket: &Path,
+        rx: std::sync::mpsc::Receiver<AttachEvent>,
+    ) -> Self {
+        let target = state.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pmacs-gpu keypaint target"),
+            size: wgpu::Extent3d {
+                width: state.config.width,
+                height: state.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: state.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            app: App {
+                mode: Mode::Attach {
+                    socket: socket.to_path_buf(),
+                },
+                proxy: None,
+                #[cfg(test)]
+                test_force_non_linux: false,
+                state: Some(state),
+                pending_events: Vec::new(),
+                attach_client: client,
+                modifiers: winit::keyboard::ModifiersState::empty(),
+                geometry: geometry::WindowGeometry::default(),
+                geometry_path: None,
+                geometry_dirty_since: None,
+                platform: Platform::current(),
+                exit_code: 0,
+                reconnect: None,
+                exit_requested: false,
+            },
+            rx,
+            view,
+            _target: target,
+            disconnect: None,
+        }
+    }
+
     fn state(&self) -> &State {
         self.app.state.as_ref().expect("the probe's state")
     }
 
-    /// Apply the attach events that arrive within `wait` of each other,
-    /// the first waited on for `wait`; whether any arrived.
+    /// Apply the attach events already waiting, the first waited on for
+    /// `wait`, for no longer than `wait` in all; whether any arrived.
+    ///
+    /// E10t.3: the drain stops at `wait` though events keep arriving, so
+    /// its caller reads its own limit again. Until then it went on while
+    /// any event was waiting, and a stream that never paused (#326's spin,
+    /// a snapshot about every 50 ms that took longer than that to apply)
+    /// held the caller here past `PMACS_GPU_PROBE_SAMPLE_MS` until a
+    /// timeout outside the probe killed it.
     fn pump(&mut self, wait: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + wait;
         let mut any = false;
         while let Ok(event) =
             self.rx
@@ -3587,6 +3648,9 @@ impl KeypaintSession {
                 self.disconnect = Some(reason.clone());
             }
             self.app.dispatch_app_event(AppEvent::Attach(event));
+            if std::time::Instant::now() >= until {
+                break;
+            }
         }
         any
     }
@@ -3655,6 +3719,83 @@ impl KeypaintSession {
     }
 }
 
+#[cfg(test)]
+mod keypaint_limit_tests {
+    use super::*;
+
+    /// How long the stream below runs at most: the bound under which the
+    /// witness hangs where the limit is not read, after which it fails.
+    const STREAM_CEILING: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// E10t.3 --- a stream that never pauses ends at the caller's limit.
+    /// A producer keeps a bounded channel full of snapshots of a 100 KB
+    /// buffer, each taking milliseconds to apply through the production
+    /// `App` and microseconds to send, so an event is always waiting and
+    /// memory stays at four snapshots. `settle` with a condition that
+    /// never holds must come back at its limit, half a second. Where
+    /// `pump` drains while anything waits, as it did until E10t.3, it
+    /// comes back only when the stream stops at [`STREAM_CEILING`], and
+    /// the row fails on the time.
+    #[test]
+    fn a_stream_that_never_pauses_ends_a_settle_at_its_limit() {
+        let Some(state) = State::new_headless(640, 480, "") else {
+            assert!(
+                std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
+                "PMACS_REQUIRE_GPU is set but there is no wgpu adapter"
+            );
+            return;
+        };
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(
+                0,
+                &"a line of the snapshot that never stops\n".repeat(2_500),
+            )
+            .expect("insert snapshot text");
+        let snapshot = doc.export(loro::ExportMode::Snapshot).expect("export");
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AttachEvent>(4);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let producer = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            let mut sent = 0_u64;
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst)
+                && began.elapsed() < STREAM_CEILING
+            {
+                let message = InstanceMessage::BufferSnapshot {
+                    buffer_id: BufferId::from_raw(7),
+                    crdt_snapshot: snapshot.clone(),
+                };
+                if tx.send(AttachEvent::Message(Box::new(message))).is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            sent
+        });
+        let mut session =
+            KeypaintSession::new(state, None, Path::new("/nonexistent-keypaint-socket"), rx);
+        let limit = std::time::Duration::from_millis(500);
+        let began = std::time::Instant::now();
+        let held = session.settle(std::time::Duration::from_hours(1), limit, &|_| false);
+        let took = began.elapsed();
+        let applied = session.state().snapshots_applied;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(session);
+        let sent = producer.join().expect("the producer");
+        assert!(!held, "the condition never holds");
+        assert!(
+            took < limit + std::time::Duration::from_secs(3),
+            "settle came back after {took:?}, its limit {limit:?}: the drain did not read it \
+             ({applied} snapshots applied of {sent} sent)"
+        );
+        assert!(
+            applied > 1 && sent > applied,
+            "the stream was still running when settle came back: {applied} applied of {sent} sent"
+        );
+    }
+}
+
 /// E10k.1 --- the time from a key's arrival at the GPU to the first
 /// frame painted with its character, through the production `App`
 /// dispatch against a real daemon, at the end of the buffer's last line.
@@ -3714,45 +3855,7 @@ fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         .unwrap_or_default();
     state.set_frontend_id(client.frontend_id());
     state.set_panel_wire(client.session_protocol_version());
-    let target = state.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("pmacs-gpu keypaint target"),
-        size: wgpu::Extent3d {
-            width: state.config.width,
-            height: state.config.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: state.config.format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut session = KeypaintSession {
-        app: App {
-            mode: Mode::Attach {
-                socket: socket.to_path_buf(),
-            },
-            proxy: None,
-            #[cfg(test)]
-            test_force_non_linux: false,
-            state: Some(state),
-            pending_events: Vec::new(),
-            attach_client: Some(client),
-            modifiers: winit::keyboard::ModifiersState::empty(),
-            geometry: geometry::WindowGeometry::default(),
-            geometry_path: None,
-            geometry_dirty_since: None,
-            platform: Platform::current(),
-            exit_code: 0,
-            reconnect: None,
-            exit_requested: false,
-        },
-        rx,
-        view,
-        disconnect: None,
-    };
+    let mut session = KeypaintSession::new(state, Some(client), socket, rx);
     for event in initial {
         session.app.dispatch_app_event(AppEvent::Attach(event));
     }
@@ -3915,7 +4018,6 @@ fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     if let Some(reason) = &failure {
         let _ = writeln!(out, "failure={reason}");
     }
-    drop(target);
     if let Err(error) = std::fs::write(report, out) {
         eprintln!("pmacs-gpu probe: write report failed: {error}");
         return 5;
