@@ -418,3 +418,119 @@ fn e10t_2_guard_a_declaration_moves_the_window_before_and_after_a_follow() {
             .then_some(())
     });
 }
+
+/// `one.log` and `two.log` of `lines` each, `one.log` shown, as
+/// [`daemon_with_two`], with `extra` after the init, its `@one@` and
+/// `@two@` replaced by the files' paths.
+fn daemon_with_pair_and(lines: usize, extra: &str) -> TestDaemon {
+    let dir = files_dir();
+    let one = dir.join("one.log");
+    let two = dir.join("two.log");
+    std::fs::write(&one, fixture(lines)).expect("write one.log");
+    std::fs::write(&two, fixture(lines)).expect("write two.log");
+    let extra = extra
+        .replace("@one@", &one.display().to_string())
+        .replace("@two@", &two.display().to_string());
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, two], false, &extra))
+}
+
+/// `C-c 8` switches the window to `two.log` `at_ms` after the key, from the
+/// tick hook, so the probe's next step (each key step pumps 250 ms) lands
+/// while `two.log`'s snapshot is in flight.
+fn late_switch(at_ms: u64) -> String {
+    format!(
+        "local at = nil\n\
+         pmacs.command.define {{ name = 'e10t.late', description = 'switch to two later',\n\
+           fn = function() at = pmacs.editor.monotonic_ms() + {at_ms} end }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c 8', command = 'e10t.late' }}\n\
+         pmacs.hook.add('process.after-tick', function()\n\
+           if at and pmacs.editor.monotonic_ms() >= at then at = nil; pmacs.buffer.find_or_open('@two@') end\n\
+         end)\n"
+    )
+}
+
+/// `C-c 9` switches the window to `two.log` at once and back to `one.log`
+/// `gap_ms` later: two `C-x b` with both snapshots in flight.
+fn flip(gap_ms: u64) -> String {
+    format!(
+        "local back = nil\n\
+         pmacs.command.define {{ name = 'e10t.flip', description = 'two, then one',\n\
+           fn = function() pmacs.buffer.find_or_open('@two@'); back = pmacs.editor.monotonic_ms() + {gap_ms} end }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c 9', command = 'e10t.flip' }}\n\
+         pmacs.hook.add('process.after-tick', function()\n\
+           if back and pmacs.editor.monotonic_ms() >= back then back = nil; pmacs.buffer.find_or_open('@one@') end\n\
+         end)\n"
+    )
+}
+
+/// From a switch to the first count. Longer than [`LEAD_MS`]: a debug
+/// daemon had not yet named a 12.5 MB buffer it switched to 3 s after the
+/// switch, though its snapshot had landed (the control below, at 8bf9b16).
+const SWITCH_LEAD_MS: u64 = 10_000;
+
+/// The steps of a switch: [`LEAD_MS`] after readiness, then `chord`, then
+/// `then` (a step or nothing), and two counts, [`SWITCH_LEAD_MS`] after the
+/// switch and [`HOLD_MS`] after that.
+fn switch_steps(chord: &str, then: &str) -> String {
+    format!(
+        "quiet:{LEAD_MS} {chord} {then} quiet:{SWITCH_LEAD_MS} count:early quiet:{HOLD_MS} count:late"
+    )
+}
+
+/// Review 1's Medium 1: a `C-x b` and a wheel turn while its snapshot is
+/// in flight, which a trackpad's inertia delivers for about a second after
+/// a gesture. Until the snapshot lands the GPU shows `one.log`, so the
+/// wheel's declaration names it; that moved the daemon's window back, the
+/// tick followed with `one.log`'s snapshot, and each applied snapshot's own
+/// answer moved it again: #326's spin, one switch after the attach. At
+/// 8bf9b16 it spun without end at both sizes, a key not ending it (9 of 9
+/// release runs). A declaration naming the buffer the frontend showed
+/// before a snapshot it has not answered is now stale and moves nothing.
+#[test]
+fn e10t_r1_a_switch_and_a_wheel_turn_in_flight_settle_on_the_switch() {
+    for (lines, label) in [(179_000, "r1-wheel-179k"), (20_000, "r1-wheel-20k")] {
+        let daemon = daemon_with_pair_and(lines, &late_switch(235));
+        let Some(probe) = run_probe(&daemon, label, &switch_steps("key:C-c key:8", "wheel:3"))
+        else {
+            return;
+        };
+        // The attach's snapshot and the switch's.
+        if let Err(said) = settled(&probe, "two.log", 2, label) {
+            panic!("{said}");
+        }
+    }
+}
+
+/// The control for the row above: the same switch with no wheel turn
+/// settles on `two.log`, at the reviewed head and after.
+#[test]
+fn e10t_r1_control_the_switch_alone_settles() {
+    let daemon = daemon_with_pair_and(179_000, &late_switch(235));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r1-control",
+        &switch_steps("key:C-c key:8", "quiet:250"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(&probe, "two.log", 2, "the switch alone") {
+        panic!("{said}");
+    }
+}
+
+/// Review 1's Medium 1, its other route: two switches about 120 ms apart,
+/// both snapshots in flight. The first's answer moved the window back to
+/// `two.log` after the second had moved it to `one.log`, and the second's
+/// moved it again (at 8bf9b16, 120 ms apart: 1, 52, 148 snapshots at 3, 7
+/// and 12 s, release). The window now settles on the last switch.
+#[test]
+fn e10t_r1_two_switches_in_flight_settle_on_the_last() {
+    let daemon = daemon_with_pair_and(179_000, &flip(120));
+    let Some(probe) = run_probe(&daemon, "r1-flip", &switch_steps("key:C-c key:9", "")) else {
+        return;
+    };
+    // The attach's snapshot and the two switches'.
+    if let Err(said) = settled(&probe, "one.log", 3, "two switches 120 ms apart") {
+        panic!("{said}");
+    }
+}

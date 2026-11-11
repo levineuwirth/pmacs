@@ -50,7 +50,7 @@
 //!   `register_session` / `unregister_session` API will be called per
 //!   attach/detach; the sweep's broadcast list becomes non-empty.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -190,6 +190,11 @@ pub struct Session {
     /// `BufferSnapshot` for by the active-buffer follow; `None` until
     /// the first one.
     pub last_active_buffer_sent: Option<BufferId>,
+    /// E10t (fix round 1) --- the snapshots written to this session that
+    /// its frontend has not answered yet, and the buffer it last answered:
+    /// what tells a declaration of the buffer it showed before a snapshot
+    /// in flight from a real one.
+    pub snapshot_answers: SnapshotAnswers,
     /// The active terminal's BEL delivery baseline: the terminal and the
     /// bells already delivered from it. Forgotten when the session's
     /// window leaves the terminal, so old bells are never replayed.
@@ -199,6 +204,77 @@ pub struct Session {
     /// read at the teardown, whichever path runs it first. `None` for a
     /// session registered without one (the tests' sessions).
     pub departing: Option<Arc<AtomicBool>>,
+}
+
+/// E10t (fix round 1, review 1's Medium 1) --- a semantic frontend's
+/// answers to the snapshots written to it. `pmacs-gpu` answers every
+/// snapshot it applies with a `Viewport` naming that snapshot's buffer, in
+/// the order it was sent (`apply_attach_message` forgets the last
+/// declaration, so the answer always goes), and declares no buffer but the
+/// one it shows. So while a snapshot is in flight its declarations still
+/// name the buffer it showed before: a wheel turn, a resize or a reflow
+/// right after a `C-x b`, or the answer to the first of two switches. Such
+/// a declaration aligned the daemon's window back, the tick followed with
+/// that buffer's snapshot, and each applied snapshot's answer moved the
+/// window again: #326's spin, one switch after the attach. Which
+/// declarations are stale is read here from what the daemon wrote and
+/// what came back, never from a claim inside the declaration
+/// (`docs/invariants.md`). A declaration of a buffer never sent to the
+/// session is never stale, so a frontend that answers nothing, as the
+/// suite's wire clients do, moves the window with it as before (E10t.2's
+/// guard); nor is one naming the newest snapshot's buffer, where the
+/// window is going already.
+#[derive(Debug, Default)]
+pub struct SnapshotAnswers {
+    /// Written and not yet answered, oldest first.
+    unanswered: VecDeque<BufferId>,
+    /// The buffer of the last snapshot answered: the one the frontend
+    /// shows until the next lands.
+    answered: Option<BufferId>,
+}
+
+/// How many unanswered snapshots [`SnapshotAnswers`] remembers. A
+/// frontend that answers keeps the queue at the few in flight; one that
+/// answers nothing (the suite's wire clients) would grow it with every
+/// follow, and losing its oldest entries changes nothing for it.
+const UNANSWERED_KEPT: usize = 64;
+
+impl SnapshotAnswers {
+    /// A snapshot of `buffer` was written to the session.
+    pub fn sent(&mut self, buffer: BufferId) {
+        if self.unanswered.len() == UNANSWERED_KEPT {
+            self.unanswered.pop_front();
+        }
+        self.unanswered.push_back(buffer);
+    }
+
+    /// The session declared `buffer`; whether the declaration is stale,
+    /// in which case it must move nothing. A declaration naming the
+    /// oldest unanswered snapshot's buffer is its answer. Answers come in
+    /// order, so one naming a later unanswered snapshot, and not the
+    /// buffer last answered, is that snapshot's answer, and the snapshots
+    /// before it were never applied (a frontend that failed to import
+    /// one): they are forgotten. A declaration made while a snapshot is
+    /// still unanswered, naming the buffer last answered, or an answer
+    /// with a later snapshot in flight, is stale, unless it names the
+    /// newest snapshot's buffer, which is where the daemon's window is
+    /// going already. Any other is a real declaration.
+    pub fn declared(&mut self, buffer: BufferId) -> bool {
+        let Some(&newest) = self.unanswered.back() else {
+            return false;
+        };
+        if self.unanswered.front() == Some(&buffer) {
+            self.unanswered.pop_front();
+            self.answered = Some(buffer);
+        } else if self.answered != Some(buffer) {
+            let Some(at) = self.unanswered.iter().position(|sent| *sent == buffer) else {
+                return false;
+            };
+            self.unanswered.drain(..=at);
+            self.answered = Some(buffer);
+        }
+        !self.unanswered.is_empty() && buffer != newest
+    }
 }
 
 impl Session {
@@ -212,6 +288,7 @@ impl Session {
             term_size: None,
             last_dispatch_idle_sent: None,
             last_active_buffer_sent: None,
+            snapshot_answers: SnapshotAnswers::default(),
             bell_baseline: None,
             departing: None,
         }
@@ -253,6 +330,7 @@ impl std::fmt::Debug for Session {
             .field("term_size", &self.term_size)
             .field("last_dispatch_idle_sent", &self.last_dispatch_idle_sent)
             .field("last_active_buffer_sent", &self.last_active_buffer_sent)
+            .field("snapshot_answers", &self.snapshot_answers)
             .field("bell_baseline", &self.bell_baseline)
             .field("departing", &self.departing)
             .finish()
@@ -537,7 +615,15 @@ impl SessionRegistry {
             return SessionWrite::NoStream;
         };
         match stream.write_message(message) {
-            Ok(()) => SessionWrite::Written,
+            Ok(()) => {
+                if let InstanceMessage::BufferSnapshot { buffer_id, .. } = message
+                    && let Some(session) = self.sessions.get_mut(&frontend_id)
+                    && session.state.negotiated_capabilities.semantic_render
+                {
+                    session.snapshot_answers.sent(*buffer_id);
+                }
+                SessionWrite::Written
+            }
             Err(error @ TransportError::Io(_)) => {
                 if let Some(stream) = self
                     .sessions
@@ -1308,5 +1394,57 @@ mod tests {
             "F16: None-exclude must include the active frontend whose mirror is stale"
         );
         assert_eq!(out.len(), 2);
+    }
+
+    /// E10t fix round 1 --- the record's cases. A frontend that answers:
+    /// a declaration of the buffer it showed while a switch is in flight is
+    /// stale, and so is the first answer of two in flight; the last answer
+    /// is not, nor a declaration naming the newest snapshot's buffer. A
+    /// snapshot it failed to import is never answered, and the next answer
+    /// forgets it. A frontend that answers nothing (the suite's wire
+    /// clients, E10t.2's declaration guard): nothing it declares about a
+    /// buffer it was not sent is stale.
+    #[test]
+    fn snapshot_answers_tell_a_declaration_made_before_a_snapshot_landed() {
+        let (one, two, three) = (
+            BufferId::from_raw(1),
+            BufferId::from_raw(2),
+            BufferId::from_raw(3),
+        );
+
+        let mut gpu = SnapshotAnswers::default();
+        gpu.sent(one);
+        assert!(!gpu.declared(one), "the attach's answer moves the window");
+        gpu.sent(two);
+        assert!(gpu.declared(one), "a wheel turn before two landed");
+        assert!(!gpu.declared(two), "two's answer");
+        gpu.sent(one);
+        gpu.sent(two);
+        assert!(!gpu.declared(two), "a wheel turn on two: the window's way");
+        assert!(gpu.declared(one), "the first answer of two in flight");
+        assert!(!gpu.declared(two), "the last answer");
+        assert!(!gpu.declared(one), "nothing in flight: a real declaration");
+
+        let mut lost = SnapshotAnswers::default();
+        lost.sent(one);
+        assert!(!lost.declared(one), "the attach's answer");
+        lost.sent(two);
+        assert!(lost.declared(one), "two never imported, the window on two");
+        lost.sent(one);
+        assert!(!lost.declared(one), "the newest: the window is going there");
+        lost.sent(three);
+        assert!(!lost.declared(three), "three's answer, two forgotten");
+        assert!(lost.unanswered.is_empty(), "the record healed");
+        assert!(!lost.declared(one), "nothing in flight: a real declaration");
+
+        let mut wire = SnapshotAnswers::default();
+        wire.sent(one);
+        assert!(!wire.declared(two), "before any follow");
+        wire.sent(two);
+        assert!(!wire.declared(three), "after the follow");
+        for _ in 0..2 * UNANSWERED_KEPT {
+            wire.sent(two);
+        }
+        assert_eq!(wire.unanswered.len(), UNANSWERED_KEPT, "bounded");
     }
 }

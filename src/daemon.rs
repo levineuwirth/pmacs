@@ -2979,14 +2979,23 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
+    // The attach's one snapshot was written before the session was
+    // registered, so past the write path that records the rest: recorded
+    // here, so its answer is known as one (E10t fix round 1).
     if let Some(buffer_id) = window_buffer
         && let Some(session) = session_registry.session_mut(frontend_id)
     {
         session.last_active_buffer_sent = Some(buffer_id);
+        if semantic_render {
+            session.snapshot_answers.sent(buffer_id);
+        }
     }
     if let Some(opened) = opened_target {
         if let Some(session) = session_registry.session_mut(frontend_id) {
             session.last_active_buffer_sent = Some(opened.buffer_id);
+            if semantic_render {
+                session.snapshot_answers.sent(opened.buffer_id);
+            }
         }
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
             buffer_id: opened.buffer_id,
@@ -3323,7 +3332,23 @@ fn handle_dispatcher_event(
                             .is_some_and(|document| manager.is_terminal(document));
                         active || manager.is_terminal(buffer_id)
                     };
-                    if session_registry.semantic(source).is_some() && !terminal_context {
+                    // E10t (fix round 1, review 1's Medium 1) --- the same
+                    // hazard for a document: a declaration made before a
+                    // snapshot in flight landed names the buffer the
+                    // frontend showed before it (a wheel turn right after a
+                    // `C-x b`, or the answer to the first of two switches),
+                    // and aligning to it dragged the window back, drew a
+                    // follow, and spun as #326's attach did. The daemon's
+                    // record of what it wrote and what was answered tells
+                    // it so (`SnapshotAnswers`); every declaration is
+                    // still counted against that record, a terminal's too,
+                    // and a stale one moves nothing. The snapshot's own
+                    // answer then declares the new buffer's viewport.
+                    let stale = session_registry.semantic(source).is_some()
+                        && session_registry
+                            .session_mut(source)
+                            .is_some_and(|session| session.snapshot_answers.declared(buffer_id));
+                    if session_registry.semantic(source).is_some() && !terminal_context && !stale {
                         // Phase B (B1) — the Viewport declares *which
                         // buffer this frontend is displaying*. Align its
                         // editor window to that buffer so keyboard input
