@@ -146,6 +146,21 @@ concurrency:
 # two test entries become five, about two more gigabytes in a budget
 # already near its limit, and a full budget evicting the entries it
 # depends on is the failure this note exists to prevent, not a fix.
+#
+# EVERY UBUNTU JOB RUNS ON `ubuntu-24.04`, NOT `ubuntu-latest` (#506).
+# PR #504's run at 01:21Z on 2026-11-11 had `ubuntu-24.04`; its run at
+# 15:09Z had `ubuntu-26.04`, and there `apt-get update` got no answer
+# from any Ubuntu archive host: every leg that calls
+# `scripts/ci-apt-update` failed in it, ten of ten over two attempts,
+# before any build (`CI` 43045455554). The test matrix keeps
+# `os: ubuntu-latest` and pins only its `runs-on`, because that value
+# is in the job names branch protection requires and in the arming
+# below; renaming it would leave the required checks pending forever.
+# The pin also keeps the caches to one image: Swatinem's key names the
+# job, the toolchains and the manifests and not the image (`Test
+# (crdt)` had the same key on both that day), so an entry `main` saved
+# on one image would be restored on the other. Moving to 26.04 is
+# separate, planned work.
 jobs:
   # Docs-only changes skip the jobs that compile and run tests, except
   # `docs-consistency` below, which exists for exactly that path. Only
@@ -157,7 +172,7 @@ jobs:
   # forever.
   changes:
     name: Changed paths
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.classify.outputs.code }}
@@ -188,7 +203,7 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -213,7 +228,7 @@ jobs:
   # reachable from the D9 epoch, and the epoch has to be in the clone.
   attribution:
     name: Commit attribution (D9)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -241,7 +256,7 @@ jobs:
 
   clippy:
     name: Lint (${{ matrix.lua }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -292,7 +307,7 @@ jobs:
   # so this job stays off that path rather than running it twice.
   docs-consistency:
     name: Docs consistency
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'false'
     timeout-minutes: 25
@@ -310,7 +325,7 @@ jobs:
 
   gpu-render:
     name: GPU Render (headless)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
@@ -348,7 +363,7 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }}${{ matrix.crdt == '' && ', no crdt' || '' }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
     # 60, not 25: this is the only job whose observed max is minutes
@@ -690,7 +705,7 @@ jobs:
   # full debug workspace build, a case these readings do not separate.
   crdt-test:
     name: Test (crdt)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 60
@@ -767,7 +782,7 @@ jobs:
 
   acceptance:
     name: M1 Acceptance Gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
@@ -782,7 +797,7 @@ jobs:
 
   m4-perf-gates:
     name: M4 Perf Gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
@@ -805,7 +820,7 @@ jobs:
   # hook invocation), revisit then.
   m5-perf-gates:
     name: M5 Perf Gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
@@ -832,7 +847,7 @@ jobs:
   # only runs on push/PR.
   m6-perf-gates:
     name: M6 Perf Gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 15
@@ -890,7 +905,7 @@ jobs:
   # the same reasoning that gives m5-perf-gates 25.
   m10-perf-gates:
     name: M10 Perf Gates (crdt)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
@@ -915,7 +930,7 @@ jobs:
   # in a debug build, which is worth knowing and is not a gate on merge.
   perf-default:
     name: Perf budgets (debug)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 35
