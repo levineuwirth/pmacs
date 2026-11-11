@@ -16750,6 +16750,116 @@ Tally (main-fuzz-a7516f5): 2 = 2 + 0.
 
 So, at E10r's close: `main` is green at `7e4d823`, `bd33294` and the squash `a7516f5`, every test leg with fish passing #254's row and all six test legs at the squash passing #494's, #489's and #490's; none rerun. E10r's six issues closed with its merge, #494 among them. #489 and #490, which the squash message names open until this merge, were closed on the owner's word at 18:26:57Z and 18:26:59Z, before the run above finished, on PR #462's `CI` 42604257347; the run above reads both rows `ok` again. No count above changes.
 
+### E10t's checkpoint: PR #504 red at `04727e4` on its own defect, green at `8bf9b16`
+
+Recorded 2026-11-11 at E10t's checkpoint (roadmap §E10t). Every run was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below, and every local gate's id, was searched for in this file before it was written, and none was in it. `main` has not moved since `868e9ba`, whose runs E10r's close recorded.
+
+#### PR #504 at `04727e4`: red at attempt 1, this branch's, not rerun
+
+`CI` 42929343254 at `04727e4`, attempt 1 of 1, `pull_request`, created 2026-11-11T00:11:11Z and completed 00:52:50Z: `failure`. The merge `9e42a87` into `868e9ba`. **One red leg, and the defect is this branch's, not an intermittent:** `Test (ubuntu-latest / luajit, no crdt)` 130223903791, `--lib`, `2188 passed; 1 failed; 13 ignored`, `finished in 72.28s`: `daemon::tests::e9_a_live_token_is_refused_before_anything_of_the_attach_exists`, `the first's bootstrap: Eof` at `src/daemon.rs:6156:66`. `c0ad22f` sent a semantic session with `crdt_replica` its window's buffer alone; the row builds such a session by hand in the build without `crdt`, where that buffer's snapshot is a stub that always fails, so the bootstrap closed the socket. `8bf9b16` keeps that build on the sweep's stub. No row and no issue: nothing here recurs.
+
+Tally (pr-504-ci-04727e4): 19 = 17 + 1 + 1.
+
+Tally (pr-504-ci-04727e4-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 130223829490 | success |
+| Changed paths | 130223829775 | success |
+| Lint (luajit) | 130223829801 | success |
+| Lint (lua54) | 130223830003 | success |
+| Format | 130223830040 | success |
+| M10 Perf Gates (crdt) | 130223903488 | success |
+| M1 Acceptance Gates | 130223903536 | success |
+| M6 Perf Gates | 130223903546 | success |
+| GPU Render (headless) | 130223903555 | success |
+| Perf budgets (debug) | 130223903562 | success |
+| Test (crdt) | 130223903584 | success |
+| Test (macos-latest / lua54) | 130223903591 | success |
+| M5 Perf Gates | 130223903635 | success |
+| Test (ubuntu-latest / luajit) | 130223903695 | success |
+| Test (macos-latest / luajit) | 130223903771 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 130223903791 | failure |
+| Test (ubuntu-latest / lua54) | 130223903842 | success |
+| M4 Perf Gates | 130223903852 | success |
+| Docs consistency | 130223905098 | skipped |
+
+Tally (pr-504-ci-04727e4-success): 17 rows of the table above with `result` = `success`.
+Tally (pr-504-ci-04727e4-failure): 1 row of the table above with `result` = `failure`.
+Tally (pr-504-ci-04727e4-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-504-ci-04727e4-legs): 6 items in the list below.
+
+- `Test (crdt)` 130223903584: `success`, 232 `running` lines and 232 results, 5,629 / 0 / 88, 84,698 MB available before the workspace build.
+- `Test (macos-latest / lua54)` 130223903591: `success`, 234 `running` lines and 234 results, 5,629 / 0 / 80.
+- `Test (ubuntu-latest / luajit)` 130223903695: `success`, 233 `running` lines and 233 results, 5,688 / 0 / 88, 84,086 MB available before the workspace build.
+- `Test (macos-latest / luajit)` 130223903771: `success`, 234 `running` lines and 234 results, 5,629 / 0 / 80.
+- `Test (ubuntu-latest / luajit, no crdt)` 130223903791: `failure`, 231 `running` lines and 231 results, 4,969 / 1 / 72, failing `daemon::tests::e9_a_live_token_is_refused_before_anything_of_the_attach_exists`.
+- `Test (ubuntu-latest / lua54)` 130223903842: `success`, 233 `running` lines and 233 results, 5,688 / 0 / 88, 84,086 MB available before the workspace build.
+
+`Grammar fuzz` 42929343263 at `04727e4`, attempt 1 of 1: `success`, `Grammar fuzz` 130223829457 and `Grammar fuzz (asan-strict)` 130223829164, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`.
+
+Tally (pr-504-fuzz-04727e4): 2 = 2 + 0.
+
+#### PR #504 at `8bf9b16`, the head: green
+
+`CI` 42938397954 at `8bf9b16`, attempt 1 of 1, `pull_request`, created 2026-11-11T01:21:45Z and completed 02:04:17Z: `success`. The merge `37afd4d` into `868e9ba`. `e9_a_live_token_is_refused_before_anything_of_the_attach_exists` reads `ok` on the no-crdt leg. `tests/e10t_gpu_window_settles.rs` ran its nine on `Test (crdt)` (52.55 s) and both macOS legs (30.50 s, 37.14 s); on the two Ubuntu matrix legs its GPU rows returned early for want of a GPU (1.19 s, 1.24 s), and the no-crdt leg compiles it out. `GPU Render (headless)` 130254106202 ran `keypaint_limit_tests::a_stream_that_never_pauses_ends_a_settle_at_its_limit`, `ok`.
+
+Tally (pr-504-ci-8bf9b16): 19 = 18 + 1.
+
+Tally (pr-504-ci-8bf9b16-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 130254034617 | success |
+| Format | 130254034966 | success |
+| Lint (luajit) | 130254035022 | success |
+| Lint (lua54) | 130254035170 | success |
+| Commit attribution (D9) | 130254035203 | success |
+| M6 Perf Gates | 130254106164 | success |
+| GPU Render (headless) | 130254106202 | success |
+| M1 Acceptance Gates | 130254106259 | success |
+| M4 Perf Gates | 130254106353 | success |
+| Test (ubuntu-latest / lua54) | 130254106359 | success |
+| Test (crdt) | 130254106377 | success |
+| Test (macos-latest / luajit) | 130254106388 | success |
+| M5 Perf Gates | 130254106409 | success |
+| Test (macos-latest / lua54) | 130254106412 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 130254106435 | success |
+| Perf budgets (debug) | 130254106444 | success |
+| M10 Perf Gates (crdt) | 130254106471 | success |
+| Test (ubuntu-latest / luajit) | 130254106518 | success |
+| Docs consistency | 130254108937 | skipped |
+
+Tally (pr-504-ci-8bf9b16-success): 18 rows of the table above with `result` = `success`.
+Tally (pr-504-ci-8bf9b16-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-504-ci-8bf9b16-legs): 6 items in the list below.
+
+- `Test (crdt)` 130254106377: `success`, 232 `running` lines and 232 results, 5,629 / 0 / 88, 84,698 MB available before the workspace build.
+- `Test (macos-latest / lua54)` 130254106412: `success`, 234 `running` lines and 234 results, 5,629 / 0 / 80.
+- `Test (ubuntu-latest / luajit)` 130254106518: `success`, 233 `running` lines and 233 results, 5,688 / 0 / 88, 84,086 MB available before the workspace build.
+- `Test (macos-latest / luajit)` 130254106388: `success`, 234 `running` lines and 234 results, 5,629 / 0 / 80.
+- `Test (ubuntu-latest / luajit, no crdt)` 130254106435: `success`, 233 `running` lines and 233 results, 5,030 / 0 / 72, 84,086 MB available before the workspace build.
+- `Test (ubuntu-latest / lua54)` 130254106359: `success`, 233 `running` lines and 233 results, 5,688 / 0 / 88, 84,086 MB available before the workspace build.
+
+`Grammar fuzz` 42938397773 at `8bf9b16`, attempt 1 of 1: `success`, `Grammar fuzz` 130254034045 and `Grammar fuzz (asan-strict)` 130254033813, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`.
+
+Tally (pr-504-fuzz-8bf9b16): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10t-local): 6 items in the list below.
+
+- `20261110T215939Z-1919922` at `c0ad22f`, `scripts/gate`: five of six, the sweep 6,079 / 4 / 88 at 241 result lines, four reds in suites the branch does not touch, each commented on or filed: #304's two `pmacs-gpu` rows (`caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled`, `overwide_status_runs_never_wrap_and_keep_the_suffix_pinned`), #460's `e7h_ordinary_large_files_parse_inside_the_default_deadline`, and `e7e_hls_attaches_in_a_cabal_project_and_reports_a_type_error` with `publishes [v2:error v2:0]`, a shape no issue carried, filed as #503. A 1-minute load of 8.68 to 62.37 beside it.
+- `20261110T221950Z-2269656` at `c0ad22f`, `scripts/gate`: all six ok, 6,083 / 0 / 88, no daemon survived.
+- `20261110T233218Z-2542520` at `d447722`, `scripts/gate`: all six ok, 6,084 / 0 / 88, no daemon survived.
+- `20261110T235433Z-2706859` at `04727e4`, `scripts/gate`: all six ok, 6,084 / 0 / 88, no daemon survived.
+- `20261111T005526Z-2953427` at `8bf9b16`, `scripts/gate --protocol`: all eight ok, `sweep` 6,084 / 0 / 88 and `sweep-luajit` 5,426 / 0 / 72, no daemon survived.
+- Not a gate: 30 suites at once by hand at the tree that became `c0ad22f`, `e9_5_an_oversize_snapshot_is_refused_with_a_visible_status_not_skipped` timing out at its 10 s, #434's fragments under that load, commented on #434; alone it passed.
+
+So, at E10t's checkpoint: PR #504 is green at its head `8bf9b16`, its first run's one red its own defect and fixed; `main` is unchanged at `868e9ba`. No row's count changes: every sample above is local, and #503 is filed on a local one.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
