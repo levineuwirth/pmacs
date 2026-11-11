@@ -2240,7 +2240,7 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     while std::time::Instant::now() < deadline && phase != Phase::Done {
         let now = std::time::Instant::now();
         // Everything the daemon wrote, through the production dispatch.
-        while let Ok(event) = rx.try_recv() {
+        drain_probe_slice(&rx, |event| {
             if let AttachEvent::Message(message) = &event {
                 match message.as_ref() {
                     InstanceMessage::BufferSnapshot { .. } => snapshot_seen = true,
@@ -2292,7 +2292,7 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 cursor_seen = false;
                 phase = Phase::Lost;
             }
-        }
+        });
         // The reconnect loop, as the deadline pump drives it.
         if phase == Phase::Lost {
             let reconnect_tx = tx.clone();
@@ -2548,7 +2548,7 @@ fn run_quit_probe(socket: &Path, report: &Path) -> i32 {
 
     while std::time::Instant::now() < deadline && phase != Phase::Done {
         // Everything the daemon wrote, through the production dispatch.
-        while let Ok(event) = rx.try_recv() {
+        drain_probe_slice(&rx, |event| {
             match &event {
                 AttachEvent::Message(message) => match message.as_ref() {
                     InstanceMessage::BufferSnapshot { .. } => snapshot_seen = true,
@@ -2558,7 +2558,7 @@ fn run_quit_probe(socket: &Path, report: &Path) -> i32 {
                 AttachEvent::Disconnected(reason) => disconnect = Some(reason.clone()),
             }
             app.dispatch_app_event(AppEvent::Attach(event));
-        }
+        });
         let s = app.state.as_ref().expect("state");
         let prompt = s.minibuffer.as_ref().map(|m| m.prompt.clone());
         match phase {
@@ -3559,6 +3559,53 @@ fn marked_covers(marked: &[(u64, u64)], start: u64, end: u64) -> bool {
     at >= end
 }
 
+/// Hand each attach event waiting on `rx` to `each`, the first waited on
+/// for `first`, for no longer than `budget` in all; whether any arrived.
+/// The drain stops at `budget` though events keep arriving, so its caller
+/// reads its own limit again (E10t.3, and for the reconnect and quit
+/// probes E10t's fix round 1, review 1's Low 2): a stream that never
+/// paused (#326's spin, a snapshot about every 50 ms that took longer than
+/// that to apply) held a drain that went on while anything waited past
+/// every deadline its caller had, until a timeout outside the probe
+/// killed it.
+fn drain_attach_events(
+    rx: &std::sync::mpsc::Receiver<AttachEvent>,
+    first: std::time::Duration,
+    budget: std::time::Duration,
+    mut each: impl FnMut(AttachEvent),
+) -> bool {
+    let until = std::time::Instant::now() + budget;
+    let mut any = false;
+    while let Ok(event) = rx.recv_timeout(if any {
+        std::time::Duration::ZERO
+    } else {
+        first
+    }) {
+        any = true;
+        each(event);
+        if std::time::Instant::now() >= until {
+            break;
+        }
+    }
+    any
+}
+
+/// How long a pass of the reconnect and quit probes' loops drains before
+/// it reads its deadline and its phase again: their own 5 ms step.
+const PROBE_DRAIN_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// The reconnect and quit probes' drain: what is already waiting, for no
+/// longer than [`PROBE_DRAIN_SLICE`]. Until E10t's fix round 1 each drained
+/// while anything waited, so its deadline went unread beside a stream that
+/// never paused (review 1's Low 2: the quit probe killed at a 40 s outside
+/// bound, the reconnect probe overrunning its 3 s to 30 s).
+fn drain_probe_slice(
+    rx: &std::sync::mpsc::Receiver<AttachEvent>,
+    each: impl FnMut(AttachEvent),
+) -> bool {
+    drain_attach_events(rx, std::time::Duration::ZERO, PROBE_DRAIN_SLICE, each)
+}
+
 /// The keypaint probe's session (E10k.1): the production `App`, the
 /// attach events behind it, and the offscreen target a timed frame is
 /// rendered into.
@@ -3637,22 +3684,12 @@ impl KeypaintSession {
     /// held the caller here past `PMACS_GPU_PROBE_SAMPLE_MS` until a
     /// timeout outside the probe killed it.
     fn pump(&mut self, wait: std::time::Duration) -> bool {
-        let until = std::time::Instant::now() + wait;
-        let mut any = false;
-        while let Ok(event) =
-            self.rx
-                .recv_timeout(if any { std::time::Duration::ZERO } else { wait })
-        {
-            any = true;
+        drain_attach_events(&self.rx, wait, wait, |event| {
             if let AttachEvent::Disconnected(reason) = &event {
                 self.disconnect = Some(reason.clone());
             }
             self.app.dispatch_app_event(AppEvent::Attach(event));
-            if std::time::Instant::now() >= until {
-                break;
-            }
-        }
-        any
+        })
     }
 
     /// The caret is at `byte`, confirmed by the daemon and fresh, and
@@ -3727,23 +3764,23 @@ mod keypaint_limit_tests {
     /// witness hangs where the limit is not read, after which it fails.
     const STREAM_CEILING: std::time::Duration = std::time::Duration::from_secs(20);
 
-    /// E10t.3 --- a stream that never pauses ends at the caller's limit.
-    /// A producer keeps a bounded channel full of snapshots of a 100 KB
-    /// buffer, each taking milliseconds to apply through the production
-    /// `App` and microseconds to send, so an event is always waiting and
-    /// memory stays at four snapshots. `settle` with a condition that
-    /// never holds must come back at its limit, half a second. Where
-    /// `pump` drains while anything waits, as it did until E10t.3, it
-    /// comes back only when the stream stops at [`STREAM_CEILING`], and
-    /// the row fails on the time.
-    #[test]
-    fn a_stream_that_never_pauses_ends_a_settle_at_its_limit() {
+    /// A stream that never pauses into a [`KeypaintSession`]: a producer
+    /// keeps a bounded channel full of snapshots of a 100 KB buffer, each
+    /// taking milliseconds to apply through the production `App` and
+    /// microseconds to send, so an event is always waiting and memory stays
+    /// at four snapshots, until it is stopped or [`STREAM_CEILING`] passes.
+    /// `None` without a wgpu adapter.
+    fn never_pausing_stream() -> Option<(
+        KeypaintSession,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<u64>,
+    )> {
         let Some(state) = State::new_headless(640, 480, "") else {
             assert!(
                 std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
                 "PMACS_REQUIRE_GPU is set but there is no wgpu adapter"
             );
-            return;
+            return None;
         };
         let doc = loro::LoroDoc::new();
         doc.get_text(LORO_TEXT_CONTAINER)
@@ -3773,8 +3810,21 @@ mod keypaint_limit_tests {
             }
             sent
         });
-        let mut session =
+        let session =
             KeypaintSession::new(state, None, Path::new("/nonexistent-keypaint-socket"), rx);
+        Some((session, stop, producer))
+    }
+
+    /// E10t.3 --- a stream that never pauses ends at the caller's limit.
+    /// `settle` with a condition that never holds must come back at its
+    /// limit, half a second. Where `pump` drains while anything waits, as
+    /// it did until E10t.3, it comes back only when the stream stops at
+    /// [`STREAM_CEILING`], and the row fails on the time.
+    #[test]
+    fn a_stream_that_never_pauses_ends_a_settle_at_its_limit() {
+        let Some((mut session, stop, producer)) = never_pausing_stream() else {
+            return;
+        };
         let limit = std::time::Duration::from_millis(500);
         let began = std::time::Instant::now();
         let held = session.settle(std::time::Duration::from_hours(1), limit, &|_| false);
@@ -3792,6 +3842,44 @@ mod keypaint_limit_tests {
         assert!(
             applied > 1 && sent > applied,
             "the stream was still running when settle came back: {applied} applied of {sent} sent"
+        );
+    }
+
+    /// E10t fix round 1 (review 1's Low 2) --- the reconnect and quit
+    /// probes' drain ends at its slice beside the same stream, so their
+    /// loops read their deadlines. Each pass of those loops drains through
+    /// [`drain_probe_slice`] and then reads its deadline; here a loop of
+    /// such passes, as theirs is, must end within a second of a 500 ms
+    /// deadline. Where the drain goes on while anything waits, as theirs
+    /// did until this round, the first pass ends only when the stream
+    /// stops at [`STREAM_CEILING`], and the row fails on the time.
+    #[test]
+    fn a_stream_that_never_pauses_ends_a_probe_loop_at_its_deadline() {
+        let Some((mut session, stop, producer)) = never_pausing_stream() else {
+            return;
+        };
+        let began = std::time::Instant::now();
+        let deadline = began + std::time::Duration::from_millis(500);
+        let mut passes = 0_u32;
+        while std::time::Instant::now() < deadline {
+            passes += 1;
+            drain_probe_slice(&session.rx, |event| {
+                session.app.dispatch_app_event(AppEvent::Attach(event));
+            });
+        }
+        let took = began.elapsed();
+        let applied = session.state().snapshots_applied;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(session);
+        let sent = producer.join().expect("the producer");
+        assert!(
+            took < std::time::Duration::from_millis(1_500),
+            "the probe loop came back after {took:?} and {passes} passes, its deadline 500 ms: \
+             the drain did not read it ({applied} snapshots applied of {sent} sent)"
+        );
+        assert!(
+            applied > 1 && sent > applied,
+            "the stream was still running when the loop came back: {applied} applied of {sent} sent"
         );
     }
 }
