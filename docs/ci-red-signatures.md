@@ -17185,6 +17185,105 @@ Tally (main-fuzz-1e766cf): 2 = 2 + 0.
 
 So, at PR #507's close: PR #507 is green at its head after one rerun of a leg on #509, and `main` is green at `5627dea` and at the squash `1e766cf`, the squash's every Ubuntu job on `ubuntu-24.04`. #506 is closed on non-reproduction at fifteen. #509 opens at one, with its rerun green. #330 stays at three, and every other count stands.
 
+### E10t fix round 2: PR #504 green at `e0c5ba6` on a merge holding PR #507's pin
+
+Recorded 2026-11-11 at E10t's fix round 2 (roadmap §E10t, review 2). Every run was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below, and the local gate's id, was searched for in this file before it was written, and none was in it. PR #507 merged as `1e766cf` at 2026-11-11T21:44:01Z, and PR #504's new head was pushed after it, so that its run tests a merge that holds the pin. `main`'s runs at `1e766cf` and at `5627dea` are recorded under PR #507's close above, and `main`'s at `6558a10`, that record's own commit, is left to the next close.
+
+#### `main` at `1c7c3d9`, E10t fix round 1's registry: green
+
+`CI` 43054691358 at `1c7c3d9`, attempt 1 of 1, `push`, created 2026-11-11T16:04:44Z and completed 16:07:27Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-1c7c3d9): 15 = 6 + 9.
+
+Tally (main-ci-1c7c3d9-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 130640884192 | success |
+| Lint (lua54) | 130640884684 | success |
+| Format | 130640884687 | success |
+| Commit attribution (D9) | 130640884766 | success |
+| Lint (luajit) | 130640885097 | success |
+| Docs consistency | 130641003170 | success |
+| M1 Acceptance Gates | 130641005469 | skipped |
+| Test (crdt) | 130641005604 | skipped |
+| M10 Perf Gates (crdt) | 130641005626 | skipped |
+| GPU Render (headless) | 130641006535 | skipped |
+| Test (matrix) | 130641006774 | skipped |
+| Perf budgets (debug) | 130641006825 | skipped |
+| M5 Perf Gates | 130641006859 | skipped |
+| M4 Perf Gates | 130641007051 | skipped |
+| M6 Perf Gates | 130641007320 | skipped |
+
+Tally (main-ci-1c7c3d9-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-1c7c3d9-skipped): 9 rows of the table above with `result` = `skipped`.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written here as `Test (matrix)`.
+
+`Grammar fuzz` 43054691483 at `1c7c3d9`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 130640886571 and `Grammar fuzz (asan-strict)` 130640886884.
+
+Tally (main-fuzz-1c7c3d9): 2 = 2 + 0.
+
+#### PR #504 at `e0c5ba6`: green, every test leg run
+
+`CI` 43105963536 at `e0c5ba6`, attempt 1 of 1, `pull_request`, created 2026-11-11T21:46:13Z and completed 22:30:43Z: `success`. The merge `e6d0159` into `1e766cf`. Every Ubuntu job ran on `ubuntu-24.04` `20261101.360.1` and both macOS legs on `macos-26-arm64` `20261102.0473.1`. In each of the five jobs that call `scripts/ci-apt-update` the step printed no `ci-apt-update:` line, so no attempt failed, and apt fetched its indexes in one or two seconds. This is the first run of PR #504 in which an Ubuntu test leg ran since `8bf9b16`'s.
+
+Tally (pr-504-ci-e0c5ba6): 19 = 18 + 1.
+
+Tally (pr-504-ci-e0c5ba6-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 130809229386 | success |
+| Lint (luajit) | 130809229838 | success |
+| Commit attribution (D9) | 130809229850 | success |
+| Format | 130809229877 | success |
+| Lint (lua54) | 130809230034 | success |
+| M1 Acceptance Gates | 130809340532 | success |
+| Test (crdt) | 130809340537 | success |
+| M10 Perf Gates (crdt) | 130809340563 | success |
+| Perf budgets (debug) | 130809340633 | success |
+| M5 Perf Gates | 130809340652 | success |
+| M4 Perf Gates | 130809340658 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 130809340660 | success |
+| Test (ubuntu-latest / lua54) | 130809340669 | success |
+| Test (macos-latest / luajit) | 130809340682 | success |
+| M6 Perf Gates | 130809340703 | success |
+| Test (macos-latest / lua54) | 130809340722 | success |
+| Test (ubuntu-latest / luajit) | 130809340829 | success |
+| GPU Render (headless) | 130809340972 | success |
+| Docs consistency | 130809343322 | skipped |
+
+Tally (pr-504-ci-e0c5ba6-success): 18 rows of the table above with `result` = `success`.
+
+Tally (pr-504-ci-e0c5ba6-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-504-ci-e0c5ba6-legs): 7 items in the list below.
+
+- `Test (crdt)` 130809340537: `success`, 232 `running` lines and 232 results, 5,643 / 0 / 88; `tests/e10t_gpu_window_settles.rs` 22 passed in 277.85 s, `PMACS_REQUIRE_GPU` armed.
+- `Test (ubuntu-latest / lua54)` 130809340669: `success`, 233 `running` lines and 233 results, 5,702 / 0 / 88; the E10t suite 22 passed in 19.10 s, `PMACS_REQUIRE_GPU` unset, so its GPU rows returned and read `ok`.
+- `Test (ubuntu-latest / luajit)` 130809340829: `success`, 233 `running` lines and 233 results, 5,702 / 0 / 88; the E10t suite 22 passed in 18.04 s, `PMACS_REQUIRE_GPU` unset as on the leg above.
+- `Test (ubuntu-latest / luajit, no crdt)` 130809340660: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72; the E10t suite compiled out, `running 0 tests`.
+- `Test (macos-latest / luajit)` 130809340682: `success`, 234 `running` lines and 234 results, 5,643 / 0 / 80; the E10t suite 22 passed in 125.00 s, `PMACS_REQUIRE_GPU` armed.
+- `Test (macos-latest / lua54)` 130809340722: `success`, 234 `running` lines and 234 results, 5,643 / 0 / 80; the E10t suite 22 passed in 121.95 s, `PMACS_REQUIRE_GPU` armed.
+- `GPU Render (headless)` 130809340972: `success`, one `running` line and one result, 398 / 0 / 0.
+
+Against `main`'s run at `1e766cf` (`CI` 43105647878, under PR #507's close above), each leg that builds `crdt` has one more `running` line and 23 more passed, the E10t suite's 22 and the record's unit row; the no-crdt leg has the target with no test in it and one more passed, the unit row; `GPU Render (headless)` has two more, `pmacs-gpu`'s stream rows. On the three armed legs the suite's nine rows of review 2 (six named `review2_`, three `e10t_r2_`) each read `ok`. #509's row, `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, reads `ok` on all six test legs.
+
+`Grammar fuzz` 43105963519 at `e0c5ba6`, attempt 1 of 1, on `ubuntu-24.04` as its workflow pins: `success`, `Grammar fuzz` 130809229786 and `Grammar fuzz (asan-strict)` 130809230200, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`.
+
+Tally (pr-504-fuzz-e0c5ba6): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10t-fixes2-local): 2 items in the list below.
+
+- `20261111T163209Z-2112566` at `143920e`, review 2's `scripts/gate --protocol`: all eight ok, `sweep` 6,090 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 241 result lines in each.
+- `20261111T193152Z-3602193` at `e0c5ba6`, `scripts/gate --protocol`: all eight ok, `sweep` 6,099 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 237 `Running` targets and 241 result lines in each, no daemon survived.
+
+So, at E10t's fix round 2: PR #504's head `e0c5ba6` is green on a merge into `1e766cf`, every test leg run and paired, and `main`'s run at `1c7c3d9`, which fix round 1's section left unrecorded, is green in the registry-push shape. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
