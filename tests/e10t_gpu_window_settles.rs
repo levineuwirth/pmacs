@@ -224,6 +224,15 @@ fn settle_steps() -> String {
 /// Settled on `name`: ready, the same buffer named `name` at both counts,
 /// and the count unchanged across the hold and at most [`AT_MOST`].
 fn assert_settled(probe: &Probe, name: &str, what: &str) {
+    if let Err(said) = settled(probe, name, AT_MOST, what) {
+        panic!("{said}");
+    }
+}
+
+/// Whether `probe` settled on `name`: ready, the same buffer named `name`
+/// at its `early` and `late` counts, the count unchanged across the hold
+/// and at most `at_most`; what it read when it did not.
+fn settled(probe: &Probe, name: &str, at_most: u64, what: &str) -> Result<(), String> {
     let (early, late) = (probe.count("early"), probe.count("late"));
     let said = format!(
         "{what}: early {early} snapshots on {:?} ({}), late {late} on {:?} ({}), \
@@ -235,19 +244,24 @@ fn assert_settled(probe: &Probe, name: &str, what: &str) {
         probe.fact("ready"),
         probe.took
     );
-    assert_eq!(probe.fact("ready"), "true", "{said}");
-    assert_eq!(probe.fact("early.name"), name, "{said}");
-    assert_eq!(probe.fact("late.name"), name, "{said}");
-    assert_eq!(
-        probe.fact("early.buffer"),
-        probe.fact("late.buffer"),
-        "{said}"
-    );
-    assert_eq!(early, late, "the count rose across the hold; {said}");
-    assert!(
-        late <= AT_MOST,
-        "more snapshots than a window that settles is sent; {said}"
-    );
+    if probe.fact("ready") != "true" {
+        return Err(format!("not ready; {said}"));
+    }
+    if probe.fact("early.name") != name || probe.fact("late.name") != name {
+        return Err(format!("not on {name:?}; {said}"));
+    }
+    if probe.fact("early.buffer") != probe.fact("late.buffer") {
+        return Err(format!("the buffer changed across the hold; {said}"));
+    }
+    if early != late {
+        return Err(format!("the count rose across the hold; {said}"));
+    }
+    if late > at_most {
+        return Err(format!(
+            "more snapshots than a window that settles is sent, {at_most}; {said}"
+        ));
+    }
+    Ok(())
 }
 
 /// E10t.2 (i): two files of 10,000 + 20,000 lines on a fresh root. At the
@@ -266,9 +280,28 @@ fn e10t_2_i_ten_and_twenty_thousand_lines_settle_on_the_shown_file() {
 /// `two.rs` and `three.rs`, keeps `*scratch*` and shows `one.rs`; four
 /// attaches one after another. The first is on a fresh root; each later
 /// one finds the desktop the one before it left (E10.2), so a first attach
-/// that settled elsewhere would carry its buffer into the rest.
+/// that settled elsewhere would carry its buffer into the rest. Those
+/// three take the restored branch, which bootstrapped on one buffer before
+/// E10t too; the row below makes all four fresh.
 #[test]
 fn e10t_2_ii_four_attaches_settle_on_the_file_the_daemon_shows() {
+    four_attaches_settle_on_one_rs("");
+}
+
+/// E10t.2 (ii) as #326 ran it (review 1's Low 1): four attaches, each a
+/// fresh no-target attach, since `session.reopen-desktop` is off and so no
+/// attach reopens the desktop the one before it left. At the base each
+/// was sent every buffer and could settle anywhere, as #326's four did
+/// (`two.rs`, `two.rs`, `one.rs`, `one.rs`, 2026-10-07).
+#[test]
+fn e10t_2_ii_four_fresh_attaches_settle_with_the_desktop_off() {
+    four_attaches_settle_on_one_rs("pmacs.config.set('session.reopen-desktop', false)\n");
+}
+
+/// #326's run: `one.rs`, `two.rs` and `three.rs` visited, `*scratch*` kept,
+/// `one.rs` shown, `extra` after, and four attaches one after another, each
+/// of which must settle on `one.rs`.
+fn four_attaches_settle_on_one_rs(extra: &str) {
     let dir = files_dir();
     let files: Vec<PathBuf> = ["one.rs", "two.rs", "three.rs"]
         .iter()
@@ -282,13 +315,25 @@ fn e10t_2_ii_four_attaches_settle_on_the_file_the_daemon_shows() {
             path
         })
         .collect();
-    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&files, true, ""));
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&files, true, extra));
+    // Every attach is read, and every one that did not settle named, so
+    // a failure says which of the four did not (at the base a fresh attach
+    // was sent every buffer, a restored one only its own).
+    let mut unsettled = Vec::new();
     for attach in 1..=4 {
         let Some(probe) = run_probe(&daemon, &format!("ii-{attach}"), &settle_steps()) else {
             return;
         };
-        assert_settled(&probe, "one.rs", &format!("attach {attach} of 4"));
+        if let Err(said) = settled(&probe, "one.rs", AT_MOST, &format!("attach {attach} of 4")) {
+            unsettled.push(said);
+        }
     }
+    assert!(
+        unsettled.is_empty(),
+        "{} of 4 attaches did not settle on one.rs:\n{}",
+        unsettled.len(),
+        unsettled.join("\n")
+    );
 }
 
 /// E10t.2 (iii): a pair large enough to have run to the timeout at the
