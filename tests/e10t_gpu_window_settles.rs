@@ -38,10 +38,11 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use pmacs_protocol::BufferId;
 use pmacs_protocol::message::{InstanceMessage, PROTOCOL_VERSION};
+use pmacs_protocol::{BufferId, Key, Modifiers};
 
 use common::daemon::TestDaemon;
+use common::oversize::oversize_text;
 use common::wire::WireSession;
 
 /// From the probe's readiness to the first count.
@@ -533,4 +534,265 @@ fn e10t_r1_two_switches_in_flight_settle_on_the_last() {
     if let Err(said) = settled(&probe, "one.log", 3, "two switches 120 ms apart") {
         panic!("{said}");
     }
+}
+
+/// `C-c 6` holds the dispatcher `hold_ms`, as a slow command does, and then
+/// shows `@two@` in the key's own handling. A declaration made in that
+/// time waits behind the key and is read in the same dispatcher pass: after
+/// the switch, before the tick writes the follow. (Review 2 timed the real
+/// commands: a switch to an open 12.5 MB buffer held the dispatcher 11 ms
+/// in release and 101 ms in debug, a cold open 13 and 109 ms, about a
+/// touchpad's 8 to 16 ms between scroll events in release and under the
+/// probe's 250 ms step in both, which is why the hold is here.)
+fn slow_switch(hold_ms: u64) -> String {
+    format!(
+        "pmacs.command.define {{ name = 'e10t.slow', description = 'hold, then show two',\n\
+           fn = function()\n\
+             local until_ms = pmacs.editor.monotonic_ms() + {hold_ms}\n\
+             while pmacs.editor.monotonic_ms() < until_ms do end\n\
+             pmacs.buffer.find_or_open('@two@')\n\
+           end }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c 6', command = 'e10t.slow' }}\n"
+    )
+}
+
+/// Review 2's Medium 1: a declaration read in the same dispatcher pass as
+/// the key that switched the window, before the follow is written, names
+/// the buffer the frontend still shows. Fix round 1's record holds only
+/// snapshots already written, so it found nothing in flight and called the
+/// declaration real; aligning to it put the window back, no snapshot was
+/// ever written, and the switch was gone under a status line that claimed
+/// it (in a real window, a scroll under way when `RET` went). At 143920e:
+/// `not on "two.log"; early 1 snapshots on "one.log"`, 2 of 2 release runs
+/// and 1 of 1 debug, and the pre-round daemon the same. While the daemon
+/// owes the session a follow, a declaration naming the buffer last sent to
+/// it now moves nothing.
+#[test]
+fn review2_a_wheel_turn_read_in_the_switch_s_own_pass_does_not_undo_it() {
+    let daemon = daemon_with_pair_and(179_000, &slow_switch(400));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-same-pass",
+        &switch_steps("key:C-c key:6", "wheel:3"),
+    ) else {
+        return;
+    };
+    // The attach's snapshot and the switch's.
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "a wheel turn in the switch's own pass",
+    ) {
+        panic!("{said}");
+    }
+}
+
+/// Its control: the same slow switch with no wheel turn settles on
+/// `two.log`, at the reviewed head and after.
+#[test]
+fn review2_control_the_slow_switch_alone_settles() {
+    let daemon = daemon_with_pair_and(179_000, &slow_switch(400));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-same-pass-control",
+        &switch_steps("key:C-c key:6", "quiet:250"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(&probe, "two.log", 2, "the slow switch alone") {
+        panic!("{said}");
+    }
+}
+
+/// `C-c 3` kills the shown buffer 235 ms after the key, from the tick hook,
+/// so the window falls to `two.log` and the probe's wheel turn declares a
+/// buffer that no longer exists while `two.log`'s snapshot is in flight.
+fn late_kill() -> String {
+    "local at = nil\n\
+     pmacs.command.define { name = 'e10t.latekill', description = 'kill one later',\n\
+       fn = function() at = pmacs.editor.monotonic_ms() + 235 end }\n\
+     pmacs.keymap.bind { scope = 'global', sequence = 'C-c 3', command = 'e10t.latekill' }\n\
+     pmacs.hook.add('process.after-tick', function()\n\
+       if at and pmacs.editor.monotonic_ms() >= at then\n\
+         at = nil\n\
+         for _, b in ipairs(pmacs.buffer.list()) do\n\
+           if b:name() == 'one.log' then pcall(pmacs.buffer.kill, b) end\n\
+         end\n\
+       end\n\
+     end)\n"
+        .to_owned()
+}
+
+/// Review 2's guard, passing at 143920e (2 / 2 / 2 on `two.log`, release)
+/// and after: the shown buffer is killed with a wheel turn in flight, and
+/// the record reads the declaration of the buffer that is gone as made
+/// before the snapshot that replaced it.
+#[test]
+fn review2_a_killed_buffer_and_a_wheel_turn_in_flight_settle() {
+    let daemon = daemon_with_pair_and(179_000, &late_kill());
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-kill",
+        &switch_steps("key:C-c key:3", "wheel:3"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the shown buffer killed, a wheel turn in flight",
+    ) {
+        panic!("{said}");
+    }
+}
+
+/// [`WireSession::wait`] with `patience` in place of its ten seconds: a
+/// debug daemon upgrading and encoding a 24 MiB buffer on its main thread
+/// writes nothing meanwhile (#434 is E9.5's row timing out at ten under
+/// load).
+fn wait_within<T>(
+    session: &mut WireSession,
+    what: &str,
+    patience: Duration,
+    mut pick: impl FnMut(&InstanceMessage) -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + patience;
+    let mut seen = 0_usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out after {patience:?} waiting for {what}; the daemon wrote {seen} other messages"
+        );
+        match session
+            .rx
+            .recv_timeout(remaining.min(Duration::from_millis(200)))
+        {
+            Ok(message) => {
+                if let Some(found) = pick(&message) {
+                    return found;
+                }
+                seen += 1;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the daemon closed the session while waiting for {what}")
+            }
+        }
+    }
+}
+
+/// `C-c 6` and, written behind it at once, a declaration of the buffer the
+/// session shows: the declaration waits in the dispatcher's queue while
+/// the command holds it, and is read in the key's own pass.
+fn slow_switch_and_declare(session: &mut WireSession, shown: BufferId) {
+    session.key(Key::Char('c'), Modifiers::CTRL);
+    session.key(Key::Char('6'), Modifiers::NONE);
+    session.declare_viewport(shown);
+}
+
+/// Review 2's Medium 1 on the wire, where the pass is forced and no GPU is
+/// needed: the key that switches the window and, written behind it, a
+/// declaration of the buffer the session was last sent. The window goes to
+/// `two.log`, the tick follows with its snapshot, and the next key lands
+/// there. At 143920e the declaration put the window back and nothing
+/// followed: `timed out waiting for two.log's snapshot, the follow`.
+#[test]
+fn e10t_r2_a_declaration_read_in_the_switch_s_own_pass_does_not_undo_it() {
+    let daemon = daemon_with_pair_and(20, &slow_switch(400));
+    let mut session = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    let (one, _) = session.where_am_i();
+    assert_eq!(
+        session.bootstrap_snapshots(),
+        [one],
+        "bootstrapped on the window's buffer alone"
+    );
+    // The frontend's answer to its bootstrap snapshot, as `pmacs-gpu`'s is.
+    session.declare_viewport(one);
+
+    slow_switch_and_declare(&mut session, one);
+    let two = session.wait("two.log's snapshot, the follow", |m| match m {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id != one => Some(*buffer_id),
+        _ => None,
+    });
+    session.declare_viewport(two);
+    session.type_str("k");
+    session.wait("the key's echo on two.log", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == two)
+            .then_some(())
+    });
+}
+
+/// The same pass when the follow it leaves owed is then refused (E9.5):
+/// the switch is to a buffer whose snapshot is past the frame. The owner's
+/// ruling on review 2 read the code as putting the window back on the last
+/// buffer sent, so that no follow stays owed there, and asked for the run.
+/// The refusal is said on the status line; the window is back on the
+/// buffer the session mirrors, where the next key lands; and the daemon
+/// refused once and not on every tick after, as it would with a follow
+/// still owed.
+/// At 143920e the declaration put the window back before the tick could
+/// refuse anything, so the user was told nothing: `timed out ... waiting
+/// for the refusal on the status line`.
+#[test]
+fn e10t_r2_a_follow_refused_after_such_a_declaration_is_said_and_leaves_none_owed() {
+    let dir = files_dir();
+    let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
+    std::fs::write(&one, fixture(20)).expect("write one.log");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    // Visited one, big; `*scratch*` killed; `one.log` shown. `C-c 6`
+    // holds, then shows `big.bin`.
+    let extra = slow_switch(400).replace("@two@", &big.display().to_string());
+    let daemon =
+        TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, big], false, &extra));
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+
+    slow_switch_and_declare(&mut session, shown);
+    let message = wait_within(
+        &mut session,
+        "the refusal on the status line",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                message: Some(message),
+                ..
+            } if message.contains("a frontend can mirror") => Some(message.clone()),
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => {
+                panic!(
+                    "a snapshot of {buffer_id:?} was sent; the switch was to a buffer past the frame"
+                )
+            }
+            _ => None,
+        },
+    );
+    assert!(
+        message.contains("big.bin is 24.0 MiB") && message.contains("this window stays on one.log"),
+        "the status names what weighed too much and where the window stayed: {message:?}"
+    );
+    // Back on the buffer the session mirrors: the next key lands there.
+    session.type_str("k");
+    session.wait("the key's echo on one.log", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == shown)
+            .then_some(())
+    });
+    // No follow stays owed: a window left on `big.bin` would be refused
+    // again on every tick. A second of ticks, named, then the count.
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert_eq!(
+        log.matches("this window stays on one.log").count(),
+        1,
+        "the daemon refused the switch once; its log:\n{log}"
+    );
 }

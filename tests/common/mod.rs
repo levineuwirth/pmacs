@@ -32,6 +32,9 @@
 //!   --headless-probe`) as a row drives it: the binary beside this
 //!   build's `pmacs`, and a finished probe's report as facts. Extracted
 //!   at E10 (D37) from `tests/e9_session_acceptance.rs`.
+//! - [`oversize`]: E9.5's oversize fixture, text whose snapshot is past
+//!   the frame. Extracted at E10t's fix round 2 (D37) from the E9 suites'
+//!   three copies.
 //! - [`wire`]: a frontend session over a real daemon socket (the
 //!   semantic handshake as `pmacs-gpu` performs it, or a grid attach),
 //!   a reader thread, and the keys and waits a row drives it with.
@@ -43,6 +46,7 @@
 pub mod daemon;
 pub mod gpu_probe;
 pub mod iso;
+pub mod oversize;
 pub mod pty;
 pub mod ready;
 pub mod reap;

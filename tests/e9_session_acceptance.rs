@@ -28,6 +28,7 @@ use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
 use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
 use common::gpu_probe::{fact, gpu_probe_binary, probe_facts};
+use common::oversize::oversize_text;
 
 #[path = "common/editor.rs"]
 mod editor;
@@ -2478,21 +2479,7 @@ fn e9_4_idle_exit_is_opt_in() {
 fn daemon_with_big_and_small() -> TestDaemon {
     let dir = tempfile::TempDir::new().expect("tempdir for the files");
     let big = dir.path().join("big.txt");
-    let mut text = String::with_capacity(24 * 1024 * 1024 + 80);
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-    while text.len() < 24 * 1024 * 1024 {
-        // xorshift64: every byte a printable character, 95 of them.
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        for byte in state.to_le_bytes() {
-            text.push(char::from(b' ' + byte % 95));
-        }
-        if text.len() % 80 < 8 {
-            text.push('\n');
-        }
-    }
-    std::fs::write(&big, &text).expect("write the big file");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write the big file");
     let small = dir.path().join("small.txt");
     std::fs::write(&small, "small\n").expect("write the small file");
     let init = format!(

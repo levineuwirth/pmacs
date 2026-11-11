@@ -1764,48 +1764,42 @@ fn dispatcher_loop(
                 if session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_capabilities.semantic_render)
+                    && let Some((active_now, last_sent)) =
+                        follow_owed(editor, &session_registry, *fid)
                 {
-                    let active_now = document_buffer_to_follow(editor, *fid);
-                    let last_sent = session_registry
-                        .session(*fid)
-                        .and_then(|session| session.last_active_buffer_sent);
-                    if let Some(active_now) = active_now
-                        && last_sent != Some(active_now)
-                    {
-                        match send_buffer_snapshot_to_frontend(
-                            editor,
-                            active_now,
-                            *fid,
-                            &mut session_registry,
-                        ) {
-                            Ok(()) => {
-                                // PR #120 round 2 — the snapshot just
-                                // wiped this frontend's buffer-scoped
-                                // render state; the emission baselines
-                                // must die with it or an
-                                // unchanged-generation revisit
-                                // (A → B → A) suppresses every re-send.
-                                if let Some(session) = session_registry.session_mut(*fid) {
-                                    if let Some(sem) = session.semantic.as_mut() {
-                                        sem.on_buffer_snapshot_sent(active_now);
-                                    }
-                                    session.last_active_buffer_sent = Some(active_now);
+                    match send_buffer_snapshot_to_frontend(
+                        editor,
+                        active_now,
+                        *fid,
+                        &mut session_registry,
+                    ) {
+                        Ok(()) => {
+                            // PR #120 round 2 — the snapshot just
+                            // wiped this frontend's buffer-scoped
+                            // render state; the emission baselines
+                            // must die with it or an
+                            // unchanged-generation revisit
+                            // (A → B → A) suppresses every re-send.
+                            if let Some(session) = session_registry.session_mut(*fid) {
+                                if let Some(sem) = session.semantic.as_mut() {
+                                    sem.on_buffer_snapshot_sent(active_now);
                                 }
+                                session.last_active_buffer_sent = Some(active_now);
                             }
-                            // E9.5 — refused, said, and the window put
-                            // back on the buffer the frontend mirrors; a
-                            // session that was never sent one goes where
-                            // `kill_buffer` would send it, so the refusal
-                            // happens once and the next tick sends that
-                            // buffer (fix round 2, review 2's Low 1: left
-                            // in place, the window was refused again on
-                            // every tick that reached here).
-                            Err(len) => {
-                                let back_to = last_sent.unwrap_or_else(|| {
-                                    editor.core.borrow().fallback_buffer_for(active_now)
-                                });
-                                refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
-                            }
+                        }
+                        // E9.5 — refused, said, and the window put
+                        // back on the buffer the frontend mirrors; a
+                        // session that was never sent one goes where
+                        // `kill_buffer` would send it, so the refusal
+                        // happens once and the next tick sends that
+                        // buffer (fix round 2, review 2's Low 1: left
+                        // in place, the window was refused again on
+                        // every tick that reached here).
+                        Err(len) => {
+                            let back_to = last_sent.unwrap_or_else(|| {
+                                editor.core.borrow().fallback_buffer_for(active_now)
+                            });
+                            refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
                         }
                     }
                 }
@@ -3348,6 +3342,26 @@ fn handle_dispatcher_event(
                         && session_registry
                             .session_mut(source)
                             .is_some_and(|session| session.snapshot_answers.declared(buffer_id));
+                    // E10t (fix round 2, review 2's Medium 1) --- that
+                    // record holds only snapshots already written. A
+                    // declaration read in the same dispatcher pass as the
+                    // key that switched the window comes before the tick
+                    // has written the follow: nothing is in flight, the
+                    // record calls it real, and aligning to it put the
+                    // window back where the frontend still was, so the
+                    // switch was gone under a status line that claimed it
+                    // (a scroll under way when `RET` went). The daemon's
+                    // own state tells this one too: while it owes the
+                    // session a follow, a declaration naming the buffer
+                    // last sent to it was made by a frontend that could not
+                    // yet know of the switch, and moves nothing. What it
+                    // says the frontend has on screen is still true of that
+                    // buffer and is kept, so a follow then refused (E9.5),
+                    // which puts the window back there, leaves the
+                    // declaration in force.
+                    let before_the_follow = session_registry.semantic(source).is_some()
+                        && follow_owed(editor, session_registry, source)
+                            .is_some_and(|(_, last_sent)| last_sent == Some(buffer_id));
                     if session_registry.semantic(source).is_some() && !terminal_context && !stale {
                         // Phase B (B1) — the Viewport declares *which
                         // buffer this frontend is displaying*. Align its
@@ -3362,7 +3376,9 @@ fn handle_dispatcher_event(
                         // NOT move focus. Routing this through the
                         // focused window would let an ordinary document
                         // viewport overwrite a focused panel's buffer.
-                        align_primary_document_window(editor, source, buffer_id);
+                        if !before_the_follow {
+                            align_primary_document_window(editor, source, buffer_id);
+                        }
                         // E6b.4 — remember what this frontend has on
                         // screen where Lua can read it, so the next
                         // semantic-token pull can ask for those lines
@@ -4819,6 +4835,36 @@ fn document_buffer_to_follow(
     fid: FrontendId,
 ) -> Option<crate::buffer::BufferId> {
     editor.core.borrow().primary_document_buffer(fid)
+}
+
+/// The follow the tick owes `fid`: the buffer its document window shows
+/// and the buffer it was last sent a snapshot of, when they differ; `None`
+/// when the window is on the buffer last sent. One condition for the two
+/// places that read it (E10t fix round 2): the tick, which then sends the
+/// window's buffer or refuses it (E9.5), and the `Viewport` arm, where a
+/// declaration naming the buffer last sent while a follow is owed was made
+/// before its frontend could know the window had moved.
+#[cfg(feature = "crdt")]
+fn follow_owed(
+    editor: &EditorState,
+    session_registry: &SessionRegistry,
+    fid: FrontendId,
+) -> Option<(crate::buffer::BufferId, Option<crate::buffer::BufferId>)> {
+    let active_now = document_buffer_to_follow(editor, fid)?;
+    let last_sent = session_registry
+        .session(fid)
+        .and_then(|session| session.last_active_buffer_sent);
+    (last_sent != Some(active_now)).then_some((active_now, last_sent))
+}
+
+/// A build without `crdt` follows nothing, so it owes no follow.
+#[cfg(not(feature = "crdt"))]
+fn follow_owed(
+    _editor: &EditorState,
+    _session_registry: &SessionRegistry,
+    _fid: FrontendId,
+) -> Option<(crate::buffer::BufferId, Option<crate::buffer::BufferId>)> {
+    None
 }
 
 /// The `(buffer, byte)` a semantic replica's authoritative `CursorByte`

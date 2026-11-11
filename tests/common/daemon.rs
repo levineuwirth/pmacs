@@ -120,6 +120,12 @@ impl TestDaemon {
         &self.socket_path
     }
 
+    /// What the daemon has written to its stderr so far, which this
+    /// fixture keeps in a file beside the socket.
+    pub fn stderr_log(&self) -> String {
+        read_daemon_stderr(&self.socket_path)
+    }
+
     pub fn connect(&self) -> UnixStream {
         UnixStream::connect(&self.socket_path).expect("connect")
     }
@@ -243,8 +249,9 @@ fn daemon_stderr_path(socket: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Read the daemon's file-backed stderr, best-effort. Used only on
-/// failure paths in [`wait_for_socket_or_exit`].
+/// Read the daemon's file-backed stderr, best-effort: for the failure
+/// paths in [`wait_for_socket_or_exit`], and for a row that reads what
+/// the daemon said ([`TestDaemon::stderr_log`]).
 fn read_daemon_stderr(socket: &Path) -> String {
     let path = daemon_stderr_path(socket);
     match fs::read_to_string(&path) {
