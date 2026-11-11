@@ -16860,6 +16860,102 @@ Tally (e10t-local): 6 items in the list below.
 
 So, at E10t's checkpoint: PR #504 is green at its head `8bf9b16`, its first run's one red its own defect and fixed; `main` is unchanged at `868e9ba`. No row's count changes: every sample above is local, and #503 is filed on a local one.
 
+### E10t fix round 1: PR #504 at `143920e`, every Ubuntu leg that updates apt failed on `ubuntu-26.04`, #330 from three to thirteen
+
+Recorded 2026-11-11 at E10t's fix round 1 (roadmap §E10t, review 1). Every run was read from the jobs endpoint by conclusion, and every test leg that ran was read through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below, and every local gate's id, was searched for in this file before it was written, and none was in it. `main` has not moved since `49a8b26`, the E10t checkpoint's record above.
+
+#### PR #504 at `143920e`, attempt 1: five Ubuntu legs on #330, no test run on any
+
+`CI` 43045455554 at `143920e`, attempt 1, `pull_request`, created 2026-11-11T15:09:09Z: `failure`. The merge `6fe7cda` into `49a8b26`. Every Ubuntu job of the run ran on `ubuntu-26.04` `20261101.186.1` (Ubuntu 26.04.1 LTS); this PR's run at `8bf9b16` above had `ubuntu-24.04` `20261101.360.1`. Both macOS legs ran on `macos-26-arm64`. The workflow asks for `ubuntu-latest`. **Each of the five jobs that call `scripts/ci-apt-update` failed in it before any build, and none printed a `running` or result line.** Each step started between 15:09:44Z and 15:09:54Z and ended six minutes later. Every Azure `resolute` index came back `Ign` (`Ign:2 http://azure.archive.ubuntu.com/ubuntu resolute InRelease`, and the same for `-updates`, `-backports` and `-security`), then `Ign:2 https://archive.ubuntu.com/ubuntu resolute InRelease` on the fallback. Each attempt ran to the 120 s bound (`ci-apt-update: attempt N of 3 failed or ran past 120 s (#330)`), and the step ended with `ci-apt-update: apt-get update did not complete in 3 attempts (#330)`. Every Ubuntu job that does not update apt passed on the same image. **#330 by its mechanism as #329's bound reports it**, Azure ignored and then the fallback not answering. That is not by its required fragments word for word, which were written for `noble` and for the 45-minute cancel before the bound existed. Counted per leg, as #330's first three were, these are its fourth to eighth occurrences, commented there (issuecomment-6800475197). No cause is claimed past the image the logs name.
+
+Tally (pr-504-ci-143920e-a1): 19 = 13 + 5 + 1.
+
+Tally (pr-504-ci-143920e-a1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 130608085552 | success |
+| Commit attribution (D9) | 130608085696 | success |
+| Lint (luajit) | 130608085712 | success |
+| Lint (lua54) | 130608085716 | success |
+| Changed paths | 130608085818 | success |
+| M4 Perf Gates | 130608191239 | success |
+| M1 Acceptance Gates | 130608191244 | success |
+| Test (macos-latest / lua54) | 130608191254 | success |
+| M5 Perf Gates | 130608191269 | success |
+| Test (crdt) | 130608191284 | failure |
+| Test (ubuntu-latest / lua54) | 130608191296 | failure |
+| GPU Render (headless) | 130608191355 | failure |
+| Test (ubuntu-latest / luajit) | 130608191357 | failure |
+| M6 Perf Gates | 130608191374 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 130608191393 | failure |
+| Perf budgets (debug) | 130608191398 | success |
+| Test (macos-latest / luajit) | 130608191486 | success |
+| M10 Perf Gates (crdt) | 130608192819 | success |
+| Docs consistency | 130608194168 | skipped |
+
+Tally (pr-504-ci-143920e-a1-success): 13 rows of the table above with `result` = `success`.
+Tally (pr-504-ci-143920e-a1-failure): 5 rows of the table above with `result` = `failure`.
+Tally (pr-504-ci-143920e-a1-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-504-ci-143920e-a1-legs): 7 items in the list below.
+
+- `Test (crdt)` 130608191284: `failure` in `scripts/ci-apt-update`, 15:09:46Z to 15:15:46Z, no `running` line.
+- `Test (ubuntu-latest / lua54)` 130608191296: `failure` in `scripts/ci-apt-update`, 15:09:52Z to 15:15:53Z, no `running` line.
+- `GPU Render (headless)` 130608191355: `failure` in `scripts/ci-apt-update`, 15:09:54Z to 15:15:54Z, no `running` line.
+- `Test (ubuntu-latest / luajit)` 130608191357: `failure` in `scripts/ci-apt-update`, 15:09:44Z to 15:15:44Z, no `running` line.
+- `Test (ubuntu-latest / luajit, no crdt)` 130608191393: `failure` in `scripts/ci-apt-update`, 15:09:46Z to 15:15:46Z, no `running` line.
+- `Test (macos-latest / lua54)` 130608191254: `success`, 234 `running` lines and 234 results, 5,634 / 0 / 80; `tests/e10t_gpu_window_settles.rs` 13 passed in 66.14 s. (A 235th match for `running N test` is the workflow's own `grep -q 'running 1 test'` echoed in the log.)
+- `Test (macos-latest / luajit)` 130608191486: `success`, 234 `running` lines and 234 results, 5,634 / 0 / 80; `tests/e10t_gpu_window_settles.rs` 13 passed in 67.63 s.
+
+#### PR #504 at `143920e`, attempt 2: the five rerun, the same image, the same failure
+
+Attempt 2 was a rerun of the failed jobs, on the same merge `6fe7cda`, started 2026-11-11T15:52:44Z and completed 15:59:23Z: `failure`. It was taken because attempt 1 had tested nothing on any Ubuntu leg. All five ran on `ubuntu-26.04` `20261101.186.1` again and failed the same way, each six minutes after its apt step began (15:53:14Z to 15:53:19Z), no `running` line. These are **#330's ninth to thirteenth**, commented there (issuecomment-6800666154). The macOS legs and the other passing jobs are attempt 1's, carried (the API lists them under attempt 2 with new ids). Not rerun again: until the workflow pins `ubuntu-24.04` or the apt step answers on 26.04, which is the owner's ruling, no Ubuntu leg of any run can test anything.
+
+Tally (pr-504-ci-143920e-a2): 19 = 13 + 5 + 1.
+
+Tally (pr-504-ci-143920e-a2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Test (crdt) | 130633897962 | failure |
+| GPU Render (headless) | 130633898218 | failure |
+| Test (ubuntu-latest / luajit) | 130633898570 | failure |
+| Format | 130633898667 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 130633898717 | failure |
+| Test (ubuntu-latest / lua54) | 130633898783 | failure |
+| Changed paths | 130633898843 | success |
+| Lint (lua54) | 130633899486 | success |
+| M6 Perf Gates | 130633900031 | success |
+| M4 Perf Gates | 130633900178 | success |
+| Docs consistency | 130633900321 | skipped |
+| Test (macos-latest / lua54) | 130633900432 | success |
+| Test (macos-latest / luajit) | 130633900842 | success |
+| M5 Perf Gates | 130633901055 | success |
+| Perf budgets (debug) | 130633901077 | success |
+| Commit attribution (D9) | 130633950215 | success |
+| M1 Acceptance Gates | 130633976261 | success |
+| Lint (luajit) | 130633976814 | success |
+| M10 Perf Gates (crdt) | 130633982177 | success |
+
+Tally (pr-504-ci-143920e-a2-success): 13 rows of the table above with `result` = `success`.
+Tally (pr-504-ci-143920e-a2-failure): 5 rows of the table above with `result` = `failure`.
+Tally (pr-504-ci-143920e-a2-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43045455460 at `143920e`, attempt 1 of 1, on `ubuntu-24.04` as its workflow pins: `success`, `Grammar fuzz` 130608085253 and `Grammar fuzz (asan-strict)` 130608084930, both arms deciding `no changed path can change the grammar set or the parse worker`.
+
+Tally (pr-504-fuzz-143920e): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10t-fixes1-local): 3 items in the list below.
+
+- `20261111T143016Z-1255339` at `4226799` (since folded into `143920e`'s history; its tree less one refinement in `src/presence.rs`), `scripts/gate --protocol`: all eight ok, `sweep` 6,090 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 237 `Running` targets and 241 result lines in each, no daemon survived.
+- `20261111T150855Z-1634342` at `143920e`, `scripts/gate --protocol`: all eight ok, the same counts, no daemon survived.
+- Not a gate: a batch of the suites that send their own declarations, with the lib, run by hand without `--no-fail-fast` at `3506ed9`'s tree, stopped at the lib's `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`, `live runtime probe` at `src/process.rs:5530:53`, #256's row; the same batch with `--no-fail-fast` passed it.
+
+So, at E10t's fix round 1: PR #504's head `143920e` is red on #330 alone, every Ubuntu leg that updates apt failing on `ubuntu-26.04` in both attempts and no test failing anywhere; both macOS legs green. #330 moves from three to thirteen, all ten in one run; every other count stands.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
