@@ -2793,9 +2793,12 @@ fn handle_session_established(
     // answer came last. A semantic frontend shows one buffer, the last
     // snapshot it applied, and is sent any other when its window goes
     // there; the sweep stays a grid replica's, whose mirror holds every
-    // buffer.
+    // buffer. In a build without `crdt` the one buffer's snapshot cannot be
+    // taken, so a session there keeps the sweep's stub, as it always had.
     let mut window_buffer = if opened_target.is_none()
-        && (resumed || restored.is_some() || (semantic_render && crdt_replica))
+        && (resumed
+            || restored.is_some()
+            || (cfg!(feature = "crdt") && semantic_render && crdt_replica))
     {
         editor.core.borrow().primary_document_buffer(frontend_id)
     } else {
