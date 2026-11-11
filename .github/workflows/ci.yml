@@ -147,19 +147,19 @@ concurrency:
 # already near its limit, and a full budget evicting the entries it
 # depends on is the failure this note exists to prevent, not a fix.
 #
-# EVERY UBUNTU JOB RUNS ON `ubuntu-24.04`, NOT `ubuntu-latest` (#506).
-# PR #504's run at 01:21Z on 2026-11-11 had `ubuntu-24.04`; its run at
-# 15:09Z had `ubuntu-26.04`, and there `apt-get update` got no answer
-# from any Ubuntu archive host: every leg that calls
-# `scripts/ci-apt-update` failed in it, ten of ten over two attempts,
-# before any build (`CI` 43045455554). The test matrix keeps
+# EVERY UBUNTU JOB RUNS ON `ubuntu-24.04`, NOT `ubuntu-latest`.
+# `ubuntu-latest` became `ubuntu-26.04` on 2026-11-11, between two of
+# PR #504's runs. The pin keeps a new image's toolchains, mesa and fish
+# out of phase pull requests until a change of its own moves them, and
+# it keeps the caches to one image: Swatinem's key names the job, the
+# toolchains and the manifests and not the image (`Test (crdt)` had the
+# same key on both that day), so an entry `main` saved on one image
+# would be restored on the other. The test matrix keeps
 # `os: ubuntu-latest` and pins only its `runs-on`, because that value
 # is in the job names branch protection requires and in the arming
 # below; renaming it would leave the required checks pending forever.
-# The pin also keeps the caches to one image: Swatinem's key names the
-# job, the toolchains and the manifests and not the image (`Test
-# (crdt)` had the same key on both that day), so an entry `main` saved
-# on one image would be restored on the other. Moving to 26.04 is
+# The pin does not avoid that day's apt failures (#506): they came on
+# `ubuntu-24.04` as well (`CI` 43058555206). Moving to 26.04 is
 # separate, planned work.
 jobs:
   # Docs-only changes skip the jobs that compile and run tests, except
