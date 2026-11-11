@@ -146,6 +146,21 @@ impl Probe {
 /// [`OUTSIDE`]. `None` when skipped (no `pmacs-gpu` built, or no wgpu
 /// adapter), which panics under `PMACS_REQUIRE_GPU`.
 fn run_probe(daemon: &TestDaemon, label: &str, steps: &str) -> Option<Probe> {
+    run_probe_as(daemon, label, "popup", steps, READY_MS, OUTSIDE)
+}
+
+/// [`run_probe`] under any of the probe's actions: `text` is the popup
+/// action's steps or what the quit and reconnect probes type, `deadline_ms`
+/// the probe's own limit (`PMACS_GPU_PROBE_DEADLINE_MS`), and `outside` the
+/// bound it is killed at from here, which panics naming it.
+fn run_probe_as(
+    daemon: &TestDaemon,
+    label: &str,
+    action: &str,
+    text: &str,
+    deadline_ms: u64,
+    outside: Duration,
+) -> Option<Probe> {
     let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
     let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
         .parent()
@@ -168,9 +183,9 @@ fn run_probe(daemon: &TestDaemon, label: &str, steps: &str) -> Option<Probe> {
         .arg("--headless-probe")
         .arg(daemon.socket_path())
         .arg(&report)
-        .env("PMACS_GPU_PROBE_TYPE_TEXT", steps)
-        .env("PMACS_GPU_PROBE_ACTION", "popup")
-        .env("PMACS_GPU_PROBE_DEADLINE_MS", READY_MS.to_string())
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", text)
+        .env("PMACS_GPU_PROBE_ACTION", action)
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", deadline_ms.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(&stderr_path).expect("probe stderr"))
         .spawn()
@@ -179,11 +194,11 @@ fn run_probe(daemon: &TestDaemon, label: &str, steps: &str) -> Option<Probe> {
         if let Some(status) = child.try_wait().expect("poll the probe") {
             break status;
         }
-        if started.elapsed() > OUTSIDE {
+        if started.elapsed() > outside {
             let _ = child.kill();
             let _ = child.wait();
             panic!(
-                "{label}: the probe was still running at the outside bound, {OUTSIDE:?}, \
+                "{label}: the probe was still running at the outside bound, {outside:?}, \
                  and was killed; its stderr ends {:?}",
                 tail(&stderr_path)
             );
@@ -918,5 +933,51 @@ fn review2_a_switch_after_the_oversize_fallback_settles() {
         "a switch with a wheel turn in flight, after the oversize attach",
     ) {
         panic!("{said}");
+    }
+}
+
+/// A daemon whose window changes buffer on every tick, so the follow
+/// writes a snapshot on every pass: a stream that never pauses, made by the
+/// daemon at the head, where #326's own spin is gone.
+const STREAM: &str = "local n = 0\n\
+    pmacs.hook.add('process.after-tick', function()\n\
+      n = n + 1\n\
+      if n % 2 == 0 then pmacs.buffer.find_or_open('@two@') else pmacs.buffer.find_or_open('@one@') end\n\
+    end)\n";
+
+/// The quit and reconnect probes' own limit in the row below.
+const STREAM_DEADLINE_MS: u64 = 3_000;
+/// The outside bound of the row below: a probe that does not read its
+/// limit is killed here.
+const STREAM_OUTSIDE: Duration = Duration::from_secs(40);
+
+/// Review 2's Low 1: the reconnect and quit probes themselves, beside a
+/// stream that never pauses, return at their own deadline. Fix round 1's
+/// row for them (`pmacs-gpu`'s `a_stream_that_never_pauses_ends_a_probe_loop_at_its_deadline`)
+/// runs the drain they share in a loop of its own, so it passes with either
+/// probe's call site back on the unbounded drain (`scripts/bite`:
+/// `VACUOUS`). With either call site's drain as it was until 143920e that
+/// probe runs to the outside bound and is killed there (the pre-round
+/// `pmacs-gpu`, release: both killed at 40 s; the head's: 3.2 s each).
+#[test]
+fn review2_the_quit_and_reconnect_probes_end_at_their_deadline_beside_a_stream() {
+    for action in ["quit", "reconnect"] {
+        let daemon = daemon_with_pair_and(10_000, STREAM);
+        let Some(probe) = run_probe_as(
+            &daemon,
+            &format!("r2-stream-{action}"),
+            action,
+            "x",
+            STREAM_DEADLINE_MS,
+            STREAM_OUTSIDE,
+        ) else {
+            return;
+        };
+        assert!(
+            probe.took < STREAM_OUTSIDE / 2,
+            "the {action} probe ran {:?} beside a stream that never pauses, its deadline \
+             {STREAM_DEADLINE_MS} ms",
+            probe.took
+        );
     }
 }
