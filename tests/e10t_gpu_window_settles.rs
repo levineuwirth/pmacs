@@ -796,3 +796,127 @@ fn e10t_r2_a_follow_refused_after_such_a_declaration_is_said_and_leaves_none_owe
         "the daemon refused the switch once; its log:\n{log}"
     );
 }
+
+/// A daemon whose window shows a file too large to mirror: `big.bin`,
+/// E9.5's fixture (24 MiB of pseudo-random printable text, its snapshot
+/// past the 16 MiB frame), visited first, then `one.log` of 10,000 lines
+/// and `two.log` of 20,000; `*scratch*` killed; `big.bin` shown; `extra`
+/// after, its `@two@` replaced by `two.log`'s path.
+fn daemon_showing_oversize(extra: &str) -> TestDaemon {
+    let dir = files_dir();
+    let (big, one, two) = (
+        dir.join("big.bin"),
+        dir.join("one.log"),
+        dir.join("two.log"),
+    );
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    std::fs::write(&one, fixture(10_000)).expect("write one.log");
+    std::fs::write(&two, fixture(20_000)).expect("write two.log");
+    let extra = extra.replace("@two@", &two.display().to_string());
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[big, one, two], false, &extra))
+}
+
+/// Review 2's Medium 2: a GPU attaching with no target to a daemon whose
+/// window shows a buffer too large to mirror. The daemon refuses it, puts
+/// the window on the fallback and says so (`this window stays on
+/// one.log`). Until E10t's fix round 2 the attach then swept every other
+/// buffer, as a fresh semantic window's did before E10t: each answer moved
+/// the window and the last one won, `two.log`, at 3 or 4 snapshots, 9 runs
+/// of 9 across two reviews, under a status line naming `one.log`. The
+/// session now bootstraps on the fallback's one snapshot.
+#[test]
+fn review2_an_oversize_window_s_gpu_settles_where_the_daemon_says() {
+    let daemon = daemon_showing_oversize("");
+    let Some(probe) = run_probe(&daemon, "r2-oversize", &settle_steps()) else {
+        return;
+    };
+    assert_settled(
+        &probe,
+        "one.log",
+        "a window on a buffer past the frame, sent to the fallback",
+    );
+    let log = daemon.stderr_log();
+    assert!(
+        log.contains("this window stays on one.log"),
+        "the daemon said where the window stays; its log:\n{log}"
+    );
+}
+
+/// Medium 2 on the wire, where no GPU is needed: the refused window's
+/// session is sent one snapshot in its bootstrap, the fallback's, the
+/// status line names that buffer, and the window is on it. At 143920e the
+/// bootstrap carried every other buffer's snapshot, `one.log`'s and
+/// `two.log`'s.
+#[test]
+fn e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot() {
+    let daemon = daemon_showing_oversize("");
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let sent = session.bootstrap_snapshots();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the bootstrap carries the fallback's snapshot alone: {sent:?}"
+    );
+    // The frontend's answer to it, as `pmacs-gpu`'s is; the status line
+    // comes with the frames for the declared buffer.
+    session.declare_viewport(sent[0]);
+    let (name, status) = wait_within(
+        &mut session,
+        "the first status",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                message: Some(message),
+                ..
+            } if *buffer_id == sent[0] => Some((name.clone(), message.clone())),
+            _ => None,
+        },
+    );
+    assert_eq!(name, "one.log", "the snapshot sent is the fallback's");
+    assert!(
+        status.contains("big.bin is 24.0 MiB") && status.contains("this window stays on one.log"),
+        "the status names what weighed too much and where the window stays: {status:?}"
+    );
+    assert_eq!(
+        session.where_am_i().0,
+        sent[0],
+        "the window is on the buffer the session was sent"
+    );
+}
+
+/// Review 2's guard for the record after the oversize attach, restated for
+/// the bootstrap that attach now has: the window starts on `one.log`, the
+/// fallback, and a switch to `two.log` with a wheel turn in flight settles
+/// there at two snapshots, the attach's and the switch's. The attach's one
+/// snapshot is in the session's record, so the wheel's declaration of
+/// `one.log` is read as made before `two.log`'s landed. (At 143920e the
+/// sweep had left the window on `two.log` already, at 3 or 4 snapshots the
+/// record never held; the review's probe switched back to `one.log` and
+/// read 5 / 5 / 5.)
+#[test]
+fn review2_a_switch_after_the_oversize_fallback_settles() {
+    let daemon = daemon_showing_oversize(&late_switch(235));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-oversize-switch",
+        &switch_steps("key:C-c key:8", "wheel:3"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "a switch with a wheel turn in flight, after the oversize attach",
+    ) {
+        panic!("{said}");
+    }
+}

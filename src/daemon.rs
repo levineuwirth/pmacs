@@ -2852,55 +2852,48 @@ fn handle_session_established(
                 .unregister_frontend_view(frontend_id);
             return;
         }
-    } else if let Some(buffer_id) = window_buffer {
-        match initial_target_snapshot(editor, buffer_id) {
-            Ok(snapshot) => {
-                let message = InstanceMessage::BufferSnapshot {
-                    buffer_id,
-                    crdt_snapshot: snapshot.crdt_snapshot,
-                };
-                // E9.5 — a retained window on a buffer past the frame
-                // cap is refused and sent to the buffer `kill_buffer`
-                // would send it to, said so; the sweep bootstraps the
-                // session as a fresh one would be, and runs first so the
-                // fallback is chosen among the buffers it delivered (fix
-                // round 2, review 2's Low 1). (Until fix round 1 the
-                // window went to LOCAL's document, which can be the
-                // oversize buffer itself.)
-                let frame_len = snapshot_frame_len(&message);
-                if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
-                    let Ok(left_out) = send_buffer_snapshots(editor, &mut write_stream) else {
-                        let _ = write_stream.shutdown(Shutdown::Both);
-                        editor
-                            .core
-                            .borrow_mut()
-                            .unregister_frontend_view(frontend_id);
-                        return;
-                    };
-                    let back_to = fallback_among_delivered(editor, buffer_id, &left_out);
-                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
-                    window_buffer = None;
-                } else {
-                    if snapshot.upgraded_to_crdt {
-                        publish_buffer_snapshot_to_replicas(
-                            editor,
-                            buffer_id,
-                            &message,
-                            session_registry,
-                        );
-                    }
-                    if write_stream.write_message(&message).is_err() {
-                        let _ = write_stream.shutdown(Shutdown::Both);
-                        editor
-                            .core
-                            .borrow_mut()
-                            .unregister_frontend_view(frontend_id);
-                        return;
-                    }
+    } else if let Some(shown) = window_buffer {
+        // E9.5 --- a window on a buffer past the frame cap is refused and
+        // sent to the buffer `kill_buffer` would send it to, said so. The
+        // session bootstraps on that buffer's one snapshot, recorded below
+        // as any attach's is (E10t fix round 2, review 2's Medium 2), and a
+        // fallback that is itself past the frame is passed over for the
+        // next (E9 fix round 2, review 2's Low 1), down to a fresh
+        // `*scratch*`. Until this round the refused window was swept every
+        // other buffer, as a fresh semantic one was before E10t: each
+        // answer moved the window and the last one won, so the frontend
+        // landed on the sweep's last buffer under a status line naming
+        // another (9 runs of 9 across E10t's two reviews), and none of
+        // those snapshots was in the session's record.
+        let mut buffer_id = shown;
+        let mut refused: Vec<(crate::buffer::BufferId, usize)> = Vec::new();
+        loop {
+            let snapshot = match initial_target_snapshot(editor, buffer_id) {
+                Ok(snapshot) => snapshot,
+                Err(message) => {
+                    eprintln!("pmacs: snapshot of the window's buffer failed: {message}");
+                    let _ = write_stream.shutdown(Shutdown::Both);
+                    editor
+                        .core
+                        .borrow_mut()
+                        .unregister_frontend_view(frontend_id);
+                    return;
                 }
+            };
+            let message = InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot: snapshot.crdt_snapshot,
+            };
+            let frame_len = snapshot_frame_len(&message);
+            if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+                refused.push((buffer_id, frame_len));
+                buffer_id = fallback_among_delivered(editor, shown, &refused);
+                continue;
             }
-            Err(message) => {
-                eprintln!("pmacs: snapshot of the resumed buffer failed: {message}");
+            if snapshot.upgraded_to_crdt {
+                publish_buffer_snapshot_to_replicas(editor, buffer_id, &message, session_registry);
+            }
+            if write_stream.write_message(&message).is_err() {
                 let _ = write_stream.shutdown(Shutdown::Both);
                 editor
                     .core
@@ -2908,6 +2901,11 @@ fn handle_session_established(
                     .unregister_frontend_view(frontend_id);
                 return;
             }
+            break;
+        }
+        if let Some((_, frame_len)) = refused.first() {
+            refuse_oversize_snapshot(editor, frontend_id, shown, *frame_len, buffer_id);
+            window_buffer = Some(buffer_id);
         }
     } else if crdt_replica {
         // A grid replica's no-target attach is the all-buffer bootstrap:
@@ -4189,11 +4187,13 @@ fn oversize_sizes(text_len: u64, frame_len: usize) -> String {
 }
 
 /// E9.5 (fix round 2, review 2's Low 1) --- the buffer a window refused
-/// at its bootstrap goes to: `kill_buffer`'s fallback, chosen among the
-/// buffers the attach sweep delivered, never one it left out past the
-/// frame (`left_out`, as `send_buffer_snapshots` returns it), else a
-/// fresh `*scratch*`, which the tick loop's upgrade sends on the next
-/// tick.
+/// at its bootstrap goes to: `kill_buffer`'s fallback, never a buffer
+/// whose snapshot is past the frame (`left_out`: what a grid replica's
+/// sweep left out, as `send_buffer_snapshots` returns it, or what a
+/// semantic window's bootstrap has already refused), else a fresh
+/// `*scratch*`. A grid replica is sent that one by the tick loop's
+/// upgrade on the next tick; a semantic window bootstraps on it (E10t fix
+/// round 2).
 fn fallback_among_delivered(
     editor: &EditorState,
     victim: crate::buffer::BufferId,
