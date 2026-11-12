@@ -741,18 +741,23 @@ fn e10t_r2_a_declaration_read_in_the_switch_s_own_pass_does_not_undo_it() {
 }
 
 /// The same pass when the follow it leaves owed is then refused (E9.5):
-/// the switch is to a buffer whose snapshot is past the frame. The owner's
-/// ruling on review 2 read the code as putting the window back on the last
-/// buffer sent, so that no follow stays owed there, and asked for the run.
-/// The refusal is said on the status line; the window is back on the
-/// buffer the session mirrors, where the next key lands; and the daemon
-/// refused once and not on every tick after, as it would with a follow
-/// still owed.
+/// the switch is to a buffer whose snapshot is past the frame, and the
+/// buffer the session was last sent still exists, which is the one case
+/// this row runs. The owner's ruling on review 2 read the code as putting
+/// the window back on the last buffer sent, so that no follow stays owed
+/// there, and asked for the run. The refusal is said on the status line;
+/// the window is back on the buffer the session mirrors, where the next
+/// key lands; and the daemon refused once and not on every tick after, as
+/// it would with a follow still owed. Until fix round 3 the row's name
+/// ended `leaves_none_owed`, which is true of this case and was read as
+/// the general claim: with the buffer last sent killed there was nowhere
+/// to go back to (review 3's Medium 1, the `review3_` and `e10t_r3_` rows
+/// below).
 /// At 143920e the declaration put the window back before the tick could
 /// refuse anything, so the user was told nothing: `timed out ... waiting
 /// for the refusal on the status line`.
 #[test]
-fn e10t_r2_a_follow_refused_after_such_a_declaration_is_said_and_leaves_none_owed() {
+fn e10t_r2_a_follow_refused_after_such_a_declaration_is_said_and_goes_back() {
     let dir = files_dir();
     let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
     std::fs::write(&one, fixture(20)).expect("write one.log");
@@ -934,6 +939,204 @@ fn review2_a_switch_after_the_oversize_fallback_settles() {
     ) {
         panic!("{said}");
     }
+}
+
+/// Review 3's Medium 1, through the real `pmacs-gpu` (its runs `k1`, two of
+/// two in release). The window attaches onto `big.bin`, is refused and
+/// bootstraps on `one.log` (fix round 2). `C-x k RET` then kills
+/// `one.log`: with `*scratch*` gone, `kill_buffer`'s fallback is the first
+/// other buffer, `big.bin`. The tick refuses the follow, and the buffer
+/// last sent, where a refused follow goes back, no longer exists. At
+/// e0c5ba6 the window stayed on `big.bin` and was refused again on every
+/// tick (68 and 90 refusals in about 12 s, the daemon at 10 to 11 s of CPU
+/// over a 14 s run, each tick exporting the 48 MiB snapshot again), the
+/// GPU at 1 / 1 / 1 on the buffer just killed under a band that said
+/// nothing, and a key typed there edited `big.bin`. The window now goes to
+/// a buffer the frontend can mirror, here `two.log`, the refusal said
+/// once, and the next tick sends it.
+#[test]
+fn review3_a_kill_whose_fallback_is_past_the_frame_lands_where_the_gpu_can_follow() {
+    let daemon = daemon_showing_oversize("");
+    let Some(probe) = run_probe(
+        &daemon,
+        "r3-kill-oversize-fallback",
+        &switch_steps("key:C-x key:k quiet:400 key:ret", "quiet:250"),
+    ) else {
+        return;
+    };
+    // The attach's snapshot and the one for the buffer the window went to.
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the shown buffer killed, its fallback past the frame",
+    ) {
+        panic!("{said}");
+    }
+    let log = daemon.stderr_log();
+    assert!(
+        log.matches("past the 16 MiB a frontend can mirror").count() <= 2,
+        "the attach's refusal and the kill's, each once; the daemon's log:\n{log}"
+    );
+    assert!(
+        !log.contains("back on BufferId"),
+        "the window was put back on a buffer that exists; the daemon's log:\n{log}"
+    );
+}
+
+/// The same on the wire, on every leg that builds `crdt`: after the kill
+/// the session is sent a buffer that fits, the daemon's window is on it,
+/// a key typed lands there and not in `big.bin`, and the refusal is in the
+/// log no more than once for the attach and once for the kill. At e0c5ba6
+/// no snapshot ever came: `timed out ... waiting for a snapshot of the
+/// buffer the window went to`.
+#[test]
+fn review3_a_kill_whose_fallback_is_past_the_frame_leaves_no_follow_owed() {
+    let daemon = daemon_showing_oversize("");
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let sent = session.bootstrap_snapshots();
+    assert_eq!(sent.len(), 1, "the fallback's one snapshot: {sent:?}");
+    session.declare_viewport(sent[0]);
+    // `C-x k RET`: the prompt is prefilled with the window's buffer.
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, sent[0], "the killed buffer is not sent again");
+    session.declare_viewport(next);
+    session.type_str("k");
+    session.wait("the key's echo on the buffer sent", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == next)
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert!(
+        log.matches("past the 16 MiB a frontend can mirror").count() <= 2,
+        "no follow stays owed: a window left on `big.bin` is refused on every tick; the log:\n{log}"
+    );
+}
+
+/// Review 3's run `k7`, on the wire: the same arm reached with no oversize
+/// attach, and both of its ways out in one session. The window is on
+/// `one.log`, sent by an ordinary bootstrap; a switch to `big.bin` is
+/// refused and goes back to `one.log`, which exists (E10t.2's guard for
+/// this arm). `C-x k RET` then kills `one.log`: the large file a user was
+/// refused is still open, and with `*scratch*` gone the window falls to
+/// it. The follow is refused a second time and the buffer last sent is
+/// gone; nothing else is open, so the fallback that fits is a fresh
+/// `*scratch*` (the creation `k1s` reached by killing `*scratch*` itself).
+/// At e0c5ba6 the review counted 134 refusals there, the GPU on the dead
+/// `s.txt`.
+#[test]
+fn e10t_r3_a_refused_switch_and_then_a_kill_end_on_a_fresh_scratch() {
+    let dir = files_dir();
+    let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
+    std::fs::write(&one, fixture(20)).expect("write one.log");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    // Visited one, big; `*scratch*` killed; `one.log` shown. `C-c 6`
+    // shows `big.bin`.
+    let extra = slow_switch(0).replace("@two@", &big.display().to_string());
+    let daemon =
+        TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, big], false, &extra));
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+
+    // The switch, refused: back on `one.log`.
+    session.key(Key::Char('c'), Modifiers::CTRL);
+    session.key(Key::Char('6'), Modifiers::NONE);
+    wait_within(
+        &mut session,
+        "the switch's refusal on the status line",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                message: Some(message),
+                ..
+            } if message.contains("this window stays on one.log") => Some(()),
+            _ => None,
+        },
+    );
+
+    // The kill: `one.log` goes, and the window falls to `big.bin`.
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, shown, "the killed buffer is not sent again");
+    session.declare_viewport(next);
+    let (name, status) = wait_within(
+        &mut session,
+        "the status of the buffer sent",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                message: Some(message),
+                ..
+            } if *buffer_id == next => Some((name.clone(), message.clone())),
+            _ => None,
+        },
+    );
+    assert_eq!(name, "*scratch*", "nothing else was open that fits");
+    assert!(
+        status.contains("big.bin is 24.0 MiB") && status.contains("this window stays on *scratch*"),
+        "the status names what weighed too much and where the window went: {status:?}"
+    );
+    session.type_str("k");
+    session.wait("the key's echo on the buffer sent", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == next)
+            .then_some(())
+    });
+    // A second of ticks, then the log: the switch's refusal and the
+    // kill's, each once, and no window put back on a buffer that is gone.
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert_eq!(
+        log.matches("past the 16 MiB a frontend can mirror").count(),
+        2,
+        "the switch's refusal and the kill's, each once; the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        log.matches("this window stays on one.log").count(),
+        1,
+        "the refused switch went back to the buffer last sent; the daemon's log:\n{log}"
+    );
+    assert!(
+        !log.contains("back on BufferId"),
+        "the window was put on a buffer that exists; the daemon's log:\n{log}"
+    );
 }
 
 /// A daemon whose window changes buffer on every tick, so the follow
