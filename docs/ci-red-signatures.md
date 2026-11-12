@@ -17265,11 +17265,11 @@ Tally (pr-504-ci-e0c5ba6-legs): 7 items in the list below.
 - `Test (ubuntu-latest / lua54)` 130809340669: `success`, 233 `running` lines and 233 results, 5,702 / 0 / 88; the E10t suite 22 passed in 19.10 s, `PMACS_REQUIRE_GPU` unset, so its GPU rows returned and read `ok`.
 - `Test (ubuntu-latest / luajit)` 130809340829: `success`, 233 `running` lines and 233 results, 5,702 / 0 / 88; the E10t suite 22 passed in 18.04 s, `PMACS_REQUIRE_GPU` unset as on the leg above.
 - `Test (ubuntu-latest / luajit, no crdt)` 130809340660: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72; the E10t suite compiled out, `running 0 tests`.
-- `Test (macos-latest / luajit)` 130809340682: `success`, 234 `running` lines and 234 results, 5,643 / 0 / 80; the E10t suite 22 passed in 125.00 s, `PMACS_REQUIRE_GPU` armed.
-- `Test (macos-latest / lua54)` 130809340722: `success`, 234 `running` lines and 234 results, 5,643 / 0 / 80; the E10t suite 22 passed in 121.95 s, `PMACS_REQUIRE_GPU` armed.
+- `Test (macos-latest / luajit)` 130809340682: `success`, 234 `running` lines and 234 results, 5,643 / 0 / 80; the E10t suite 22 passed in 125.00 s, `PMACS_REQUIRE_GPU` unset: the leg sets it for its adapter step alone, which printed `ADAPTER VERDICT: PRESENT`, and its arming report before the tests reads `gate: unarmed    PMACS_REQUIRE_GPU: unset`, so the GPU rows ran, by the time alone, and one that had returned would have read `ok`. (Corrected in place at E10t's fix round 3, 2026-11-12, on review 3's Low 1: this line read "`PMACS_REQUIRE_GPU` armed".)
+- `Test (macos-latest / lua54)` 130809340722: `success`, 234 `running` lines and 234 results, 5,643 / 0 / 80; the E10t suite 22 passed in 121.95 s, `PMACS_REQUIRE_GPU` unset as on the leg above, an adapter present, the GPU rows run by the time alone. (Corrected in place at E10t's fix round 3, 2026-11-12, on review 3's Low 1: this line read "`PMACS_REQUIRE_GPU` armed".)
 - `GPU Render (headless)` 130809340972: `success`, one `running` line and one result, 398 / 0 / 0.
 
-Against `main`'s run at `1e766cf` (`CI` 43105647878, under PR #507's close above), each leg that builds `crdt` has one more `running` line and 23 more passed, the E10t suite's 22 and the record's unit row; the no-crdt leg has the target with no test in it and one more passed, the unit row; `GPU Render (headless)` has two more, `pmacs-gpu`'s stream rows. On the three armed legs the suite's nine rows of review 2 (six named `review2_`, three `e10t_r2_`) each read `ok`. #509's row, `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, reads `ok` on all six test legs.
+Against `main`'s run at `1e766cf` (`CI` 43105647878, under PR #507's close above), each leg that builds `crdt` has one more `running` line and 23 more passed, the E10t suite's 22 and the record's unit row; the no-crdt leg has the target with no test in it and one more passed, the unit row; `GPU Render (headless)` has two more, `pmacs-gpu`'s stream rows. On `Test (crdt)`, the one armed leg, and on the two macOS legs, which are not armed, the suite's nine rows of review 2 (six named `review2_`, three `e10t_r2_`) each read `ok`. (Corrected in place at E10t's fix round 3, 2026-11-12, on review 3's Low 1: this sentence began "On the three armed legs".) #509's row, `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, reads `ok` on all six test legs.
 
 `Grammar fuzz` 43105963519 at `e0c5ba6`, attempt 1 of 1, on `ubuntu-24.04` as its workflow pins: `success`, `Grammar fuzz` 130809229786 and `Grammar fuzz (asan-strict)` 130809230200, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`.
 
@@ -17283,6 +17283,71 @@ Tally (e10t-fixes2-local): 2 items in the list below.
 - `20261111T193152Z-3602193` at `e0c5ba6`, `scripts/gate --protocol`: all eight ok, `sweep` 6,099 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 237 `Running` targets and 241 result lines in each, no daemon survived.
 
 So, at E10t's fix round 2: PR #504's head `e0c5ba6` is green on a merge into `1e766cf`, every test leg run and paired, and `main`'s run at `1c7c3d9`, which fix round 1's section left unrecorded, is green in the registry-push shape. No row's count moves here.
+
+### E10t fix round 3: PR #504 green at `3f1d48e`; one CI leg arms `PMACS_REQUIRE_GPU`, not three
+
+Recorded 2026-11-12 at E10t's fix round 3 (roadmap §E10t, review 3). Every run was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below, and each local gate's id, was searched for in this file before it was written, and none was in it. `main`'s runs at `6558a10` and at `95ec1e6`, the two registry commits before this one, are not named here and are left to E10t's merge record.
+
+**A correction made in place, in the section above** (review 3's Low 1). That section's lines for `Test (macos-latest / luajit)` 130809340682 and `Test (macos-latest / lua54)` 130809340722 said "`PMACS_REQUIRE_GPU` armed", and its closing paragraph "On the three armed legs". One leg of `ci.yml` arms the variable for its tests, `Test (crdt)`. The macOS legs set it for one step, `Does a macOS runner present a wgpu adapter?`, and each leg's arming report, printed before its tests, reads `gate: unarmed    PMACS_REQUIRE_GPU: unset; a row that finds no adapter or no built pmacs-gpu returns and reads ok`. The three places now say so, each marked where it stands. What the figures there show is unchanged: the suite's GPU rows ran on both macOS legs, by the 125.00 s and 121.95 s they took against 19.10 s and 18.04 s on the legs where they returned.
+
+#### PR #504 at `3f1d48e`: green, every test leg run
+
+`CI` 43210573944 at `3f1d48e`, attempt 1 of 1, `pull_request`, created 2026-11-12T11:36:15Z and completed 12:21:55Z: `success`. The merge `7d03476` into `95ec1e6`. Each of the seven jobs read below ran on the image of the run at `e0c5ba6` above, the Ubuntu ones on `ubuntu-24.04` `20261101.360.1` and the macOS legs on `macos-26-arm64` `20261102.0473.1`, and none printed a `ci-apt-update:` line.
+
+Tally (pr-504-ci-3f1d48e): 19 = 18 + 1.
+
+Tally (pr-504-ci-3f1d48e-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 131156806667 | success |
+| Format | 131156807115 | success |
+| Lint (lua54) | 131156807156 | success |
+| Commit attribution (D9) | 131156807194 | success |
+| Lint (luajit) | 131156807216 | success |
+| M1 Acceptance Gates | 131156936290 | success |
+| M4 Perf Gates | 131156936308 | success |
+| M5 Perf Gates | 131156936323 | success |
+| Test (ubuntu-latest / lua54) | 131156936365 | success |
+| Test (crdt) | 131156936372 | success |
+| GPU Render (headless) | 131156936379 | success |
+| Test (macos-latest / luajit) | 131156936402 | success |
+| Test (macos-latest / lua54) | 131156936405 | success |
+| Test (ubuntu-latest / luajit) | 131156936406 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 131156936427 | success |
+| M6 Perf Gates | 131156936438 | success |
+| Perf budgets (debug) | 131156936514 | success |
+| M10 Perf Gates (crdt) | 131156936533 | success |
+| Docs consistency | 131156938727 | skipped |
+
+Tally (pr-504-ci-3f1d48e-success): 18 rows of the table above with `result` = `success`.
+
+Tally (pr-504-ci-3f1d48e-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-504-ci-3f1d48e-legs): 7 items in the list below.
+
+- `Test (crdt)` 131156936372: `success`, 232 `running` lines and 232 results, 5,647 / 0 / 88; `tests/e10t_gpu_window_settles.rs` 26 passed in 334.90 s, `PMACS_REQUIRE_GPU` armed (`gate: armed      PMACS_REQUIRE_GPU (set; a row that finds no adapter or no built pmacs-gpu fails)`); 21 skips recorded, none of this suite.
+- `Test (ubuntu-latest / lua54)` 131156936365: `success`, 233 `running` lines and 233 results, 5,706 / 0 / 88; the E10t suite 26 passed in 29.04 s, `PMACS_REQUIRE_GPU` unset; 19 skips recorded, 15 of them this suite's GPU rows, each `no wgpu adapter and PMACS_REQUIRE_GPU unset`.
+- `Test (ubuntu-latest / luajit)` 131156936406: `success`, 233 `running` lines and 233 results, 5,706 / 0 / 88; the E10t suite 26 passed in 42.17 s, unset, 19 skips recorded with the same 15.
+- `Test (ubuntu-latest / luajit, no crdt)` 131156936427: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72; the E10t suite compiled out, `running 0 tests`; 4 skips recorded.
+- `Test (macos-latest / luajit)` 131156936402: `success`, 234 `running` lines and 234 results, 5,647 / 0 / 80; the E10t suite 26 passed in 150.55 s, `PMACS_REQUIRE_GPU` unset, `ADAPTER VERDICT: PRESENT`; 40 skips recorded, none of this suite, so its GPU rows ran.
+- `Test (macos-latest / lua54)` 131156936405: `success`, 234 `running` lines and 234 results, 5,647 / 0 / 80; the E10t suite 26 passed in 143.63 s, unset, an adapter present, 40 skips recorded, none of this suite.
+- `GPU Render (headless)` 131156936379: `success`, one `running` line and one result, 398 / 0 / 0.
+
+Against this PR's run at `e0c5ba6` above, each leg that builds `crdt` has the same `running` lines and four more passed, the round's four rows in the E10t suite (`review3_a_kill_whose_fallback_is_past_the_frame_lands_where_the_gpu_can_follow`, `review3_a_kill_whose_fallback_is_past_the_frame_leaves_no_follow_owed`, `e10t_r3_a_refused_switch_and_then_a_kill_end_on_a_fresh_scratch`, `e10t_r3_a_kill_under_a_focused_band_sends_the_document_to_the_fallback`), each `ok` on all five; the no-crdt leg and `GPU Render (headless)` are as they were. The skip record is the round's other change (`3f1d48e`): the suite's GPU rows that return now write a line each, so the two Ubuntu matrix legs record 19 where they recorded 4, and each of those lines reads `no wgpu adapter and PMACS_REQUIRE_GPU unset`, the return the suite's helper reaches only once it has found `pmacs-gpu` beside `pmacs` and the probe has left with status 3; none reads that the binary is not built. On the macOS legs the record holds no line of the suite, which with their times says the GPU rows ran there; before this round only the times said it. #509's row, `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, reads `ok` on all six test legs.
+
+`Grammar fuzz` 43210573927 at `3f1d48e`, attempt 1 of 1, `pull_request`: `success`, `Grammar fuzz` 131156806458 and `Grammar fuzz (asan-strict)` 131156806598, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`. The first ran on `ubuntu-24.04` `20261111.370.1`, an image version this file has not recorded before, and the second on `20261101.360.1`.
+
+Tally (pr-504-fuzz-3f1d48e): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10t-fixes3-local): 2 items in the list below.
+
+- `20261112T104201Z-2033571` at `3f1d48e`, `scripts/gate --protocol`: six of eight stages ok. `sweep` 6,102 / 1 / 88, its red #434's row, `e9_5_an_oversize_snapshot_is_refused_with_a_visible_status_not_skipped` (`timed out waiting for the refusal on the status line; the daemon wrote` one `CursorByte`, `31 passed; 1 failed`), commented (issuecomment-6821982296). `sweep-luajit` 5,427 / 1 / 72, its red #304's `pmacs-gpu` row `tests::caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled` (the two frames differing in 44 pixels, a caret), commented (issuecomment-6821982896). 237 `Running` targets and 241 result lines in each sweep, no daemon survived. The sampler beside it read a 1-minute load of 3.19 to 46.24 and a cpu `some avg60` up to 64.35, another project's processes at the top. Each row passed alone after it.
+- `20261112T111102Z-2488808` at `3f1d48e`, the gate run again: seven of eight stages ok. `sweep` 6,102 / 1 / 88, its red #304's other `pmacs-gpu` row, `tests::overwide_status_runs_never_wrap_and_keep_the_suffix_pinned` (`assertion failed: min_y >= band_top && max_y <= height`), alone this time, commented (issuecomment-6822501535); `sweep-luajit` 5,428 / 0 / 72. 237 `Running` targets and 241 result lines in each, no daemon survived. The sampler read a load of 8.97 to 27.00 and a cpu `some avg60` up to 24.94. The row passed alone after it. Not run a third time.
+
+So, at E10t's fix round 3: PR #504's head `3f1d48e` is green on CI on a merge into `95ec1e6`, every test leg run and paired, and the section above now says which leg arms `PMACS_REQUIRE_GPU`. The round's two local gates were each red on one or two rows of #434 and #304, local samples that no tally counts. No row's count moves here.
 
 ### R3 — live-leader EPERM with an unobservable group
 
