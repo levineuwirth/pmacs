@@ -17349,6 +17349,124 @@ Tally (e10t-fixes3-local): 2 items in the list below.
 
 So, at E10t's fix round 3: PR #504's head `3f1d48e` is green on CI on a merge into `95ec1e6`, every test leg run and paired, and the section above now says which leg arms `PMACS_REQUIRE_GPU`. The round's two local gates were each red on one or two rows of #434 and #304, local samples that no tally counts. No row's count moves here.
 
+### E10t review 4: `main` green at its three registry commits; the checkpoint's gate green at `3f1d48e`
+
+Recorded 2026-11-12 at E10t's review 4 (roadmap §E10t, fix round 3). Every run below was read from the jobs endpoint by conclusion. Every run id and job id below, and each local gate's id, was searched for in this file before it was written, and none was in it. These are the six runs of `main` that fix round 3's section, and fix round 2's before it, left to E10t's merge record; the review named them, so they are recorded here instead. The runs this commit's own push starts are left to that record. PR #504's runs at `3f1d48e` were read again, each test leg through its own log, and are as the section above has them; nothing was rerun.
+
+#### `main` at `6558a10`, PR #507's close: green
+
+`CI` 43112043749 at `6558a10`, attempt 1 of 1, `push`, created 2026-11-11T22:28:22Z and completed 22:30:15Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-6558a10): 15 = 6 + 9.
+
+Tally (main-ci-6558a10-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 130830335600 | success |
+| Format | 130830336079 | success |
+| Lint (luajit) | 130830336101 | success |
+| Commit attribution (D9) | 130830336233 | success |
+| Lint (lua54) | 130830336472 | success |
+| Docs consistency | 130830442067 | success |
+| M6 Perf Gates | 130830444149 | skipped |
+| Perf budgets (debug) | 130830444488 | skipped |
+| M1 Acceptance Gates | 130830444523 | skipped |
+| Test (matrix) | 130830444673 | skipped |
+| M4 Perf Gates | 130830444694 | skipped |
+| M10 Perf Gates (crdt) | 130830444887 | skipped |
+| M5 Perf Gates | 130830444933 | skipped |
+| Test (crdt) | 130830445130 | skipped |
+| GPU Render (headless) | 130830445228 | skipped |
+
+Tally (main-ci-6558a10-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-6558a10-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43112043835 at `6558a10`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 130830336060 and `Grammar fuzz (asan-strict)` 130830336436.
+
+Tally (main-fuzz-6558a10): 2 = 2 + 0.
+
+#### `main` at `95ec1e6`, E10t fix round 2's registry: green
+
+`CI` 43113775146 at `95ec1e6`, attempt 1 of 1, `push`, created 2026-11-11T22:40:50Z and completed 22:43:20Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-95ec1e6): 15 = 6 + 9.
+
+Tally (main-ci-95ec1e6-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 130836350052 | success |
+| Lint (luajit) | 130836350306 | success |
+| Format | 130836350350 | success |
+| Commit attribution (D9) | 130836350386 | success |
+| Lint (lua54) | 130836350406 | success |
+| Docs consistency | 130836427115 | success |
+| M1 Acceptance Gates | 130836428897 | skipped |
+| M5 Perf Gates | 130836429002 | skipped |
+| M6 Perf Gates | 130836429195 | skipped |
+| GPU Render (headless) | 130836429269 | skipped |
+| M10 Perf Gates (crdt) | 130836429663 | skipped |
+| Test (matrix) | 130836429855 | skipped |
+| M4 Perf Gates | 130836429862 | skipped |
+| Perf budgets (debug) | 130836430094 | skipped |
+| Test (crdt) | 130836430143 | skipped |
+
+Tally (main-ci-95ec1e6-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-95ec1e6-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43113775124 at `95ec1e6`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 130836349867 and `Grammar fuzz (asan-strict)` 130836350308.
+
+Tally (main-fuzz-95ec1e6): 2 = 2 + 0.
+
+#### `main` at `6c6b5de`, E10t fix round 3's registry: green
+
+`CI` 43217919781 at `6c6b5de`, attempt 1 of 1, `push`, created 2026-11-12T12:26:34Z and completed 12:28:52Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-6c6b5de): 15 = 6 + 9.
+
+Tally (main-ci-6c6b5de-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 131181775586 | success |
+| Lint (lua54) | 131181775862 | success |
+| Format | 131181775876 | success |
+| Changed paths | 131181775930 | success |
+| Lint (luajit) | 131181775988 | success |
+| Docs consistency | 131181907343 | success |
+| M1 Acceptance Gates | 131181909528 | skipped |
+| M6 Perf Gates | 131181909742 | skipped |
+| M4 Perf Gates | 131181909743 | skipped |
+| Perf budgets (debug) | 131181910018 | skipped |
+| M5 Perf Gates | 131181910144 | skipped |
+| Test (matrix) | 131181910307 | skipped |
+| M10 Perf Gates (crdt) | 131181910701 | skipped |
+| Test (crdt) | 131181910762 | skipped |
+| GPU Render (headless) | 131181911718 | skipped |
+
+Tally (main-ci-6c6b5de-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-6c6b5de-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43217919799 at `6c6b5de`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 131181783149 and `Grammar fuzz (asan-strict)` 131181783666.
+
+Tally (main-fuzz-6c6b5de): 2 = 2 + 0.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written in each table as `Test (matrix)`.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10t-review4-local): 3 items in the list below.
+
+- `20261112T130252Z-3405329` at `3f1d48e`, review 4's `scripts/gate --protocol`, the checkpoint's gate by the owner's ruling: all eight ok, `sweep` 6,103 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 237 `Running` targets and 241 result lines in each, no daemon survived. #434's row and #304's two read `ok`. The sampler beside it read a 1-minute load of 5.0 to 23.99 and a cpu `some avg60` at most 23.81, another project's processes at the top.
+- `20261112T001847Z-913646` at `e0c5ba6`, review 3's first `scripts/gate --protocol`, which no section above lists: seven of eight stages ok. `sweep` 6,096 / 3 / 88, its reds #289's row (`process::tests::m6_1_pty_mode_lifecycle_started_then_exited`), #492's (`e10d_fixes1_an_op_past_the_frame_ends_nothing`) and, in the same target, `e10d_review1_p1_the_attached_tui_copying_past_the_frame_stays_attached`, which no issue carried and review 3 filed as #510; `sweep-luajit` 5,428 / 0 / 72. 237 `Running` targets and 241 result lines in each.
+- `20261112T005300Z-1173238` at `e0c5ba6`, review 3's gate run again: all eight ok, `sweep` 6,099 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 237 `Running` targets and 241 result lines in each.
+
+So, at E10t's review 4: `main` is green at `6558a10`, `95ec1e6` and `6c6b5de`, each in the registry-push shape, and the checkpoint's gate at PR #504's head `3f1d48e` is green in all eight stages. #510 stands at no CI occurrence. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
