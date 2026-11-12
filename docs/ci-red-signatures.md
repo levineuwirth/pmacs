@@ -17467,6 +17467,106 @@ Tally (e10t-review4-local): 3 items in the list below.
 
 So, at E10t's review 4: `main` is green at `6558a10`, `95ec1e6` and `6c6b5de`, each in the registry-push shape, and the checkpoint's gate at PR #504's head `3f1d48e` is green in all eight stages. #510 stands at no CI occurrence. No row's count moves here.
 
+### E10t fix round 4: PR #504 at `34a1410`, one macOS leg red on #511, its first occurrence; `main` green at `b88a25e`
+
+Recorded 2026-11-12 at E10t's fix round 4 (roadmap §E10t, review 4). Every run was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id and job id below, and the local gate's id, was searched for in this file before it was written, and none was in it. `main`'s two runs at `b88a25e`, which review 4's section above left to E10t's merge record, are named by the round's pass and so are recorded here instead; the runs this commit's own push starts are left to that record.
+
+#### PR #504 at `34a1410`: one leg red on a row the branch does not touch, not rerun
+
+`CI` 43241700420 at `34a1410`, attempt 1 of 1, `pull_request`, created 2026-11-12T14:52:20Z and completed 15:42:40Z: `failure`. The merge `63f19e7` into `b88a25e`. Each of the seven jobs read below ran on the image of the run at `3f1d48e` above, the Ubuntu ones on `ubuntu-24.04` `20261101.360.1` and the macOS legs on `macos-26-arm64` `20261102.0473.1`, and none printed a `ci-apt-update:` line. **`Test (macos-latest / luajit)` failed on `tests/vterm_stage2_acceptance.rs`'s `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`** (`panicked at tests/vterm_stage2_acceptance.rs:767:5:`, `child-input settling on [86, 84, 69, 82, 77, 95, 73, 78, 80, 85, 84, 95, 83, 77, 79, 75, 69, 10] did not become ready within 5s (waited 5.10211375s, 47 polls); last observed: None`, at 15:18:35Z, `13 passed; 1 failed` in 6.14 s). No issue and no section of this file carried that fragment. **Filed as #511, its first occurrence**, with a candidate mechanism read and not run: the row's `init.lua` sends the child its bytes on the 180th tick, and the row waits 5 s of wall clock from the moment it has seen the copy's OSC 52. The push that started the run adds four rows to `tests/e10t_gpu_window_settles.rs` and changes one doc comment in `src/daemon.rs`; the PR does not touch the row's file. Not rerun, at the round's rule and the registry's.
+
+Tally (pr-504-ci-34a1410): 19 = 17 + 1 + 1.
+
+Tally (pr-504-ci-34a1410-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 131263552447 | success |
+| Format | 131263552970 | success |
+| Changed paths | 131263553049 | success |
+| Commit attribution (D9) | 131263553137 | success |
+| Lint (lua54) | 131263553156 | success |
+| M4 Perf Gates | 131263694137 | success |
+| M10 Perf Gates (crdt) | 131263694165 | success |
+| Test (crdt) | 131263694222 | success |
+| M5 Perf Gates | 131263694279 | success |
+| GPU Render (headless) | 131263694285 | success |
+| Test (macos-latest / luajit) | 131263694298 | failure |
+| M6 Perf Gates | 131263694327 | success |
+| Test (ubuntu-latest / lua54) | 131263694341 | success |
+| Test (macos-latest / lua54) | 131263694371 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 131263694382 | success |
+| Test (ubuntu-latest / luajit) | 131263694404 | success |
+| Perf budgets (debug) | 131263694419 | success |
+| M1 Acceptance Gates | 131263694420 | success |
+| Docs consistency | 131263697662 | skipped |
+
+Tally (pr-504-ci-34a1410-success): 17 rows of the table above with `result` = `success`.
+
+Tally (pr-504-ci-34a1410-failure): 1 row of the table above with `result` = `failure`.
+
+Tally (pr-504-ci-34a1410-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-504-ci-34a1410-legs): 7 items in the list below.
+
+- `Test (crdt)` 131263694222: `success`, 232 `running` lines and 232 results, 5,651 / 0 / 88; `tests/e10t_gpu_window_settles.rs` 30 passed in 435.94 s, `PMACS_REQUIRE_GPU` armed (`gate: armed      PMACS_REQUIRE_GPU (set; a row that finds no adapter or no built pmacs-gpu fails)`); 21 skips recorded, none of this suite.
+- `Test (ubuntu-latest / lua54)` 131263694341: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88; the E10t suite 30 passed in 64.69 s, `PMACS_REQUIRE_GPU` unset; 21 skips recorded, 17 of them this suite's GPU rows, each `no wgpu adapter and PMACS_REQUIRE_GPU unset`.
+- `Test (ubuntu-latest / luajit)` 131263694404: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88; the E10t suite 30 passed in 65.11 s, unset, 21 skips recorded with the same 17.
+- `Test (ubuntu-latest / luajit, no crdt)` 131263694382: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72; the E10t suite compiled out, `running 0 tests`; 4 skips recorded.
+- `Test (macos-latest / luajit)` 131263694298: `failure`, 232 `running` lines and 232 results, 5,590 / 1 / 80, #511 as above; the E10t suite 30 passed in 101.00 s, `PMACS_REQUIRE_GPU` unset, `ADAPTER VERDICT: PRESENT`; 40 skips recorded, none of this suite. The step after the test step, which on the lua54 leg runs `pmacs`'s doc-tests and `pmacs_protocol`'s unit tests (1 and 59 tests), did not run.
+- `Test (macos-latest / lua54)` 131263694371: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80; the E10t suite 30 passed in 146.52 s, unset, an adapter present, 40 skips recorded, none of this suite; #511's row `ok`, its binary `14 passed` in 5.22 s.
+- `GPU Render (headless)` 131263694285: `success`, one `running` line and one result, 398 / 0 / 0.
+
+Against this PR's run at `3f1d48e` above, each green leg that builds `crdt` has the same `running` lines and four more passed, the round's four rows in the E10t suite (`review4_two_buffers_past_the_frame_met_at_the_tick_end_on_a_fresh_scratch`, `review4_a_grid_replica_beside_is_sent_the_fallback_the_tick_measured`, `review4_a_refused_passive_display_under_a_focused_panel_goes_back_in_the_document`, `review4_a_kill_by_a_key_under_a_focused_panel_sends_the_document_to_the_fallback`), each `ok` on all five legs that build `crdt`, the red one among them; the no-crdt leg and `GPU Render (headless)` are as they were. The two GPU rows among the four add two lines to each Ubuntu matrix leg's skip record, 21 where it held 19, and the suite's lines there number 17 where they numbered 15. The red leg's 5,590 passed and one failed are the lua54 leg's 5,651 less the 60 tests of the step that did not run. #509's row, `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, reads `ok` on all six test legs, #434's row `ok` on the five that build `crdt`, and #511's row `ok` on the five that are green.
+
+`Grammar fuzz` 43241700419 at `34a1410`, attempt 1 of 1, `pull_request`: `success`, `Grammar fuzz` 131263551922 and `Grammar fuzz (asan-strict)` 131263552696, both arms `run=false`, `reason=no changed path can change the grammar set or the parse worker`, both on `ubuntu-24.04` `20261101.360.1`.
+
+Tally (pr-504-fuzz-34a1410): 2 = 2 + 0.
+
+#### `main` at `b88a25e`, E10t review 4's registry: green
+
+`CI` 43231659699 at `b88a25e`, attempt 1 of 1, `push`, created 2026-11-12T13:53:38Z and completed 13:56:16Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-b88a25e): 15 = 6 + 9.
+
+Tally (main-ci-b88a25e-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 131228251904 | success |
+| Lint (luajit) | 131228252302 | success |
+| Commit attribution (D9) | 131228252344 | success |
+| Lint (lua54) | 131228252381 | success |
+| Changed paths | 131228252674 | success |
+| Docs consistency | 131228348619 | success |
+| M5 Perf Gates | 131228351201 | skipped |
+| M4 Perf Gates | 131228351346 | skipped |
+| Test (crdt) | 131228351604 | skipped |
+| GPU Render (headless) | 131228351608 | skipped |
+| M1 Acceptance Gates | 131228351635 | skipped |
+| M6 Perf Gates | 131228351830 | skipped |
+| Test (matrix) | 131228351933 | skipped |
+| M10 Perf Gates (crdt) | 131228352009 | skipped |
+| Perf budgets (debug) | 131228352041 | skipped |
+
+Tally (main-ci-b88a25e-success): 6 rows of the table above with `result` = `success`.
+
+Tally (main-ci-b88a25e-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43231659516 at `b88a25e`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 131228250701 and `Grammar fuzz (asan-strict)` 131228251838.
+
+Tally (main-fuzz-b88a25e): 2 = 2 + 0.
+
+The skipped matrix row is the one job the API names with its unexpanded template, written in the table as `Test (matrix)`.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10t-fixes4-local): 1 item in the list below.
+
+- `20261112T142504Z-4113804` at `34a1410`, `scripts/gate --protocol`: all eight ok, `sweep` 6,107 / 0 / 88 and `sweep-luajit` 5,428 / 0 / 72, 237 `Running` targets and 241 result lines in each, no daemon survived. The E10t suite 30 passed in 47.69 s; #434's row, #304's two and #511's read `ok`. The sampler beside it read a 1-minute load of 3.99 to 22.66, a cpu `some avg60` at most 7.56 and a memory `some avg60` at most 4.55, other projects' processes at the top.
+
+So, at E10t's fix round 4: PR #504's head `34a1410` is red on CI on one macOS leg, on #511's row at its first occurrence, in a file the branch does not touch, and green on every other job on a merge into `b88a25e`; it was not rerun. `main` is green at `b88a25e` in the registry-push shape. #511 stands at one CI occurrence. No other row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
