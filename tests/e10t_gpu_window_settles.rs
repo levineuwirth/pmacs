@@ -32,6 +32,8 @@
 #![cfg(feature = "crdt")]
 
 mod common;
+#[path = "support/mod.rs"]
+mod support;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -144,7 +146,11 @@ impl Probe {
 /// `pmacs-gpu --headless-probe` with the popup action against `daemon`,
 /// attaching with no target, running `steps`; killed from outside past
 /// [`OUTSIDE`]. `None` when skipped (no `pmacs-gpu` built, or no wgpu
-/// adapter), which panics under `PMACS_REQUIRE_GPU`.
+/// adapter), which panics under `PMACS_REQUIRE_GPU` and is otherwise
+/// written to the leg's skip record (`support::record_skip`): a row that
+/// returns reads `ok`, and until E10t's fix round 3 nothing in a leg's log
+/// said these had (review 3's Low 1: the rows' elapsed time was the only
+/// sign that the macOS legs, which do not arm the variable, had run them).
 fn run_probe(daemon: &TestDaemon, label: &str, steps: &str) -> Option<Probe> {
     run_probe_as(daemon, label, "popup", steps, READY_MS, OUTSIDE)
 }
@@ -172,6 +178,10 @@ fn run_probe_as(
             "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
             binary.display()
         );
+        support::record_skip(&format!(
+            "{label}: `pmacs-gpu` is not built beside this build's `pmacs` and \
+             PMACS_REQUIRE_GPU unset"
+        ));
         eprintln!("skipping the GPU probe: {} is not built", binary.display());
         return None;
     }
@@ -213,6 +223,9 @@ fn run_probe_as(
             "{label}: the probe failed ({status}); its stderr ends {:?}",
             tail(&stderr_path)
         );
+        support::record_skip(&format!(
+            "{label}: no wgpu adapter and PMACS_REQUIRE_GPU unset"
+        ));
         eprintln!("skipping the GPU probe: no wgpu adapter available");
         return None;
     }
