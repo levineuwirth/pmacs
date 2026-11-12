@@ -1139,6 +1139,84 @@ fn e10t_r3_a_refused_switch_and_then_a_kill_end_on_a_fresh_scratch() {
     );
 }
 
+/// `C-c 3` kills `one.log` 4 s after the key, from the tick hook, and
+/// writes to the daemon's log the buffer and the side of the window that
+/// holds the focus then, and again 5 s later.
+const KILL_UNDER_A_BAND: &str = "local at, again = nil, nil\n\
+    local function focused(when)\n\
+      local side = tostring(pmacs.window.params().side)\n\
+      local name = pmacs.window.buffer():name()\n\
+      io.stderr:write('e10t ' .. when .. ' focused=' .. name .. ' side=' .. side .. '\\n')\n\
+    end\n\
+    pmacs.command.define { name = 'e10t.bandkill', description = 'kill one.log later',\n\
+      fn = function() at = pmacs.editor.monotonic_ms() + 4000 end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 3', command = 'e10t.bandkill' }\n\
+    pmacs.hook.add('process.after-tick', function()\n\
+      local now = pmacs.editor.monotonic_ms()\n\
+      if at and now >= at then\n\
+        at, again = nil, now + 5000\n\
+        focused('at-kill')\n\
+        for _, b in ipairs(pmacs.buffer.list()) do\n\
+          if b:name() == 'one.log' then pcall(pmacs.buffer.kill, b) end\n\
+        end\n\
+      elseif again and now >= again then\n\
+        again = nil\n\
+        focused('after')\n\
+      end\n\
+    end)\n";
+
+/// The refusal puts back the document window, not the focused one (E10t
+/// fix round 3; review 3 named the reading, and its one run did not reach
+/// the state). The GPU opens the terminal in the band and the focus goes
+/// there (`C-c t`); `one.log`, which the document shows, is then killed,
+/// the document window falls to `big.bin`, and the follow is refused.
+/// `refuse_oversize_snapshot` switched the frontend's active window, so
+/// with Medium 1 fixed the fallback went into the band, over the terminal,
+/// and the document stayed on `big.bin`: `not on "two.log"; ... early 1
+/// snapshots`, the refusal on every tick, and the band's window on
+/// `two.log` five seconds later. The document window now goes to the
+/// fallback, which is sent, and the band keeps its terminal.
+#[test]
+fn e10t_r3_a_kill_under_a_focused_band_sends_the_document_to_the_fallback() {
+    let daemon = daemon_showing_oversize(KILL_UNDER_A_BAND);
+    let Some(probe) = run_probe(
+        &daemon,
+        "r3-kill-under-a-band",
+        &switch_steps("key:C-c key:3 key:C-c key:t", "quiet:250"),
+    ) else {
+        return;
+    };
+    let log = daemon.stderr_log();
+    let focused = |when: &str| {
+        log.lines()
+            .find_map(|l| l.strip_prefix(&format!("e10t {when} focused=")))
+            .unwrap_or_else(|| panic!("no `{when}` line in the daemon's log:\n{log}"))
+    };
+    // The premise: the band's terminal held the focus when the buffer went.
+    let at_kill = focused("at-kill");
+    assert!(
+        at_kill.starts_with("*terminal:") && at_kill.ends_with("side=bottom"),
+        "the focus was in the terminal band at the kill: {at_kill:?}; the daemon's log:\n{log}"
+    );
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the document's buffer killed under a focused band",
+    ) {
+        panic!("{said}; the daemon's log:\n{log}");
+    }
+    assert!(
+        log.matches("past the 16 MiB a frontend can mirror").count() <= 2,
+        "the attach's refusal and the kill's, each once; the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        focused("after"),
+        at_kill,
+        "the band keeps its terminal and the focus; the daemon's log:\n{log}"
+    );
+}
+
 /// A daemon whose window changes buffer on every tick, so the follow
 /// writes a snapshot on every pass: a stream that never pauses, made by the
 /// daemon at the head, where #326's own spin is gone.

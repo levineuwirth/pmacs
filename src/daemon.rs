@@ -4316,8 +4316,8 @@ fn fallback_that_fits(
 
 /// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:
 /// say so on the status line every frontend reads, naming the buffer
-/// and both sizes, and put `fid`'s window on `back_to`, which its caller
-/// chose: the buffer that frontend still mirrors while it exists, and
+/// and both sizes, and put `fid`'s document window on `back_to`, which its
+/// caller chose: the buffer that frontend still mirrors while it exists, and
 /// otherwise a fallback that fits (a session never sent a buffer, an
 /// attach onto the oversize buffer, or, since E10t fix round 3, a follow
 /// refused after the buffer last sent was killed), so the daemon's view
@@ -4328,6 +4328,13 @@ fn fallback_that_fits(
 /// to go back to did until E9's fix round 2 (review 2's Low 1) and what
 /// the tick did after a kill until E10t's fix round 3 (review 3's
 /// Medium 1). A caller passes a buffer that exists.
+///
+/// The window is the primary document window, the one the follow reads
+/// ([`follow_owed`]), and not the focused one. Until E10t's fix round 3
+/// it was the frontend's active window: with the focus in a panel (the
+/// GPU's terminal band) and the document's buffer killed, `back_to` went
+/// into the panel, over the terminal, and the document stayed on the
+/// refused buffer, refused again on every tick.
 fn refuse_oversize_snapshot(
     editor: &EditorState,
     fid: FrontendId,
@@ -4355,7 +4362,10 @@ fn refuse_oversize_snapshot(
     );
     eprintln!("pmacs: {}", core.status);
     if back_to != buffer_id
-        && let Err(e) = core.switch_active_buffer_for(fid, back_to)
+        && let Err(e) = core
+            .primary_document_window(fid)
+            .ok_or_else(|| format!("{fid:?} has no document window"))
+            .and_then(|window| core.install_buffer_in_window(window, back_to))
     {
         eprintln!("pmacs: putting {fid:?} back on {back_to:?} failed: {e}");
     }
