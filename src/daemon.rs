@@ -4283,9 +4283,20 @@ fn first_snapshot_that_fits(
 /// buffer chosen, which the next tick exports again to send. A buffer
 /// upgraded to be measured is published to the replicas that mirror every
 /// buffer, as the tick's own upgrade is; this session's window is not on
-/// it yet, so its copy is the follow's. A candidate whose snapshot cannot
-/// be taken is logged and chosen unmeasured: the follow then treats it as
-/// it treats any buffer it cannot export, and nothing stays owed.
+/// it yet, so its copy is the follow's.
+///
+/// A candidate whose snapshot cannot be taken is logged and chosen
+/// unmeasured, where the attach in the same position ends the session.
+/// What that leaves (E10t fix round 4, review 4's Low 2: said here, and
+/// not changed): the window is put on that buffer, and the next tick's
+/// follow gets nothing from its export, writes nothing and records the
+/// buffer as sent (`send_buffer_snapshot_to_frontend`'s `Ok`). So nothing
+/// is owed and nothing is retried, and nothing is sent: the frontend
+/// stays on the buffer it had, and the daemon's window is on a buffer
+/// that frontend was never sent, with no refusal repeated to give it
+/// away. No way to cause the failure is known: review 4 reached this
+/// state only on a failure it planted, and there a key typed in the GPU
+/// edited the fallback.
 #[cfg(feature = "crdt")]
 fn fallback_that_fits(
     editor: &EditorState,
