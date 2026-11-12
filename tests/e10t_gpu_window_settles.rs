@@ -1275,3 +1275,313 @@ fn review2_the_quit_and_reconnect_probes_end_at_their_deadline_beside_a_stream()
         );
     }
 }
+
+/// A side window that is not the terminal's, as a list view's panel is
+/// (`builtin/runtime/listview.lua`: `side = "bottom", select = true`), and
+/// three commands that act from wherever the focus is. `C-c 4` opens
+/// `*band*` below the document and gives it the focus. `C-c 1` shows
+/// `big.bin` in the document window without selecting it. `C-c 5` kills
+/// `one.log`. `C-c 2` writes the focused window's buffer and side to the
+/// daemon's log.
+const BAND: &str = "local function named(name)\n\
+      for _, b in ipairs(pmacs.buffer.list()) do\n\
+        if b:name() == name then return b end\n\
+      end\n\
+    end\n\
+    pmacs.command.define { name = 'e10t.band', description = 'open a band and focus it',\n\
+      fn = function()\n\
+        pmacs.window.display(pmacs.buffer.create('*band*'), { side = 'bottom', select = true })\n\
+      end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 4', command = 'e10t.band' }\n\
+    pmacs.command.define { name = 'e10t.showbig', description = 'show big.bin in the document, unselected',\n\
+      fn = function() pmacs.window.display(named('big.bin'), { select = false }) end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 1', command = 'e10t.showbig' }\n\
+    pmacs.command.define { name = 'e10t.killone', description = 'kill one.log',\n\
+      fn = function() pmacs.buffer.kill(named('one.log')) end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 5', command = 'e10t.killone' }\n\
+    local notes = 0\n\
+    pmacs.command.define { name = 'e10t.focused', description = 'log the focused window',\n\
+      fn = function()\n\
+        notes = notes + 1\n\
+        io.stderr:write('e10t note' .. notes .. ' focused=' .. pmacs.window.buffer():name()\n\
+          .. ' side=' .. tostring(pmacs.window.params().side) .. '\\n')\n\
+      end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 2', command = 'e10t.focused' }\n";
+
+/// `big.bin` (24 MiB, past the frame), `one.log` and `two.log` visited in
+/// that order, `*scratch*` killed, and `one.log` shown: the window's
+/// bootstrap is an ordinary one, and the buffer past the frame is the first
+/// other buffer `kill_buffer` falls to.
+fn daemon_showing_one_beside_oversize(extra: &str) -> TestDaemon {
+    let dir = files_dir();
+    let (big, one, two) = (
+        dir.join("big.bin"),
+        dir.join("one.log"),
+        dir.join("two.log"),
+    );
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    std::fs::write(&one, fixture(10_000)).expect("write one.log");
+    std::fs::write(&two, fixture(20_000)).expect("write two.log");
+    // `init_visiting` shows `files[0]`; the extra shows `one.log` after it.
+    let extra = format!(
+        "pmacs.buffer.find_or_open({:?})\n{extra}",
+        one.display().to_string()
+    );
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[big, one, two], false, &extra))
+}
+
+/// The daemon's `e10t note<n>` line, written by [`BAND`]'s `C-c 2`.
+fn note(log: &str, n: usize) -> &str {
+    log.lines()
+        .find_map(|l| l.strip_prefix(&format!("e10t note{n} focused=")))
+        .unwrap_or_else(|| panic!("no note {n} in the daemon's log:\n{log}"))
+}
+
+/// Review 4's row for the second shape of the refusal's window, which fix
+/// round 3 read and did not run: a side window that is not the terminal's
+/// holds the focus, and a buffer past the frame is shown in the document
+/// window without selecting it, while the buffer last sent still exists.
+/// The follow is refused; the document window goes back to `one.log`, the
+/// band keeps its buffer and the focus, and the refusal is said once. This
+/// refusal is older than the phase: with e0c5ba6's daemon, in release, it
+/// put `one.log` into the band and was said again on every tick while the
+/// band held the focus (review 4's run `p1`, 65 times in about seven
+/// seconds), and with that daemon or 5b0a1c8's the row fails on the band's
+/// second note, `one.log side=bottom`. The first count waits for the
+/// refusal's band (`band:big.bin`), since a count taken on a fixed delay
+/// can come before the refusal under load.
+#[test]
+fn review4_a_refused_passive_display_under_a_focused_panel_goes_back_in_the_document() {
+    let daemon = daemon_showing_one_beside_oversize(BAND);
+    let steps = format!(
+        "quiet:{LEAD_MS} key:C-c key:4 quiet:500 key:C-c key:2 quiet:300 key:C-c key:1 \
+         quiet:{SWITCH_LEAD_MS} band:big.bin count:early key:C-c key:2 quiet:{HOLD_MS} count:late"
+    );
+    let Some(probe) = run_probe(&daemon, "r4-passive-under-a-panel", &steps) else {
+        return;
+    };
+    let log = daemon.stderr_log();
+    // The premise: the band held the focus before the display, and after.
+    assert_eq!(
+        note(&log, 1),
+        "*band* side=bottom",
+        "the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        note(&log, 2),
+        "*band* side=bottom",
+        "the band keeps its buffer and the focus; the daemon's log:\n{log}"
+    );
+    if let Err(said) = settled(
+        &probe,
+        "one.log",
+        1,
+        "a buffer past the frame shown in the document under a focused panel",
+    ) {
+        panic!("{said}; the daemon's log:\n{log}");
+    }
+    assert_eq!(
+        log.matches("this window stays on one.log").count(),
+        1,
+        "the refusal said once, the document back on the buffer last sent; the log:\n{log}"
+    );
+}
+
+/// Review 4's row for the kill fix round 3's row made from the tick hook
+/// under the terminal band, made here by a key pressed in a side window
+/// that is not the terminal's: `one.log`, which the document shows, is
+/// killed with the focus in `*band*`. The document window falls to
+/// `big.bin`, the follow is refused, and the document goes to the fallback
+/// that fits, `two.log`, which is sent; the band keeps its buffer and the
+/// focus. With 5b0a1c8's daemon the fallback went into the band and the
+/// row fails on its second note, `two.log side=bottom`. The first count
+/// waits for the refusal's band: in a batch beside a daemon that was
+/// spinning, review 4 once read it before the follow had landed (`early 1
+/// snapshots on "one.log" (4), late 2 on "two.log" (5)`).
+#[test]
+fn review4_a_kill_by_a_key_under_a_focused_panel_sends_the_document_to_the_fallback() {
+    let daemon = daemon_showing_one_beside_oversize(BAND);
+    let steps = format!(
+        "quiet:{LEAD_MS} key:C-c key:4 quiet:500 key:C-c key:2 quiet:300 key:C-c key:5 \
+         quiet:{SWITCH_LEAD_MS} band:big.bin count:early key:C-c key:2 quiet:{HOLD_MS} count:late"
+    );
+    let Some(probe) = run_probe(&daemon, "r4-kill-under-a-panel", &steps) else {
+        return;
+    };
+    let log = daemon.stderr_log();
+    assert_eq!(
+        note(&log, 1),
+        "*band* side=bottom",
+        "the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        note(&log, 2),
+        "*band* side=bottom",
+        "the band keeps its buffer and the focus; the daemon's log:\n{log}"
+    );
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the document's buffer killed by a key under a focused panel",
+    ) {
+        panic!("{said}; the daemon's log:\n{log}");
+    }
+    assert_eq!(
+        log.matches("past the 16 MiB a frontend can mirror").count(),
+        1,
+        "the kill's refusal, once; the daemon's log:\n{log}"
+    );
+}
+
+/// Review 4's Low 1, the tick's measuring: two buffers past the frame met
+/// at the tick. `s.txt` is shown beside `big1.bin` and `big2.bin`,
+/// `*scratch*` gone. `C-x k RET` kills `s.txt`, the window falls to
+/// `big1.bin`, the follow is refused, and the fallback is measured past
+/// `big2.bin` down to a fresh `*scratch*`. On the wire: one snapshot
+/// follows, of a buffer named `*scratch*`, the status names `big1.bin` and
+/// where the window went, the next key lands there, and the refusal is in
+/// the log once. Every other row of the suite that reaches a refusal has a
+/// fixture in which the buffer `kill_buffer` would choose next already
+/// fits, so each passes with `fallback_that_fits` returning its first
+/// candidate unmeasured; this one does not, since the window then passes
+/// between the two large files on every tick and no snapshot comes
+/// (`timed out ... waiting for a snapshot of the buffer the window went
+/// to`), which is also how it fails with e0c5ba6's daemon.
+#[test]
+fn review4_two_buffers_past_the_frame_met_at_the_tick_end_on_a_fresh_scratch() {
+    let dir = files_dir();
+    let (big1, big2, small) = (
+        dir.join("big1.bin"),
+        dir.join("big2.bin"),
+        dir.join("s.txt"),
+    );
+    std::fs::write(&big1, oversize_text(24 * 1024 * 1024)).expect("write big1.bin");
+    std::fs::write(&big2, oversize_text(24 * 1024 * 1024)).expect("write big2.bin");
+    std::fs::write(&small, fixture(5)).expect("write s.txt");
+    let extra = format!(
+        "pmacs.buffer.find_or_open({:?})\n",
+        small.display().to_string()
+    );
+    let daemon = TestDaemon::spawn_with_env_and_init(
+        &[],
+        &init_visiting(&[big1, big2, small], false, &extra),
+    );
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    // Two upgrades and three exports of 24 MiB in one pass of a debug
+    // daemon: the patience is the suite's longest.
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(3),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, shown, "the killed buffer is not sent again");
+    session.declare_viewport(next);
+    let (name, status) = wait_within(
+        &mut session,
+        "the status of the buffer sent",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                message: Some(message),
+                ..
+            } if *buffer_id == next => Some((name.clone(), message.clone())),
+            _ => None,
+        },
+    );
+    assert_eq!(
+        name, "*scratch*",
+        "neither large file is where the window went"
+    );
+    assert!(
+        status.contains("big1.bin is 24.0 MiB")
+            && status.contains("this window stays on *scratch*"),
+        "the status names what weighed too much and where the window went: {status:?}"
+    );
+    session.type_str("k");
+    session.wait("the key's echo on the buffer sent", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == next)
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert_eq!(
+        log.matches("past the 16 MiB a frontend can mirror").count(),
+        1,
+        "one refusal for the kill, however many candidates were measured; the log:\n{log}"
+    );
+}
+
+/// Review 4's Low 1, the publish beside the measuring: a grid replica
+/// attached beside mirrors every buffer, and the fallback the tick's
+/// measure created and upgraded is sent to it. `one.log` is shown beside
+/// `big.bin`, `*scratch*` gone; a grid session and a semantic one both
+/// show `one.log`; the semantic one kills it. Its window falls to
+/// `big.bin`, the follow is refused, and the fallback that fits is a fresh
+/// `*scratch*`, upgraded where it is measured. The semantic session is
+/// sent it by the next tick's follow; the grid replica only by the publish
+/// in `fallback_that_fits`, since the tick's own upgrade never fires for a
+/// buffer the measure already upgraded. No other row of the suite has a
+/// replica beside, so each passes with that publish removed; this one
+/// then times out `waiting for the fallback's snapshot on the grid
+/// replica`. With e0c5ba6's daemon no fallback is chosen at all, and it
+/// times out on the semantic session's snapshot.
+#[test]
+fn review4_a_grid_replica_beside_is_sent_the_fallback_the_tick_measured() {
+    let dir = files_dir();
+    let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
+    std::fs::write(&one, fixture(20)).expect("write one.log");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, big], false, ""));
+    let mut grid = WireSession::grid(&daemon, pmacs_protocol::cell::CellSize::new(24, 80));
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, shown, "the killed buffer is not sent again");
+    wait_within(
+        &mut grid,
+        "the fallback's snapshot on the grid replica",
+        Duration::from_secs(8),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id == next => Some(()),
+            _ => None,
+        },
+    );
+}
