@@ -1820,9 +1820,36 @@ fn press_probe_key(app: &mut App, key: &str) {
     }
 }
 
+/// E10y --- the theme the window holds, under `label`: how many
+/// `ThemeFacts` it has applied, how long before this report the last one
+/// was (`none` when there was none), the names in its face table, sorted,
+/// and whether `ui.popup` is among them. A popup painted in the
+/// frontend's defaults under a theme that sets its face is then told
+/// apart: a window never sent the theme, one sent a table without the
+/// face, or one that held the face and did not paint it (#513).
+fn theme_probe_facts(state: &State, label: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "{label}.theme_facts={}", state.theme_facts_applied);
+    let last = state.theme_facts_last.map_or_else(
+        || "none".to_owned(),
+        |at| at.elapsed().as_millis().to_string(),
+    );
+    let _ = writeln!(out, "{label}.theme_facts_last_ms_ago={last}");
+    let mut names: Vec<&str> = state.faces.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    let _ = writeln!(out, "{label}.faces={}", names.join(","));
+    let _ = writeln!(
+        out,
+        "{label}.has_ui_popup={}",
+        state.faces.contains_key("ui.popup")
+    );
+}
+
 /// The popup's facts under `label`, one `key=value` line each, the box
 /// measured as the next frame paints it and a pixel of its background
-/// read back from that frame.
+/// read back from that frame, after the theme the window holds
+/// ([`theme_probe_facts`]), which is written whether a popup is open or
+/// not.
 fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
     use std::fmt::Write as _;
     let open = state.popup_open_for_current_buffer();
@@ -1833,6 +1860,7 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
         .and_then(|f| f.message.clone())
         .unwrap_or_default();
     let _ = writeln!(out, "{label}.status={status:?}");
+    theme_probe_facts(state, label, out);
     let Some(popup) = state.popup.clone().filter(|_| open) else {
         return;
     };
@@ -1921,10 +1949,10 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// `click` presses and releases the left button over the popup;
 /// `band:<prefix>` waits up to five seconds for the status band to begin
 /// with `prefix` (a switch's or a kill's message lands a frame or more
-/// after its key, later under load); `report:<label>` writes the popup's
-/// facts under `label`; `count:<label>` writes the snapshots applied so far,
-/// the buffer shown, the band's name for it and the time since attach
-/// (E10t); `frame:<label>` writes the composited frame,
+/// after its key, later under load); `report:<label>` writes the theme
+/// the window holds and the popup's facts under `label`; `count:<label>`
+/// writes the snapshots applied so far, the buffer shown, the band's name
+/// for it and the time since attach (E10t); `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
 /// times out is reported as `step.<i>=timeout` and the script goes on.
@@ -5687,6 +5715,14 @@ struct State {
     /// `face_fg_or` / `face_wash_or` / `modeline_face_colors` /
     /// `diag_face_rgba` resolvers (Q#TH5 mask + `Default` mapping).
     faces: HashMap<String, CellStyle>,
+    /// `ThemeFacts` applied since the session began, and when the last
+    /// one was (E10y): the popup probe's `report:` step writes both
+    /// beside the table's names, so a row that reads a frontend default
+    /// where a theme set a face says whether the window held the theme
+    /// at all when it was read (#513).
+    theme_facts_applied: u64,
+    /// When the last `ThemeFacts` was applied; see `theme_facts_applied`.
+    theme_facts_last: Option<std::time::Instant>,
     /// Vterm Stage 3 — the installed terminal frame and its derived
     /// paint plan, or `None` in document mode. The two-state machine is
     /// explicit: `BufferSnapshot` always leaves terminal mode, a valid
@@ -12483,6 +12519,8 @@ impl State {
             minimap_cache: None,
             line_numbers: LineNumberMode::Off,
             faces: HashMap::new(),
+            theme_facts_applied: 0,
+            theme_facts_last: None,
             gutter_buffer,
             gutter_text_renderer,
             terminal: None,
@@ -13344,6 +13382,8 @@ impl State {
             // would keep stale colors indefinitely without this.
             InstanceMessage::ThemeFacts { faces } => {
                 self.faces = faces.into_iter().map(|f| (f.name, f.style)).collect();
+                self.theme_facts_applied += 1;
+                self.theme_facts_last = Some(std::time::Instant::now());
                 self.status_runs = None;
                 self.status_left_runs = None;
                 self.request_redraw();

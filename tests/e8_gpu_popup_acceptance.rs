@@ -275,7 +275,15 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
         &[],
         "pmacs.theme.set { [\"ui.popup\"] = { fg = { 255, 255, 255 }, bg = { 200, 0, 0 } } }",
     );
-    let Some(themed) = run_popup_probe(&daemon, "ask:h report:themed", "themed.report") else {
+    // `themed` is read the moment the popup is open, and is what the row
+    // asserts on. `settled` is the same window a second later, read and
+    // not asserted: beside a red `themed` it says whether the theme came
+    // after the report or not at all (E10y.1, #513).
+    let Some(themed) = run_popup_probe(
+        &daemon,
+        "ask:h report:themed quiet:1000 report:settled",
+        "themed.report",
+    ) else {
         return;
     };
     let px: Vec<u32> = fact(&themed, "themed.pixel")
