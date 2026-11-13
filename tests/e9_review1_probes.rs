@@ -28,6 +28,7 @@ use pmacs_protocol::{
 };
 
 use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
+use common::oversize::oversize_text;
 
 struct Session {
     stream: UnixStream,
@@ -706,20 +707,7 @@ fn e9_review1_the_last_frontend_s_question_survives_the_socket_and_is_answerable
 fn daemon_showing_big(extra: &str) -> (TestDaemon, std::path::PathBuf) {
     let dir = tempfile::TempDir::new().expect("tempdir for the files");
     let big = dir.path().join("big.txt");
-    let mut text = String::with_capacity(24 * 1024 * 1024 + 80);
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-    while text.len() < 24 * 1024 * 1024 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        for byte in state.to_le_bytes() {
-            text.push(char::from(b' ' + byte % 95));
-        }
-        if text.len() % 80 < 8 {
-            text.push('\n');
-        }
-    }
-    std::fs::write(&big, &text).expect("write the big file");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write the big file");
     let init = format!(
         "pmacs.buffer.find_or_open({big:?})\n{extra}",
         big = big.to_str().expect("utf-8"),

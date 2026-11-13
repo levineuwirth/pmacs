@@ -28,6 +28,7 @@ use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
 use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
 use common::gpu_probe::{fact, gpu_probe_binary, probe_facts};
+use common::oversize::oversize_text;
 
 #[path = "common/editor.rs"]
 mod editor;
@@ -2064,7 +2065,7 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
     }
 
     /// E10d.2 --- the bootstrap's sweep ends at its first failed write. A
-    /// v26 replica (no token, so nothing after the sweep writes to it
+    /// grid replica (no token, so nothing after the sweep writes to it
     /// before the tick) stops reading after `Hello` and before its last
     /// handshake message, so every snapshot the sweep sends it fails;
     /// the daemon holds two buffers, the note its init opens and the
@@ -2073,7 +2074,9 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
     /// installed, so no drain is ever announced for it. At `73bc1e6` the
     /// sweep logged a failure per buffer and went on, the session was
     /// installed with the dead stream, and the tick's write failed again
-    /// and began a drain.
+    /// and began a drain. Until E10t (#326) the row drove a v26 semantic
+    /// replica, which was swept too; a semantic window with no target is
+    /// now sent its own buffer alone, and the sweep is a grid replica's.
     #[test]
     fn e10d_2_a_bootstrap_sweep_ends_at_its_first_failed_write() {
         let daemon = daemon_with_note("pmacs.lsp.config = {}\npmacs.command.invoke('e9.open')\n");
@@ -2083,22 +2086,20 @@ pmacs.command.define { name = 'e10d.hold', description = 'open the note and hold
         stream
             .shutdown(std::net::Shutdown::Read)
             .expect("stop reading before the bootstrap");
+        // A grid replica's handshake is `AttachRequest` alone: it sends no
+        // bootstrap envelope, which only a semantic session reads.
         write_message(
             &mut stream,
             &AttachRequest {
                 protocol_version: SESSION_MIN_VERSION - 1,
-                frontend_capabilities: semantic_caps(),
+                frontend_capabilities: FrontendCapabilities {
+                    semantic_render: false,
+                    ..semantic_caps()
+                },
                 initial_size: CellSize::new(24, 80),
             },
         )
         .expect("AttachRequest");
-        write_message(
-            &mut stream,
-            &SessionBootstrapRequest {
-                initial_target: None,
-            },
-        )
-        .expect("bootstrap");
         // The sweep's own lines: the follow's send names its frontend
         // (`… to FrontendId(n) failed`), and the sweep's does not.
         let sweep_failures = || {
@@ -2478,21 +2479,7 @@ fn e9_4_idle_exit_is_opt_in() {
 fn daemon_with_big_and_small() -> TestDaemon {
     let dir = tempfile::TempDir::new().expect("tempdir for the files");
     let big = dir.path().join("big.txt");
-    let mut text = String::with_capacity(24 * 1024 * 1024 + 80);
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-    while text.len() < 24 * 1024 * 1024 {
-        // xorshift64: every byte a printable character, 95 of them.
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        for byte in state.to_le_bytes() {
-            text.push(char::from(b' ' + byte % 95));
-        }
-        if text.len() % 80 < 8 {
-            text.push('\n');
-        }
-    }
-    std::fs::write(&big, &text).expect("write the big file");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write the big file");
     let small = dir.path().join("small.txt");
     std::fs::write(&small, "small\n").expect("write the small file");
     let init = format!(

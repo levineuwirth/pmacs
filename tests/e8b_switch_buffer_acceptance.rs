@@ -20,7 +20,10 @@
 //! nothing. The first row is that session; the second is the same keys
 //! where the session declares the buffer its window shows. The harness's
 //! declaration is #324's, filed with the scope its fix needs; the third
-//! row is E8b.1's bare name through the daemon.
+//! row is E8b.1's bare name through the daemon. Since E10t (#326) a fresh
+//! semantic window is bootstrapped on the buffer its window shows, so the
+//! first row's session no longer starts on `b.rs`: the first snapshot is
+//! `a.rs`'s, and the same keys switch.
 //!
 //! The last row is E8b fix round 1's: the same daemon driven by the GPU
 //! frontend itself (`pmacs-gpu --headless-probe`, every key through
@@ -379,33 +382,32 @@ fn daemon_with(sub: &str) -> (TestDaemon, tempfile::TempDir, String, String) {
     (daemon, dir, "a.rs".to_owned(), "b.rs".to_owned())
 }
 
-/// E8b.3, E8 review 1's session as it was: its harness declares the
-/// first snapshot's buffer, `b.rs`, so the window shows `b.rs` before
-/// any key, though the init left `a.rs` shown; the hover opens there;
-/// and `C-x b b.rs RET` selects the buffer already shown. The window
-/// stays, as review 1's daemon session saw, and the band now says so
-/// (E8b.2) where it said nothing. Review 1 typed `b.rs`'s full path,
-/// which under D40 names no buffer; its name is what selects it.
+/// E8b.3, E8 review 1's session: its harness declares the first
+/// snapshot's buffer. Until E10t (#326) that was `b.rs`, the first of an
+/// all-buffer sweep, so the window showed `b.rs` before any key though the
+/// init left `a.rs` shown, and `C-x b b.rs RET` selected the buffer
+/// already shown, which E8b.2's band then said. A fresh semantic window is
+/// now bootstrapped on the buffer its window shows, so the first snapshot
+/// is `a.rs`'s, the declaration keeps the window there, and under the open
+/// hover the same keys switch to `b.rs` and say so. (The band for a buffer
+/// already shown keeps its rows in `tests/minibuffer_accept_acceptance.rs`
+/// and `tests/e8b_review1_daemon_probes.rs`.)
 #[test]
-fn e8b_3_review1_s_session_already_showed_the_file_whose_path_it_typed() {
+fn e8b_3_review1_s_session_now_starts_on_the_window_s_file_and_switches() {
     let (daemon, _dir, a, b) = daemon_with("");
     let mut s = Session::attach(&daemon, Declare::FirstSnapshot);
     let before = s.shown();
     assert_eq!(
         before.name.as_deref(),
-        Some(b.as_str()),
-        "the mechanism: declaring the first snapshot put b.rs in the window, not a.rs ({a}); \
+        Some(a.as_str()),
+        "declaring the first snapshot keeps the window on the init's a.rs, not b.rs ({b}); \
          {} cursor(s) sent before the declaration was read set aside",
         before.stale
     );
     s.hover_until_present();
     let after = s.switch_by_typing(&b, &b);
     assert_eq!(after.name.as_deref(), Some(b.as_str()), "{after:?}");
-    assert_eq!(
-        after.bands,
-        vec![format!("switch-buffer: already showing {b}")],
-        "the band says the selection is the buffer already shown"
-    );
+    assert_eq!(after.bands, vec![format!("switch-buffer: showing {b}")]);
 }
 
 /// E8b.3's control: the same keys under the open popup, where the

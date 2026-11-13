@@ -1764,48 +1764,63 @@ fn dispatcher_loop(
                 if session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_capabilities.semantic_render)
+                    && let Some((active_now, last_sent)) =
+                        follow_owed(editor, &session_registry, *fid)
                 {
-                    let active_now = document_buffer_to_follow(editor, *fid);
-                    let last_sent = session_registry
-                        .session(*fid)
-                        .and_then(|session| session.last_active_buffer_sent);
-                    if let Some(active_now) = active_now
-                        && last_sent != Some(active_now)
-                    {
-                        match send_buffer_snapshot_to_frontend(
-                            editor,
-                            active_now,
-                            *fid,
-                            &mut session_registry,
-                        ) {
-                            Ok(()) => {
-                                // PR #120 round 2 — the snapshot just
-                                // wiped this frontend's buffer-scoped
-                                // render state; the emission baselines
-                                // must die with it or an
-                                // unchanged-generation revisit
-                                // (A → B → A) suppresses every re-send.
-                                if let Some(session) = session_registry.session_mut(*fid) {
-                                    if let Some(sem) = session.semantic.as_mut() {
-                                        sem.on_buffer_snapshot_sent(active_now);
-                                    }
-                                    session.last_active_buffer_sent = Some(active_now);
+                    match send_buffer_snapshot_to_frontend(
+                        editor,
+                        active_now,
+                        *fid,
+                        &mut session_registry,
+                    ) {
+                        Ok(()) => {
+                            // PR #120 round 2 — the snapshot just
+                            // wiped this frontend's buffer-scoped
+                            // render state; the emission baselines
+                            // must die with it or an
+                            // unchanged-generation revisit
+                            // (A → B → A) suppresses every re-send.
+                            if let Some(session) = session_registry.session_mut(*fid) {
+                                if let Some(sem) = session.semantic.as_mut() {
+                                    sem.on_buffer_snapshot_sent(active_now);
                                 }
+                                session.last_active_buffer_sent = Some(active_now);
                             }
-                            // E9.5 — refused, said, and the window put
-                            // back on the buffer the frontend mirrors; a
-                            // session that was never sent one goes where
-                            // `kill_buffer` would send it, so the refusal
-                            // happens once and the next tick sends that
-                            // buffer (fix round 2, review 2's Low 1: left
-                            // in place, the window was refused again on
-                            // every tick that reached here).
-                            Err(len) => {
-                                let back_to = last_sent.unwrap_or_else(|| {
-                                    editor.core.borrow().fallback_buffer_for(active_now)
+                        }
+                        // E9.5 — refused, said, and the window put
+                        // back on the buffer the frontend mirrors, the
+                        // one it was last sent, while that buffer
+                        // exists. When it is gone there is nothing to
+                        // go back to: a kill sent the window here,
+                        // `kill_buffer`'s fallback being the buffer
+                        // past the frame, and the buffer killed is the
+                        // one last sent (E10t fix round 3, review 3's
+                        // Medium 1: put back on a buffer that no
+                        // longer existed, the window stayed where it
+                        // was and was refused on every tick, each one
+                        // exporting the snapshot again, the frontend
+                        // on the dead buffer and its keys in this
+                        // one). The window then goes to a fallback
+                        // that fits, as the attach's refused window
+                        // does, and so does a session never sent one.
+                        // Either way the refusal happens once and no
+                        // follow stays owed for this buffer: the
+                        // window is on the buffer last sent, or the
+                        // next tick sends the fallback.
+                        Err(len) => {
+                            let back_to = last_sent
+                                .filter(|id| {
+                                    editor.core.borrow().registry.borrow().get(*id).is_ok()
+                                })
+                                .unwrap_or_else(|| {
+                                    fallback_that_fits(
+                                        editor,
+                                        &mut session_registry,
+                                        active_now,
+                                        len,
+                                    )
                                 });
-                                refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
-                            }
+                            refuse_oversize_snapshot(editor, *fid, active_now, len, back_to);
                         }
                     }
                 }
@@ -2781,7 +2796,25 @@ fn handle_session_established(
     // last snapshot landed, which is the wrong-buffer return E9 exists
     // to remove. A window restored from its kind's desktop (E10.2) is
     // bootstrapped the same way, for the same reason.
-    let mut resumed_buffer = if (resumed || restored.is_some()) && opened_target.is_none() {
+    //
+    // E10t (#326) --- and so is a fresh semantic window with no target.
+    // On the sweep its answers were in flight together: each moved the
+    // window, and the tick followed the window with a snapshot that was
+    // answered in turn, so two answers reaching the dispatcher on separate
+    // passes kept each other going until two reached it on one pass. That
+    // grew rarer as the frontend took longer to apply a snapshot (E10t.1:
+    // never within 16 s at 10,000 + 20,000 lines in release, nor at any
+    // size in debug), and when it came the window stayed on whichever
+    // answer came last. A semantic frontend shows one buffer, the last
+    // snapshot it applied, and is sent any other when its window goes
+    // there; the sweep stays a grid replica's, whose mirror holds every
+    // buffer. In a build without `crdt` the one buffer's snapshot cannot be
+    // taken, so a session there keeps the sweep's stub, as it always had.
+    let mut window_buffer = if opened_target.is_none()
+        && (resumed
+            || restored.is_some()
+            || (cfg!(feature = "crdt") && semantic_render && crdt_replica))
+    {
         editor.core.borrow().primary_document_buffer(frontend_id)
     } else {
         None
@@ -2840,55 +2873,24 @@ fn handle_session_established(
                 .unregister_frontend_view(frontend_id);
             return;
         }
-    } else if let Some(buffer_id) = resumed_buffer {
-        match initial_target_snapshot(editor, buffer_id) {
-            Ok(snapshot) => {
-                let message = InstanceMessage::BufferSnapshot {
-                    buffer_id,
-                    crdt_snapshot: snapshot.crdt_snapshot,
-                };
-                // E9.5 — a retained window on a buffer past the frame
-                // cap is refused and sent to the buffer `kill_buffer`
-                // would send it to, said so; the sweep bootstraps the
-                // session as a fresh one would be, and runs first so the
-                // fallback is chosen among the buffers it delivered (fix
-                // round 2, review 2's Low 1). (Until fix round 1 the
-                // window went to LOCAL's document, which can be the
-                // oversize buffer itself.)
-                let frame_len = snapshot_frame_len(&message);
-                if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
-                    let Ok(left_out) = send_buffer_snapshots(editor, &mut write_stream) else {
-                        let _ = write_stream.shutdown(Shutdown::Both);
-                        editor
-                            .core
-                            .borrow_mut()
-                            .unregister_frontend_view(frontend_id);
-                        return;
-                    };
-                    let back_to = fallback_among_delivered(editor, buffer_id, &left_out);
-                    refuse_oversize_snapshot(editor, frontend_id, buffer_id, frame_len, back_to);
-                    resumed_buffer = None;
-                } else {
-                    if snapshot.upgraded_to_crdt {
-                        publish_buffer_snapshot_to_replicas(
-                            editor,
-                            buffer_id,
-                            &message,
-                            session_registry,
-                        );
-                    }
-                    if write_stream.write_message(&message).is_err() {
-                        let _ = write_stream.shutdown(Shutdown::Both);
-                        editor
-                            .core
-                            .borrow_mut()
-                            .unregister_frontend_view(frontend_id);
-                        return;
-                    }
-                }
-            }
-            Err(message) => {
-                eprintln!("pmacs: snapshot of the resumed buffer failed: {message}");
+    } else if let Some(shown) = window_buffer {
+        // E9.5 --- a window on a buffer past the frame cap is refused and
+        // sent to the buffer `kill_buffer` would send it to, said so. The
+        // session bootstraps on that buffer's one snapshot, recorded below
+        // as any attach's is (E10t fix round 2, review 2's Medium 2), and a
+        // fallback that is itself past the frame is passed over for the
+        // next (E9 fix round 2, review 2's Low 1), down to a fresh
+        // `*scratch*`. Until this round the refused window was swept every
+        // other buffer, as a fresh semantic one was before E10t: each
+        // answer moved the window and the last one won, so the frontend
+        // landed on the sweep's last buffer under a status line naming
+        // another (9 runs of 9 across E10t's two reviews), and none of
+        // those snapshots was in the session's record.
+        let mut refused: Vec<(crate::buffer::BufferId, usize)> = Vec::new();
+        let fits = match first_snapshot_that_fits(editor, shown, shown, &mut refused) {
+            Ok(fits) => fits,
+            Err((_, message)) => {
+                eprintln!("pmacs: snapshot of the window's buffer failed: {message}");
                 let _ = write_stream.shutdown(Shutdown::Both);
                 editor
                     .core
@@ -2896,9 +2898,27 @@ fn handle_session_established(
                     .unregister_frontend_view(frontend_id);
                 return;
             }
+        };
+        let buffer_id = fits.buffer_id;
+        if fits.upgraded_to_crdt {
+            publish_buffer_snapshot_to_replicas(editor, buffer_id, &fits.message, session_registry);
+        }
+        if write_stream.write_message(&fits.message).is_err() {
+            let _ = write_stream.shutdown(Shutdown::Both);
+            editor
+                .core
+                .borrow_mut()
+                .unregister_frontend_view(frontend_id);
+            return;
+        }
+        if let Some((_, frame_len)) = refused.first() {
+            refuse_oversize_snapshot(editor, frontend_id, shown, *frame_len, buffer_id);
+            window_buffer = Some(buffer_id);
         }
     } else if crdt_replica {
-        // Legacy no-target attach remains an all-buffer replica bootstrap.
+        // A grid replica's no-target attach is the all-buffer bootstrap:
+        // its mirror holds every buffer (a semantic one takes the branch
+        // above, E10t).
         let Ok(left_out) = send_buffer_snapshots(editor, &mut write_stream) else {
             let _ = write_stream.shutdown(Shutdown::Both);
             editor
@@ -2959,14 +2979,23 @@ fn handle_session_established(
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
-    if let Some(buffer_id) = resumed_buffer
+    // The attach's one snapshot was written before the session was
+    // registered, so past the write path that records the rest: recorded
+    // here, so its answer is known as one (E10t fix round 1).
+    if let Some(buffer_id) = window_buffer
         && let Some(session) = session_registry.session_mut(frontend_id)
     {
         session.last_active_buffer_sent = Some(buffer_id);
+        if semantic_render {
+            session.snapshot_answers.sent(buffer_id);
+        }
     }
     if let Some(opened) = opened_target {
         if let Some(session) = session_registry.session_mut(frontend_id) {
             session.last_active_buffer_sent = Some(opened.buffer_id);
+            if semantic_render {
+                session.snapshot_answers.sent(opened.buffer_id);
+            }
         }
         let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
             buffer_id: opened.buffer_id,
@@ -3303,7 +3332,47 @@ fn handle_dispatcher_event(
                             .is_some_and(|document| manager.is_terminal(document));
                         active || manager.is_terminal(buffer_id)
                     };
-                    if session_registry.semantic(source).is_some() && !terminal_context {
+                    // E10t (fix round 1, review 1's Medium 1) --- the same
+                    // hazard for a document: a declaration made before a
+                    // snapshot in flight landed names the buffer the
+                    // frontend showed before it (a wheel turn right after a
+                    // `C-x b`, or the answer to the first of two switches),
+                    // and aligning to it dragged the window back, drew a
+                    // follow, and spun as #326's attach did. The daemon's
+                    // record of what it wrote and what was answered tells
+                    // it so (`SnapshotAnswers`); every declaration is
+                    // still counted against that record, a terminal's too,
+                    // and a stale one moves nothing. The snapshot's own
+                    // answer then declares the new buffer's viewport.
+                    let stale = session_registry.semantic(source).is_some()
+                        && session_registry
+                            .session_mut(source)
+                            .is_some_and(|session| session.snapshot_answers.declared(buffer_id));
+                    // E10t (fix round 2, review 2's Medium 1) --- that
+                    // record holds only snapshots already written. A
+                    // declaration read in the same dispatcher pass as the
+                    // key that switched the window comes before the tick
+                    // has written the follow: nothing is in flight, the
+                    // record calls it real, and aligning to it put the
+                    // window back where the frontend still was, so the
+                    // switch was gone under a status line that claimed it
+                    // (a scroll under way when `RET` went). The daemon's
+                    // own state tells this one too: while it owes the
+                    // session a follow, a declaration naming the buffer
+                    // last sent to it was made by a frontend that could not
+                    // yet know of the switch, and moves nothing. What it
+                    // says the frontend has on screen is still true of that
+                    // buffer and is kept, so when the follow is then
+                    // refused (E9.5) and the window goes back there, the
+                    // declaration is in force. A refused follow does not
+                    // always go back: with that buffer killed the window
+                    // goes to a fallback that fits (fix round 3, review 3's
+                    // Medium 1), and what was kept names a buffer that is
+                    // gone, as it does after any kill.
+                    let before_the_follow = session_registry.semantic(source).is_some()
+                        && follow_owed(editor, session_registry, source)
+                            .is_some_and(|(_, last_sent)| last_sent == Some(buffer_id));
+                    if session_registry.semantic(source).is_some() && !terminal_context && !stale {
                         // Phase B (B1) — the Viewport declares *which
                         // buffer this frontend is displaying*. Align its
                         // editor window to that buffer so keyboard input
@@ -3317,7 +3386,9 @@ fn handle_dispatcher_event(
                         // NOT move focus. Routing this through the
                         // focused window would let an ordinary document
                         // viewport overwrite a focused panel's buffer.
-                        align_primary_document_window(editor, source, buffer_id);
+                        if !before_the_follow {
+                            align_primary_document_window(editor, source, buffer_id);
+                        }
                         // E6b.4 — remember what this frontend has on
                         // screen where Lua can read it, so the next
                         // semantic-token pull can ask for those lines
@@ -4128,11 +4199,13 @@ fn oversize_sizes(text_len: u64, frame_len: usize) -> String {
 }
 
 /// E9.5 (fix round 2, review 2's Low 1) --- the buffer a window refused
-/// at its bootstrap goes to: `kill_buffer`'s fallback, chosen among the
-/// buffers the attach sweep delivered, never one it left out past the
-/// frame (`left_out`, as `send_buffer_snapshots` returns it), else a
-/// fresh `*scratch*`, which the tick loop's upgrade sends on the next
-/// tick.
+/// at its bootstrap goes to: `kill_buffer`'s fallback, never a buffer
+/// whose snapshot is past the frame (`left_out`: what a grid replica's
+/// sweep left out, as `send_buffer_snapshots` returns it, or what a
+/// semantic window's bootstrap has already refused), else a fresh
+/// `*scratch*`. A grid replica is sent that one by the tick loop's
+/// upgrade on the next tick; a semantic window bootstraps on it (E10t fix
+/// round 2).
 fn fallback_among_delivered(
     editor: &EditorState,
     victim: crate::buffer::BufferId,
@@ -4145,14 +4218,134 @@ fn fallback_among_delivered(
         .fallback_buffer_for_excluding(victim, &excluded)
 }
 
+/// A buffer whose snapshot fits a frontend's frame, with the message
+/// that carries it.
+struct SnapshotThatFits {
+    buffer_id: crate::buffer::BufferId,
+    message: InstanceMessage,
+    /// The buffer was not CRDT-backed until it was measured, so the
+    /// replicas that mirror every buffer have not been sent it.
+    upgraded_to_crdt: bool,
+}
+
+/// E9.5 --- the first buffer, from `candidate` on, whose snapshot fits a
+/// frontend's frame: `candidate` itself, else [`fallback_among_delivered`]
+/// for `victim` past every buffer already refused, down to a fresh
+/// `*scratch*`. The one way to know a snapshot fits is to take it and
+/// measure the frame, so each candidate costs an export, and an upgrade
+/// when nothing mirrored it before; each one past the frame is added to
+/// `refused` with its length. It ends: a pass returns or refuses one more
+/// buffer, and with every buffer refused the fallback is a new, empty one.
+///
+/// One loop for its two callers (D37): the attach of a window on a buffer
+/// past the frame (E10t fix round 2), which writes the message, and the
+/// tick's refused follow with nothing to go back to (fix round 3), which
+/// leaves the sending to the next tick.
+///
+/// # Errors
+/// A snapshot that cannot be taken, with the buffer it was asked of; the
+/// loop does not pass over it, since a fallback whose snapshot always
+/// failed would mint `*scratch*` after `*scratch*`.
+fn first_snapshot_that_fits(
+    editor: &EditorState,
+    victim: crate::buffer::BufferId,
+    mut candidate: crate::buffer::BufferId,
+    refused: &mut Vec<(crate::buffer::BufferId, usize)>,
+) -> Result<SnapshotThatFits, (crate::buffer::BufferId, String)> {
+    loop {
+        let snapshot =
+            initial_target_snapshot(editor, candidate).map_err(|message| (candidate, message))?;
+        let message = InstanceMessage::BufferSnapshot {
+            buffer_id: candidate,
+            crdt_snapshot: snapshot.crdt_snapshot,
+        };
+        let frame_len = snapshot_frame_len(&message);
+        if frame_len > pmacs_protocol::MAX_FRAME_BYTES {
+            refused.push((candidate, frame_len));
+            candidate = fallback_among_delivered(editor, victim, refused);
+            continue;
+        }
+        return Ok(SnapshotThatFits {
+            buffer_id: candidate,
+            message,
+            upgraded_to_crdt: snapshot.upgraded_to_crdt,
+        });
+    }
+}
+
+/// E9.5 at the tick (E10t fix round 3, review 3's Medium 1) --- where a
+/// window refused the follow of `refused` goes when the buffer its
+/// session was last sent no longer exists, or it was sent none: the
+/// fallback that fits, as the attach's refused window goes. The tick has
+/// no sweep's list of what did not fit, so the fallback is measured here
+/// ([`first_snapshot_that_fits`]): one export for each candidate past the
+/// frame, which is what refusing it would have cost, and one for the
+/// buffer chosen, which the next tick exports again to send. A buffer
+/// upgraded to be measured is published to the replicas that mirror every
+/// buffer, as the tick's own upgrade is; this session's window is not on
+/// it yet, so its copy is the follow's.
+///
+/// A candidate whose snapshot cannot be taken is logged and chosen
+/// unmeasured, where the attach in the same position ends the session.
+/// What that leaves (E10t fix round 4, review 4's Low 2: said here, and
+/// not changed): the window is put on that buffer, and the next tick's
+/// follow gets nothing from its export, writes nothing and records the
+/// buffer as sent (`send_buffer_snapshot_to_frontend`'s `Ok`). So nothing
+/// is owed and nothing is retried, and nothing is sent: the frontend
+/// stays on the buffer it had, and the daemon's window is on a buffer
+/// that frontend was never sent, with no refusal repeated to give it
+/// away. No way to cause the failure is known: review 4 reached this
+/// state only on a failure it planted, and there a key typed in the GPU
+/// edited the fallback.
+#[cfg(feature = "crdt")]
+fn fallback_that_fits(
+    editor: &EditorState,
+    session_registry: &mut SessionRegistry,
+    refused: crate::buffer::BufferId,
+    frame_len: usize,
+) -> crate::buffer::BufferId {
+    let mut left_out = vec![(refused, frame_len)];
+    let candidate = fallback_among_delivered(editor, refused, &left_out);
+    match first_snapshot_that_fits(editor, refused, candidate, &mut left_out) {
+        Ok(fits) => {
+            if fits.upgraded_to_crdt {
+                publish_buffer_snapshot_to_replicas(
+                    editor,
+                    fits.buffer_id,
+                    &fits.message,
+                    session_registry,
+                );
+            }
+            fits.buffer_id
+        }
+        Err((buffer_id, message)) => {
+            eprintln!("pmacs: the fallback {buffer_id:?} could not be measured: {message}");
+            buffer_id
+        }
+    }
+}
+
 /// E9.5 --- a snapshot of `buffer_id` cannot reach a semantic frontend:
 /// say so on the status line every frontend reads, naming the buffer
-/// and both sizes, and put `fid`'s document window back on `back_to`,
-/// the buffer that frontend still mirrors (or, for a session never sent
-/// one, the fallback its caller chose), so the daemon's view and the
-/// frontend's never show different buffers. Until fix round 2 a caller
-/// with nothing to go back to left the window where it was, and the
-/// follow path refused it again every tick (review 2's Low 1).
+/// and both sizes, and put `fid`'s document window on `back_to`, which its
+/// caller chose: the buffer that frontend still mirrors while it exists, and
+/// otherwise a fallback that fits (a session never sent a buffer, an
+/// attach onto the oversize buffer, or, since E10t fix round 3, a follow
+/// refused after the buffer last sent was killed), so the daemon's view
+/// and the frontend's never rest on different buffers. It does not
+/// always go back: a `back_to` that no longer exists leaves the window
+/// where it is, with the failure logged, and the follow path then
+/// refuses it again on every tick, which is what a caller with nothing
+/// to go back to did until E9's fix round 2 (review 2's Low 1) and what
+/// the tick did after a kill until E10t's fix round 3 (review 3's
+/// Medium 1). A caller passes a buffer that exists.
+///
+/// The window is the primary document window, the one the follow reads
+/// ([`follow_owed`]), and not the focused one. Until E10t's fix round 3
+/// it was the frontend's active window: with the focus in a panel (the
+/// GPU's terminal band) and the document's buffer killed, `back_to` went
+/// into the panel, over the terminal, and the document stayed on the
+/// refused buffer, refused again on every tick.
 fn refuse_oversize_snapshot(
     editor: &EditorState,
     fid: FrontendId,
@@ -4180,7 +4373,10 @@ fn refuse_oversize_snapshot(
     );
     eprintln!("pmacs: {}", core.status);
     if back_to != buffer_id
-        && let Err(e) = core.switch_active_buffer_for(fid, back_to)
+        && let Err(e) = core
+            .primary_document_window(fid)
+            .ok_or_else(|| format!("{fid:?} has no document window"))
+            .and_then(|window| core.install_buffer_in_window(window, back_to))
     {
         eprintln!("pmacs: putting {fid:?} back on {back_to:?} failed: {e}");
     }
@@ -4774,6 +4970,36 @@ fn document_buffer_to_follow(
     fid: FrontendId,
 ) -> Option<crate::buffer::BufferId> {
     editor.core.borrow().primary_document_buffer(fid)
+}
+
+/// The follow the tick owes `fid`: the buffer its document window shows
+/// and the buffer it was last sent a snapshot of, when they differ; `None`
+/// when the window is on the buffer last sent. One condition for the two
+/// places that read it (E10t fix round 2): the tick, which then sends the
+/// window's buffer or refuses it (E9.5), and the `Viewport` arm, where a
+/// declaration naming the buffer last sent while a follow is owed was made
+/// before its frontend could know the window had moved.
+#[cfg(feature = "crdt")]
+fn follow_owed(
+    editor: &EditorState,
+    session_registry: &SessionRegistry,
+    fid: FrontendId,
+) -> Option<(crate::buffer::BufferId, Option<crate::buffer::BufferId>)> {
+    let active_now = document_buffer_to_follow(editor, fid)?;
+    let last_sent = session_registry
+        .session(fid)
+        .and_then(|session| session.last_active_buffer_sent);
+    (last_sent != Some(active_now)).then_some((active_now, last_sent))
+}
+
+/// A build without `crdt` follows nothing, so it owes no follow.
+#[cfg(not(feature = "crdt"))]
+fn follow_owed(
+    _editor: &EditorState,
+    _session_registry: &SessionRegistry,
+    _fid: FrontendId,
+) -> Option<(crate::buffer::BufferId, Option<crate::buffer::BufferId>)> {
+    None
 }
 
 /// The `(buffer, byte)` a semantic replica's authoritative `CursorByte`

@@ -25,6 +25,7 @@ use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{BufferId, FrontendId, SESSION_MIN_VERSION, SessionToken};
 
 use common::daemon::{NO_REOPEN, TestDaemon, build_default_caps};
+use common::oversize::{OVERSIZE_SEED, oversize_text_from};
 
 struct Session {
     stream: UnixStream,
@@ -529,20 +530,9 @@ fn e9_review2_the_idle_clock_runs_once_a_resumed_window_leaves_on_purpose() {
 /// Twenty-four MiB of pseudo-random printable text at `path`, past the
 /// frame (the E9.5 row's file).
 fn write_big(path: &Path) {
-    let mut text = String::with_capacity(24 * 1024 * 1024 + 80);
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (path.as_os_str().len() as u64);
-    while text.len() < 24 * 1024 * 1024 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        for byte in state.to_le_bytes() {
-            text.push(char::from(b' ' + byte % 95));
-        }
-        if text.len() % 80 < 8 {
-            text.push('\n');
-        }
-    }
-    std::fs::write(path, &text).expect("write the big file");
+    // Seeded by the path's length, so two files differ, as they did.
+    let seed = OVERSIZE_SEED ^ (path.as_os_str().len() as u64);
+    std::fs::write(path, oversize_text_from(24 * 1024 * 1024, seed)).expect("write the big file");
 }
 
 /// A daemon whose init opens `big.txt` into LOCAL's window after

@@ -1,0 +1,1587 @@
+//! E10t --- a GPU window that settles (#326).
+//!
+//! A `pmacs-gpu` attaching with no target was sent every buffer, one
+//! snapshot each, and answered each with a `Viewport`, which moves the
+//! daemon's window to the buffer it names; the tick then followed the
+//! window with a snapshot of that buffer, answered in turn. Two answers
+//! reaching the dispatcher on separate passes kept each other going until
+//! two reached it on one pass, which grew rarer as the snapshots grew: at
+//! 10,000 + 20,000 lines the window alternated between the files about a
+//! hundred times a second in release, and never stopped within a watch of
+//! 16 s; in debug it never stopped at any size. Where it did stop, the
+//! window stayed on whichever answer came last. A semantic window
+//! with no target now bootstraps on the one buffer its window shows, as a
+//! resumed (E9) or restored (E10.2) one does.
+//!
+//! **Settled** (the roadmap's definition): the expected buffer stays
+//! selected, and the count of snapshots written to that frontend stops
+//! increasing, both held across a stated interval. Here the interval is
+//! [`HOLD_MS`], after [`LEAD_MS`] from the probe's readiness, read by the
+//! production `App` in `pmacs-gpu --headless-probe`'s popup action, whose
+//! `count:` step reports the snapshots it has applied and the band's name
+//! for the buffer it shows. E10t.1 measured the base: wherever it spins, the
+//! longest gap between two snapshots was 1.5 s (debug, 179,000 + 179,000
+//! lines), so a hold of five seconds sees the count rise. A snapshot reaches the probe in order
+//! on its one socket, so the count it applied once the interval is over is
+//! the count written to it before the interval began. A window that
+//! settles is sent its buffer once: [`AT_MOST`].
+//!
+//! Every probe here runs under a deadline enforced from outside its
+//! process ([`OUTSIDE`]), killed and reported when it passes: until E10t.3
+//! a probe's own limit was not always read.
+#![cfg(feature = "crdt")]
+
+mod common;
+#[path = "support/mod.rs"]
+mod support;
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use pmacs_protocol::message::{InstanceMessage, PROTOCOL_VERSION};
+use pmacs_protocol::{BufferId, Key, Modifiers};
+
+use common::daemon::TestDaemon;
+use common::oversize::oversize_text;
+use common::wire::WireSession;
+
+/// From the probe's readiness to the first count.
+const LEAD_MS: u64 = 3_000;
+/// The stated observation interval: the count and the buffer must hold
+/// across it.
+const HOLD_MS: u64 = 5_000;
+/// How long the probe waits to be ready (a snapshot applied, the caret
+/// known, the daemon idle) before it goes on with its steps regardless.
+const READY_MS: u64 = 30_000;
+/// The outside bound: the probe is killed from here past it.
+const OUTSIDE: Duration = Duration::from_mins(2);
+/// The snapshots a window that settles is sent: its own buffer, once.
+const AT_MOST: u64 = 1;
+
+const LINE_BYTES: usize = 70;
+
+/// `lines` log lines of [`LINE_BYTES`], E10k's fixture.
+fn fixture(lines: usize) -> String {
+    let mut out = String::with_capacity(lines * LINE_BYTES);
+    for i in 0..lines {
+        let line = format!(
+            "2026-10-27T12:{:02}:{:02}.{:03}Z INFO daemon: served request {i:07} in {:03}us\n",
+            (i / 60_000) % 60,
+            (i / 1000) % 60,
+            i % 1000,
+            i % 997
+        );
+        assert_eq!(line.len(), LINE_BYTES, "fixture line {i}: {line:?}");
+        out.push_str(&line);
+    }
+    out
+}
+
+/// A directory the daemon outlives: leaked, as E9's note is.
+fn files_dir() -> PathBuf {
+    let dir = tempfile::TempDir::new().expect("tempdir for the files");
+    let path = dir.path().to_path_buf();
+    std::mem::forget(dir);
+    path
+}
+
+/// An init visiting `files` in order, killing `*scratch*` unless `keep`,
+/// and then showing `files[0]`, so the buffer the window shows is never
+/// the sweep's last, plus `extra`.
+fn init_visiting(files: &[PathBuf], keep_scratch: bool, extra: &str) -> String {
+    let mut init = String::new();
+    for f in files {
+        let _ = writeln!(
+            init,
+            "pmacs.buffer.find_or_open({:?})",
+            f.display().to_string()
+        );
+    }
+    if !keep_scratch {
+        init.push_str(
+            "for _, b in ipairs(pmacs.buffer.list()) do\n  if b:name() == '*scratch*' then pcall(pmacs.buffer.kill, b) end\nend\n",
+        );
+    }
+    let _ = writeln!(
+        init,
+        "pmacs.buffer.find_or_open({:?})",
+        files[0].display().to_string()
+    );
+    init.push_str(extra);
+    init
+}
+
+/// Two log files of `a` and `b` lines, `one.log` and `two.log`, visited
+/// in that order, `*scratch*` killed and `one.log` shown, on a fresh state
+/// root (each `TestDaemon` has its own).
+fn daemon_with_two(a: usize, b: usize) -> TestDaemon {
+    let dir = files_dir();
+    let one = dir.join("one.log");
+    let two = dir.join("two.log");
+    std::fs::write(&one, fixture(a)).expect("write one.log");
+    std::fs::write(&two, fixture(b)).expect("write two.log");
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, two], false, ""))
+}
+
+/// The probe's report, and how long it ran.
+struct Probe {
+    facts: HashMap<String, String>,
+    took: Duration,
+}
+
+impl Probe {
+    fn fact(&self, key: &str) -> &str {
+        self.facts.get(key).map_or("", String::as_str)
+    }
+
+    fn count(&self, label: &str) -> u64 {
+        self.fact(&format!("{label}.snapshots"))
+            .parse()
+            .unwrap_or_else(|_| panic!("no {label}.snapshots in {:?}", self.facts))
+    }
+}
+
+/// `pmacs-gpu --headless-probe` with the popup action against `daemon`,
+/// attaching with no target, running `steps`; killed from outside past
+/// [`OUTSIDE`]. `None` when skipped (no `pmacs-gpu` built, or no wgpu
+/// adapter), which panics under `PMACS_REQUIRE_GPU` and is otherwise
+/// written to the leg's skip record (`support::record_skip`): a row that
+/// returns reads `ok`, and until E10t's fix round 3 nothing in a leg's log
+/// said these had (review 3's Low 1: the rows' elapsed time was the only
+/// sign that the macOS legs, which do not arm the variable, had run them).
+fn run_probe(daemon: &TestDaemon, label: &str, steps: &str) -> Option<Probe> {
+    run_probe_as(daemon, label, "popup", steps, READY_MS, OUTSIDE)
+}
+
+/// [`run_probe`] under any of the probe's actions: `text` is the popup
+/// action's steps or what the quit and reconnect probes type, `deadline_ms`
+/// the probe's own limit (`PMACS_GPU_PROBE_DEADLINE_MS`), and `outside` the
+/// bound it is killed at from here, which panics naming it.
+fn run_probe_as(
+    daemon: &TestDaemon,
+    label: &str,
+    action: &str,
+    text: &str,
+    deadline_ms: u64,
+    outside: Duration,
+) -> Option<Probe> {
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = Path::new(env!("CARGO_BIN_EXE_pmacs"))
+        .parent()
+        .expect("test binary directory")
+        .join("pmacs-gpu");
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+            binary.display()
+        );
+        support::record_skip(&format!(
+            "{label}: `pmacs-gpu` is not built beside this build's `pmacs` and \
+             PMACS_REQUIRE_GPU unset"
+        ));
+        eprintln!("skipping the GPU probe: {} is not built", binary.display());
+        return None;
+    }
+    let dir = daemon.socket_path().parent().expect("socket parent");
+    let report = dir.join(format!("{label}.report"));
+    let stderr_path = dir.join(format!("{label}.stderr"));
+    let started = Instant::now();
+    let mut child = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", text)
+        .env("PMACS_GPU_PROBE_ACTION", action)
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", deadline_ms.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&stderr_path).expect("probe stderr"))
+        .spawn()
+        .expect("spawn the headless GPU probe");
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the probe") {
+            break status;
+        }
+        if started.elapsed() > outside {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "{label}: the probe was still running at the outside bound, {outside:?}, \
+                 and was killed; its stderr ends {:?}",
+                tail(&stderr_path)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let took = started.elapsed();
+    if !status.success() {
+        let no_adapter = status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "{label}: the probe failed ({status}); its stderr ends {:?}",
+            tail(&stderr_path)
+        );
+        support::record_skip(&format!(
+            "{label}: no wgpu adapter and PMACS_REQUIRE_GPU unset"
+        ));
+        eprintln!("skipping the GPU probe: no wgpu adapter available");
+        return None;
+    }
+    let text = std::fs::read_to_string(&report).expect("read the probe report");
+    let facts = text
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    Some(Probe { facts, took })
+}
+
+fn tail(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(6)..].join(" | ")
+}
+
+/// The steps that read a settle: a count after [`LEAD_MS`], another
+/// [`HOLD_MS`] later.
+fn settle_steps() -> String {
+    format!("quiet:{LEAD_MS} count:early quiet:{HOLD_MS} count:late")
+}
+
+/// Settled on `name`: ready, the same buffer named `name` at both counts,
+/// and the count unchanged across the hold and at most [`AT_MOST`].
+fn assert_settled(probe: &Probe, name: &str, what: &str) {
+    if let Err(said) = settled(probe, name, AT_MOST, what) {
+        panic!("{said}");
+    }
+}
+
+/// Whether `probe` settled on `name`: ready, the same buffer named `name`
+/// at its `early` and `late` counts, the count unchanged across the hold
+/// and at most `at_most`; what it read when it did not.
+fn settled(probe: &Probe, name: &str, at_most: u64, what: &str) -> Result<(), String> {
+    let (early, late) = (probe.count("early"), probe.count("late"));
+    let said = format!(
+        "{what}: early {early} snapshots on {:?} ({}), late {late} on {:?} ({}), \
+         ready={}, the probe ran {:?}",
+        probe.fact("early.name"),
+        probe.fact("early.buffer"),
+        probe.fact("late.name"),
+        probe.fact("late.buffer"),
+        probe.fact("ready"),
+        probe.took
+    );
+    if probe.fact("ready") != "true" {
+        return Err(format!("not ready; {said}"));
+    }
+    if probe.fact("early.name") != name || probe.fact("late.name") != name {
+        return Err(format!("not on {name:?}; {said}"));
+    }
+    if probe.fact("early.buffer") != probe.fact("late.buffer") {
+        return Err(format!("the buffer changed across the hold; {said}"));
+    }
+    if early != late {
+        return Err(format!("the count rose across the hold; {said}"));
+    }
+    if late > at_most {
+        return Err(format!(
+            "more snapshots than a window that settles is sent, {at_most}; {said}"
+        ));
+    }
+    Ok(())
+}
+
+/// E10t.2 (i): two files of 10,000 + 20,000 lines on a fresh root. At the
+/// base the window never settled there (E10t.1: about 105 snapshots a second
+/// in release and 5 in debug, to the end of every watch).
+#[test]
+fn e10t_2_i_ten_and_twenty_thousand_lines_settle_on_the_shown_file() {
+    let daemon = daemon_with_two(10_000, 20_000);
+    let Some(probe) = run_probe(&daemon, "i", &settle_steps()) else {
+        return;
+    };
+    assert_settled(&probe, "one.log", "10,000 + 20,000 lines");
+}
+
+/// E10t.2 (ii): #326's own run. A daemon whose init visits `one.rs`,
+/// `two.rs` and `three.rs`, keeps `*scratch*` and shows `one.rs`; four
+/// attaches one after another. The first is on a fresh root; each later
+/// one finds the desktop the one before it left (E10.2), so a first attach
+/// that settled elsewhere would carry its buffer into the rest. Those
+/// three take the restored branch, which bootstrapped on one buffer before
+/// E10t too; the row below makes all four fresh.
+#[test]
+fn e10t_2_ii_four_attaches_settle_on_the_file_the_daemon_shows() {
+    four_attaches_settle_on_one_rs("");
+}
+
+/// E10t.2 (ii) as #326 ran it (review 1's Low 1): four attaches, each a
+/// fresh no-target attach, since `session.reopen-desktop` is off and so no
+/// attach reopens the desktop the one before it left. At the base each
+/// was sent every buffer and could settle anywhere, as #326's four did
+/// (`two.rs`, `two.rs`, `one.rs`, `one.rs`, 2026-10-07).
+#[test]
+fn e10t_2_ii_four_fresh_attaches_settle_with_the_desktop_off() {
+    four_attaches_settle_on_one_rs("pmacs.config.set('session.reopen-desktop', false)\n");
+}
+
+/// #326's run: `one.rs`, `two.rs` and `three.rs` visited, `*scratch*` kept,
+/// `one.rs` shown, `extra` after, and four attaches one after another, each
+/// of which must settle on `one.rs`.
+fn four_attaches_settle_on_one_rs(extra: &str) {
+    let dir = files_dir();
+    let files: Vec<PathBuf> = ["one.rs", "two.rs", "three.rs"]
+        .iter()
+        .map(|name| {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!("fn {}() {{}}\n", name.trim_end_matches(".rs")),
+            )
+            .expect("write a source file");
+            path
+        })
+        .collect();
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&files, true, extra));
+    // Every attach is read, and every one that did not settle named, so
+    // a failure says which of the four did not (at the base a fresh attach
+    // was sent every buffer, a restored one only its own).
+    let mut unsettled = Vec::new();
+    for attach in 1..=4 {
+        let Some(probe) = run_probe(&daemon, &format!("ii-{attach}"), &settle_steps()) else {
+            return;
+        };
+        if let Err(said) = settled(&probe, "one.rs", AT_MOST, &format!("attach {attach} of 4")) {
+            unsettled.push(said);
+        }
+    }
+    assert!(
+        unsettled.is_empty(),
+        "{} of 4 attaches did not settle on one.rs:\n{}",
+        unsettled.len(),
+        unsettled.join("\n")
+    );
+}
+
+/// E10t.2 (iii): a pair large enough to have run to the timeout at the
+/// base, 179,000 + 179,000 lines (12.5 MB each): 4 runs of 4 spun to a
+/// 400 s timeout (#326's comment), and E10t.1's 4 to the end of their
+/// 30 s watches, about 20 snapshots a second in release and 1 in debug.
+#[test]
+fn e10t_2_iii_two_twelve_megabyte_files_settle_too() {
+    let daemon = daemon_with_two(179_000, 179_000);
+    let Some(probe) = run_probe(&daemon, "iii", &settle_steps()) else {
+        return;
+    };
+    assert_settled(&probe, "one.log", "179,000 + 179,000 lines");
+}
+
+/// Guard: a real declaration still moves the window, before a follow as
+/// well as after it, and the window's buffer then follows it. One session
+/// learns the three buffers' ids through commands that put its window on
+/// each; a second, attached fresh beside it, declares `two.log` before the
+/// daemon has followed anything for it, and `three.log` after the follow
+/// that answered that. Passes at the base and after.
+#[test]
+fn e10t_2_guard_a_declaration_moves_the_window_before_and_after_a_follow() {
+    let dir = files_dir();
+    let files: Vec<PathBuf> = ["one.log", "two.log", "three.log"]
+        .iter()
+        .map(|name| {
+            let path = dir.join(name);
+            std::fs::write(&path, fixture(20)).expect("write a log");
+            path
+        })
+        .collect();
+    let mut commands = String::new();
+    for (name, path) in [("two", &files[1]), ("three", &files[2])] {
+        let _ = writeln!(
+            commands,
+            "pmacs.command.define {{ name = 'e10t.{name}', description = 'show {name}',\n\
+               fn = function() pmacs.buffer.find_or_open({:?}) end }}",
+            path.display().to_string()
+        );
+    }
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&files, false, &commands));
+
+    let mut learner = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    let (one, _) = learner.where_am_i();
+    let reach = |s: &mut WireSession, command: &str, from: BufferId| {
+        s.run_command(command);
+        s.wait("the window to leave", |m| match m {
+            InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id != from => Some(*buffer_id),
+            _ => None,
+        })
+    };
+    let two = reach(&mut learner, "e10t.two", one);
+    let three = reach(&mut learner, "e10t.three", two);
+    assert!(one != two && two != three && one != three);
+
+    let mut window = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    assert_eq!(
+        window.where_am_i().0,
+        one,
+        "a fresh window shows the daemon's"
+    );
+    // Before any follow: the declaration moves the window, and the tick
+    // then sends the buffer it moved to.
+    window.declare_viewport(two);
+    window.wait("two's snapshot, the follow", |m| {
+        matches!(m, InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id == two)
+            .then_some(())
+    });
+    window.wait("the window on two", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id == two)
+            .then_some(())
+    });
+    // After that follow: another declaration moves it again.
+    window.declare_viewport(three);
+    window.wait("three's snapshot, the follow", |m| {
+        matches!(m, InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id == three)
+            .then_some(())
+    });
+    window.wait("the window on three", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, .. } if *buffer_id == three)
+            .then_some(())
+    });
+}
+
+/// `one.log` and `two.log` of `lines` each, `one.log` shown, as
+/// [`daemon_with_two`], with `extra` after the init, its `@one@` and
+/// `@two@` replaced by the files' paths.
+fn daemon_with_pair_and(lines: usize, extra: &str) -> TestDaemon {
+    let dir = files_dir();
+    let one = dir.join("one.log");
+    let two = dir.join("two.log");
+    std::fs::write(&one, fixture(lines)).expect("write one.log");
+    std::fs::write(&two, fixture(lines)).expect("write two.log");
+    let extra = extra
+        .replace("@one@", &one.display().to_string())
+        .replace("@two@", &two.display().to_string());
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, two], false, &extra))
+}
+
+/// `C-c 8` switches the window to `two.log` `at_ms` after the key, from the
+/// tick hook, so the probe's next step (each key step pumps 250 ms) lands
+/// while `two.log`'s snapshot is in flight.
+fn late_switch(at_ms: u64) -> String {
+    format!(
+        "local at = nil\n\
+         pmacs.command.define {{ name = 'e10t.late', description = 'switch to two later',\n\
+           fn = function() at = pmacs.editor.monotonic_ms() + {at_ms} end }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c 8', command = 'e10t.late' }}\n\
+         pmacs.hook.add('process.after-tick', function()\n\
+           if at and pmacs.editor.monotonic_ms() >= at then at = nil; pmacs.buffer.find_or_open('@two@') end\n\
+         end)\n"
+    )
+}
+
+/// `C-c 9` switches the window to `two.log` at once and back to `one.log`
+/// `gap_ms` later: two `C-x b` with both snapshots in flight.
+fn flip(gap_ms: u64) -> String {
+    format!(
+        "local back = nil\n\
+         pmacs.command.define {{ name = 'e10t.flip', description = 'two, then one',\n\
+           fn = function() pmacs.buffer.find_or_open('@two@'); back = pmacs.editor.monotonic_ms() + {gap_ms} end }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c 9', command = 'e10t.flip' }}\n\
+         pmacs.hook.add('process.after-tick', function()\n\
+           if back and pmacs.editor.monotonic_ms() >= back then back = nil; pmacs.buffer.find_or_open('@one@') end\n\
+         end)\n"
+    )
+}
+
+/// From a switch to the first count. Longer than [`LEAD_MS`]: a debug
+/// daemon had not yet named a 12.5 MB buffer it switched to 3 s after the
+/// switch, though its snapshot had landed (the control below, at 8bf9b16).
+const SWITCH_LEAD_MS: u64 = 10_000;
+
+/// The steps of a switch: [`LEAD_MS`] after readiness, then `chord`, then
+/// `then` (a step or nothing), and two counts, [`SWITCH_LEAD_MS`] after the
+/// switch and [`HOLD_MS`] after that.
+fn switch_steps(chord: &str, then: &str) -> String {
+    format!(
+        "quiet:{LEAD_MS} {chord} {then} quiet:{SWITCH_LEAD_MS} count:early quiet:{HOLD_MS} count:late"
+    )
+}
+
+/// Review 1's Medium 1: a `C-x b` and a wheel turn while its snapshot is
+/// in flight, which a trackpad's inertia delivers for about a second after
+/// a gesture. Until the snapshot lands the GPU shows `one.log`, so the
+/// wheel's declaration names it; that moved the daemon's window back, the
+/// tick followed with `one.log`'s snapshot, and each applied snapshot's own
+/// answer moved it again: #326's spin, one switch after the attach. At
+/// 8bf9b16 it spun without end at both sizes, a key not ending it (9 of 9
+/// release runs). A declaration naming the buffer the frontend showed
+/// before a snapshot it has not answered is now stale and moves nothing.
+#[test]
+fn e10t_r1_a_switch_and_a_wheel_turn_in_flight_settle_on_the_switch() {
+    for (lines, label) in [(179_000, "r1-wheel-179k"), (20_000, "r1-wheel-20k")] {
+        let daemon = daemon_with_pair_and(lines, &late_switch(235));
+        let Some(probe) = run_probe(&daemon, label, &switch_steps("key:C-c key:8", "wheel:3"))
+        else {
+            return;
+        };
+        // The attach's snapshot and the switch's.
+        if let Err(said) = settled(&probe, "two.log", 2, label) {
+            panic!("{said}");
+        }
+    }
+}
+
+/// The control for the row above: the same switch with no wheel turn
+/// settles on `two.log`, at the reviewed head and after.
+#[test]
+fn e10t_r1_control_the_switch_alone_settles() {
+    let daemon = daemon_with_pair_and(179_000, &late_switch(235));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r1-control",
+        &switch_steps("key:C-c key:8", "quiet:250"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(&probe, "two.log", 2, "the switch alone") {
+        panic!("{said}");
+    }
+}
+
+/// Review 1's Medium 1, its other route: two switches about 120 ms apart,
+/// both snapshots in flight. The first's answer moved the window back to
+/// `two.log` after the second had moved it to `one.log`, and the second's
+/// moved it again (at 8bf9b16, 120 ms apart: 1, 52, 148 snapshots at 3, 7
+/// and 12 s, release). The window now settles on the last switch.
+#[test]
+fn e10t_r1_two_switches_in_flight_settle_on_the_last() {
+    let daemon = daemon_with_pair_and(179_000, &flip(120));
+    let Some(probe) = run_probe(&daemon, "r1-flip", &switch_steps("key:C-c key:9", "")) else {
+        return;
+    };
+    // The attach's snapshot and the two switches'.
+    if let Err(said) = settled(&probe, "one.log", 3, "two switches 120 ms apart") {
+        panic!("{said}");
+    }
+}
+
+/// `C-c 6` holds the dispatcher `hold_ms`, as a slow command does, and then
+/// shows `@two@` in the key's own handling. A declaration made in that
+/// time waits behind the key and is read in the same dispatcher pass: after
+/// the switch, before the tick writes the follow. (Review 2 timed the real
+/// commands: a switch to an open 12.5 MB buffer held the dispatcher 11 ms
+/// in release and 101 ms in debug, a cold open 13 and 109 ms, about a
+/// touchpad's 8 to 16 ms between scroll events in release and under the
+/// probe's 250 ms step in both, which is why the hold is here.)
+fn slow_switch(hold_ms: u64) -> String {
+    format!(
+        "pmacs.command.define {{ name = 'e10t.slow', description = 'hold, then show two',\n\
+           fn = function()\n\
+             local until_ms = pmacs.editor.monotonic_ms() + {hold_ms}\n\
+             while pmacs.editor.monotonic_ms() < until_ms do end\n\
+             pmacs.buffer.find_or_open('@two@')\n\
+           end }}\n\
+         pmacs.keymap.bind {{ scope = 'global', sequence = 'C-c 6', command = 'e10t.slow' }}\n"
+    )
+}
+
+/// Review 2's Medium 1: a declaration read in the same dispatcher pass as
+/// the key that switched the window, before the follow is written, names
+/// the buffer the frontend still shows. Fix round 1's record holds only
+/// snapshots already written, so it found nothing in flight and called the
+/// declaration real; aligning to it put the window back, no snapshot was
+/// ever written, and the switch was gone under a status line that claimed
+/// it (in a real window, a scroll under way when `RET` went). At 143920e:
+/// `not on "two.log"; early 1 snapshots on "one.log"`, 2 of 2 release runs
+/// and 1 of 1 debug, and the pre-round daemon the same. While the daemon
+/// owes the session a follow, a declaration naming the buffer last sent to
+/// it now moves nothing.
+#[test]
+fn review2_a_wheel_turn_read_in_the_switch_s_own_pass_does_not_undo_it() {
+    let daemon = daemon_with_pair_and(179_000, &slow_switch(400));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-same-pass",
+        &switch_steps("key:C-c key:6", "wheel:3"),
+    ) else {
+        return;
+    };
+    // The attach's snapshot and the switch's.
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "a wheel turn in the switch's own pass",
+    ) {
+        panic!("{said}");
+    }
+}
+
+/// Its control: the same slow switch with no wheel turn settles on
+/// `two.log`, at the reviewed head and after.
+#[test]
+fn review2_control_the_slow_switch_alone_settles() {
+    let daemon = daemon_with_pair_and(179_000, &slow_switch(400));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-same-pass-control",
+        &switch_steps("key:C-c key:6", "quiet:250"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(&probe, "two.log", 2, "the slow switch alone") {
+        panic!("{said}");
+    }
+}
+
+/// `C-c 3` kills the shown buffer 235 ms after the key, from the tick hook,
+/// so the window falls to `two.log` and the probe's wheel turn declares a
+/// buffer that no longer exists while `two.log`'s snapshot is in flight.
+fn late_kill() -> String {
+    "local at = nil\n\
+     pmacs.command.define { name = 'e10t.latekill', description = 'kill one later',\n\
+       fn = function() at = pmacs.editor.monotonic_ms() + 235 end }\n\
+     pmacs.keymap.bind { scope = 'global', sequence = 'C-c 3', command = 'e10t.latekill' }\n\
+     pmacs.hook.add('process.after-tick', function()\n\
+       if at and pmacs.editor.monotonic_ms() >= at then\n\
+         at = nil\n\
+         for _, b in ipairs(pmacs.buffer.list()) do\n\
+           if b:name() == 'one.log' then pcall(pmacs.buffer.kill, b) end\n\
+         end\n\
+       end\n\
+     end)\n"
+        .to_owned()
+}
+
+/// Review 2's guard, passing at 143920e (2 / 2 / 2 on `two.log`, release)
+/// and after: the shown buffer is killed with a wheel turn in flight, and
+/// the record reads the declaration of the buffer that is gone as made
+/// before the snapshot that replaced it.
+#[test]
+fn review2_a_killed_buffer_and_a_wheel_turn_in_flight_settle() {
+    let daemon = daemon_with_pair_and(179_000, &late_kill());
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-kill",
+        &switch_steps("key:C-c key:3", "wheel:3"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the shown buffer killed, a wheel turn in flight",
+    ) {
+        panic!("{said}");
+    }
+}
+
+/// [`WireSession::wait`] with `patience` in place of its ten seconds: a
+/// debug daemon upgrading and encoding a 24 MiB buffer on its main thread
+/// writes nothing meanwhile (#434 is E9.5's row timing out at ten under
+/// load).
+fn wait_within<T>(
+    session: &mut WireSession,
+    what: &str,
+    patience: Duration,
+    mut pick: impl FnMut(&InstanceMessage) -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + patience;
+    let mut seen = 0_usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out after {patience:?} waiting for {what}; the daemon wrote {seen} other messages"
+        );
+        match session
+            .rx
+            .recv_timeout(remaining.min(Duration::from_millis(200)))
+        {
+            Ok(message) => {
+                if let Some(found) = pick(&message) {
+                    return found;
+                }
+                seen += 1;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the daemon closed the session while waiting for {what}")
+            }
+        }
+    }
+}
+
+/// `C-c 6` and, written behind it at once, a declaration of the buffer the
+/// session shows: the declaration waits in the dispatcher's queue while
+/// the command holds it, and is read in the key's own pass.
+fn slow_switch_and_declare(session: &mut WireSession, shown: BufferId) {
+    session.key(Key::Char('c'), Modifiers::CTRL);
+    session.key(Key::Char('6'), Modifiers::NONE);
+    session.declare_viewport(shown);
+}
+
+/// Review 2's Medium 1 on the wire, where the pass is forced and no GPU is
+/// needed: the key that switches the window and, written behind it, a
+/// declaration of the buffer the session was last sent. The window goes to
+/// `two.log`, the tick follows with its snapshot, and the next key lands
+/// there. At 143920e the declaration put the window back and nothing
+/// followed: `timed out waiting for two.log's snapshot, the follow`.
+#[test]
+fn e10t_r2_a_declaration_read_in_the_switch_s_own_pass_does_not_undo_it() {
+    let daemon = daemon_with_pair_and(20, &slow_switch(400));
+    let mut session = WireSession::semantic(&daemon, PROTOCOL_VERSION, None, None);
+    let (one, _) = session.where_am_i();
+    assert_eq!(
+        session.bootstrap_snapshots(),
+        [one],
+        "bootstrapped on the window's buffer alone"
+    );
+    // The frontend's answer to its bootstrap snapshot, as `pmacs-gpu`'s is.
+    session.declare_viewport(one);
+
+    slow_switch_and_declare(&mut session, one);
+    let two = session.wait("two.log's snapshot, the follow", |m| match m {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id != one => Some(*buffer_id),
+        _ => None,
+    });
+    session.declare_viewport(two);
+    session.type_str("k");
+    session.wait("the key's echo on two.log", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == two)
+            .then_some(())
+    });
+}
+
+/// The same pass when the follow it leaves owed is then refused (E9.5):
+/// the switch is to a buffer whose snapshot is past the frame, and the
+/// buffer the session was last sent still exists, which is the one case
+/// this row runs. The owner's ruling on review 2 read the code as putting
+/// the window back on the last buffer sent, so that no follow stays owed
+/// there, and asked for the run. The refusal is said on the status line;
+/// the window is back on the buffer the session mirrors, where the next
+/// key lands; and the daemon refused once and not on every tick after, as
+/// it would with a follow still owed. Until fix round 3 the row's name
+/// ended `leaves_none_owed`, which is true of this case and was read as
+/// the general claim: with the buffer last sent killed there was nowhere
+/// to go back to (review 3's Medium 1, the `review3_` and `e10t_r3_` rows
+/// below).
+/// At 143920e the declaration put the window back before the tick could
+/// refuse anything, so the user was told nothing: `timed out ... waiting
+/// for the refusal on the status line`.
+#[test]
+fn e10t_r2_a_follow_refused_after_such_a_declaration_is_said_and_goes_back() {
+    let dir = files_dir();
+    let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
+    std::fs::write(&one, fixture(20)).expect("write one.log");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    // Visited one, big; `*scratch*` killed; `one.log` shown. `C-c 6`
+    // holds, then shows `big.bin`.
+    let extra = slow_switch(400).replace("@two@", &big.display().to_string());
+    let daemon =
+        TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, big], false, &extra));
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+
+    slow_switch_and_declare(&mut session, shown);
+    let message = wait_within(
+        &mut session,
+        "the refusal on the status line",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                message: Some(message),
+                ..
+            } if message.contains("a frontend can mirror") => Some(message.clone()),
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => {
+                panic!(
+                    "a snapshot of {buffer_id:?} was sent; the switch was to a buffer past the frame"
+                )
+            }
+            _ => None,
+        },
+    );
+    assert!(
+        message.contains("big.bin is 24.0 MiB") && message.contains("this window stays on one.log"),
+        "the status names what weighed too much and where the window stayed: {message:?}"
+    );
+    // Back on the buffer the session mirrors: the next key lands there.
+    session.type_str("k");
+    session.wait("the key's echo on one.log", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == shown)
+            .then_some(())
+    });
+    // No follow stays owed: a window left on `big.bin` would be refused
+    // again on every tick. A second of ticks, named, then the count.
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert_eq!(
+        log.matches("this window stays on one.log").count(),
+        1,
+        "the daemon refused the switch once; its log:\n{log}"
+    );
+}
+
+/// A daemon whose window shows a file too large to mirror: `big.bin`,
+/// E9.5's fixture (24 MiB of pseudo-random printable text, its snapshot
+/// past the 16 MiB frame), visited first, then `one.log` of 10,000 lines
+/// and `two.log` of 20,000; `*scratch*` killed; `big.bin` shown; `extra`
+/// after, its `@two@` replaced by `two.log`'s path.
+fn daemon_showing_oversize(extra: &str) -> TestDaemon {
+    let dir = files_dir();
+    let (big, one, two) = (
+        dir.join("big.bin"),
+        dir.join("one.log"),
+        dir.join("two.log"),
+    );
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    std::fs::write(&one, fixture(10_000)).expect("write one.log");
+    std::fs::write(&two, fixture(20_000)).expect("write two.log");
+    let extra = extra.replace("@two@", &two.display().to_string());
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[big, one, two], false, &extra))
+}
+
+/// Review 2's Medium 2: a GPU attaching with no target to a daemon whose
+/// window shows a buffer too large to mirror. The daemon refuses it, puts
+/// the window on the fallback and says so (`this window stays on
+/// one.log`). Until E10t's fix round 2 the attach then swept every other
+/// buffer, as a fresh semantic window's did before E10t: each answer moved
+/// the window and the last one won, `two.log`, at 3 or 4 snapshots, 9 runs
+/// of 9 across two reviews, under a status line naming `one.log`. The
+/// session now bootstraps on the fallback's one snapshot.
+#[test]
+fn review2_an_oversize_window_s_gpu_settles_where_the_daemon_says() {
+    let daemon = daemon_showing_oversize("");
+    let Some(probe) = run_probe(&daemon, "r2-oversize", &settle_steps()) else {
+        return;
+    };
+    assert_settled(
+        &probe,
+        "one.log",
+        "a window on a buffer past the frame, sent to the fallback",
+    );
+    let log = daemon.stderr_log();
+    assert!(
+        log.contains("this window stays on one.log"),
+        "the daemon said where the window stays; its log:\n{log}"
+    );
+}
+
+/// Medium 2 on the wire, where no GPU is needed: the refused window's
+/// session is sent one snapshot in its bootstrap, the fallback's, the
+/// status line names that buffer, and the window is on it. At 143920e the
+/// bootstrap carried every other buffer's snapshot, `one.log`'s and
+/// `two.log`'s.
+#[test]
+fn e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot() {
+    let daemon = daemon_showing_oversize("");
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let sent = session.bootstrap_snapshots();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the bootstrap carries the fallback's snapshot alone: {sent:?}"
+    );
+    // The frontend's answer to it, as `pmacs-gpu`'s is; the status line
+    // comes with the frames for the declared buffer.
+    session.declare_viewport(sent[0]);
+    let (name, status) = wait_within(
+        &mut session,
+        "the first status",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                message: Some(message),
+                ..
+            } if *buffer_id == sent[0] => Some((name.clone(), message.clone())),
+            _ => None,
+        },
+    );
+    assert_eq!(name, "one.log", "the snapshot sent is the fallback's");
+    assert!(
+        status.contains("big.bin is 24.0 MiB") && status.contains("this window stays on one.log"),
+        "the status names what weighed too much and where the window stays: {status:?}"
+    );
+    assert_eq!(
+        session.where_am_i().0,
+        sent[0],
+        "the window is on the buffer the session was sent"
+    );
+}
+
+/// Review 2's guard for the record after the oversize attach, restated for
+/// the bootstrap that attach now has: the window starts on `one.log`, the
+/// fallback, and a switch to `two.log` with a wheel turn in flight settles
+/// there at two snapshots, the attach's and the switch's. The attach's one
+/// snapshot is in the session's record, so the wheel's declaration of
+/// `one.log` is read as made before `two.log`'s landed. (At 143920e the
+/// sweep had left the window on `two.log` already, at 3 or 4 snapshots the
+/// record never held; the review's probe switched back to `one.log` and
+/// read 5 / 5 / 5.)
+#[test]
+fn review2_a_switch_after_the_oversize_fallback_settles() {
+    let daemon = daemon_showing_oversize(&late_switch(235));
+    let Some(probe) = run_probe(
+        &daemon,
+        "r2-oversize-switch",
+        &switch_steps("key:C-c key:8", "wheel:3"),
+    ) else {
+        return;
+    };
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "a switch with a wheel turn in flight, after the oversize attach",
+    ) {
+        panic!("{said}");
+    }
+}
+
+/// Review 3's Medium 1, through the real `pmacs-gpu` (its runs `k1`, two of
+/// two in release). The window attaches onto `big.bin`, is refused and
+/// bootstraps on `one.log` (fix round 2). `C-x k RET` then kills
+/// `one.log`: with `*scratch*` gone, `kill_buffer`'s fallback is the first
+/// other buffer, `big.bin`. The tick refuses the follow, and the buffer
+/// last sent, where a refused follow goes back, no longer exists. At
+/// e0c5ba6 the window stayed on `big.bin` and was refused again on every
+/// tick (68 and 90 refusals in about 12 s, the daemon at 10 to 11 s of CPU
+/// over a 14 s run, each tick exporting the 48 MiB snapshot again), the
+/// GPU at 1 / 1 / 1 on the buffer just killed under a band that said
+/// nothing, and a key typed there edited `big.bin`. The window now goes to
+/// a buffer the frontend can mirror, here `two.log`, the refusal said
+/// once, and the next tick sends it.
+#[test]
+fn review3_a_kill_whose_fallback_is_past_the_frame_lands_where_the_gpu_can_follow() {
+    let daemon = daemon_showing_oversize("");
+    let Some(probe) = run_probe(
+        &daemon,
+        "r3-kill-oversize-fallback",
+        &switch_steps("key:C-x key:k quiet:400 key:ret", "quiet:250"),
+    ) else {
+        return;
+    };
+    // The attach's snapshot and the one for the buffer the window went to.
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the shown buffer killed, its fallback past the frame",
+    ) {
+        panic!("{said}");
+    }
+    let log = daemon.stderr_log();
+    assert!(
+        log.matches("past the 16 MiB a frontend can mirror").count() <= 2,
+        "the attach's refusal and the kill's, each once; the daemon's log:\n{log}"
+    );
+    assert!(
+        !log.contains("back on BufferId"),
+        "the window was put back on a buffer that exists; the daemon's log:\n{log}"
+    );
+}
+
+/// The same on the wire, on every leg that builds `crdt`: after the kill
+/// the session is sent a buffer that fits, the daemon's window is on it,
+/// a key typed lands there and not in `big.bin`, and the refusal is in the
+/// log no more than once for the attach and once for the kill. At e0c5ba6
+/// no snapshot ever came: `timed out ... waiting for a snapshot of the
+/// buffer the window went to`.
+#[test]
+fn review3_a_kill_whose_fallback_is_past_the_frame_leaves_no_follow_owed() {
+    let daemon = daemon_showing_oversize("");
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let sent = session.bootstrap_snapshots();
+    assert_eq!(sent.len(), 1, "the fallback's one snapshot: {sent:?}");
+    session.declare_viewport(sent[0]);
+    // `C-x k RET`: the prompt is prefilled with the window's buffer.
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, sent[0], "the killed buffer is not sent again");
+    session.declare_viewport(next);
+    session.type_str("k");
+    session.wait("the key's echo on the buffer sent", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == next)
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert!(
+        log.matches("past the 16 MiB a frontend can mirror").count() <= 2,
+        "no follow stays owed: a window left on `big.bin` is refused on every tick; the log:\n{log}"
+    );
+}
+
+/// Review 3's run `k7`, on the wire: the same arm reached with no oversize
+/// attach, and both of its ways out in one session. The window is on
+/// `one.log`, sent by an ordinary bootstrap; a switch to `big.bin` is
+/// refused and goes back to `one.log`, which exists (E10t.2's guard for
+/// this arm). `C-x k RET` then kills `one.log`: the large file a user was
+/// refused is still open, and with `*scratch*` gone the window falls to
+/// it. The follow is refused a second time and the buffer last sent is
+/// gone; nothing else is open, so the fallback that fits is a fresh
+/// `*scratch*` (the creation `k1s` reached by killing `*scratch*` itself).
+/// At e0c5ba6 the review counted 134 refusals there, the GPU on the dead
+/// `s.txt`.
+#[test]
+fn e10t_r3_a_refused_switch_and_then_a_kill_end_on_a_fresh_scratch() {
+    let dir = files_dir();
+    let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
+    std::fs::write(&one, fixture(20)).expect("write one.log");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    // Visited one, big; `*scratch*` killed; `one.log` shown. `C-c 6`
+    // shows `big.bin`.
+    let extra = slow_switch(0).replace("@two@", &big.display().to_string());
+    let daemon =
+        TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, big], false, &extra));
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+
+    // The switch, refused: back on `one.log`.
+    session.key(Key::Char('c'), Modifiers::CTRL);
+    session.key(Key::Char('6'), Modifiers::NONE);
+    wait_within(
+        &mut session,
+        "the switch's refusal on the status line",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                message: Some(message),
+                ..
+            } if message.contains("this window stays on one.log") => Some(()),
+            _ => None,
+        },
+    );
+
+    // The kill: `one.log` goes, and the window falls to `big.bin`.
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, shown, "the killed buffer is not sent again");
+    session.declare_viewport(next);
+    let (name, status) = wait_within(
+        &mut session,
+        "the status of the buffer sent",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                message: Some(message),
+                ..
+            } if *buffer_id == next => Some((name.clone(), message.clone())),
+            _ => None,
+        },
+    );
+    assert_eq!(name, "*scratch*", "nothing else was open that fits");
+    assert!(
+        status.contains("big.bin is 24.0 MiB") && status.contains("this window stays on *scratch*"),
+        "the status names what weighed too much and where the window went: {status:?}"
+    );
+    session.type_str("k");
+    session.wait("the key's echo on the buffer sent", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == next)
+            .then_some(())
+    });
+    // A second of ticks, then the log: the switch's refusal and the
+    // kill's, each once, and no window put back on a buffer that is gone.
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert_eq!(
+        log.matches("past the 16 MiB a frontend can mirror").count(),
+        2,
+        "the switch's refusal and the kill's, each once; the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        log.matches("this window stays on one.log").count(),
+        1,
+        "the refused switch went back to the buffer last sent; the daemon's log:\n{log}"
+    );
+    assert!(
+        !log.contains("back on BufferId"),
+        "the window was put on a buffer that exists; the daemon's log:\n{log}"
+    );
+}
+
+/// `C-c 3` kills `one.log` 4 s after the key, from the tick hook, and
+/// writes to the daemon's log the buffer and the side of the window that
+/// holds the focus then, and again 5 s later.
+const KILL_UNDER_A_BAND: &str = "local at, again = nil, nil\n\
+    local function focused(when)\n\
+      local side = tostring(pmacs.window.params().side)\n\
+      local name = pmacs.window.buffer():name()\n\
+      io.stderr:write('e10t ' .. when .. ' focused=' .. name .. ' side=' .. side .. '\\n')\n\
+    end\n\
+    pmacs.command.define { name = 'e10t.bandkill', description = 'kill one.log later',\n\
+      fn = function() at = pmacs.editor.monotonic_ms() + 4000 end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 3', command = 'e10t.bandkill' }\n\
+    pmacs.hook.add('process.after-tick', function()\n\
+      local now = pmacs.editor.monotonic_ms()\n\
+      if at and now >= at then\n\
+        at, again = nil, now + 5000\n\
+        focused('at-kill')\n\
+        for _, b in ipairs(pmacs.buffer.list()) do\n\
+          if b:name() == 'one.log' then pcall(pmacs.buffer.kill, b) end\n\
+        end\n\
+      elseif again and now >= again then\n\
+        again = nil\n\
+        focused('after')\n\
+      end\n\
+    end)\n";
+
+/// The refusal puts back the document window, not the focused one (E10t
+/// fix round 3; review 3 named the reading, and its one run did not reach
+/// the state). The GPU opens the terminal in the band and the focus goes
+/// there (`C-c t`); `one.log`, which the document shows, is then killed,
+/// the document window falls to `big.bin`, and the follow is refused.
+/// `refuse_oversize_snapshot` switched the frontend's active window, so
+/// with Medium 1 fixed the fallback went into the band, over the terminal,
+/// and the document stayed on `big.bin`: `not on "two.log"; ... early 1
+/// snapshots`, the refusal on every tick, and the band's window on
+/// `two.log` five seconds later. The document window now goes to the
+/// fallback, which is sent, and the band keeps its terminal.
+#[test]
+fn e10t_r3_a_kill_under_a_focused_band_sends_the_document_to_the_fallback() {
+    let daemon = daemon_showing_oversize(KILL_UNDER_A_BAND);
+    let Some(probe) = run_probe(
+        &daemon,
+        "r3-kill-under-a-band",
+        &switch_steps("key:C-c key:3 key:C-c key:t", "quiet:250"),
+    ) else {
+        return;
+    };
+    let log = daemon.stderr_log();
+    let focused = |when: &str| {
+        log.lines()
+            .find_map(|l| l.strip_prefix(&format!("e10t {when} focused=")))
+            .unwrap_or_else(|| panic!("no `{when}` line in the daemon's log:\n{log}"))
+    };
+    // The premise: the band's terminal held the focus when the buffer went.
+    let at_kill = focused("at-kill");
+    assert!(
+        at_kill.starts_with("*terminal:") && at_kill.ends_with("side=bottom"),
+        "the focus was in the terminal band at the kill: {at_kill:?}; the daemon's log:\n{log}"
+    );
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the document's buffer killed under a focused band",
+    ) {
+        panic!("{said}; the daemon's log:\n{log}");
+    }
+    assert!(
+        log.matches("past the 16 MiB a frontend can mirror").count() <= 2,
+        "the attach's refusal and the kill's, each once; the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        focused("after"),
+        at_kill,
+        "the band keeps its terminal and the focus; the daemon's log:\n{log}"
+    );
+}
+
+/// A daemon whose window changes buffer on every tick, so the follow
+/// writes a snapshot on every pass: a stream that never pauses, made by the
+/// daemon at the head, where #326's own spin is gone.
+const STREAM: &str = "local n = 0\n\
+    pmacs.hook.add('process.after-tick', function()\n\
+      n = n + 1\n\
+      if n % 2 == 0 then pmacs.buffer.find_or_open('@two@') else pmacs.buffer.find_or_open('@one@') end\n\
+    end)\n";
+
+/// The quit and reconnect probes' own limit in the row below.
+const STREAM_DEADLINE_MS: u64 = 3_000;
+/// The outside bound of the row below: a probe that does not read its
+/// limit is killed here.
+const STREAM_OUTSIDE: Duration = Duration::from_secs(40);
+
+/// Review 2's Low 1: the reconnect and quit probes themselves, beside a
+/// stream that never pauses, return at their own deadline. Fix round 1's
+/// row for them (`pmacs-gpu`'s `a_stream_that_never_pauses_ends_a_probe_loop_at_its_deadline`)
+/// runs the drain they share in a loop of its own, so it passes with either
+/// probe's call site back on the unbounded drain (`scripts/bite`:
+/// `VACUOUS`). With either call site's drain as it was until 143920e that
+/// probe runs to the outside bound and is killed there (the pre-round
+/// `pmacs-gpu`, release: both killed at 40 s; the head's: 3.2 s each).
+#[test]
+fn review2_the_quit_and_reconnect_probes_end_at_their_deadline_beside_a_stream() {
+    for action in ["quit", "reconnect"] {
+        let daemon = daemon_with_pair_and(10_000, STREAM);
+        let Some(probe) = run_probe_as(
+            &daemon,
+            &format!("r2-stream-{action}"),
+            action,
+            "x",
+            STREAM_DEADLINE_MS,
+            STREAM_OUTSIDE,
+        ) else {
+            return;
+        };
+        assert!(
+            probe.took < STREAM_OUTSIDE / 2,
+            "the {action} probe ran {:?} beside a stream that never pauses, its deadline \
+             {STREAM_DEADLINE_MS} ms",
+            probe.took
+        );
+    }
+}
+
+/// A side window that is not the terminal's, as a list view's panel is
+/// (`builtin/runtime/listview.lua`: `side = "bottom", select = true`), and
+/// three commands that act from wherever the focus is. `C-c 4` opens
+/// `*band*` below the document and gives it the focus. `C-c 1` shows
+/// `big.bin` in the document window without selecting it. `C-c 5` kills
+/// `one.log`. `C-c 2` writes the focused window's buffer and side to the
+/// daemon's log.
+const BAND: &str = "local function named(name)\n\
+      for _, b in ipairs(pmacs.buffer.list()) do\n\
+        if b:name() == name then return b end\n\
+      end\n\
+    end\n\
+    pmacs.command.define { name = 'e10t.band', description = 'open a band and focus it',\n\
+      fn = function()\n\
+        pmacs.window.display(pmacs.buffer.create('*band*'), { side = 'bottom', select = true })\n\
+      end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 4', command = 'e10t.band' }\n\
+    pmacs.command.define { name = 'e10t.showbig', description = 'show big.bin in the document, unselected',\n\
+      fn = function() pmacs.window.display(named('big.bin'), { select = false }) end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 1', command = 'e10t.showbig' }\n\
+    pmacs.command.define { name = 'e10t.killone', description = 'kill one.log',\n\
+      fn = function() pmacs.buffer.kill(named('one.log')) end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 5', command = 'e10t.killone' }\n\
+    local notes = 0\n\
+    pmacs.command.define { name = 'e10t.focused', description = 'log the focused window',\n\
+      fn = function()\n\
+        notes = notes + 1\n\
+        io.stderr:write('e10t note' .. notes .. ' focused=' .. pmacs.window.buffer():name()\n\
+          .. ' side=' .. tostring(pmacs.window.params().side) .. '\\n')\n\
+      end }\n\
+    pmacs.keymap.bind { scope = 'global', sequence = 'C-c 2', command = 'e10t.focused' }\n";
+
+/// `big.bin` (24 MiB, past the frame), `one.log` and `two.log` visited in
+/// that order, `*scratch*` killed, and `one.log` shown: the window's
+/// bootstrap is an ordinary one, and the buffer past the frame is the first
+/// other buffer `kill_buffer` falls to.
+fn daemon_showing_one_beside_oversize(extra: &str) -> TestDaemon {
+    let dir = files_dir();
+    let (big, one, two) = (
+        dir.join("big.bin"),
+        dir.join("one.log"),
+        dir.join("two.log"),
+    );
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    std::fs::write(&one, fixture(10_000)).expect("write one.log");
+    std::fs::write(&two, fixture(20_000)).expect("write two.log");
+    // `init_visiting` shows `files[0]`; the extra shows `one.log` after it.
+    let extra = format!(
+        "pmacs.buffer.find_or_open({:?})\n{extra}",
+        one.display().to_string()
+    );
+    TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[big, one, two], false, &extra))
+}
+
+/// The daemon's `e10t note<n>` line, written by [`BAND`]'s `C-c 2`.
+fn note(log: &str, n: usize) -> &str {
+    log.lines()
+        .find_map(|l| l.strip_prefix(&format!("e10t note{n} focused=")))
+        .unwrap_or_else(|| panic!("no note {n} in the daemon's log:\n{log}"))
+}
+
+/// Review 4's row for the second shape of the refusal's window, which fix
+/// round 3 read and did not run: a side window that is not the terminal's
+/// holds the focus, and a buffer past the frame is shown in the document
+/// window without selecting it, while the buffer last sent still exists.
+/// The follow is refused; the document window goes back to `one.log`, the
+/// band keeps its buffer and the focus, and the refusal is said once. This
+/// refusal is older than the phase: with e0c5ba6's daemon, in release, it
+/// put `one.log` into the band and was said again on every tick while the
+/// band held the focus (review 4's run `p1`, 65 times in about seven
+/// seconds), and with that daemon or 5b0a1c8's the row fails on the band's
+/// second note, `one.log side=bottom`. The first count waits for the
+/// refusal's band (`band:big.bin`), since a count taken on a fixed delay
+/// can come before the refusal under load.
+#[test]
+fn review4_a_refused_passive_display_under_a_focused_panel_goes_back_in_the_document() {
+    let daemon = daemon_showing_one_beside_oversize(BAND);
+    let steps = format!(
+        "quiet:{LEAD_MS} key:C-c key:4 quiet:500 key:C-c key:2 quiet:300 key:C-c key:1 \
+         quiet:{SWITCH_LEAD_MS} band:big.bin count:early key:C-c key:2 quiet:{HOLD_MS} count:late"
+    );
+    let Some(probe) = run_probe(&daemon, "r4-passive-under-a-panel", &steps) else {
+        return;
+    };
+    let log = daemon.stderr_log();
+    // The premise: the band held the focus before the display, and after.
+    assert_eq!(
+        note(&log, 1),
+        "*band* side=bottom",
+        "the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        note(&log, 2),
+        "*band* side=bottom",
+        "the band keeps its buffer and the focus; the daemon's log:\n{log}"
+    );
+    if let Err(said) = settled(
+        &probe,
+        "one.log",
+        1,
+        "a buffer past the frame shown in the document under a focused panel",
+    ) {
+        panic!("{said}; the daemon's log:\n{log}");
+    }
+    assert_eq!(
+        log.matches("this window stays on one.log").count(),
+        1,
+        "the refusal said once, the document back on the buffer last sent; the log:\n{log}"
+    );
+}
+
+/// Review 4's row for the kill fix round 3's row made from the tick hook
+/// under the terminal band, made here by a key pressed in a side window
+/// that is not the terminal's: `one.log`, which the document shows, is
+/// killed with the focus in `*band*`. The document window falls to
+/// `big.bin`, the follow is refused, and the document goes to the fallback
+/// that fits, `two.log`, which is sent; the band keeps its buffer and the
+/// focus. With 5b0a1c8's daemon the fallback went into the band and the
+/// row fails on its second note, `two.log side=bottom`. The first count
+/// waits for the refusal's band: in a batch beside a daemon that was
+/// spinning, review 4 once read it before the follow had landed (`early 1
+/// snapshots on "one.log" (4), late 2 on "two.log" (5)`).
+#[test]
+fn review4_a_kill_by_a_key_under_a_focused_panel_sends_the_document_to_the_fallback() {
+    let daemon = daemon_showing_one_beside_oversize(BAND);
+    let steps = format!(
+        "quiet:{LEAD_MS} key:C-c key:4 quiet:500 key:C-c key:2 quiet:300 key:C-c key:5 \
+         quiet:{SWITCH_LEAD_MS} band:big.bin count:early key:C-c key:2 quiet:{HOLD_MS} count:late"
+    );
+    let Some(probe) = run_probe(&daemon, "r4-kill-under-a-panel", &steps) else {
+        return;
+    };
+    let log = daemon.stderr_log();
+    assert_eq!(
+        note(&log, 1),
+        "*band* side=bottom",
+        "the daemon's log:\n{log}"
+    );
+    assert_eq!(
+        note(&log, 2),
+        "*band* side=bottom",
+        "the band keeps its buffer and the focus; the daemon's log:\n{log}"
+    );
+    if let Err(said) = settled(
+        &probe,
+        "two.log",
+        2,
+        "the document's buffer killed by a key under a focused panel",
+    ) {
+        panic!("{said}; the daemon's log:\n{log}");
+    }
+    assert_eq!(
+        log.matches("past the 16 MiB a frontend can mirror").count(),
+        1,
+        "the kill's refusal, once; the daemon's log:\n{log}"
+    );
+}
+
+/// Review 4's Low 1, the tick's measuring: two buffers past the frame met
+/// at the tick. `s.txt` is shown beside `big1.bin` and `big2.bin`,
+/// `*scratch*` gone. `C-x k RET` kills `s.txt`, the window falls to
+/// `big1.bin`, the follow is refused, and the fallback is measured past
+/// `big2.bin` down to a fresh `*scratch*`. On the wire: one snapshot
+/// follows, of a buffer named `*scratch*`, the status names `big1.bin` and
+/// where the window went, the next key lands there, and the refusal is in
+/// the log once. Every other row of the suite that reaches a refusal has a
+/// fixture in which the buffer `kill_buffer` would choose next already
+/// fits, so each passes with `fallback_that_fits` returning its first
+/// candidate unmeasured; this one does not, since the window then passes
+/// between the two large files on every tick and no snapshot comes
+/// (`timed out ... waiting for a snapshot of the buffer the window went
+/// to`), which is also how it fails with e0c5ba6's daemon.
+#[test]
+fn review4_two_buffers_past_the_frame_met_at_the_tick_end_on_a_fresh_scratch() {
+    let dir = files_dir();
+    let (big1, big2, small) = (
+        dir.join("big1.bin"),
+        dir.join("big2.bin"),
+        dir.join("s.txt"),
+    );
+    std::fs::write(&big1, oversize_text(24 * 1024 * 1024)).expect("write big1.bin");
+    std::fs::write(&big2, oversize_text(24 * 1024 * 1024)).expect("write big2.bin");
+    std::fs::write(&small, fixture(5)).expect("write s.txt");
+    let extra = format!(
+        "pmacs.buffer.find_or_open({:?})\n",
+        small.display().to_string()
+    );
+    let daemon = TestDaemon::spawn_with_env_and_init(
+        &[],
+        &init_visiting(&[big1, big2, small], false, &extra),
+    );
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    // Two upgrades and three exports of 24 MiB in one pass of a debug
+    // daemon: the patience is the suite's longest.
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(3),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, shown, "the killed buffer is not sent again");
+    session.declare_viewport(next);
+    let (name, status) = wait_within(
+        &mut session,
+        "the status of the buffer sent",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                message: Some(message),
+                ..
+            } if *buffer_id == next => Some((name.clone(), message.clone())),
+            _ => None,
+        },
+    );
+    assert_eq!(
+        name, "*scratch*",
+        "neither large file is where the window went"
+    );
+    assert!(
+        status.contains("big1.bin is 24.0 MiB")
+            && status.contains("this window stays on *scratch*"),
+        "the status names what weighed too much and where the window went: {status:?}"
+    );
+    session.type_str("k");
+    session.wait("the key's echo on the buffer sent", |m| {
+        matches!(m, InstanceMessage::CursorByte { buffer_id, byte_pos: 1 } if *buffer_id == next)
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let log = daemon.stderr_log();
+    assert_eq!(
+        log.matches("past the 16 MiB a frontend can mirror").count(),
+        1,
+        "one refusal for the kill, however many candidates were measured; the log:\n{log}"
+    );
+}
+
+/// Review 4's Low 1, the publish beside the measuring: a grid replica
+/// attached beside mirrors every buffer, and the fallback the tick's
+/// measure created and upgraded is sent to it. `one.log` is shown beside
+/// `big.bin`, `*scratch*` gone; a grid session and a semantic one both
+/// show `one.log`; the semantic one kills it. Its window falls to
+/// `big.bin`, the follow is refused, and the fallback that fits is a fresh
+/// `*scratch*`, upgraded where it is measured. The semantic session is
+/// sent it by the next tick's follow; the grid replica only by the publish
+/// in `fallback_that_fits`, since the tick's own upgrade never fires for a
+/// buffer the measure already upgraded. No other row of the suite has a
+/// replica beside, so each passes with that publish removed; this one
+/// then times out `waiting for the fallback's snapshot on the grid
+/// replica`. With e0c5ba6's daemon no fallback is chosen at all, and it
+/// times out on the semantic session's snapshot.
+#[test]
+fn review4_a_grid_replica_beside_is_sent_the_fallback_the_tick_measured() {
+    let dir = files_dir();
+    let (one, big) = (dir.join("one.log"), dir.join("big.bin"));
+    std::fs::write(&one, fixture(20)).expect("write one.log");
+    std::fs::write(&big, oversize_text(24 * 1024 * 1024)).expect("write big.bin");
+    let daemon = TestDaemon::spawn_with_env_and_init(&[], &init_visiting(&[one, big], false, ""));
+    let mut grid = WireSession::grid(&daemon, pmacs_protocol::cell::CellSize::new(24, 80));
+    let mut session = WireSession::semantic_with_patience(
+        &daemon,
+        PROTOCOL_VERSION,
+        None,
+        None,
+        Duration::from_mins(2),
+    );
+    let (shown, _) = session.where_am_i();
+    assert_eq!(session.bootstrap_snapshots(), [shown]);
+    session.declare_viewport(shown);
+    session.key(Key::Char('x'), Modifiers::CTRL);
+    session.key(Key::Char('k'), Modifiers::NONE);
+    session.key(Key::Enter, Modifiers::NONE);
+    let next = wait_within(
+        &mut session,
+        "a snapshot of the buffer the window went to",
+        Duration::from_mins(1),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_ne!(next, shown, "the killed buffer is not sent again");
+    wait_within(
+        &mut grid,
+        "the fallback's snapshot on the grid replica",
+        Duration::from_secs(8),
+        |m| match m {
+            InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id == next => Some(()),
+            _ => None,
+        },
+    );
+}

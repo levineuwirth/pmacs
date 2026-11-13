@@ -1922,7 +1922,9 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// `band:<prefix>` waits up to five seconds for the status band to begin
 /// with `prefix` (a switch's or a kill's message lands a frame or more
 /// after its key, later under load); `report:<label>` writes the popup's
-/// facts under `label`; `frame:<label>` writes the composited frame,
+/// facts under `label`; `count:<label>` writes the snapshots applied so far,
+/// the buffer shown, the band's name for it and the time since attach
+/// (E10t); `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
 /// times out is reported as `step.<i>=timeout` and the script goes on.
@@ -2054,6 +2056,27 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
             "report" => {
                 if let Some(state) = app.state.as_mut() {
                     popup_probe_facts(state, arg, &mut out);
+                }
+                Ok(true)
+            }
+            "count" => {
+                // E10t: what the window shows and how many snapshots it
+                // has applied, so two counts a stated time apart say
+                // whether it settled. The name is the status band's,
+                // the daemon's word for the window's buffer.
+                if let Some(state) = app.state.as_ref() {
+                    let _ = writeln!(out, "{arg}.snapshots={}", state.snapshots_applied);
+                    let _ = writeln!(
+                        out,
+                        "{arg}.buffer={}",
+                        state.current_buffer_id.map_or(0, BufferId::raw)
+                    );
+                    let _ = writeln!(
+                        out,
+                        "{arg}.name={}",
+                        state.status_facts.as_ref().map_or("", |f| f.name.as_str())
+                    );
+                    let _ = writeln!(out, "{arg}.at_ms={}", started.elapsed().as_millis());
                 }
                 Ok(true)
             }
@@ -2217,7 +2240,7 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     while std::time::Instant::now() < deadline && phase != Phase::Done {
         let now = std::time::Instant::now();
         // Everything the daemon wrote, through the production dispatch.
-        while let Ok(event) = rx.try_recv() {
+        drain_probe_slice(&rx, |event| {
             if let AttachEvent::Message(message) = &event {
                 match message.as_ref() {
                     InstanceMessage::BufferSnapshot { .. } => snapshot_seen = true,
@@ -2269,7 +2292,7 @@ fn run_reconnect_probe(socket: &Path, report: &Path, text: &str) -> i32 {
                 cursor_seen = false;
                 phase = Phase::Lost;
             }
-        }
+        });
         // The reconnect loop, as the deadline pump drives it.
         if phase == Phase::Lost {
             let reconnect_tx = tx.clone();
@@ -2525,7 +2548,7 @@ fn run_quit_probe(socket: &Path, report: &Path) -> i32 {
 
     while std::time::Instant::now() < deadline && phase != Phase::Done {
         // Everything the daemon wrote, through the production dispatch.
-        while let Ok(event) = rx.try_recv() {
+        drain_probe_slice(&rx, |event| {
             match &event {
                 AttachEvent::Message(message) => match message.as_ref() {
                     InstanceMessage::BufferSnapshot { .. } => snapshot_seen = true,
@@ -2535,7 +2558,7 @@ fn run_quit_probe(socket: &Path, report: &Path) -> i32 {
                 AttachEvent::Disconnected(reason) => disconnect = Some(reason.clone()),
             }
             app.dispatch_app_event(AppEvent::Attach(event));
-        }
+        });
         let s = app.state.as_ref().expect("state");
         let prompt = s.minibuffer.as_ref().map(|m| m.prompt.clone());
         match phase {
@@ -3536,6 +3559,53 @@ fn marked_covers(marked: &[(u64, u64)], start: u64, end: u64) -> bool {
     at >= end
 }
 
+/// Hand each attach event waiting on `rx` to `each`, the first waited on
+/// for `first`, for no longer than `budget` in all; whether any arrived.
+/// The drain stops at `budget` though events keep arriving, so its caller
+/// reads its own limit again (E10t.3, and for the reconnect and quit
+/// probes E10t's fix round 1, review 1's Low 2): a stream that never
+/// paused (#326's spin, a snapshot about every 50 ms that took longer than
+/// that to apply) held a drain that went on while anything waited past
+/// every deadline its caller had, until a timeout outside the probe
+/// killed it.
+fn drain_attach_events(
+    rx: &std::sync::mpsc::Receiver<AttachEvent>,
+    first: std::time::Duration,
+    budget: std::time::Duration,
+    mut each: impl FnMut(AttachEvent),
+) -> bool {
+    let until = std::time::Instant::now() + budget;
+    let mut any = false;
+    while let Ok(event) = rx.recv_timeout(if any {
+        std::time::Duration::ZERO
+    } else {
+        first
+    }) {
+        any = true;
+        each(event);
+        if std::time::Instant::now() >= until {
+            break;
+        }
+    }
+    any
+}
+
+/// How long a pass of the reconnect and quit probes' loops drains before
+/// it reads its deadline and its phase again: their own 5 ms step.
+const PROBE_DRAIN_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// The reconnect and quit probes' drain: what is already waiting, for no
+/// longer than [`PROBE_DRAIN_SLICE`]. Until E10t's fix round 1 each drained
+/// while anything waited, so its deadline went unread beside a stream that
+/// never paused (review 1's Low 2: the quit probe killed at a 40 s outside
+/// bound, the reconnect probe overrunning its 3 s to 30 s).
+fn drain_probe_slice(
+    rx: &std::sync::mpsc::Receiver<AttachEvent>,
+    each: impl FnMut(AttachEvent),
+) -> bool {
+    drain_attach_events(rx, std::time::Duration::ZERO, PROBE_DRAIN_SLICE, each)
+}
+
 /// The keypaint probe's session (E10k.1): the production `App`, the
 /// attach events behind it, and the offscreen target a timed frame is
 /// rendered into.
@@ -3543,29 +3613,83 @@ struct KeypaintSession {
     app: App,
     rx: std::sync::mpsc::Receiver<AttachEvent>,
     view: wgpu::TextureView,
+    /// The texture `view` renders into, held for the session's life.
+    _target: wgpu::Texture,
     disconnect: Option<String>,
 }
 
 impl KeypaintSession {
+    /// `state` under the production `App`, attached through `client` to
+    /// `socket` (or to nothing, for a row that feeds `rx` itself), with an
+    /// offscreen target of the window's size to paint into.
+    fn new(
+        state: State,
+        client: Option<AttachClient>,
+        socket: &Path,
+        rx: std::sync::mpsc::Receiver<AttachEvent>,
+    ) -> Self {
+        let target = state.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pmacs-gpu keypaint target"),
+            size: wgpu::Extent3d {
+                width: state.config.width,
+                height: state.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: state.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            app: App {
+                mode: Mode::Attach {
+                    socket: socket.to_path_buf(),
+                },
+                proxy: None,
+                #[cfg(test)]
+                test_force_non_linux: false,
+                state: Some(state),
+                pending_events: Vec::new(),
+                attach_client: client,
+                modifiers: winit::keyboard::ModifiersState::empty(),
+                geometry: geometry::WindowGeometry::default(),
+                geometry_path: None,
+                geometry_dirty_since: None,
+                platform: Platform::current(),
+                exit_code: 0,
+                reconnect: None,
+                exit_requested: false,
+            },
+            rx,
+            view,
+            _target: target,
+            disconnect: None,
+        }
+    }
+
     fn state(&self) -> &State {
         self.app.state.as_ref().expect("the probe's state")
     }
 
-    /// Apply the attach events that arrive within `wait` of each other,
-    /// the first waited on for `wait`; whether any arrived.
+    /// Apply the attach events already waiting, the first waited on for
+    /// `wait`, for no longer than `wait` in all; whether any arrived.
+    ///
+    /// E10t.3: the drain stops at `wait` though events keep arriving, so
+    /// its caller reads its own limit again. Until then it went on while
+    /// any event was waiting, and a stream that never paused (#326's spin,
+    /// a snapshot about every 50 ms that took longer than that to apply)
+    /// held the caller here past `PMACS_GPU_PROBE_SAMPLE_MS` until a
+    /// timeout outside the probe killed it.
     fn pump(&mut self, wait: std::time::Duration) -> bool {
-        let mut any = false;
-        while let Ok(event) =
-            self.rx
-                .recv_timeout(if any { std::time::Duration::ZERO } else { wait })
-        {
-            any = true;
+        drain_attach_events(&self.rx, wait, wait, |event| {
             if let AttachEvent::Disconnected(reason) = &event {
                 self.disconnect = Some(reason.clone());
             }
             self.app.dispatch_app_event(AppEvent::Attach(event));
-        }
-        any
+        })
     }
 
     /// The caret is at `byte`, confirmed by the daemon and fresh, and
@@ -3632,6 +3756,134 @@ impl KeypaintSession {
     }
 }
 
+#[cfg(test)]
+mod keypaint_limit_tests {
+    use super::*;
+
+    /// How long the stream below runs at most: the bound under which the
+    /// witness hangs where the limit is not read, after which it fails.
+    const STREAM_CEILING: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// A stream that never pauses into a [`KeypaintSession`]: a producer
+    /// keeps a bounded channel full of snapshots of a 100 KB buffer, each
+    /// taking milliseconds to apply through the production `App` and
+    /// microseconds to send, so an event is always waiting and memory stays
+    /// at four snapshots, until it is stopped or [`STREAM_CEILING`] passes.
+    /// `None` without a wgpu adapter.
+    fn never_pausing_stream() -> Option<(
+        KeypaintSession,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<u64>,
+    )> {
+        let Some(state) = State::new_headless(640, 480, "") else {
+            assert!(
+                std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
+                "PMACS_REQUIRE_GPU is set but there is no wgpu adapter"
+            );
+            return None;
+        };
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(
+                0,
+                &"a line of the snapshot that never stops\n".repeat(2_500),
+            )
+            .expect("insert snapshot text");
+        let snapshot = doc.export(loro::ExportMode::Snapshot).expect("export");
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AttachEvent>(4);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let producer = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            let mut sent = 0_u64;
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst)
+                && began.elapsed() < STREAM_CEILING
+            {
+                let message = InstanceMessage::BufferSnapshot {
+                    buffer_id: BufferId::from_raw(7),
+                    crdt_snapshot: snapshot.clone(),
+                };
+                if tx.send(AttachEvent::Message(Box::new(message))).is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            sent
+        });
+        let session =
+            KeypaintSession::new(state, None, Path::new("/nonexistent-keypaint-socket"), rx);
+        Some((session, stop, producer))
+    }
+
+    /// E10t.3 --- a stream that never pauses ends at the caller's limit.
+    /// `settle` with a condition that never holds must come back at its
+    /// limit, half a second. Where `pump` drains while anything waits, as
+    /// it did until E10t.3, it comes back only when the stream stops at
+    /// [`STREAM_CEILING`], and the row fails on the time.
+    #[test]
+    fn a_stream_that_never_pauses_ends_a_settle_at_its_limit() {
+        let Some((mut session, stop, producer)) = never_pausing_stream() else {
+            return;
+        };
+        let limit = std::time::Duration::from_millis(500);
+        let began = std::time::Instant::now();
+        let held = session.settle(std::time::Duration::from_hours(1), limit, &|_| false);
+        let took = began.elapsed();
+        let applied = session.state().snapshots_applied;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(session);
+        let sent = producer.join().expect("the producer");
+        assert!(!held, "the condition never holds");
+        assert!(
+            took < limit + std::time::Duration::from_secs(3),
+            "settle came back after {took:?}, its limit {limit:?}: the drain did not read it \
+             ({applied} snapshots applied of {sent} sent)"
+        );
+        assert!(
+            applied > 1 && sent > applied,
+            "the stream was still running when settle came back: {applied} applied of {sent} sent"
+        );
+    }
+
+    /// E10t fix round 1 (review 1's Low 2) --- the reconnect and quit
+    /// probes' drain ends at its slice beside the same stream, so their
+    /// loops read their deadlines. Each pass of those loops drains through
+    /// [`drain_probe_slice`] and then reads its deadline; here a loop of
+    /// such passes, as theirs is, must end within a second of a 500 ms
+    /// deadline. Where the drain goes on while anything waits, as theirs
+    /// did until this round, the first pass ends only when the stream
+    /// stops at [`STREAM_CEILING`], and the row fails on the time.
+    #[test]
+    fn a_stream_that_never_pauses_ends_a_probe_loop_at_its_deadline() {
+        let Some((mut session, stop, producer)) = never_pausing_stream() else {
+            return;
+        };
+        let began = std::time::Instant::now();
+        let deadline = began + std::time::Duration::from_millis(500);
+        let mut passes = 0_u32;
+        while std::time::Instant::now() < deadline {
+            passes += 1;
+            drain_probe_slice(&session.rx, |event| {
+                session.app.dispatch_app_event(AppEvent::Attach(event));
+            });
+        }
+        let took = began.elapsed();
+        let applied = session.state().snapshots_applied;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(session);
+        let sent = producer.join().expect("the producer");
+        assert!(
+            took < std::time::Duration::from_millis(1_500),
+            "the probe loop came back after {took:?} and {passes} passes, its deadline 500 ms: \
+             the drain did not read it ({applied} snapshots applied of {sent} sent)"
+        );
+        assert!(
+            applied > 1 && sent > applied,
+            "the stream was still running when the loop came back: {applied} applied of {sent} sent"
+        );
+    }
+}
+
 /// E10k.1 --- the time from a key's arrival at the GPU to the first
 /// frame painted with its character, through the production `App`
 /// dispatch against a real daemon, at the end of the buffer's last line.
@@ -3691,45 +3943,7 @@ fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
         .unwrap_or_default();
     state.set_frontend_id(client.frontend_id());
     state.set_panel_wire(client.session_protocol_version());
-    let target = state.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("pmacs-gpu keypaint target"),
-        size: wgpu::Extent3d {
-            width: state.config.width,
-            height: state.config.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: state.config.format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut session = KeypaintSession {
-        app: App {
-            mode: Mode::Attach {
-                socket: socket.to_path_buf(),
-            },
-            proxy: None,
-            #[cfg(test)]
-            test_force_non_linux: false,
-            state: Some(state),
-            pending_events: Vec::new(),
-            attach_client: Some(client),
-            modifiers: winit::keyboard::ModifiersState::empty(),
-            geometry: geometry::WindowGeometry::default(),
-            geometry_path: None,
-            geometry_dirty_since: None,
-            platform: Platform::current(),
-            exit_code: 0,
-            reconnect: None,
-            exit_requested: false,
-        },
-        rx,
-        view,
-        disconnect: None,
-    };
+    let mut session = KeypaintSession::new(state, Some(client), socket, rx);
     for event in initial {
         session.app.dispatch_app_event(AppEvent::Attach(event));
     }
@@ -3892,7 +4106,6 @@ fn run_keypaint_probe(socket: &Path, report: &Path, text: &str) -> i32 {
     if let Some(reason) = &failure {
         let _ = writeln!(out, "failure={reason}");
     }
-    drop(target);
     if let Err(error) = std::fs::write(report, out) {
         eprintln!("pmacs-gpu probe: write report failed: {error}");
         return 5;
@@ -5114,6 +5327,10 @@ struct State {
     /// `BufferSnapshot` arrives; used as the routing key for
     /// `StyleSpans` updates (drop those for other buffers).
     current_buffer_id: Option<BufferId>,
+    /// `BufferSnapshot`s applied since the session began (E10t): the
+    /// popup probe's `count:` step reports it, so a row can tell a window
+    /// that settled from one still being sent its buffers.
+    snapshots_applied: u64,
     /// Sorted-by-`range.start` styling spans for `current_buffer_id`.
     /// Replaced wholesale on `StyleSpans { full: true, .. }`; merged
     /// per the M11.4 dirty-segment rule on `full: false` (segments'
@@ -12180,6 +12397,7 @@ impl State {
             loro_text_delta_batches: None,
             loro_text_subscription: None,
             current_buffer_id: None,
+            snapshots_applied: 0,
             current_spans: Vec::new(),
             current_decorations: Vec::new(),
             current_adornments: Vec::new(),
@@ -12909,6 +13127,7 @@ impl State {
                 self.loro_text_delta_batches = Some(text_delta_batches);
                 self.loro_text_subscription = Some(text_subscription);
                 self.current_buffer_id = Some(buffer_id);
+                self.snapshots_applied += 1;
                 // New buffer ⇒ drop any prior styling/decorations;
                 // the next StyleSpans / Decorations frame for this
                 // buffer is authoritative.
