@@ -1820,6 +1820,22 @@ fn press_probe_key(app: &mut App, key: &str) {
     }
 }
 
+/// E10y.2 --- how long the popup probe's `face:<name>` step waits for
+/// the window's face table to hold `name`. The theme a daemon holds
+/// reaches a fresh window with its first document frame, so the wait
+/// that is ever needed is the rest of one frame; five seconds is the
+/// `band:` step's bound, and a face that has not come by then is
+/// reported as that step's timeout, the script going on.
+const PROBE_FACE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the window's face table holds `name`: the `face:` step's
+/// condition.
+fn probe_holds_face(app: &App, name: &str) -> bool {
+    app.state
+        .as_ref()
+        .is_some_and(|state| state.faces.contains_key(name))
+}
+
 /// E10y --- the theme the window holds, under `label`: how many
 /// `ThemeFacts` it has applied, how long before this report the last one
 /// was (`none` when there was none), the names in its face table, sorted,
@@ -1949,7 +1965,13 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// `click` presses and releases the left button over the popup;
 /// `band:<prefix>` waits up to five seconds for the status band to begin
 /// with `prefix` (a switch's or a kill's message lands a frame or more
-/// after its key, later under load); `report:<label>` writes the theme
+/// after its key, later under load); `face:<name>` waits up to
+/// [`PROBE_FACE_WAIT`] for the window's face table to hold `name`, which
+/// a row reading a themed face puts before its `report:` (E10y: the
+/// daemon writes a frame's `ThemeFacts` after its `Popup`, and `ask:`
+/// stops at the popup, so a popup in the window's first document frame
+/// is otherwise reported before the theme that frame carries is
+/// applied); `report:<label>` writes the theme
 /// the window holds and the popup's facts under `label`; `count:<label>`
 /// writes the snapshots applied so far, the buffer shown, the band's name
 /// for it and the time since attach (E10t); `frame:<label>` writes the composited frame,
@@ -2062,6 +2084,10 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                             .is_some_and(|m| m.starts_with(arg))
                     })
                 })
+            }
+            "face" => {
+                let until = std::time::Instant::now() + PROBE_FACE_WAIT;
+                pump_probe_events(&mut app, &rx, until, |app| probe_holds_face(app, arg))
             }
             "wheel" | "click" => {
                 let centre = app.state.as_mut().and_then(|s| {
@@ -3909,6 +3935,106 @@ mod keypaint_limit_tests {
             applied > 1 && sent > applied,
             "the stream was still running when the loop came back: {applied} applied of {sent} sent"
         );
+    }
+
+    /// E10y.2 (#513) --- a popup in a window's first document frame, as
+    /// the probe reads it. The daemon writes a frame's `Popup` before its
+    /// `ThemeFacts`, and the pump stops at the first event its condition
+    /// holds after. So the wait `ask:` makes, for a paintable popup, ends
+    /// with the frame's theme still unread: the face table is empty and
+    /// the popup's text is the frontend's default, which is what the
+    /// popup face row read on CI. The wait `face:` makes then ends with
+    /// the theme applied and the popup's text the theme's. A face no
+    /// message brings ends that wait at its limit, unheld.
+    #[test]
+    fn a_popup_ahead_of_its_frames_theme_is_read_themed_after_the_face_wait() {
+        let Some(mut state) = State::new_headless(640, 480, "") else {
+            assert!(
+                std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
+                "PMACS_REQUIRE_GPU is set but there is no wgpu adapter"
+            );
+            return;
+        };
+        state.set_panel_wire(POPUP_MIN_VERSION);
+        let buffer_id = BufferId::from_raw(7);
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, "fn main() {}\n")
+            .expect("insert snapshot text");
+        let (tx, rx) = std::sync::mpsc::channel::<AttachEvent>();
+        let frame = [
+            InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+            },
+            InstanceMessage::Popup(PopupPayload::Present(PopupFrame {
+                buffer_id,
+                anchor_byte: 0,
+                kind: PopupKind::Hover,
+                lines: vec!["hovered".to_owned()],
+                active_range: None,
+                omitted_lines: 0,
+            })),
+            InstanceMessage::ThemeFacts {
+                faces: vec![pmacs_protocol::ThemeFace {
+                    name: "ui.popup".to_owned(),
+                    style: CellStyle {
+                        fg: CellColor::Rgb(255, 255, 255),
+                        bg: CellColor::Rgb(200, 0, 0),
+                        ..CellStyle::default()
+                    },
+                }],
+            },
+        ];
+        for message in frame {
+            tx.send(AttachEvent::Message(Box::new(message)))
+                .expect("queue the frame");
+        }
+        let mut session =
+            KeypaintSession::new(state, None, Path::new("/nonexistent-popup-socket"), rx);
+        let limit = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        let open = pump_probe_events(&mut session.app, &session.rx, limit(), |app| {
+            app.state
+                .as_ref()
+                .is_some_and(State::popup_open_for_current_buffer)
+        });
+        assert_eq!(open, Ok(true), "the popup is open");
+        assert_eq!(
+            session.state().theme_facts_applied,
+            0,
+            "the wait for the popup ends ahead of the theme its frame carries"
+        );
+        assert!(!probe_holds_face(&session.app, "ui.popup"));
+        assert_eq!(
+            session.state().popup_colors()[0],
+            POPUP_TEXT_DEFAULT,
+            "read here, the popup is the frontend's default"
+        );
+
+        let held = pump_probe_events(&mut session.app, &session.rx, limit(), |app| {
+            probe_holds_face(app, "ui.popup")
+        });
+        assert_eq!(held, Ok(true), "the face comes with the rest of the frame");
+        assert_eq!(session.state().theme_facts_applied, 1);
+        assert_eq!(
+            session.state().popup_colors()[0],
+            Color::rgb(255, 255, 255),
+            "read after the wait, the popup is the theme's"
+        );
+
+        let began = std::time::Instant::now();
+        let short = began + std::time::Duration::from_millis(300);
+        let never = pump_probe_events(&mut session.app, &session.rx, short, |app| {
+            probe_holds_face(app, "ui.never-sent")
+        });
+        assert_eq!(never, Ok(false), "a face no message brings is not held");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(3),
+            "and its wait ends at its limit: {:?}",
+            began.elapsed()
+        );
+        drop(tx);
     }
 }
 
