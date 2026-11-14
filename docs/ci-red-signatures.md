@@ -17800,6 +17800,338 @@ Tally (main-fuzz-bf4b098): 2 = 2 + 0.
 
 So, at E10t's close: PR #504 merged as `bf4b098`, and #326 closed with it. `main` is red at `bf4b098` on one macOS leg, on #513's row in both attempts, its first and second occurrences, on code that read the row `ok` on this leg as the PR's merge. `main` is green at `868e9ba`, `49a8b26` and `8e415a7`, each in the registry-push shape. #511 stands at one CI occurrence and #513 at two. No other row's count moves here.
 
+### E10y's checkpoint: PR #515 green at `501b6a1`; five dispatches, #513's row `ok` on all ten of their macOS legs; #514 filed, #306 at four, #509 at two
+
+Recorded 2026-11-14 at E10y's checkpoint. Every run was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Every run id below, and the id of each failing job, was searched for in this file before it was written, and none was in it. `main`'s own runs at `1e90534`, the commit that records E10t's close, were not in this file and are recorded here. The five `workflow_dispatch` runs are the owner's, taken for E10y.1 (d) to measure #513 and not to make a run green; none was rerun. A dispatch of `ci.yml` runs what a push runs, on the ref's commit itself and not on a merge, and starts no `Grammar fuzz`.
+
+#### `main` at `1e90534`, E10t's close: green
+
+`CI` 43516521140 at `1e90534`, attempt 1 of 1, `push`, created 2026-11-13T22:06:39Z and completed 22:09:19Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-1e90534): 15 = 6 + 9.
+
+Tally (main-ci-1e90534-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 132199738512 | success |
+| Commit attribution (D9) | 132199738648 | success |
+| Format | 132199738675 | success |
+| Changed paths | 132199738870 | success |
+| Lint (luajit) | 132199738925 | success |
+| Docs consistency | 132199837972 | success |
+| M4 Perf Gates | 132199840270 | skipped |
+| M6 Perf Gates | 132199840324 | skipped |
+| Perf budgets (debug) | 132199840461 | skipped |
+| Test (matrix) | 132199840468 | skipped |
+| GPU Render (headless) | 132199840670 | skipped |
+| Test (crdt) | 132199841037 | skipped |
+| M10 Perf Gates (crdt) | 132199841380 | skipped |
+| M5 Perf Gates | 132199841601 | skipped |
+| M1 Acceptance Gates | 132199841634 | skipped |
+
+Tally (main-ci-1e90534-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-1e90534-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43516521164 at `1e90534`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 132199737683 and `Grammar fuzz (asan-strict)` 132199738262.
+
+Tally (main-fuzz-1e90534): 2 = 2 + 0.
+
+#### `CI` 43581099753, a dispatch of `e10y/popup-theme-fresh-window` at `06ee354`, the branch's first dispatch: one macOS lua54 leg red on #514, its first occurrence
+
+`CI` 43581099753 at `06ee354`, attempt 1 of 1, `workflow_dispatch` of `e10y/popup-theme-fresh-window`, created 2026-11-14T09:33:17Z and completed 10:22:16Z (the API's `updated_at`): `failure`.
+
+Tally (dispatch-e10y-06ee354-1): 19 = 17 + 1 + 1.
+
+Tally (dispatch-e10y-06ee354-1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 132405796780 | success |
+| Commit attribution (D9) | 132405796955 | success |
+| Lint (lua54) | 132405797002 | success |
+| Lint (luajit) | 132405797003 | success |
+| Changed paths | 132405797008 | success |
+| M4 Perf Gates | 132405839601 | success |
+| M1 Acceptance Gates | 132405839602 | success |
+| GPU Render (headless) | 132405839623 | success |
+| Test (crdt) | 132405839639 | success |
+| M6 Perf Gates | 132405839659 | success |
+| M10 Perf Gates (crdt) | 132405839668 | success |
+| Test (macos-latest / luajit) | 132405839674 | success |
+| M5 Perf Gates | 132405839675 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132405839682 | success |
+| Test (macos-latest / lua54) | 132405839707 | failure |
+| Test (ubuntu-latest / lua54) | 132405839717 | success |
+| Test (ubuntu-latest / luajit) | 132405839750 | success |
+| Perf budgets (debug) | 132405839846 | success |
+| Docs consistency | 132405841076 | skipped |
+
+Tally (dispatch-e10y-06ee354-1-success): 17 rows of the table above with `result` = `success`.
+Tally (dispatch-e10y-06ee354-1-failure): 1 row of the table above with `result` = `failure`.
+Tally (dispatch-e10y-06ee354-1-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, a dispatch reading as a change to code.
+
+Tally (dispatch-e10y-06ee354-1-legs): 7 items in the list below.
+
+- `GPU Render (headless)` 132405839623: `success`, 1 pair, 398 / 0 / 0, on `20261103.629` `ubuntu-24.04`.
+- `Test (crdt)` 132405839639: `success`, 232 `running` lines and 232 results, 5,651 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 15.41 s.
+- `Test (macos-latest / luajit)` 132405839674: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 12.91 s.
+- `Test (ubuntu-latest / luajit, no crdt)` 132405839682: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `20261103.629` `ubuntu-24.04`.
+- `Test (macos-latest / lua54)` 132405839707: `failure`, 232 `running` lines and 232 results, 5,590 / 1 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 11.44 s. The last two test steps did not run. **Its red is #514's first occurrence**, below.
+- `Test (ubuntu-latest / lua54)` 132405839717: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.62 s.
+- `Test (ubuntu-latest / luajit)` 132405839750: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.73 s.
+
+**The red, #514's first occurrence** (filed by the owner at 2026-11-14T11:08:25Z): `Test (macos-latest / lua54)` 132405839707, `attach::tests::a_write_that_blocks_holds_no_key_and_the_kick_wakes_it` in `unittests src/lib.rs`, `panicked at src/attach.rs:4799:9:` with the row's elapsed time as its message, `31.752479375s`, against `WIND_DOWN_DEADLINE`, 5 s; the binary read `FAILED. 2385 passed; 1 failed; 14 ignored` in 57.21 s. No section of this file carried that selector. The branch at `06ee354` changes `pmacs-gpu/src/main.rs` and `tests/e8_gpu_popup_acceptance.rs` alone, so the library the row is compiled into is `main`'s. The row read `ok` on this run's `Test (macos-latest / luajit)` and on every other test leg of the five dispatches and of PR #515's run. Where the 31.75 s went was not read, and #514 says so. Not rerun.
+
+#513's row, `e8_3_the_gpu_popup_paints_the_ui_popup_face`, read `ok` on both macOS legs and on `Test (crdt)`, and returned on the two Ubuntu matrix legs, which have no adapter.
+
+#### `CI` 43582544642, a dispatch of `main` at `1e90534`, `main`'s first dispatch: green
+
+`CI` 43582544642 at `1e90534`, attempt 1 of 1, `workflow_dispatch` of `main`, created 2026-11-14T09:51:52Z and completed 10:39:54Z (the API's `updated_at`): `success`.
+
+Tally (dispatch-main-1e90534-1): 19 = 18 + 1.
+
+Tally (dispatch-main-1e90534-1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 132410155466 | success |
+| Commit attribution (D9) | 132410155694 | success |
+| Lint (lua54) | 132410155724 | success |
+| Format | 132410155755 | success |
+| Lint (luajit) | 132410155787 | success |
+| M1 Acceptance Gates | 132410191836 | success |
+| M6 Perf Gates | 132410191843 | success |
+| M4 Perf Gates | 132410191855 | success |
+| Test (crdt) | 132410191876 | success |
+| M5 Perf Gates | 132410191880 | success |
+| Perf budgets (debug) | 132410191885 | success |
+| M10 Perf Gates (crdt) | 132410191895 | success |
+| Test (macos-latest / lua54) | 132410191930 | success |
+| Test (ubuntu-latest / luajit) | 132410191939 | success |
+| GPU Render (headless) | 132410191940 | success |
+| Test (ubuntu-latest / lua54) | 132410191951 | success |
+| Test (macos-latest / luajit) | 132410191969 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132410192001 | success |
+| Docs consistency | 132410193259 | skipped |
+
+Tally (dispatch-main-1e90534-1-success): 18 rows of the table above with `result` = `success`.
+Tally (dispatch-main-1e90534-1-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, a dispatch reading as a change to code.
+
+Tally (dispatch-main-1e90534-1-legs): 7 items in the list below.
+
+- `Test (crdt)` 132410191876: `success`, 232 `running` lines and 232 results, 5,651 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 14.06 s.
+- `Test (macos-latest / lua54)` 132410191930: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 12.16 s.
+- `Test (ubuntu-latest / luajit)` 132410191939: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.62 s.
+- `GPU Render (headless)` 132410191940: `success`, 1 pair, 398 / 0 / 0, on `20261103.629` `ubuntu-24.04`.
+- `Test (ubuntu-latest / lua54)` 132410191951: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.65 s.
+- `Test (macos-latest / luajit)` 132410191969: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 12.53 s.
+- `Test (ubuntu-latest / luajit, no crdt)` 132410192001: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `20261103.629` `ubuntu-24.04`.
+
+#513's row, `e8_3_the_gpu_popup_paints_the_ui_popup_face`, read `ok` on both macOS legs and on `Test (crdt)`, and returned on the two Ubuntu matrix legs, which have no adapter.
+
+#### `CI` 43588651908, a dispatch of `e10y/popup-theme-fresh-window` at `06ee354`, the branch's second dispatch: green
+
+`CI` 43588651908 at `06ee354`, attempt 1 of 1, `workflow_dispatch` of `e10y/popup-theme-fresh-window`, created 2026-11-14T11:09:13Z and completed 11:59:19Z (the API's `updated_at`): `success`.
+
+Tally (dispatch-e10y-06ee354-2): 19 = 18 + 1.
+
+Tally (dispatch-e10y-06ee354-2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 132428484437 | success |
+| Format | 132428484617 | success |
+| Commit attribution (D9) | 132428484659 | success |
+| Changed paths | 132428484700 | success |
+| Lint (lua54) | 132428484703 | success |
+| Test (crdt) | 132428545011 | success |
+| M4 Perf Gates | 132428545013 | success |
+| M10 Perf Gates (crdt) | 132428545074 | success |
+| GPU Render (headless) | 132428545077 | success |
+| M5 Perf Gates | 132428545096 | success |
+| Test (ubuntu-latest / luajit) | 132428545100 | success |
+| M1 Acceptance Gates | 132428545106 | success |
+| Test (macos-latest / luajit) | 132428545120 | success |
+| Test (macos-latest / lua54) | 132428545143 | success |
+| Test (ubuntu-latest / lua54) | 132428545153 | success |
+| Perf budgets (debug) | 132428545158 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132428545162 | success |
+| M6 Perf Gates | 132428545192 | success |
+| Docs consistency | 132428546701 | skipped |
+
+Tally (dispatch-e10y-06ee354-2-success): 18 rows of the table above with `result` = `success`.
+Tally (dispatch-e10y-06ee354-2-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, a dispatch reading as a change to code.
+
+Tally (dispatch-e10y-06ee354-2-legs): 7 items in the list below.
+
+- `Test (crdt)` 132428545011: `success`, 232 `running` lines and 232 results, 5,651 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 15.47 s.
+- `GPU Render (headless)` 132428545077: `success`, 1 pair, 398 / 0 / 0, on `20261103.629` `ubuntu-24.04`.
+- `Test (ubuntu-latest / luajit)` 132428545100: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.85 s.
+- `Test (macos-latest / luajit)` 132428545120: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 12.29 s.
+- `Test (macos-latest / lua54)` 132428545143: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 11.55 s.
+- `Test (ubuntu-latest / lua54)` 132428545153: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.86 s.
+- `Test (ubuntu-latest / luajit, no crdt)` 132428545162: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `20261103.629` `ubuntu-24.04`.
+
+#513's row, `e8_3_the_gpu_popup_paints_the_ui_popup_face`, read `ok` on both macOS legs and on `Test (crdt)`, and returned on the two Ubuntu matrix legs, which have no adapter.
+
+#### `CI` 43588659472, a dispatch of `main` at `1e90534`, `main`'s second dispatch: one macOS lua54 leg red on #306, its fourth occurrence
+
+`CI` 43588659472 at `1e90534`, attempt 1 of 1, `workflow_dispatch` of `main`, created 2026-11-14T11:09:19Z and completed 11:58:44Z (the API's `updated_at`): `failure`.
+
+Tally (dispatch-main-1e90534-2): 19 = 17 + 1 + 1.
+
+Tally (dispatch-main-1e90534-2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 132428507174 | success |
+| Lint (lua54) | 132428507422 | success |
+| Format | 132428507430 | success |
+| Lint (luajit) | 132428507484 | success |
+| Changed paths | 132428507628 | success |
+| GPU Render (headless) | 132428564644 | success |
+| M4 Perf Gates | 132428564648 | success |
+| M1 Acceptance Gates | 132428564659 | success |
+| Test (crdt) | 132428564671 | success |
+| M5 Perf Gates | 132428564683 | success |
+| M6 Perf Gates | 132428564736 | success |
+| M10 Perf Gates (crdt) | 132428564742 | success |
+| Test (macos-latest / luajit) | 132428564752 | success |
+| Perf budgets (debug) | 132428564758 | success |
+| Test (macos-latest / lua54) | 132428564764 | failure |
+| Test (ubuntu-latest / luajit) | 132428564775 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132428564786 | success |
+| Test (ubuntu-latest / lua54) | 132428564894 | success |
+| Docs consistency | 132428565768 | skipped |
+
+Tally (dispatch-main-1e90534-2-success): 17 rows of the table above with `result` = `success`.
+Tally (dispatch-main-1e90534-2-failure): 1 row of the table above with `result` = `failure`.
+Tally (dispatch-main-1e90534-2-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, a dispatch reading as a change to code.
+
+Tally (dispatch-main-1e90534-2-legs): 7 items in the list below.
+
+- `GPU Render (headless)` 132428564644: `success`, 1 pair, 398 / 0 / 0, on `20261103.629` `ubuntu-24.04`.
+- `Test (crdt)` 132428564671: `success`, 232 `running` lines and 232 results, 5,651 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 14.41 s.
+- `Test (macos-latest / luajit)` 132428564752: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 12.57 s.
+- `Test (macos-latest / lua54)` 132428564764: `failure`, 232 `running` lines and 232 results, 5,590 / 1 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 11.66 s. The last two test steps did not run. **Its red is #306's fourth occurrence**, below.
+- `Test (ubuntu-latest / luajit)` 132428564775: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.66 s.
+- `Test (ubuntu-latest / luajit, no crdt)` 132428564786: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `20261103.629` `ubuntu-24.04`.
+- `Test (ubuntu-latest / lua54)` 132428564894: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.75 s.
+
+**The red, #306's fourth occurrence** (commented by the owner, issuecomment-6877401178): `Test (macos-latest / lua54)` 132428564764, `compile_mode_acceptance::acc05_kill_reaps_backgrounded_descendant`, `panicked at tests/compile_mode_acceptance.rs:442:5:`, `kill must produce a signaled exit marker; buffer:` with the buffer holding the command, its `Directory:` line and `/bin/sh: line 1: 20284 Terminated: 15          sleep 30`, no `[compile killed by` marker, the buffer ending `[compile exited with code 0]`, and `test result: FAILED. 74 passed; 1 failed; 0 ignored` (11.33 s): all three of #306's fragments, its second occurrence on `main`'s code and its first on a dispatch. Not rerun.
+
+#513's row, `e8_3_the_gpu_popup_paints_the_ui_popup_face`, read `ok` on both macOS legs and on `Test (crdt)`, and returned on the two Ubuntu matrix legs, which have no adapter.
+
+#### `CI` 43596005888, a dispatch of `e10y/popup-theme-fresh-window` at `06ee354`, the branch's third dispatch: one macOS lua54 leg red on #509, its second occurrence
+
+`CI` 43596005888 at `06ee354`, attempt 1 of 1, `workflow_dispatch` of `e10y/popup-theme-fresh-window`, created 2026-11-14T12:40:52Z and completed 13:31:07Z (the API's `updated_at`): `failure`.
+
+Tally (dispatch-e10y-06ee354-3): 19 = 17 + 1 + 1.
+
+Tally (dispatch-e10y-06ee354-3-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 132450522790 | success |
+| Commit attribution (D9) | 132450522970 | success |
+| Lint (luajit) | 132450522992 | success |
+| Format | 132450523017 | success |
+| Lint (lua54) | 132450523149 | success |
+| Test (crdt) | 132450557910 | success |
+| M6 Perf Gates | 132450557921 | success |
+| GPU Render (headless) | 132450557926 | success |
+| Perf budgets (debug) | 132450557943 | success |
+| M4 Perf Gates | 132450557948 | success |
+| M1 Acceptance Gates | 132450557958 | success |
+| M5 Perf Gates | 132450557997 | success |
+| Test (ubuntu-latest / luajit) | 132450558011 | success |
+| Test (macos-latest / lua54) | 132450558014 | failure |
+| Test (ubuntu-latest / lua54) | 132450558022 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132450558117 | success |
+| M10 Perf Gates (crdt) | 132450558151 | success |
+| Test (macos-latest / luajit) | 132450558284 | success |
+| Docs consistency | 132450559211 | skipped |
+
+Tally (dispatch-e10y-06ee354-3-success): 17 rows of the table above with `result` = `success`.
+Tally (dispatch-e10y-06ee354-3-failure): 1 row of the table above with `result` = `failure`.
+Tally (dispatch-e10y-06ee354-3-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Docs consistency` is skipped, a dispatch reading as a change to code.
+
+Tally (dispatch-e10y-06ee354-3-legs): 7 items in the list below.
+
+- `Test (crdt)` 132450557910: `success`, 232 `running` lines and 232 results, 5,651 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 15.25 s.
+- `GPU Render (headless)` 132450557926: `success`, 1 pair, 398 / 0 / 0, on `20261103.629` `ubuntu-24.04`.
+- `Test (ubuntu-latest / luajit)` 132450558011: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.86 s.
+- `Test (macos-latest / lua54)` 132450558014: `failure`, 232 `running` lines and 232 results, 5,590 / 1 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 11.95 s. The last two test steps did not run. **Its red is #509's second occurrence**, below.
+- `Test (ubuntu-latest / lua54)` 132450558022: `success`, 233 `running` lines and 233 results, 5,710 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `9 passed` in 0.65 s.
+- `Test (ubuntu-latest / luajit, no crdt)` 132450558117: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `20261103.629` `ubuntu-24.04`.
+- `Test (macos-latest / luajit)` 132450558284: `success`, 234 `running` lines and 234 results, 5,651 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `9 passed` in 12.39 s.
+
+**The red, #509's second occurrence** (commented, issuecomment-6878204789): `Test (macos-latest / lua54)` 132450558014, `tests/e10r_attach_routes.rs`'s `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, `panicked at tests/e10r_attach_routes.rs:3392:5:`, `a slow link that moved: 10256 then 0 bytes`, both of #509's fragments and the first occurrence's own count; the suite read `FAILED. 88 passed; 1 failed; 0 ignored` in 147.25 s. It is the row's first red on the lua54 leg; the first occurrence was on luajit. The row read `ok` on this run's other five test legs. Not rerun.
+
+#513's row, `e8_3_the_gpu_popup_paints_the_ui_popup_face`, read `ok` on both macOS legs and on `Test (crdt)`, and returned on the two Ubuntu matrix legs, which have no adapter.
+
+#### PR #515 at `501b6a1`: green at the first attempt
+
+PR #515 is `e10y/popup-theme-fresh-window`, two commits on `1e90534`: `06ee354`, the popup probe's report naming the theme its window holds, and `501b6a1`, the probe's `face:<name>` wait and the popup face row taking it. `CI` 43597118116 at `501b6a1` (the merge `95244e6` into `1e90534`), attempt 1 of 1, `pull_request`, created 2026-11-14T12:54:49Z and completed 13:45:00Z (the API's `updated_at`): `success`.
+
+Tally (pr-515-ci-501b6a1): 19 = 18 + 1.
+
+Tally (pr-515-ci-501b6a1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 132453891451 | success |
+| Changed paths | 132453891517 | success |
+| Lint (lua54) | 132453891548 | success |
+| Lint (luajit) | 132453891555 | success |
+| Commit attribution (D9) | 132453891567 | success |
+| M5 Perf Gates | 132453958087 | success |
+| M10 Perf Gates (crdt) | 132453958111 | success |
+| M1 Acceptance Gates | 132453958128 | success |
+| Test (crdt) | 132453958129 | success |
+| Perf budgets (debug) | 132453958133 | success |
+| M6 Perf Gates | 132453958151 | success |
+| Test (macos-latest / luajit) | 132453958158 | success |
+| M4 Perf Gates | 132453958161 | success |
+| Test (ubuntu-latest / lua54) | 132453958163 | success |
+| Test (ubuntu-latest / luajit) | 132453958169 | success |
+| GPU Render (headless) | 132453958175 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132453958180 | success |
+| Test (macos-latest / lua54) | 132453958184 | success |
+| Docs consistency | 132453959382 | skipped |
+
+Tally (pr-515-ci-501b6a1-success): 18 rows of the table above with `result` = `success`.
+Tally (pr-515-ci-501b6a1-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-515-ci-501b6a1-legs): 7 items in the list below.
+
+- `Test (crdt)` 132453958129: `success`, 232 `running` lines and 232 results, 5,652 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `10 passed` in 15.21 s.
+- `Test (macos-latest / luajit)` 132453958158: `success`, 234 `running` lines and 234 results, 5,652 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `10 passed` in 12.15 s.
+- `Test (ubuntu-latest / lua54)` 132453958163: `success`, 233 `running` lines and 233 results, 5,711 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `10 passed` in 0.77 s.
+- `Test (ubuntu-latest / luajit)` 132453958169: `success`, 233 `running` lines and 233 results, 5,711 / 0 / 88, on `20261103.629` `ubuntu-24.04`. The popup suite read `10 passed` in 0.87 s.
+- `GPU Render (headless)` 132453958175: `success`, 1 pair, 399 / 0 / 0, on `20261103.629` `ubuntu-24.04`.
+- `Test (ubuntu-latest / luajit, no crdt)` 132453958180: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `20261103.629` `ubuntu-24.04`.
+- `Test (macos-latest / lua54)` 132453958184: `success`, 234 `running` lines and 234 results, 5,652 / 0 / 80, on `20261028.624` `macos-26-arm64`. The popup suite read `10 passed` in 11.59 s.
+
+The popup suite is at ten rows, the guard `e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup` added: #513's row and the guard read `ok` on `Test (crdt)` and both macOS legs, and returned on the two Ubuntu matrix legs. `GPU Render (headless)` ran `pmacs-gpu`'s unit rows, `keypaint_limit_tests::a_popup_ahead_of_its_frames_theme_is_read_themed_after_the_face_wait` among them, `ok`. #306's, #509's and #514's rows read `ok` on every test leg that holds them.
+
+`Grammar fuzz` 43597118087 at `501b6a1`, attempt 1 of 1, `pull_request`: `success`, `Grammar fuzz` 132453891167 and `Grammar fuzz (asan-strict)` 132453891247.
+
+Tally (pr-515-fuzz-501b6a1): 2 = 2 + 0.
+
+So, at E10y's checkpoint: PR #515 is open and green at `501b6a1`, not merged. `main` is `1e90534`, green in the registry-push shape; its last code-bearing commit, `bf4b098`, stays red on #513 in both attempts of `CI` 43429626685. #513 stands at two CI occurrences. Its row read `ok` on all ten macOS legs of the five dispatches, six at `06ee354` and four at `1e90534`, which is non-reproduction and nothing more. What PR #515 shows of its mechanism is local, listed on the issue and not tallied (issuecomment-6878218410): the row's report was read between a frame's `Popup` and the `ThemeFacts` the daemon writes after it. #514 is filed at one occurrence, #306 moves to four and #509 to two, each on `Test (macos-latest / lua54)` of a dispatch. No other row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
