@@ -275,9 +275,31 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
         &[],
         "pmacs.theme.set { [\"ui.popup\"] = { fg = { 255, 255, 255 }, bg = { 200, 0, 0 } } }",
     );
-    let Some(themed) = run_popup_probe(&daemon, "ask:h report:themed", "themed.report") else {
+    // The daemon writes a frame's `ThemeFacts` after its `Popup`, and
+    // `ask:` stops at the popup. A hover answered inside the window's
+    // first document frame, the frame that carries the theme, was
+    // therefore read before the theme was applied (#513; E10y.1 measured
+    // it: no `ThemeFacts` applied at the report, one a second later). So
+    // the row waits for the face, up to the probe's five seconds, before
+    // it reads the pixel. A theme that never reaches the window still
+    // fails here, on the first assertion, naming the faces the window
+    // held.
+    let Some(themed) = run_popup_probe(
+        &daemon,
+        "ask:h face:ui.popup report:themed",
+        "themed.report",
+    ) else {
         return;
     };
+    assert_eq!(
+        fact(&themed, "themed.has_ui_popup"),
+        "true",
+        "the window never held the ui.popup face its daemon's theme sets: it held [{}] after {} \
+         ThemeFacts (the last one, in ms before the report: {}): {themed:?}",
+        fact(&themed, "themed.faces"),
+        fact(&themed, "themed.theme_facts"),
+        fact(&themed, "themed.theme_facts_last_ms_ago"),
+    );
     let px: Vec<u32> = fact(&themed, "themed.pixel")
         .split(',')
         .map(|n| n.parse().expect("pixel"))
@@ -299,6 +321,67 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
     assert!(
         px[0] < 150 && px[0].abs_diff(px[2]) < 40,
         "unset, the frontend's own dark default: {plain:?}"
+    );
+}
+
+/// E10y.2's guard: a theme set after the attach repaints the popup. The
+/// daemon starts with no `ui.popup` face, so the window's first frame
+/// brings none and the popup is the frontend's default; `C-c 9` then
+/// merges the face into the daemon's theme, and the popup, asked for
+/// again in case the key closed it, is painted in it. The wait for the
+/// face is the themed row's: a theme that did not reach the window after
+/// the attach fails here on `after.has_ui_popup`.
+#[test]
+fn e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup() {
+    let (daemon, _td) = daemon_on(
+        "fn main() {}\n",
+        "hover",
+        &[],
+        "pmacs.command.define {\n\
+           name = 'test.popup-red',\n\
+           description = 'set the popup face, after the attach',\n\
+           fn = function()\n\
+             pmacs.theme.merge { [\"ui.popup\"] = { fg = { 255, 255, 255 }, bg = { 200, 0, 0 } } }\n\
+           end,\n\
+         }\n\
+         pmacs.keymap.bind { scope = 'global', sequence = 'C-c 9', command = 'test.popup-red' }",
+    );
+    let Some(facts) = run_popup_probe(
+        &daemon,
+        "ask:h report:before key:C-c key:9 face:ui.popup ask:h report:after",
+        "late-theme.report",
+    ) else {
+        return;
+    };
+    let pixel = |label: &str| -> Vec<u32> {
+        fact(&facts, &format!("{label}.pixel"))
+            .split(',')
+            .map(|n| n.parse().expect("pixel"))
+            .collect()
+    };
+    assert_eq!(
+        fact(&facts, "before.has_ui_popup"),
+        "false",
+        "the setup: no theme sets the face before the key: {facts:?}"
+    );
+    let px = pixel("before");
+    assert!(
+        px[0] < 150 && px[0].abs_diff(px[2]) < 40,
+        "before the key, the frontend's own dark default: {facts:?}"
+    );
+    assert_eq!(
+        fact(&facts, "after.has_ui_popup"),
+        "true",
+        "the theme set after the attach never reached the window: it held [{}] after {} \
+         ThemeFacts: {facts:?}",
+        fact(&facts, "after.faces"),
+        fact(&facts, "after.theme_facts"),
+    );
+    assert_eq!(fact(&facts, "after.open"), "true", "{facts:?}");
+    let px = pixel("after");
+    assert!(
+        px[0] > 150 && px[1] < 60 && px[2] < 60,
+        "the popup is repainted in the face set after the attach: {facts:?}"
     );
 }
 
