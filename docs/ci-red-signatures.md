@@ -18132,6 +18132,53 @@ Tally (pr-515-fuzz-501b6a1): 2 = 2 + 0.
 
 So, at E10y's checkpoint: PR #515 is open and green at `501b6a1`, not merged. `main` is `1e90534`, green in the registry-push shape; its last code-bearing commit, `bf4b098`, stays red on #513 in both attempts of `CI` 43429626685. #513 stands at two CI occurrences. Its row read `ok` on all ten macOS legs of the five dispatches, six at `06ee354` and four at `1e90534`, which is non-reproduction and nothing more. What PR #515 shows of its mechanism is local, listed on the issue and not tallied (issuecomment-6878218410): the row's report was read between a frame's `Popup` and the `ThemeFacts` the daemon writes after it. #514 is filed at one occurrence, #306 moves to four and #509 to two, each on `Test (macos-latest / lua54)` of a dispatch. No other row's count moves here.
 
+### E10y review 1: `main` green at `a58950c`; no CI occurrence; two local gates at `501b6a1`, the first red on #304, #432 and #516
+
+Recorded 2026-11-14 at E10y's review round 1. Both runs below were read from the jobs endpoint by conclusion. Each run id was searched for in this file before it was written, and neither was in it. The review names no other CI run this file lacks: PR #515's runs at `501b6a1` and the owner's five dispatches are in the section above, and were read again against the API, by job, and found as recorded; the logs of six of their jobs (132405839707, 132450558284, 132453958129, 132453958158, 132453958175 and 132453958184) were fetched again and are byte for byte the ones that section was written from. No run was dispatched or rerun for the review.
+
+#### `main` at `a58950c`, E10y's checkpoint record: green
+
+`CI` 43601987903 at `a58950c`, attempt 1 of 1, `push`, created 2026-11-14T13:53:06Z and completed 13:55:13Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-a58950c): 15 = 6 + 9.
+
+Tally (main-ci-a58950c-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 132468506682 | success |
+| Changed paths | 132468506950 | success |
+| Commit attribution (D9) | 132468507007 | success |
+| Lint (lua54) | 132468507029 | success |
+| Lint (luajit) | 132468507192 | success |
+| Docs consistency | 132468549439 | success |
+| Perf budgets (debug) | 132468550346 | skipped |
+| Test (crdt) | 132468550399 | skipped |
+| M1 Acceptance Gates | 132468550500 | skipped |
+| M4 Perf Gates | 132468550504 | skipped |
+| Test (matrix) | 132468550624 | skipped |
+| M10 Perf Gates (crdt) | 132468550754 | skipped |
+| M6 Perf Gates | 132468551067 | skipped |
+| GPU Render (headless) | 132468551098 | skipped |
+| M5 Perf Gates | 132468551248 | skipped |
+
+Tally (main-ci-a58950c-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-a58950c-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43601987920 at `a58950c`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 132468507402 and `Grammar fuzz (asan-strict)` 132468507098.
+
+Tally (main-fuzz-a58950c): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10y-review-1-local): 3 items in the list below.
+
+- `20261114T142425Z-367978` at `501b6a1`, `scripts/gate --protocol`, at `nice -n 19` and six build jobs, other projects' work beside it (the runbook's sampler: 56 readings, 1-minute load 22.3 on average and 48.8 at its highest): six of eight stages ok, no daemon survived. `06-sweep` 6,106 / 3 / 88 at 241 pairs: #304's two rows in `pmacs-gpu`'s unit tests, `tests::caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled` and `tests::overwide_status_runs_never_wrap_and_keep_the_suffix_pinned` (`397 passed; 2 failed`), and `pmacs-parse-unit`'s `r1_p10_the_watch_s_limit_is_the_worker_s_start_plus_the_allowance_under_any_parent` (`2 passed; 1 failed`: the limit less the allowance 6656000 against a start of 5586944, 20,480 bytes past the row's 1 MiB slack), which had no issue and is filed as #516; no CI leg runs that row (#469). `07-sweep-luajit` 5,427 / 2 / 72 at 241 pairs: #432's `e7i_a_process_unit_s_previous_parse_answers_after_its_discard` (`28 passed; 1 failed`, `the report did not reach the expected state in 30s`) and #304's `caret_inside_a_span…` again (`398 passed; 1 failed`); #516's row read `ok` there.
+- `20261114T151350Z-808860` at `501b6a1`, the same plan run again as D43 has it (49 readings, 11.9 on average and 24.4 at its highest): all eight stages ok, `06-sweep` 6,109 / 0 / 88 and `07-sweep-luajit` 5,429 / 0 / 72 at 241 pairs each, no daemon survived; the popup suite `10 passed` in each gate's `06-sweep` (9.71 s and 9.69 s).
+- #513's row under the review's own builds, each a named run and not an occurrence: with the dispatcher held as E10y.1 (c)'s plant holds it, red 20 of 20 on the suite file as `06ee354` has it and green 20 of 20 as `501b6a1` has it; at `868e9ba` with the same plant, red 20 of 20 held, and unheld 2 of 40 on one CPU and 1 of 40 on two, each failure reading no `ThemeFacts` at the report and one a second later.
+
+So, at E10y's review round 1: PR #515 is open at `501b6a1`, green on CI as the section above records, not merged. `main` is `a58950c`, green in the registry-push shape. No row's count moves here: the first local gate's reds are samples on #304 and #432, and #516 is filed with no CI occurrence, since its row runs on no leg.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
