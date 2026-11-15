@@ -18325,6 +18325,104 @@ Tally (e10y-fixes-1-local): 4 items in the list below.
 
 So, at E10y's fix round 1: PR #515 is open at `0389360`, green on CI at the first attempt at both of the round's heads, not merged. `main` is `8cba920`, green in the registry-push shape; its last code-bearing commit, `bf4b098`, stays red on #513 in both attempts of `CI` 43429626685. #513 stands at two CI occurrences; its row has read `ok` on the four macOS legs of the round's two runs, which is four more samples and nothing more. By the owner's ruling of 2026-11-14 the PR's closing of #513 rests on the laptop's showing, and `main`'s macOS luajit leg on the merge's push run is to be recorded as a sample, not as proof: the row without the wait read `ok` on 24 of the 26 macOS legs that ran it since `c0ad22f`. No row's count moves here: the first local gate's red is a sample on #304.
 
+### E10y fix round 2: PR #515 green at `5b64967`; `main` green at `f7b83d2`; #498's row red in two local gates at `0389360`, and by hand at the base as at the tip
+
+Recorded 2026-11-15 at E10y's fix round 2. Every run below was read from the jobs endpoint by conclusion, and every test leg named below through its own log, fetched with escape sequences allowed and stripped, each `running` line paired with its own result line. Each run id and each gate id below was searched for in this file before it was written, and none was in it. `main`'s runs at `f7b83d2`, the commit that records E10y's fix round 1, were owed by that record. E10y's review 2 made no registry commit and left them, with its own two gates, to a later record; none had landed on `main` when this one was written, so they are recorded here. No run was dispatched or rerun in the round or in the review. The image beside each leg is the `Image` and `Version` of its log's `Runner Image` group.
+
+#### `main` at `f7b83d2`, E10y fix round 1's record: green
+
+`CI` 43714897820 at `f7b83d2`, attempt 1 of 1, `push`, created 2026-11-15T12:38:41Z and completed 12:41:02Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-f7b83d2): 15 = 6 + 9.
+
+Tally (main-ci-f7b83d2-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 132814181085 | success |
+| Commit attribution (D9) | 132814181288 | success |
+| Lint (luajit) | 132814181327 | success |
+| Format | 132814181336 | success |
+| Lint (lua54) | 132814181338 | success |
+| Docs consistency | 132814236291 | success |
+| Test (crdt) | 132814237134 | skipped |
+| Test (matrix) | 132814237259 | skipped |
+| M4 Perf Gates | 132814237368 | skipped |
+| Perf budgets (debug) | 132814237412 | skipped |
+| GPU Render (headless) | 132814237462 | skipped |
+| M5 Perf Gates | 132814237568 | skipped |
+| M10 Perf Gates (crdt) | 132814237570 | skipped |
+| M1 Acceptance Gates | 132814237730 | skipped |
+| M6 Perf Gates | 132814237782 | skipped |
+
+Tally (main-ci-f7b83d2-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-f7b83d2-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43714897889 at `f7b83d2`, attempt 1 of 1, `push`: `success`, `Grammar fuzz` 132814181491 and `Grammar fuzz (asan-strict)` 132814181339.
+
+Tally (main-fuzz-f7b83d2): 2 = 2 + 0.
+
+#### PR #515 at `5b64967`, fix round 2's tip: green at the first attempt
+
+Fix round 2 puts two commits on `0389360`, each changing comment lines of `tests/e8_gpu_popup_acceptance.rs` alone, on E10y review 2's two Lows: `9dabd3b`, the witness's comment, which now says that the witness's theme reaches the window a frame behind the popup and that the row holds the probe's `face:` wait and not #513's order, a frame's `ThemeFacts` written after that frame's own `Popup`; and `5b64967`, the guard's comment, which now cites runs of the row as it stands. No committed row holds #513's order; the row that does is the review's probe P6, not committed, by the owner's ruling. `CI` 43742717497 at `5b64967` (the merge `2f4ca08` into `f7b83d2`), attempt 1 of 1, `pull_request`, created 2026-11-15T17:43:34Z and completed 18:34:22Z (the API's `updated_at`): `success`.
+
+Tally (pr-515-ci-5b64967): 19 = 18 + 1.
+
+Tally (pr-515-ci-5b64967-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 132899191644 | success |
+| Format | 132899191825 | success |
+| Commit attribution (D9) | 132899191910 | success |
+| Changed paths | 132899191946 | success |
+| Lint (lua54) | 132899191958 | success |
+| M4 Perf Gates | 132899241046 | success |
+| M1 Acceptance Gates | 132899241094 | success |
+| M5 Perf Gates | 132899241132 | success |
+| M6 Perf Gates | 132899241180 | success |
+| Test (crdt) | 132899241188 | success |
+| Perf budgets (debug) | 132899241190 | success |
+| GPU Render (headless) | 132899241194 | success |
+| Test (ubuntu-latest / luajit) | 132899241197 | success |
+| Test (ubuntu-latest / lua54) | 132899241212 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 132899241221 | success |
+| Test (macos-latest / lua54) | 132899241222 | success |
+| M10 Perf Gates (crdt) | 132899241231 | success |
+| Test (macos-latest / luajit) | 132899241244 | success |
+| Docs consistency | 132899242331 | skipped |
+
+Tally (pr-515-ci-5b64967-success): 18 rows of the table above with `result` = `success`.
+Tally (pr-515-ci-5b64967-skipped): 1 row of the table above with `result` = `skipped`.
+
+Tally (pr-515-ci-5b64967-legs): 7 items in the list below.
+
+- `Test (crdt)` 132899241188: `success`, 232 `running` lines and 232 results, 5,653 / 0 / 88, on `ubuntu-24.04` `20261111.370.1`. The popup suite's binary read `11 passed` in 15.73 s; the row's line reads `waited 0 ms for ui.popup after its popup (1 ThemeFacts applied, the last 1 ms before the report)`. `tests/e10t_gpu_window_settles.rs` read `30 passed` in 435.24 s.
+- `GPU Render (headless)` 132899241194: `success`, 1 pair, 399 / 0 / 0, on `ubuntu-24.04` `20261111.370.1`.
+- `Test (ubuntu-latest / luajit)` 132899241197: `success`, 233 `running` lines and 233 results, 5,712 / 0 / 88, on `ubuntu-24.04` `20261111.370.1`. The popup suite's binary read `11 passed` in 1.03 s, and printed no line. `tests/e10t_gpu_window_settles.rs` read `30 passed` in 50.96 s.
+- `Test (ubuntu-latest / lua54)` 132899241212: `success`, 233 `running` lines and 233 results, 5,712 / 0 / 88, on `ubuntu-24.04` `20261111.370.1`. The popup suite's binary read `11 passed` in 1.07 s, and printed no line. `tests/e10t_gpu_window_settles.rs` read `30 passed` in 50.94 s.
+- `Test (ubuntu-latest / luajit, no crdt)` 132899241221: `success`, 233 `running` lines and 233 results, 5,031 / 0 / 72, on `ubuntu-24.04` `20261111.370.1`.
+- `Test (macos-latest / lua54)` 132899241222: `success`, 234 `running` lines and 234 results, 5,653 / 0 / 80, on `macos-26-arm64` `20261102.0473.1`. The popup suite's binary read `11 passed` in 12.12 s; the row's line reads `waited 0 ms`, `the last 12 ms before the report`. `tests/e10t_gpu_window_settles.rs` read `30 passed` in 165.59 s.
+- `Test (macos-latest / luajit)` 132899241244: `success`, 234 `running` lines and 234 results, 5,653 / 0 / 80, on `macos-26-arm64` `20261102.0473.1`. The popup suite's binary read `11 passed` in 12.76 s; the row's line reads `waited 0 ms`, `the last 1 ms before the report`. `tests/e10t_gpu_window_settles.rs` read `30 passed` in 164.55 s.
+
+The totals are the totals of the run at `0389360`, leg for leg. #513's row, the guard and the witness read `ok` on `Test (crdt)` and both macOS legs, and returned on the two Ubuntu matrix legs, which have no adapter. `e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot`, the row of the local record below, read `ok` on the five legs that build `crdt`; the leg without `crdt` compiles its suite out.
+
+`Grammar fuzz` 43742717472 at `5b64967`, attempt 1 of 1, `pull_request`: `success`, `Grammar fuzz` 132899191878 and `Grammar fuzz (asan-strict)` 132899191604.
+
+Tally (pr-515-fuzz-5b64967): 2 = 2 + 0.
+
+#### The local record, listed and not tallied (D38)
+
+Tally (e10y-fixes-2-local): 5 items in the list below.
+
+- `20261115T152834Z-3313809` at `0389360`, E10y review 2's first gate, `scripts/gate --protocol`, at `nice -n 19` and six build jobs (the runbook's sampler: 50 readings, 1-minute load 9.3 on average, 6.30 to 13.61): seven of eight stages ok, no daemon survived. `06-sweep` 6,109 / 1 / 88 at 241 pairs: `e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot` in `tests/e10t_gpu_window_settles.rs` (`29 passed; 1 failed` in 49.05 s), `timed out waiting for the SessionToken; the daemon wrote []` at `tests/common/wire.rs:372:13`, #498's first fragment in a third selector, a sample on that issue (issuecomment-6897194808). `07-sweep-luajit` 5,429 / 0 / 72 at 241 pairs; it compiles the suite's rows out.
+- `20261115T155440Z-3529806` at `0389360`, the review's second gate, the same plan run again as D43 has it (45 readings, 10.8 on average, 6.06 to 20.95): seven of eight stages ok, `06-sweep` 6,109 / 1 / 88 on the same row with the same fragment (`29 passed; 1 failed` in 47.73 s) and `07-sweep-luajit` 5,429 / 0 / 72 at 241 pairs each, no daemon survived. By hand after it, from the gate's own binary, the review read the row alone 6 of 6 and its suite failing on it in 3 of 9 more runs, so 5 of the 11 runs of the suite with the two gates (issuecomment-6897655639).
+- `20261115T170000Z-3863990` at `5b64967`, fix round 2's gate at its tip (49 readings, 10.9 on average, 4.62 to 30.94): all eight stages ok, `06-sweep` 6,110 / 0 / 88 and `07-sweep-luajit` 5,429 / 0 / 72 at 241 pairs each, no daemon survived; `tests/e10t_gpu_window_settles.rs` `30 passed` in 47.17 s and the popup suite's binary `11 passed` in 9.55 s, the row's line `waited 0 ms` in the sweep's log.
+- `tests/e10t_gpu_window_settles.rs` as a whole suite, by hand in the gate's environment, 11 times at the tip `5b64967` and 11 times at `1e90534`, the branch's base, alternating, the base in a worktree and target of the round's own, a 1-minute load of 8.00 to 17.80 beside the runs, each a named run and not an occurrence: the row failed in 2 of the tip's 11 and in 1 of the base's 11, each `29 passed; 1 failed` on the fragment above, the other 19 runs `30 passed` (issuecomment-6898623751). The row fails at the base, which has none of the branch's changes.
+- The witness at the tip `5b64967`, unmutated, 30 of 30 (10 on one CPU), each run reading one `ThemeFacts` at the popup and two after the `face:` wait. No mutation was run in the round: the counts its comments and the PR's body cite under the review's M1 and M4 are fix round 1's and review 2's.
+
+So, at E10y's fix round 2: PR #515 is open at `5b64967`, green on CI at the first attempt, not merged. `main` is `f7b83d2`, green in the registry-push shape; its last code-bearing commit, `bf4b098`, stays red on #513 in both attempts of `CI` 43429626685. #513 stands at two CI occurrences; its row has read `ok` on the two macOS legs of the round's run, which is two more samples and nothing more, and by the owner's ruling of 2026-11-14 `main`'s macOS luajit leg on the merge's push run is to be recorded as a sample, not as proof. #498 has no CI occurrence: its third selector failed in two local gates of two at `0389360`, passed in the one at `5b64967`, and by hand failed at the base as at the tip. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
