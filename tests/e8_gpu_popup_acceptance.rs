@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::Path;
 
 mod common;
@@ -311,9 +312,13 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
         return;
     };
     let waited = waited_ms(&themed, "asked", "faced");
-    eprintln!(
-        "the popup face row waited {waited} ms for ui.popup after its popup ({} ThemeFacts \
-         applied, the last {} ms before the report)",
+    // Written to stderr itself and not through `eprintln!`, which the
+    // test harness captures and drops when the row passes: the wait is
+    // to be read in a passing leg's log, where a late theme would show.
+    let _ = writeln!(
+        std::io::stderr(),
+        "e8_3_the_gpu_popup_paints_the_ui_popup_face: waited {waited} ms for ui.popup after its \
+         popup ({} ThemeFacts applied, the last {} ms before the report)",
         fact(&themed, "themed.theme_facts"),
         fact(&themed, "themed.theme_facts_last_ms_ago"),
     );
