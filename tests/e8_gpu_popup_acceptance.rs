@@ -428,18 +428,28 @@ fn e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup() {
 
 /// The witness of the probe's `face:` step (E10y review 1's Medium 1,
 /// its probe P1): the popup ahead of its theme on the wire with nothing
-/// planted, every time. A coroutine in the daemon's init waits for the
-/// hover popup and merges `ui.popup` into the theme in that dispatcher
-/// iteration (`tick_async` follows `tick_lsp`), and the daemon writes a
-/// frame's `ThemeFacts` after its `Popup`, so the window holds the popup
-/// before the face. `early` is the report the popup face row made
+/// planted, every time, the theme a frame behind it. A coroutine in the
+/// daemon's init polls for the hover popup, yielding to the next tick,
+/// and merges `ui.popup` into the theme once it sees one.
+/// `pmacs._async.tick` steps such a poller before it resumes the hover
+/// command's own coroutine, which is what opens the popup, so the poller
+/// sees the popup a dispatcher iteration after it opened. The popup's
+/// frame has gone out by then, and the face goes out with the frame
+/// after it. So the window holds the popup before the face, and this row
+/// holds the `face:` step's wait. It does not hold #513's order, a
+/// frame's `ThemeFacts` written after that frame's own `Popup` (E10y
+/// review 2's Low 1): with the daemon made to write the two the other
+/// way round (that review's mutation M4) it still passes, and no
+/// committed row holds that order. The row's name says "as the popup
+/// opens" and its second assertion's message "as it opened", loosely:
+/// it is the iteration after. `early` is the report the popup face row made
 /// before E10y.2 (`ask:h report:`): no face, the frontend's default.
 /// `themed`, after `face:ui.popup`, is the one it makes now: the face,
 /// and the popup, not asked for again, repainted in it. With the step
-/// made not to wait (the review's mutation M1) this row fails every time
+/// made not to wait (review 1's mutation M1) this row fails every time
 /// on `themed.has_ui_popup`, where the popup face row fails only when
 /// its race fires and the guard above not at all. A user reaches the
-/// state with any package that themes the popup as it opens. The two
+/// state with any package that themes the popup once it is open. The two
 /// `count:` steps say how long the wait was; nothing is asserted of it.
 #[test]
 fn e10y_a_theme_merged_as_the_popup_opens_is_behind_it_and_the_face_wait_reads_it() {
