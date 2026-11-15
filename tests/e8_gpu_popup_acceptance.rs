@@ -130,6 +130,19 @@ fn num(facts: &HashMap<String, String>, key: &str) -> f32 {
         .unwrap_or_else(|_| panic!("{key} is not a number: {facts:?}"))
 }
 
+/// The milliseconds between two `count:` steps of a report, which is how
+/// long the steps between them took (`count:` writes the time since the
+/// attach as `<label>.at_ms`).
+fn waited_ms(facts: &HashMap<String, String>, from: &str, to: &str) -> u64 {
+    let at = |label: &str| -> u64 {
+        let key = format!("{label}.at_ms");
+        fact(facts, &key)
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} is not a number: {facts:?}"))
+    };
+    at(to).saturating_sub(at(from))
+}
+
 /// `x,y,w,h` of a report's box.
 fn rect(facts: &HashMap<String, String>, label: &str) -> [f32; 4] {
     let v: Vec<f32> = fact(facts, &format!("{label}.box"))
@@ -327,10 +340,14 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
 /// E10y.2's guard: a theme set after the attach repaints the popup. The
 /// daemon starts with no `ui.popup` face, so the window's first frame
 /// brings none and the popup is the frontend's default; `C-c 9` then
-/// merges the face into the daemon's theme, and the popup, asked for
-/// again in case the key closed it, is painted in it. The wait for the
-/// face is the themed row's: a theme that did not reach the window after
-/// the attach fails here on `after.has_ui_popup`.
+/// merges the face into the daemon's theme, and the popup, left open and
+/// not asked for again (the key moves nothing, so it closes nothing), is
+/// painted in it. A theme that did not reach the window after the attach
+/// fails here on `after.has_ui_popup`. This row does not hold the
+/// `face:` step's wait: each `key:` step drains a quarter second, the
+/// theme the key sets arrives inside them, and with the step made not to
+/// wait the row still passes (E10y review 1's mutation M1, 30 of 30).
+/// The step's witness is the row after this one.
 #[test]
 fn e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup() {
     let (daemon, _td) = daemon_on(
@@ -348,7 +365,7 @@ fn e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup() {
     );
     let Some(facts) = run_popup_probe(
         &daemon,
-        "ask:h report:before key:C-c key:9 face:ui.popup ask:h report:after",
+        "ask:h report:before key:C-c key:9 face:ui.popup report:after",
         "late-theme.report",
     ) else {
         return;
@@ -377,12 +394,98 @@ fn e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup() {
         fact(&facts, "after.faces"),
         fact(&facts, "after.theme_facts"),
     );
-    assert_eq!(fact(&facts, "after.open"), "true", "{facts:?}");
+    assert_eq!(
+        fact(&facts, "after.open"),
+        "true",
+        "the key that set the face left the popup open: {facts:?}"
+    );
     let px = pixel("after");
     assert!(
         px[0] > 150 && px[1] < 60 && px[2] < 60,
         "the popup is repainted in the face set after the attach: {facts:?}"
     );
+}
+
+/// The witness of the probe's `face:` step (E10y review 1's Medium 1,
+/// its probe P1): the popup ahead of its theme on the wire with nothing
+/// planted, every time. A coroutine in the daemon's init waits for the
+/// hover popup and merges `ui.popup` into the theme in that dispatcher
+/// iteration (`tick_async` follows `tick_lsp`), and the daemon writes a
+/// frame's `ThemeFacts` after its `Popup`, so the window holds the popup
+/// before the face. `early` is the report the popup face row made
+/// before E10y.2 (`ask:h report:`): no face, the frontend's default.
+/// `themed`, after `face:ui.popup`, is the one it makes now: the face,
+/// and the popup, not asked for again, repainted in it. With the step
+/// made not to wait (the review's mutation M1) this row fails every time
+/// on `themed.has_ui_popup`, where the popup face row fails only when
+/// its race fires and the guard above not at all. A user reaches the
+/// state with any package that themes the popup as it opens. The two
+/// `count:` steps say how long the wait was; nothing is asserted of it.
+#[test]
+fn e10y_a_theme_merged_as_the_popup_opens_is_behind_it_and_the_face_wait_reads_it() {
+    let (daemon, _td) = daemon_on(
+        "fn main() {}\n",
+        "hover",
+        &[],
+        "pmacs.async(function()\n\
+           while pmacs.lsp.popup_kind() ~= 'hover' do pmacs.async.yield_to_next_tick() end\n\
+           pmacs.theme.merge { [\"ui.popup\"] = { fg = { 255, 255, 255 }, bg = { 200, 0, 0 } } }\n\
+         end)",
+    );
+    let Some(facts) = run_popup_probe(
+        &daemon,
+        "ask:h report:early count:t0 face:ui.popup count:t1 report:themed",
+        "theme-behind.report",
+    ) else {
+        return;
+    };
+    let pixel = |label: &str| -> Vec<u32> {
+        fact(&facts, &format!("{label}.pixel"))
+            .split(',')
+            .map(|n| n.parse().expect("pixel"))
+            .collect()
+    };
+    let mut timeouts: Vec<String> = facts
+        .iter()
+        .filter(|(k, _)| k.starts_with("step."))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    timeouts.sort();
+    eprintln!(
+        "the face wait's witness: early faces [{}] after {} ThemeFacts, pixel {}; the face wait \
+         took {} ms; themed after {} ThemeFacts, the last {} ms before the report, pixel {}; \
+         timeouts {timeouts:?}",
+        fact(&facts, "early.faces"),
+        fact(&facts, "early.theme_facts"),
+        fact(&facts, "early.pixel"),
+        waited_ms(&facts, "t0", "t1"),
+        fact(&facts, "themed.theme_facts"),
+        fact(&facts, "themed.theme_facts_last_ms_ago"),
+        fact(&facts, "themed.pixel"),
+    );
+    assert_eq!(fact(&facts, "early.open"), "true", "{facts:?}");
+    assert_eq!(
+        fact(&facts, "early.has_ui_popup"),
+        "false",
+        "read at the popup, the face merged as it opened is not yet in the window: {facts:?}"
+    );
+    let px = pixel("early");
+    assert!(
+        px[0] < 150 && px[0].abs_diff(px[2]) < 40,
+        "and the popup is the frontend's default: {facts:?}"
+    );
+    assert_eq!(
+        fact(&facts, "themed.has_ui_popup"),
+        "true",
+        "after the face wait the window holds it: {facts:?}"
+    );
+    assert_eq!(fact(&facts, "themed.open"), "true", "{facts:?}");
+    let px = pixel("themed");
+    assert!(
+        px[0] > 150 && px[1] < 60 && px[2] < 60,
+        "and the open popup, not asked for again, is repainted in it: {facts:?}"
+    );
+    assert!(timeouts.is_empty(), "no step timed out: {facts:?}");
 }
 
 /// The signature popup on the GPU: `C-c s` inside a call opens it,
