@@ -297,18 +297,32 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
     // it reads the pixel. A theme that never reaches the window still
     // fails here, on the first assertion, naming the faces the window
     // held.
+    //
+    // The row states how long that wait was, by a `count:` step on
+    // either side of it, and asserts nothing of it (E10y review 1's
+    // Low 1, the owner's ruling: no time bound). Without the statement a
+    // theme seconds behind its popup passed this row unremarked, as one
+    // in the popup's own frame does.
     let Some(themed) = run_popup_probe(
         &daemon,
-        "ask:h face:ui.popup report:themed",
+        "ask:h count:asked face:ui.popup count:faced report:themed",
         "themed.report",
     ) else {
         return;
     };
+    let waited = waited_ms(&themed, "asked", "faced");
+    eprintln!(
+        "the popup face row waited {waited} ms for ui.popup after its popup ({} ThemeFacts \
+         applied, the last {} ms before the report)",
+        fact(&themed, "themed.theme_facts"),
+        fact(&themed, "themed.theme_facts_last_ms_ago"),
+    );
     assert_eq!(
         fact(&themed, "themed.has_ui_popup"),
         "true",
         "the window never held the ui.popup face its daemon's theme sets: it held [{}] after {} \
-         ThemeFacts (the last one, in ms before the report: {}): {themed:?}",
+         ThemeFacts (the last one, in ms before the report: {}), having waited {waited} ms for \
+         the face: {themed:?}",
         fact(&themed, "themed.faces"),
         fact(&themed, "themed.theme_facts"),
         fact(&themed, "themed.theme_facts_last_ms_ago"),
@@ -319,7 +333,8 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
         .collect();
     assert!(
         px[0] > 150 && px[1] < 60 && px[2] < 60,
-        "the ui.popup background paints the box: {themed:?}"
+        "the ui.popup background paints the box, the face held after a wait of {waited} ms: \
+         {themed:?}"
     );
     drop(daemon);
 
