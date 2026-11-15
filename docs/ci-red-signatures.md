@@ -18511,6 +18511,45 @@ Tally (main-fuzz-ca7bd55): 2 = 2 + 0.
 
 So, after E10y: `main` is `ca7bd55`, code-bearing and green at the first attempt; the code-bearing `main` before it, `bf4b098`, was red on #513's row in both attempts of `CI` 43429626685. #513 is closed at two CI occurrences, by PR #515's test-side wait; the daemon's frame order that put the theme behind the popup is unchanged and filed as #517, which no committed row holds. No row's count moves here.
 
+### E10u's early checkpoint: `main` green at `726a35a`; the phase has no run of its own
+
+Recorded 2026-11-15 at E10u's early checkpoint. The phase measured and changed no code: its branch, `e10u/chord-second-key`, holds no commit beyond `main`, no pull request was opened, and so no run is the phase's own. Each run below was read from the jobs endpoint by conclusion, and each run id was searched for in this file before it was written; neither was in it. `main`'s runs at `726a35a`, the commit that records E10y's merge, were owed by that record. No run was dispatched or rerun, and no gate ran in the phase, so it lists no local sample.
+
+#### `main` at `726a35a`, E10y.3's record: green
+
+`CI` 43755046343 at `726a35a`, attempt 1 of 1, `push`, created 2026-11-15T19:54:43Z and completed 19:57:23Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-726a35a): 15 = 6 + 9.
+
+Tally (main-ci-726a35a-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 132937180921 | success |
+| Lint (luajit) | 132937181039 | success |
+| Lint (lua54) | 132937181058 | success |
+| Format | 132937181112 | success |
+| Changed paths | 132937181135 | success |
+| Docs consistency | 132937240033 | success |
+| M4 Perf Gates | 132937241208 | skipped |
+| GPU Render (headless) | 132937241221 | skipped |
+| Test (crdt) | 132937241246 | skipped |
+| M5 Perf Gates | 132937241342 | skipped |
+| Perf budgets (debug) | 132937241616 | skipped |
+| M10 Perf Gates (crdt) | 132937241681 | skipped |
+| M6 Perf Gates | 132937241724 | skipped |
+| Test (matrix) | 132937241732 | skipped |
+| M1 Acceptance Gates | 132937241928 | skipped |
+
+Tally (main-ci-726a35a-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-726a35a-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43755046356 at `726a35a`, attempt 1 of 1, `push`, created 19:54:43Z and completed 19:54:56Z: `success`, `Grammar fuzz` 132937181085 and `Grammar fuzz (asan-strict)` 132937180797.
+
+Tally (main-fuzz-726a35a): 2 = 2 + 0.
+
+So, at E10u's early checkpoint: `main` is `726a35a`, green in the registry-push shape; its last code-bearing commit, `ca7bd55`, is green at the first attempt and is the base this phase measured #470 on. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
