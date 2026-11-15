@@ -366,8 +366,9 @@ fn e8_3_the_gpu_popup_paints_the_ui_popup_face() {
 /// fails here on `after.has_ui_popup`. This row does not hold the
 /// `face:` step's wait: each `key:` step drains a quarter second, the
 /// theme the key sets arrives inside them, and with the step made not to
-/// wait the row still passes (E10y review 1's mutation M1, 30 of 30).
-/// The step's witness is the row after this one.
+/// wait (E10y review 1's mutation M1) the row as it stands still passes,
+/// 20 of 20 in fix round 1 and 20 of 20 at review 2. The step's witness
+/// is the row after this one.
 #[test]
 fn e10y_a_theme_set_after_the_attach_repaints_the_gpu_popup() {
     let (daemon, _td) = daemon_on(
