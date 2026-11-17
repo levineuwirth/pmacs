@@ -27,7 +27,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pmacs_protocol::message::{AttachRequest, FrontendEvent, Key, Modifiers, MouseKind};
+use pmacs_protocol::message::{
+    AttachRequest, FrontendEvent, InstanceMessage, Key, Modifiers, MouseKind,
+};
 
 use common::daemon::{NO_REOPEN, TestDaemon};
 use common::gpu_probe::{fact, gpu_probe_binary, probe_facts};
@@ -65,11 +67,27 @@ fn sent_of(event: &FrontendEvent) -> Sent {
     }
 }
 
+/// A daemon message's name for a timeline, with the field that matters.
+fn received_name(m: &InstanceMessage) -> String {
+    match m {
+        InstanceMessage::CursorByte { byte_pos, .. } => format!("CursorByte({byte_pos})"),
+        InstanceMessage::DispatchIdle { idle } => format!("DispatchIdle({idle})"),
+        InstanceMessage::InputHandled { events } => format!("InputHandled({events})"),
+        other => format!("{other:?}")
+            .split(['(', ' ', '{'])
+            .next()
+            .unwrap_or("")
+            .to_owned(),
+    }
+}
+
 type Trigger = Box<dyn Fn(&FrontendEvent) -> bool + Send>;
 
 #[derive(Default)]
 struct ProxyState {
     sent: Vec<(Instant, Sent)>,
+    /// What the daemon wrote, by variant, as the proxy read it.
+    received: Vec<(Instant, String)>,
     /// The next event this accepts holds it and every event after it
     /// until `.1` has passed from its read; one-shot.
     arm: Option<(Trigger, Duration)>,
@@ -146,14 +164,18 @@ impl Proxy {
         let mut back_read = back.try_clone().expect("clone");
         let front_write = front.try_clone().expect("clone");
         let back_shut = back.try_clone().expect("clone");
+        let down_state = Arc::clone(&state);
         std::thread::spawn(move || {
-            let mut buf = vec![0u8; 1 << 16];
-            while let Ok(n) = back_read.read(&mut buf) {
-                if n == 0
-                    || down_tx
-                        .send((Instant::now() + latency, buf[..n].to_vec()))
-                        .is_err()
-                {
+            while let Some(frame) = read_frame(&mut back_read) {
+                let at = Instant::now();
+                let name = postcard::from_bytes::<InstanceMessage>(&frame[4..])
+                    .map_or_else(|_| "?".to_owned(), |m| received_name(&m));
+                down_state
+                    .lock()
+                    .expect("proxy state")
+                    .received
+                    .push((at, name));
+                if down_tx.send((at + latency, frame)).is_err() {
                     break;
                 }
             }
@@ -219,6 +241,29 @@ impl Proxy {
             .iter()
             .map(|(_, s)| s.clone())
             .collect()
+    }
+
+    /// Both directions since `from`, in order, ms after it: a failing
+    /// row's account of what the frontend had read when it decided.
+    fn timeline(&self, from: Instant) -> String {
+        let st = self.state.lock().expect("proxy state");
+        let mut all: Vec<(Instant, String)> = st
+            .sent
+            .iter()
+            .filter(|(at, _)| *at >= from)
+            .map(|(at, s)| (*at, format!("  frontend -> {s:?}")))
+            .chain(
+                st.received
+                    .iter()
+                    .filter(|(at, _)| *at >= from)
+                    .map(|(at, s)| (*at, format!("daemon -> {s}"))),
+            )
+            .collect();
+        all.sort_by_key(|(at, _)| *at);
+        all.iter()
+            .map(|(at, s)| format!("{:9.2} {s}", at.duration_since(from).as_secs_f64() * 1000.0))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Wait until the frontend has sent `n` events after `mark`.
@@ -372,10 +417,13 @@ fn c_x_b(tui: &mut ScreenTui, proxy: &Proxy, gap: Option<Duration>) -> (Vec<Sent
 }
 
 /// E10z.2 (i): with the daemon's read of `C-x` held 300 ms by the proxy,
-/// `b` typed 50 ms after it goes as a key, the prompt opens, and no `b`
+/// `b` typed 150 ms after it goes as a key, the prompt opens, and no `b`
 /// reaches the buffer. At the base the `CursorByte`s the daemon's ticks
 /// write while the read is held re-ground the cursor, and `b` goes as
-/// text, 20 of 20 in E10u.1 (c).
+/// text (E10u.1 (c): 20 of 20 at 200 ms). The gap is past the pump's
+/// 50 ms poll three times over: at 50 ms the base's pump had or had not
+/// read a cursor by whether its wait ran out before `b` came, so a row
+/// there passed at the base by timing alone.
 #[test]
 fn e10z_2_i_with_the_daemons_read_held_the_second_key_stays_a_key() {
     let daemon = daemon();
@@ -388,11 +436,14 @@ fn e10z_2_i_with_the_daemons_read_held_the_second_key_stays_a_key() {
             |e| matches!(e, FrontendEvent::Key(k) if k.key == Key::Char('x') && k.mods == Modifiers::CTRL),
             HOLD,
         );
-        let (sent, prompt) = c_x_b(&mut tui, &proxy, Some(Duration::from_millis(50)));
+        let from = Instant::now();
+        let (sent, prompt) = c_x_b(&mut tui, &proxy, Some(Duration::from_millis(150)));
         assert_eq!(
             sent,
             vec![ctrl('x'), plain('b')],
-            "trial {trial}: `b` typed while the daemon had not read `C-x` must go as a key"
+            "trial {trial}: `b` typed while the daemon had not read `C-x` must go as a key; \
+             what passed:\n{}",
+            proxy.timeline(from)
         );
         assert!(
             prompt,
@@ -551,9 +602,9 @@ fn e10z_2_iii_over_a_link_slower_than_the_hands_the_second_key_stays_a_key() {
     }
 }
 
-/// E10z.2 (iii) and the ruling on the count (D47): a character typed after
-/// a click, with the daemon's read of the click held, goes as a key and
-/// lands where the click put the caret. At the base it went as text at
+/// E10z.2 (iii) and the ruling on the count (D47): a character typed 150
+/// ms after a click, with the daemon's read of the click held 300 ms, goes
+/// as a key and lands where the click put the caret. At the base it went as text at
 /// the cursor from before the click, 20 of 20 (C10z.1's measurement).
 #[test]
 fn e10z_2_a_character_after_a_held_click_lands_where_the_click_put_the_caret() {
@@ -582,15 +633,18 @@ fn e10z_2_a_character_after_a_held_click_lands_where_the_click_put_the_caret() {
         HOLD,
     );
     let mark = proxy.mark();
+    let from = Instant::now();
     // SGR mouse: a left press and release on `a`, one-based.
     tui.write(format!("\x1b[<0;{c};{r}M\x1b[<0;{c};{r}m", c = col + 1, r = row + 1).as_bytes());
-    std::thread::sleep(Duration::from_millis(50));
+    // Past the base pump's 50 ms poll, inside the hold (as row (i)).
+    std::thread::sleep(Duration::from_millis(150));
     tui.write(b"x");
     let sent = proxy.wait_sent(mark, 3, "the click and `x`");
     assert_eq!(
         sent.last().cloned(),
         Some(plain('x')),
-        "`x` typed while the daemon had not read the click must go as a key: {sent:?}"
+        "`x` typed while the daemon had not read the click must go as a key; what passed:\n{}",
+        proxy.timeline(from)
     );
     tui.wait_for(PATIENCE, "`xab`", &|t| {
         buffer_text(t)
