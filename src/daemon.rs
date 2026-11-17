@@ -1083,6 +1083,75 @@ fn peer_accepts_popup_message(protocol_version: u32, message: &InstanceMessage) 
         || !matches!(message, InstanceMessage::Popup(_))
 }
 
+/// E10z --- belt-and-braces write-loop gate for the v28 handled-input
+/// count: [`answer_handled_input`] is its one producer and writes it past
+/// the frame vector, to a session it has itself checked, so a copy
+/// reaching that vector for an older peer would be a defect; it is
+/// withheld here rather than mis-decoded there.
+fn peer_accepts_input_handled_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= pmacs_protocol::INPUT_HANDLED_MIN_VERSION
+        || !matches!(message, InstanceMessage::InputHandled { .. })
+}
+
+/// E10z --- tell a replica session how much of its input the dispatcher
+/// has handled, if that has changed since it was last told.
+///
+/// The count itself moves in [`handle_dispatcher_event`], once for every
+/// `FrontendEvent` taken up from the session. It is written here and
+/// nowhere else, and only while the last `DispatchIdle` written to the
+/// session says what the dispatcher is for it now: that test is here and
+/// not at the callers, so the first half of what
+/// `InstanceMessage::InputHandled` promises (a frontend that has read
+/// the count has read every `DispatchIdle` flip that input caused) holds
+/// wherever this is called from, and a flip still owed holds the count
+/// back until the tick has written it. The second half (every
+/// `CursorByte` after the count reflects that input) is the callers', by
+/// calling this before their `CursorByte`:
+///
+/// - the tick, straight after its `DispatchIdle` and before its frame
+///   and its `CursorByte`;
+/// - [`confirm_cursor_early`], before its `CursorByte`, which its own
+///   test sends only when no flip is owed.
+///
+/// Gated as `DispatchIdle` is, on `crdt_replica` (a frontend with no
+/// optimistic path has no use for it), and on the negotiated version. A
+/// write that fails begins the session's drain through the one path
+/// (E10d), and the count is not recorded as sent.
+fn answer_handled_input(
+    editor: &EditorState,
+    session_registry: &mut SessionRegistry,
+    frontend_id: FrontendId,
+) {
+    if !session_registry
+        .session_state(frontend_id)
+        .is_some_and(|s| {
+            s.negotiated_capabilities.crdt_replica
+                && s.negotiated_protocol_version >= pmacs_protocol::INPUT_HANDLED_MIN_VERSION
+        })
+    {
+        return;
+    }
+    let idle_now = editor.dispatch_idle_for(frontend_id);
+    let Some(events) = session_registry
+        .session(frontend_id)
+        .filter(|session| session.last_dispatch_idle_sent == Some(idle_now))
+        .filter(|session| session.input_handled != session.input_handled_sent)
+        .map(|session| session.input_handled)
+    else {
+        return;
+    };
+    if write_to_session(
+        editor,
+        session_registry,
+        frontend_id,
+        &InstanceMessage::InputHandled { events },
+        || format!("write InputHandled for {frontend_id:?} failed"),
+    ) && let Some(session) = session_registry.session_mut(frontend_id)
+    {
+        session.input_handled_sent = events;
+    }
+}
+
 /// Whether an authenticated source may send the v21 panel event family
 /// (Q#BP9's "every gate keys on the daemon's own state").
 ///
@@ -1946,6 +2015,12 @@ fn dispatcher_loop(
                     session.last_dispatch_idle_sent = Some(idle_now);
                 }
             }
+            // E10z --- the handled-input count, after the `DispatchIdle`
+            // above and before the frame and the `CursorByte` below: a
+            // frontend that has read it has read any flip that input
+            // caused, and the cursor it reads next is not one from
+            // before that input.
+            answer_handled_input(editor, &mut session_registry, *fid);
 
             // Write frame messages to this frontend's stream, if it still
             // has one.
@@ -2101,6 +2176,12 @@ fn dispatcher_loop(
                     // here is the belt-and-braces half, as for every
                     // other appended variant.
                     if !peer_accepts_session_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
+                    // E10z — the handled-input count is written above,
+                    // past this vector, and never rides a frame; the
+                    // gate here is the belt-and-braces half.
+                    if !peer_accepts_input_handled_message(negotiated_protocol_version, msg) {
                         continue;
                     }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
@@ -3185,6 +3266,15 @@ fn handle_dispatcher_event(
             if session_registry.session_state(source).is_none() {
                 eprintln!("pmacs: dropping frontend event from uninstalled session {source:?}");
                 return;
+            }
+            // E10z --- one more of this session's events taken up,
+            // whatever its kind and whatever its arm below makes of it
+            // (a refused `TextInput` and a dropped `CrdtOp` are handled
+            // too: the frontend sent them and is owed their answer).
+            // Counted before the arm runs, so that the early
+            // confirmation an arm ends in already names this event.
+            if let Some(session) = session_registry.session_mut(source) {
+                session.input_handled = session.input_handled.saturating_add(1);
             }
             match event {
                 FrontendEvent::Detach(_) => {
@@ -5143,6 +5233,11 @@ fn confirm_cursor_early(
     let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, source) else {
         return;
     };
+    // E10z --- the answer to the event just handled goes ahead of the
+    // cursor that reflects it, and does not wait for the tick: no flip is
+    // owed past the test above, and a frontend holding its optimistic
+    // path for the answer gets it as early as it gets this cursor.
+    answer_handled_input(editor, session_registry, source);
     // A failed write begins the drain here, through the one path (E10d),
     // so the tick writes nothing after it.
     write_to_session(
@@ -12489,6 +12584,22 @@ mod tests {
         assert!(
             peer_accepts_popup_message(25, &InstanceMessage::DispatchIdle { idle: true }),
             "the filter must be scoped to the popup variant"
+        );
+    }
+
+    /// E10z's write-loop gate, independent of the producer's own test.
+    #[test]
+    fn the_input_handled_write_gate_rejects_v27_independently() {
+        let count = InstanceMessage::InputHandled { events: 1 };
+        assert!(!peer_accepts_input_handled_message(27, &count));
+        assert!(peer_accepts_input_handled_message(28, &count));
+        assert!(peer_accepts_input_handled_message(
+            pmacs_protocol::INPUT_HANDLED_MIN_VERSION,
+            &count
+        ));
+        assert!(
+            peer_accepts_input_handled_message(27, &InstanceMessage::DispatchIdle { idle: true }),
+            "the filter must be scoped to the count's variant"
         );
     }
 

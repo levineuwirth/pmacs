@@ -1974,7 +1974,9 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// applied); `report:<label>` writes the theme
 /// the window holds and the popup's facts under `label`; `count:<label>`
 /// writes the snapshots applied so far, the buffer shown, the band's name
-/// for it and the time since attach (E10t); `frame:<label>` writes the composited frame,
+/// for it and the time since attach (E10t); `answer:<label>` writes how
+/// many of the session's events the daemon has said it handled, as the
+/// window holds it (E10z.1); `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
 /// times out is reported as `step.<i>=timeout` and the script goes on.
@@ -2131,6 +2133,14 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                         state.status_facts.as_ref().map_or("", |f| f.name.as_str())
                     );
                     let _ = writeln!(out, "{arg}.at_ms={}", started.elapsed().as_millis());
+                }
+                Ok(true)
+            }
+            "answer" => {
+                // E10z.1: the count of this session's events the daemon
+                // has said it handled, as the window holds it.
+                if let Some(state) = app.state.as_ref() {
+                    let _ = writeln!(out, "{arg}.input_handled={}", state.input_handled);
                 }
                 Ok(true)
             }
@@ -5561,6 +5571,13 @@ struct State {
     /// keys round-trip so minibuffer and prefix commands keep their
     /// daemon-owned semantics.
     dispatch_idle: bool,
+    /// E10z.1 --- how many of this session's events the daemon says its
+    /// dispatcher has handled (`InstanceMessage::InputHandled`, v28): 0
+    /// until the first count arrives, on a session below the version,
+    /// and again when a new session's client is installed, whose count
+    /// starts over. Held and reported by the probe; the optimistic gate
+    /// does not read it yet.
+    input_handled: u64,
     /// OS clipboard handle (Q#CM6), created lazily on first cut / copy /
     /// paste. `None` until first use or when the platform clipboard is
     /// unavailable (headless / unsupported compositor) --- clipboard ops
@@ -12571,6 +12588,7 @@ impl State {
             last_viewport_sent: None,
             local_frontend_id: None,
             dispatch_idle: false,
+            input_handled: 0,
             clipboard: None,
             cursor_fresh: false,
             optimistic_cursor_floor: None,
@@ -12677,6 +12695,9 @@ impl State {
 
     fn set_frontend_id(&mut self, frontend_id: FrontendId) {
         self.local_frontend_id = Some(frontend_id);
+        // E10z.1 --- a new id is a new session, and the daemon counts
+        // each session's input from its own start.
+        self.input_handled = 0;
         if let Some(doc) = self.loro_doc.as_ref()
             && let Err(e) = doc.set_peer_id(frontend_id.0)
         {
@@ -13659,6 +13680,12 @@ impl State {
             }
             InstanceMessage::DispatchIdle { idle } => {
                 self.dispatch_idle = idle;
+                None
+            }
+            // E10z.1 --- how much of this session's input the daemon
+            // has handled: held, and nothing is gated on it yet.
+            InstanceMessage::InputHandled { events } => {
+                self.input_handled = events;
                 None
             }
             // E2.3 — a bell is a 120 ms whole-client flash.
@@ -21030,6 +21057,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::PanelFrame(_) => "PanelFrame",
         InstanceMessage::Popup(_) => "Popup",
         InstanceMessage::SessionToken(_) => "SessionToken",
+        InstanceMessage::InputHandled { .. } => "InputHandled",
     }
 }
 

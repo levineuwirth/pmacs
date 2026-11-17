@@ -1784,8 +1784,9 @@ mod tests {
         // after `Popup`, `FrontendEvent::Resume` after
         // `PanelPointerMapped`, `GoodbyeReason::Detached` after
         // `CapabilityMismatch`, all APPENDED, each with a pin on the
-        // variant it follows.
-        assert_eq!(PROTOCOL_VERSION, 27);
+        // variant it follows. v28 is `InstanceMessage::InputHandled`
+        // (E10z), APPENDED after `SessionToken`, with its pin.
+        assert_eq!(PROTOCOL_VERSION, 28);
     }
 
     #[test]
@@ -2218,9 +2219,9 @@ mod tests {
     /// the advertised baseline does not move.
     #[test]
     fn the_popup_family_takes_v26_and_the_advertised_baseline_stays_pinned() {
-        // E9 bumped the wire to 27; the popup's own gate stays at its
-        // literal below, which is the point of the test.
-        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 27);
+        // E9 bumped the wire to 27 and E10z to 28; the popup's own gate
+        // stays at its literal below, which is the point of the test.
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 28);
         // A literal, not `PROTOCOL_VERSION`: stated arithmetically the
         // gate would follow the next bump and admit sessions that never
         // negotiated the popup.
@@ -2319,7 +2320,9 @@ mod tests {
     /// literal; the advertised baseline does not move.
     #[test]
     fn the_session_family_takes_v27_and_the_advertised_baseline_stays_pinned() {
-        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 27);
+        // E10z bumped the wire to 28; the session family's own gate
+        // stays at its literal below.
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 28);
         // A literal, not `PROTOCOL_VERSION`: stated arithmetically the
         // gate would follow the next bump and read the `Resume` step
         // from sessions that never negotiated it, desynchronizing them.
@@ -2376,6 +2379,95 @@ mod tests {
         );
         let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
         assert_eq!(decoded, msg, "the frozen bytes must decode back");
+    }
+
+    /// E10z --- the handled-input count takes v28 and its gate is its
+    /// own literal; the advertised baseline does not move.
+    #[test]
+    fn the_handled_input_count_takes_v28_and_the_advertised_baseline_stays_pinned() {
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 28);
+        // A literal, not `PROTOCOL_VERSION`: stated arithmetically the
+        // gate would follow the next bump and withhold the count from
+        // sessions that negotiated it.
+        assert_eq!(28, pmacs_protocol::INPUT_HANDLED_MIN_VERSION);
+        assert_ne!(
+            pmacs_protocol::INPUT_HANDLED_MIN_VERSION,
+            pmacs_protocol::SESSION_MIN_VERSION,
+            "the count must not share v27's gate — that would send it to \
+             sessions that negotiated only the session family"
+        );
+        assert!(
+            pmacs_protocol::SUPPORTED_PROTOCOL_VERSIONS
+                .contains(&pmacs_protocol::INPUT_HANDLED_MIN_VERSION)
+        );
+        assert_eq!(
+            pmacs_protocol::SUPPORTED_PROTOCOL_VERSIONS.last(),
+            Some(&pmacs_protocol::PROTOCOL_VERSION),
+            "the supported set ends at the wire this binary speaks"
+        );
+        assert_eq!(
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            20,
+            "the advertised baseline is PERMANENT — it is not bumped to \
+             chase the wire version"
+        );
+    }
+
+    /// E10z placement pin: `InputHandled` must be APPENDED after
+    /// `SessionToken`, the final v27 `InstanceMessage` variant. The new
+    /// variant's own round-trip cannot see a discriminant shift, so the
+    /// pin sits on the PREVIOUS final variant, as literal bytes, decoded
+    /// back too: the discriminant 32, then the sixteen bytes bare, every
+    /// byte distinct and none of them the fixture `session_token_encodes_
+    /// and_decodes_exactly` uses, so the two pins cannot be one edit.
+    #[test]
+    fn session_token_encoding_is_unchanged_by_the_v28_build() {
+        const WIRE: [u8; 17] = [
+            32, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae,
+            0xaf, 0xb0,
+        ];
+        let msg = InstanceMessage::SessionToken(pmacs_protocol::SessionToken([
+            0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae,
+            0xaf, 0xb0,
+        ]));
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            WIRE,
+            "SessionToken's v27 wire bytes changed — a variant was inserted \
+             before it; append new InstanceMessage variants at the end"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, msg, "the frozen bytes must decode back");
+    }
+
+    /// E10z --- exact **encode and decode** for the count: the
+    /// discriminant after `SessionToken`'s 32, then `events` as a
+    /// varint, at one byte (5), at two (300 is `0xac 0x02`) and at the
+    /// ten a `u64::MAX` takes, so a field narrowed below `u64` or
+    /// encoded at a fixed width is visible.
+    #[test]
+    fn input_handled_encodes_and_decodes_exactly() {
+        let cases: [(u64, &[u8]); 3] = [
+            (5, &[33, 5]),
+            (300, &[33, 0xac, 0x02]),
+            (
+                u64::MAX,
+                &[
+                    33, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+                ],
+            ),
+        ];
+        for (events, wire) in cases {
+            let msg = InstanceMessage::InputHandled { events };
+            assert_eq!(
+                postcard::to_allocvec(&msg).expect("encode"),
+                wire,
+                "InputHandled's v28 wire bytes changed — it must be APPENDED \
+                 after SessionToken, carrying `events` as a varint"
+            );
+            let decoded: InstanceMessage = postcard::from_bytes(wire).expect("decode");
+            assert_eq!(decoded, msg, "the frozen bytes must decode back");
+        }
     }
 
     /// E9 placement pin: `Resume` must be APPENDED after

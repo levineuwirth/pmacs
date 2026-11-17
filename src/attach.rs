@@ -1873,6 +1873,12 @@ pub(crate) fn run_attach_pair(
                         // gate reads `dispatch_idle` below.
                         dispatch_idle = idle;
                     }
+                    // E10z.1 — how much of this session's input the
+                    // daemon has handled. Taken out of the batch here,
+                    // as `DispatchIdle` is, since nothing paints from
+                    // it; the gate below does not read it yet, and
+                    // until it does this pump keeps the rule it had.
+                    Ok(InstanceMessage::InputHandled { .. }) => {}
                     Ok(msg) => batch.push(msg),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {

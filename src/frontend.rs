@@ -487,6 +487,10 @@ impl Frontend {
             // E9 — the session token is minted for semantic sessions
             // only; the grid attach never negotiates one and drops it.
             | InstanceMessage::SessionToken(_)
+            // E10z — the count of handled input is consumed by
+            // `attach.rs`'s drain, as `DispatchIdle` is; one that reaches
+            // this render path is dropped.
+            | InstanceMessage::InputHandled { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

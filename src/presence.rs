@@ -186,6 +186,15 @@ pub struct Session {
     /// T M11.6 --- the last `DispatchIdle` value sent to a `crdt_replica`
     /// session; `None` until the first tick sends one.
     pub last_dispatch_idle_sent: Option<bool>,
+    /// E10z --- the `FrontendEvent`s the dispatcher has taken up from
+    /// this session, of every kind, counted as each one's handling
+    /// begins; and the count last written to it as
+    /// `InstanceMessage::InputHandled`, which is written when the two
+    /// differ. Both start at 0 with the session, a resumed one included:
+    /// its frontend counts from its new socket's handshake.
+    pub input_handled: u64,
+    /// See [`Self::input_handled`].
+    pub input_handled_sent: u64,
     /// Arc 1b --- the buffer this replica was last sent a
     /// `BufferSnapshot` for by the active-buffer follow; `None` until
     /// the first one.
@@ -287,6 +296,8 @@ impl Session {
             stream: None,
             term_size: None,
             last_dispatch_idle_sent: None,
+            input_handled: 0,
+            input_handled_sent: 0,
             last_active_buffer_sent: None,
             snapshot_answers: SnapshotAnswers::default(),
             bell_baseline: None,
@@ -329,6 +340,8 @@ impl std::fmt::Debug for Session {
             .field("stream", &self.stream)
             .field("term_size", &self.term_size)
             .field("last_dispatch_idle_sent", &self.last_dispatch_idle_sent)
+            .field("input_handled", &self.input_handled)
+            .field("input_handled_sent", &self.input_handled_sent)
             .field("last_active_buffer_sent", &self.last_active_buffer_sent)
             .field("snapshot_answers", &self.snapshot_answers)
             .field("bell_baseline", &self.bell_baseline)

@@ -255,7 +255,7 @@ const FAKE_HOVER: [&str; 3] = [
 #[test]
 fn e8_2_hover_opens_once_closes_on_motion_cg_and_edit_and_never_reaches_v25() {
     let (daemon, _dir) = daemon_with("hover", &[], "");
-    assert_eq!(PROTOCOL_VERSION, 27);
+    assert_eq!(PROTOCOL_VERSION, 28);
     let mut current = Session::attach(&daemon, PROTOCOL_VERSION);
 
     let frame = current.ask_until_present('h');
