@@ -421,6 +421,13 @@ struct Outbox {
     /// Set once the writer gives up (socket error) or a lossless overflow
     /// trips fail-fast. Further [`Outbox::enqueue`] calls return `false`.
     closed: bool,
+    /// E10z.2 --- the events this session has put in the queue, each
+    /// once: an event that replaces the tail it coalesces with is the
+    /// same event on the wire, and a refused one is none. The daemon
+    /// counts the events it takes up from the socket the same way
+    /// (`InstanceMessage::InputHandled`), so the two meet once everything
+    /// queued has been handled.
+    appended: u64,
 }
 
 impl Outbox {
@@ -428,6 +435,7 @@ impl Outbox {
         Self {
             queue: VecDeque::new(),
             closed: false,
+            appended: 0,
         }
     }
 
@@ -458,6 +466,7 @@ impl Outbox {
             return false;
         }
         self.queue.push_back(event);
+        self.appended += 1;
         true
     }
 }
@@ -1334,6 +1343,14 @@ impl AttachClient {
         self.baseline_protocol_version
     }
 
+    /// E10z.2 --- how many events this session has queued for the
+    /// daemon, each once ([`Outbox`]'s count): what a frontend compares
+    /// with `InstanceMessage::InputHandled` to know that what it sent has
+    /// been handled.
+    pub fn events_sent(&self) -> u64 {
+        self.outbox.0.lock().expect("outbox lock").appended
+    }
+
     /// Send a locally-authored CRDT operation to the daemon. The GPU
     /// uses this for idle plain-text insertion after applying the same
     /// op to its local Loro replica, avoiding a Key round trip on the
@@ -1584,6 +1601,29 @@ mod tests {
             FrontendEvent::Viewport { generation, .. } => assert_eq!(*generation, 3),
             other => panic!("expected a viewport, got {other:?}"),
         }
+    }
+
+    /// E10z.2 --- the outbox counts each event once as it goes on the
+    /// queue: one that coalesces into the tail is that same event on the
+    /// wire, and a refused one is no event. The daemon's
+    /// `InputHandled` counts what it reads, so the two agree only if this
+    /// equals what the writer will put on the socket.
+    #[test]
+    fn the_outbox_counts_what_goes_on_the_wire_once() {
+        let mut ob = Outbox::new();
+        assert!(ob.enqueue(fe_viewport(1)));
+        assert!(ob.enqueue(fe_viewport(2)), "coalesces into the tail");
+        assert!(ob.enqueue(fe_key('a')));
+        assert!(ob.enqueue(fe_viewport(3)), "a viewport after a key is new");
+        assert_eq!(ob.queue.len(), 3, "premise: three events are queued");
+        assert_eq!(ob.appended, 3, "one count per queued event");
+        // Whatever the writer has taken stays counted.
+        ob.queue.clear();
+        assert!(ob.enqueue(fe_key('b')));
+        assert_eq!(ob.appended, 4);
+        ob.closed = true;
+        assert!(!ob.enqueue(fe_key('c')), "a closed outbox refuses");
+        assert_eq!(ob.appended, 4, "a refused event is not counted");
     }
 
     #[test]

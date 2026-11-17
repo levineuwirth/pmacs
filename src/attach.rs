@@ -706,6 +706,13 @@ pub(crate) struct AttachIo {
     /// — by the time the kick runs, the pump has already decided to
     /// exit.
     pub kick: Box<dyn FnOnce() + Send>,
+    /// E10z.2 --- the protocol version this session negotiated, which is
+    /// what [`requested_protocol_version`](crate::protocol::requested_protocol_version)
+    /// made of the daemon's `Hello`: at
+    /// [`INPUT_HANDLED_MIN_VERSION`](pmacs_protocol::INPUT_HANDLED_MIN_VERSION) or
+    /// later the pump holds its optimistic path for the daemon's count of
+    /// handled input, and below it keeps the rule it had.
+    pub session_version: u32,
 }
 
 impl std::fmt::Debug for AttachIo {
@@ -714,6 +721,7 @@ impl std::fmt::Debug for AttachIo {
             .field("reader", &"<dyn Read>")
             .field("writer", &"<dyn Write>")
             .field("kick", &"<FnOnce>")
+            .field("session_version", &self.session_version)
             .finish()
     }
 }
@@ -987,7 +995,10 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // Take over the terminal. Frontend's Drop tears it down.
     let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
 
-    let io = build_local_socket_io(stream)?;
+    let io = build_local_socket_io(
+        stream,
+        crate::protocol::requested_protocol_version(hello.protocol_version),
+    )?;
     let result = run_local_sessions(
         &socket_path,
         io,
@@ -1159,7 +1170,11 @@ fn connect_again(
     memory.heard(&hello);
     stream.set_read_timeout(None)?;
     write_attach_request(&mut stream, &hello, size)?;
-    Ok((build_local_socket_io(stream)?, hello.assigned_frontend_id))
+    let session_version = crate::protocol::requested_protocol_version(hello.protocol_version);
+    Ok((
+        build_local_socket_io(stream, session_version)?,
+        hello.assigned_frontend_id,
+    ))
 }
 
 /// Build an [`AttachIo`] for a connected `UnixStream`.
@@ -1168,7 +1183,10 @@ fn connect_again(
 /// `shutdown(Both)`. Cloning may
 /// fail (rare — the kernel is out of file descriptors), in which
 /// case the caller propagates the error before raw mode engages.
-fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error> {
+fn build_local_socket_io(
+    stream: UnixStream,
+    session_version: u32,
+) -> Result<AttachIo, std::io::Error> {
     let reader = stream.try_clone()?;
     let kick_handle = stream.try_clone()?;
     let kicked = Arc::new(AtomicBool::new(false));
@@ -1183,6 +1201,7 @@ fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error>
             kicked.store(true, Ordering::SeqCst);
             let _ = kick_handle.shutdown(Shutdown::Both);
         }),
+        session_version,
     })
 }
 
@@ -1728,7 +1747,10 @@ pub(crate) fn run_attach_pair(
         reader,
         writer,
         kick,
+        session_version,
     } = io;
+    #[cfg(not(feature = "crdt"))]
+    let _ = session_version;
 
     let (tx, rx) = mpsc::channel::<InstanceMessage>();
     let far_side_text = Arc::new(Mutex::new(Vec::new()));
@@ -1757,6 +1779,34 @@ pub(crate) fn run_attach_pair(
     // document.
     #[cfg(feature = "crdt")]
     let mut dispatch_idle = false;
+
+    // E10z.2 --- the daemon's answer (#470). At v28 the daemon says how
+    // many of this session's events its dispatcher has handled
+    // (`InstanceMessage::InputHandled`), after any `DispatchIdle` flip they
+    // caused and before any `CursorByte` that reflects them. The pump
+    // counts what it puts on the wire the same way, every event once;
+    // when it forwards an event (a key it does not apply, a click, a
+    // paste) it needs the answer to reach that count before a
+    // `CursorByte` may re-ground its cursor, so a `CursorByte` the daemon
+    // wrote before it read the event no longer does. An optimistic edit
+    // raises nothing: its stale mark clears as it did, so typing keeps
+    // its pace on every route. Below v28 nothing is needed and the rule
+    // is the one it was.
+    #[cfg(feature = "crdt")]
+    let answer_wire = session_version >= pmacs_protocol::INPUT_HANDLED_MIN_VERSION;
+    #[cfg(feature = "crdt")]
+    let mut events_sent: u64 = 0;
+    #[cfg(feature = "crdt")]
+    let mut answered: u64 = 0;
+    #[cfg(feature = "crdt")]
+    let mut answer_needed: u64 = 0;
+    // E10z.2 --- a terminal event read during the poll's wait waits here
+    // for one more turn of the loop, so that what the daemon sent
+    // meanwhile is read before the event is decided (#470's second
+    // mechanism: the `DispatchIdle` flip had been written, sometimes tens
+    // of milliseconds before, and was not read until after the key went
+    // as text).
+    let mut pending: Option<Event> = None;
 
     // Closure-and-call: any `return` from this closure still falls
     // through to `kick()` and `reader_handle.join()` below. Without
@@ -1819,6 +1869,12 @@ pub(crate) fn run_attach_pair(
                         // keeps that lookup current. Convert wire
                         // u64 → usize for the loro API.
                         buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
+                        // E10z.2 --- a cursor from before the daemon
+                        // read what this pump last forwarded moves the
+                        // mirror's cursor and leaves it stale.
+                        if answer_wire && answered < answer_needed {
+                            buffer_mirror.mark_cursor_stale(buffer_id);
+                        }
                     }
                     #[cfg(feature = "crdt")]
                     Ok(InstanceMessage::CrdtOp { buffer_id, op }) => {
@@ -1873,12 +1929,14 @@ pub(crate) fn run_attach_pair(
                         // gate reads `dispatch_idle` below.
                         dispatch_idle = idle;
                     }
-                    // E10z.1 — how much of this session's input the
-                    // daemon has handled. Taken out of the batch here,
-                    // as `DispatchIdle` is, since nothing paints from
-                    // it; the gate below does not read it yet, and
-                    // until it does this pump keeps the rule it had.
-                    Ok(InstanceMessage::InputHandled { .. }) => {}
+                    // E10z.2 — how much of this session's input the
+                    // daemon has handled; the `CursorByte` arm above
+                    // reads it. Taken out of the batch, as
+                    // `DispatchIdle` is, since nothing paints from it.
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::InputHandled { events }) => {
+                        answered = events;
+                    }
                     Ok(msg) => batch.push(msg),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -1937,11 +1995,15 @@ pub(crate) fn run_attach_pair(
                 return Err(AttachError::Terminal(e));
             }
 
-            let event = match frontend.poll_event(Duration::from_millis(50)) {
-                Ok(opt) => opt,
-                Err(e) => return Err(AttachError::Terminal(e)),
-            };
-            let Some(ev) = event else {
+            let Some(ev) = pending.take() else {
+                let event = match frontend.poll_event(Duration::from_millis(50)) {
+                    Ok(opt) => opt,
+                    Err(e) => return Err(AttachError::Terminal(e)),
+                };
+                if let Some(ev) = event {
+                    // Back to the drain first, then this event.
+                    pending = Some(ev);
+                }
                 continue;
             };
 
@@ -2036,6 +2098,7 @@ pub(crate) fn run_attach_pair(
                     if let Err(e) = writer.send(&frontend_event) {
                         return lost_or_failed(e, bootstrapped);
                     }
+                    events_sent += 1;
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command
                     // pipeline may move the cursor in ways the mirror
@@ -2044,10 +2107,11 @@ pub(crate) fn run_attach_pair(
                     // active buffer's cursor stale so subsequent
                     // keystrokes round-trip too until the daemon's
                     // next `CursorByte` re-grounds the mirror cursor.
-                    if matches!(frontend_event, FrontendEvent::Key(_))
-                        && let Some(active_buf) = buffer_mirror.active_buffer()
-                    {
-                        buffer_mirror.mark_cursor_stale(active_buf);
+                    if matches!(frontend_event, FrontendEvent::Key(_)) {
+                        answer_needed = events_sent;
+                        if let Some(active_buf) = buffer_mirror.active_buffer() {
+                            buffer_mirror.mark_cursor_stale(active_buf);
+                        }
                     }
 
                     // Visual optimistic paint (Path β). Fires only when
@@ -2095,6 +2159,14 @@ pub(crate) fn run_attach_pair(
                 let mut frame = Vec::new();
                 if let Err(e) = forward_event(&mut frame, &ev, assigned_id, frontend.size()) {
                     return lost_or_failed(e, bootstrapped);
+                }
+                // A key release writes nothing, and `push` drops an empty
+                // frame: only a frame on the wire is an event the daemon
+                // will count.
+                #[cfg(feature = "crdt")]
+                if !frame.is_empty() {
+                    events_sent += 1;
+                    answer_needed = events_sent;
                 }
                 writer.push(frame);
             }
@@ -3306,7 +3378,7 @@ fn run_pump_and_reap(
     child_stdin: std::process::ChildStdin,
     (protocol_reader, stderr_handle, stderr_tail): ProtocolChannel,
     frontend: &mut Frontend,
-    assigned_frontend_id: FrontendId,
+    (assigned_frontend_id, session_version): (FrontendId, u32),
     ended: &mut SessionEnded,
     notice: Option<Notice>,
 ) -> Result<(), AttachError> {
@@ -3316,6 +3388,7 @@ fn run_pump_and_reap(
         reader: protocol_reader,
         writer: Box::new(child_stdin),
         kick: ssh_kick(pid, Arc::clone(&reaped)),
+        session_version,
     };
     let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, notice);
     let over = matches!(pump_end, Ok(PumpEnd::Over(_)));
@@ -3693,7 +3766,10 @@ fn run_one_session(
         child_stdin,
         (protocol_reader, stderr_handle, stderr_tail),
         frontend,
-        hello.assigned_frontend_id,
+        (
+            hello.assigned_frontend_id,
+            crate::protocol::requested_protocol_version(hello.protocol_version),
+        ),
         ended,
         memory.notice(),
     )
@@ -3830,6 +3906,10 @@ fn classify_ssh_exit(
 
 #[cfg(test)]
 mod tests {
+    /// E10z.2 --- the version the pumps these rows build by hand speak:
+    /// below the count's, so each keeps the rule it was written against.
+    const LEGACY_SESSION: u32 = pmacs_protocol::INPUT_HANDLED_MIN_VERSION - 1;
+
     use super::*;
 
     /// Try to bind a `UnixListener` at `path`. On `PermissionDenied`
@@ -3998,13 +4078,15 @@ mod tests {
             kick: Box::new(move || {
                 counter.fetch_add(1, Ordering::SeqCst);
             }),
+            session_version: LEGACY_SESSION,
         }
     }
 
     #[test]
     fn pump_routes_instance_messages_to_frontend() {
         let (daemon_side, frontend_side) = UnixStream::pair().expect("UnixStream::pair");
-        let io = build_local_socket_io(frontend_side).expect("build_local_socket_io");
+        let io =
+            build_local_socket_io(frontend_side, LEGACY_SESSION).expect("build_local_socket_io");
 
         let daemon = thread::spawn(move || {
             let mut w = daemon_side;
@@ -4041,7 +4123,7 @@ mod tests {
     fn the_pump_tells_a_goodbye_from_a_lost_socket() {
         let run = |write: fn(&mut UnixStream)| {
             let (mut daemon_side, frontend_side) = UnixStream::pair().expect("pair");
-            let io = build_local_socket_io(frontend_side).expect("io");
+            let io = build_local_socket_io(frontend_side, LEGACY_SESSION).expect("io");
             write(&mut daemon_side);
             drop(daemon_side);
             let mut frontend = FakeFrontend::default();
@@ -4235,11 +4317,13 @@ mod tests {
         // wake the reader. If we let the daemon side close, the reader
         // sees EOF naturally and we'd be testing nothing.
         let (_daemon_side, frontend_side) = UnixStream::pair().expect("UnixStream::pair");
-        let io = build_local_socket_io(frontend_side).expect("build_local_socket_io");
+        let io =
+            build_local_socket_io(frontend_side, LEGACY_SESSION).expect("build_local_socket_io");
         let AttachIo {
             reader,
             writer: _writer,
             kick,
+            ..
         } = io;
 
         let entered = Arc::new(AtomicBool::new(false));
@@ -4638,7 +4722,7 @@ mod tests {
         });
         let io = AttachIo {
             writer: Box::new(BrokenWriter),
-            ..build_local_socket_io(frontend_side).expect("io")
+            ..build_local_socket_io(frontend_side, LEGACY_SESSION).expect("io")
         };
         let mut frontend = ScriptedFrontend::default();
         frontend.events.push_back(press(KeyCode::Char('a')));
@@ -4663,7 +4747,7 @@ mod tests {
     #[test]
     fn a_paste_past_a_frame_ends_the_session_as_it_says() {
         let (_daemon_side, frontend_side) = UnixStream::pair().expect("pair");
-        let io = build_local_socket_io(frontend_side).expect("io");
+        let io = build_local_socket_io(frontend_side, LEGACY_SESSION).expect("io");
         let mut frontend = ScriptedFrontend::default();
         frontend
             .events
@@ -4724,6 +4808,7 @@ mod tests {
                 *seen.lock().expect("seen") = Some((record.dropped, record.bytes.clone()));
                 let _ = frontend_side.shutdown(Shutdown::Both);
             }),
+            session_version: LEGACY_SESSION,
         };
         let mut frontend = ScriptedFrontend::default();
         frontend.events.push_back(press(KeyCode::F(12)));
@@ -4792,6 +4877,7 @@ mod tests {
                 let _ = frontend_side.shutdown(Shutdown::Both);
                 release(&kicked);
             }),
+            session_version: LEGACY_SESSION,
         };
         let mut frontend = ScriptedFrontend::default();
         frontend.events.extend([

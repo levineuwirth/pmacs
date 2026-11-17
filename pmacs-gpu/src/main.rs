@@ -5582,13 +5582,24 @@ struct State {
     /// keys round-trip so minibuffer and prefix commands keep their
     /// daemon-owned semantics.
     dispatch_idle: bool,
-    /// E10z.1 --- how many of this session's events the daemon says its
+    /// E10z --- how many of this session's events the daemon says its
     /// dispatcher has handled (`InstanceMessage::InputHandled`, v28): 0
     /// until the first count arrives, on a session below the version,
     /// and again when a new session's client is installed, whose count
-    /// starts over. Held and reported by the probe; the optimistic gate
-    /// does not read it yet.
+    /// starts over.
     input_handled: u64,
+    /// E10z.2 --- the count the daemon must reach before a `CursorByte`
+    /// makes the cursor authoritative again: the events this session had
+    /// queued when it last forwarded one the daemon must answer (a key it
+    /// does not apply, text input, a pointer gesture). A `CursorByte` the
+    /// daemon wrote before it read that event no longer re-grounds the
+    /// caret (#470), and an optimistic edit raises nothing, so typing
+    /// keeps its pace. Read only when [`Self::answer_wire`] holds.
+    answer_needed: u64,
+    /// E10z.2 --- whether this session negotiated
+    /// [`pmacs_protocol::INPUT_HANDLED_MIN_VERSION`]: below it no count
+    /// comes and the cursor is fresh on any `CursorByte`, as before.
+    answer_wire: bool,
     /// OS clipboard handle (Q#CM6), created lazily on first cut / copy /
     /// paste. `None` until first use or when the platform clipboard is
     /// unavailable (headless / unsupported compositor) --- clipboard ops
@@ -6588,7 +6599,7 @@ impl App {
     /// Ship a Pointer event if the daemon speaks protocol v5+ — the
     /// Q#M1 frontend-side gate (an older instance cannot decode the
     /// variant and would drop the connection).
-    fn send_pointer(&self, buffer_id: BufferId, byte: u64, kind: PointerKind, mods: Modifiers) {
+    fn send_pointer(&mut self, buffer_id: BufferId, byte: u64, kind: PointerKind, mods: Modifiers) {
         let Some(client) = self.attach_client.as_ref() else {
             return;
         };
@@ -6613,6 +6624,7 @@ impl App {
         if let Err(e) = client.send_pointer(buffer_id, byte, kind, mods) {
             eprintln!("pmacs-gpu: send_pointer failed: {e}");
         }
+        self.note_forwarded_input();
     }
 
     /// Ship a terminal-cell gesture if the daemon speaks v19+.
@@ -7146,6 +7158,7 @@ impl App {
                 };
                 state.release_timed_out_floor();
                 let ready_keys = state.take_ready_round_trip_keys();
+                let flushed = !ready_keys.is_empty();
                 if let Some(client) = self.attach_client.as_ref() {
                     for (key, mods) in ready_keys {
                         if debug_input() {
@@ -7155,6 +7168,9 @@ impl App {
                             eprintln!("pmacs-gpu: flush send_key failed: {e}");
                         }
                     }
+                }
+                if flushed {
+                    self.note_forwarded_input();
                 }
             }
             AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
@@ -8292,6 +8308,7 @@ impl App {
             if let Err(e) = client.send_text_input(text) {
                 eprintln!("pmacs-gpu: send_text_input failed: {e}");
             }
+            self.note_forwarded_input();
             return;
         }
 
@@ -8307,6 +8324,7 @@ impl App {
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
             }
+            self.note_forwarded_input();
             return;
         }
 
@@ -8328,6 +8346,7 @@ impl App {
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
             }
+            self.note_forwarded_input();
             return;
         }
 
@@ -8393,6 +8412,16 @@ impl App {
         }
         if let Err(e) = client.send_key(pkey, pmods) {
             eprintln!("pmacs-gpu: send_key failed: {e}");
+        }
+        self.note_forwarded_input();
+    }
+
+    /// E10z.2 --- after an event the daemon must answer has been queued:
+    /// the cursor waits for the daemon's count to reach what is queued now.
+    fn note_forwarded_input(&mut self) {
+        let sent = self.attach_client.as_ref().map(AttachClient::events_sent);
+        if let (Some(sent), Some(state)) = (sent, self.state.as_mut()) {
+            state.await_answer(sent);
         }
     }
 }
@@ -12600,6 +12629,8 @@ impl State {
             local_frontend_id: None,
             dispatch_idle: false,
             input_handled: 0,
+            answer_needed: 0,
+            answer_wire: false,
             clipboard: None,
             cursor_fresh: false,
             optimistic_cursor_floor: None,
@@ -12706,9 +12737,10 @@ impl State {
 
     fn set_frontend_id(&mut self, frontend_id: FrontendId) {
         self.local_frontend_id = Some(frontend_id);
-        // E10z.1 --- a new id is a new session, and the daemon counts
-        // each session's input from its own start.
+        // E10z --- a new id is a new session, and the daemon counts each
+        // session's input from its own start, as its client does.
         self.input_handled = 0;
+        self.answer_needed = 0;
         if let Some(doc) = self.loro_doc.as_ref()
             && let Err(e) = doc.set_peer_id(frontend_id.0)
         {
@@ -12920,6 +12952,18 @@ impl State {
 
     fn mark_cursor_stale_after_round_trip(&mut self) {
         self.cursor_fresh = false;
+    }
+
+    /// E10z.2 --- record that this session had queued `sent` events when it
+    /// last forwarded one the daemon must answer.
+    fn await_answer(&mut self, sent: u64) {
+        self.answer_needed = sent;
+    }
+
+    /// E10z.2 --- whether the daemon has said it handled everything up to
+    /// the event this window last forwarded; always, below v28.
+    fn forwarded_input_answered(&self) -> bool {
+        !self.answer_wire || self.input_handled >= self.answer_needed
     }
 
     fn apply_loro_text_delta_batches(
@@ -13652,7 +13696,11 @@ impl State {
                 };
                 let moved = self.own_cursor != Some(arrived);
                 self.own_cursor = Some(arrived);
-                self.cursor_fresh = self.current_buffer_id == Some(buffer_id);
+                // E10z.2 --- and only once the daemon has answered what
+                // this window last forwarded: a cursor from before it read
+                // that event moves the caret and leaves it unconfirmed.
+                self.cursor_fresh =
+                    self.current_buffer_id == Some(buffer_id) && self.forwarded_input_answered();
                 // Session S1 — keep the caret on screen (Q#S2). When the
                 // cursor leaves the visible slice (arrows past an edge,
                 // PageUp/Down), scroll to follow it, re-shape the new
@@ -14309,6 +14357,7 @@ impl State {
         // the probes), so the apply and paint gates cannot disagree with
         // the daemon's send filter about what this session negotiated.
         self.popup_wire = session_protocol_version >= POPUP_MIN_VERSION;
+        self.answer_wire = session_protocol_version >= pmacs_protocol::INPUT_HANDLED_MIN_VERSION;
         if !self.popup_wire {
             self.popup = None;
         }
