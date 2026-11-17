@@ -1957,7 +1957,9 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// has settled; the report says what the popup was at each `report:`
 /// step, and the probe asserts nothing.
 ///
-/// Steps: `key:<k>` presses one key ([`press_probe_key`]); `ask:<k>`
+/// Steps: `key:<k>` presses one key ([`press_probe_key`]) and drains
+/// events for 250 ms; `tap:<k>` presses one key and goes straight on
+/// (E10z.2); `ask:<k>`
 /// presses `C-c <k>` every half second until a popup is paintable (the
 /// server answers only once it has initialized); `closed` waits for the
 /// popup to go; `quiet:<ms>` drains events that long; `wheel:<n>` turns
@@ -1976,7 +1978,8 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// writes the snapshots applied so far, the buffer shown, the band's name
 /// for it and the time since attach (E10t); `answer:<label>` writes how
 /// many of the session's events the daemon has said it handled, as the
-/// window holds it (E10z.1); `frame:<label>` writes the composited frame,
+/// window holds it (E10z.1), and whether the minibuffer is open (E10z.2);
+/// `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
 /// times out is reported as `step.<i>=timeout` and the script goes on.
@@ -2047,6 +2050,13 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
             "key" => {
                 press_probe_key(&mut app, arg);
                 pump_probe_events(&mut app, &rx, settle, |_| false)
+            }
+            "tap" => {
+                // E10z.2: one key and no settle, so the next step's key
+                // follows it by what that step waits (`quiet:<ms>`), as a
+                // hand's does, and not by `key:`'s 250 ms.
+                press_probe_key(&mut app, arg);
+                Ok(true)
             }
             "ask" => {
                 let mut got = Ok(false);
@@ -2141,6 +2151,7 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                 // has said it handled, as the window holds it.
                 if let Some(state) = app.state.as_ref() {
                     let _ = writeln!(out, "{arg}.input_handled={}", state.input_handled);
+                    let _ = writeln!(out, "{arg}.minibuffer_open={}", state.minibuffer.is_some());
                 }
                 Ok(true)
             }
