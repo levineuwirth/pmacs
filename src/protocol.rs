@@ -2194,8 +2194,9 @@ mod tests {
         assert!(pmacs_protocol::is_supported_protocol_version(25));
         assert!(pmacs_protocol::is_supported_protocol_version(26));
         assert!(pmacs_protocol::is_supported_protocol_version(27));
+        assert!(pmacs_protocol::is_supported_protocol_version(28));
         assert!(
-            !pmacs_protocol::is_supported_protocol_version(28),
+            !pmacs_protocol::is_supported_protocol_version(29),
             "an unreleased version must not negotiate"
         );
         // The family boundary is stated against a LITERAL, not against
