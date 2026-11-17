@@ -18550,6 +18550,84 @@ Tally (main-fuzz-726a35a): 2 = 2 + 0.
 
 So, at E10u's early checkpoint: `main` is `726a35a`, green in the registry-push shape; its last code-bearing commit, `ca7bd55`, is green at the first attempt and is the base this phase measured #470 on. No row's count moves here.
 
+### E10z's early checkpoint: `main` green at `d8fd793`; PR #518 at `ffeaad7`
+
+Recorded 2026-11-17 at E10z's early checkpoint, C10z.1. Each run below was read from the jobs endpoint by conclusion, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `d8fd793`, E10u's early-checkpoint record, were owed by that record. No run was dispatched or rerun.
+
+#### `main` at `d8fd793`, E10u's early-checkpoint record: green
+
+`CI` 43854774057 at `d8fd793`, attempt 1 of 1, `push`, created 2026-11-16T11:06:24Z and completed 11:08:51Z (the API's `updated_at`): `success`, the registry-push shape.
+
+Tally (main-ci-d8fd793): 15 = 6 + 9.
+
+Tally (main-ci-d8fd793-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 133256088916 | success |
+| Changed paths | 133256089283 | success |
+| Lint (lua54) | 133256089332 | success |
+| Commit attribution (D9) | 133256089381 | success |
+| Format | 133256089547 | success |
+| Docs consistency | 133256219948 | success |
+| Test (matrix) | 133256221734 | skipped |
+| Perf budgets (debug) | 133256221883 | skipped |
+| M1 Acceptance Gates | 133256222088 | skipped |
+| GPU Render (headless) | 133256222130 | skipped |
+| Test (crdt) | 133256222410 | skipped |
+| M5 Perf Gates | 133256222545 | skipped |
+| M4 Perf Gates | 133256222707 | skipped |
+| M6 Perf Gates | 133256222852 | skipped |
+| M10 Perf Gates (crdt) | 133256223179 | skipped |
+
+Tally (main-ci-d8fd793-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-d8fd793-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 43854774134 at `d8fd793`, attempt 1 of 1, `push`, created 11:06:24Z and completed 11:06:46Z: `success`, `Grammar fuzz` 133256089140 and `Grammar fuzz (asan-strict)` 133256089157.
+
+Tally (main-fuzz-d8fd793): 2 = 2 + 0.
+
+#### PR #518 at `ffeaad7`, E10z.1: green
+
+`CI` 44092757289 at `ffeaad7`, attempt 1 of 1, `pull_request` (a merge into `d8fd793`), created 2026-11-17T13:26:32Z and completed 14:17:02Z: `success`. Each test leg was read from its own log, every `running` line paired with its own `test result: ok` and none `FAILED`: the two macOS legs 235 each, 5,669 / 0 / 80, on `macos-26-arm64` 20261112.0504.1; `Test (ubuntu-latest / luajit)` and `/ lua54` 234 each, 5,728 / 0 / 88, and `Test (ubuntu-latest / luajit, no crdt)` 234, 5,035 / 0 / 72, on `ubuntu-24.04` (20261111.127.1 for the first two, 20261111.370.1 for the third); `Test (crdt)` 233, 5,669 / 0 / 88, on `ubuntu-24.04` 20261111.370.1. #514's row, `a_write_that_blocks_holds_no_key_and_the_kick_wakes_it`, read `ok` on all six legs, so its count does not move.
+
+Tally (pr518-ci-ffeaad7): 19 = 18 + 1.
+
+Tally (pr518-ci-ffeaad7-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 134071877025 | success |
+| Format | 134071877350 | success |
+| Commit attribution (D9) | 134071877409 | success |
+| Changed paths | 134071877470 | success |
+| Lint (luajit) | 134071877599 | success |
+| GPU Render (headless) | 134072004722 | success |
+| M4 Perf Gates | 134072004781 | success |
+| Test (crdt) | 134072004844 | success |
+| M10 Perf Gates (crdt) | 134072004874 | success |
+| M6 Perf Gates | 134072004924 | success |
+| Perf budgets (debug) | 134072004931 | success |
+| M1 Acceptance Gates | 134072004948 | success |
+| Test (macos-latest / luajit) | 134072005008 | success |
+| M5 Perf Gates | 134072005029 | success |
+| Test (macos-latest / lua54) | 134072005055 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 134072005095 | success |
+| Test (ubuntu-latest / luajit) | 134072005104 | success |
+| Test (ubuntu-latest / lua54) | 134072005112 | success |
+| Docs consistency | 134072007363 | skipped |
+
+Tally (pr518-ci-ffeaad7-success): 18 rows of the table above with `result` = `success`.
+Tally (pr518-ci-ffeaad7-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44092757159 at `ffeaad7`, attempt 1 of 1, `pull_request`, created 13:26:32Z and completed 13:26:54Z: `success`, `Grammar fuzz` 134071876296 and `Grammar fuzz (asan-strict)` 134071876690.
+
+Tally (pr518-fuzz-ffeaad7): 2 = 2 + 0.
+
+Local gate samples, listed and not tallied: `scripts/gate --protocol` at `8dd7533` (`20261117T123510Z-3037623`) failed on two rows, `protocol::tests::the_supported_set_ends_at_the_current_wire_version` in both sweeps and `e8_3_the_gpu_shows_scrolls_keeps_on_click_and_closes_on_motion_the_hover` in the default sweep, each a version tripwire the bump owed and `ffeaad7` moved, no intermittent; the gate at `ffeaad7` (`20261117T130113Z-3290871`) passed every stage.
+
+So, at E10z's early checkpoint: `main` is `d8fd793`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is green at its first attempt. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
