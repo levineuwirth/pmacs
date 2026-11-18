@@ -18628,6 +18628,84 @@ Local gate samples, listed and not tallied: `scripts/gate --protocol` at `8dd753
 
 So, at E10z's early checkpoint: `main` is `d8fd793`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is green at its first attempt. No row's count moves here.
 
+### E10z's checkpoint C10z: `main` green at `b19904c`; PR #518 green at `b66a66b`
+
+Recorded 2026-11-18 at E10z's checkpoint, C10z. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `b19904c`, E10z's early-checkpoint record, were owed by that record. No run was dispatched or rerun.
+
+#### `main` at `b19904c`, E10z's early-checkpoint record: green
+
+`CI` 44102698053 at `b19904c`, attempt 1 of 1, `push`, created 2026-11-17T14:24:07Z and completed 14:26:27Z: `success`, the registry-push shape.
+
+Tally (main-ci-b19904c): 15 = 6 + 9.
+
+Tally (main-ci-b19904c-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 134106658780 | success |
+| Changed paths | 134106659212 | success |
+| Lint (luajit) | 134106659234 | success |
+| Commit attribution (D9) | 134106659297 | success |
+| Lint (lua54) | 134106659937 | success |
+| Docs consistency | 134106830233 | success |
+| M5 Perf Gates | 134106832473 | skipped |
+| M4 Perf Gates | 134106833067 | skipped |
+| M1 Acceptance Gates | 134106833105 | skipped |
+| GPU Render (headless) | 134106833134 | skipped |
+| M6 Perf Gates | 134106833653 | skipped |
+| Test (crdt) | 134106833788 | skipped |
+| Test (matrix) | 134106834159 | skipped |
+| Perf budgets (debug) | 134106834303 | skipped |
+| M10 Perf Gates (crdt) | 134106834948 | skipped |
+
+Tally (main-ci-b19904c-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-b19904c-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44102698065 at `b19904c`, attempt 1 of 1, `push`, created 14:24:07Z and completed 14:24:23Z: `success`, `Grammar fuzz` 134106659657 and `Grammar fuzz (asan-strict)` 134106659063.
+
+Tally (main-fuzz-b19904c): 2 = 2 + 0.
+
+#### PR #518 at `b66a66b`, E10z.2 and E10z.3: green
+
+`CI` 44203348987 at `b66a66b`, attempt 1 of 1, `pull_request` (a merge into `b19904c`), created 2026-11-17T23:54:09Z and completed 2026-11-18T00:51:12Z: `success`. Each test leg was read from its own log, every `running` line paired with its own `test result: ok` and none `FAILED`: the two macOS legs 236 each, 5,683 / 0 / 80, on `macos-26-arm64` 20261102.0473.1; `Test (ubuntu-latest / luajit)` and `/ lua54` 235 each, 5,742 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 235, 5,035 / 0 / 72; `Test (crdt)` 234, 5,683 / 0 / 88, the Ubuntu legs on `ubuntu-24.04` 20261111.127.1 or 20261111.370.1. #514's row read `ok` on all six legs, so its count does not move.
+
+Tally (pr518-ci-b66a66b): 19 = 18 + 1.
+
+Tally (pr518-ci-b66a66b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 134462855534 | success |
+| Lint (lua54) | 134462855893 | success |
+| Lint (luajit) | 134462855905 | success |
+| Format | 134462856008 | success |
+| Changed paths | 134462856011 | success |
+| GPU Render (headless) | 134463010038 | success |
+| M1 Acceptance Gates | 134463010113 | success |
+| Perf budgets (debug) | 134463010118 | success |
+| M4 Perf Gates | 134463010125 | success |
+| M6 Perf Gates | 134463010138 | success |
+| M10 Perf Gates (crdt) | 134463010205 | success |
+| Test (macos-latest / luajit) | 134463010226 | success |
+| Test (macos-latest / lua54) | 134463010237 | success |
+| Test (ubuntu-latest / luajit) | 134463010278 | success |
+| Test (ubuntu-latest / lua54) | 134463010298 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 134463010303 | success |
+| Test (crdt) | 134463010377 | success |
+| M5 Perf Gates | 134463010404 | success |
+| Docs consistency | 134463012773 | skipped |
+
+Tally (pr518-ci-b66a66b-success): 18 rows of the table above with `result` = `success`.
+Tally (pr518-ci-b66a66b-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44203349035 at `b66a66b`, attempt 1 of 1, `pull_request`, created 23:54:09Z and completed 23:54:32Z: `success`, `Grammar fuzz` 134462855916 and `Grammar fuzz (asan-strict)` 134462855472.
+
+Tally (pr518-fuzz-b66a66b): 2 = 2 + 0.
+
+Local gate samples, listed and not tallied: `scripts/gate --protocol` at `b66a66b` (`20261117T232736Z-93474`) passed every stage. Its bites and plant are the handoff's.
+
+So, at C10z: `main` is `b19904c`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is green at its first attempt at `b66a66b`. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
