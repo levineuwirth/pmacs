@@ -2145,6 +2145,16 @@ pub(crate) fn run_attach_pair(
                         .and_then(|b| buffer_mirror.cursor_at_end_of_line_safe_for_delete_back(b))
                         == Some(true);
 
+                    // E10z fix round 1 --- no further ahead of the daemon's
+                    // answer than [`OPTIMISTIC_RUN_AHEAD`]: past it the key
+                    // round-trips, as after any key the pump forwards.
+                    #[cfg(feature = "crdt")]
+                    if answer_wire
+                        && events_sent.saturating_sub(answered) >= OPTIMISTIC_RUN_AHEAD
+                        && let Some(active_buf) = buffer_mirror.active_buffer()
+                    {
+                        buffer_mirror.mark_cursor_stale(active_buf);
+                    }
                     let frontend_event = crate::optimistic::frontend_event_for_keystroke(
                         &mut buffer_mirror,
                         assigned_id,
@@ -2344,6 +2354,18 @@ fn is_typed(ev: &Event) -> bool {
         Event::Resize(..) | Event::FocusGained | Event::FocusLost => false,
     }
 }
+
+/// E10z fix round 1 --- how far the optimistic path may run ahead of the daemon's answer at
+/// v28: with this many events unanswered, the next key goes as a key, and the keys after it
+/// wait for the answer as after any key the pump forwards. Over a link a word typed faster
+/// than the round trip keeps its pace (a character every 60 ms over 100 ms each way has four
+/// or five in flight), while at a daemon that has stopped answering the queue holds at most
+/// this many ops, which the daemon, once it resumes, takes far more slowly than the keys
+/// behind them: about 30 a second, measured 2026-11-18, where 6,000 letters queued as ops
+/// took minutes and kept `F12` behind them. The bound and its value are the owner's ruling
+/// of that day.
+#[cfg(feature = "crdt")]
+const OPTIMISTIC_RUN_AHEAD: u64 = 16;
 
 /// Whether a forwarded `ev` is one the next key waits on the daemon's
 /// answer for (E10z): anything that can move the caret, change the buffer

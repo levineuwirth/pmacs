@@ -1089,6 +1089,52 @@ fn e10z_r1_a_sentence_typed_beside_a_moving_pointer_reads_right_on_the_pane() {
     );
 }
 
+/// The fix round's run-ahead bound (the owner's ruling of 2026-11-18): with
+/// the daemon's read held from the first of 24 letters, typed 20 ms apart,
+/// the first 16 go as ops and the rest as keys, so a daemon that stops
+/// answering is owed at most 16 ops; and once it has answered them, a
+/// letter goes as an op again, so nothing is stranded. At `3805ec0`, with
+/// no bound, all 24 went as ops (and E10r's `r2` and `h2`, 6,000 letters at
+/// a stopped daemon, failed on the minutes the daemon took over the ops).
+#[test]
+fn e10z_r1_optimistic_typing_runs_ahead_of_the_answer_by_at_most_16() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    proxy.hold_from(
+        |e| matches!(e, FrontendEvent::CrdtOp { .. }),
+        Duration::from_millis(1500),
+    );
+    let mark = proxy.mark();
+    for c in "abcdefghijklmnopqrstuvwx".chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let sent = proxy.wait_sent(mark, 24, "24 letters");
+    let ops = sent[..24].iter().take_while(|s| **s == Sent::Op).count();
+    let rest_keys = sent[ops..24].iter().all(|s| matches!(s, Sent::Key(..)));
+    assert!(
+        ops == 16 && rest_keys,
+        "16 letters as ops and then keys while the daemon had answered none: {:?}",
+        &sent[..24]
+    );
+    tui.wait_for(PATIENCE, "all 24 letters", &|t| {
+        buffer_text(t)
+            .lines()
+            .any(|l| l.trim_end().ends_with(" abcdefghijklmnopqrstuvwx"))
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let mark = proxy.mark();
+    tui.write(b"y");
+    let sent = proxy.wait_sent(mark, 1, "y");
+    assert_eq!(
+        sent[0],
+        Sent::Op,
+        "once answered, a letter goes as an op again"
+    );
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the
