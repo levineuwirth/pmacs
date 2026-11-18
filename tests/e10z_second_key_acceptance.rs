@@ -849,6 +849,176 @@ fn e10z_r1_the_gpu_window_holds_a_key_typed_after_a_panel_click() {
     );
 }
 
+/// Review 1's Medium 2 (a): over a link slower than the hands, a character
+/// typed 100 ms after a buttonless pointer motion goes as an op, as it did
+/// at the base (`d8fd793`): a motion moves no caret and flips nothing, so
+/// it is not something the next key waits for. At `b66a66b` every one went
+/// as a key, the pump raising what it needs after every forwarded frame
+/// (review 1: 0 of 10 over the link, 10 of 10 at the base and locally). A
+/// regression row: it passes at the base. At review 1's 50 ms the base
+/// failed 2 of 10 here, the gap the base pump's 50 ms poll, which decided a
+/// key before reading the daemon's re-grounding cursor whenever the key
+/// came before the poll ran out; 100 ms is past the poll and well inside
+/// the link's 200 ms round trip.
+#[test]
+fn e10z_r1_text_after_a_pointer_motion_over_a_link_stays_optimistic() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mut phase = Phase::new();
+    let mut late = Vec::new();
+    for trial in 0..10u16 {
+        // everything before the motion answered
+        std::thread::sleep(Duration::from_millis(600));
+        phase.wait(60);
+        let mark = proxy.mark();
+        // SGR 35: a motion with no button held, over the buffer
+        tui.write(format!("\x1b[<35;{};5M", 30 + trial % 5).as_bytes());
+        std::thread::sleep(Duration::from_millis(100));
+        tui.write(b"x");
+        let sent = proxy.wait_sent(mark, 2, "a motion, then x");
+        if sent[..2] != [Sent::Mouse, Sent::Op] {
+            late.push(format!("trial {trial}: {:?}", &sent[..2]));
+        }
+    }
+    assert!(
+        late.is_empty(),
+        "a character after a pointer motion went as a key over the link: {late:#?}"
+    );
+}
+
+/// How many of the characters of each word typed one every `gap` went as
+/// ops, over `tui`, each word on a fresh line, everything before it
+/// answered; and the words the screen shows wrong.
+fn type_words(
+    tui: &mut ScreenTui,
+    proxy: &Proxy,
+    words: &[&str],
+    gap: Duration,
+) -> (usize, usize, Vec<String>) {
+    let mut phase = Phase::new();
+    let (mut ops, mut chars, mut wrong) = (0, 0, Vec::new());
+    for word in words {
+        std::thread::sleep(Duration::from_millis(800));
+        phase.wait(60);
+        let mark = proxy.mark();
+        for c in word.chars() {
+            tui.write(c.to_string().as_bytes());
+            std::thread::sleep(gap);
+        }
+        let sent = proxy.wait_sent(mark, word.len(), word);
+        ops += sent[..word.len()]
+            .iter()
+            .filter(|s| **s == Sent::Op)
+            .count();
+        chars += word.len();
+        let shown = tui
+            .watch_for(Duration::from_secs(5), &|t| {
+                buffer_text(t)
+                    .lines()
+                    .any(|l| l.trim_end().ends_with(&format!(" {word}")))
+            })
+            .is_some();
+        if !shown {
+            wrong.push(format!("{word}: {}", buffer_text(tui)));
+        }
+        tui.write(b"\r");
+    }
+    (ops, chars, wrong)
+}
+
+/// Review 1's Medium 2 (b): over a link, 100 ms each way, a word typed a
+/// character every 60 ms, each on a fresh line, keeps its optimistic pace:
+/// at least 27 of its 30 characters go as ops, and every word reads right.
+/// At `b66a66b` 3 of 30 went as ops (review 1), the first of each word: the
+/// mirror re-grounded on a `CursorByte` older than its own ops, behind the
+/// character just typed, and the next fell back to a key that the rest
+/// then waited on; at the base (`d8fd793`) 9 of 30. The bound is the fix
+/// round's: 30 of 30 in each of six runs with the fix, room left for three
+/// to go as keys on a loaded machine.
+#[test]
+fn e10z_r1_typing_over_a_link_keeps_its_optimistic_pace() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let words = ["hello", "there", "quick", "brown", "foxes", "jumps"];
+    let (ops, chars, wrong) = type_words(&mut tui, &proxy, &words, Duration::from_millis(60));
+    eprintln!("e10z_r1 typing over the link at 60 ms: {ops} of {chars} characters as ops");
+    assert!(
+        wrong.is_empty(),
+        "every word reads right over the link: {wrong:#?}"
+    );
+    assert!(
+        ops >= 27,
+        "{ops} of {chars} characters typed 60 ms apart over the link went as ops; \
+         at least 27 must"
+    );
+}
+
+/// E10z's paste on the terminal (D47 counts it), and what review 1's
+/// Medium 2 (b) does after one: with the daemon's read of a bracketed
+/// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the
+/// line reads `PQx`. A paste is not an op the mirror applied, so a
+/// `CursorByte` read before the answer covers it re-grounds the mirror and
+/// leaves it stale; the mirror keeps no caret across it. At the base
+/// (`d8fd793`) `x` went as an op at the caret from before the paste.
+#[test]
+fn e10z_r1_a_key_typed_after_a_held_paste_goes_as_a_key() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    proxy.hold_from(|e| matches!(e, FrontendEvent::Paste { .. }), HOLD);
+    let mark = proxy.mark();
+    let from = Instant::now();
+    tui.write(b"\x1b[200~PQ\x1b[201~");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.write(b"x");
+    let sent = proxy.wait_sent(mark, 2, "the paste and `x`");
+    assert_eq!(
+        sent[..2].to_vec(),
+        vec![Sent::Other("Paste".to_owned()), plain('x')],
+        "`x` typed while the daemon had not read the paste must go as a key; what passed:\n{}",
+        proxy.timeline(from)
+    );
+    tui.wait_for(PATIENCE, "`PQx`", &|t| {
+        buffer_text(t)
+            .lines()
+            .any(|l| l.trim_end().ends_with(" PQx"))
+    });
+}
+
+/// What review 1's Medium 2 (b) does after a resize: with the daemon's read
+/// of a terminal resize held 300 ms, `x` typed 150 ms after it goes as a
+/// key. A resize is not an op the mirror applied and raises the answer as
+/// a key does, so the mirror keeps no caret across it, and the next key
+/// waits for the daemon. At the base (`d8fd793`) `x` went as an op once a
+/// tick's `CursorByte` had re-grounded the mirror.
+#[test]
+fn e10z_r1_a_key_typed_after_a_held_resize_goes_as_a_key() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    proxy.hold_from(|e| matches!(e, FrontendEvent::Resize { .. }), HOLD);
+    let mark = proxy.mark();
+    let from = Instant::now();
+    tui.resize(ROWS, COLS - 4);
+    std::thread::sleep(Duration::from_millis(150));
+    tui.write(b"x");
+    let sent = proxy.wait_sent(mark, 2, "the resize and `x`");
+    assert_eq!(
+        sent[..2].to_vec(),
+        vec![Sent::Other("Resize".to_owned()), plain('x')],
+        "`x` typed while the daemon had not read the resize must go as a key; what passed:\n{}",
+        proxy.timeline(from)
+    );
+}
+
 /// Guard, E10z.2: after a motion key the daemon has answered, text goes as
 /// ops again, every character, read by count, so that the fix cannot be to
 /// round-trip everything. Passes at the base and after.

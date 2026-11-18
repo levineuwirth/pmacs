@@ -1800,6 +1800,16 @@ pub(crate) fn run_attach_pair(
     let mut answered: u64 = 0;
     #[cfg(feature = "crdt")]
     let mut answer_needed: u64 = 0;
+    // E10z fix round 1 --- the count at the last event on the wire that is
+    // not an op the mirror applied: a key, a click, a paste, a resize, a
+    // pointer motion or a focus change. While the daemon's answer is short
+    // of what this pump has sent but covers that event, everything it has
+    // not answered is the mirror's own text, so a `CursorByte` read then
+    // describes the buffer before some of it and the mirror keeps its own
+    // caret (review 1's Medium 2 (b)); once the answer covers everything,
+    // the cursor re-grounds as before.
+    #[cfg(feature = "crdt")]
+    let mut last_unapplied: u64 = 0;
     // E10z.2 --- a terminal event read during the poll's wait waits here
     // for one more turn of the loop, so that what the daemon sent
     // meanwhile is read before the event is decided (#470's second
@@ -1868,12 +1878,25 @@ pub(crate) fn run_attach_pair(
                         // before generating a local CrdtOp; this
                         // keeps that lookup current. Convert wire
                         // u64 → usize for the loro API.
-                        buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
-                        // E10z.2 --- a cursor from before the daemon
-                        // read what this pump last forwarded moves the
-                        // mirror's cursor and leaves it stale.
-                        if answer_wire && answered < answer_needed {
-                            buffer_mirror.mark_cursor_stale(buffer_id);
+                        //
+                        // E10z fix round 1 --- at v28, a cursor read while
+                        // the daemon has yet to answer only the mirror's own
+                        // ops, in the buffer they went to, is older than
+                        // the mirror's, which is kept; any staleness a
+                        // remote op left stays until the answer covers.
+                        let keeps_own_caret = answer_wire
+                            && answered < events_sent
+                            && answered >= last_unapplied
+                            && buffer_mirror.active_buffer() == Some(buffer_id)
+                            && buffer_mirror.cursor_byte_pos(buffer_id).is_some();
+                        if !keeps_own_caret {
+                            buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
+                            // E10z.2 --- a cursor from before the daemon
+                            // read what this pump last forwarded moves the
+                            // mirror's cursor and leaves it stale.
+                            if answer_wire && answered < answer_needed {
+                                buffer_mirror.mark_cursor_stale(buffer_id);
+                            }
                         }
                     }
                     #[cfg(feature = "crdt")]
@@ -2099,6 +2122,9 @@ pub(crate) fn run_attach_pair(
                         return lost_or_failed(e, bootstrapped);
                     }
                     events_sent += 1;
+                    if matches!(frontend_event, FrontendEvent::Key(_)) {
+                        last_unapplied = events_sent;
+                    }
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command
                     // pipeline may move the cursor in ways the mirror
@@ -2163,10 +2189,18 @@ pub(crate) fn run_attach_pair(
                 // A key release writes nothing, and `push` drops an empty
                 // frame: only a frame on the wire is an event the daemon
                 // will count.
+                //
+                // E10z fix round 1 --- and only an event that can move the
+                // caret or flip the dispatcher is one the next key waits
+                // for: a pointer motion and a focus change are neither
+                // (review 1's Medium 2 (a)).
                 #[cfg(feature = "crdt")]
                 if !frame.is_empty() {
                     events_sent += 1;
-                    answer_needed = events_sent;
+                    last_unapplied = events_sent;
+                    if awaits_answer(&ev) {
+                        answer_needed = events_sent;
+                    }
                 }
                 writer.push(frame);
             }
@@ -2181,8 +2215,16 @@ pub(crate) fn run_attach_pair(
             // active buffer's cursor stale so subsequent
             // keystrokes round-trip until the daemon's next
             // `CursorByte` re-grounds the mirror.
+            //
+            // E10z fix round 1 --- at v28 that is the block's written
+            // scope again: `45be65b` marked inside `if !optimistic_handled`,
+            // and `d3fa632`'s let-chain sweep moved the mark out of it, so
+            // since then an op the mirror applied marked its own caret stale
+            // too. Below v28 it stays as it is.
             #[cfg(feature = "crdt")]
-            if let Some(active_buf) = buffer_mirror.active_buffer() {
+            if (!optimistic_handled || !answer_wire)
+                && let Some(active_buf) = buffer_mirror.active_buffer()
+            {
                 buffer_mirror.mark_cursor_stale(active_buf);
             }
         }
@@ -2268,6 +2310,22 @@ fn is_typed(ev: &Event) -> bool {
             MouseEventKind::Moved | MouseEventKind::Up(_) | MouseEventKind::Drag(_)
         ),
         Event::Resize(..) | Event::FocusGained | Event::FocusLost => false,
+    }
+}
+
+/// Whether a forwarded `ev` is one the next key waits on the daemon's
+/// answer for (E10z): anything that can move the caret, change the buffer
+/// or flip the dispatcher. A pointer motion with no button held, which
+/// crossterm's any-event tracking reports as the pointer crosses the pane,
+/// and a focus change are neither (`dispatch_mouse` ignores the one; the
+/// other only dims the caret), so they raise nothing (E10z fix round 1).
+#[cfg(feature = "crdt")]
+fn awaits_answer(ev: &Event) -> bool {
+    use crossterm::event::MouseEventKind;
+    match ev {
+        Event::Mouse(mouse) => !matches!(mouse.kind, MouseEventKind::Moved),
+        Event::FocusGained | Event::FocusLost => false,
+        Event::Key(_) | Event::Paste(_) | Event::Resize(..) => true,
     }
 }
 
