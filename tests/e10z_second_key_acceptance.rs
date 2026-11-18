@@ -1044,6 +1044,242 @@ fn e10z_r1_a_key_typed_after_a_held_resize_goes_as_a_key() {
     );
 }
 
+/// Review 1's Low 2: `C-c l`, the chord E10u.1 (e) found and row (iii)
+/// left out: with the read of `C-c` held 300 ms, `l` 150 ms later goes as a
+/// key and `*lsp*` opens, three trials. At the base (`d8fd793`) `l` went as
+/// an op and no `*lsp*` opened (review 1's probe, 0 of 5).
+#[test]
+fn e10z_r1_c_c_l_holds_its_second_key() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    for trial in 0..3 {
+        proxy.hold_from(|e| sent_of(e) == ctrl('c'), HOLD);
+        let mark = proxy.mark();
+        tui.write(b"\x03");
+        std::thread::sleep(Duration::from_millis(150));
+        tui.write(b"l");
+        let sent = proxy.wait_sent(mark, 2, "C-c l");
+        assert_eq!(
+            sent[..2].to_vec(),
+            vec![ctrl('c'), plain('l')],
+            "trial {trial}: `l` typed while the daemon had not read `C-c` must go as a key"
+        );
+        tui.wait_for(PATIENCE, "*lsp*", &|t| t.screen_contains("*lsp*"));
+        close_lsp(&mut tui);
+    }
+}
+
+/// `q` quits `*lsp*`'s list, `C-x 1` leaves one window, and the screen
+/// settles on the buffer again.
+fn close_lsp(tui: &mut ScreenTui) {
+    tui.write(b"q");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.write(b"\x181");
+    tui.settle(
+        Duration::from_millis(300),
+        PATIENCE,
+        "`*lsp*` closed",
+        &|t| !t.screen_contains("*lsp*"),
+    );
+}
+
+/// Review 1's Low 2: the remote route at the owner's hands for more than
+/// `C-x b`. Over the `ssh` stand-in, 100 ms each way and nothing held,
+/// `C-x k`, `M-x q`, `C-s q` and `C-c l`, each second key 150 ms after the
+/// first, and `C-c l q`, each key 150 ms after the last: every key goes as
+/// a key and each prompt opens. At the base (`d8fd793`) each second key
+/// went as an op (review 1's probes, 0 of 25).
+#[test]
+fn e10z_r1_over_a_link_every_chord_holds_its_next_key() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let cases: [(&[u8], Sent, u8, &str); 4] = [
+        (b"\x18", ctrl('x'), b'k', "Kill buffer"),
+        (
+            b"\x1bx",
+            Sent::Key(Key::Char('x'), Modifiers::ALT),
+            b'q',
+            "M-x",
+        ),
+        (b"\x13", ctrl('s'), b'q', "I-search"),
+        (b"\x03", ctrl('c'), b'l', "*lsp*"),
+    ];
+    let mut wrong = Vec::new();
+    for (first, first_sent, second, needle) in cases {
+        let mark = proxy.mark();
+        tui.write(first);
+        std::thread::sleep(Duration::from_millis(150));
+        tui.write(&[second]);
+        let sent = proxy.wait_sent(mark, 2, needle);
+        let shown = tui
+            .watch_for(Duration::from_secs(5), &|t| t.screen_contains(needle))
+            .is_some();
+        if sent[..2] != [first_sent, plain(second as char)] || !shown {
+            wrong.push(format!("{needle}: sent {:?}, shown {shown}", &sent[..2]));
+        }
+        if needle == "*lsp*" && shown {
+            close_lsp(&mut tui);
+        } else {
+            cancel(&mut tui, needle);
+        }
+        if sent[1] == Sent::Op {
+            tui.write(b"\x7f");
+            tui.settle(Duration::from_millis(400), PATIENCE, "taken back", &|_| {
+                true
+            });
+        }
+    }
+    let mark = proxy.mark();
+    tui.write(b"\x03");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.write(b"l");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.write(b"q");
+    let sent = proxy.wait_sent(mark, 3, "C-c l q");
+    if sent[..3] != [ctrl('c'), plain('l'), plain('q')] {
+        wrong.push(format!("C-c l q: sent {:?}", &sent[..3]));
+    }
+    assert!(
+        wrong.is_empty(),
+        "over the link each next key must go as a key: {wrong:#?}"
+    );
+}
+
+/// Review 1's Low 2: `pmacs-gpu` for more than `C-x b`: `C-c l`, `C-s q`
+/// and `C-x k`, the first key's read held 300 ms and the second tapped 60
+/// ms after it, each in a fresh window on a fresh daemon: the second goes
+/// as a key. At the base's window (`8d09a6c`'s, the gate taken out) each
+/// went as an op (review 1's hand bite, 6 of 6 for `C-x b`, `C-c l` and
+/// `C-x k`).
+#[test]
+fn e10z_r1_the_gpu_window_holds_every_chords_next_key() {
+    let mut wrong = Vec::new();
+    for (first, second, first_sent) in [
+        ("C-c", 'l', ctrl('c')),
+        ("C-s", 'q', ctrl('s')),
+        ("C-x", 'k', ctrl('x')),
+    ] {
+        let daemon = daemon();
+        let proxy = Proxy::start(&daemon, Duration::ZERO);
+        let held = first_sent.clone();
+        proxy.hold_from(move |e| sent_of(e) == held, HOLD);
+        let Some(_facts) = gpu_script(
+            &proxy,
+            &format!("tap:{first} quiet:60 tap:{second} quiet:1500 answer:after"),
+            "e10z-r1-gpu-chord",
+        ) else {
+            return;
+        };
+        let keys: Vec<Sent> = proxy
+            .since(0)
+            .into_iter()
+            .filter(|s| matches!(s, Sent::Key(..) | Sent::Op))
+            .collect();
+        let at = keys.iter().position(|s| *s == first_sent);
+        if at.and_then(|at| keys.get(at + 1)) != Some(&plain(second)) {
+            wrong.push(format!("{first} {second}: {keys:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the window must send each second key as a key while the daemon has not read \
+         the first: {wrong:#?}"
+    );
+}
+
+/// Review 1's Low 2, the reconnect: the daemon killed and a new one
+/// started on the same socket and home, and the terminal attaching again
+/// by itself, a session whose counts start over. The first session forwards
+/// a held chord and types, so both counts have moved; in the second, text
+/// after an answered motion key still goes as ops (a count carried over
+/// would strand it), and `C-x b` with the read of `C-x` held still opens
+/// the prompt with `b` a key, three trials. At the base (`d8fd793`) the
+/// witness half fails, `b` going as an op, as in row (i).
+#[test]
+fn e10z_r1_after_a_reconnect_the_answer_starts_over() {
+    let mut daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    // The first session: a held chord, then a word.
+    proxy.hold_from(|e| sent_of(e) == ctrl('x'), HOLD);
+    tui.write(b"\x18");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.write(b"b");
+    let _ = tui.watch_for(Duration::from_secs(3), &|t| {
+        t.screen_contains("Switch to buffer")
+    });
+    cancel(&mut tui, "Switch to buffer");
+    tui.write(b"abcdef");
+    std::thread::sleep(Duration::from_millis(600));
+    let first_session = proxy.mark();
+    assert!(first_session >= 8, "the first session sent its events");
+
+    // The daemon dies; another starts on its socket, in its home.
+    let socket = daemon.socket_path().to_path_buf();
+    let pgid = i32::try_from(daemon.pid()).expect("pid");
+    nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pgid), nix::sys::signal::SIGKILL)
+        .expect("kill the daemon's group");
+    let _ = daemon.wait_for_exit();
+    let _ = std::fs::remove_file(&socket);
+    let mut second = common::daemon::spawn_daemon_process_with_env(&socket, &[]);
+    common::daemon::wait_for_socket_or_exit(&socket, second.child(), Duration::from_secs(10))
+        .expect("the second daemon listens");
+    // The pump's notice for a session on a daemon that is not the last
+    // one: the terminal has attached again, and to the second daemon.
+    tui.wait_for(
+        Duration::from_secs(40),
+        "the terminal attached again, to a new daemon",
+        &|t| t.screen_contains("new daemon"),
+    );
+    assert_eq!(
+        proxy.mark(),
+        first_session,
+        "nothing went to either daemon between the sessions"
+    );
+    tui.settle(Duration::from_secs(1), PATIENCE, "reattached", &|_| true);
+    tui.write(b"\x1b>");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.write(b"\r");
+    tui.settle(
+        Duration::from_millis(500),
+        PATIENCE,
+        "a fresh line",
+        &|_| true,
+    );
+
+    // The guard in the second session.
+    let mark = proxy.mark();
+    tui.write(b"\x05");
+    std::thread::sleep(Duration::from_millis(300));
+    for c in ["x", "y", "z"] {
+        tui.write(c.as_bytes());
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let sent = proxy.wait_sent(mark, 4, "C-e then xyz after the reconnect");
+    assert_eq!(
+        sent[..4].to_vec(),
+        vec![ctrl('e'), Sent::Op, Sent::Op, Sent::Op],
+        "after the reconnect, text after an answered motion goes as ops"
+    );
+    // The witness in the second session.
+    for trial in 0..3 {
+        proxy.hold_from(|e| sent_of(e) == ctrl('x'), HOLD);
+        let (sent, prompt) = c_x_b(&mut tui, &proxy, Some(Duration::from_millis(150)));
+        assert!(
+            sent == vec![ctrl('x'), plain('b')] && prompt,
+            "after the reconnect, trial {trial}: sent {sent:?}, prompt {prompt}"
+        );
+        cancel(&mut tui, "Switch to buffer");
+    }
+    drop(second);
+}
+
 /// Guard, E10z.2: after a motion key the daemon has answered, text goes as
 /// ops again, every character, read by count, so that the fix cannot be to
 /// round-trip everything. Passes at the base and after.
