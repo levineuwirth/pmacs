@@ -914,6 +914,40 @@ fn e10z_r1_text_after_a_pointer_motion_over_a_link_stays_optimistic() {
     );
 }
 
+/// Review 1's Medium 2 (a), its second half, found by CI's macOS luajit leg
+/// at `722f154` (the motion row above, 3 of 10 keys there): a pointer motion
+/// raised nothing, but the pump still marked the caret stale after it, so a
+/// character typed before some `CursorByte` came went as a key. A motion,
+/// or a focus change, moves no caret, so it marks nothing: twenty trials of
+/// a motion over a link and `x` 5 ms after it, every `x` an op. At `722f154`
+/// `x` went as a key whenever no cursor had arrived in those 5 ms.
+#[test]
+fn e10z_r1_a_pointer_motion_leaves_the_caret_fresh() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mut phase = Phase::new();
+    let mut late = Vec::new();
+    for trial in 0..20u16 {
+        std::thread::sleep(Duration::from_millis(400));
+        phase.wait(60);
+        let mark = proxy.mark();
+        tui.write(format!("\x1b[<35;{};5M", 30 + trial % 5).as_bytes());
+        std::thread::sleep(Duration::from_millis(5));
+        tui.write(b"x");
+        let sent = proxy.wait_sent(mark, 2, "a motion, then x");
+        if sent[..2] != [Sent::Mouse, Sent::Op] {
+            late.push(format!("trial {trial}: {:?}", &sent[..2]));
+        }
+    }
+    assert!(
+        late.is_empty(),
+        "a character 5 ms after a pointer motion went as a key: {late:#?}"
+    );
+}
+
 /// How many of the characters of each word typed one every `gap` went as
 /// ops, over `tui`, each word on a fresh line, everything before it
 /// answered; and the words the screen shows wrong.

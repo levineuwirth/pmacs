@@ -2262,9 +2262,12 @@ pub(crate) fn run_attach_pair(
             // scope again: `45be65b` marked inside `if !optimistic_handled`,
             // and `d3fa632`'s let-chain sweep moved the mark out of it, so
             // since then an op the mirror applied marked its own caret stale
-            // too. Below v28 it stays as it is.
+            // too. Nor, at v28, does a pointer motion or a focus change
+            // mark it: neither moves a caret ([`awaits_answer`]), and the
+            // mark made the next key wait for any `CursorByte` at all
+            // (CI's macOS luajit leg, `722f154`). Below v28 it stays as it is.
             #[cfg(feature = "crdt")]
-            if (!optimistic_handled || !answer_wire)
+            if (!answer_wire || (!optimistic_handled && awaits_answer(&ev)))
                 && let Some(active_buf) = buffer_mirror.active_buffer()
             {
                 buffer_mirror.mark_cursor_stale(active_buf);
