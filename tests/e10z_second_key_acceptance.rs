@@ -1070,15 +1070,45 @@ fn e10z_r1_a_sentence_typed_over_a_link_reads_right_on_the_pane() {
     );
 }
 
-/// The same sentence over the same link with the pointer moving the whole
-/// time, a buttonless motion between every two characters, reads right on
-/// the pane. The pace is not held here: a motion is not an op the mirror
-/// applied, so by Medium 2 (b) as ruled the mirror keeps no caret across
-/// one, and a cursor older than its ops re-grounds it; the row prints how
-/// many characters still went as ops. The base (`d8fd793`) misplaced
-/// letters on the pane here as without the pointer.
+/// A pointer crossing the pane as a hand moves it, measured at fix round 1's
+/// addition through `foot`, tmux and crossterm on a private headless sway:
+/// about 115 buttonless motions a second at 1000 px/s, 50 at 400 and up to
+/// 280 at 2500 (`~/build/e10z-f1/rate`). This writes a motion every 8.5 ms
+/// after `text`'s every letter, the letters `gap` apart, crossing row 4.
+fn type_beside_a_moving_pointer(tui: &mut ScreenTui, text: &str, gap: Duration, start_col: u16) {
+    let motions = (gap.as_micros() / 8_500).max(1) as u32;
+    let step = gap / motions;
+    let mut col = start_col;
+    for c in text.chars() {
+        tui.write(c.to_string().as_bytes());
+        for _ in 0..motions {
+            std::thread::sleep(step);
+            col = 2 + (col + 1) % (COLS - 4);
+            tui.write(format!("\x1b[<35;{col};4M").as_bytes());
+        }
+    }
+}
+
+/// The letters, ops or keys, among what the frontend sent.
+fn letters(sent: &[Sent]) -> Vec<Sent> {
+    sent.iter()
+        .filter(|s| matches!(s, Sent::Op | Sent::Key(..)))
+        .cloned()
+        .collect()
+}
+
+/// The owner's ruling of 2026-11-18 on fix round 1's open question: over a
+/// link, 100 ms each way, a sentence typed a letter every 60 ms with the
+/// pointer moving the whole time, at the rate a hand gives (a motion every
+/// 8.5 ms, about 7 between two letters), keeps its optimistic pace: at
+/// least 40 of its 43 letters go as ops in each of three trials, and the
+/// pane reads it right. The bound is the addition's own: 43 of 43 in every
+/// trial of its runs, room left for three on a loaded machine. At `96ba5d1`
+/// a motion stopped the mirror keeping its caret and counted toward the
+/// run-ahead bound, and the letters went as keys; at the base (`d8fd793`)
+/// the pane misplaced letters as without the pointer.
 #[test]
-fn e10z_r1_a_sentence_typed_beside_a_moving_pointer_reads_right_on_the_pane() {
+fn e10z_r1_typing_beside_a_moving_pointer_over_a_link_keeps_its_pace() {
     let daemon = daemon();
     let proxy = Proxy::start(&daemon, Duration::from_millis(100));
     let home = tempfile::tempdir().expect("home");
@@ -1089,16 +1119,17 @@ fn e10z_r1_a_sentence_typed_beside_a_moving_pointer_reads_right_on_the_pane() {
     for trial in 0..3u16 {
         std::thread::sleep(Duration::from_millis(800));
         let mark = proxy.mark();
-        for (i, c) in sentence.chars().enumerate() {
-            let col = 10 + (trial * 13 + i as u16 * 7) % 80;
-            tui.write(format!("\x1b[<35;{col};4M").as_bytes());
-            std::thread::sleep(Duration::from_millis(30));
-            tui.write(c.to_string().as_bytes());
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        let sent = proxy.wait_sent(mark, 2 * sentence.len(), "the sentence and the motions");
-        let ops = sent.iter().filter(|s| **s == Sent::Op).count();
-        eprintln!("e10z_r1 beside a moving pointer, trial {trial}: {ops} of 43 characters as ops");
+        type_beside_a_moving_pointer(&mut tui, sentence, Duration::from_millis(60), trial * 17);
+        let start = Instant::now();
+        let typed = loop {
+            let got = letters(&proxy.since(mark));
+            if got.len() >= sentence.len() || start.elapsed() > PATIENCE {
+                break got;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let ops = typed.iter().filter(|s| **s == Sent::Op).count();
+        eprintln!("e10z_r1 beside a moving pointer, trial {trial}: {ops} of 43 letters as ops");
         let shown = tui
             .watch_for(Duration::from_secs(5), &|t| {
                 buffer_text(t)
@@ -1106,20 +1137,111 @@ fn e10z_r1_a_sentence_typed_beside_a_moving_pointer_reads_right_on_the_pane() {
                     .any(|l| l.trim_end().ends_with(&format!(" {sentence}")))
             })
             .is_some();
-        if !shown {
+        if ops < 40 || !shown {
             let line = buffer_text(&tui)
                 .lines()
                 .rfind(|l| l.contains("lazy") || l.contains("quick"))
                 .unwrap_or("")
                 .trim_end()
                 .to_owned();
-            wrong.push(format!("trial {trial} ({ops} ops): {line:?}"));
+            wrong.push(format!("trial {trial}: {ops} of 43 ops, the pane {line:?}"));
         }
         tui.write(b"\r");
     }
     assert!(
         wrong.is_empty(),
-        "the pane must read the sentence as typed beside a moving pointer: {wrong:#?}"
+        "beside a moving pointer at least 40 of 43 letters go as ops and the pane reads \
+         the sentence: {wrong:#?}"
+    );
+}
+
+/// The ruling's other half: a focus change, `FocusGained` or `FocusLost`,
+/// between two letters over the link does not stop the mirror keeping its
+/// caret. Ten trials of a letter, a focus change 5 ms later and a second
+/// letter 60 ms after the first: both go as ops every time. At `96ba5d1` a
+/// focus change was an unanswered event the mirror kept no caret across,
+/// and a cursor older than the first letter sent the second as a key.
+#[test]
+fn e10z_r1_a_focus_change_between_two_letters_keeps_the_pace() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mut phase = Phase::new();
+    let mut late = Vec::new();
+    for trial in 0..10u16 {
+        std::thread::sleep(Duration::from_millis(600));
+        phase.wait(60);
+        let mark = proxy.mark();
+        tui.write(b"a");
+        std::thread::sleep(Duration::from_millis(5));
+        tui.write(if trial % 2 == 0 { b"\x1b[I" } else { b"\x1b[O" });
+        std::thread::sleep(Duration::from_millis(55));
+        tui.write(b"b");
+        let sent = proxy.wait_sent(mark, 3, "a, a focus change, b");
+        let expect_focus = if trial % 2 == 0 {
+            "FocusGained"
+        } else {
+            "FocusLost"
+        };
+        if sent[..3] != [Sent::Op, Sent::Other(expect_focus.to_owned()), Sent::Op] {
+            late.push(format!("trial {trial}: {:?}", &sent[..3]));
+        }
+    }
+    assert!(
+        late.is_empty(),
+        "a letter after a focus change over the link went as a key: {late:#?}"
+    );
+}
+
+/// The run-ahead bound with a pointer moving at a daemon that does not
+/// answer: the read held 6 s from the first of 24 letters typed 20 ms
+/// apart, two motions between each two letters, and still 16 letters go as
+/// ops and the rest as keys: motions do not count toward the bound, and do
+/// not loosen it. At `96ba5d1` motions counted, and the letters went as
+/// keys after five or six.
+#[test]
+fn e10z_r1_the_run_ahead_bound_holds_beside_a_moving_pointer() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    let hold = Duration::from_secs(6);
+    let inside = Duration::from_millis(5500);
+    proxy.hold_from(|e| matches!(e, FrontendEvent::CrdtOp { .. }), hold);
+    let mark = proxy.mark();
+    let first = Instant::now();
+    type_beside_a_moving_pointer(
+        &mut tui,
+        "abcdefghijklmnopqrstuvwx",
+        Duration::from_millis(20),
+        5,
+    );
+    let start = Instant::now();
+    let typed = loop {
+        let got = letters(&proxy.since(mark));
+        if got.len() >= 24 || start.elapsed() > PATIENCE {
+            break got;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let took = first.elapsed();
+    assert!(
+        took < inside && typed.len() >= 24,
+        "premise: the 24 letters reached the proxy {} ms after the first was typed, \
+         not inside the {} ms hold ({} letters)",
+        took.as_millis(),
+        hold.as_millis(),
+        typed.len()
+    );
+    let ops = typed[..24].iter().take_while(|s| **s == Sent::Op).count();
+    let rest_keys = typed[ops..24].iter().all(|s| matches!(s, Sent::Key(..)));
+    assert!(
+        ops == 16 && rest_keys,
+        "16 letters as ops and then keys beside a moving pointer at a daemon that \
+         answered none: {:?}",
+        &typed[..24]
     );
 }
 

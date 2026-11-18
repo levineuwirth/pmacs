@@ -1814,15 +1814,24 @@ pub(crate) fn run_attach_pair(
     #[cfg(feature = "crdt")]
     let mut answer_needed: u64 = 0;
     // E10z fix round 1 --- the count at the last event on the wire that is
-    // not an op the mirror applied: a key, a click, a paste, a resize, a
-    // pointer motion or a focus change. While the daemon's answer is short
+    // neither an op the mirror applied nor one that changes nothing ([`awaits_answer`]):
+    // a key, a click, a paste, a resize. While the daemon's answer is short
     // of what this pump has sent but covers that event, everything it has
-    // not answered is the mirror's own text, so a `CursorByte` read then
-    // describes the buffer before some of it and the mirror keeps its own
-    // caret (review 1's Medium 2 (b)); once the answer covers everything,
-    // the cursor re-grounds as before.
+    // not answered is the mirror's own text or a pointer motion or focus
+    // change, so a `CursorByte` read then describes the buffer before some
+    // of the text and the mirror keeps its own caret (review 1's Medium 2
+    // (b), and the owner's ruling of 2026-11-18 that a motion and a focus
+    // change do not stop it); once the answer covers everything, the cursor
+    // re-grounds as before.
     #[cfg(feature = "crdt")]
     let mut last_unapplied: u64 = 0;
+    // E10z fix round 1's addition --- the numbers of the unanswered pointer
+    // motions and focus changes, oldest first, so that
+    // [`OPTIMISTIC_RUN_AHEAD`] counts only what the daemon has work to do
+    // for: a pointer crossing cells over a link can owe it that many
+    // motions alone.
+    #[cfg(feature = "crdt")]
+    let mut changes_nothing: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     // E10z.2 --- a terminal event read during the poll's wait waits here
     // for one more turn of the loop, so that what the daemon sent
     // meanwhile is read before the event is decided (#470's second
@@ -1987,6 +1996,9 @@ pub(crate) fn run_attach_pair(
                     #[cfg(feature = "crdt")]
                     Ok(InstanceMessage::InputHandled { events }) => {
                         answered = events;
+                        while changes_nothing.front().is_some_and(|n| *n <= answered) {
+                            changes_nothing.pop_front();
+                        }
                     }
                     Ok(msg) => batch.push(msg),
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -2150,7 +2162,10 @@ pub(crate) fn run_attach_pair(
                     // round-trips, as after any key the pump forwards.
                     #[cfg(feature = "crdt")]
                     if answer_wire
-                        && events_sent.saturating_sub(answered) >= OPTIMISTIC_RUN_AHEAD
+                        && events_sent
+                            .saturating_sub(answered)
+                            .saturating_sub(changes_nothing.len() as u64)
+                            >= OPTIMISTIC_RUN_AHEAD
                         && let Some(active_buf) = buffer_mirror.active_buffer()
                     {
                         buffer_mirror.mark_cursor_stale(active_buf);
@@ -2236,12 +2251,18 @@ pub(crate) fn run_attach_pair(
                 // caret or flip the dispatcher is one the next key waits
                 // for: a pointer motion and a focus change are neither
                 // (review 1's Medium 2 (a)).
+                //
+                // E10z fix round 1's addition --- nor does either stop the
+                // mirror keeping its caret, or count toward the run-ahead
+                // bound (the owner's ruling of 2026-11-18).
                 #[cfg(feature = "crdt")]
                 if !frame.is_empty() {
                     events_sent += 1;
-                    last_unapplied = events_sent;
                     if awaits_answer(&ev) {
                         answer_needed = events_sent;
+                        last_unapplied = events_sent;
+                    } else {
+                        changes_nothing.push_back(events_sent);
                     }
                 }
                 writer.push(frame);
@@ -2359,7 +2380,8 @@ fn is_typed(ev: &Event) -> bool {
 }
 
 /// E10z fix round 1 --- how far the optimistic path may run ahead of the daemon's answer at
-/// v28: with this many events unanswered, the next key goes as a key, and the keys after it
+/// v28: with this many events unanswered, pointer motions and focus changes not counted (E10z
+/// fix round 1's addition), the next key goes as a key, and the keys after it
 /// wait for the answer as after any key the pump forwards. Over a link a word typed faster
 /// than the round trip keeps its pace (a character every 60 ms over 100 ms each way has four
 /// or five in flight), while at a daemon that has stopped answering the queue holds at most
@@ -2374,8 +2396,16 @@ const OPTIMISTIC_RUN_AHEAD: u64 = 16;
 /// answer for (E10z): anything that can move the caret, change the buffer
 /// or flip the dispatcher. A pointer motion with no button held, which
 /// crossterm's any-event tracking reports as the pointer crosses the pane,
-/// and a focus change are neither (`dispatch_mouse` ignores the one; the
-/// other only dims the caret), so they raise nothing (E10z fix round 1).
+/// and a focus change are neither, so they raise nothing (E10z fix round 1)
+/// and stop neither the mirror keeping its caret nor count toward the
+/// run-ahead bound (its addition). In the daemon a motion sets the active
+/// frontend, which that frontend's next key sets anyway; moves an open
+/// menu's row, and an open menu holds the dispatcher; ends an armed
+/// divider drag where it stands; goes to a terminal's child, claiming no
+/// control, and a terminal's buffer round-trips every key; and otherwise
+/// forgets a double click's first press (`EditorState::dispatch_mouse`). A
+/// focus change sets the active frontend and reaches only a terminal
+/// (`EditorState::dispatch_focus`).
 #[cfg(feature = "crdt")]
 fn awaits_answer(ev: &Event) -> bool {
     use crossterm::event::MouseEventKind;
