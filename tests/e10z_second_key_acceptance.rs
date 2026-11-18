@@ -1127,25 +1127,37 @@ fn e10z_r1_a_sentence_typed_beside_a_moving_pointer_reads_right_on_the_pane() {
 /// the daemon's read held from the first of 24 letters, typed 20 ms apart,
 /// the first 16 go as ops and the rest as keys, so a daemon that stops
 /// answering is owed at most 16 ops; and once it has answered them, a
-/// letter goes as an op again, so nothing is stranded. At `3805ec0`, with
+/// letter goes as an op again, so nothing is stranded. At `1d34cf8`, with
 /// no bound, all 24 went as ops (and E10r's `r2` and `h2`, 6,000 letters at
 /// a stopped daemon, failed on the minutes the daemon took over the ops).
+/// The hold is 6 s and the row requires all 24 read inside it: at 1.5 s
+/// CI's macOS legs read 24 ops at `722f154`, the suite there four times as
+/// slow as on the laptop, which a hold that ended before the 16th letter
+/// would give with the bound in place.
 #[test]
 fn e10z_r1_optimistic_typing_runs_ahead_of_the_answer_by_at_most_16() {
     let daemon = daemon();
     let proxy = Proxy::start(&daemon, Duration::ZERO);
     let home = tempfile::tempdir().expect("home");
     let mut tui = tui(&proxy.path, home.path(), None);
-    proxy.hold_from(
-        |e| matches!(e, FrontendEvent::CrdtOp { .. }),
-        Duration::from_millis(1500),
-    );
+    let hold = Duration::from_secs(6);
+    let inside = Duration::from_millis(5500);
+    proxy.hold_from(|e| matches!(e, FrontendEvent::CrdtOp { .. }), hold);
     let mark = proxy.mark();
+    let first = Instant::now();
     for c in "abcdefghijklmnopqrstuvwx".chars() {
         tui.write(c.to_string().as_bytes());
         std::thread::sleep(Duration::from_millis(20));
     }
     let sent = proxy.wait_sent(mark, 24, "24 letters");
+    let took = first.elapsed();
+    assert!(
+        took < inside,
+        "premise: the 24 letters reached the proxy {} ms after the first was typed, \
+         not inside the {} ms hold",
+        took.as_millis(),
+        hold.as_millis()
+    );
     let ops = sent[..24].iter().take_while(|s| **s == Sent::Op).count();
     let rest_keys = sent[ops..24].iter().all(|s| matches!(s, Sent::Key(..)));
     assert!(
