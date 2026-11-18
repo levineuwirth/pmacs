@@ -1959,7 +1959,9 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 ///
 /// Steps: `key:<k>` presses one key ([`press_probe_key`]) and drains
 /// events for 250 ms; `tap:<k>` presses one key and goes straight on
-/// (E10z.2); `ask:<k>`
+/// (E10z.2); `paste:<text>` sends `text` as Ctrl-V sends what it read
+/// from the clipboard ([`App::send_os_paste`]) and goes straight on;
+/// `ask:<k>`
 /// presses `C-c <k>` every half second until a popup is paintable (the
 /// server answers only once it has initialized); `closed` waits for the
 /// popup to go; `quiet:<ms>` drains events that long; `wheel:<n>` turns
@@ -2056,6 +2058,13 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                 // follows it by what that step waits (`quiet:<ms>`), as a
                 // hand's does, and not by `key:`'s 250 ms.
                 press_probe_key(&mut app, arg);
+                Ok(true)
+            }
+            "paste" => {
+                // E10z fix round 1: what Ctrl-V does once it has read the
+                // clipboard, `arg` standing for what it read, through the
+                // same function; and no settle, as `tap:`.
+                app.send_os_paste(arg.as_bytes().to_vec());
                 Ok(true)
             }
             "ask" => {
@@ -7841,10 +7850,20 @@ impl App {
             .and_then(|state| state.read_os_selection(source));
         if let Some(bytes) = bytes
             && !bytes.is_empty()
-            && let Some(client) = self.attach_client.as_ref()
+        {
+            self.send_os_paste(bytes);
+        }
+    }
+
+    /// Ship text the window read from the OS (Ctrl-V's clipboard, the
+    /// middle press's selection) as one `Paste`, which the daemon inserts
+    /// at its own caret: the one place both gestures, and the probe's
+    /// `paste:` step, send it (E10z fix round 1).
+    fn send_os_paste(&mut self, bytes: Vec<u8>) {
+        if let Some(client) = self.attach_client.as_ref()
             && let Err(e) = client.send_paste(bytes)
         {
-            eprintln!("pmacs-gpu: middle-click send_paste failed: {e}");
+            eprintln!("pmacs-gpu: send_paste failed: {e}");
         }
     }
 
@@ -8254,11 +8273,8 @@ impl App {
         // C-y yanks the in-app slot instead.
         if !intercept && pkey == ProtocolKey::Char('v') && pmods == Modifiers::CTRL {
             let bytes = self.state.as_mut().and_then(State::read_os_clipboard);
-            if let Some(bytes) = bytes
-                && let Some(client) = self.attach_client.as_ref()
-                && let Err(e) = client.send_paste(bytes)
-            {
-                eprintln!("pmacs-gpu: send_paste failed: {e}");
+            if let Some(bytes) = bytes {
+                self.send_os_paste(bytes);
             }
             return;
         }
