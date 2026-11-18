@@ -18861,6 +18861,85 @@ Local gate samples, listed and not tallied, each `scripts/gate --protocol` in `p
 
 So, at E10z's fix round 1: `main` is `224148d`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is green at `96ba5d1`, its first attempt, after a red at `722f154` on two of the round's own rows. No row's count moves here.
 
+### E10z fix round 1's addition: `main` green at `62dd215`; PR #518 red at `8e7e230` on two legs, neither on the branch's code
+
+Recorded 2026-11-18 at E10z fix round 1's addition. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, every `running` line paired with its own result line, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `62dd215`, fix round 1's record, were owed by that record. No run was dispatched or rerun.
+
+#### `main` at `62dd215`, fix round 1's record: green
+
+`CI` 44340318804 at `62dd215`, attempt 1 of 1, `push`, created 2026-11-18T15:50:50Z and completed 15:53:15Z: `success`, the registry-push shape.
+
+Tally (main-ci-62dd215): 15 = 6 + 9.
+
+Tally (main-ci-62dd215-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 134928172742 | success |
+| Format | 134928173303 | success |
+| Changed paths | 134928173305 | success |
+| Lint (lua54) | 134928173423 | success |
+| Commit attribution (D9) | 134928173956 | success |
+| Docs consistency | 134928393459 | success |
+| M4 Perf Gates | 134928396270 | skipped |
+| Perf budgets (debug) | 134928396277 | skipped |
+| M6 Perf Gates | 134928396311 | skipped |
+| Test ((matrix) | 134928396660 | skipped |
+| M1 Acceptance Gates | 134928396723 | skipped |
+| Test (crdt) | 134928396934 | skipped |
+| M10 Perf Gates (crdt) | 134928396984 | skipped |
+| M5 Perf Gates | 134928397101 | skipped |
+| GPU Render (headless) | 134928397323 | skipped |
+
+Tally (main-ci-62dd215-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-62dd215-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44340319625 at `62dd215`, attempt 1 of 1, `push`, created 15:50:50Z and completed 15:51:12Z: `success`, `Grammar fuzz` 134928175377 and `Grammar fuzz (asan-strict)` 134928176404.
+
+Tally (main-fuzz-62dd215): 2 = 2 + 0.
+
+#### PR #518 at `8e7e230`, the addition: red on two legs, neither on the branch's code
+
+`CI` 44409384373 at `8e7e230`, attempt 1 of 1, `pull_request` (a merge into `62dd215`), created 2026-11-18T22:12:58Z and completed 23:04:04Z: `failure`. `Test (ubuntu-latest / lua54)` 135173225358 ended in its tool step before any test, on runner image `ubuntu-24.04` `20261116.376.1`, whose default Go moved to 1.26 that day (runner-images#15253): `go install golang.org/x/tools/gopls@v0.16.2` failed to build, `internal/tokeninternal/tokeninternal.go:64:9: invalid array length -delta * delta (constant -256 of type int64)`, no `running` line and no result line; filed as **#520**, an image change and not the code's, the legs on `20261111.127.1` and `20261111.370.1` passing the step in the same run. `Test (macos-latest / luajit)` 135173225203, `macos-26-arm64` `20261102.0473.1`, 234 paired, 5,638 / 1 / 80, failed `p4_the_notice_stands_its_floor_under_typing_and_the_keys_reach_the_daemon` in `tests/e10r_attach_routes.rs`, `the notice stood 4999 ms under typing` against its 5 s, `test result: FAILED. 88 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`; in no row and no issue, filed as **#521** (first occurrence). The other test legs paired every line with `test result: ok`: `Test (macos-latest / lua54)` 135173225221, 236, 5,699 / 0 / 80; `Test (ubuntu-latest / luajit)` 135173225162, 235, 5,758 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 135173225142, 235, 5,035 / 0 / 72; `Test (crdt)` 135173225049, 234, 5,699 / 0 / 88; #521's row `ok` on each.
+
+Tally (pr518-ci-8e7e230): 19 = 16 + 2 + 1.
+
+Tally (pr518-ci-8e7e230-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 135173127346 | success |
+| Lint (luajit) | 135173127768 | success |
+| Lint (lua54) | 135173127791 | success |
+| Changed paths | 135173127817 | success |
+| Commit attribution (D9) | 135173127871 | success |
+| GPU Render (headless) | 135173224922 | success |
+| M1 Acceptance Gates | 135173224990 | success |
+| Test (crdt) | 135173225049 | success |
+| Perf budgets (debug) | 135173225062 | success |
+| M10 Perf Gates (crdt) | 135173225082 | success |
+| M5 Perf Gates | 135173225126 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 135173225142 | success |
+| M6 Perf Gates | 135173225159 | success |
+| Test (ubuntu-latest / luajit) | 135173225162 | success |
+| Test (macos-latest / luajit) | 135173225203 | failure |
+| Test (macos-latest / lua54) | 135173225221 | success |
+| Test (ubuntu-latest / lua54) | 135173225358 | failure |
+| M4 Perf Gates | 135173225591 | success |
+| Docs consistency | 135173228063 | skipped |
+
+Tally (pr518-ci-8e7e230-success): 16 rows of the table above with `result` = `success`.
+Tally (pr518-ci-8e7e230-failures): 2 rows of the table above with `result` = `failure`.
+Tally (pr518-ci-8e7e230-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44409384371 at `8e7e230`, attempt 1 of 1, `pull_request`, created 22:12:58Z and completed 22:13:15Z: `success`, `Grammar fuzz` 135173126909 and `Grammar fuzz (asan-strict)` 135173126298.
+
+Tally (pr518-fuzz-8e7e230): 2 = 2 + 0.
+
+Local gate sample, listed and not tallied: `scripts/gate --protocol` at `8e7e230` (`20261118T214554Z-3341704`) in `pmacs-e10o`, all passed, 6,157 / 0 / 88 and 5,434 / 0 / 72, CPU pressure `avg60` at most about 7.
+
+So, at E10z fix round 1's addition: `main` is `62dd215`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is red at `8e7e230` on #520 and #521, neither the branch's code, after green at `96ba5d1`. No row's count moves here; #520 and #521 are new.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
