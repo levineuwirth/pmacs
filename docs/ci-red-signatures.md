@@ -18706,6 +18706,45 @@ Local gate samples, listed and not tallied: `scripts/gate --protocol` at `b66a66
 
 So, at C10z: `main` is `b19904c`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is green at its first attempt at `b66a66b`. No row's count moves here.
 
+### E10z review 1: `main` green at `069fc07`
+
+Recorded 2026-11-18 at E10z's review 1. Each run below was read from the jobs endpoint by conclusion, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `069fc07`, C10z's record, were owed by that record. PR #518's runs at `b66a66b` are recorded above and were read again by job, each test leg from its own log, with the same pairs and totals. No run was dispatched or rerun.
+
+`CI` 44266609433 at `069fc07`, attempt 1 of 1, `push`, created 2026-11-18T08:23:49Z and completed 08:25:46Z: `success`, the registry-push shape.
+
+Tally (main-ci-069fc07): 15 = 6 + 9.
+
+Tally (main-ci-069fc07-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 134672600005 | success |
+| Lint (lua54) | 134672600360 | success |
+| Commit attribution (D9) | 134672600440 | success |
+| Lint (luajit) | 134672600564 | success |
+| Changed paths | 134672600602 | success |
+| Docs consistency | 134672692148 | success |
+| M4 Perf Gates | 134672694225 | skipped |
+| M10 Perf Gates (crdt) | 134672694353 | skipped |
+| M1 Acceptance Gates | 134672694901 | skipped |
+| Test (matrix) | 134672695014 | skipped |
+| Perf budgets (debug) | 134672695016 | skipped |
+| M5 Perf Gates | 134672695358 | skipped |
+| GPU Render (headless) | 134672695438 | skipped |
+| M6 Perf Gates | 134672695459 | skipped |
+| Test (crdt) | 134672696100 | skipped |
+
+Tally (main-ci-069fc07-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-069fc07-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44266609508 at `069fc07`, attempt 1 of 1, `push`, created 08:23:49Z and completed 08:24:10Z: `success`, `Grammar fuzz` 134672600352 and `Grammar fuzz (asan-strict)` 134672600797.
+
+Tally (main-fuzz-069fc07): 2 = 2 + 0.
+
+Local gate samples, listed and not tallied: `scripts/gate --protocol` at `b66a66b` (`20261118T084819Z-665681`), the review's, seven of eight stages ok and `06-sweep` 6,139 / 2 / 88 at 243 pairs, both failures in `tests/e10t_gpu_window_settles.rs` beside another project's load (1-minute load 3.3 to 24.8, mean 13.5): `e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot`, #498's fragment, a sample on that issue (issuecomment-6974126953); and `e10t_r1_two_switches_in_flight_settle_on_the_last`, `not on "one.log"; two switches 120 ms apart: early 3 snapshots on "" (3), late 3 on "one.log" (3)`, filed as #519. `07-sweep-luajit` 5,434 / 0 / 72 at 243 pairs. Its second, `20261118T092857Z-974569`, at the same tree and run again as the runbook asks, passed every stage: `06-sweep` 6,141 / 0 / 88 and `07-sweep-luajit` 5,434 / 0 / 72 at 243 pairs each, both rows above `ok` (1-minute load 5.5 to 21.3, mean 9.6).
+
+So, at E10z's review 1: `main` is `069fc07`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is unchanged at `b66a66b`. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
