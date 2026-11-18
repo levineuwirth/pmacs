@@ -13817,7 +13817,10 @@ impl State {
                 None
             }
             // E10z.1 --- how much of this session's input the daemon
-            // has handled: held, and nothing is gated on it yet.
+            // has handled. Since E10z.2 the `CursorByte` arm above reads
+            // it: after a forwarded event, a cursor makes the caret
+            // authoritative again only once this covers that event
+            // (`forwarded_input_answered`).
             InstanceMessage::InputHandled { events } => {
                 self.input_handled = events;
                 None
