@@ -984,6 +984,111 @@ fn e10z_r1_typing_over_a_link_keeps_its_optimistic_pace() {
     );
 }
 
+/// The fix round's own finding, by the walk of the owner's guide: over a
+/// link, 100 ms each way, a sentence typed a character every 60 ms reads on
+/// the pane as it was typed, with no repaint, as it reads in the buffer.
+/// With Medium 2 (b) alone the mirror kept its caret over a frame older
+/// than its ops, but the frame's `Cursor` moved the terminal's caret back,
+/// so the next optimistic paint printed a column early; where the true
+/// character was a space the daemon, which diffs against what it last sent,
+/// never repainted the cell, and the pane read `theqquick brownofox`. The
+/// base (`d8fd793`) did the same wherever two ops went in a row; `b66a66b`
+/// sent nearly every character as a key over a link, and read right.
+#[test]
+fn e10z_r1_a_sentence_typed_over_a_link_reads_right_on_the_pane() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let sentence = "the quick brown fox jumps over the lazy dog";
+    let mut wrong = Vec::new();
+    for trial in 0..3 {
+        std::thread::sleep(Duration::from_millis(800));
+        let mark = proxy.mark();
+        for c in sentence.chars() {
+            tui.write(c.to_string().as_bytes());
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        let sent = proxy.wait_sent(mark, sentence.len(), "the sentence");
+        let ops = sent.iter().filter(|s| **s == Sent::Op).count();
+        let shown = tui
+            .watch_for(Duration::from_secs(5), &|t| {
+                buffer_text(t)
+                    .lines()
+                    .any(|l| l.trim_end().ends_with(&format!(" {sentence}")))
+            })
+            .is_some();
+        if !shown {
+            let line = buffer_text(&tui)
+                .lines()
+                .rfind(|l| l.contains("lazy") || l.contains("quick"))
+                .unwrap_or("")
+                .trim_end()
+                .to_owned();
+            wrong.push(format!("trial {trial} ({ops} ops): {line:?}"));
+        }
+        tui.write(b"\r");
+    }
+    assert!(
+        wrong.is_empty(),
+        "the pane must read the sentence as typed: {wrong:#?}"
+    );
+}
+
+/// The same sentence over the same link with the pointer moving the whole
+/// time, a buttonless motion between every two characters, reads right on
+/// the pane. The pace is not held here: a motion is not an op the mirror
+/// applied, so by Medium 2 (b) as ruled the mirror keeps no caret across
+/// one, and a cursor older than its ops re-grounds it; the row prints how
+/// many characters still went as ops. The base (`d8fd793`) misplaced
+/// letters on the pane here as without the pointer.
+#[test]
+fn e10z_r1_a_sentence_typed_beside_a_moving_pointer_reads_right_on_the_pane() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let sentence = "the quick brown fox jumps over the lazy dog";
+    let mut wrong = Vec::new();
+    for trial in 0..3u16 {
+        std::thread::sleep(Duration::from_millis(800));
+        let mark = proxy.mark();
+        for (i, c) in sentence.chars().enumerate() {
+            let col = 10 + (trial * 13 + i as u16 * 7) % 80;
+            tui.write(format!("\x1b[<35;{col};4M").as_bytes());
+            std::thread::sleep(Duration::from_millis(30));
+            tui.write(c.to_string().as_bytes());
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let sent = proxy.wait_sent(mark, 2 * sentence.len(), "the sentence and the motions");
+        let ops = sent.iter().filter(|s| **s == Sent::Op).count();
+        eprintln!("e10z_r1 beside a moving pointer, trial {trial}: {ops} of 43 characters as ops");
+        let shown = tui
+            .watch_for(Duration::from_secs(5), &|t| {
+                buffer_text(t)
+                    .lines()
+                    .any(|l| l.trim_end().ends_with(&format!(" {sentence}")))
+            })
+            .is_some();
+        if !shown {
+            let line = buffer_text(&tui)
+                .lines()
+                .rfind(|l| l.contains("lazy") || l.contains("quick"))
+                .unwrap_or("")
+                .trim_end()
+                .to_owned();
+            wrong.push(format!("trial {trial} ({ops} ops): {line:?}"));
+        }
+        tui.write(b"\r");
+    }
+    assert!(
+        wrong.is_empty(),
+        "the pane must read the sentence as typed beside a moving pointer: {wrong:#?}"
+    );
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the

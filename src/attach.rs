@@ -785,6 +785,15 @@ pub(crate) trait AttachPumpFrontend {
     fn paint_optimistic_delete_back(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+
+    /// E10z fix round 1 --- put the terminal's caret back where the last
+    /// `Cursor` applied, moved by the optimistic paints since, left it: after
+    /// a batch whose own `Cursor` the pump held back, a frame older than the
+    /// mirror's ops, whose spans moved the caret as they painted.
+    #[cfg(feature = "crdt")]
+    fn put_caret_back(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl AttachPumpFrontend for Frontend {
@@ -817,6 +826,10 @@ impl AttachPumpFrontend for Frontend {
     #[cfg(feature = "crdt")]
     fn paint_optimistic_delete_back(&mut self) -> std::io::Result<()> {
         Frontend::paint_optimistic_delete_back(self)
+    }
+    #[cfg(feature = "crdt")]
+    fn put_caret_back(&mut self) -> std::io::Result<()> {
+        Frontend::put_caret_back(self)
     }
 }
 
@@ -1844,6 +1857,8 @@ pub(crate) fn run_attach_pair(
             let mut batch: Vec<InstanceMessage> = Vec::new();
             let mut goodbye: Option<GoodbyeReason> = None;
             let mut reader_eof = false;
+            #[cfg(feature = "crdt")]
+            let mut caret_held = false;
             loop {
                 match rx.try_recv() {
                     Ok(InstanceMessage::Goodbye(reason)) => {
@@ -1952,6 +1967,19 @@ pub(crate) fn run_attach_pair(
                         // gate reads `dispatch_idle` below.
                         dispatch_idle = idle;
                     }
+                    // E10z fix round 1 --- the terminal caret of a frame
+                    // read while the daemon has yet to answer only the
+                    // mirror's own ops: older than the caret those ops'
+                    // paints left, which a later optimistic paint prints
+                    // at. Held back, as the `CursorByte` arm keeps the
+                    // mirror's caret, and the caret put back after the
+                    // batch's spans have moved it.
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::Cursor(_))
+                        if answer_wire && answered < events_sent && answered >= last_unapplied =>
+                    {
+                        caret_held = true;
+                    }
                     // E10z.2 — how much of this session's input the
                     // daemon has handled; the `CursorByte` arm above
                     // reads it. Taken out of the batch, as
@@ -1993,6 +2021,10 @@ pub(crate) fn run_attach_pair(
                 if let Err(e) = presented {
                     return Err(AttachError::Terminal(e));
                 }
+            }
+            #[cfg(feature = "crdt")]
+            if caret_held && let Err(e) = frontend.put_caret_back() {
+                return Err(AttachError::Terminal(e));
             }
             if let Some(reason) = goodbye {
                 return Ok(PumpEnd::Over(Some(reason)));

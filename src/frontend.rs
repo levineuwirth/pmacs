@@ -155,6 +155,10 @@ pub struct Frontend {
     /// over it can come off and leave it as they left it. A frame only says what
     /// changed, so nothing else would ever repaint it.
     status_row: Vec<Cell>,
+    /// E10z fix round 1: where the terminal's caret was last put, by a visible
+    /// `Cursor` and moved by the optimistic paints since, for
+    /// [`Self::put_caret_back`].
+    caret: Option<(u16, u16)>,
     /// E10r: the row that was the bottom one before the last resize, and what the
     /// frames had left on it then, for [`Self::put_back_the_old_bottom_row`].
     old_bottom_row: Option<(u32, Vec<Cell>)>,
@@ -185,6 +189,7 @@ impl Frontend {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::detect_env(),
             status_row: vec![Cell::default(); size.cols as usize],
+            caret: None,
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -303,6 +308,9 @@ impl Frontend {
             SetAttribute(Attribute::Reset),
             Print(c)
         )?;
+        if let Some((col, _)) = self.caret.as_mut() {
+            *col = col.saturating_add(1);
+        }
         self.out.flush()
     }
 
@@ -339,6 +347,19 @@ impl Frontend {
             Print(' '),
             MoveLeft(1)
         )?;
+        if let Some((col, _)) = self.caret.as_mut() {
+            *col = col.saturating_sub(1);
+        }
+        self.out.flush()
+    }
+
+    /// E10z fix round 1 --- put the terminal's caret where the last applied
+    /// `Cursor` and the optimistic paints since left it ([`Self::caret`]),
+    /// after a batch whose `Cursor` the attach pump held back.
+    pub fn put_caret_back(&mut self) -> io::Result<()> {
+        if let Some((col, row)) = self.caret {
+            queue!(self.out, MoveTo(col, row))?;
+        }
         self.out.flush()
     }
 
@@ -356,6 +377,7 @@ impl Frontend {
             }
             InstanceMessage::Cursor(state) => match state {
                 Some(cs) if cs.visible => {
+                    self.caret = Some((cs.coord.col as u16, cs.coord.row as u16));
                     queue!(
                         self.out,
                         MoveTo(cs.coord.col as u16, cs.coord.row as u16),
@@ -1106,6 +1128,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            caret: None,
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -1134,6 +1157,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            caret: None,
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -1156,6 +1180,7 @@ mod tests {
             keyboard_enhancement: false,
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
+            caret: None,
             old_bottom_row: None,
             lent_modes: None,
         };
