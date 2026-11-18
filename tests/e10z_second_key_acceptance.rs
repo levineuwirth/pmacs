@@ -513,9 +513,13 @@ fn e10z_2_ii_a_fast_chord_on_a_local_socket_opens_its_prompt_every_time() {
 }
 
 /// E10z.2 (iii), the chords and prompt keys E10u.1 (e) found it on, with
-/// the daemon's read of the first key held: `C-x k`, `M-g g`, and a letter
-/// typed straight after `M-x`, `C-s` and `M-%`, each second key a key. At
-/// the base each went as text in 16 to 17 of 20 at a 30 ms gap.
+/// the daemon's read of the first key held 300 ms: `C-x k`, `M-g g`, and a
+/// letter typed after `M-x`, `C-s` and `M-%`, each second key 150 ms after
+/// the first and a key. At the base each went as text in 16 to 17 of 20 at
+/// a 30 ms gap. The gap was 50 ms, the base pump's poll, until review 1
+/// found the row passing at the base in one bite of three (its Low 1), as
+/// (i) did before `b66a66b`; and every case is tried before the row
+/// asserts, so that a failure names each case that went wrong.
 #[test]
 fn e10z_2_iii_every_prefix_and_prompt_key_holds_the_next_key() {
     let daemon = daemon();
@@ -545,6 +549,7 @@ fn e10z_2_iii_every_prefix_and_prompt_key_holds_the_next_key() {
             "Query replace",
         ),
     ];
+    let mut wrong = Vec::new();
     for (first, first_sent, second, needle) in cases {
         let Sent::Key(Key::Char(second_char), _) = second else {
             unreachable!()
@@ -553,17 +558,37 @@ fn e10z_2_iii_every_prefix_and_prompt_key_holds_the_next_key() {
         proxy.hold_from(move |e| sent_of(e) == first_key, HOLD);
         let mark = proxy.mark();
         tui.write(first);
-        std::thread::sleep(Duration::from_millis(50));
+        // Past the base pump's 50 ms poll, inside the hold (as row (i)).
+        std::thread::sleep(Duration::from_millis(150));
         tui.write(second_char.to_string().as_bytes());
         let sent = proxy.wait_sent(mark, 2, needle);
-        assert_eq!(
-            sent[..2].to_vec(),
-            vec![first_sent.clone(), second.clone()],
-            "after {first_sent:?}, the next key must go as a key"
-        );
-        tui.wait_for(PATIENCE, needle, &|t| t.screen_contains(needle));
+        let shown = tui
+            .watch_for(Duration::from_secs(3), &|t| t.screen_contains(needle))
+            .is_some();
+        if sent[..2] != [first_sent.clone(), second.clone()] || !shown {
+            wrong.push(format!(
+                "{needle}: sent {:?}, the prompt {}",
+                &sent[..2],
+                if shown { "shown" } else { "never shown" }
+            ));
+        }
         cancel(&mut tui, needle);
+        if sent[1] == Sent::Op {
+            // A second key taken as text: with the prefix or prompt gone,
+            // take it back, so the next case starts as this one did.
+            tui.write(b"\x7f");
+            tui.settle(
+                Duration::from_millis(250),
+                PATIENCE,
+                "the stray letter taken back",
+                &|_| true,
+            );
+        }
     }
+    assert!(
+        wrong.is_empty(),
+        "after each first key the next must go as a key, its prompt open: {wrong:#?}"
+    );
 }
 
 /// E10z.2 (iii), the remote route, at the owner's hands: `C-x`, then `b`
