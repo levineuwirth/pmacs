@@ -706,6 +706,149 @@ fn e10z_2_iii_the_gpu_window_holds_the_second_key_too() {
     );
 }
 
+/// Run `pmacs-gpu --headless-probe` on `proxy`'s socket with `script`,
+/// or `None` where the probe cannot run (no binary, no adapter), as the
+/// GPU rows above do.
+fn gpu_script(
+    proxy: &Proxy,
+    script: &str,
+    label: &str,
+) -> Option<std::collections::HashMap<String, String>> {
+    let binary = gpu_probe_binary()?;
+    let report = proxy.path.with_file_name(format!("{label}.report"));
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(&proxy.path)
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", script)
+        .env("PMACS_GPU_PROBE_ACTION", "popup")
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "40000")
+        .output()
+        .expect("run the headless GPU probe");
+    let facts = probe_facts(&output, &report, label)?;
+    assert_eq!(
+        fact(&facts, "ready"),
+        "true",
+        "{label}: the window got ready"
+    );
+    Some(facts)
+}
+
+/// Review 1's Medium 1, the GPU's own paste: with the daemon's read of a
+/// `Paste` held 300 ms, `x` typed 60 ms after it goes as a key, and with
+/// `y` typed 350 ms after `x`, once the daemon has answered both, the
+/// daemon's buffer reads `PQxy`. Before the fix round the window marked
+/// nothing after a paste and sent both as ops, and its optimistic floor
+/// put `y` inside the pasted text, `PyQx` (3 of 3 by review 1's probe
+/// through the real Ctrl-V on a private compositor's clipboard, and this
+/// row at `3833dfb`); the `paste:` step sends what Ctrl-V sends once it
+/// has read the clipboard, through the same function. `y` may go as an
+/// op: by then the count covers the paste, and the caret is the daemon's.
+#[test]
+fn e10z_r1_the_gpu_window_holds_text_typed_after_its_paste() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    proxy.hold_from(|e| matches!(e, FrontendEvent::Paste { .. }), HOLD);
+    let from = Instant::now();
+    let Some(_facts) = gpu_script(
+        &proxy,
+        "quiet:400 paste:PQ quiet:60 tap:x quiet:350 tap:y quiet:1500 answer:after",
+        "e10z-r1-gpu-paste",
+    ) else {
+        return;
+    };
+    let sent = proxy.since(0);
+    let at = sent
+        .iter()
+        .position(|s| matches!(s, Sent::Other(name) if name == "Paste"))
+        .unwrap_or_else(|| panic!("the window sent no Paste: {sent:?}"));
+    let after: Vec<Sent> = sent[at + 1..]
+        .iter()
+        .filter(|s| matches!(s, Sent::Key(..) | Sent::Op))
+        .cloned()
+        .collect();
+    let timeline = proxy.timeline(from);
+    // What the daemon holds, read by a terminal attached afterwards.
+    let home = tempfile::tempdir().expect("home");
+    let tui = tui(&proxy.path, home.path(), None);
+    let text = buffer_text(&tui);
+    assert!(
+        after.first() == Some(&plain('x')) && text.contains("PQxy"),
+        "`x`, typed while the daemon had not read the paste, must go as a key, and both \
+         letters land after the paste: sent after the paste {after:?}, the buffer\n{text}\n\
+         what passed:\n{timeline}"
+    );
+}
+
+/// A bottom panel on `C-c 9`, as `bottom_panel_stage2b_gpu_acceptance`
+/// opens one: `pmacs.window.display` with a side.
+const PANEL_ON_KEY: &str = r#"
+pmacs.command.define {
+  name = "e10z.panel",
+  description = "Open a bottom panel for E10z's GPU row.",
+  fn = function()
+    pmacs.window.display(pmacs.buffer.create("*e10z-panel*"), { side = "bottom", height = 4 })
+  end,
+}
+pmacs.keymap.bind { scope = "global", sequence = "C-c 9", command = "e10z.panel" }
+"#;
+
+/// Review 1's Medium 1, the panel: with the daemon's read of a left press
+/// on the panel held 300 ms, `x` typed 60 ms after the click goes as a
+/// key, which the daemon gives the panel the click focused. Before the
+/// fix round the window marked nothing after a panel gesture and sent
+/// `x` as an op into the document it still showed, which the daemon,
+/// its focus moved to the side window, does not take
+/// (`validate_remote_crdt_op`). The `panel-click:` step presses and
+/// releases on a cell of the presented panel through the panel's sender.
+#[test]
+fn e10z_r1_the_gpu_window_holds_a_key_typed_after_a_panel_click() {
+    let daemon = TestDaemon::spawn_with_config(&format!(
+        "{NO_REOPEN}pmacs.lsp.config = {{}}\n{PANEL_ON_KEY}"
+    ));
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    proxy.hold_from(
+        |e| {
+            matches!(
+                e,
+                FrontendEvent::PanelPointer {
+                    kind: MouseKind::Down(_),
+                    ..
+                } | FrontendEvent::PanelPointerMapped {
+                    kind: MouseKind::Down(_),
+                    ..
+                }
+            )
+        },
+        HOLD,
+    );
+    let from = Instant::now();
+    let Some(facts) = gpu_script(
+        &proxy,
+        "key:C-c key:9 quiet:500 panel-click:1,1 quiet:60 tap:x quiet:1500 answer:after",
+        "e10z-r1-gpu-panel",
+    ) else {
+        return;
+    };
+    let sent = proxy.since(0);
+    let at = sent
+        .iter()
+        .position(|s| matches!(s, Sent::Other(name) if name.starts_with("PanelPointer")))
+        .unwrap_or_else(|| panic!("the window sent no panel gesture: {sent:?}; {facts:?}"));
+    let after: Vec<Sent> = sent[at + 1..]
+        .iter()
+        .filter(|s| matches!(s, Sent::Key(..) | Sent::Op))
+        .cloned()
+        .collect();
+    assert_eq!(
+        after.first(),
+        Some(&plain('x')),
+        "`x`, typed while the daemon had not read the panel click, must go as a key: \
+         sent {sent:?}\nwhat passed:\n{}",
+        proxy.timeline(from)
+    );
+}
+
 /// Guard, E10z.2: after a motion key the daemon has answered, text goes as
 /// ops again, every character, read by count, so that the fix cannot be to
 /// round-trip everything. Passes at the base and after.

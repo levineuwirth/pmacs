@@ -6997,7 +6997,7 @@ impl App {
     /// falling back would be the frontend half of the bypass, and the
     /// daemon would refuse it anyway.
     fn send_panel_gesture(
-        &self,
+        &mut self,
         geometry_epoch: u64,
         panel_epoch: u64,
         buffer_id: pmacs_protocol::BufferId,
@@ -7030,6 +7030,14 @@ impl App {
         };
         if let Err(e) = sent {
             eprintln!("pmacs-gpu: send_panel_pointer failed: {e}");
+        }
+        // E10z fix round 1: a panel gesture can move focus to the side
+        // window, and the daemon answers it as it answers a key, so the
+        // next key waits for that answer as it does after a key. A hover
+        // (`Move`) neither focuses nor claims, so it raises nothing, as a
+        // pointer motion raises nothing on the terminal's pump.
+        if kind != ProtocolMouseKind::Move {
+            self.mark_forwarded_input();
         }
     }
 
@@ -7121,7 +7129,7 @@ impl App {
     /// Ship a [`pmacs_protocol::FrontendEvent::MenuPointer`] if the
     /// daemon speaks v11+ (Q#CM1). Navigates the open menu the daemon
     /// owns; pixels stay local, only the resolved row index crosses.
-    fn send_menu_pointer(&self, index: Option<u32>, invoke: bool) {
+    fn send_menu_pointer(&mut self, index: Option<u32>, invoke: bool) {
         let Some(client) = self.attach_client.as_ref() else {
             return;
         };
@@ -7131,6 +7139,9 @@ impl App {
         if let Err(e) = client.send_menu_pointer(index, invoke) {
             eprintln!("pmacs-gpu: send_menu_pointer failed: {e}");
         }
+        // E10z fix round 1: an open menu holds the daemon's dispatcher,
+        // and its invoke may move the caret or open a prompt.
+        self.mark_forwarded_input();
     }
 
     fn dispatch_app_event(&mut self, event: AppEvent) {
@@ -7888,12 +7899,21 @@ impl App {
     /// middle press's selection) as one `Paste`, which the daemon inserts
     /// at its own caret: the one place both gestures, and the probe's
     /// `paste:` step, send it (E10z fix round 1).
+    ///
+    /// The paste moves the daemon's caret past the pasted text, which this
+    /// window cannot predict, so until the daemon has answered it the next
+    /// key goes as a key and no `CursorByte` written before the daemon read
+    /// it makes the caret authoritative again (review 1's Medium 1: before,
+    /// a character typed straight after went in as an op, and the next
+    /// landed inside the pasted text).
     fn send_os_paste(&mut self, bytes: Vec<u8>) {
-        if let Some(client) = self.attach_client.as_ref()
-            && let Err(e) = client.send_paste(bytes)
-        {
+        let Some(client) = self.attach_client.as_ref() else {
+            return;
+        };
+        if let Err(e) = client.send_paste(bytes) {
             eprintln!("pmacs-gpu: send_paste failed: {e}");
         }
+        self.mark_forwarded_input();
     }
 
     /// Perform [`PointerRoute::Wheel`].
@@ -8457,6 +8477,16 @@ impl App {
         }
         if let Err(e) = client.send_key(pkey, pmods) {
             eprintln!("pmacs-gpu: send_key failed: {e}");
+        }
+        self.note_forwarded_input();
+    }
+
+    /// E10z fix round 1 --- after a send the daemon answers as a key, made
+    /// by no key: the cursor goes stale, as before a round-tripped key, and
+    /// waits for the daemon's count ([`Self::note_forwarded_input`]).
+    fn mark_forwarded_input(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.mark_cursor_stale_after_round_trip();
         }
         self.note_forwarded_input();
     }
