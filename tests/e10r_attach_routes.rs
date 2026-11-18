@@ -3102,10 +3102,16 @@ fn not_answering_after(
 /// **Review 3's Medium 1, `p40`'s first row, as ruled 2026-11-08:** a word typed at a daemon
 /// that has stopped answering, and then waiting, as a user does when nothing happens. A few
 /// keys fit the transport, so at `e111983`, which waited for it to be full, nothing is said.
+///
+/// What the daemon would paint is the mode line's column after the word, `L1:C6`, and it must
+/// not come. The word itself is the terminal's own optimistic paint, which needs no daemon:
+/// since E10z's fix round 1 every letter of it goes as an op and paints at once (the owner's
+/// ruling of 2026-11-18, amending this row), where before only its first did, an op then
+/// marking the caret stale (`d3fa632`), so the row had read the word for the daemon's paint.
 #[test]
 fn j1_a_word_at_a_daemon_that_stopped_says_it_is_not_answering_locally() {
     on_route(Route::Local, |route, tui, daemon| {
-        not_answering_after(route, tui, daemon, &[b"hello"], "hello");
+        not_answering_after(route, tui, daemon, &[b"hello"], WORD_ANSWERED);
     });
 }
 
@@ -3113,9 +3119,13 @@ fn j1_a_word_at_a_daemon_that_stopped_says_it_is_not_answering_locally() {
 #[test]
 fn j1_a_word_at_a_daemon_that_stopped_says_it_is_not_answering_over_the_remote_route() {
     on_route(Route::Remote, |route, tui, daemon| {
-        not_answering_after(route, tui, daemon, &[b"hello"], "hello");
+        not_answering_after(route, tui, daemon, &[b"hello"], WORD_ANSWERED);
     });
 }
+
+/// The mode line's column once the daemon has taken `hello` on the first line of `*scratch*`:
+/// what only the daemon paints after J1's word.
+const WORD_ANSWERED: &str = "L1:C6";
 
 /// `p40`'s second row: `C-x b` alone, which only the daemon answers, its prompt not shown.
 #[test]
