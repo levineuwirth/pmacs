@@ -18745,6 +18745,122 @@ Local gate samples, listed and not tallied: `scripts/gate --protocol` at `b66a66
 
 So, at E10z's review 1: `main` is `069fc07`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is unchanged at `b66a66b`. No row's count moves here.
 
+### E10z fix round 1: `main` green at `224148d`; PR #518 red at `722f154`, green at `96ba5d1`
+
+Recorded 2026-11-18 at E10z's fix round 1. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, every `running` line paired with its own result line, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `224148d`, review 1's record, were owed by that record. No run was dispatched or rerun.
+
+#### `main` at `224148d`, E10z review 1's record: green
+
+`CI` 44281161517 at `224148d`, attempt 1 of 1, `push`, created 2026-11-18T10:00:07Z and completed 10:02:26Z: `success`, the registry-push shape.
+
+Tally (main-ci-224148d): 15 = 6 + 9.
+
+Tally (main-ci-224148d-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 134721924127 | success |
+| Changed paths | 134721924477 | success |
+| Format | 134721924548 | success |
+| Lint (luajit) | 134721924818 | success |
+| Lint (lua54) | 134721925017 | success |
+| Docs consistency | 134722095881 | success |
+| M6 Perf Gates | 134722098093 | skipped |
+| M5 Perf Gates | 134722098279 | skipped |
+| Test (crdt) | 134722098727 | skipped |
+| M1 Acceptance Gates | 134722098770 | skipped |
+| GPU Render (headless) | 134722098884 | skipped |
+| Perf budgets (debug) | 134722098894 | skipped |
+| Test ((matrix) | 134722098898 | skipped |
+| M10 Perf Gates (crdt) | 134722099028 | skipped |
+| M4 Perf Gates | 134722099593 | skipped |
+
+Tally (main-ci-224148d-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-224148d-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44281161461 at `224148d`, attempt 1 of 1, `push`, created 10:00:07Z and completed 10:00:27Z: `success`, `Grammar fuzz` 134721923338 and `Grammar fuzz (asan-strict)` 134721923820.
+
+Tally (main-fuzz-224148d): 2 = 2 + 0.
+
+#### PR #518 at `722f154`, fix round 1's first push: red on two rows of the round's own
+
+`CI` 44311936448 at `722f154`, attempt 1 of 1, `pull_request` (a merge into `224148d`), created 2026-11-18T13:15:50Z and completed 14:08:03Z: `failure`. Both macOS test legs failed, each on rows the round had just committed, none a registry row: `Test (macos-latest / lua54)` 134828103603, 234 paired, 5,635 / 1 / 80, on `e10z_r1_optimistic_typing_runs_ahead_of_the_answer_by_at_most_16` (`[Op, …]` 24 times, its 1.5 s hold ending before the run-ahead built up on a runner four times as slow as the laptop over the suite); `Test (macos-latest / luajit)` 134828103944, 234 paired, 5,634 / 2 / 80, on that row and `e10z_r1_text_after_a_pointer_motion_over_a_link_stays_optimistic` (3 trials of 10 with `x` a key: the caret was still marked stale after a motion). Both fixed at `6c2417e` and `96ba5d1`. The four Ubuntu test legs paired every line with `test result: ok`: `luajit` 134828103619 and `lua54` 134828104181, 235 each, 5,755 / 0 / 88; `luajit, no crdt` 134828103483, 235, 5,035 / 0 / 72; `Test (crdt)` 134828103660, 234, 5,696 / 0 / 88. #514's row read `ok` on all six legs.
+
+Tally (pr518-ci-722f154): 19 = 16 + 2 + 1.
+
+Tally (pr518-ci-722f154-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 134828001244 | success |
+| Lint (lua54) | 134828001597 | success |
+| Lint (luajit) | 134828001660 | success |
+| Changed paths | 134828001731 | success |
+| Commit attribution (D9) | 134828001968 | success |
+| M6 Perf Gates | 134828103387 | success |
+| M4 Perf Gates | 134828103408 | success |
+| GPU Render (headless) | 134828103432 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 134828103483 | success |
+| Perf budgets (debug) | 134828103487 | success |
+| M1 Acceptance Gates | 134828103585 | success |
+| M10 Perf Gates (crdt) | 134828103599 | success |
+| Test (macos-latest / lua54) | 134828103603 | failure |
+| Test (ubuntu-latest / luajit) | 134828103619 | success |
+| Test (crdt) | 134828103660 | success |
+| M5 Perf Gates | 134828103862 | success |
+| Test (macos-latest / luajit) | 134828103944 | failure |
+| Test (ubuntu-latest / lua54) | 134828104181 | success |
+| Docs consistency | 134828106751 | skipped |
+
+Tally (pr518-ci-722f154-success): 16 rows of the table above with `result` = `success`.
+Tally (pr518-ci-722f154-failures): 2 rows of the table above with `result` = `failure`.
+Tally (pr518-ci-722f154-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44311936487 at `722f154`, attempt 1 of 1, `pull_request`, created 13:15:50Z and completed 13:16:13Z: `success`, `Grammar fuzz` 134828002521 and `Grammar fuzz (asan-strict)` 134828001959.
+
+Tally (pr518-fuzz-722f154): 2 = 2 + 0.
+
+#### PR #518 at `96ba5d1`, fix round 1's tip: green
+
+`CI` 44329322204 at `96ba5d1`, attempt 1 of 1, `pull_request` (a merge into `224148d`), created 2026-11-18T14:53:43Z and completed 15:45:44Z: `success`. Each test leg paired every `running` line with `test result: ok`, none `FAILED`: `Test (macos-latest / lua54)` 134889230108 and `/ luajit` 134889230322, 236 each, 5,697 / 0 / 80; `Test (ubuntu-latest / luajit)` 134889230089 and `/ lua54` 134889230040, 235 each, 5,756 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 134889230489, 235, 5,035 / 0 / 72; `Test (crdt)` 134889229963, 234, 5,697 / 0 / 88. `e10z_second_key_acceptance` 28 passed on every `crdt` leg; #514's row read `ok` on all six, so its count does not move.
+
+Tally (pr518-ci-96ba5d1): 19 = 18 + 1.
+
+Tally (pr518-ci-96ba5d1-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 134889100851 | success |
+| Commit attribution (D9) | 134889101610 | success |
+| Format | 134889101709 | success |
+| Lint (luajit) | 134889101768 | success |
+| Lint (lua54) | 134889101786 | success |
+| M6 Perf Gates | 134889229797 | success |
+| Test (crdt) | 134889229963 | success |
+| M4 Perf Gates | 134889229981 | success |
+| Test (ubuntu-latest / lua54) | 134889230040 | success |
+| Perf budgets (debug) | 134889230050 | success |
+| Test (ubuntu-latest / luajit) | 134889230089 | success |
+| GPU Render (headless) | 134889230095 | success |
+| Test (macos-latest / lua54) | 134889230108 | success |
+| M10 Perf Gates (crdt) | 134889230113 | success |
+| M1 Acceptance Gates | 134889230115 | success |
+| M5 Perf Gates | 134889230192 | success |
+| Test (macos-latest / luajit) | 134889230322 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 134889230489 | success |
+| Docs consistency | 134889233449 | skipped |
+
+Tally (pr518-ci-96ba5d1-success): 18 rows of the table above with `result` = `success`.
+Tally (pr518-ci-96ba5d1-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44329322405 at `96ba5d1`, attempt 1 of 1, `pull_request`, created 14:53:43Z and completed 14:54:04Z: `success`, `Grammar fuzz` 134889102700 and `Grammar fuzz (asan-strict)` 134889103290.
+
+Tally (pr518-fuzz-96ba5d1): 2 = 2 + 0.
+
+Local gate samples, listed and not tallied, each `scripts/gate --protocol` in `pmacs-e10o`: at `1d34cf8` (`20261118T113010Z-1744526`), seven of eight stages ok and `06-sweep` 6,147 / 6 / 88 at 243 pairs: four rows of `tests/e10r_attach_routes.rs` that the round's own change had broken (`h2_every_key_queued_at_a_stopped_daemon_arrives_in_order_once_it_resumes`, `r2_f12_ends_a_tui_blocked_writing_over_the_remote_route` and J1's two word rows), fixed at `b00e7f8` and `722f154` on the owner's rulings; and `fr1_c_c_h_opens_the_last_popup_after_a_motion_closed_it` and `review1_rust_analyzer_hover_on_use_std_fmt_passes_the_line_bound`, each `no accepted popup for C-c h in 120 s; last None; status "LSP: no hover info"`, #417's mechanism, its result line `5 passed; 2 failed` against the issue's `6 passed; 1 failed`, listed on #417 (issuecomment-6978966609); `07-sweep-luajit` 5,434 / 0 / 72; CPU pressure `avg60` at most about 11. At `722f154` (`20261118T124540Z-2318464`), all passed, 6,154 / 0 / 88 and 5,434 / 0 / 72. At `96ba5d1` (`20261118T142246Z-2663378`), all passed, 6,155 / 0 / 88 and 5,434 / 0 / 72.
+
+So, at E10z's fix round 1: `main` is `224148d`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is green at `96ba5d1`, its first attempt, after a red at `722f154` on two of the round's own rows. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
