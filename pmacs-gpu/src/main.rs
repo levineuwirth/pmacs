@@ -1961,6 +1961,9 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// events for 250 ms; `tap:<k>` presses one key and goes straight on
 /// (E10z.2); `paste:<text>` sends `text` as Ctrl-V sends what it read
 /// from the clipboard ([`App::send_os_paste`]) and goes straight on;
+/// `panel-click:<row>,<col>` waits for a presented panel and presses
+/// and releases the left button on that cell of it, through the panel's
+/// sender, and goes straight on;
 /// `ask:<k>`
 /// presses `C-c <k>` every half second until a popup is paintable (the
 /// server answers only once it has initialized); `closed` waits for the
@@ -2066,6 +2069,32 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                 // same function; and no settle, as `tap:`.
                 app.send_os_paste(arg.as_bytes().to_vec());
                 Ok(true)
+            }
+            "panel-click" => {
+                // E10z fix round 1: a left press and release on the cell
+                // `<row>,<col>` of the panel the window presents, once one
+                // is presented (up to five seconds), through the window's
+                // one panel sender, and no settle, as `tap:`.
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let presented = pump_probe_events(&mut app, &rx, until, |app| {
+                    app.state
+                        .as_ref()
+                        .is_some_and(|s| s.panel.presented().is_some())
+                });
+                let (row, col) = arg.split_once(',').unwrap_or(("0", "0"));
+                let coord = CellCoord {
+                    row: row.parse().unwrap_or(0),
+                    col: col.parse().unwrap_or(0),
+                };
+                if matches!(presented, Ok(true)) {
+                    for kind in [
+                        ProtocolMouseKind::Down(ProtocolMouseButton::Left),
+                        ProtocolMouseKind::Up(ProtocolMouseButton::Left),
+                    ] {
+                        app.send_panel_pointer_at_cell(Some(coord), kind, Modifiers::NONE);
+                    }
+                }
+                presented
             }
             "ask" => {
                 let mut got = Ok(false);
