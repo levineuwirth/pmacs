@@ -2008,20 +2008,23 @@ pub(crate) fn run_attach_pair(
                         dispatch_idle = idle;
                     }
                     // E10z fix round 1 --- the terminal caret of a frame
-                    // read while the daemon has yet to answer only the
-                    // mirror's own ops: older than the caret those ops'
-                    // paints left, which a later optimistic paint prints
-                    // at. Held back, as the `CursorByte` arm keeps the
-                    // mirror's caret, and the caret put back after the
-                    // batch's spans have moved it.
+                    // read while the daemon has yet to answer an op of the
+                    // mirror's: older than the caret that op's paint left,
+                    // which a later optimistic paint prints at. Held back,
+                    // and the caret put back after the batch's spans have
+                    // moved it.
                     //
-                    // E10z fix round 2 --- an op of the mirror's
-                    // ([`last_own_op`]), as that arm reads it: a motion
-                    // alone began a hold until this round.
+                    // E10z fix round 2 --- while an op is unanswered,
+                    // whatever else is: the daemon handles what it reads in
+                    // order, so a frame from before it handled the op is
+                    // from before it handled anything sent after the op,
+                    // a key included. Until this round a key behind the ops
+                    // ended the hold, and at the run-ahead bound the caret
+                    // went back to where the run began for a round trip
+                    // (review 2's Low 2); and a motion alone began one
+                    // (its Medium 1).
                     #[cfg(feature = "crdt")]
-                    Ok(InstanceMessage::Cursor(_))
-                        if answer_wire && answered < last_own_op && answered >= last_unapplied =>
-                    {
+                    Ok(InstanceMessage::Cursor(_)) if answer_wire && answered < last_own_op => {
                         caret_held = true;
                     }
                     // E10z.2 — how much of this session's input the

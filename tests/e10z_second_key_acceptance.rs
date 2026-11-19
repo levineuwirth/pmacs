@@ -1599,6 +1599,70 @@ fn e10z_r2_a_word_typed_after_attaching_beside_a_moving_pointer_leaves_the_pane_
     );
 }
 
+/// Review 2's Low 2: at the run-ahead bound the painted caret stays ahead of
+/// a frame older than the ops. Over a link, 300 ms each way, 24 letters
+/// 10 ms apart: 16 go as ops and are painted, the rest as keys. The proxy
+/// passes the first op and holds the second and everything behind it 3 s,
+/// so the pump reads the daemon's frame for the first letter, and nothing
+/// after it, with fifteen of its ops and a key unanswered. The caret must
+/// still stand after the sixteenth painted letter. At `8e7e230` a key
+/// behind the ops ended the hold of the frame's `Cursor`, and the caret
+/// went back to after the first letter with fifteen painted beyond it; the
+/// review read it at the line's start for the round trip.
+#[test]
+fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_bound() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(300));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    std::thread::sleep(Duration::from_millis(900));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the pane", &|_| true);
+    let start = tui.cursor().expect("a caret before the letters");
+    let ops_seen = std::sync::atomic::AtomicUsize::new(0);
+    proxy.hold_from(
+        move |e| {
+            matches!(e, FrontendEvent::CrdtOp { .. })
+                && ops_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+        },
+        Duration::from_secs(3),
+    );
+    let mark = proxy.mark();
+    for c in "abcdefghijklmnopqrstuvwx".chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let sent = proxy.wait_sent(mark, 24, "24 letters");
+    let ops = sent[..24].iter().take_while(|s| **s == Sent::Op).count();
+    assert!(
+        ops == 16 && sent[16..24].iter().all(|s| matches!(s, Sent::Key(..))),
+        "premise: 16 letters as ops and then keys, all before the first answer: {:?}",
+        &sent[..24]
+    );
+    // The first letter's frame is back 600 ms after it was typed; the hold
+    // keeps everything else from the daemon until 3 s.
+    std::thread::sleep(Duration::from_millis(1200));
+    tui.settle(
+        Duration::from_millis(300),
+        PATIENCE,
+        "the first frame",
+        &|_| true,
+    );
+    let held = tui.cursor().expect("a caret at the bound");
+    assert_eq!(
+        (held.row, held.col),
+        (start.row, start.col + 16),
+        "with a key and fifteen ops unanswered the caret stands after the sixteenth painted \
+         letter, from {start:?}; {}",
+        tui.describe()
+    );
+    tui.wait_for(PATIENCE, "all 24 letters", &|t| {
+        buffer_text(t)
+            .lines()
+            .any(|l| l.trim_end().ends_with(" abcdefghijklmnopqrstuvwx"))
+    });
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the
