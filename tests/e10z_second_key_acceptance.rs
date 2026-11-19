@@ -1615,8 +1615,15 @@ fn e10z_r2_a_word_typed_after_attaching_beside_a_moving_pointer_leaves_the_pane_
 /// op, and 17 go: CI's macOS lua54 leg at `267fb75`, the suite there seven
 /// times as slow as on the laptop, where the row's first form required 16.
 /// Either count is the bound holding with one op answered at the most, and
-/// the caret's place follows the count. The hold is 6 s and all 24 letters
-/// must be read inside 5.5 s, as the run-ahead rows have it.
+/// the caret's place follows the count.
+///
+/// The hold is 6 s, and the caret is read 1.2 s and a still screen after
+/// the last letter is. So all 24 letters must be read inside the hold less
+/// that wait, 4.5 s, and the caret inside the hold, each a premise failing
+/// by name (review 3's Low 2). Until fix round 3 the letters had 5.5 s:
+/// read between about 4.8 and 5.5 s, the hold was over before the caret was
+/// read, and the row failed on its caret, at the 24th letter, and not on
+/// the premise it names.
 #[test]
 fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_bound() {
     let daemon = daemon();
@@ -1629,7 +1636,10 @@ fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_boun
     let start = tui.cursor().expect("a caret before the letters");
     let ops_seen = std::sync::atomic::AtomicUsize::new(0);
     let hold = Duration::from_secs(6);
-    let inside = Duration::from_millis(5500);
+    // What the row waits between the letters and its read of the caret: a
+    // sleep, and a screen this long still.
+    let (then_sleeps, then_still) = (Duration::from_millis(1200), Duration::from_millis(300));
+    let inside = hold.saturating_sub(then_sleeps + then_still);
     proxy.hold_from(
         move |e| {
             matches!(e, FrontendEvent::CrdtOp { .. })
@@ -1651,21 +1661,26 @@ fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_boun
             && (ops == 16 || ops == 17)
             && sent[ops..24].iter().all(|s| matches!(s, Sent::Key(..))),
         "premise: 16 letters as ops, or 17 with the first answered, and then keys, all read \
-         {} ms after the first was typed and inside the {} ms hold: {:?}",
+         {} ms after the first was typed, inside the {} ms that leave the caret's read inside \
+         the {} ms hold: {:?}",
         took.as_millis(),
+        inside.as_millis(),
         hold.as_millis(),
         &sent[..24]
     );
     // The first letter's frame is back 600 ms after it was typed; the hold
     // keeps everything else from the daemon until 6 s.
-    std::thread::sleep(Duration::from_millis(1200));
-    tui.settle(
-        Duration::from_millis(300),
-        PATIENCE,
-        "the first frame",
-        &|_| true,
-    );
+    std::thread::sleep(then_sleeps);
+    tui.settle(then_still, PATIENCE, "the first frame", &|_| true);
+    let read_at = first.elapsed();
     let held = tui.cursor().expect("a caret at the bound");
+    assert!(
+        read_at < hold,
+        "premise: the caret was read {} ms after the first letter was typed, inside the {} ms \
+         hold, so that no frame from after the held ops had come",
+        read_at.as_millis(),
+        hold.as_millis()
+    );
     assert_eq!(
         (held.row, held.col as usize),
         (start.row, start.col as usize + ops),
@@ -1680,12 +1695,44 @@ fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_boun
     });
 }
 
+/// How many times the TUI has cleared its whole screen (`CSI 2 J`): once as it
+/// starts, and then once at the head of every resync, which is the only frame
+/// the daemon paints whole.
+fn clears(tui: &ScreenTui) -> usize {
+    tui.pty
+        .output()
+        .windows(4)
+        .filter(|w| *w == b"\x1b[2J")
+        .count()
+}
+
 /// The pane after a repaint: a resize a column narrower and back makes the
 /// daemon paint the whole grid, which is what the buffer holds.
+///
+/// Each resize's repaint is waited for by the clear it begins with, and the
+/// row fails by name without it (review 3's Low 2). Until fix round 3 this
+/// slept 800 ms between the two resizes and read the screen once it had been
+/// still for 500 ms, with nothing to say a repaint had been read: the
+/// modelled screen keeps its cells across a resize, so on a runner that
+/// answered a resize more than about a second late the "after" was the
+/// "before" less its last column, and a row comparing the two passed on a
+/// pane nobody had repainted. The second resize is made only once the first
+/// one's clear has been read, so the clear waited for after it is its own.
 fn repainted(tui: &mut ScreenTui) -> Vec<String> {
+    let seen = clears(tui);
     tui.resize(ROWS, COLS - 1);
-    std::thread::sleep(Duration::from_millis(800));
+    tui.wait_for(
+        PATIENCE,
+        "the repaint a column narrower: no clear after the resize",
+        &|t| clears(t) > seen,
+    );
+    let seen = clears(tui);
     tui.resize(ROWS, COLS);
+    tui.wait_for(
+        PATIENCE,
+        "the repaint at the full width: no clear after the resize back",
+        &|t| clears(t) > seen,
+    );
     tui.settle(Duration::from_millis(500), PATIENCE, "the repaint", &|_| {
         true
     });
