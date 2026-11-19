@@ -1090,10 +1090,19 @@ impl PaintLedger {
 
     /// Note what one frame paints. A resync carries only its ink (FG-INV at
     /// [`write_frame`]), over a blank grid, and from it on the screen is known.
+    ///
+    /// E10z fix round 3 --- and it is written over a screen cleared for it, so no
+    /// paint of this frontend's is on the screen after it, and none is kept: the
+    /// daemon's frames paint those characters when it has answered their ops. In a
+    /// session a resync follows only a resize, which has dropped the paints already;
+    /// the one that finds any is a new session's first frame, after a session lost
+    /// with paints outstanding. Their counts were the lost session's, and kept they
+    /// would be read against the new one's answers.
     fn keep(&mut self, spans: &[DiffSpan], full_grid: bool) {
         if full_grid {
             self.grid.fill(Cell::default());
             self.known = true;
+            self.unconfirmed.clear();
         }
         if self.cols == 0 {
             return;
@@ -2101,6 +2110,39 @@ mod tests {
         assert_eq!(ledger.shown(0, 1), Some('q'));
         assert_eq!(ledger.shown(3, 1), Some(' '));
         assert_eq!(ledger.shown(9, 0), None, "no such cell");
+    }
+
+    /// E10z fix round 3: a resync is painted over a cleared screen, so the paints
+    /// outstanding when it comes are on no screen, and the record drops them. A new
+    /// session's first frame is one: a paint the lost session's fortieth event made
+    /// is not read against the new session's count when that reaches forty, where
+    /// it would be found missing and take the new session's own paints back.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_resync_drops_the_paints_it_cleared_off_the_screen() {
+        let mut ledger = PaintLedger::new(CellSize::new(2, 8));
+        ledger.keep(&[span_at(0, 0, " 1 ab")], true);
+        ledger.record(40, 5, 0, 'c');
+        ledger.record(41, 4, 1, ' ');
+        // The new session's first frame, with the line as its daemon has it.
+        ledger.keep(&[span_at(0, 0, " 1 ab"), span_at(1, 0, " 2 xy")], true);
+        assert!(ledger.unconfirmed.is_empty(), "no paint outlives the clear");
+        assert_eq!(
+            ledger.expects(5, 0),
+            Some(' '),
+            "the cell as the resync shows it"
+        );
+        assert_eq!(
+            ledger.expects(4, 1),
+            Some('y'),
+            "and not the blank a deletion painted there in the lost session"
+        );
+        // The new session's own paint, and its answer at the lost one's count.
+        ledger.record(3, 5, 0, 'z');
+        assert_eq!(ledger.settle(2), None);
+        ledger.keep(&[span_at(0, 5, "z")], false);
+        assert_eq!(ledger.settle(40), None, "nothing is taken back");
+        assert!(ledger.unconfirmed.is_empty());
     }
 
     /// A frontend of `size` that has taken no terminal over, for the rows below:
