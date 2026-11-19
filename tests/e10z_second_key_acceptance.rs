@@ -287,6 +287,48 @@ impl Proxy {
             .join("\n")
     }
 
+    /// Wait until the daemon has answered every event the frontend has sent so
+    /// far, and the answer has had `latency` and a turn of the pump to reach
+    /// it: the proxy has read an `InputHandled` whose count is the number of
+    /// events it has recorded. A row whose first letter must go as an op calls
+    /// this before it types. [`tui`] ends on a screen 400 ms still, which says
+    /// nothing of whether the answer to its last key has come, and until it has
+    /// the mirror's caret is stale and a letter goes as a key, with every
+    /// letter typed behind it inside the round trip (E10z.2). For a row with one
+    /// session: the proxy's record runs on across a reconnect and the daemon's
+    /// count does not.
+    fn wait_answered(&self, latency: Duration, what: &str) {
+        let start = Instant::now();
+        loop {
+            let (sent, answered_at) = {
+                let st = self.state.lock().expect("proxy state");
+                let sent = st.sent.len() as u64;
+                let at = st.received.iter().find_map(|(at, name)| {
+                    let count: u64 = name
+                        .strip_prefix("InputHandled(")?
+                        .strip_suffix(')')?
+                        .parse()
+                        .ok()?;
+                    (count >= sent).then_some(*at)
+                });
+                (sent, at)
+            };
+            if sent == 0 {
+                return;
+            }
+            if let Some(at) = answered_at {
+                let reaches = at + latency + Duration::from_millis(200);
+                std::thread::sleep(reaches.saturating_duration_since(Instant::now()));
+                return;
+            }
+            assert!(
+                start.elapsed() < PATIENCE,
+                "{what}: the daemon has not answered the {sent} events the frontend sent"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Wait until the frontend has sent `n` events after `mark`.
     fn wait_sent(&self, mark: usize, n: usize, what: &str) -> Vec<Sent> {
         let start = Instant::now();
@@ -2158,7 +2200,14 @@ fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
     let home = tempfile::tempdir().expect("home");
     let script = stand_in(home.path(), &proxy.path);
     let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    // The first letter must go as an op, so the answer to the fresh line's
+    // Enter must have been read first: on CI's macOS luajit leg at `7b1efc4`
+    // all forty letters went as keys and the row failed on its premise.
+    proxy.wait_answered(Duration::from_millis(100), "the fresh line's answer");
     let mark = proxy.mark();
+    let from = Instant::now()
+        .checked_sub(Duration::from_millis(1500))
+        .expect("the row is older than that");
     let line = long_line(40);
     for (i, c) in line.chars().enumerate() {
         if i == 20 {
@@ -2171,8 +2220,18 @@ fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
     assert!(
         sent[..=20].iter().all(|s| *s == Sent::Op),
         "premise: the letters before the switch, and the first after it, went as ops, so that \
-         ops were out when the daemon switched: {}",
-        pattern(&sent[..40])
+         ops were out when the daemon switched: {}; what the frontend sent and the daemon \
+         answered from 1.5 s before the first letter:\n{}",
+        pattern(&sent[..40]),
+        proxy
+            .timeline(from)
+            .lines()
+            .filter(|l| ["frontend ->", "InputHandled", "DispatchIdle"]
+                .iter()
+                .any(|kind| l.contains(kind)))
+            .take(80)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     tui.wait_for(PATIENCE, "the other buffer", &|t| {
         t.screen_contains("other line two")
