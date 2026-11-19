@@ -294,6 +294,124 @@ fn the_answer_comes_before_the_first_cursor_its_key_moved() {
     );
 }
 
+/// E10z fix round 3 (review 3's Low 1) --- the premise the terminal pump's
+/// caret rests on since fix round 2, which no row asserted: every `Cursor`
+/// and every `CursorByte` the daemon writes to a session is its caret after
+/// exactly the events the last `InputHandled` before it counts. The pump
+/// moves each frame's `Cursor` by the ops that count does not cover; a count
+/// written behind its frame would move a caret the frame already shows.
+///
+/// Both of the daemon's writers are met, which is the row's premise. Forty
+/// characters go as keys in one burst at the end of an empty line, each
+/// moving the caret a column and a byte: every key is answered by the early
+/// confirmation (`confirm_cursor_early`), its count straight ahead of its
+/// `CursorByte`, with the ticks' frames among them. Then a paste of two
+/// characters, alone: a paste gets no early confirmation, so its count is
+/// the tick's, written after any `DispatchIdle` and ahead of the frame that
+/// shows the paste. With the tick's count moved behind its frame, a defect by
+/// this premise, that frame's `Cursor` is two columns past what the count
+/// read before it allows, and the row fails on it.
+#[test]
+fn a_cursor_is_the_caret_after_exactly_the_count_read_before_it() {
+    let daemon = TestDaemon::spawn_with_config(NO_REOPEN);
+    let mut tui = Tui::attach(&daemon, PROTOCOL_VERSION, multi_frontend_caps());
+    // The first tick: the frame's `Cursor`, then its `CursorByte`, nothing sent yet.
+    let (first, (buffer, byte0)) = tui.read_until("the first CursorByte", |m| match m {
+        InstanceMessage::CursorByte {
+            buffer_id,
+            byte_pos,
+        } => Some((*buffer_id, *byte_pos)),
+        _ => None,
+    });
+    let (row0, col0) = first
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            InstanceMessage::Cursor(Some(c)) if c.visible => Some((c.coord.row, c.coord.col)),
+            _ => None,
+        })
+        .expect("premise: the first frame's Cursor comes before the first CursorByte");
+    assert!(
+        first
+            .iter()
+            .any(|m| matches!(m, InstanceMessage::DispatchIdle { idle: true })),
+        "premise: the dispatcher is idle before the burst: {:?}",
+        first.iter().map(name).collect::<Vec<_>>()
+    );
+
+    for i in 0..40u8 {
+        tui.key(Key::Char(char::from(b'a' + i % 26)), Modifiers::NONE);
+    }
+    let mut read = tui.read_to_answer();
+    // The burst's last cursors and a tick or two with nothing owed, so that the
+    // paste's answer is the tick's alone.
+    read.extend(tui.drain_for(Duration::from_millis(150)));
+    let fid = tui.fid;
+    tui.send(&FrontendEvent::Paste {
+        frontend_id: fid,
+        data: b"PQ".to_vec(),
+    });
+    read.extend(tui.read_to_answer());
+    read.extend(tui.drain_for(Duration::from_millis(300)));
+
+    // The columns, and bytes, the caret has moved after `n` events.
+    let moved = |n: u64| n.min(40) + if n > 40 { 2 } else { 0 };
+    let names = || read.iter().map(name).collect::<Vec<_>>();
+    let mut count = 0u64;
+    let (mut cursors, mut bytes, mut early, mut by_the_tick) = (0, 0, 0, 0);
+    for (at, m) in read.iter().enumerate() {
+        match m {
+            InstanceMessage::InputHandled { events } => {
+                assert!(
+                    *events > count,
+                    "a count never goes back or repeats: {events} after {count}"
+                );
+                count = *events;
+                match read.get(at + 1) {
+                    Some(InstanceMessage::CursorByte { .. }) => early += 1,
+                    Some(InstanceMessage::CellDelta { .. }) => by_the_tick += 1,
+                    _ => {}
+                }
+            }
+            InstanceMessage::Cursor(Some(c)) if c.visible => {
+                cursors += 1;
+                assert_eq!(
+                    (c.coord.row, u64::from(c.coord.col)),
+                    (row0, u64::from(col0) + moved(count)),
+                    "a frame's Cursor read with the count at {count} is the caret after {count} \
+                     events: {:?}",
+                    names()
+                );
+            }
+            InstanceMessage::CursorByte {
+                buffer_id,
+                byte_pos,
+            } => {
+                bytes += 1;
+                assert_eq!(
+                    (*buffer_id, *byte_pos),
+                    (buffer, byte0 + moved(count)),
+                    "a CursorByte read with the count at {count} is the caret after {count} \
+                     events: {:?}",
+                    names()
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        count, 41,
+        "premise: the forty keys and the paste were answered"
+    );
+    assert!(
+        early >= 1 && by_the_tick >= 1 && cursors >= 2 && bytes >= 3,
+        "premise: the burst met both writers, a count straight ahead of an early CursorByte \
+         ({early}) and a count the tick wrote ahead of its frame ({by_the_tick}), with \
+         {cursors} Cursor and {bytes} CursorByte read: {:?}",
+        names()
+    );
+}
+
 /// E10z.1 --- the count is of every event the dispatcher takes up from
 /// the session, whatever its kind: a focus change, a resize, a paste, a
 /// mouse press and a key each move it by one, and it never passes what
