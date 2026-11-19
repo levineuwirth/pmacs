@@ -454,8 +454,17 @@ jobs:
           # Versions are PINNED. `@latest` and bare `npm install -g`
           # make CI behaviour drift with upstream releases: a bad gopls
           # or yaml-language-server publish then breaks CI with no
-          # commit in this repository to bisect against.
-          go install golang.org/x/tools/gopls@v0.16.2
+          # commit in this repository to bisect against. The Go that
+          # builds gopls is pinned with it (#520): v0.16.2 compiles
+          # under Go 1.24 and not under 1.25 or later, and the image's
+          # default Go moves with the image. `GOTOOLCHAIN` makes that
+          # `go` fetch and run the pinned toolchain for this one
+          # command; the `go` on `PATH`, which gopls calls, stays the
+          # image's. The two `go version` lines put in the job's log
+          # the image's Go and the Go the binary was built with.
+          go version
+          GOTOOLCHAIN=go1.24.13 go install golang.org/x/tools/gopls@v0.16.2
+          go version "$(go env GOPATH)/bin/gopls"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           npm install -g vscode-langservers-extracted@4.10.0 \
                          yaml-language-server@1.15.0
