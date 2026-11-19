@@ -19133,6 +19133,126 @@ Local gate samples, listed and not tallied: `scripts/gate --protocol` at `267fb7
 So, at E10z fix round 2: `main` is `1c680e6`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #524 is green at `7933bd2` and unmerged; PR #518 is green at `c98f06a`. #520 has two occurrences, both on `20261116.376.1`, and stays open until a leg on a Go 1.26 default passes the tool step. No row's count moves here.
 
 
+### PR #524's merge: `main` green at `bce222e` and at the squash `69ccb27`, every test leg; a dispatch of the branch red on #509, its third occurrence; #520 open, no leg on a Go 1.26 default
+
+Recorded 2026-11-19 after PR #524's merge, at the close of E10z fix round 2. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, fetched with escape sequences allowed and stripped, every `running` line paired with its own result line, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `bce222e`, fix round 2's record, were owed by that record. The dispatch was the owner's. No run was rerun.
+
+#### `main` at `bce222e`, fix round 2's record: green
+
+`CI` 44553222987 at `bce222e`, attempt 1 of 1, `push`, created 2026-11-19T15:18:03Z and completed 15:20:38Z: `success`, the registry-push shape.
+
+Tally (main-ci-bce222e): 15 = 6 + 9.
+
+Tally (main-ci-bce222e-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 135662221381 | success |
+| Changed paths | 135662221779 | success |
+| Commit attribution (D9) | 135662221994 | success |
+| Lint (lua54) | 135662222053 | success |
+| Lint (luajit) | 135662222235 | success |
+| Docs consistency | 135662350354 | success |
+| M6 Perf Gates | 135662352992 | skipped |
+| M5 Perf Gates | 135662353819 | skipped |
+| GPU Render (headless) | 135662354151 | skipped |
+| Test (crdt) | 135662354162 | skipped |
+| M10 Perf Gates (crdt) | 135662354234 | skipped |
+| M4 Perf Gates | 135662354394 | skipped |
+| Perf budgets (debug) | 135662354415 | skipped |
+| M1 Acceptance Gates | 135662354886 | skipped |
+| Test ((matrix) | 135662355086 | skipped |
+
+Tally (main-ci-bce222e-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-bce222e-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44553223409 at `bce222e`, attempt 1 of 1, `push`, created 15:18:03Z and completed 15:18:26Z: `success`, `Grammar fuzz` 135662224790 and `Grammar fuzz (asan-strict)` 135662224830.
+
+Tally (main-fuzz-bce222e): 2 = 2 + 0.
+
+#### `main` at `69ccb27`, PR #524's squash: green on every test leg, the three Ubuntu matrix legs on a Go 1.24.13 default
+
+PR #524 (`ci/gopls-go-toolchain`, `7933bd2`) was squash-merged by the owner at 2026-11-19T15:34:40Z as `69ccb27`, which touches `.github/workflows/ci.yml` alone: the Ubuntu test legs' tool step builds the pinned gopls v0.16.2 under `GOTOOLCHAIN=go1.24.13` and prints `go version` before the install and `go version` of the built binary after it. It is the first commit on `main` since `ca7bd55` that is not a change to this file alone, so its push run ran every job but `Docs consistency`.
+
+`CI` 44556366897 at `69ccb27`, attempt 1 of 1, `push`, created 2026-11-19T15:34:44Z and completed 16:26:57Z: `success`. The three Ubuntu legs that run the tool step, by the "Runner Image" group of each log and the step's two `go version` lines: `Test (ubuntu-latest / luajit)` 135673543754 on `ubuntu-24.04` `20261111.127.1` (AWS, us-east-1), 233 `running` lines each paired, 5,712 passed, 0 failed, 88 ignored; `Test (ubuntu-latest / lua54)` 135673543497 on `20261111.370.1` (Azure, centralus), 233, 5,712 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 135673543641 on `20261111.127.1` (AWS, us-west-2), 233, 5,031 / 0 / 72. Each printed `go version go1.24.13 linux/amd64` as the image's Go and `/home/runner/go/bin/gopls: go1.24.13` for the built gopls, and the three real-gopls rows read `ok` on each. `Test (crdt)` 135673542987, which does not run the step, on `20261111.127.1`, 232 paired, 5,653 / 0 / 88; `Test (macos-latest / luajit)` 135673543403 and `Test (macos-latest / lua54)` 135673543502, both on `macos-26-arm64` `20261102.0473.1`, 234 paired each, 5,653 / 0 / 80. Every leg's figures are those of the same leg of PR #524's run at `7933bd2` in the section above. #509's row, `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, reads `ok` on all six test legs.
+
+Tally (main-ci-69ccb27): 19 = 18 + 1.
+
+Tally (main-ci-69ccb27-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 135673388565 | success |
+| Lint (luajit) | 135673389042 | success |
+| Format | 135673389093 | success |
+| Changed paths | 135673389178 | success |
+| Lint (lua54) | 135673389361 | success |
+| Test (crdt) | 135673542987 | success |
+| GPU Render (headless) | 135673543088 | success |
+| M5 Perf Gates | 135673543284 | success |
+| M1 Acceptance Gates | 135673543316 | success |
+| M10 Perf Gates (crdt) | 135673543331 | success |
+| M6 Perf Gates | 135673543344 | success |
+| Perf budgets (debug) | 135673543354 | success |
+| Test (macos-latest / luajit) | 135673543403 | success |
+| M4 Perf Gates | 135673543463 | success |
+| Test (ubuntu-latest / lua54) | 135673543497 | success |
+| Test (macos-latest / lua54) | 135673543502 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 135673543641 | success |
+| Test (ubuntu-latest / luajit) | 135673543754 | success |
+| Docs consistency | 135673546229 | skipped |
+
+Tally (main-ci-69ccb27-success): 18 rows of the table above with `result` = `success`.
+Tally (main-ci-69ccb27-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44556366918 at `69ccb27`, attempt 1 of 1, `push`, created 15:34:44Z and completed 15:34:57Z: `success`, `Grammar fuzz` 135673387842 and `Grammar fuzz (asan-strict)` 135673388182.
+
+Tally (main-fuzz-69ccb27): 2 = 2 + 0.
+
+#### `CI` 44556399054, a dispatch of `ci/gopls-go-toolchain` at `7933bd2`: one macOS luajit leg red on #509, its third occurrence; no Ubuntu leg on a Go 1.26 default
+
+The dispatch was taken to give the pinned step three more Ubuntu legs, since no leg of PR #524's own run had met an image whose default Go is 1.26. The branch at `7933bd2` is `main` at `1c680e6` and the one workflow commit; a dispatch runs the branch's head and not a merge.
+
+`CI` 44556399054 at `7933bd2`, attempt 1 of 1, `workflow_dispatch` of `ci/gopls-go-toolchain`, created 2026-11-19T15:34:54Z and completed 16:23:09Z (the API's `updated_at`): `failure`.
+
+Tally (dispatch-524-7933bd2): 19 = 17 + 1 + 1.
+
+Tally (dispatch-524-7933bd2-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 135673512353 | success |
+| Changed paths | 135673512678 | success |
+| Lint (luajit) | 135673512747 | success |
+| Lint (lua54) | 135673512974 | success |
+| Commit attribution (D9) | 135673513117 | success |
+| M4 Perf Gates | 135673697889 | success |
+| M6 Perf Gates | 135673697900 | success |
+| Test (macos-latest / luajit) | 135673697904 | failure |
+| Test (macos-latest / lua54) | 135673697957 | success |
+| Test (ubuntu-latest / lua54) | 135673697964 | success |
+| Perf budgets (debug) | 135673697967 | success |
+| M10 Perf Gates (crdt) | 135673697997 | success |
+| GPU Render (headless) | 135673698018 | success |
+| M5 Perf Gates | 135673698028 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 135673698052 | success |
+| Test (ubuntu-latest / luajit) | 135673698181 | success |
+| Test (crdt) | 135673698204 | success |
+| M1 Acceptance Gates | 135673699245 | success |
+| Docs consistency | 135673701805 | skipped |
+
+Tally (dispatch-524-7933bd2-success): 17 rows of the table above with `result` = `success`.
+Tally (dispatch-524-7933bd2-failures): 1 row of the table above with `result` = `failure`.
+Tally (dispatch-524-7933bd2-skipped): 1 row of the table above with `result` = `skipped`.
+
+The three Ubuntu legs that run the tool step: `Test (ubuntu-latest / luajit)` 135673698181 on `20261111.370.1` (Azure, southcentralus), 233 `running` lines each paired, 5,712 / 0 / 88; `Test (ubuntu-latest / lua54)` 135673697964 on `20261116.133.1` (AWS, us-west-2), 233, 5,712 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 135673698052 on `20261111.370.1` (Azure, westcentralus), 233, 5,031 / 0 / 72. Each printed `go version go1.24.13 linux/amd64` and `/home/runner/go/bin/gopls: go1.24.13`, and read the three real-gopls rows `ok`. `Test (crdt)` 135673698204 on `20261116.133.1` (AWS, us-east-1), 232 paired, 5,653 / 0 / 88; `Test (macos-latest / lua54)` 135673697957 on `macos-26-arm64` `20261112.0504.1`, 234 paired, 5,653 / 0 / 80.
+
+**The red, #509's third occurrence** (commented, issuecomment-7016520072): `Test (macos-latest / luajit)` 135673697904 on `macos-26-arm64` `20261102.0473.1`, `tests/e10r_attach_routes.rs`'s `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, `panicked at tests/e10r_attach_routes.rs:3392:5:`, `a slow link that moved: 10256 then 0 bytes`, both of #509's fragments and the count of both earlier occurrences; the row was named `FAILED` at 15:52:00Z and the suite read `FAILED. 88 passed; 1 failed; 0 ignored` in 168.05 s. The leg: 232 `running` lines and 232 results, 5,592 / 1 / 80, the last two test steps not run. It is the row's second red on the luajit leg; the second occurrence was on lua54. The row read `ok` on this run's other five test legs and on all six of `main`'s push run of the same minute. The branch's one commit changes a step the macOS legs do not run. Not rerun.
+
+**#520 after these runs** (commented, issuecomment-7016520513): nine Ubuntu legs have now run the pinned step, three of PR #524's run, three of `main`'s push run and three of this dispatch, on images `20261111.127.1`, `20261111.370.1` and `20261116.133.1`, and each printed `go1.24.13` as the image's Go. None landed on `20261116.376.1`, the image of both occurrences. So no job has yet shown the pinned command building under a 1.26 default; that is shown on the laptop alone (PR #524's body). #520 stays open at two occurrences until an Ubuntu leg's log reads `go version go1.26` and passes the step, which every run's legs now print.
+
+So, at PR #524's merge: `main` is `69ccb27`, green on its push run with every test leg, the pin in it. PR #524 is merged. PR #518 is green at `c98f06a`, its run a merge into `1c680e6`, which does not have the pin. #509 moves to three, each on a macOS leg. #520 stays at two and open. No other row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
