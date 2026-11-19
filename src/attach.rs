@@ -1815,16 +1815,29 @@ pub(crate) fn run_attach_pair(
     let mut answer_needed: u64 = 0;
     // E10z fix round 1 --- the count at the last event on the wire that is
     // neither an op the mirror applied nor one that changes nothing ([`awaits_answer`]):
-    // a key, a click, a paste, a resize. While the daemon's answer is short
-    // of what this pump has sent but covers that event, everything it has
-    // not answered is the mirror's own text or a pointer motion or focus
-    // change, so a `CursorByte` read then describes the buffer before some
-    // of the text and the mirror keeps its own caret (review 1's Medium 2
-    // (b), and the owner's ruling of 2026-11-18 that a motion and a focus
-    // change do not stop it); once the answer covers everything, the cursor
-    // re-grounds as before.
+    // a key, a click, a paste, a resize. While the daemon's answer covers
+    // that event but is short of the mirror's last op (`last_own_op`,
+    // below), everything it has not answered is the mirror's own text or a
+    // pointer motion or focus change, so a `CursorByte` read then describes
+    // the buffer before some of the text and the mirror keeps its own caret
+    // (review 1's Medium 2 (b), and the owner's ruling of 2026-11-18 that a
+    // motion and a focus change do not stop it); once the answer covers the
+    // op, the cursor re-grounds as before.
     #[cfg(feature = "crdt")]
     let mut last_unapplied: u64 = 0;
+    // E10z fix round 2 --- the count at the last op the mirror applied at
+    // the caret this pump keeps. The mirror's caret is kept over a
+    // `CursorByte`, and a frame's `Cursor` held back, only while the
+    // daemon's answer is short of it: only then is what the daemon sent
+    // older than something the mirror did. Until this round both tests
+    // read `answered < events_sent`, which a pointer motion in flight
+    // satisfies with no op out; over a link a moving pointer always has
+    // one in flight, so the daemon's answer to a round-tripped key was
+    // taken for older than the mirror and never applied (review 2's
+    // Medium 1). A motion or a focus change now neither stops a keep
+    // (`last_unapplied` does not count it) nor starts one.
+    #[cfg(feature = "crdt")]
+    let mut last_own_op: u64 = 0;
     // E10z fix round 1's addition --- the numbers of the unanswered pointer
     // motions and focus changes, oldest first, so that
     // [`OPTIMISTIC_RUN_AHEAD`] counts only what the daemon has work to do
@@ -1908,11 +1921,17 @@ pub(crate) fn run_attach_pair(
                         // ops, in the buffer they went to, is older than
                         // the mirror's, which is kept; any staleness a
                         // remote op left stays until the answer covers.
-                        let keeps_own_caret = answer_wire
-                            && answered < events_sent
-                            && answered >= last_unapplied
-                            && buffer_mirror.active_buffer() == Some(buffer_id)
+                        //
+                        // E10z fix round 2 --- "has yet to answer" an op of
+                        // the mirror's ([`last_own_op`]), not anything at
+                        // all: with only a motion out the cursor is the
+                        // daemon's answer and is taken.
+                        let in_the_ops_buffer = buffer_mirror.active_buffer() == Some(buffer_id)
                             && buffer_mirror.cursor_byte_pos(buffer_id).is_some();
+                        let keeps_own_caret = answer_wire
+                            && answered < last_own_op
+                            && answered >= last_unapplied
+                            && in_the_ops_buffer;
                         if !keeps_own_caret {
                             buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
                             // E10z.2 --- a cursor from before the daemon
@@ -1920,6 +1939,18 @@ pub(crate) fn run_attach_pair(
                             // mirror's cursor and leaves it stale.
                             if answer_wire && answered < answer_needed {
                                 buffer_mirror.mark_cursor_stale(buffer_id);
+                            }
+                            // E10z fix round 2 --- the daemon's caret is in
+                            // a buffer the mirror's unanswered ops did not
+                            // go to (this buffer's first cursor, or another
+                            // buffer's): the mirror is now grounded there,
+                            // so the caret those ops' paints left is no
+                            // longer kept, and the frame's `Cursor` is
+                            // taken with this one. Review 2 found the two
+                            // apart: this applied, that held, and a word
+                            // painted where the old caret had been.
+                            if !in_the_ops_buffer {
+                                last_own_op = 0;
                             }
                         }
                     }
@@ -1983,9 +2014,13 @@ pub(crate) fn run_attach_pair(
                     // at. Held back, as the `CursorByte` arm keeps the
                     // mirror's caret, and the caret put back after the
                     // batch's spans have moved it.
+                    //
+                    // E10z fix round 2 --- an op of the mirror's
+                    // ([`last_own_op`]), as that arm reads it: a motion
+                    // alone began a hold until this round.
                     #[cfg(feature = "crdt")]
                     Ok(InstanceMessage::Cursor(_))
-                        if answer_wire && answered < events_sent && answered >= last_unapplied =>
+                        if answer_wire && answered < last_own_op && answered >= last_unapplied =>
                     {
                         caret_held = true;
                     }
@@ -2181,6 +2216,8 @@ pub(crate) fn run_attach_pair(
                     events_sent += 1;
                     if matches!(frontend_event, FrontendEvent::Key(_)) {
                         last_unapplied = events_sent;
+                    } else {
+                        last_own_op = events_sent;
                     }
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command

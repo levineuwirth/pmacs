@@ -92,6 +92,9 @@ struct ProxyState {
     /// until `.1` has passed from its read; one-shot.
     arm: Option<(Trigger, Duration)>,
     hold_until: Option<Instant>,
+    /// What the daemon writes after the handshake's reply reaches the
+    /// frontend no sooner than this long behind the reply.
+    first_frame_late: Duration,
 }
 
 /// A socket between one frontend and the daemon (see the module's note).
@@ -166,16 +169,26 @@ impl Proxy {
         let back_shut = back.try_clone().expect("clone");
         let down_state = Arc::clone(&state);
         std::thread::spawn(move || {
+            let mut reply_at = None;
             while let Some(frame) = read_frame(&mut back_read) {
                 let at = Instant::now();
                 let name = postcard::from_bytes::<InstanceMessage>(&frame[4..])
                     .map_or_else(|_| "?".to_owned(), |m| received_name(&m));
-                down_state
-                    .lock()
-                    .expect("proxy state")
-                    .received
-                    .push((at, name));
-                if down_tx.send((at + latency, frame)).is_err() {
+                let late = {
+                    let mut st = down_state.lock().expect("proxy state");
+                    st.received.push((at, name));
+                    st.first_frame_late
+                };
+                // The first frame is the handshake's reply; the session's
+                // frames follow it, `late` behind it at the soonest.
+                let release = match reply_at {
+                    None => {
+                        reply_at = Some(at);
+                        at + latency
+                    }
+                    Some(reply) => (at + latency).max(reply + latency + late),
+                };
+                if down_tx.send((release, frame)).is_err() {
                     break;
                 }
             }
@@ -228,6 +241,14 @@ impl Proxy {
         let mut st = self.state.lock().expect("proxy state");
         st.arm = Some((Box::new(trigger), hold));
         st.hold_until = None;
+    }
+
+    /// Before a frontend attaches: its session's first frame, and what
+    /// follows, reach it no sooner than `late` behind the handshake's
+    /// reply, so that the frontend has forwarded input before it has read
+    /// any frame, as it has on a link whose far side is slow to paint.
+    fn first_frame_late(&self, late: Duration) {
+        self.state.lock().expect("proxy state").first_frame_late = late;
     }
 
     /// How many events the frontend has sent so far: a mark for [`Self::since`].
@@ -300,6 +321,25 @@ fn daemon() -> TestDaemon {
 /// `*scratch*` with the caret on a fresh empty last line, where a typed
 /// character is the optimistic path's.
 fn tui(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
+    let mut tui = tui_just_started(socket, home, remote);
+    tui.wait_for(PATIENCE, "the attached *scratch*", &|t| {
+        t.screen_contains("*scratch*")
+    });
+    tui.write(b"\x1b>");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.write(b"\r");
+    tui.settle(
+        Duration::from_millis(400),
+        PATIENCE,
+        "the fresh last line",
+        &|_| true,
+    );
+    tui
+}
+
+/// [`tui`] as it is the moment the process is started: nothing waited for
+/// and nothing typed, for a row whose state begins before the first frame.
+fn tui_just_started(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
     let socket = socket.to_str().expect("utf-8").to_owned();
     let (args, envs): (Vec<&str>, Vec<(&str, &Path)>) = match remote {
         None => (
@@ -316,20 +356,7 @@ fn tui(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
         ),
     };
     let (pty, tap) = spawn_pmacs_in_pty_tapped(&args, &envs, ROWS, COLS);
-    let mut tui = ScreenTui::new(pty, tap, ROWS, COLS);
-    tui.wait_for(PATIENCE, "the attached *scratch*", &|t| {
-        t.screen_contains("*scratch*")
-    });
-    tui.write(b"\x1b>");
-    std::thread::sleep(Duration::from_millis(300));
-    tui.write(b"\r");
-    tui.settle(
-        Duration::from_millis(400),
-        PATIENCE,
-        "the fresh last line",
-        &|_| true,
-    );
-    tui
+    ScreenTui::new(pty, tap, ROWS, COLS)
 }
 
 /// The `ssh` stand-in: the real far-side bridge, `--daemon-attach`, on
@@ -1243,6 +1270,31 @@ fn e10z_r1_the_run_ahead_bound_holds_beside_a_moving_pointer() {
          answered none: {:?}",
         &typed[..24]
     );
+    // E10z fix round 2 --- the plain row's last step, the pointer still
+    // moving: once the daemon has answered, a letter goes as an op again.
+    let mut col = 5u16;
+    let until = Instant::now() + PATIENCE;
+    while !buffer_text(&tui)
+        .lines()
+        .any(|l| l.trim_end().ends_with(" abcdefghijklmnopqrstuvwx"))
+    {
+        assert!(
+            Instant::now() < until,
+            "all 24 letters on the pane beside the moving pointer: {}",
+            tui.describe()
+        );
+        move_the_pointer(&mut tui, Duration::from_millis(50), &mut col);
+    }
+    move_the_pointer(&mut tui, Duration::from_millis(500), &mut col);
+    let mark = proxy.mark();
+    tui.write(b"y");
+    move_the_pointer(&mut tui, Duration::from_millis(300), &mut col);
+    let after = letters(&proxy.since(mark));
+    assert_eq!(
+        after.first(),
+        Some(&Sent::Op),
+        "once answered, a letter goes as an op again beside the moving pointer: {after:?}"
+    );
 }
 
 /// The fix round's run-ahead bound (the owner's ruling of 2026-11-18): with
@@ -1300,6 +1352,250 @@ fn e10z_r1_optimistic_typing_runs_ahead_of_the_answer_by_at_most_16() {
         sent[0],
         Sent::Op,
         "once answered, a letter goes as an op again"
+    );
+}
+
+/// A pointer crossing row 4 for `time`, a buttonless motion every 8.5 ms as
+/// [`type_beside_a_moving_pointer`] writes them, the pane read between
+/// them, so that the screen a row reads next is the one the pointer was
+/// moving over and not one from before it.
+fn move_the_pointer(tui: &mut ScreenTui, time: Duration, col: &mut u16) {
+    let until = Instant::now() + time;
+    while Instant::now() < until {
+        *col = 2 + (*col + 1) % (COLS - 4);
+        tui.write(format!("\x1b[<35;{col};4M").as_bytes());
+        let _ = tui.watch_for(Duration::from_micros(8_500), &|_| false);
+    }
+}
+
+/// Letters `gap` apart with the pointer moving between them.
+fn type_beside(tui: &mut ScreenTui, text: &str, gap: Duration, col: &mut u16) {
+    for c in text.chars() {
+        tui.write(c.to_string().as_bytes());
+        move_the_pointer(tui, gap, col);
+    }
+}
+
+/// Review 2's Medium 1, the pace: over a link, 100 ms each way, with the
+/// pointer moving the whole time, text typed after a round-tripped key the
+/// daemon has answered goes as ops again, as it does with the pointer
+/// still. `ab`, the key, 700 ms (three round trips and more), then `cdefgh`
+/// 60 ms apart: at least five of the six as ops, after Enter and after
+/// `C-e`, which is E10z.2's own guard beside a pointer. At `8e7e230` a
+/// motion in flight counted as something the daemon had yet to answer, so
+/// the `CursorByte` that answers the key was taken for older than the
+/// mirror's caret and not applied, the stale mark the key left stood, and
+/// every letter went as a key: 0 of 6 by the review's probe (6 of 6 with no
+/// pointer, 2 of 6 at `d8fd793`).
+#[test]
+fn e10z_r2_text_after_an_answered_key_beside_a_moving_pointer_is_optimistic() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mut col = 5u16;
+    let mut wrong = Vec::new();
+    for (trial, key) in [b"\r".as_slice(), b"\x05", b"\r"].into_iter().enumerate() {
+        std::thread::sleep(Duration::from_millis(800));
+        move_the_pointer(&mut tui, Duration::from_millis(500), &mut col);
+        type_beside(&mut tui, "ab", Duration::from_millis(60), &mut col);
+        move_the_pointer(&mut tui, Duration::from_millis(400), &mut col);
+        tui.write(key);
+        move_the_pointer(&mut tui, Duration::from_millis(700), &mut col);
+        let mark = proxy.mark();
+        type_beside(&mut tui, "cdefgh", Duration::from_millis(60), &mut col);
+        move_the_pointer(&mut tui, Duration::from_millis(300), &mut col);
+        let typed = letters(&proxy.since(mark));
+        let ops = typed.iter().take(6).filter(|s| **s == Sent::Op).count();
+        eprintln!(
+            "e10z_r2 after an answered key beside a moving pointer, trial {trial}: {ops} of 6"
+        );
+        if ops < 5 {
+            wrong.push(format!("trial {trial}: {ops} of 6 ops, {typed:?}"));
+        }
+        tui.write(b"\r");
+    }
+    assert!(
+        wrong.is_empty(),
+        "text typed after an answered key beside a moving pointer must go as ops: {wrong:#?}"
+    );
+}
+
+/// Review 2's Medium 1, the caret: the same state, read on the pane. After
+/// Enter, with the pointer still moving and nothing else typed, the
+/// terminal's caret is on the new line. At `8e7e230` it stayed at the end
+/// of the old line for as long as the pointer moved: the frame's `Cursor`
+/// was held back because a motion was unanswered, and the caret put back
+/// where it had been. The caret is read while the pointer moves.
+#[test]
+fn e10z_r2_the_caret_follows_enter_beside_a_moving_pointer() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mut col = 5u16;
+    move_the_pointer(&mut tui, Duration::from_millis(500), &mut col);
+    type_beside(&mut tui, "ab", Duration::from_millis(60), &mut col);
+    move_the_pointer(&mut tui, Duration::from_millis(600), &mut col);
+    let before = tui.cursor().expect("a caret after ab");
+    tui.write(b"\r");
+    move_the_pointer(&mut tui, Duration::from_millis(900), &mut col);
+    let after = tui.cursor().expect("a caret after Enter");
+    assert_eq!(
+        (after.row, after.col),
+        (before.row + 1, before.col - 2),
+        "after Enter the caret is at the start of the next line while the pointer moves: \
+         {before:?} then {after:?}; {}",
+        tui.describe()
+    );
+}
+
+/// Review 2's Medium 1, the pane: a file opened beside a moving pointer,
+/// then a word. The word goes as ops (the mirror re-grounds on the new
+/// buffer's first cursor) and must be painted where it goes: on the file's
+/// first line, which is empty so that the word is the optimistic path's,
+/// and nowhere else. At `8e7e230` the new buffer's `CursorByte` was applied
+/// while the frame's `Cursor` was held for the motions in flight, so the
+/// word was painted on the bottom row, where the prompt's caret had been,
+/// and stayed there until something repainted the grid; the buffer was
+/// right throughout. The prompt comes prefilled with the daemon's
+/// directory, which the row deletes before it types the file's path.
+#[test]
+fn e10z_r2_a_word_typed_in_a_file_opened_beside_a_moving_pointer_is_painted_where_it_goes() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let file = home.path().join("f.txt");
+    std::fs::write(&file, "\nsecond line\nthird line\n").expect("the file");
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mut col = 5u16;
+    move_the_pointer(&mut tui, Duration::from_millis(500), &mut col);
+    tui.write(b"\x18");
+    move_the_pointer(&mut tui, Duration::from_millis(500), &mut col);
+    tui.write(b"\x06");
+    // The prompt's field: what stands after its label, up to the
+    // candidate hint the prompt shows beside it.
+    let field = |t: &ScreenTui| -> String {
+        t.bottom_row()
+            .strip_prefix("Find file: ")
+            .and_then(|rest| rest.split(' ').next())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let until = Instant::now() + PATIENCE;
+    while !field(&tui).starts_with('/') {
+        assert!(
+            Instant::now() < until,
+            "the find-file prompt beside the moving pointer: {}",
+            tui.describe()
+        );
+        move_the_pointer(&mut tui, Duration::from_millis(50), &mut col);
+    }
+    move_the_pointer(&mut tui, Duration::from_millis(400), &mut col);
+    let prefill = field(&tui).chars().count();
+    tui.write(&vec![0x7f; prefill]);
+    while !field(&tui).is_empty() {
+        assert!(
+            Instant::now() < until,
+            "the prompt's prefill deleted: {}",
+            tui.describe()
+        );
+        move_the_pointer(&mut tui, Duration::from_millis(50), &mut col);
+    }
+    type_beside(
+        &mut tui,
+        file.to_str().expect("utf-8"),
+        Duration::from_millis(30),
+        &mut col,
+    );
+    move_the_pointer(&mut tui, Duration::from_millis(400), &mut col);
+    tui.write(b"\r");
+    while !tui.screen_contains("second line") {
+        assert!(
+            Instant::now() < until,
+            "the file on the pane beside the moving pointer: {}",
+            tui.describe()
+        );
+        move_the_pointer(&mut tui, Duration::from_millis(50), &mut col);
+    }
+    move_the_pointer(&mut tui, Duration::from_secs(1), &mut col);
+    let mark = proxy.mark();
+    type_beside(&mut tui, "hello", Duration::from_millis(60), &mut col);
+    move_the_pointer(&mut tui, Duration::from_millis(800), &mut col);
+    let typed = letters(&proxy.since(mark));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the word", &|_| true);
+    let rows = tui.rows();
+    let strays: Vec<&String> = rows.iter().skip(1).filter(|r| r.contains("hel")).collect();
+    assert!(
+        rows[0].trim_end() == " 1 hello" && strays.is_empty(),
+        "hello ({typed:?}) is on the file's first line and nowhere else on the pane: {}",
+        tui.describe()
+    );
+}
+
+/// Review 2's Medium 1, the attach: the pointer already moving when the TUI
+/// attaches over the link, then a word. At `8e7e230` no `Cursor` of the
+/// session had been applied, each read while a motion was unanswered, so
+/// the terminal showed no caret, its own stood where the first frame's last
+/// span left it, past the last cell of the pane, and on the review's
+/// terminal the first optimistic paint wrapped and scrolled the whole pane
+/// up a row, the word painted along the bottom. This suite's screen model
+/// does not scroll there, so the row reads the cause as well as the pane:
+/// before the word the caret stands at line 1's start beside the gutter,
+/// after it behind the word; the word reads on line 1, the mode line stands
+/// on its own row saying `L1:C6`, and no other row holds any of the word.
+/// Whether the first frame is read before the first motion is forwarded is
+/// a race the review's release build lost and this suite's debug build
+/// wins, so the proxy holds the session's first frame 500 ms behind the
+/// handshake's reply: the state is the review's every time.
+#[test]
+fn e10z_r2_a_word_typed_after_attaching_beside_a_moving_pointer_leaves_the_pane_whole() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    proxy.first_frame_late(Duration::from_millis(500));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui_just_started(&proxy.path, home.path(), Some(&script));
+    let mut col = 5u16;
+    let until = Instant::now() + PATIENCE;
+    while !tui.screen_contains("*scratch*") {
+        assert!(
+            Instant::now() < until,
+            "the attached *scratch* beside the moving pointer: {}",
+            tui.describe()
+        );
+        move_the_pointer(&mut tui, Duration::from_millis(50), &mut col);
+    }
+    move_the_pointer(&mut tui, Duration::from_millis(1500), &mut col);
+    let before = tui.cursor();
+    let mark = proxy.mark();
+    type_beside(&mut tui, "hello", Duration::from_millis(60), &mut col);
+    move_the_pointer(&mut tui, Duration::from_secs(1), &mut col);
+    let typed = letters(&proxy.since(mark));
+    eprintln!("e10z_r2 attached beside a moving pointer: caret {before:?}, hello went {typed:?}");
+    tui.settle(Duration::from_millis(300), PATIENCE, "the word", &|_| true);
+    let rows = tui.rows();
+    let mode_line = usize::from(ROWS) - 2;
+    let strays: Vec<(usize, &String)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| *i != 0 && r.contains("hel"))
+        .collect();
+    let after = tui.cursor();
+    assert!(
+        before.map(|c| (c.row, c.col)) == Some((0, 3))
+            && after.map(|c| (c.row, c.col)) == Some((0, 8))
+            && rows[0].trim_end() == " 1 hello"
+            && rows[mode_line].contains("*scratch*")
+            && rows[mode_line].contains("L1:C6")
+            && strays.is_empty(),
+        "the caret stands at line 1's start before the word ({before:?}) and behind it after \
+         ({after:?}); hello ({typed:?}) reads on line 1 beside the gutter, the mode line on row \
+         {mode_line} says L1:C6, and no other row holds the word: {}",
+        tui.describe()
     );
 }
 
