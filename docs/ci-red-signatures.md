@@ -18940,6 +18940,45 @@ Local gate sample, listed and not tallied: `scripts/gate --protocol` at `8e7e230
 
 So, at E10z fix round 1's addition: `main` is `62dd215`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is red at `8e7e230` on #520 and #521, neither the branch's code, after green at `96ba5d1`. No row's count moves here; #520 and #521 are new.
 
+### E10z review 2: `main` green at `e63a7a2`
+
+Recorded 2026-11-19 at E10z review 2; the runs are of 2026-11-18 (UTC). Each run below was read from the jobs endpoint by conclusion, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `e63a7a2`, the addition's record, were owed by that record. PR #518's runs at `8e7e230` are in the section above; the review read them again, each test leg from its own log with every `running` line paired with its own result line, and found every figure there as written, the run still at attempt 1 of 1. No run was dispatched or rerun.
+
+`CI` 44418335210 at `e63a7a2`, attempt 1 of 1, `push`, created 2026-11-18T23:10:04Z and completed 23:12:04Z: `success`, the registry-push shape.
+
+Tally (main-ci-e63a7a2): 15 = 6 + 9.
+
+Tally (main-ci-e63a7a2-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 135204406779 | success |
+| Lint (luajit) | 135204407323 | success |
+| Changed paths | 135204407394 | success |
+| Commit attribution (D9) | 135204407436 | success |
+| Lint (lua54) | 135204407477 | success |
+| Docs consistency | 135204521416 | success |
+| M10 Perf Gates (crdt) | 135204524025 | skipped |
+| M6 Perf Gates | 135204524231 | skipped |
+| M5 Perf Gates | 135204524323 | skipped |
+| M4 Perf Gates | 135204524563 | skipped |
+| Test ((matrix) | 135204524586 | skipped |
+| GPU Render (headless) | 135204524653 | skipped |
+| Test (crdt) | 135204525017 | skipped |
+| M1 Acceptance Gates | 135204525532 | skipped |
+| Perf budgets (debug) | 135204525799 | skipped |
+
+Tally (main-ci-e63a7a2-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-e63a7a2-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44418334986 at `e63a7a2`, attempt 1 of 1, `push`, created 23:10:04Z and completed 23:10:27Z: `success`, `Grammar fuzz` 135204407638 and `Grammar fuzz (asan-strict)` 135204407148.
+
+Tally (main-fuzz-e63a7a2): 2 = 2 + 0.
+
+Local gate sample, listed and not tallied: `scripts/gate --protocol` at `8e7e230` (`20261118T232416Z-3786421`) in `pmacs-e10o`, all passed, 6,157 / 0 / 88 and 5,434 / 0 / 72, CPU pressure `avg60` at most 8.58.
+
+So, at E10z review 2: `main` is `e63a7a2`, green in the registry-push shape; its last code-bearing commit is still `ca7bd55`; PR #518 is as the section above left it, red at `8e7e230` on #520 and #521. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
