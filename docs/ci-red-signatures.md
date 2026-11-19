@@ -19253,6 +19253,45 @@ The three Ubuntu legs that run the tool step: `Test (ubuntu-latest / luajit)` 13
 
 So, at PR #524's merge: `main` is `69ccb27`, green on its push run with every test leg, the pin in it. PR #524 is merged. PR #518 is green at `c98f06a`, its run a merge into `1c680e6`, which does not have the pin. #509 moves to three, each on a macOS leg. #520 stays at two and open. No other row's count moves here.
 
+### E10z review 3: `main` green at `46dec93`
+
+Recorded 2026-11-19 at E10z review 3. Each run below was read from the jobs endpoint by conclusion, and each run id was searched for in this file before it was written; none was in it. `main`'s runs at `46dec93`, the record of PR #524's merge, were owed by that record. PR #518's run at `c98f06a`, `CI` 44541731919, is in the section of fix round 2 above; the review read it again, each test leg from its own log with every `running` line paired with its own result line, and found every figure there as written, the run still at attempt 1 of 1. No run was dispatched or rerun.
+
+`CI` 44576322009 at `46dec93`, attempt 1 of 1, `push`, created 2026-11-19T17:21:36Z and completed 17:23:58Z: `success`, the registry-push shape.
+
+Tally (main-ci-46dec93): 15 = 6 + 9.
+
+Tally (main-ci-46dec93-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 135744667277 | success |
+| Commit attribution (D9) | 135744667542 | success |
+| Lint (lua54) | 135744667644 | success |
+| Lint (luajit) | 135744667656 | success |
+| Changed paths | 135744667669 | success |
+| Docs consistency | 135744888042 | success |
+| GPU Render (headless) | 135744890546 | skipped |
+| M5 Perf Gates | 135744890565 | skipped |
+| Test ((matrix) | 135744890677 | skipped |
+| Test (crdt) | 135744890683 | skipped |
+| M1 Acceptance Gates | 135744890737 | skipped |
+| M4 Perf Gates | 135744890893 | skipped |
+| M10 Perf Gates (crdt) | 135744890920 | skipped |
+| M6 Perf Gates | 135744891083 | skipped |
+| Perf budgets (debug) | 135744891391 | skipped |
+
+Tally (main-ci-46dec93-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-46dec93-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44576322192 at `46dec93`, attempt 1 of 1, `push`, created 17:21:36Z and completed 17:21:54Z: `success`, `Grammar fuzz` 135744667611 and `Grammar fuzz (asan-strict)` 135744666950.
+
+Tally (main-fuzz-46dec93): 2 = 2 + 0.
+
+Local gate sample, listed and not tallied: `scripts/gate --protocol` at `c98f06a` (`20261119T185450Z-1191948`) in `pmacs-e10o`, all passed, 6,170 / 0 / 88 and 5,434 / 0 / 72, CPU pressure `avg60` at most 6.63.
+
+So, at E10z review 3: `main` is `46dec93`, green in the registry-push shape; its last commit whose push run ran the test legs is `69ccb27`, green; PR #518 is green at `c98f06a`, its run a merge into `1c680e6`, which does not have #524's pin. #520 stays at two and open. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
