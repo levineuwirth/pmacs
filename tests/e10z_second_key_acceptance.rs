@@ -1878,6 +1878,205 @@ fn e10z_r2_letters_painted_before_another_frontends_edit_do_not_stay_on_the_old_
     );
 }
 
+/// A window change that leaves the size as it was, as a terminal makes when
+/// its font is zoomed and its grid kept: the PTY's cells are given another
+/// size in pixels, the kernel signals the TUI, and the TUI forwards one
+/// `Resize` at the size it has, which is the premise read here.
+fn window_change_at_the_same_size(tui: &ScreenTui, proxy: &Proxy) {
+    let mark = proxy.mark();
+    tui.pty
+        .resize_pixels(ROWS, COLS, 900, 432)
+        .expect("a pixel-only size change");
+    let sent = proxy.wait_sent(mark, 1, "the resize the signal makes");
+    assert_eq!(
+        sent[0],
+        Sent::Other("Resize".to_owned()),
+        "premise: the TUI took the signal for a resize and forwarded one at the size it had"
+    );
+}
+
+/// Review 3's Medium 1: a window-change signal that leaves the size as it
+/// was emptied the frontend's record of what the frames painted, and the
+/// daemon, whose render state does not change at an unchanged size, sends
+/// no resync to fill it. The next paint taken back was then painted over
+/// from an empty record: at `c98f06a` a line typed past a split window's
+/// edge after such a signal left its row without the gutter's number and
+/// without the text that stood there before, in both windows, until a real
+/// resize repainted the grid (4 of 4 in the review's probe over the link;
+/// right at `b66a66b`, and right at the tip without the signal). Now the
+/// record is kept at an unchanged size, and the row is repainted as the
+/// frames left it.
+#[test]
+fn e10z_r3_a_window_change_at_the_same_size_leaves_a_taken_back_row_whole() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    for c in "abc".chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    tui.write(b"\x18");
+    std::thread::sleep(Duration::from_millis(400));
+    tui.write(b"3");
+    std::thread::sleep(Duration::from_millis(800));
+    tui.settle(Duration::from_millis(400), PATIENCE, "the split", &|_| true);
+    assert_eq!(
+        tui.rows()
+            .iter()
+            .filter(|r| r.matches("*scratch*").count() == 2)
+            .count(),
+        1,
+        "premise: two windows side by side: {}",
+        tui.describe()
+    );
+    window_change_at_the_same_size(&tui, &proxy);
+    std::thread::sleep(Duration::from_millis(800));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the answer", &|_| {
+        true
+    });
+    let mark = proxy.mark();
+    for c in long_line(70).chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let sent = proxy.wait_sent(mark, 70, "70 letters");
+    let ops = sent[..70].iter().filter(|s| **s == Sent::Op).count();
+    assert!(
+        ops >= 60,
+        "premise: the line went as ops ({ops} of 70, {}), so that a paint was made past the edge \
+         and taken back",
+        pattern(&sent[..70])
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the line", &|_| true);
+    let before = tui.rows();
+    let after = repainted(&mut tui);
+    assert_eq!(
+        before, after,
+        "after a window change at the same size, the row a paint was taken back from still \
+         reads its gutter and the text typed before ({ops} of 70 ops)"
+    );
+}
+
+/// Review 3's second way to a paint taken back after such a signal, #523's
+/// state: a second TUI on the daemon's own socket types `Z` and Enter at
+/// the top of the buffer twice while the first, after a window change at the
+/// same size, types a sentence over the link. Each edit moves the line a row
+/// down, the paints in flight are taken back, and the row they stood on is
+/// painted again as the frames left it. At `c98f06a` that row came back
+/// from the emptied record without the cells no frame had changed since the
+/// signal, the gutter's number first among them (` 2 B` read `  B` in the
+/// review's probe). #523 as filed, without the signal, is the row above
+/// these two; the sentence's order in the buffer is #522's, as there.
+#[test]
+fn e10z_r3_another_frontends_edit_after_a_window_change_at_the_same_size_leaves_the_row_whole() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut first = tui(&proxy.path, home.path(), Some(&script));
+    let other_home = tempfile::tempdir().expect("home");
+    let mut other = tui(daemon.socket_path(), other_home.path(), None);
+    other.write(b"\x1b<");
+    std::thread::sleep(Duration::from_millis(600));
+    first.settle(
+        Duration::from_millis(400),
+        PATIENCE,
+        "both attached",
+        &|_| true,
+    );
+    window_change_at_the_same_size(&first, &proxy);
+    std::thread::sleep(Duration::from_millis(800));
+    first.settle(Duration::from_millis(300), PATIENCE, "the answer", &|_| {
+        true
+    });
+    let mark = proxy.mark();
+    for (i, c) in "the quick brown fox jumps over the lazy dog"
+        .chars()
+        .enumerate()
+    {
+        first.write(c.to_string().as_bytes());
+        if i == 10 || i == 25 {
+            other.write(b"Z\r");
+        }
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let typed = letters(&proxy.since(mark));
+    let ops = typed.iter().filter(|s| **s == Sent::Op).count();
+    assert!(
+        ops >= 8,
+        "premise: letters were in flight as ops when the first edit landed ({ops} of {}, {})",
+        typed.len(),
+        pattern(&typed)
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    first.settle(
+        Duration::from_millis(300),
+        PATIENCE,
+        "the sentence",
+        &|_| true,
+    );
+    let before = first.rows();
+    let after = repainted(&mut first);
+    assert_eq!(
+        before,
+        after,
+        "after a window change at the same size, the row the paints were taken back from \
+         reads as the frames left it ({ops} of {} ops)",
+        typed.len()
+    );
+}
+
+/// The same signal and E10r's record of the bottom row, which the same
+/// function emptied (review 3, by reading; the base's since E10r): a notice
+/// stands on the bottom row over a prompt the frames painted under it, the
+/// window changes at the same size, and the notice comes off at its floor's
+/// end. What comes back is the prompt. At `c98f06a` it was a blank row with
+/// the prompt still open: the daemon sends a cell only when it changes, and
+/// nothing else would ever repaint it.
+#[test]
+fn e10z_r3_a_notice_taken_off_after_a_window_change_at_the_same_size_gives_the_row_back() {
+    let mut daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::ZERO);
+    let home = tempfile::tempdir().expect("home");
+    let mut tui = tui(&proxy.path, home.path(), None);
+    // The daemon dies and another starts on its socket: the session that
+    // replaces the lost one says so on the bottom row, for five seconds.
+    let socket = daemon.socket_path().to_path_buf();
+    let pgid = i32::try_from(daemon.pid()).expect("pid");
+    nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pgid), nix::sys::signal::SIGKILL)
+        .expect("kill the daemon's group");
+    let _ = daemon.wait_for_exit();
+    let _ = std::fs::remove_file(&socket);
+    let mut second = common::daemon::spawn_daemon_process_with_env(&socket, &[]);
+    common::daemon::wait_for_socket_or_exit(&socket, second.child(), Duration::from_secs(10))
+        .expect("the second daemon listens");
+    let up = |t: &ScreenTui| t.bottom_row().contains("new daemon");
+    tui.wait_for(Duration::from_secs(40), "the notice of a new daemon", &up);
+    // `M-x` under it: a key during the floor, so the notice comes off by
+    // itself at the floor's end, and a prompt on the row it stands over.
+    let mark = proxy.mark();
+    tui.write(b"\x1bx");
+    proxy.wait_sent(mark, 1, "M-x");
+    let _ = tui.watch_for(Duration::from_millis(1200), &|_| false);
+    assert!(
+        up(&tui),
+        "premise: the notice still stands, the prompt's frame under it: {}",
+        tui.describe()
+    );
+    window_change_at_the_same_size(&tui, &proxy);
+    tui.wait_for(PATIENCE, "the notice, off at its floor's end", &|t| !up(t));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the row", &|_| true);
+    assert!(
+        tui.bottom_row().starts_with("M-x"),
+        "the prompt the frames painted under the notice is back on the bottom row: {}",
+        tui.describe()
+    );
+    drop(second);
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the

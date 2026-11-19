@@ -369,11 +369,13 @@ impl Frontend {
     }
 
     /// E10z fix round 2 --- the same for a character deleted at a line's end: a
-    /// caret the pump vouches for, with a cell of the pane to its left.
+    /// caret the pump vouches for, with a cell of the pane to its left, on a screen
+    /// the record knows (fix round 3).
     #[cfg(feature = "crdt")]
     #[must_use]
     pub fn optimistic_delete_back_fits(&self) -> bool {
         self.caret_trusted
+            && self.paints.known
             && self.caret.is_some_and(|(col, row)| {
                 col > 0 && u32::from(col) <= self.size.cols && u32::from(row) < self.size.rows
             })
@@ -941,6 +943,21 @@ impl Frontend {
     }
 
     fn handle_resize(&mut self, new_size: CellSize) {
+        // E10z fix round 3 (review 3's Medium 1) --- a window change that leaves the
+        // size as it was. The kernel signals one for a change of the terminal's size
+        // in pixels alone: a font zoomed with the grid kept, a window moved to a
+        // monitor of another scale. The terminal has kept its screen, and the daemon,
+        // whose render state does not change at an unchanged size, sends no resync.
+        // So what the frames painted, on the bottom row and on every other, is still
+        // what the screen holds and is all there will ever be to repaint from, and it
+        // is kept. Until this round it was emptied here as at any resize: a notice
+        // taken off afterwards put back a blank bottom row (E10r's `status_row`), and
+        // a paint taken back a row without its gutter and the text typed before. No
+        // row moved either, so there is no old bottom row to put back.
+        if new_size == self.size {
+            self.old_bottom_row = None;
+            return;
+        }
         // A resync follows a resize, and says what the new bottom row holds; what the old
         // one held is kept for an overlay that stood over it to be taken off.
         let old_row = std::mem::replace(
@@ -951,9 +968,14 @@ impl Frontend {
         self.size = new_size;
         // E10z fix round 2 --- the resync that follows says what every cell holds;
         // what was painted ahead of the frames at the old size is not on it.
+        //
+        // E10z fix round 3 --- and until that resync has been kept, what the screen
+        // holds at the new size is not known (a terminal cuts, keeps or reflows its
+        // rows as it sees fit): the record says so, and nothing is painted over it
+        // or repainted from it meanwhile, should the resync for any reason not come.
         #[cfg(feature = "crdt")]
         {
-            self.paints = PaintLedger::new(new_size);
+            self.paints = PaintLedger::after_a_resize(new_size);
             self.caret_trusted = false;
         }
         // Cell-buffer reallocation lives on
@@ -1034,25 +1056,44 @@ struct PaintLedger {
     /// A terminal's size of cells, row by row, as the frames left them.
     grid: Vec<Cell>,
     cols: usize,
+    /// E10z fix round 3 --- whether `grid` is what the terminal's screen holds, as
+    /// far as the frames say: from a screen this frontend cleared ([`Self::new`]) or
+    /// a resync it kept, every frame since noted. Not after a resize, until its
+    /// resync ([`Self::after_a_resize`]). While it is not, the record shows no cell
+    /// ([`Self::row`]), so nothing is painted over it and nothing repainted from it.
+    known: bool,
     /// Oldest first.
     unconfirmed: std::collections::VecDeque<Painted>,
 }
 
 #[cfg(feature = "crdt")]
 impl PaintLedger {
+    /// The record of a screen just cleared, as [`Frontend::new`] leaves it.
     fn new(size: CellSize) -> Self {
+        Self {
+            known: true,
+            ..Self::after_a_resize(size)
+        }
+    }
+
+    /// The record of a screen whose size has just changed: what a terminal keeps
+    /// of its rows then is its own affair, so nothing is known of it until the
+    /// resync the daemon sends at a new size has been kept.
+    fn after_a_resize(size: CellSize) -> Self {
         Self {
             grid: vec![Cell::default(); size.rows as usize * size.cols as usize],
             cols: size.cols as usize,
+            known: false,
             unconfirmed: std::collections::VecDeque::new(),
         }
     }
 
     /// Note what one frame paints. A resync carries only its ink (FG-INV at
-    /// [`write_frame`]), over a blank grid.
+    /// [`write_frame`]), over a blank grid, and from it on the screen is known.
     fn keep(&mut self, spans: &[DiffSpan], full_grid: bool) {
         if full_grid {
             self.grid.fill(Cell::default());
+            self.known = true;
         }
         if self.cols == 0 {
             return;
@@ -1069,8 +1110,12 @@ impl PaintLedger {
         }
     }
 
-    /// The cells of `row` as the frames left them.
+    /// The cells of `row` as the frames left them; none while the screen is not
+    /// known, so that no cell reads blank that may not be.
     fn row(&self, row: u16) -> &[Cell] {
+        if !self.known {
+            return &[];
+        }
         let start = usize::from(row) * self.cols;
         self.grid.get(start..start + self.cols).unwrap_or(&[])
     }
@@ -1930,8 +1975,8 @@ mod tests {
         assert_eq!(shown(&row), "   x");
     }
 
-    /// E10z fix round 2: a span of `text` at `(row, col)`, for the ledger's rows.
-    #[cfg(feature = "crdt")]
+    /// E10z fix round 2: a span of `text` at `(row, col)`, for the ledger's rows, and
+    /// since fix round 3 for the bottom row's.
     fn span_at(row: u32, col: u32, text: &str) -> DiffSpan {
         DiffSpan {
             start: CellCoord { row, col },
@@ -2056,6 +2101,123 @@ mod tests {
         assert_eq!(ledger.shown(0, 1), Some('q'));
         assert_eq!(ledger.shown(3, 1), Some(' '));
         assert_eq!(ledger.shown(9, 0), None, "no such cell");
+    }
+
+    /// A frontend of `size` that has taken no terminal over, for the rows below:
+    /// [`Frontend::handle_resize`] writes nothing.
+    fn bare_frontend(size: CellSize) -> Frontend {
+        Frontend {
+            out: BufWriter::new(io::stdout()),
+            size,
+            raw_mode: false,
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: false,
+            keyboard_enhancement: false,
+            depth: crate::color_depth::ColorDepth::TrueColor,
+            status_row: vec![Cell::default(); size.cols as usize],
+            caret: None,
+            #[cfg(feature = "crdt")]
+            caret_trusted: false,
+            #[cfg(feature = "crdt")]
+            paints: PaintLedger::new(size),
+            old_bottom_row: None,
+            lent_modes: None,
+        }
+    }
+
+    /// E10z fix round 3 (review 3's Medium 1): a window change at the size the
+    /// frontend already has keeps what the frames put on the bottom row, since the
+    /// daemon sends nothing to say it again, and keeps no old bottom row to put
+    /// back, none having moved. A change of size still blanks the row for the
+    /// resync and keeps the old one. Until this round both did the second, and a
+    /// notice taken off after a same-size change put back a blank row.
+    #[test]
+    fn a_window_change_at_the_same_size_keeps_the_bottom_row() {
+        let size = CellSize::new(3, 6);
+        let mut fe = bare_frontend(size);
+        keep_status_row(&mut fe.status_row, size, &[span_at(2, 0, "M-x ")], true);
+        let kept = fe.status_row.clone();
+        // An old bottom row a real resize left and nothing took.
+        fe.old_bottom_row = Some((7, kept.clone()));
+
+        fe.handle_resize(size);
+        assert_eq!(fe.status_row, kept, "the bottom row as the frames left it");
+        assert_eq!(fe.size, size);
+        assert!(
+            fe.old_bottom_row.is_none(),
+            "no row moved, so none is put back, an earlier resize's least of all"
+        );
+
+        fe.handle_resize(CellSize::new(3, 7));
+        assert_eq!(
+            fe.status_row,
+            vec![Cell::default(); 7],
+            "blank for the resync"
+        );
+        assert_eq!(fe.old_bottom_row, Some((2, kept)));
+    }
+
+    /// E10z fix round 3 (review 3's Medium 1): the record of what the frames painted
+    /// is kept, paints outstanding and all, over a window change that leaves the
+    /// size as it was, so that a row repainted afterwards is the row the frames
+    /// left; at `c98f06a` it was emptied, and the row came back blank. Over a change
+    /// of size it is not known until the resync is kept: no cell of it reads blank,
+    /// so no paint fits and no row is repainted from it, a deletion's paint
+    /// included.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_window_change_at_the_same_size_keeps_what_the_frames_painted() {
+        let size = CellSize::new(3, 8);
+        let mut fe = bare_frontend(size);
+        fe.paints.keep(&[span_at(1, 0, " 2 abc")], true);
+        fe.paints.record(9, 6, 1, 'd');
+        fe.caret = Some((7, 1));
+        fe.caret_trusted = true;
+        let row = fe.paints.row(1).to_vec();
+
+        fe.handle_resize(size);
+        assert_eq!(
+            fe.paints.row(1),
+            row.as_slice(),
+            "the row as the frames left it"
+        );
+        assert_eq!(
+            fe.paints.unconfirmed.len(),
+            1,
+            "and the paint no frame has shown"
+        );
+        assert!(
+            fe.caret_trusted,
+            "nothing moved the caret: the pump says when it forwards the resize"
+        );
+        // The cell past the unconfirmed paint is blank in the record: a paint fits.
+        fe.paints.unconfirmed.clear();
+        fe.caret = Some((6, 1));
+        assert!(fe.optimistic_insert_fits());
+
+        fe.handle_resize(CellSize::new(3, 9));
+        assert!(
+            fe.paints.row(1).is_empty(),
+            "nothing is known of the new screen"
+        );
+        assert_eq!(fe.paints.shown(6, 1), None, "so no cell of it reads blank");
+        assert!(!fe.caret_trusted);
+        fe.caret_trusted = true;
+        assert!(
+            !fe.optimistic_insert_fits(),
+            "no paint over an unknown cell"
+        );
+        assert!(!fe.optimistic_delete_back_fits(), "nor a deletion's blank");
+
+        // A frame from before the resync says a cell or two; the screen is still
+        // not known. The resync makes it so.
+        fe.paints.keep(&[span_at(1, 0, " 2 ab")], false);
+        assert!(!fe.optimistic_insert_fits());
+        fe.paints.keep(&[span_at(1, 0, " 2 abc")], true);
+        assert_eq!(fe.paints.shown(5, 1), Some('c'));
+        assert!(fe.optimistic_insert_fits());
+        assert!(fe.optimistic_delete_back_fits());
     }
 
     /// The old bottom row put back after a resize is cut to the pane as a terminal cuts
