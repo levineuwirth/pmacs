@@ -2124,6 +2124,73 @@ fn e10z_r3_a_notice_taken_off_after_a_window_change_at_the_same_size_gives_the_r
     drop(second);
 }
 
+/// A guard, review 3's third row: the state fix round 2 held by reading
+/// alone. The daemon moves this session's window to another buffer on its
+/// own, with the mirror's ops out: a timer in the daemon's `init.lua`
+/// switches the active window when a file appears, as the review's probe
+/// did. The pane must read as it does after a repaint: the paints made in
+/// the round trip before the switch reached the frontend are taken back,
+/// and nothing is painted for the old buffer on the new one. It passed at
+/// `c98f06a` in the review's probe, 3 of 3.
+///
+/// What it asserts is the pane, and not that the letters arrive. They do
+/// not: the daemon drops the ops in flight for a buffer the window no
+/// longer shows, the mirror keeps them, and the letters typed after the
+/// switch go as keys into the other buffer. That is #525, the base's too,
+/// and no part of this row.
+#[test]
+fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
+    let dir = tempfile::tempdir().expect("trigger dir");
+    let trigger = dir.path().join("switch");
+    let daemon = TestDaemon::spawn_with_config(&format!(
+        "{NO_REOPEN}pmacs.lsp.config = {{}}\n\
+         local other = pmacs.buffer.create(\"other\")\n\
+         other:insert(0, \"other line one\\nother line two\\n\", {{ bypass_intercept = true }})\n\
+         pmacs.async(function()\n\
+           while true do\n\
+             pmacs.workers.sleep(10):await()\n\
+             local f = io.open({trigger:?}, \"r\")\n\
+             if f then f:close(); os.remove({trigger:?}); pmacs.window.switch_buffer(other) end\n\
+           end\n\
+         end)\n"
+    ));
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mark = proxy.mark();
+    let line = long_line(40);
+    for (i, c) in line.chars().enumerate() {
+        if i == 20 {
+            std::fs::write(&trigger, b"").expect("the trigger");
+        }
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let sent = proxy.wait_sent(mark, 40, "40 letters");
+    assert!(
+        sent[..=20].iter().all(|s| *s == Sent::Op),
+        "premise: the letters before the switch, and the first after it, went as ops, so that \
+         ops were out when the daemon switched: {}",
+        pattern(&sent[..40])
+    );
+    tui.wait_for(PATIENCE, "the other buffer", &|t| {
+        t.screen_contains("other line two")
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the switch", &|_| {
+        true
+    });
+    let before = tui.rows();
+    let after = repainted(&mut tui);
+    assert_eq!(
+        before,
+        after,
+        "after a switch the daemon made with ops out, the pane reads the buffer it shows ({})",
+        pattern(&sent[..40])
+    );
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the
