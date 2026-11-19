@@ -1798,6 +1798,69 @@ fn e10z_r2_a_line_typed_past_a_split_windows_edge_over_a_link_leaves_the_neighbo
     );
 }
 
+/// Review 2's Low 1 (#523), which the take-back that Medium 2 needed also
+/// covers: letters painted in the round trip before another frontend's edit
+/// moved their row do not stay on the old row. A second TUI on the daemon's
+/// own socket types `Z` and Enter at the top of the buffer twice while the
+/// first types a sentence over the link, 100 ms each way. The letters in
+/// flight when each edit lands were painted on the row the line then left;
+/// the daemon, which says only what changed against what it sent, names no
+/// cell a frontend painted itself, and at `8e7e230` they stayed there (`br`
+/// in the review's probe). Now the frame that carries the edit puts the
+/// caret a row down, the paints the daemon had not answered are taken back,
+/// and the pane reads as it does after a repaint. The sentence itself can
+/// come out of order in the buffer here, which is #522 and the base's.
+#[test]
+fn e10z_r2_letters_painted_before_another_frontends_edit_do_not_stay_on_the_old_row() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut first = tui(&proxy.path, home.path(), Some(&script));
+    let other_home = tempfile::tempdir().expect("home");
+    let mut other = tui(daemon.socket_path(), other_home.path(), None);
+    other.write(b"\x1b<");
+    std::thread::sleep(Duration::from_millis(600));
+    first.settle(
+        Duration::from_millis(400),
+        PATIENCE,
+        "both attached",
+        &|_| true,
+    );
+    let mark = proxy.mark();
+    for (i, c) in "the quick brown fox jumps over the lazy dog"
+        .chars()
+        .enumerate()
+    {
+        first.write(c.to_string().as_bytes());
+        if i == 10 || i == 25 {
+            other.write(b"Z\r");
+        }
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let typed = letters(&proxy.since(mark));
+    eprintln!(
+        "e10z_r2 beside another frontend's edits: {} of {} letters as ops, {}",
+        typed.iter().filter(|s| **s == Sent::Op).count(),
+        typed.len(),
+        pattern(&typed)
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    first.settle(
+        Duration::from_millis(300),
+        PATIENCE,
+        "the sentence",
+        &|_| true,
+    );
+    let before = first.rows();
+    let after = repainted(&mut first);
+    assert_eq!(
+        before, after,
+        "the pane read as the buffer holds it before any repaint, no letter left on a row \
+         the line had moved from"
+    );
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the
