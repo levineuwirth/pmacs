@@ -1602,13 +1602,21 @@ fn e10z_r2_a_word_typed_after_attaching_beside_a_moving_pointer_leaves_the_pane_
 /// Review 2's Low 2: at the run-ahead bound the painted caret stays ahead of
 /// a frame older than the ops. Over a link, 300 ms each way, 24 letters
 /// 10 ms apart: 16 go as ops and are painted, the rest as keys. The proxy
-/// passes the first op and holds the second and everything behind it 3 s,
+/// passes the first op and holds the second and everything behind it 6 s,
 /// so the pump reads the daemon's frame for the first letter, and nothing
-/// after it, with fifteen of its ops and a key unanswered. The caret must
-/// still stand after the sixteenth painted letter. At `8e7e230` a key
-/// behind the ops ended the hold of the frame's `Cursor`, and the caret
-/// went back to after the first letter with fifteen painted beyond it; the
-/// review read it at the line's start for the round trip.
+/// after it, with its other ops and a key unanswered. The caret must still
+/// stand after the last painted letter. At `8e7e230` a key behind the ops
+/// ended the hold of the frame's `Cursor`, and the caret went back to after
+/// the first letter with fifteen painted beyond it; the review read it at
+/// the line's start for the round trip.
+///
+/// On a runner slow enough that the first letter's answer is back before
+/// the seventeenth letter is decided, that answer makes room for one more
+/// op, and 17 go: CI's macOS lua54 leg at `267fb75`, the suite there seven
+/// times as slow as on the laptop, where the row's first form required 16.
+/// Either count is the bound holding with one op answered at the most, and
+/// the caret's place follows the count. The hold is 6 s and all 24 letters
+/// must be read inside 5.5 s, as the run-ahead rows have it.
 #[test]
 fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_bound() {
     let daemon = daemon();
@@ -1620,27 +1628,36 @@ fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_boun
     tui.settle(Duration::from_millis(300), PATIENCE, "the pane", &|_| true);
     let start = tui.cursor().expect("a caret before the letters");
     let ops_seen = std::sync::atomic::AtomicUsize::new(0);
+    let hold = Duration::from_secs(6);
+    let inside = Duration::from_millis(5500);
     proxy.hold_from(
         move |e| {
             matches!(e, FrontendEvent::CrdtOp { .. })
                 && ops_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
         },
-        Duration::from_secs(3),
+        hold,
     );
     let mark = proxy.mark();
+    let first = Instant::now();
     for c in "abcdefghijklmnopqrstuvwx".chars() {
         tui.write(c.to_string().as_bytes());
         std::thread::sleep(Duration::from_millis(10));
     }
     let sent = proxy.wait_sent(mark, 24, "24 letters");
+    let took = first.elapsed();
     let ops = sent[..24].iter().take_while(|s| **s == Sent::Op).count();
     assert!(
-        ops == 16 && sent[16..24].iter().all(|s| matches!(s, Sent::Key(..))),
-        "premise: 16 letters as ops and then keys, all before the first answer: {:?}",
+        took < inside
+            && (ops == 16 || ops == 17)
+            && sent[ops..24].iter().all(|s| matches!(s, Sent::Key(..))),
+        "premise: 16 letters as ops, or 17 with the first answered, and then keys, all read \
+         {} ms after the first was typed and inside the {} ms hold: {:?}",
+        took.as_millis(),
+        hold.as_millis(),
         &sent[..24]
     );
     // The first letter's frame is back 600 ms after it was typed; the hold
-    // keeps everything else from the daemon until 3 s.
+    // keeps everything else from the daemon until 6 s.
     std::thread::sleep(Duration::from_millis(1200));
     tui.settle(
         Duration::from_millis(300),
@@ -1650,10 +1667,10 @@ fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_boun
     );
     let held = tui.cursor().expect("a caret at the bound");
     assert_eq!(
-        (held.row, held.col),
-        (start.row, start.col + 16),
-        "with a key and fifteen ops unanswered the caret stands after the sixteenth painted \
-         letter, from {start:?}; {}",
+        (held.row, held.col as usize),
+        (start.row, start.col as usize + ops),
+        "with a key and all but the first op unanswered the caret stands after the last of \
+         the {ops} painted letters, from {start:?}; {}",
         tui.describe()
     );
     tui.wait_for(PATIENCE, "all 24 letters", &|t| {
