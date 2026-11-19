@@ -1663,6 +1663,141 @@ fn e10z_r2_the_painted_caret_stays_ahead_of_an_older_frame_at_the_run_ahead_boun
     });
 }
 
+/// The pane after a repaint: a resize a column narrower and back makes the
+/// daemon paint the whole grid, which is what the buffer holds.
+fn repainted(tui: &mut ScreenTui) -> Vec<String> {
+    tui.resize(ROWS, COLS - 1);
+    std::thread::sleep(Duration::from_millis(800));
+    tui.resize(ROWS, COLS);
+    tui.settle(Duration::from_millis(500), PATIENCE, "the repaint", &|_| {
+        true
+    });
+    tui.rows()
+}
+
+/// What each letter went as, in order: `o` an op, `K` a key.
+fn pattern(sent: &[Sent]) -> String {
+    sent.iter()
+        .map(|s| if *s == Sent::Op { 'o' } else { 'K' })
+        .collect()
+}
+
+/// The sentence over and over, `n` characters of it.
+fn long_line(n: usize) -> String {
+    "the quick brown fox jumps over the lazy dog "
+        .chars()
+        .cycle()
+        .take(n)
+        .collect()
+}
+
+/// Review 2's Medium 2: over a link, 100 ms each way, a line typed a letter
+/// every 60 ms past the pane's right edge reads on the pane as in the
+/// buffer: 130 letters on a 100-column pane, 97 of text beside the gutter,
+/// the pane compared with itself after a repaint. At `8e7e230` the caret
+/// the frontend tracked ran past the last column while the frames that
+/// would have corrected it were held, the terminal took every column past
+/// the pane for the last, and the paints landed on the last cell: `quico`
+/// for `quick`, 130 of 130 ops. Now the letter at the last column, and
+/// those behind it until the daemon's frame shows where the line went on,
+/// go as ops unpainted, and the caret is put where that frame has it moved
+/// by the ops since. The pace is kept by count: at least 120 of the 130 go
+/// as ops (130 of 130 in the fix round's runs). Round-tripping the key at
+/// the last column, the review's first form, read right on the pane and
+/// sent 96 of 130 as ops, every letter after the wrap a key.
+#[test]
+fn e10z_r2_a_line_typed_past_the_right_edge_over_a_link_reads_right_on_the_pane() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    let mark = proxy.mark();
+    for c in long_line(130).chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let sent = proxy.wait_sent(mark, 130, "130 letters");
+    let ops = sent[..130].iter().filter(|s| **s == Sent::Op).count();
+    eprintln!(
+        "e10z_r2 a line past the right edge: {ops} of 130 letters as ops, {}",
+        pattern(&sent[..130])
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the line", &|_| true);
+    let before = tui.rows();
+    let after = repainted(&mut tui);
+    assert_eq!(
+        before, after,
+        "the pane read the line as the buffer holds it before any repaint ({ops} of 130 ops)"
+    );
+    assert!(
+        ops >= 120,
+        "{ops} of 130 letters typed past the right edge went as ops; at least 120 must"
+    );
+}
+
+/// The fix round's own finding, by probing Medium 2 where the review had
+/// not: the right edge of a window that is not the pane's. After `C-x 3`
+/// the left window's row ends where the right window's begins, with no
+/// divider, and a terminal frontend is told no window's width. At `8e7e230`
+/// a line typed past that edge over the link was painted straight across
+/// the right window's row and stayed there until something repainted it,
+/// 130 of 130 ops. No frontend rule can see that edge beforehand. So a
+/// paint goes only onto a cell the frames left blank, each is kept until
+/// the daemon has answered its op, and the frame that answers the op at the
+/// edge puts the caret on the next row: the paints made past the edge are
+/// taken back, and painting goes on from where that frame has the caret.
+/// The pane is compared with itself after a repaint, and the pace is kept
+/// by count across the wraps: at least 120 of 130 as ops (130 of 130 in the
+/// fix round's runs; 48 of 130 with the key round-tripped at the edge).
+#[test]
+fn e10z_r2_a_line_typed_past_a_split_windows_edge_over_a_link_leaves_the_neighbour_whole() {
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    tui.write(b"\x18");
+    std::thread::sleep(Duration::from_millis(400));
+    tui.write(b"3");
+    std::thread::sleep(Duration::from_millis(800));
+    tui.settle(Duration::from_millis(400), PATIENCE, "the split", &|_| true);
+    assert_eq!(
+        tui.rows()
+            .iter()
+            .filter(|r| r.matches("*scratch*").count() == 2)
+            .count(),
+        1,
+        "premise: two windows side by side, each with its mode line: {}",
+        tui.describe()
+    );
+    let mark = proxy.mark();
+    for c in long_line(130).chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let sent = proxy.wait_sent(mark, 130, "130 letters");
+    let ops = sent[..130].iter().filter(|s| **s == Sent::Op).count();
+    eprintln!(
+        "e10z_r2 a line past a split window's edge: {ops} of 130 letters as ops, {}",
+        pattern(&sent[..130])
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the line", &|_| true);
+    let before = tui.rows();
+    let after = repainted(&mut tui);
+    assert_eq!(
+        before, after,
+        "the pane read both windows as the buffer holds them before any repaint ({ops} of \
+         130 ops)"
+    );
+    assert!(
+        ops >= 120,
+        "{ops} of 130 letters typed past a split window's edge went as ops; at least 120 must"
+    );
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the

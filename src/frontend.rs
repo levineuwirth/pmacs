@@ -155,10 +155,24 @@ pub struct Frontend {
     /// over it can come off and leave it as they left it. A frame only says what
     /// changed, so nothing else would ever repaint it.
     status_row: Vec<Cell>,
-    /// E10z fix round 1: where the terminal's caret was last put, by a visible
-    /// `Cursor` and moved by the optimistic paints since, for
-    /// [`Self::put_caret_back`].
+    /// E10z fix round 1: where the caret is: where the last `Cursor` put it, moved by
+    /// what this frontend has done since. Since fix round 2 the attach pump hands each
+    /// `Cursor` over already moved by the ops the daemon had not answered when it wrote
+    /// the frame, and every op since moves it a column, painted
+    /// ([`Self::paint_optimistic_insert`]) or not ([`Self::advance_caret`]); so it may
+    /// stand past the pane's last column, where the terminal's own caret is kept on it.
     caret: Option<(u16, u16)>,
+    /// E10z fix round 2: whether an optimistic paint may print at [`Self::caret`]: the
+    /// `Cursor` that put it there was read after the daemon had answered every key,
+    /// click, paste and resize this session forwarded, so nothing but this session's
+    /// own ops has moved the caret since. The pump says ([`Self::trust_caret`]); a
+    /// paint asks ([`Self::optimistic_insert_fits`]).
+    #[cfg(feature = "crdt")]
+    caret_trusted: bool,
+    /// E10z fix round 2: what the frames have painted and what this frontend has
+    /// painted ahead of them, so that a paint no frame confirms is taken back.
+    #[cfg(feature = "crdt")]
+    paints: PaintLedger,
     /// E10r: the row that was the bottom one before the last resize, and what the
     /// frames had left on it then, for [`Self::put_back_the_old_bottom_row`].
     old_bottom_row: Option<(u32, Vec<Cell>)>,
@@ -190,6 +204,10 @@ impl Frontend {
             depth: crate::color_depth::ColorDepth::detect_env(),
             status_row: vec![Cell::default(); size.cols as usize],
             caret: None,
+            #[cfg(feature = "crdt")]
+            caret_trusted: false,
+            #[cfg(feature = "crdt")]
+            paints: PaintLedger::new(size),
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -300,18 +318,174 @@ impl Frontend {
     /// apply it here, or suppress the optimistic paint on styled
     /// cells altogether. The right fix needs per-cell style memory
     /// the attach loop doesn't carry today.
+    ///
+    /// # E10z fix round 2: where it is painted, and the record of it
+    ///
+    /// The character is printed at [`Self::caret`] when one is tracked, and not
+    /// wherever the terminal's own caret happens to stand. With `event`, the count of
+    /// the op that carried the character at v28, the paint is entered in the ledger
+    /// until a frame confirms it ([`Self::settle_optimistic`]).
     #[cfg(feature = "crdt")]
-    pub fn paint_optimistic_insert(&mut self, c: char) -> io::Result<()> {
+    pub fn paint_optimistic_insert(&mut self, c: char, event: Option<u64>) -> io::Result<()> {
+        if let Some((col, row)) = self.caret {
+            queue!(self.out, MoveTo(col, row))?;
+        }
         queue!(
             self.out,
             ResetColor,
             SetAttribute(Attribute::Reset),
             Print(c)
         )?;
-        if let Some((col, _)) = self.caret.as_mut() {
+        if let Some((col, row)) = self.caret.as_mut() {
+            if let Some(event) = event {
+                self.paints.record(event, *col, *row, c);
+            }
             *col = col.saturating_add(1);
         }
         self.out.flush()
+    }
+
+    /// E10z fix round 2 --- whether a single `Print` at the tracked caret is a right
+    /// paint for a character typed at a line's end: the caret is one the pump vouches
+    /// for ([`Self::trust_caret`]); it is short of the pane's last column, where the
+    /// daemon wraps or scrolls the line and a terminal holds its own caret back
+    /// (review 2's Medium 2: the tracked column ran past the pane and the paints
+    /// landed on the last cell, `quico` for `quick`); and the frames show a blank
+    /// under it, as they do past a line's end, so that the paint covers nothing the
+    /// daemon painted (a neighbouring window's text, a popup). Where it is not, the
+    /// pump sends the op unpainted and the daemon's frame paints the character. What
+    /// this cannot see, a window's right edge inside the pane, the next frame's
+    /// `Cursor` shows, and the paints made past it are taken back
+    /// ([`Self::take_back_optimistic_after`]).
+    #[cfg(feature = "crdt")]
+    #[must_use]
+    pub fn optimistic_insert_fits(&self) -> bool {
+        self.caret_trusted
+            && self.caret.is_some_and(|(col, row)| {
+                u32::from(col) + 1 < self.size.cols
+                    && u32::from(row) < self.size.rows
+                    && self.paints.expects(col, row) == Some(' ')
+            })
+    }
+
+    /// E10z fix round 2 --- the same for a character deleted at a line's end: a
+    /// caret the pump vouches for, with a cell of the pane to its left.
+    #[cfg(feature = "crdt")]
+    #[must_use]
+    pub fn optimistic_delete_back_fits(&self) -> bool {
+        self.caret_trusted
+            && self.caret.is_some_and(|(col, row)| {
+                col > 0 && u32::from(col) <= self.size.cols && u32::from(row) < self.size.rows
+            })
+    }
+
+    /// E10z fix round 2 --- where the caret is, as [`Self::caret`] has it: column,
+    /// then row.
+    #[must_use]
+    pub fn caret(&self) -> Option<(u32, u32)> {
+        self.caret
+            .map(|(col, row)| (u32::from(col), u32::from(row)))
+    }
+
+    /// E10z fix round 2 --- move the tracked caret `cols` columns for an op that went
+    /// unpainted, as its paint would have: the next frame's `Cursor` is read against
+    /// where every op has left it.
+    #[cfg(feature = "crdt")]
+    pub fn advance_caret(&mut self, cols: i32) {
+        if let Some((col, _)) = self.caret.as_mut() {
+            *col = u16::try_from((i32::from(*col) + cols).max(0)).unwrap_or(u16::MAX);
+        }
+    }
+
+    /// E10z fix round 2 --- the attach pump's word on [`Self::caret`]: `true` when the
+    /// `Cursor` it has just had applied was read after the daemon answered every key,
+    /// click, paste and resize this session forwarded; `false` when it forwards one,
+    /// or the `Cursor` is from before the answer.
+    #[cfg(feature = "crdt")]
+    pub fn trust_caret(&mut self, trusted: bool) {
+        self.caret_trusted = trusted;
+    }
+
+    /// E10z fix round 2 --- check the optimistic paints the daemon has answered against
+    /// what its frames show, and take back every outstanding paint if one is not there.
+    ///
+    /// `answered` is the daemon's count ([`InstanceMessage::InputHandled`]) as it stood
+    /// when the last `Cursor` of the batch just presented was read. The daemon writes
+    /// the count ahead of the frame that reflects it, a frame's `CellDelta` ahead of
+    /// its `Cursor`, and says only what changed against what it last sent; so at that
+    /// point the frames this frontend has applied show every op up to `answered`, and
+    /// a paint the daemon has answered whose cell does not read the painted character
+    /// is one the daemon never painted and will never repaint: something lies over
+    /// the cell, or a row moved under another frontend's edit (#523). Then the rows of
+    /// every outstanding paint are painted again as the frames left them and the
+    /// ledger is emptied. Returns whether paints were taken back.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    #[cfg(feature = "crdt")]
+    pub fn settle_optimistic(&mut self, answered: u64) -> io::Result<bool> {
+        match self.paints.settle(answered) {
+            Some(rows) => self.repaint_rows(&rows).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// E10z fix round 2 --- take back the optimistic paints of the ops the daemon had
+    /// not answered at `answered`: a frame read at that count put the caret somewhere
+    /// else than this frontend had painted towards (the line wrapped at a window's
+    /// edge it cannot see, or a row moved), so those paints went to cells the daemon
+    /// will not put the characters in. Their rows are painted again as the frames
+    /// left them; the daemon's own frames paint the characters where they are.
+    /// Returns whether any paint was taken back.
+    ///
+    /// # Errors
+    /// Returns the underlying [`io::Error`] if writing to stdout fails.
+    #[cfg(feature = "crdt")]
+    pub fn take_back_optimistic_after(&mut self, answered: u64) -> io::Result<bool> {
+        let rows = self.paints.forget_after(answered);
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        self.repaint_rows(&rows).map(|()| true)
+    }
+
+    /// Paint `rows` again as the frames left them, and put the terminal's caret back
+    /// on the tracked one. The bottom row is left alone: a notice may stand on it,
+    /// and what the frames put under it is kept and put back by its own path.
+    #[cfg(feature = "crdt")]
+    fn repaint_rows(&mut self, rows: &[u16]) -> io::Result<()> {
+        queue!(self.out, BeginSynchronizedUpdate)?;
+        for row in rows {
+            if u32::from(*row) + 1 >= self.size.rows {
+                continue;
+            }
+            let span = DiffSpan {
+                start: CellCoord {
+                    row: u32::from(*row),
+                    col: 0,
+                },
+                cells: self.paints.row(*row).to_vec(),
+            };
+            write_frame(
+                &mut self.out,
+                std::slice::from_ref(&span),
+                false,
+                self.depth,
+            )?;
+        }
+        if let Some((col, row)) = self.caret {
+            let col = self.on_pane(col);
+            queue!(self.out, MoveTo(col, row))?;
+        }
+        queue!(self.out, EndSynchronizedUpdate)?;
+        self.out.flush()
+    }
+
+    /// `col` kept on the pane, for the terminal's own caret: the tracked one may
+    /// stand past the last column.
+    fn on_pane(&self, col: u16) -> u16 {
+        let last = u16::try_from(self.size.cols.saturating_sub(1)).unwrap_or(u16::MAX);
+        col.min(last)
     }
 
     /// T M10.10 Day 3 step 5 Path β — paint an optimistic
@@ -337,28 +511,35 @@ impl Frontend {
     /// [`Self::paint_optimistic_insert`] for any future milestone
     /// where the post-erase cell might re-render with a non-default
     /// background or syntax style.
+    ///
+    /// E10z fix round 2: at [`Self::caret`] when one is tracked, and entered in the
+    /// ledger under `event`, as [`Self::paint_optimistic_insert`] is.
     #[cfg(feature = "crdt")]
-    pub fn paint_optimistic_delete_back(&mut self) -> io::Result<()> {
-        queue!(
-            self.out,
-            MoveLeft(1),
-            ResetColor,
-            SetAttribute(Attribute::Reset),
-            Print(' '),
-            MoveLeft(1)
-        )?;
-        if let Some((col, _)) = self.caret.as_mut() {
-            *col = col.saturating_sub(1);
-        }
-        self.out.flush()
-    }
-
-    /// E10z fix round 1 --- put the terminal's caret where the last applied
-    /// `Cursor` and the optimistic paints since left it ([`Self::caret`]),
-    /// after a batch whose `Cursor` the attach pump held back.
-    pub fn put_caret_back(&mut self) -> io::Result<()> {
-        if let Some((col, row)) = self.caret {
-            queue!(self.out, MoveTo(col, row))?;
+    pub fn paint_optimistic_delete_back(&mut self, event: Option<u64>) -> io::Result<()> {
+        match self.caret.as_mut() {
+            Some((col, row)) => {
+                *col = col.saturating_sub(1);
+                let (col, row) = (*col, *row);
+                queue!(
+                    self.out,
+                    MoveTo(col, row),
+                    ResetColor,
+                    SetAttribute(Attribute::Reset),
+                    Print(' '),
+                    MoveTo(col, row)
+                )?;
+                if let Some(event) = event {
+                    self.paints.record(event, col, row, ' ');
+                }
+            }
+            None => queue!(
+                self.out,
+                MoveLeft(1),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+                Print(' '),
+                MoveLeft(1)
+            )?,
         }
         self.out.flush()
     }
@@ -373,18 +554,25 @@ impl Frontend {
         match msg {
             InstanceMessage::CellDelta { spans, full_grid } => {
                 keep_status_row(&mut self.status_row, self.size, spans, *full_grid);
+                #[cfg(feature = "crdt")]
+                self.paints.keep(spans, *full_grid);
                 write_frame(&mut self.out, spans, *full_grid, self.depth)?;
             }
             InstanceMessage::Cursor(state) => match state {
                 Some(cs) if cs.visible => {
-                    self.caret = Some((cs.coord.col as u16, cs.coord.row as u16));
+                    let col = u16::try_from(cs.coord.col).unwrap_or(u16::MAX);
+                    self.caret = Some((col, cs.coord.row as u16));
+                    let shown = self.on_pane(col);
                     queue!(
                         self.out,
-                        MoveTo(cs.coord.col as u16, cs.coord.row as u16),
+                        MoveTo(shown, cs.coord.row as u16),
                         cursor::Show
                     )?;
                 }
                 _ => {
+                    // E10z fix round 2 --- no caret on the pane is no caret to
+                    // paint at.
+                    self.caret = None;
                     queue!(self.out, cursor::Hide)?;
                 }
             },
@@ -761,6 +949,13 @@ impl Frontend {
         );
         self.old_bottom_row = Some((self.size.rows.saturating_sub(1), old_row));
         self.size = new_size;
+        // E10z fix round 2 --- the resync that follows says what every cell holds;
+        // what was painted ahead of the frames at the old size is not on it.
+        #[cfg(feature = "crdt")]
+        {
+            self.paints = PaintLedger::new(new_size);
+            self.caret_trusted = false;
+        }
         // Cell-buffer reallocation lives on
         // [`crate::instance_render::RenderState`] now (T M5.2). The
         // run loop is responsible for forwarding the new size there;
@@ -801,6 +996,156 @@ impl Frontend {
 impl Drop for Frontend {
     fn drop(&mut self) {
         self.teardown();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The optimistic paint ledger (pure; testable)
+// ---------------------------------------------------------------------------
+
+/// One optimistic paint no frame has confirmed yet.
+#[cfg(feature = "crdt")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Painted {
+    /// The count of the event that carried the op, as the daemon counts it
+    /// ([`InstanceMessage::InputHandled`]).
+    event: u64,
+    col: u16,
+    row: u16,
+    /// What was printed in the cell: the character typed, or a blank for one deleted.
+    glyph: char,
+}
+
+/// E10z fix round 2 --- what the frames have painted, and what the terminal frontend
+/// has painted ahead of them.
+///
+/// An optimistic paint is a guess at what the daemon's next frame will put in one
+/// cell. The daemon says only what changed against what it last sent, so a wrong
+/// guess is never corrected by it: the cell it believes unchanged keeps the guess.
+/// A terminal frontend is told no window's geometry, so it cannot always guess
+/// right: after `C-x 3` the left window's row ends where the right window's begins,
+/// with no divider, and a line typed past it over a link was painted across the
+/// neighbour (E10z fix round 2's own finding, beside review 2's Medium 2 at the
+/// pane's edge). So each guess is kept here until the daemon has answered its op,
+/// and then read against the frames ([`Self::settle`]).
+#[cfg(feature = "crdt")]
+#[derive(Default)]
+struct PaintLedger {
+    /// A terminal's size of cells, row by row, as the frames left them.
+    grid: Vec<Cell>,
+    cols: usize,
+    /// Oldest first.
+    unconfirmed: std::collections::VecDeque<Painted>,
+}
+
+#[cfg(feature = "crdt")]
+impl PaintLedger {
+    fn new(size: CellSize) -> Self {
+        Self {
+            grid: vec![Cell::default(); size.rows as usize * size.cols as usize],
+            cols: size.cols as usize,
+            unconfirmed: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Note what one frame paints. A resync carries only its ink (FG-INV at
+    /// [`write_frame`]), over a blank grid.
+    fn keep(&mut self, spans: &[DiffSpan], full_grid: bool) {
+        if full_grid {
+            self.grid.fill(Cell::default());
+        }
+        if self.cols == 0 {
+            return;
+        }
+        for span in spans {
+            let from = span.start.col as usize;
+            let row = span.start.row as usize * self.cols;
+            let Some(cells) = self.grid.get_mut(row..row + self.cols) else {
+                continue;
+            };
+            for (slot, cell) in cells.iter_mut().skip(from).zip(&span.cells) {
+                slot.clone_from(cell);
+            }
+        }
+    }
+
+    /// The cells of `row` as the frames left them.
+    fn row(&self, row: u16) -> &[Cell] {
+        let start = usize::from(row) * self.cols;
+        self.grid.get(start..start + self.cols).unwrap_or(&[])
+    }
+
+    /// The one character the frames show at a cell, if it is one.
+    fn shown(&self, col: u16, row: u16) -> Option<char> {
+        match self.row(row).get(usize::from(col))?.glyph {
+            Glyph::Char(c) => Some(c),
+            Glyph::Cluster(_) | Glyph::Continuation => None,
+        }
+    }
+
+    /// What a cell holds once the daemon has caught up, as far as this frontend can
+    /// say: its own latest paint there, or what the frames show.
+    fn expects(&self, col: u16, row: u16) -> Option<char> {
+        self.unconfirmed
+            .iter()
+            .rev()
+            .find(|p| p.col == col && p.row == row)
+            .map(|p| p.glyph)
+            .or_else(|| self.shown(col, row))
+    }
+
+    fn record(&mut self, event: u64, col: u16, row: u16, glyph: char) {
+        self.unconfirmed.push_back(Painted {
+            event,
+            col,
+            row,
+            glyph,
+        });
+    }
+
+    /// Forget the paints of ops the daemon had not answered at `answered`, and name
+    /// the rows they touched, to be painted again as the frames left them.
+    fn forget_after(&mut self, answered: u64) -> Vec<u16> {
+        let mut rows: Vec<u16> = self
+            .unconfirmed
+            .iter()
+            .filter(|p| p.event > answered)
+            .map(|p| p.row)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        self.unconfirmed.retain(|p| p.event <= answered);
+        rows
+    }
+
+    /// Read the paints whose ops the daemon has answered against the frames. `None`
+    /// when each is there, and those are forgotten; otherwise every outstanding
+    /// paint is forgotten and the rows they touched are returned, to be painted
+    /// again as the frames left them.
+    ///
+    /// A cell painted more than once is read by its latest paint alone, and not at
+    /// all while that one is unanswered: the frames may by then be a frame past
+    /// `answered` (a `CellDelta` read ahead of its `Cursor`), and show the later
+    /// paint's cell.
+    fn settle(&mut self, answered: u64) -> Option<Vec<u16>> {
+        let wrong = self.unconfirmed.iter().enumerate().any(|(at, p)| {
+            p.event <= answered
+                && !self
+                    .unconfirmed
+                    .iter()
+                    .skip(at + 1)
+                    .any(|later| later.col == p.col && later.row == p.row)
+                && self.shown(p.col, p.row) != Some(p.glyph)
+        });
+        if wrong {
+            let mut rows: Vec<u16> = self.unconfirmed.iter().map(|p| p.row).collect();
+            rows.sort_unstable();
+            rows.dedup();
+            self.unconfirmed.clear();
+            return Some(rows);
+        }
+        self.unconfirmed.retain(|p| p.event > answered);
+        None
     }
 }
 
@@ -1129,6 +1474,10 @@ mod tests {
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
             caret: None,
+            #[cfg(feature = "crdt")]
+            caret_trusted: false,
+            #[cfg(feature = "crdt")]
+            paints: PaintLedger::default(),
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -1158,6 +1507,10 @@ mod tests {
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
             caret: None,
+            #[cfg(feature = "crdt")]
+            caret_trusted: false,
+            #[cfg(feature = "crdt")]
+            paints: PaintLedger::default(),
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -1181,6 +1534,10 @@ mod tests {
             depth: crate::color_depth::ColorDepth::TrueColor,
             status_row: Vec::new(),
             caret: None,
+            #[cfg(feature = "crdt")]
+            caret_trusted: false,
+            #[cfg(feature = "crdt")]
+            paints: PaintLedger::default(),
             old_bottom_row: None,
             lent_modes: None,
         };
@@ -1571,6 +1928,134 @@ mod tests {
         assert_eq!(shown(&row), " acd", "past the width is not kept");
         keep_status_row(&mut row, size, &[at(2, 3, "x")], true);
         assert_eq!(shown(&row), "   x");
+    }
+
+    /// E10z fix round 2: a span of `text` at `(row, col)`, for the ledger's rows.
+    #[cfg(feature = "crdt")]
+    fn span_at(row: u32, col: u32, text: &str) -> DiffSpan {
+        DiffSpan {
+            start: CellCoord { row, col },
+            cells: text
+                .chars()
+                .map(|c| Cell {
+                    glyph: Glyph::Char(c),
+                    ..Cell::default()
+                })
+                .collect(),
+        }
+    }
+
+    /// E10z fix round 2: a paint the daemon has answered and its frame shows is
+    /// forgotten; one it has not yet answered is kept; a blank typed onto a blank is
+    /// there without any span naming it.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_paint_the_frames_show_is_confirmed() {
+        let mut ledger = PaintLedger::new(CellSize::new(3, 8));
+        ledger.keep(&[span_at(1, 0, " 1 ab")], true);
+        ledger.record(5, 5, 1, 'c');
+        ledger.record(6, 6, 1, ' ');
+        ledger.record(7, 7, 1, 'd');
+        ledger.keep(&[span_at(1, 5, "c")], false);
+        assert_eq!(ledger.settle(6), None);
+        assert_eq!(ledger.unconfirmed.len(), 1, "the unanswered paint is kept");
+        assert_eq!(ledger.expects(7, 1), Some('d'));
+        assert_eq!(ledger.expects(5, 1), Some('c'));
+    }
+
+    /// E10z fix round 2: a paint the daemon has answered that no frame shows was
+    /// painted where the daemon did not put the character: every outstanding paint
+    /// is given up, the unanswered ones after it too, and their rows named.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_paint_no_frame_shows_takes_every_outstanding_paint_back() {
+        let mut ledger = PaintLedger::new(CellSize::new(4, 8));
+        ledger.keep(&[span_at(1, 0, " 1 abcd"), span_at(2, 4, "  9 ")], true);
+        // The row is full: the daemon wraps `e` and `f` to row 2; this frontend
+        // painted them on, across what stands beside the window.
+        ledger.record(5, 7, 1, 'e');
+        ledger.record(6, 4, 2, 'f');
+        ledger.keep(&[span_at(1, 7, "e"), span_at(2, 0, "   f")], false);
+        assert_eq!(
+            ledger.settle(5),
+            None,
+            "the last cell of the row was a right paint"
+        );
+        ledger.record(7, 5, 2, 'g');
+        assert_eq!(
+            ledger.settle(6),
+            Some(vec![2]),
+            "`f` is not at (4, 2), where the frames still show a blank"
+        );
+        assert!(ledger.unconfirmed.is_empty(), "`g` is given up with it");
+        let row: String = ledger
+            .row(2)
+            .iter()
+            .map(|c| match c.glyph {
+                Glyph::Char(ch) => ch,
+                _ => '.',
+            })
+            .collect();
+        assert_eq!(row, "   f  9 ", "what the frames left, to be painted again");
+    }
+
+    /// E10z fix round 2: when a frame's caret is not where the paints assumed, the
+    /// paints of the ops the daemon had not answered by then are given up and their
+    /// rows named; the answered ones stay to be read against the frames.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn the_paints_past_a_corrected_caret_are_given_up() {
+        let mut ledger = PaintLedger::new(CellSize::new(4, 8));
+        ledger.keep(&[span_at(1, 0, " 1 abc")], true);
+        ledger.record(5, 6, 1, 'd');
+        ledger.record(6, 7, 1, 'e');
+        ledger.record(7, 0, 2, 'f');
+        assert_eq!(ledger.forget_after(5), vec![1, 2]);
+        assert_eq!(ledger.unconfirmed.len(), 1, "the answered paint is kept");
+        assert_eq!(
+            ledger.forget_after(5),
+            Vec::<u16>::new(),
+            "and nothing is left past it"
+        );
+        ledger.keep(&[span_at(1, 6, "d")], false);
+        assert_eq!(ledger.settle(5), None);
+    }
+
+    /// E10z fix round 2: a cell painted twice is read by its latest paint, and not
+    /// at all while that one is unanswered: a letter and its deletion, with the
+    /// frames a frame past the answer.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_cell_painted_twice_is_read_by_its_latest_paint() {
+        let mut ledger = PaintLedger::new(CellSize::new(2, 6));
+        ledger.keep(&[span_at(0, 0, " 1 a")], true);
+        ledger.record(3, 4, 0, 'x');
+        ledger.record(4, 4, 0, ' ');
+        assert_eq!(
+            ledger.expects(4, 0),
+            Some(' '),
+            "the cell is blank again as far as this frontend can say"
+        );
+        // Both ops handled before the frame: the cell never showed `x`.
+        assert_eq!(ledger.settle(3), None);
+        assert_eq!(ledger.unconfirmed.len(), 1);
+        assert_eq!(ledger.settle(4), None);
+        assert!(ledger.unconfirmed.is_empty());
+    }
+
+    /// E10z fix round 2: a resync says what every cell holds, the blank ones by
+    /// naming nothing; and a span past the grid is not kept.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn the_ledger_keeps_a_resync_as_ink_over_blank() {
+        let mut ledger = PaintLedger::new(CellSize::new(2, 4));
+        ledger.keep(&[span_at(0, 0, "abcd"), span_at(1, 2, "xyz")], false);
+        assert_eq!(ledger.shown(3, 1), Some('y'), "cut at the row's end");
+        ledger.keep(&[span_at(1, 0, "q"), span_at(5, 0, "zz")], true);
+        assert_eq!(ledger.shown(0, 0), Some(' '));
+        assert_eq!(ledger.shown(0, 1), Some('q'));
+        assert_eq!(ledger.shown(3, 1), Some(' '));
+        assert_eq!(ledger.shown(9, 0), None, "no such cell");
     }
 
     /// The old bottom row put back after a resize is cut to the pane as a terminal cuts
