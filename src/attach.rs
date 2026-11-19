@@ -1917,6 +1917,21 @@ pub(crate) fn run_attach_pair(
     // and kept the caret its own paints had left, which nothing ever
     // corrected: past the pane's last column it ran on, and past a split
     // window's edge it painted across the neighbour.
+    //
+    // E10z fix round 3 (review 3's Low 3) --- "as far as this frontend can
+    // say" has one case the wire shows it cannot: a blank typed where a
+    // word has just filled its row. The daemon's word wrap hangs that blank
+    // past the row's end and its caret, already at the next row's start,
+    // moves no column; one is counted here, since a frontend is told no
+    // row's width. So until the frame that answers the blank, the caret is
+    // put one column right of the daemon's and a letter typed meanwhile is
+    // painted there: three letters for about 175 ms in the round's probe,
+    // 100 ms each way, a letter every 60 ms. That frame shows the caret
+    // where the daemon has it, the paints are taken back as any wrong paint
+    // is, and the daemon's frames paint the letters. It is left so: a rule
+    // that refused those paints would have to guess the daemon's wrap from
+    // here, and what a frame contradicts is corrected within the round
+    // trip of the blank.
     #[cfg(feature = "crdt")]
     let mut own_ops: std::collections::VecDeque<(u64, i32)> = std::collections::VecDeque::new();
     // E10z fix round 1's addition --- the numbers of the unanswered pointer
@@ -2038,10 +2053,22 @@ pub(crate) fn run_attach_pair(
                             // go to (this buffer's first cursor, or another
                             // buffer's): the mirror is now grounded there,
                             // so those ops no longer move the caret a
-                            // frame shows, and the frame's `Cursor` is
-                            // taken as it is with this one. Review 2 found
-                            // the two apart: this applied, that held, and a
+                            // frame shows. Review 2 found the two apart:
+                            // this applied, a frame's `Cursor` held, and a
                             // word painted where the old caret had been.
+                            //
+                            // E10z fix round 3 (review 3's Low 3) --- which
+                            // frame that begins with depends on who moved
+                            // the window. After a key of this session's,
+                            // no op is out by now, and the `Cursor` of the
+                            // tick that wrote this was taken as it was. When
+                            // the daemon moved the window on its own (a
+                            // timer, another frontend) with ops out, that
+                            // tick's `Cursor` was written ahead of this, and
+                            // has been moved by the old buffer's ops in the
+                            // arm below; the next tick's is the first that
+                            // is not, and the caret is those columns right
+                            // of the daemon's for the one frame between.
                             if !in_the_ops_buffer {
                                 last_own_op = 0;
                                 own_ops.clear();
