@@ -2304,6 +2304,126 @@ fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
     );
 }
 
+/// Review 4's Low 3, the bound the owner accepted in writing on 2026-11-20,
+/// held by a number. A word that exactly fills its row leaves the daemon's
+/// caret at the next row's start, and the daemon's word wrap hangs every
+/// blank typed there past the row's end, its caret moving no column; the
+/// pump counts a column for each op, a frontend being told no row's width.
+/// So a letter typed behind hanging blanks the daemon has yet to answer is
+/// painted one column right of where the daemon puts it for each such
+/// blank, and the frame that answers a blank takes the paint back. Here the
+/// word, a pause, three blanks and `brown`, over a link 100 ms each way, a
+/// character every 60 ms: the row under the word is read at every write the
+/// TUI makes, and no letter may stand more than three columns right of
+/// where it ends, nor left of it. Review 4 measured `b` three columns right,
+/// `r` two and `o` one, each for about 50 ms. At the end the row reads
+/// `brown` at its start and the pane is equal to its repaint.
+///
+/// The premise is that the offset was seen at all: a run in which every
+/// blank was answered before a letter was typed holds nothing. With a blank
+/// planted to count for two columns in the pump (`own_ops`) the row fails
+/// on the bound. The same offset a column left after a deletion back over a
+/// hanging blank is review 4's measurement and no row's.
+#[test]
+fn e10z_r4_a_letter_behind_hanging_blanks_is_painted_at_most_a_column_right_for_each() {
+    const BLANKS: usize = 3;
+    const TAIL: &str = "brown";
+    let daemon = daemon();
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    proxy.wait_answered(Duration::from_millis(100), "the fresh line's answer");
+    let start = tui.cursor().expect("a caret on the fresh line");
+    let gutter = start.col as usize;
+    let below = start.row as usize + 1;
+    // As wide as the row's text, and of periods: the wrap takes any run
+    // without a blank, a hyphen or a slash for one word, and the completion
+    // popup, which opens on the row under a word of letters it has a
+    // candidate for and would stand where this row reads, takes it for none.
+    let word = ".".repeat(usize::from(COLS) - gutter);
+    let mark = proxy.mark();
+    for c in word.chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    proxy.wait_sent(mark, word.len(), "the word");
+    proxy.wait_answered(Duration::from_millis(100), "the word's answer");
+    tui.settle(Duration::from_millis(400), PATIENCE, "the word", &|_| true);
+    assert!(
+        tui.rows()[below - 1].get(gutter..) == Some(word.as_str())
+            && tui.rows()[below].trim().is_empty()
+            && tui.cursor().map(|c| (c.col as usize, c.row as usize)) == Some((gutter, below)),
+        "premise: the word fills its row to the last column and the caret is at the next \
+         row's start, so that a blank typed there hangs: {}",
+        tui.describe()
+    );
+    // What the row under the word showed at every write the TUI made: for
+    // each letter of `TAIL` on it, how far right of its final column at the
+    // most, and how far left.
+    let seen: std::cell::RefCell<(usize, usize, Vec<String>)> =
+        std::cell::RefCell::new((0, 0, Vec::new()));
+    let sample = |t: &ScreenTui| {
+        let row = t.rows().swap_remove(below);
+        let mut seen = seen.borrow_mut();
+        for (col, c) in row.chars().enumerate().skip(gutter) {
+            if let Some(i) = TAIL.find(c) {
+                let ends = gutter + i;
+                seen.0 = seen.0.max(col.saturating_sub(ends));
+                seen.1 = seen.1.max(ends.saturating_sub(col));
+            }
+        }
+        let row = row.trim_end().to_owned();
+        if seen.2.last() != Some(&row) {
+            seen.2.push(row);
+        }
+        false
+    };
+    let typed = format!("{}{TAIL}", " ".repeat(BLANKS));
+    for c in typed.chars() {
+        tui.write(c.to_string().as_bytes());
+        let _ = tui.watch_for(Duration::from_millis(60), &sample);
+    }
+    let _ = tui.watch_for(Duration::from_millis(1500), &sample);
+    let sent = proxy.wait_sent(mark, word.len() + typed.len(), "the blanks and the letters");
+    assert!(
+        sent.iter().all(|s| *s == Sent::Op),
+        "premise: the word, the blanks and the letters all went as ops: {}",
+        pattern(&sent)
+    );
+    let (right, left, rows) = seen.into_inner();
+    let trace = rows.join("|\n");
+    eprintln!(
+        "e10z_r4 behind {BLANKS} hanging blanks: a letter at most {right} columns right of where \
+         it ended and {left} left; the row under the word, in turn:\n{trace}|"
+    );
+    assert!(
+        right >= 1,
+        "premise: a letter was painted right of where it ended, behind a blank the daemon had \
+         not answered; the row under the word read, in turn:\n{trace}|"
+    );
+    assert!(
+        right <= BLANKS && left == 0,
+        "a letter typed behind {BLANKS} hanging blanks stood {right} columns right of where \
+         it ended, and {left} left; at most {BLANKS} right and none left is the bound; the \
+         row under the word read, in turn:\n{trace}|"
+    );
+    tui.settle(Duration::from_millis(300), PATIENCE, "the letters", &|_| {
+        true
+    });
+    let before = tui.rows();
+    assert_eq!(
+        before[below].trim_end(),
+        format!("{}{TAIL}", " ".repeat(gutter)),
+        "the letters end at the row's start, the blanks hanging on the row above"
+    );
+    let after = repainted(&mut tui);
+    assert_eq!(
+        before, after,
+        "the pane reads as the buffer holds it once every blank is answered"
+    );
+}
+
 /// E10z's paste on the terminal (D47 counts it), and what review 1's
 /// Medium 2 (b) does after one: with the daemon's read of a bracketed
 /// paste held 300 ms, `x` typed 150 ms after it goes as a key, and the

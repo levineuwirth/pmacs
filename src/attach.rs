@@ -1918,20 +1918,29 @@ pub(crate) fn run_attach_pair(
     // corrected: past the pane's last column it ran on, and past a split
     // window's edge it painted across the neighbour.
     //
-    // E10z fix round 3 (review 3's Low 3) --- "as far as this frontend can
-    // say" has one case the wire shows it cannot: a blank typed where a
-    // word has just filled its row. The daemon's word wrap hangs that blank
-    // past the row's end and its caret, already at the next row's start,
-    // moves no column; one is counted here, since a frontend is told no
-    // row's width. So until the frame that answers the blank, the caret is
-    // put one column right of the daemon's and a letter typed meanwhile is
-    // painted there: three letters for about 175 ms in the round's probe,
-    // 100 ms each way, a letter every 60 ms. That frame shows the caret
-    // where the daemon has it, the paints are taken back as any wrong paint
-    // is, and the daemon's frames paint the letters. It is left so: a rule
-    // that refused those paints would have to guess the daemon's wrap from
-    // here, and what a frame contradicts is corrected within the round
-    // trip of the blank.
+    // E10z fix round 3 (review 3's Low 3), restated at fix round 4 (review
+    // 4's Low 3) --- "as far as this frontend can say" has one case the
+    // wire shows it cannot: blanks typed where a word has just filled its
+    // row. The daemon's word wrap hangs a run of blanks past the row's end,
+    // and its caret, already at the next row's start, moves no column for
+    // any of them; one is counted here for each, since a frontend is told
+    // no row's width. So the caret is put one column right of the daemon's
+    // for each hanging blank the daemon has yet to answer, which
+    // [`OPTIMISTIC_RUN_AHEAD`] bounds at 16, and a letter typed meanwhile is
+    // painted there: after three blanks one letter three columns right, the
+    // next two and the next one, in review 4's run, 100 ms each way, a
+    // character every 60 ms. A deletion back over a hanging blank is
+    // counted a column left, which the daemon's caret does not move either,
+    // so until it is answered the caret is put one column left of the
+    // daemon's, on the gutter's last cell, and a letter is painted there.
+    // Each offset ends with the frame that answers its own blank or
+    // deletion: that frame shows the caret where the daemon has it, the
+    // paints are taken back as any wrong paint is, and the daemon's frames
+    // paint the letters. Only the paint is off; the buffer is never wrong.
+    // It is left so, the bound accepted as measured (the owner's ruling of
+    // 2026-11-20, replacing "one column for one round trip" of the same
+    // day): a rule that refused those paints would have to guess the
+    // daemon's wrap from here.
     #[cfg(feature = "crdt")]
     let mut own_ops: std::collections::VecDeque<(u64, i32)> = std::collections::VecDeque::new();
     // E10z fix round 1's addition --- the numbers of the unanswered pointer
