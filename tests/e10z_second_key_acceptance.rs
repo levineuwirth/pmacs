@@ -1761,11 +1761,25 @@ fn clears(tui: &ScreenTui) -> usize {
 /// pane nobody had repainted. The second resize is made only once the first
 /// one's clear has been read, so the clear waited for after it is its own.
 fn repainted(tui: &mut ScreenTui) -> Vec<String> {
+    repainted_through(tui, ROWS, COLS - 1, "a column narrower")
+}
+
+/// [`repainted`] by a row fewer and back, for a pane under `truncate`: a
+/// column narrower is no fair oracle there, since the narrower window
+/// scrolls its line a column further to keep the caret in it and the wider
+/// one does not scroll it back (review 4). A row fewer changes no window's
+/// width, so nothing scrolls sideways, and each resize is still answered by
+/// a resync.
+fn repainted_a_row_shorter(tui: &mut ScreenTui) -> Vec<String> {
+    repainted_through(tui, ROWS - 1, COLS, "a row shorter")
+}
+
+fn repainted_through(tui: &mut ScreenTui, rows: u16, cols: u16, what: &str) -> Vec<String> {
     let seen = clears(tui);
-    tui.resize(ROWS, COLS - 1);
+    tui.resize(rows, cols);
     tui.wait_for(
         PATIENCE,
-        "the repaint a column narrower: no clear after the resize",
+        &format!("the repaint {what}: no clear after the resize"),
         &|t| clears(t) > seen,
     );
     let seen = clears(tui);
@@ -2421,6 +2435,93 @@ fn e10z_r4_a_letter_behind_hanging_blanks_is_painted_at_most_a_column_right_for_
     assert_eq!(
         before, after,
         "the pane reads as the buffer holds it once every blank is answered"
+    );
+}
+
+/// Review 4's Low 4, the part of it a row can hold: the pane at rest under
+/// `ui.line-wrap` = `truncate` (`C-x t`), which no row set before fix round
+/// 4. Two windows side by side, and a line typed in the left one past its
+/// edge over the link. The line does not wrap: the left window scrolls it a
+/// column with each letter and keeps its caret on its last column. Once the
+/// typing has stopped and the frames have answered, the pane must read as
+/// it does after a repaint, the right window's row and its gutter among it.
+///
+/// It fails at `8e7e230`, which paints the line straight across the right
+/// window and leaves it there (`jumps e quick brown fox jumps jumps over`
+/// where the repaint has `jumps   2 the quick brown fox jumps over`), and at
+/// the tip with `Frontend::repaint_rows` planted to write nothing, a letter
+/// left on the left window's last cell. `d8fd793`'s frontend does not build
+/// against this tree; on a real pane its release build sends 18 of the 70
+/// letters as ops and leaves one on that same cell at rest, 3 runs of 3.
+///
+/// What it does not hold, and what the PR names as not covered: while the
+/// typing lasts, each letter is painted in turn on the last cell of the
+/// right window's gutter, the caret the pump puts two or three cells past
+/// the left window's last column, and is taken back by the next frame about
+/// 50 ms later (sixteen of seventeen letters in review 4's run, the same at
+/// `c98f06a`). That is fix round 2's rule doing what it does at any edge it
+/// cannot see, at every letter where a wrapped line pays it once. A
+/// terminal frontend is told no window's geometry, and telling it is the
+/// wire's to change (#527).
+#[test]
+fn e10z_r4_under_truncate_a_line_typed_past_a_split_windows_edge_leaves_the_pane_right_at_rest() {
+    let daemon = TestDaemon::spawn_with_config(&format!(
+        "{NO_REOPEN}pmacs.lsp.config = {{}}\npmacs.config.set(\"ui.line-wrap\", \"truncate\")\n"
+    ));
+    let proxy = Proxy::start(&daemon, Duration::from_millis(100));
+    let home = tempfile::tempdir().expect("home");
+    let script = stand_in(home.path(), &proxy.path);
+    let mut tui = tui(&proxy.path, home.path(), Some(&script));
+    tui.write(b"\x18");
+    std::thread::sleep(Duration::from_millis(400));
+    tui.write(b"3");
+    std::thread::sleep(Duration::from_millis(800));
+    tui.settle(Duration::from_millis(400), PATIENCE, "the split", &|_| true);
+    assert_eq!(
+        tui.rows()
+            .iter()
+            .filter(|r| r.matches("*scratch*").count() == 2)
+            .count(),
+        1,
+        "premise: two windows side by side, each with its mode line: {}",
+        tui.describe()
+    );
+    proxy.wait_answered(Duration::from_millis(100), "the split's answer");
+    let caret = tui.cursor().expect("a caret");
+    let (gutter, line_row) = (caret.col as usize, caret.row as usize);
+    let mark = proxy.mark();
+    let line = long_line(70);
+    for c in line.chars() {
+        tui.write(c.to_string().as_bytes());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let sent = proxy.wait_sent(mark, 70, "70 letters");
+    let ops = sent[..70].iter().filter(|s| **s == Sent::Op).count();
+    eprintln!(
+        "e10z_r4 under truncate, a line past a split window's edge: {ops} of 70 letters as ops, {}",
+        pattern(&sent[..70])
+    );
+    assert!(
+        ops >= 60,
+        "premise: the line went as ops ({ops} of 70, {}), so that letters were painted ahead \
+         past the left window's edge",
+        pattern(&sent[..70])
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    tui.settle(Duration::from_millis(300), PATIENCE, "the line", &|_| true);
+    let before = tui.rows();
+    assert!(
+        !before[line_row][gutter..].starts_with(&line[..10])
+            && before[line_row + 1].trim().is_empty(),
+        "premise: truncate is in force, so the line stands on one row, which the left window \
+         has scrolled away from its head, and nothing of it is on the row below: {}",
+        tui.describe()
+    );
+    let after = repainted_a_row_shorter(&mut tui);
+    assert_eq!(
+        before, after,
+        "under truncate, with the typing over, both windows read as the buffer holds them \
+         before any repaint ({ops} of 70 ops)"
     );
 }
 
