@@ -2125,6 +2125,11 @@ fn e10z_r3_another_frontends_edit_after_a_window_change_at_the_same_size_leaves_
 /// end. What comes back is the prompt. At `c98f06a` it was a blank row with
 /// the prompt still open: the daemon sends a cell only when it changes, and
 /// nothing else would ever repaint it.
+///
+/// The signal is sent only once the prompt's frame has been read, by the
+/// candidates it opens above the notice, and the row fails by name without
+/// them: a frame read after the signal would fill an emptied record and
+/// hide the defect.
 #[test]
 fn e10z_r3_a_notice_taken_off_after_a_window_change_at_the_same_size_gives_the_row_back() {
     let mut daemon = daemon();
@@ -2149,10 +2154,37 @@ fn e10z_r3_a_notice_taken_off_after_a_window_change_at_the_same_size_gives_the_r
     let mark = proxy.mark();
     tui.write(b"\x1bx");
     proxy.wait_sent(mark, 1, "M-x");
-    let _ = tui.watch_for(Duration::from_millis(1200), &|_| false);
+    // The prompt's frame must have been read before the signal, and the
+    // notice hides the prompt itself. The same frame opens `M-x`'s
+    // candidates on the rows above the notice, which it does not cover, so
+    // they are what is waited for (review 4's Low 2). Until fix round 4 the
+    // row slept 1.2 s here and asserted only that the notice stood: with the
+    // daemon's read of `M-x` held 2 s the frame came after the signal, filled
+    // the record `c98f06a` had emptied, and the row passed there with the
+    // defect in.
+    let candidates = |t: &ScreenTui| {
+        let rows = t.rows();
+        rows[..rows.len() - 1]
+            .iter()
+            .filter(|row| row.trim_start().starts_with("buffer."))
+            .count()
+            >= 2
+    };
+    tui.wait_for(
+        PATIENCE,
+        "premise: M-x's candidates above the notice, which the prompt's frame opens",
+        &candidates,
+    );
+    tui.settle(
+        Duration::from_millis(300),
+        PATIENCE,
+        "the prompt's frame",
+        &|_| true,
+    );
     assert!(
-        up(&tui),
-        "premise: the notice still stands, the prompt's frame under it: {}",
+        up(&tui) && candidates(&tui),
+        "premise: the notice still stands with M-x's candidates above it, so the prompt's \
+         frame was read under it and before the signal: {}",
         tui.describe()
     );
     window_change_at_the_same_size(&tui, &proxy);
