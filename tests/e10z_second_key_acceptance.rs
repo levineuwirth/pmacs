@@ -2166,19 +2166,35 @@ fn e10z_r3_a_notice_taken_off_after_a_window_change_at_the_same_size_gives_the_r
     drop(second);
 }
 
-/// A guard, review 3's third row: the state fix round 2 held by reading
-/// alone. The daemon moves this session's window to another buffer on its
-/// own, with the mirror's ops out: a timer in the daemon's `init.lua`
-/// switches the active window when a file appears, as the review's probe
-/// did. The pane must read as it does after a repaint: the paints made in
-/// the round trip before the switch reached the frontend are taken back,
-/// and nothing is painted for the old buffer on the new one. It passed at
-/// `c98f06a` in the review's probe, 3 of 3.
+/// Review 3's third row, cut at review 4's Low 1 to the letters in flight,
+/// and since then a witness and no guard: the daemon moves this session's
+/// window to another buffer on its own, with the mirror's ops out. A timer
+/// in the daemon's `init.lua` switches the active window when a file
+/// appears, as the review's probe did. Twenty letters are typed before the
+/// trigger and two straight after it, `j` and `u`, in one write, so that
+/// both are read before the switch can have crossed the link; all
+/// twenty-two go as ops, by premise, and nothing is typed after them. The
+/// paints made in the round trip before the switch reached the frontend
+/// must be taken back, and the pane read as it does after a repaint.
+///
+/// It fails at `8e7e230`, whose frontend keeps no record to take a paint
+/// back from: `ju` stays on the new buffer's second row, right of `other
+/// line two`, until something else repaints the cell (3 of 3 on a real pane
+/// in review 4's probe). It fails at the tip with `Frontend::repaint_rows`
+/// planted to write nothing. It passes at `c98f06a`'s sources and at the
+/// tip.
+///
+/// As committed at `7b1efc4` it typed twenty more letters after the
+/// trigger, and passed at `8e7e230` and under that plant alike. Those
+/// letters go as keys into the other buffer at the head of its first line,
+/// the daemon opens a box on the row below the caret that moves a column
+/// right with each of them, and its repaint of the cells the box leaves
+/// blanked the old buffer's paints: the row could not tell a frontend that
+/// takes its paints back from one that does not.
 ///
 /// What it asserts is the pane, and not that the letters arrive. They do
 /// not: the daemon drops the ops in flight for a buffer the window no
-/// longer shows, the mirror keeps them, and the letters typed after the
-/// switch go as keys into the other buffer. That is #525, the base's too,
+/// longer shows, and the mirror keeps them. That is #525, the base's too,
 /// and no part of this row.
 #[test]
 fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
@@ -2208,21 +2224,20 @@ fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
     let from = Instant::now()
         .checked_sub(Duration::from_millis(1500))
         .expect("the row is older than that");
-    let line = long_line(40);
-    for (i, c) in line.chars().enumerate() {
-        if i == 20 {
-            std::fs::write(&trigger, b"").expect("the trigger");
-        }
+    let line = long_line(22);
+    for c in line.chars().take(20) {
         tui.write(c.to_string().as_bytes());
         std::thread::sleep(Duration::from_millis(60));
     }
-    let sent = proxy.wait_sent(mark, 40, "40 letters");
+    std::fs::write(&trigger, b"").expect("the trigger");
+    tui.write(&line.as_bytes()[20..]);
+    let sent = proxy.wait_sent(mark, 22, "22 letters");
     assert!(
-        sent[..=20].iter().all(|s| *s == Sent::Op),
-        "premise: the letters before the switch, and the first after it, went as ops, so that \
-         ops were out when the daemon switched: {}; what the frontend sent and the daemon \
-         answered from 1.5 s before the first letter:\n{}",
-        pattern(&sent[..40]),
+        sent[..22].iter().all(|s| *s == Sent::Op),
+        "premise: every letter went as an op, the two after the trigger among them, so that \
+         paints stood on the pane for ops the daemon would drop: {}; what the frontend sent and \
+         the daemon answered from 1.5 s before the first letter:\n{}",
+        pattern(&sent[..22]),
         proxy
             .timeline(from)
             .lines()
@@ -2240,13 +2255,20 @@ fn e10z_r3_a_switch_the_daemon_makes_with_ops_out_leaves_the_pane_right() {
     tui.settle(Duration::from_millis(300), PATIENCE, "the switch", &|_| {
         true
     });
+    assert_eq!(
+        proxy.since(mark).len(),
+        22,
+        "premise: nothing was typed after the two letters in flight, so that nothing but a \
+         take-back could have cleared their paints"
+    );
     let before = tui.rows();
     let after = repainted(&mut tui);
     assert_eq!(
         before,
         after,
-        "after a switch the daemon made with ops out, the pane reads the buffer it shows ({})",
-        pattern(&sent[..40])
+        "after a switch the daemon made with ops out, the pane reads the buffer it shows and \
+         no paint made for the old one ({})",
+        pattern(&sent[..22])
     );
 }
 
