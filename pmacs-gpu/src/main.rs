@@ -1809,15 +1809,69 @@ fn pump_probe_events(
 /// Press one key through the production dispatch: `<k>` a character,
 /// `C-<k>` with Control held, `ret` Enter.
 fn press_probe_key(app: &mut App, key: &str) {
-    if key == "ret" {
-        app.apply_keyboard(&Key::Named(NamedKey::Enter), None, None);
+    let named = match key {
+        "ret" => Some(NamedKey::Enter),
+        // E10a: the keys a walk of the working day presses besides
+        // letters and `C-` chords.
+        "esc" => Some(NamedKey::Escape),
+        "tab" => Some(NamedKey::Tab),
+        "bs" => Some(NamedKey::Backspace),
+        "spc" => Some(NamedKey::Space),
+        _ => None,
+    };
+    if let Some(named) = named {
+        let text = (named == NamedKey::Space).then_some(" ");
+        app.apply_keyboard(&Key::Named(named), text, None);
     } else if let Some(k) = key.strip_prefix("C-") {
         app.modifiers = winit::keyboard::ModifiersState::CONTROL;
+        app.apply_keyboard(&Key::Character(k.into()), None, None);
+        app.modifiers = winit::keyboard::ModifiersState::empty();
+    } else if let Some(k) = key.strip_prefix("M-") {
+        // E10a: Alt held, as `M-x` and `M-g` are typed.
+        app.modifiers = winit::keyboard::ModifiersState::ALT;
         app.apply_keyboard(&Key::Character(k.into()), None, None);
         app.modifiers = winit::keyboard::ModifiersState::empty();
     } else {
         app.apply_keyboard(&Key::Character(key.into()), Some(key), None);
     }
+}
+
+/// E10a --- where the window is, under `label`: the band's name for the
+/// buffer it shows, how many bytes of it the window holds, its own
+/// caret as a byte and as the 1-based line and column of that text
+/// (`none` while the daemon has named no caret in this buffer), the
+/// first line of its view, and the band's message. What a person reads off the window after a jump, a rename
+/// or a closed panel, for an acceptance to compare; the probe asserts
+/// nothing.
+fn place_probe_facts(state: &State, label: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let facts = state.status_facts.as_ref();
+    let _ = writeln!(
+        out,
+        "{label}.name={}",
+        facts.map_or("", |f| f.name.as_str())
+    );
+    let _ = writeln!(
+        out,
+        "{label}.status={:?}",
+        facts.and_then(|f| f.message.as_deref()).unwrap_or_default()
+    );
+    let _ = writeln!(out, "{label}.scroll_top={}", state.scroll_top);
+    let _ = writeln!(out, "{label}.text_len={}", state.current_text.len());
+    let caret = state
+        .own_cursor
+        .filter(|own| state.current_buffer_id == Some(own.buffer_id))
+        .and_then(|own| usize::try_from(own.byte).ok())
+        .and_then(|byte| state.current_text.get(..byte).map(|before| (byte, before)));
+    let Some((byte, before)) = caret else {
+        let _ = writeln!(out, "{label}.caret=none");
+        return;
+    };
+    let line = before.matches('\n').count() + 1;
+    let col = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
+    let _ = writeln!(out, "{label}.caret={byte}");
+    let _ = writeln!(out, "{label}.line={line}");
+    let _ = writeln!(out, "{label}.col={col}");
 }
 
 /// E10y.2 --- how long the popup probe's `face:<name>` step waits for
@@ -1984,6 +2038,10 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// for it and the time since attach (E10t); `answer:<label>` writes how
 /// many of the session's events the daemon has said it handled, as the
 /// window holds it (E10z.1), and whether the minibuffer is open (E10z.2);
+/// `place:<label>` writes where the window is ([`place_probe_facts`]),
+/// `shows:<name>` waits up to five seconds for the band to name that
+/// buffer with the window's caret in it, and `type:<text>` types `text`
+/// a key at a time, `_` for a space (E10a);
 /// `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
@@ -2183,6 +2241,46 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                     let _ = writeln!(out, "{arg}.at_ms={}", started.elapsed().as_millis());
                 }
                 Ok(true)
+            }
+            "place" => {
+                // E10a: where the window is.
+                if let Some(state) = app.state.as_ref() {
+                    place_probe_facts(state, arg, &mut out);
+                }
+                Ok(true)
+            }
+            "shows" => {
+                // E10a: wait up to five seconds for the band to name the
+                // buffer `arg`, with a caret of the window's own in it: a
+                // visit's buffer arrives a frame or more after its key.
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                pump_probe_events(&mut app, &rx, until, |app| {
+                    app.state.as_ref().is_some_and(|s| {
+                        s.status_facts.as_ref().is_some_and(|f| f.name == arg)
+                            && s.own_cursor
+                                .is_some_and(|own| s.current_buffer_id == Some(own.buffer_id))
+                    })
+                })
+            }
+            "type" => {
+                // E10a: `arg` typed a key at a time, each settled as
+                // `key:` settles one, `_` standing for a space (a step
+                // holds none).
+                let mut typed = Ok(true);
+                for ch in arg.chars() {
+                    let key = if ch == '_' {
+                        "spc".to_owned()
+                    } else {
+                        ch.to_string()
+                    };
+                    press_probe_key(&mut app, &key);
+                    let until = std::time::Instant::now() + std::time::Duration::from_millis(60);
+                    typed = pump_probe_events(&mut app, &rx, until, |_| false).map(|_| true);
+                    if typed.is_err() {
+                        break;
+                    }
+                }
+                typed
             }
             "answer" => {
                 // E10z.1: the count of this session's events the daemon
