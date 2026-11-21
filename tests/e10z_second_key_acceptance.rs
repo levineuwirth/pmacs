@@ -361,7 +361,9 @@ fn daemon() -> TestDaemon {
 /// A real `pmacs --attach` in a PTY on `socket` (the proxy's), or through
 /// the `ssh` stand-in when `remote` names one, its screen modelled, on
 /// `*scratch*` with the caret on a fresh empty last line, where a typed
-/// character is the optimistic path's.
+/// character is the optimistic path's. The settle here ends on 400 ms with
+/// no byte from the TUI, whether or not the Enter's frame has come, so a row
+/// that reads the caret takes it by [`caret_on_the_fresh_line`] (#528).
 fn tui(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
     let mut tui = tui_just_started(socket, home, remote);
     tui.wait_for(PATIENCE, "the attached *scratch*", &|t| {
@@ -377,6 +379,30 @@ fn tui(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
         &|_| true,
     );
     tui
+}
+
+/// The caret on [`tui`]'s fresh line, line 2 of `*scratch*`, read once a
+/// frame has put it there and the screen has then been still for 300 ms.
+/// [`Proxy::wait_answered`] feeds the modelled screen nothing, and `tui`'s
+/// settle can end before the Enter's frame: read straight after the two,
+/// the caret was still on line 1 on main's macOS luajit leg at `9354e01`,
+/// and a row that took it for the fresh line looked a row too high (#528).
+/// Fails by name, as a premise, if no frame puts the caret there.
+fn caret_on_the_fresh_line(tui: &mut ScreenTui) -> pmacs_protocol::cell::CellCoord {
+    let on_line_two = |t: &ScreenTui| {
+        t.cursor().is_some_and(|c| {
+            t.rows()[c.row as usize]
+                .chars()
+                .take(c.col as usize)
+                .collect::<String>()
+                .trim()
+                == "2"
+        })
+    };
+    let what = "premise: the caret on the fresh line, line 2, after its frame";
+    tui.wait_for(PATIENCE, what, &on_line_two);
+    tui.settle(Duration::from_millis(300), PATIENCE, what, &on_line_two);
+    tui.cursor().expect("a caret")
 }
 
 /// [`tui`] as it is the moment the process is started: nothing waited for
@@ -2348,7 +2374,7 @@ fn e10z_r4_a_letter_behind_hanging_blanks_is_painted_at_most_a_column_right_for_
     let script = stand_in(home.path(), &proxy.path);
     let mut tui = tui(&proxy.path, home.path(), Some(&script));
     proxy.wait_answered(Duration::from_millis(100), "the fresh line's answer");
-    let start = tui.cursor().expect("a caret on the fresh line");
+    let start = caret_on_the_fresh_line(&mut tui);
     let gutter = start.col as usize;
     let below = start.row as usize + 1;
     // As wide as the row's text, and of periods: the wrap takes any run
@@ -2487,7 +2513,7 @@ fn e10z_r4_under_truncate_a_line_typed_past_a_split_windows_edge_leaves_the_pane
         tui.describe()
     );
     proxy.wait_answered(Duration::from_millis(100), "the split's answer");
-    let caret = tui.cursor().expect("a caret");
+    let caret = caret_on_the_fresh_line(&mut tui);
     let (gutter, line_row) = (caret.col as usize, caret.row as usize);
     let mark = proxy.mark();
     let line = long_line(70);
