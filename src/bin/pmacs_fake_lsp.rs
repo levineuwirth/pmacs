@@ -15,6 +15,11 @@
 //!   `publishDiagnostics` so M4.6 tests have content to read.
 //! * On `textDocument/completion`: returns a deterministic
 //!   `CompletionList` with three items so M4.7 tests can read it.
+//!   With `PMACS_FAKE_LSP_COMPLETION_PLAN` naming a JSON file (E10a.1)
+//!   the answer's `result` is that file's content instead, read at each
+//!   request, so a test writes its own items --- a `textEdit`, an
+//!   `InsertReplaceEdit`, `isIncomplete` --- beside its assertions; an
+//!   unreadable plan answers `null`.
 //! * On `textDocument/hover`: returns a `MarkupContent`-shaped
 //!   markdown payload. With `PMACS_FAKE_LSP_HOVER_LINES=N` set (E8) it
 //!   returns instead a fenced code block followed by `N` numbered prose
@@ -728,6 +733,25 @@ fn main() {
             }
             ("exit", _) => return,
             ("textDocument/completion", Some(idv)) => {
+                // E10a.1: `PMACS_FAKE_LSP_COMPLETION_PLAN` names a JSON
+                // file whose content is the answer's `result`, whole,
+                // so a test writes the items beside what it asserts of
+                // them. An unreadable plan answers `null`, an empty
+                // list to the client, so a broken fixture opens no
+                // popup and cannot read as a pass.
+                if let Ok(plan) = std::env::var("PMACS_FAKE_LSP_COMPLETION_PLAN") {
+                    let result = std::fs::read_to_string(&plan)
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "result": result
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // E7.4: `PMACS_FAKE_LSP_COMPLETION_EXTRA_EDIT=line:col:text`
                 // gives every item one `additionalTextEdits` entry
                 // inserting `text` (with `\n` spelled `\\n`) at that

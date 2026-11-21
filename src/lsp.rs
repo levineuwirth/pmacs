@@ -961,11 +961,13 @@ enum ResponseRoute {
     /// `(server, uri)`, with every item's `additionalTextEdits`
     /// resolved against `anchor`, the text the server answers for, and
     /// stamped with `base_seq`, the edit number that text is current at
-    /// (E7.4).
+    /// (E7.4), and with `requested_at`, the request's position as a
+    /// byte of `anchor` (E10a.1).
     Completion {
         uri: String,
         anchor: std::sync::Arc<str>,
         base_seq: u64,
+        requested_at: Option<u64>,
     },
     /// Absorb response into [`crate::hover::HoverStore`] at
     /// `(server, uri)`.
@@ -1994,12 +1996,18 @@ impl LspManager {
         // item's `additionalTextEdits` resolve against that text and
         // are carried across the edits since at accept time.
         let (anchor, base_seq) = self.semantic_token_anchor(sid, &uri);
+        // E10a.1: where the request was made, in that text. `col` is a
+        // byte column, as `outbound_position` reads it.
+        let requested_at = line_starts(&anchor)
+            .get(line as usize)
+            .map(|start| (start + col as usize).min(anchor.len()) as u64);
         self.pending_routes.insert(
             (sid, req_id),
             ResponseRoute::Completion {
                 uri,
                 anchor,
                 base_seq,
+                requested_at,
             },
         );
         Ok(job_id)
@@ -3029,16 +3037,29 @@ impl LspManager {
                 uri,
                 anchor,
                 base_seq,
+                requested_at,
             } => {
-                let mut resp = crate::completion::CompletionResponse::from_lsp_value(result);
+                // Parsed from the answer as the server wrote it, not
+                // from `converted` (E10a.1): an item's edits are placed
+                // below in `anchor`, the text the server answered for,
+                // by the negotiated encoding. `converted` has already
+                // turned each column into bytes of the text held now,
+                // so placing from it converted a UTF-16 column twice
+                // and put an edit one byte late for each character
+                // before it on its line that is wider in UTF-8.
+                let mut resp = crate::completion::CompletionResponse::from_lsp_value(raw);
                 self.semantic_token_store
                     .lock()
                     .expect("semantic token store mutex poisoned")
                     .note_completion_base(uri, *base_seq);
-                if resp.items.iter().any(|i| !i.carry.raw.is_empty()) {
+                if resp
+                    .items
+                    .iter()
+                    .any(|i| !i.carry.raw.is_empty() || i.carry.raw_main.is_some())
+                {
                     let encoding = self.position_encoding(sid);
                     let starts = line_starts(anchor);
-                    resp.resolve_additional_edits(uri, *base_seq, |edit| {
+                    resp.resolve_edits(uri, *base_seq, *requested_at, |edit| {
                         let start = position_to_byte(
                             anchor,
                             &starts,

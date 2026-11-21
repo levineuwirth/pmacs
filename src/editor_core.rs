@@ -609,6 +609,22 @@ pub struct AcceptedCompletion {
     pub inserted: u64,
     /// The candidate's `additionalTextEdits` and how to place them.
     pub carry: crate::completion::CompletionEditsCarry,
+    /// The replace took the range the dispatcher placed the item's own
+    /// `textEdit` at (E10a.1), not the typed word.
+    pub main_placed: bool,
+}
+
+/// Where a completion item's own `textEdit` lies in the current text
+/// (E10a.1), as the dispatcher carried it there for
+/// [`EditorCore::completion_popup_accept_edits`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacedCompletionEdit {
+    /// First byte the edit replaces.
+    pub start: Position,
+    /// One past the last byte it replaces.
+    pub end: Position,
+    /// Where the caret stood when the item's request went out.
+    pub requested_at: Position,
 }
 
 /// The world state mutated by editor commands.
@@ -6083,7 +6099,22 @@ impl EditorCore {
     /// buffer was edited (the dispatcher fires `buffer.after-edit`
     /// off that signal).
     pub fn completion_popup_accept(&mut self) -> bool {
-        self.completion_popup_accept_edits().is_some()
+        self.completion_popup_accept_edits(None).is_some()
+    }
+
+    /// The highlighted candidate's carry, for the dispatcher to place
+    /// its `textEdit` before the accept (E10a.1). `None` with no popup.
+    #[must_use]
+    pub fn completion_popup_selected_carry(
+        &self,
+    ) -> Option<crate::completion::CompletionEditsCarry> {
+        let guard = self
+            .completion_popup
+            .lock()
+            .expect("completion popup poisoned");
+        guard
+            .as_ref()
+            .and_then(|p| p.selected_candidate().map(|c| c.carry.clone()))
     }
 
     /// [`Self::completion_popup_accept`] returning what it accepted:
@@ -6091,7 +6122,23 @@ impl EditorCore {
     /// `additionalTextEdits` carry (E7.4), for the dispatcher to place
     /// through the edit log and apply inside the same command. `None`
     /// when nothing was edited.
-    pub fn completion_popup_accept_edits(&mut self) -> Option<AcceptedCompletion> {
+    ///
+    /// `main` is where the dispatcher placed the candidate's own
+    /// `textEdit` in the current text (E10a.1). The replace takes that
+    /// range on two conditions. The caret is inside it or at either
+    /// end, the specification's condition on the range ("it must
+    /// contain the position at which completion has been requested")
+    /// carried to now. And the request was made inside the word this
+    /// session completes, between its anchor and the caret: the store
+    /// keeps an answer until the next one lands, so the popup can show
+    /// the answer for the word before a `.` at the `.`, and that
+    /// answer's range, grown over the `.` typed at its end, holds the
+    /// caret too. Any other range, and `None`, replace the typed word
+    /// `[anchor .. cursor]`.
+    pub fn completion_popup_accept_edits(
+        &mut self,
+        main: Option<PlacedCompletionEdit>,
+    ) -> Option<AcceptedCompletion> {
         let holds = self.completion_session_holds();
         let snap = {
             let guard = self
@@ -6108,14 +6155,25 @@ impl EditorCore {
             return None;
         };
         self.active_window_mut().goal_col = None;
+        let len = self
+            .registry
+            .borrow()
+            .get(self.active_buffer_id())
+            .map_or(0, crate::buffer::Buffer::len);
+        let placed = main.filter(|m| {
+            m.start <= cursor
+                && cursor <= m.end
+                && m.end <= len
+                && anchor <= m.requested_at
+                && m.requested_at <= cursor
+        });
+        let main_placed = placed.is_some();
+        let (anchor, end) = placed.map_or((anchor, cursor), |m| (m.start, m.end));
         // An empty range degenerates to a plain insert (the
         // trigger-character case, where nothing was typed yet).
-        let result = if cursor > anchor {
+        let result = if end > anchor {
             self.apply_active_edit(EditOp::Replace {
-                range: Range {
-                    start: anchor,
-                    end: cursor,
-                },
+                range: Range { start: anchor, end },
                 bytes: text.as_bytes(),
             })
         } else {
@@ -6135,6 +6193,7 @@ impl EditorCore {
             anchor,
             inserted: text.len() as u64,
             carry,
+            main_placed,
         })
     }
 

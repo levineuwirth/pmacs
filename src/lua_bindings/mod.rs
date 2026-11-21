@@ -13807,11 +13807,28 @@ fn candidate_to_lua(lua: &Lua, c: &CompletionCandidate) -> mlua::Result<Table> {
             edits.set(i + 1, row)?;
         }
         t.set("additional_edits", edits)?;
+        t.set("edits_unresolved", c.item.carry.unresolved)?;
+    }
+    // E10a.1: the range of the item's own `textEdit`, bytes of the same
+    // answered-for text (`insert_text` above is already its `newText`),
+    // or the word that the server sent one this client could not place.
+    if let Some((start, stop)) = c.item.carry.main {
+        let range = lua.create_table_with_capacity(0, 3)?;
+        range.set("start", start)?;
+        range.set("stop", stop)?;
+        // Where the request was made, in the same text.
+        if let Some(at) = c.item.carry.requested_at {
+            range.set("at", at)?;
+        }
+        t.set("text_edit", range)?;
+    } else if c.item.carry.has_main() {
+        t.set("text_edit_unresolved", true)?;
+    }
+    if !c.item.carry.is_empty() {
         if let Some(uri) = &c.item.carry.uri {
             t.set("edits_uri", &**uri)?;
         }
         t.set("edits_base", c.item.carry.base)?;
-        t.set("edits_unresolved", c.item.carry.unresolved)?;
     }
     Ok(t)
 }
@@ -14108,6 +14125,51 @@ pub fn make_completion_framework(
     Ok((registry, snippets))
 }
 
+/// A `popup_show` row's carry, in the shape [`candidate_to_lua`] emits
+/// it: the item's `additionalTextEdits` (E7.4) and the range of its own
+/// `textEdit` (E10a.1), with the document and the edit number both are
+/// relative to. Default for a row with neither.
+fn popup_row_carry(row: &Table) -> mlua::Result<crate::completion::CompletionEditsCarry> {
+    let mut carry = crate::completion::CompletionEditsCarry::default();
+    if let Ok(Some(edits)) = row.get::<Option<Table>>("additional_edits") {
+        for e in edits.sequence_values::<Table>() {
+            let e = e?;
+            carry.edits.push(crate::completion::AdditionalEdit {
+                start: e.get("start")?,
+                end: e.get("stop")?,
+                new_text: e.get::<Option<String>>("text")?.unwrap_or_default(),
+            });
+        }
+        carry.unresolved = row
+            .get::<Option<bool>>("edits_unresolved")
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+    }
+    if let Ok(Some(range)) = row.get::<Option<Table>>("text_edit") {
+        carry.main = Some((range.get("start")?, range.get("stop")?));
+        carry.requested_at = range.get::<Option<u64>>("at")?;
+    }
+    carry.main_unresolved = row
+        .get::<Option<bool>>("text_edit_unresolved")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if !carry.is_empty() {
+        carry.uri = row
+            .get::<Option<String>>("edits_uri")
+            .ok()
+            .flatten()
+            .map(std::sync::Arc::from);
+        carry.base = row
+            .get::<Option<u64>>("edits_base")
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+    }
+    Ok(carry)
+}
+
 /// Install the in-buffer completion popup surface (Arc 1a, Q#C2) into
 /// `pmacs.completion`: `popup_show{...}` publishes a session into the
 /// core's shared popup (the Lua driver's write path), `popup_hide()`
@@ -14153,34 +14215,7 @@ pub fn install_completion_popup(lua: &Lua, core: &SharedCore) -> mlua::Result<()
                     let detail: Option<String> = row.get::<Option<String>>("detail").ok().flatten();
                     let insert_text: Option<String> =
                         row.get::<Option<String>>("insert_text").ok().flatten();
-                    // E7.4: the carry, in the shape `candidate_to_lua`
-                    // emits; absent for a candidate without extra edits.
-                    let mut carry = crate::completion::CompletionEditsCarry::default();
-                    if let Ok(Some(edits)) = row.get::<Option<Table>>("additional_edits") {
-                        for e in edits.sequence_values::<Table>() {
-                            let e = e?;
-                            carry.edits.push(crate::completion::AdditionalEdit {
-                                start: e.get("start")?,
-                                end: e.get("stop")?,
-                                new_text: e.get::<Option<String>>("text")?.unwrap_or_default(),
-                            });
-                        }
-                        carry.uri = row
-                            .get::<Option<String>>("edits_uri")
-                            .ok()
-                            .flatten()
-                            .map(std::sync::Arc::from);
-                        carry.base = row
-                            .get::<Option<u64>>("edits_base")
-                            .ok()
-                            .flatten()
-                            .unwrap_or(0);
-                        carry.unresolved = row
-                            .get::<Option<bool>>("edits_unresolved")
-                            .ok()
-                            .flatten()
-                            .unwrap_or(false);
-                    }
+                    let carry = popup_row_carry(&row)?;
                     candidates.push(crate::completion::PopupCandidate {
                         insert_text: insert_text.unwrap_or_else(|| label.clone()),
                         label,

@@ -103,6 +103,10 @@ local function collect_rows(buf, prefix, trigger, trigger_char)
           edits_uri = c.edits_uri,
           edits_base = c.edits_base,
           edits_unresolved = c.edits_unresolved,
+          -- E10a.1: and the range of its own textEdit, whose newText
+          -- is already `insert_text`.
+          text_edit = c.text_edit,
+          text_edit_unresolved = c.text_edit_unresolved,
         }
       end
     end

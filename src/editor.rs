@@ -4053,9 +4053,17 @@ impl EditorState {
                     (core.active_frontend, core.active_buffer_id())
                 };
                 self.core.borrow_mut().command_group_begin(fid, buffer_id);
-                let accepted = self.core.borrow_mut().completion_popup_accept_edits();
+                let main = self.place_completion_main_edit();
+                let accepted = self.core.borrow_mut().completion_popup_accept_edits(main);
                 if let Some(accepted) = accepted {
                     self.apply_completion_additional_edits(&accepted);
+                    // After the extra edits, whose own refusal would
+                    // otherwise be the only thing said.
+                    if accepted.carry.has_main() && !accepted.main_placed {
+                        "completion: the server's range for this item could not be placed at \
+                         the caret, so the typed word was replaced"
+                            .clone_into(&mut self.core.borrow_mut().status);
+                    }
                 }
                 self.core.borrow_mut().command_group_collapse(buffer_id);
                 if pre_revision != self.active_buffer_revision() {
@@ -4064,6 +4072,31 @@ impl EditorState {
                 }
             }
         }
+    }
+
+    /// E10a.1: where the highlighted candidate's own `textEdit` lies in
+    /// the current text. Its range is bytes of the text the server
+    /// answered for, carried across every edit recorded since through
+    /// the semantic-token store's log, as its `additionalTextEdits` are
+    /// (E7.4), with what was typed at the range's start kept inside it,
+    /// and the request's own position carried beside it. `None` for a
+    /// candidate without a `textEdit`, and for a range the log cannot
+    /// place; the accept then replaces the typed word, and the
+    /// dispatcher says so for the second.
+    fn place_completion_main_edit(&self) -> Option<crate::editor_core::PlacedCompletionEdit> {
+        let carry = self.core.borrow().completion_popup_selected_carry()?;
+        let (start, end) = carry.main?;
+        let at = carry.requested_at?;
+        let uri = carry.uri.as_deref()?;
+        let store = self.lsp_manager.borrow().semantic_token_store();
+        let guard = store.lock().expect("semantic token store mutex poisoned");
+        let (start, end, requested_at) =
+            guard.translate_region_since(uri, carry.base, start, end, at)?;
+        Some(crate::editor_core::PlacedCompletionEdit {
+            start,
+            end,
+            requested_at,
+        })
     }
 
     /// E7.4: apply an accepted candidate's `additionalTextEdits` --- an
