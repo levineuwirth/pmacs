@@ -173,6 +173,13 @@ pub fn classify_key(key: Key, mods: Modifiers) -> OptimisticAction {
 /// "yes" at the mirror's new cursor while the terminal cursor was
 /// at the OLD pre-edit position, causing `paint_optimistic_insert`
 /// to write at the wrong column.
+///
+/// Since E10z fix round 2 the terminal attach pump paints at a caret it
+/// tracks and not at the terminal's own, so at v28 an end-of-line op
+/// whose paint has no right form on the pane (the last column, a cell
+/// the frames did not leave blank) goes without one, and the daemon's
+/// frame paints it. This function's rule is unchanged: it makes an op
+/// only where a single `Print` could be its paint.
 #[must_use]
 pub fn frontend_event_for_keystroke(
     mirror: &mut BufferMirror,

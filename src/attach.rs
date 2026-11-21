@@ -706,6 +706,13 @@ pub(crate) struct AttachIo {
     /// — by the time the kick runs, the pump has already decided to
     /// exit.
     pub kick: Box<dyn FnOnce() + Send>,
+    /// E10z.2 --- the protocol version this session negotiated, which is
+    /// what [`requested_protocol_version`](crate::protocol::requested_protocol_version)
+    /// made of the daemon's `Hello`: at
+    /// [`INPUT_HANDLED_MIN_VERSION`](pmacs_protocol::INPUT_HANDLED_MIN_VERSION) or
+    /// later the pump holds its optimistic path for the daemon's count of
+    /// handled input, and below it keeps the rule it had.
+    pub session_version: u32,
 }
 
 impl std::fmt::Debug for AttachIo {
@@ -714,6 +721,7 @@ impl std::fmt::Debug for AttachIo {
             .field("reader", &"<dyn Read>")
             .field("writer", &"<dyn Write>")
             .field("kick", &"<FnOnce>")
+            .field("session_version", &self.session_version)
             .finish()
     }
 }
@@ -763,8 +771,12 @@ pub(crate) trait AttachPumpFrontend {
     /// Feature-gated: the orchestrator's call site is `#[cfg(feature =
     /// "crdt")]`; the trait method exists only in CRDT builds to keep
     /// the non-CRDT trait surface minimal.
+    ///
+    /// E10z fix round 2: `event` is the count of the op that carried the
+    /// character, at v28, under which the paint is kept until a frame
+    /// confirms it ([`Self::settle_optimistic`]).
     #[cfg(feature = "crdt")]
-    fn paint_optimistic_insert(&mut self, _c: char) -> std::io::Result<()> {
+    fn paint_optimistic_insert(&mut self, _c: char, _event: Option<u64>) -> std::io::Result<()> {
         Ok(())
     }
 
@@ -774,8 +786,56 @@ pub(crate) trait AttachPumpFrontend {
     /// `CellDelta` will eventually carry (last char of line becomes a
     /// space at the cursor position before the cursor returns).
     #[cfg(feature = "crdt")]
-    fn paint_optimistic_delete_back(&mut self) -> std::io::Result<()> {
+    fn paint_optimistic_delete_back(&mut self, _event: Option<u64>) -> std::io::Result<()> {
         Ok(())
+    }
+
+    /// E10z fix round 2 --- whether a single `Print` at the caret the
+    /// frontend tracks is a right paint for a character typed at a line's
+    /// end ([`Frontend::optimistic_insert_fits`]); where it is not, the op
+    /// goes unpainted. A stub has no screen and says yes.
+    #[cfg(feature = "crdt")]
+    fn optimistic_insert_fits(&self) -> bool {
+        true
+    }
+
+    /// E10z fix round 2 --- the same for a character deleted at a line's end.
+    #[cfg(feature = "crdt")]
+    fn optimistic_delete_back_fits(&self) -> bool {
+        true
+    }
+
+    /// E10z fix round 2 --- where the frontend has the caret
+    /// ([`Frontend::caret`]). A stub has none.
+    #[cfg(feature = "crdt")]
+    fn caret(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// E10z fix round 2 --- move the tracked caret for an op that went
+    /// unpainted ([`Frontend::advance_caret`]).
+    #[cfg(feature = "crdt")]
+    fn advance_caret(&mut self, _cols: i32) {}
+
+    /// E10z fix round 2 --- whether the caret the frontend tracks is one to
+    /// paint ahead from ([`Frontend::trust_caret`]).
+    #[cfg(feature = "crdt")]
+    fn trust_caret(&mut self, _trusted: bool) {}
+
+    /// E10z fix round 2 --- read the optimistic paints the daemon has
+    /// answered against its frames, and take back every outstanding one if
+    /// one is not there ([`Frontend::settle_optimistic`]); whether any was.
+    #[cfg(feature = "crdt")]
+    fn settle_optimistic(&mut self, _answered: u64) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    /// E10z fix round 2 --- take back the optimistic paints of ops the
+    /// daemon had not answered at `answered`
+    /// ([`Frontend::take_back_optimistic_after`]); whether any was.
+    #[cfg(feature = "crdt")]
+    fn take_back_optimistic_after(&mut self, _answered: u64) -> std::io::Result<bool> {
+        Ok(false)
     }
 }
 
@@ -803,12 +863,40 @@ impl AttachPumpFrontend for Frontend {
         Frontend::put_back_the_old_bottom_row(self)
     }
     #[cfg(feature = "crdt")]
-    fn paint_optimistic_insert(&mut self, c: char) -> std::io::Result<()> {
-        Frontend::paint_optimistic_insert(self, c)
+    fn paint_optimistic_insert(&mut self, c: char, event: Option<u64>) -> std::io::Result<()> {
+        Frontend::paint_optimistic_insert(self, c, event)
     }
     #[cfg(feature = "crdt")]
-    fn paint_optimistic_delete_back(&mut self) -> std::io::Result<()> {
-        Frontend::paint_optimistic_delete_back(self)
+    fn paint_optimistic_delete_back(&mut self, event: Option<u64>) -> std::io::Result<()> {
+        Frontend::paint_optimistic_delete_back(self, event)
+    }
+    #[cfg(feature = "crdt")]
+    fn optimistic_insert_fits(&self) -> bool {
+        Frontend::optimistic_insert_fits(self)
+    }
+    #[cfg(feature = "crdt")]
+    fn optimistic_delete_back_fits(&self) -> bool {
+        Frontend::optimistic_delete_back_fits(self)
+    }
+    #[cfg(feature = "crdt")]
+    fn caret(&self) -> Option<(u32, u32)> {
+        Frontend::caret(self)
+    }
+    #[cfg(feature = "crdt")]
+    fn advance_caret(&mut self, cols: i32) {
+        Frontend::advance_caret(self, cols);
+    }
+    #[cfg(feature = "crdt")]
+    fn trust_caret(&mut self, trusted: bool) {
+        Frontend::trust_caret(self, trusted);
+    }
+    #[cfg(feature = "crdt")]
+    fn settle_optimistic(&mut self, answered: u64) -> std::io::Result<bool> {
+        Frontend::settle_optimistic(self, answered)
+    }
+    #[cfg(feature = "crdt")]
+    fn take_back_optimistic_after(&mut self, answered: u64) -> std::io::Result<bool> {
+        Frontend::take_back_optimistic_after(self, answered)
     }
 }
 
@@ -987,7 +1075,10 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // Take over the terminal. Frontend's Drop tears it down.
     let mut frontend = Frontend::new().map_err(AttachError::Terminal)?;
 
-    let io = build_local_socket_io(stream)?;
+    let io = build_local_socket_io(
+        stream,
+        crate::protocol::requested_protocol_version(hello.protocol_version),
+    )?;
     let result = run_local_sessions(
         &socket_path,
         io,
@@ -1159,7 +1250,11 @@ fn connect_again(
     memory.heard(&hello);
     stream.set_read_timeout(None)?;
     write_attach_request(&mut stream, &hello, size)?;
-    Ok((build_local_socket_io(stream)?, hello.assigned_frontend_id))
+    let session_version = crate::protocol::requested_protocol_version(hello.protocol_version);
+    Ok((
+        build_local_socket_io(stream, session_version)?,
+        hello.assigned_frontend_id,
+    ))
 }
 
 /// Build an [`AttachIo`] for a connected `UnixStream`.
@@ -1168,7 +1263,10 @@ fn connect_again(
 /// `shutdown(Both)`. Cloning may
 /// fail (rare — the kernel is out of file descriptors), in which
 /// case the caller propagates the error before raw mode engages.
-fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error> {
+fn build_local_socket_io(
+    stream: UnixStream,
+    session_version: u32,
+) -> Result<AttachIo, std::io::Error> {
     let reader = stream.try_clone()?;
     let kick_handle = stream.try_clone()?;
     let kicked = Arc::new(AtomicBool::new(false));
@@ -1183,6 +1281,7 @@ fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error>
             kicked.store(true, Ordering::SeqCst);
             let _ = kick_handle.shutdown(Shutdown::Both);
         }),
+        session_version,
     })
 }
 
@@ -1728,7 +1827,10 @@ pub(crate) fn run_attach_pair(
         reader,
         writer,
         kick,
+        session_version,
     } = io;
+    #[cfg(not(feature = "crdt"))]
+    let _ = session_version;
 
     let (tx, rx) = mpsc::channel::<InstanceMessage>();
     let far_side_text = Arc::new(Mutex::new(Vec::new()));
@@ -1758,6 +1860,104 @@ pub(crate) fn run_attach_pair(
     #[cfg(feature = "crdt")]
     let mut dispatch_idle = false;
 
+    // E10z.2 --- the daemon's answer (#470). At v28 the daemon says how
+    // many of this session's events its dispatcher has handled
+    // (`InstanceMessage::InputHandled`), after any `DispatchIdle` flip they
+    // caused and before any `CursorByte` that reflects them. The pump
+    // counts what it puts on the wire the same way, every event once;
+    // when it forwards an event (a key it does not apply, a click, a
+    // paste) it needs the answer to reach that count before a
+    // `CursorByte` may re-ground its cursor, so a `CursorByte` the daemon
+    // wrote before it read the event no longer does. An optimistic edit
+    // raises nothing: its stale mark clears as it did, so typing keeps
+    // its pace on every route. Below v28 nothing is needed and the rule
+    // is the one it was.
+    #[cfg(feature = "crdt")]
+    let answer_wire = session_version >= pmacs_protocol::INPUT_HANDLED_MIN_VERSION;
+    #[cfg(feature = "crdt")]
+    let mut events_sent: u64 = 0;
+    #[cfg(feature = "crdt")]
+    let mut answered: u64 = 0;
+    #[cfg(feature = "crdt")]
+    let mut answer_needed: u64 = 0;
+    // E10z fix round 1 --- the count at the last event on the wire that is
+    // neither an op the mirror applied nor one that changes nothing ([`awaits_answer`]):
+    // a key, a click, a paste, a resize. While the daemon's answer covers
+    // that event but is short of the mirror's last op (`last_own_op`,
+    // below), everything it has not answered is the mirror's own text or a
+    // pointer motion or focus change, so a `CursorByte` read then describes
+    // the buffer before some of the text and the mirror keeps its own caret
+    // (review 1's Medium 2 (b), and the owner's ruling of 2026-11-18 that a
+    // motion and a focus change do not stop it); once the answer covers the
+    // op, the cursor re-grounds as before.
+    #[cfg(feature = "crdt")]
+    let mut last_unapplied: u64 = 0;
+    // E10z fix round 2 --- the count at the last op the mirror applied in
+    // the buffer its caret is in. The mirror's caret is kept over a
+    // `CursorByte` only while the daemon's answer is short of it: only then
+    // is the cursor the daemon sent older than something the mirror did.
+    // Until this round the test read `answered < events_sent`, which a
+    // pointer motion in flight satisfies with no op out; over a link a
+    // moving pointer always has one in flight, so the daemon's answer to a
+    // round-tripped key was taken for older than the mirror and never
+    // applied (review 2's Medium 1). A motion or a focus change now neither
+    // stops a keep (`last_unapplied` does not count it) nor starts one. What
+    // a frame's `Cursor` does is `own_ops`'s, below.
+    #[cfg(feature = "crdt")]
+    let mut last_own_op: u64 = 0;
+    // E10z fix round 2 --- the mirror's ops the daemon has yet to answer,
+    // oldest first, each with the columns it moves the caret by at a line's
+    // end: one right for a character typed, one left for one deleted. A
+    // frame read with the daemon's count at `n` shows its caret after `n`
+    // events; that caret moved by the ops after `n` is where the next
+    // character goes, as far as this frontend can say, and is where the
+    // pump puts the frame's `Cursor` (review 2's Medium 2, by its second
+    // form as the owner ruled it on 2026-11-19: re-grounded from the
+    // daemon's frames). Until this round the pump held such a `Cursor` back
+    // and kept the caret its own paints had left, which nothing ever
+    // corrected: past the pane's last column it ran on, and past a split
+    // window's edge it painted across the neighbour.
+    //
+    // E10z fix round 3 (review 3's Low 3), restated at fix round 4 (review
+    // 4's Low 3) --- "as far as this frontend can say" has one case the
+    // wire shows it cannot: blanks typed where a word has just filled its
+    // row. The daemon's word wrap hangs a run of blanks past the row's end,
+    // and its caret, already at the next row's start, moves no column for
+    // any of them; one is counted here for each, since a frontend is told
+    // no row's width. So the caret is put one column right of the daemon's
+    // for each hanging blank the daemon has yet to answer, which
+    // [`OPTIMISTIC_RUN_AHEAD`] bounds at 16, and a letter typed meanwhile is
+    // painted there: after three blanks one letter three columns right, the
+    // next two and the next one, in review 4's run, 100 ms each way, a
+    // character every 60 ms. A deletion back over a hanging blank is
+    // counted a column left, which the daemon's caret does not move either,
+    // so until it is answered the caret is put one column left of the
+    // daemon's, on the gutter's last cell, and a letter is painted there.
+    // Each offset ends with the frame that answers its own blank or
+    // deletion: that frame shows the caret where the daemon has it, the
+    // paints are taken back as any wrong paint is, and the daemon's frames
+    // paint the letters. Only the paint is off; the buffer is never wrong.
+    // It is left so, the bound accepted as measured (the owner's ruling of
+    // 2026-11-20, replacing "one column for one round trip" of the same
+    // day): a rule that refused those paints would have to guess the
+    // daemon's wrap from here.
+    #[cfg(feature = "crdt")]
+    let mut own_ops: std::collections::VecDeque<(u64, i32)> = std::collections::VecDeque::new();
+    // E10z fix round 1's addition --- the numbers of the unanswered pointer
+    // motions and focus changes, oldest first, so that
+    // [`OPTIMISTIC_RUN_AHEAD`] counts only what the daemon has work to do
+    // for: a pointer crossing cells over a link can owe it that many
+    // motions alone.
+    #[cfg(feature = "crdt")]
+    let mut changes_nothing: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    // E10z.2 --- a terminal event read during the poll's wait waits here
+    // for one more turn of the loop, so that what the daemon sent
+    // meanwhile is read before the event is decided (#470's second
+    // mechanism: the `DispatchIdle` flip had been written, sometimes tens
+    // of milliseconds before, and was not read until after the key went
+    // as text).
+    let mut pending: Option<Event> = None;
+
     // Closure-and-call: any `return` from this closure still falls
     // through to `kick()` and `reader_handle.join()` below. Without
     // this wrapping a writer-side IO error inside the loop would skip
@@ -1784,6 +1984,20 @@ pub(crate) fn run_attach_pair(
             let mut batch: Vec<InstanceMessage> = Vec::new();
             let mut goodbye: Option<GoodbyeReason> = None;
             let mut reader_eof = false;
+            // E10z fix round 2 --- over this batch: where the last `Cursor`
+            // read put the caret (or, before one is, where the frontend has
+            // it); the daemon's count at a `Cursor` that put it somewhere
+            // else than the frontend had painted towards; the count at the
+            // batch's last `Cursor`, which is how far its frames reach; and
+            // whether that `Cursor` is one to paint ahead from.
+            #[cfg(feature = "crdt")]
+            let mut caret_now: Option<Option<(u32, u32)>> = None;
+            #[cfg(feature = "crdt")]
+            let mut corrected_at: Option<u64> = None;
+            #[cfg(feature = "crdt")]
+            let mut frames_reach: Option<u64> = None;
+            #[cfg(feature = "crdt")]
+            let mut caret_grounded: Option<bool> = None;
             loop {
                 match rx.try_recv() {
                     Ok(InstanceMessage::Goodbye(reason)) => {
@@ -1818,7 +2032,57 @@ pub(crate) fn run_attach_pair(
                         // before generating a local CrdtOp; this
                         // keeps that lookup current. Convert wire
                         // u64 → usize for the loro API.
-                        buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
+                        //
+                        // E10z fix round 1 --- at v28, a cursor read while
+                        // the daemon has yet to answer only the mirror's own
+                        // ops, in the buffer they went to, is older than
+                        // the mirror's, which is kept; any staleness a
+                        // remote op left stays until the answer covers.
+                        //
+                        // E10z fix round 2 --- "has yet to answer" an op of
+                        // the mirror's ([`last_own_op`]), not anything at
+                        // all: with only a motion out the cursor is the
+                        // daemon's answer and is taken.
+                        let in_the_ops_buffer = buffer_mirror.active_buffer() == Some(buffer_id)
+                            && buffer_mirror.cursor_byte_pos(buffer_id).is_some();
+                        let keeps_own_caret = answer_wire
+                            && answered < last_own_op
+                            && answered >= last_unapplied
+                            && in_the_ops_buffer;
+                        if !keeps_own_caret {
+                            buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
+                            // E10z.2 --- a cursor from before the daemon
+                            // read what this pump last forwarded moves the
+                            // mirror's cursor and leaves it stale.
+                            if answer_wire && answered < answer_needed {
+                                buffer_mirror.mark_cursor_stale(buffer_id);
+                            }
+                            // E10z fix round 2 --- the daemon's caret is in
+                            // a buffer the mirror's unanswered ops did not
+                            // go to (this buffer's first cursor, or another
+                            // buffer's): the mirror is now grounded there,
+                            // so those ops no longer move the caret a
+                            // frame shows. Review 2 found the two apart:
+                            // this applied, a frame's `Cursor` held, and a
+                            // word painted where the old caret had been.
+                            //
+                            // E10z fix round 3 (review 3's Low 3) --- which
+                            // frame that begins with depends on who moved
+                            // the window. After a key of this session's,
+                            // no op is out by now, and the `Cursor` of the
+                            // tick that wrote this was taken as it was. When
+                            // the daemon moved the window on its own (a
+                            // timer, another frontend) with ops out, that
+                            // tick's `Cursor` was written ahead of this, and
+                            // has been moved by the old buffer's ops in the
+                            // arm below; the next tick's is the first that
+                            // is not, and the caret is those columns right
+                            // of the daemon's for the one frame between.
+                            if !in_the_ops_buffer {
+                                last_own_op = 0;
+                                own_ops.clear();
+                            }
+                        }
                     }
                     #[cfg(feature = "crdt")]
                     Ok(InstanceMessage::CrdtOp { buffer_id, op }) => {
@@ -1873,6 +2137,65 @@ pub(crate) fn run_attach_pair(
                         // gate reads `dispatch_idle` below.
                         dispatch_idle = idle;
                     }
+                    // E10z fix round 2 --- a frame's terminal caret. The
+                    // daemon writes its count ahead of the frame that
+                    // reflects it, so this `Cursor` is its caret after
+                    // `answered` events, and the ops the mirror applied
+                    // since (`own_ops`) each move it a column: the caret
+                    // goes where they leave it, which is where the next
+                    // character goes. Round 1 held such a `Cursor` back and
+                    // kept the caret its own paints had left; that caret was
+                    // never checked against the daemon's, and a motion in
+                    // flight, a key behind the ops, the pane's last column
+                    // and a split window's edge each left it wrong (review
+                    // 2's Medium 1, Low 2 and Medium 2, and this round's own
+                    // finding). Where this differs from where the frontend
+                    // had painted towards, the daemon's caret is not where
+                    // the paints assumed: the line wrapped, or another
+                    // frontend's edit moved the row. The paints the daemon
+                    // has not answered are then taken back, below.
+                    //
+                    // It is a caret to paint ahead from only if the daemon
+                    // had by then answered everything this pump forwarded
+                    // that can move it (`answer_needed`): one from before a
+                    // key's answer is shown and not trusted, since the early
+                    // `CursorByte` can re-ground the mirror a frame ahead of
+                    // the `Cursor`, and a letter typed between the two would
+                    // be painted at the old caret.
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::Cursor(state)) if answer_wire => {
+                        let ahead: i64 = own_ops.iter().map(|(_, cols)| i64::from(*cols)).sum();
+                        let shifted = state.map(|mut cursor| {
+                            cursor.coord.col =
+                                u32::try_from((i64::from(cursor.coord.col) + ahead).max(0))
+                                    .unwrap_or(u32::MAX);
+                            cursor
+                        });
+                        let now = shifted
+                            .filter(|cursor| cursor.visible)
+                            .map(|cursor| (cursor.coord.col, cursor.coord.row));
+                        if now != caret_now.unwrap_or_else(|| frontend.caret()) {
+                            corrected_at = Some(answered);
+                        }
+                        caret_now = Some(now);
+                        caret_grounded = Some(answered >= answer_needed);
+                        frames_reach = Some(answered);
+                        batch.push(InstanceMessage::Cursor(shifted));
+                    }
+                    // E10z.2 — how much of this session's input the
+                    // daemon has handled; the `CursorByte` arm above
+                    // reads it. Taken out of the batch, as
+                    // `DispatchIdle` is, since nothing paints from it.
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::InputHandled { events }) => {
+                        answered = events;
+                        while changes_nothing.front().is_some_and(|n| *n <= answered) {
+                            changes_nothing.pop_front();
+                        }
+                        while own_ops.front().is_some_and(|(n, _)| *n <= answered) {
+                            own_ops.pop_front();
+                        }
+                    }
                     Ok(msg) => batch.push(msg),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -1907,6 +2230,30 @@ pub(crate) fn run_attach_pair(
                     return Err(AttachError::Terminal(e));
                 }
             }
+            #[cfg(feature = "crdt")]
+            {
+                if let Some(grounded) = caret_grounded {
+                    frontend.trust_caret(grounded);
+                }
+                // E10z fix round 2 --- a `Cursor` of this batch put the caret
+                // somewhere else than the frontend had painted towards: what
+                // it painted for ops the daemon had not answered by then went
+                // to cells the daemon will not put those characters in, and
+                // will not repaint either, so they are taken back.
+                if let Some(count) = corrected_at
+                    && let Err(e) = frontend.take_back_optimistic_after(count)
+                {
+                    return Err(AttachError::Terminal(e));
+                }
+                // And the frames now reach `frames_reach` events: a paint the
+                // daemon has answered that no frame shows is taken back with
+                // every paint after it.
+                if let Some(reach) = frames_reach
+                    && let Err(e) = frontend.settle_optimistic(reach)
+                {
+                    return Err(AttachError::Terminal(e));
+                }
+            }
             if let Some(reason) = goodbye {
                 return Ok(PumpEnd::Over(Some(reason)));
             }
@@ -1931,11 +2278,15 @@ pub(crate) fn run_attach_pair(
                 return Err(AttachError::Terminal(e));
             }
 
-            let event = match frontend.poll_event(Duration::from_millis(50)) {
-                Ok(opt) => opt,
-                Err(e) => return Err(AttachError::Terminal(e)),
-            };
-            let Some(ev) = event else {
+            let Some(ev) = pending.take() else {
+                let event = match frontend.poll_event(Duration::from_millis(50)) {
+                    Ok(opt) => opt,
+                    Err(e) => return Err(AttachError::Terminal(e)),
+                };
+                if let Some(ev) = event {
+                    // Back to the drain first, then this event.
+                    pending = Some(ev);
+                }
                 continue;
             };
 
@@ -2022,6 +2373,19 @@ pub(crate) fn run_attach_pair(
                         .and_then(|b| buffer_mirror.cursor_at_end_of_line_safe_for_delete_back(b))
                         == Some(true);
 
+                    // E10z fix round 1 --- no further ahead of the daemon's
+                    // answer than [`OPTIMISTIC_RUN_AHEAD`]: past it the key
+                    // round-trips, as after any key the pump forwards.
+                    #[cfg(feature = "crdt")]
+                    if answer_wire
+                        && events_sent
+                            .saturating_sub(answered)
+                            .saturating_sub(changes_nothing.len() as u64)
+                            >= OPTIMISTIC_RUN_AHEAD
+                        && let Some(active_buf) = buffer_mirror.active_buffer()
+                    {
+                        buffer_mirror.mark_cursor_stale(active_buf);
+                    }
                     let frontend_event = crate::optimistic::frontend_event_for_keystroke(
                         &mut buffer_mirror,
                         assigned_id,
@@ -2029,6 +2393,12 @@ pub(crate) fn run_attach_pair(
                     );
                     if let Err(e) = writer.send(&frontend_event) {
                         return lost_or_failed(e, bootstrapped);
+                    }
+                    events_sent += 1;
+                    if matches!(frontend_event, FrontendEvent::Key(_)) {
+                        last_unapplied = events_sent;
+                    } else {
+                        last_own_op = events_sent;
                     }
                     // Post-audit-round-4 F22 — if we round-tripped via
                     // `FrontendEvent::Key`, the daemon's command
@@ -2038,10 +2408,17 @@ pub(crate) fn run_attach_pair(
                     // active buffer's cursor stale so subsequent
                     // keystrokes round-trip too until the daemon's
                     // next `CursorByte` re-grounds the mirror cursor.
-                    if matches!(frontend_event, FrontendEvent::Key(_))
-                        && let Some(active_buf) = buffer_mirror.active_buffer()
-                    {
-                        buffer_mirror.mark_cursor_stale(active_buf);
+                    if matches!(frontend_event, FrontendEvent::Key(_)) {
+                        answer_needed = events_sent;
+                        if let Some(active_buf) = buffer_mirror.active_buffer() {
+                            buffer_mirror.mark_cursor_stale(active_buf);
+                        }
+                        // E10z fix round 2 --- nor is the painted caret
+                        // where the next character goes until a frame from
+                        // after the daemon's answer says so.
+                        if answer_wire {
+                            frontend.trust_caret(false);
+                        }
                     }
 
                     // Visual optimistic paint (Path β). Fires only when
@@ -2052,24 +2429,52 @@ pub(crate) fn run_attach_pair(
                     // backspace, and round-trip cases skip — the
                     // daemon's CellDelta drives paint for those.
                     //
-                    // Daemon-side CellDelta suppression is NOT needed:
-                    // under Path β, optimistic paint either matches
-                    // the eventual CellDelta exactly (end-of-line)
-                    // or doesn't exist (mid-line / line-join). Either
-                    // way, no flicker.
+                    // E10z fix round 2 --- at v28 the paint also needs a
+                    // right form on the pane, which the frontend says
+                    // ([`Frontend::optimistic_insert_fits`]): a caret it can
+                    // vouch for, short of the pane's last column, over a cell
+                    // the frames left blank. Where there is none the op still
+                    // goes, unpainted, and the daemon's frame paints it a
+                    // round trip later: review 2's Medium 2 by its second
+                    // form. Its first, to round-trip the key there, was built
+                    // and measured first: every letter behind that key waits
+                    // on its answer as E10z.2 has it, so a line typed faster
+                    // than the round trip went as keys from its first wrap to
+                    // its end (96 of 130 letters as ops, and 48 of 130 beside
+                    // a split, a letter every 60 ms over 100 ms each way).
+                    // Either way the op moves the caret, which the frontend
+                    // tracks and the next frame's `Cursor` is checked against.
                     if matches!(frontend_event, FrontendEvent::CrdtOp { .. }) {
+                        let cols = match action {
+                            crate::optimistic::OptimisticAction::Insert(_) => 1,
+                            crate::optimistic::OptimisticAction::DeleteBack => -1,
+                            _ => 0,
+                        };
+                        if answer_wire {
+                            own_ops.push_back((events_sent, cols));
+                        }
                         let paint_result = match action {
                             crate::optimistic::OptimisticAction::Insert(c)
-                                if insert_paint_eligible =>
+                                if insert_paint_eligible
+                                    && (!answer_wire || frontend.optimistic_insert_fits()) =>
                             {
-                                frontend.paint_optimistic_insert(c)
+                                frontend
+                                    .paint_optimistic_insert(c, answer_wire.then_some(events_sent))
                             }
                             crate::optimistic::OptimisticAction::DeleteBack
-                                if delete_back_paint_eligible =>
+                                if delete_back_paint_eligible
+                                    && (!answer_wire || frontend.optimistic_delete_back_fits()) =>
                             {
-                                frontend.paint_optimistic_delete_back()
+                                frontend.paint_optimistic_delete_back(
+                                    answer_wire.then_some(events_sent),
+                                )
                             }
-                            _ => Ok(()),
+                            _ => {
+                                if answer_wire {
+                                    frontend.advance_caret(cols);
+                                }
+                                Ok(())
+                            }
                         };
                         if let Err(e) = paint_result {
                             eprintln!("pmacs: optimistic paint failed: {e}");
@@ -2090,6 +2495,32 @@ pub(crate) fn run_attach_pair(
                 if let Err(e) = forward_event(&mut frame, &ev, assigned_id, frontend.size()) {
                     return lost_or_failed(e, bootstrapped);
                 }
+                // A key release writes nothing, and `push` drops an empty
+                // frame: only a frame on the wire is an event the daemon
+                // will count.
+                //
+                // E10z fix round 1 --- and only an event that can move the
+                // caret or flip the dispatcher is one the next key waits
+                // for: a pointer motion and a focus change are neither
+                // (review 1's Medium 2 (a)).
+                //
+                // E10z fix round 1's addition --- nor does either stop the
+                // mirror keeping its caret, or count toward the run-ahead
+                // bound (the owner's ruling of 2026-11-18).
+                #[cfg(feature = "crdt")]
+                if !frame.is_empty() {
+                    events_sent += 1;
+                    if awaits_answer(&ev) {
+                        answer_needed = events_sent;
+                        last_unapplied = events_sent;
+                        // E10z fix round 2 --- as after a forwarded key.
+                        if answer_wire {
+                            frontend.trust_caret(false);
+                        }
+                    } else {
+                        changes_nothing.push_back(events_sent);
+                    }
+                }
                 writer.push(frame);
             }
             // Post-audit-round-6 F30 — `forward_event` (success
@@ -2103,8 +2534,19 @@ pub(crate) fn run_attach_pair(
             // active buffer's cursor stale so subsequent
             // keystrokes round-trip until the daemon's next
             // `CursorByte` re-grounds the mirror.
+            //
+            // E10z fix round 1 --- at v28 that is the block's written
+            // scope again: `45be65b` marked inside `if !optimistic_handled`,
+            // and `d3fa632`'s let-chain sweep moved the mark out of it, so
+            // since then an op the mirror applied marked its own caret stale
+            // too. Nor, at v28, does a pointer motion or a focus change
+            // mark it: neither moves a caret ([`awaits_answer`]), and the
+            // mark made the next key wait for any `CursorByte` at all
+            // (CI's macOS luajit leg, `722f154`). Below v28 it stays as it is.
             #[cfg(feature = "crdt")]
-            if let Some(active_buf) = buffer_mirror.active_buffer() {
+            if (!answer_wire || (!optimistic_handled && awaits_answer(&ev)))
+                && let Some(active_buf) = buffer_mirror.active_buffer()
+            {
                 buffer_mirror.mark_cursor_stale(active_buf);
             }
         }
@@ -2190,6 +2632,43 @@ fn is_typed(ev: &Event) -> bool {
             MouseEventKind::Moved | MouseEventKind::Up(_) | MouseEventKind::Drag(_)
         ),
         Event::Resize(..) | Event::FocusGained | Event::FocusLost => false,
+    }
+}
+
+/// E10z fix round 1 --- how far the optimistic path may run ahead of the daemon's answer at
+/// v28: with this many events unanswered, pointer motions and focus changes not counted (E10z
+/// fix round 1's addition), the next key goes as a key, and the keys after it
+/// wait for the answer as after any key the pump forwards. Over a link a word typed faster
+/// than the round trip keeps its pace (a character every 60 ms over 100 ms each way has four
+/// or five in flight), while at a daemon that has stopped answering the queue holds at most
+/// this many ops, which the daemon, once it resumes, takes far more slowly than the keys
+/// behind them: about 30 a second, measured 2026-11-18, where 6,000 letters queued as ops
+/// took minutes and kept `F12` behind them. The bound and its value are the owner's ruling
+/// of that day.
+#[cfg(feature = "crdt")]
+const OPTIMISTIC_RUN_AHEAD: u64 = 16;
+
+/// Whether a forwarded `ev` is one the next key waits on the daemon's
+/// answer for (E10z): anything that can move the caret, change the buffer
+/// or flip the dispatcher. A pointer motion with no button held, which
+/// crossterm's any-event tracking reports as the pointer crosses the pane,
+/// and a focus change are neither, so they raise nothing (E10z fix round 1)
+/// and stop neither the mirror keeping its caret nor count toward the
+/// run-ahead bound (its addition). In the daemon a motion sets the active
+/// frontend, which that frontend's next key sets anyway; moves an open
+/// menu's row, and an open menu holds the dispatcher; ends an armed
+/// divider drag where it stands; goes to a terminal's child, claiming no
+/// control, and a terminal's buffer round-trips every key; and otherwise
+/// forgets a double click's first press (`EditorState::dispatch_mouse`). A
+/// focus change sets the active frontend and reaches only a terminal
+/// (`EditorState::dispatch_focus`).
+#[cfg(feature = "crdt")]
+fn awaits_answer(ev: &Event) -> bool {
+    use crossterm::event::MouseEventKind;
+    match ev {
+        Event::Mouse(mouse) => !matches!(mouse.kind, MouseEventKind::Moved),
+        Event::FocusGained | Event::FocusLost => false,
+        Event::Key(_) | Event::Paste(_) | Event::Resize(..) => true,
     }
 }
 
@@ -3300,7 +3779,7 @@ fn run_pump_and_reap(
     child_stdin: std::process::ChildStdin,
     (protocol_reader, stderr_handle, stderr_tail): ProtocolChannel,
     frontend: &mut Frontend,
-    assigned_frontend_id: FrontendId,
+    (assigned_frontend_id, session_version): (FrontendId, u32),
     ended: &mut SessionEnded,
     notice: Option<Notice>,
 ) -> Result<(), AttachError> {
@@ -3310,6 +3789,7 @@ fn run_pump_and_reap(
         reader: protocol_reader,
         writer: Box::new(child_stdin),
         kick: ssh_kick(pid, Arc::clone(&reaped)),
+        session_version,
     };
     let pump_end = run_attach_pair(io, frontend, assigned_frontend_id, notice);
     let over = matches!(pump_end, Ok(PumpEnd::Over(_)));
@@ -3687,7 +4167,10 @@ fn run_one_session(
         child_stdin,
         (protocol_reader, stderr_handle, stderr_tail),
         frontend,
-        hello.assigned_frontend_id,
+        (
+            hello.assigned_frontend_id,
+            crate::protocol::requested_protocol_version(hello.protocol_version),
+        ),
         ended,
         memory.notice(),
     )
@@ -3824,6 +4307,10 @@ fn classify_ssh_exit(
 
 #[cfg(test)]
 mod tests {
+    /// E10z.2 --- the version the pumps these rows build by hand speak:
+    /// below the count's, so each keeps the rule it was written against.
+    const LEGACY_SESSION: u32 = pmacs_protocol::INPUT_HANDLED_MIN_VERSION - 1;
+
     use super::*;
 
     /// Try to bind a `UnixListener` at `path`. On `PermissionDenied`
@@ -3992,13 +4479,15 @@ mod tests {
             kick: Box::new(move || {
                 counter.fetch_add(1, Ordering::SeqCst);
             }),
+            session_version: LEGACY_SESSION,
         }
     }
 
     #[test]
     fn pump_routes_instance_messages_to_frontend() {
         let (daemon_side, frontend_side) = UnixStream::pair().expect("UnixStream::pair");
-        let io = build_local_socket_io(frontend_side).expect("build_local_socket_io");
+        let io =
+            build_local_socket_io(frontend_side, LEGACY_SESSION).expect("build_local_socket_io");
 
         let daemon = thread::spawn(move || {
             let mut w = daemon_side;
@@ -4035,7 +4524,7 @@ mod tests {
     fn the_pump_tells_a_goodbye_from_a_lost_socket() {
         let run = |write: fn(&mut UnixStream)| {
             let (mut daemon_side, frontend_side) = UnixStream::pair().expect("pair");
-            let io = build_local_socket_io(frontend_side).expect("io");
+            let io = build_local_socket_io(frontend_side, LEGACY_SESSION).expect("io");
             write(&mut daemon_side);
             drop(daemon_side);
             let mut frontend = FakeFrontend::default();
@@ -4229,11 +4718,13 @@ mod tests {
         // wake the reader. If we let the daemon side close, the reader
         // sees EOF naturally and we'd be testing nothing.
         let (_daemon_side, frontend_side) = UnixStream::pair().expect("UnixStream::pair");
-        let io = build_local_socket_io(frontend_side).expect("build_local_socket_io");
+        let io =
+            build_local_socket_io(frontend_side, LEGACY_SESSION).expect("build_local_socket_io");
         let AttachIo {
             reader,
             writer: _writer,
             kick,
+            ..
         } = io;
 
         let entered = Arc::new(AtomicBool::new(false));
@@ -4632,7 +5123,7 @@ mod tests {
         });
         let io = AttachIo {
             writer: Box::new(BrokenWriter),
-            ..build_local_socket_io(frontend_side).expect("io")
+            ..build_local_socket_io(frontend_side, LEGACY_SESSION).expect("io")
         };
         let mut frontend = ScriptedFrontend::default();
         frontend.events.push_back(press(KeyCode::Char('a')));
@@ -4657,7 +5148,7 @@ mod tests {
     #[test]
     fn a_paste_past_a_frame_ends_the_session_as_it_says() {
         let (_daemon_side, frontend_side) = UnixStream::pair().expect("pair");
-        let io = build_local_socket_io(frontend_side).expect("io");
+        let io = build_local_socket_io(frontend_side, LEGACY_SESSION).expect("io");
         let mut frontend = ScriptedFrontend::default();
         frontend
             .events
@@ -4718,6 +5209,7 @@ mod tests {
                 *seen.lock().expect("seen") = Some((record.dropped, record.bytes.clone()));
                 let _ = frontend_side.shutdown(Shutdown::Both);
             }),
+            session_version: LEGACY_SESSION,
         };
         let mut frontend = ScriptedFrontend::default();
         frontend.events.push_back(press(KeyCode::F(12)));
@@ -4786,6 +5278,7 @@ mod tests {
                 let _ = frontend_side.shutdown(Shutdown::Both);
                 release(&kicked);
             }),
+            session_version: LEGACY_SESSION,
         };
         let mut frontend = ScriptedFrontend::default();
         frontend.events.extend([

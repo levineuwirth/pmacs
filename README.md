@@ -49,10 +49,10 @@ the tree, never typed.
 <!-- anchor:begin -->
 | status | value |
 |---|---|
-| generated after | `53d116c` (2026-10-15) |
-| `PROTOCOL_VERSION` | 27 |
+| generated after | `d8fd793` (2026-11-16) |
+| `PROTOCOL_VERSION` | 28 |
 | `ADVERTISED_PROTOCOL_VERSION` | 20 |
-| `SUPPORTED_PROTOCOL_VERSIONS` | `6..=27` |
+| `SUPPORTED_PROTOCOL_VERSIONS` | `6..=28` |
 | default features | luajit, crdt |
 <!-- anchor:end -->
 

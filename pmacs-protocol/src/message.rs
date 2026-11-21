@@ -673,6 +673,14 @@ pub const PANEL_MAPPING_MIN_VERSION: u32 = 25;
 /// variant such a peer cannot encode.
 pub const TEXT_INPUT_MIN_VERSION: u32 = 24;
 
+/// First protocol version carrying [`InstanceMessage::InputHandled`].
+///
+/// A session below it is sent no count and its frontend keeps the rule
+/// it had: the first `CursorByte` after a round-tripped key makes its
+/// cursor authoritative again. A literal, and **not** derived from
+/// [`PROTOCOL_VERSION`], for [`PANEL_MAPPING_MIN_VERSION`]'s reason.
+pub const INPUT_HANDLED_MIN_VERSION: u32 = 28;
+
 /// Cap on [`FrontendEvent::TextInput::text`], in bytes of UTF-8.
 ///
 /// 64 KiB is far above any keystroke or IME commit and far below a
@@ -1594,6 +1602,47 @@ pub enum InstanceMessage {
     /// v26 variant, so no existing postcard discriminant moves; a
     /// literal byte fixture of that variant guards the placement.
     SessionToken(crate::session::SessionToken),
+    /// E10z (**protocol v28**, [`INPUT_HANDLED_MIN_VERSION`]): how much
+    /// of this session's input the daemon's dispatcher has handled.
+    ///
+    /// [`Self::DispatchIdle`] is written on a change and
+    /// [`Self::CursorByte`] carries a buffer and a byte, so after a key
+    /// that changes neither, what the daemon writes is what it wrote
+    /// before it read the key: a frontend cannot tell a key not yet read
+    /// from a key read that changed nothing, and an optimistic frontend
+    /// that takes the first `CursorByte` as the answer sends the next key
+    /// as text while the daemon is about to open a prefix or a prompt
+    /// (#470). This is the answer.
+    ///
+    /// Written to a session that negotiated v28 or later with
+    /// `crdt_replica`, when the count has changed since the last one
+    /// written, and never to another. The order it holds, which is the
+    /// whole of what a frontend may build on:
+    ///
+    /// - every [`Self::DispatchIdle`] flip that the first `events` events
+    ///   caused is written before it, so a frontend that has read it has
+    ///   read the flip;
+    /// - every [`Self::CursorByte`] written after it reflects at least
+    ///   those events, so a cursor read after it is not one from before
+    ///   them.
+    ///
+    /// It goes out at each tick after that tick's `DispatchIdle`, and
+    /// ahead of the early `CursorByte` that follows an event which left
+    /// the dispatcher idle, as the frontend last heard it.
+    ///
+    /// Outbound only; the write filter withholds it from an older peer
+    /// as it does every gated variant, and such a peer keeps the rule it
+    /// has. Appended after [`Self::SessionToken`], the final v27 variant,
+    /// so no existing postcard discriminant moves; a literal byte fixture
+    /// of that variant guards the placement.
+    InputHandled {
+        /// The [`FrontendEvent`]s the dispatcher has taken up from this
+        /// session since it was established, of every kind, each counted
+        /// once as its handling begins: the frontend's first event after
+        /// its handshake is 1. A frontend that counts what it sends holds
+        /// the same number once everything it sent has been handled.
+        events: u64,
+    },
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -2120,7 +2169,14 @@ pub enum ResourceBody {
 /// writes the token and the `Detached` goodbye only to a v27 session,
 /// and reads the `Resume` step only from one. The advertised baseline
 /// remains 20.
-pub const PROTOCOL_VERSION: u32 = 27;
+///
+/// E10z: bumped 27 → 28 for [`InstanceMessage::InputHandled`], the count
+/// of a session's events the dispatcher has handled, appended after
+/// `SessionToken`, the final v27 `InstanceMessage` variant, so no
+/// existing discriminant moves. Outbound only, gated at
+/// [`INPUT_HANDLED_MIN_VERSION`] by the daemon's producer and write
+/// filter. The advertised baseline remains 20.
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -2325,8 +2381,12 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// both directions: a v26 peer negotiates v26, receives no token and no
 /// `Detached` goodbye, and is never read for the `Resume` step.
 /// [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
+///
+/// E10z: extended to `[6, ..., 28]` for [`InstanceMessage::InputHandled`].
+/// Additive and outbound only: a v27 peer negotiates v27 and never
+/// receives the variant. [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
 ];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if

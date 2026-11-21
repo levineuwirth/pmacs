@@ -53,6 +53,27 @@ impl PmacsPty {
             .map_err(|error| error.to_string())
     }
 
+    /// Tell the PTY its cells are a different size in pixels, the rows and columns
+    /// unchanged: what a terminal does when its font is zoomed and its grid kept. The
+    /// kernel signals the foreground process for a change of any of the four fields,
+    /// so pmacs hears a window change at the size it has (E10z review 3's Medium 1).
+    pub fn resize_pixels(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), String> {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width,
+                pixel_height,
+            })
+            .map_err(|error| error.to_string())
+    }
+
     /// Snapshot all bytes emitted by pmacs to its host terminal.
     #[must_use]
     pub fn output(&self) -> Vec<u8> {
