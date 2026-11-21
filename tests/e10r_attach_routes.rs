@@ -3304,7 +3304,11 @@ fn l2_a_resize_in_a_countdown_leaves_the_banner_on_the_bottom_row_alone() {
 /// A stand-in for `ssh` on a slow link: one process, as `ssh` is, running the real bridge on
 /// `socket` and passing on what the client writes at `rate` bytes a second, the bridge's
 /// words coming back as they come, and counting in `moved` what it has passed on (review
-/// 3's `ssh_throttle.py`). No `ssh` and no network.
+/// 3's `ssh_throttle.py`). No `ssh` and no network. The count is written to a file beside
+/// `moved` and renamed over it, so a read finds a whole count. Until #509 it was rewritten in
+/// place by `open(…, "w")`, which leaves the file empty until its write, and the row's
+/// `passed()` reads a file it cannot parse as 0: #509's five reds each read 0 after a count
+/// above it, which a count that only grows cannot give.
 fn throttled_ssh(
     dir: &Path,
     socket: &Path,
@@ -3327,8 +3331,9 @@ def down():
         if not data:
             break
         child.stdin.write(data); child.stdin.flush(); sent += len(data)
-        with open("{moved}", "w") as f:
+        with open("{moved}.part", "w") as f:
             f.write(str(sent))
+        os.replace("{moved}.part", "{moved}")
         due = max(due, time.time()) + len(data) / {rate}
         if due > time.time():
             time.sleep(due - time.time())
