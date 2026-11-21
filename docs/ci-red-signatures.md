@@ -19538,6 +19538,214 @@ One run of `scripts/gate --protocol` at `9ecf143` in `pmacs-e10o`, `20261120T151
 
 So, at E10z fix round 4: `main` is `83e61fb`, green in the registry-push shape; its last commit whose push run ran the test legs is `69ccb27`, green; PR #518 is green at `9ecf143`, its run a merge into `83e61fb`. #520 is closed at two occurrences, the pinned step shown on a 1.26 default by two legs. No other row's count moves here.
 
+### E10z's merge and #528's fix: `main` green at `aa1ccaa`, red at `9354e01` on #528; PR #530 red at `fa6619b` on a third row of #528's gap and on #509, green at `b6a4747`; `main` red on #509 at `f1ca403`
+
+Recorded 2026-11-21 by the coordinating session. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, every `running` line paired with its own result line, and each run id and gate log was searched for in this file before it was written; none was in it. `main`'s runs at `aa1ccaa`, fix round 4's record, were owed by that record. No run was dispatched or rerun.
+
+#### `main` at `aa1ccaa`, fix round 4's record: green
+
+`CI` 44789338079 at `aa1ccaa`, attempt 1 of 1, `push`, created 2026-11-20T18:04:43Z and completed 18:06:58Z: `success`, the registry-push shape.
+
+Tally (main-ci-aa1ccaa): 15 = 6 + 9.
+
+Tally (main-ci-aa1ccaa-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 136472536896 | success |
+| Lint (lua54) | 136472537226 | success |
+| Lint (luajit) | 136472537265 | success |
+| Format | 136472537290 | success |
+| Commit attribution (D9) | 136472537517 | success |
+| Docs consistency | 136472643315 | success |
+| Perf budgets (debug) | 136472645036 | skipped |
+| Test (crdt) | 136472645040 | skipped |
+| M4 Perf Gates | 136472645165 | skipped |
+| GPU Render (headless) | 136472645364 | skipped |
+| M6 Perf Gates | 136472645441 | skipped |
+| Test ((matrix) | 136472645502 | skipped |
+| M10 Perf Gates (crdt) | 136472645621 | skipped |
+| M1 Acceptance Gates | 136472645624 | skipped |
+| M5 Perf Gates | 136472646455 | skipped |
+
+Tally (main-ci-aa1ccaa-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-aa1ccaa-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44789338204 at `aa1ccaa`, attempt 1 of 1, `push`, created 18:04:43Z and completed 18:05:04Z: `success`, `Grammar fuzz` 136472537532 and `Grammar fuzz (asan-strict)` 136472537897.
+
+Tally (main-fuzz-aa1ccaa): 2 = 2 + 0.
+
+#### `main` at `9354e01`, E10z's merge (PR #518): red on one macOS leg, on fix round 4's hanging-blanks row; #528 filed
+
+`CI` 44891898424 at `9354e01`, attempt 1 of 1, `push`, created 2026-11-21T09:56:01Z and completed 10:48:38Z: `failure`. `Test (macos-latest / luajit)` 136809398658 on `macos-26-arm64` `20261117.0516.1` (westus) failed one row, 234 `running` lines each paired, 5,661 passed, 1 failed, 80 ignored, the step after the failed sweep not run: `tests/e10z_second_key_acceptance.rs`, `e10z_r4_a_letter_behind_hanging_blanks_is_painted_at_most_a_column_right_for_each`, `43 passed; 1 failed` in 99.21 s, `panicked at tests/e10z_second_key_acceptance.rs:2367:5:`, `premise: the word fills its row to the last column and the caret is at the next row's start, so that a blank typed there hangs: caret Some(CellCoord { row: 2, col: 3 })`. The screen the message prints meets the premise; the row read its start caret from a screen last fed by `tui()`'s settle, which ended on 400 ms with no byte from the TUI whether or not the setup Enter's frame had come, and by elimination that caret was still on line 1. **Filed as #528**, its first occurrence. On the laptop, with the proxy holding everything the frontend sent from `tui()`'s Enter for 900 ms, the row as merged failed with CI's caret and screen.
+
+The other legs paired every `running` line with `test result: ok`: `Test (ubuntu-latest / luajit, no crdt)` 136809398587 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 235, 5,036 passed, 0 failed, 72 ignored; `Test (crdt)` 136809398606 on `ubuntu-24.04` `20261116.376.1` (centralus), 234, 5,722 / 0 / 88; `Test (macos-latest / lua54)` 136809398682 on `macos-26-arm64` `20261117.0516.1` (westus), 236, 5,722 / 0 / 80; `Test (ubuntu-latest / lua54)` 136809398683 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 235, 5,781 / 0 / 88; `Test (ubuntu-latest / luajit)` 136809398708 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 235, 5,781 / 0 / 88. The suite read `ok. 44 passed; 0 failed` on the four other legs that build `crdt`.
+
+Tally (main-ci-9354e01): 19 = 17 + 1 + 1.
+
+Tally (main-ci-9354e01-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 136809327949 | success |
+| Lint (luajit) | 136809328067 | success |
+| Commit attribution (D9) | 136809328097 | success |
+| Lint (lua54) | 136809328110 | success |
+| Changed paths | 136809328160 | success |
+| GPU Render (headless) | 136809398502 | success |
+| M10 Perf Gates (crdt) | 136809398558 | success |
+| M4 Perf Gates | 136809398563 | success |
+| M5 Perf Gates | 136809398572 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 136809398587 | success |
+| M6 Perf Gates | 136809398594 | success |
+| M1 Acceptance Gates | 136809398599 | success |
+| Test (crdt) | 136809398606 | success |
+| Perf budgets (debug) | 136809398611 | success |
+| Test (macos-latest / luajit) | 136809398658 | failure |
+| Test (macos-latest / lua54) | 136809398682 | success |
+| Test (ubuntu-latest / lua54) | 136809398683 | success |
+| Test (ubuntu-latest / luajit) | 136809398708 | success |
+| Docs consistency | 136809400066 | skipped |
+
+Tally (main-ci-9354e01-success): 17 rows of the table above with `result` = `success`.
+Tally (main-ci-9354e01-failure): 1 row of the table above with `result` = `failure`.
+Tally (main-ci-9354e01-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44891898321 at `9354e01`, attempt 1 of 1, `push`, created 09:56:01Z and completed 09:56:15Z: `success`, `Grammar fuzz` 136809328084 and `Grammar fuzz (asan-strict)` 136809327852.
+
+Tally (main-fuzz-9354e01): 2 = 2 + 0.
+
+#### PR #530 at `fa6619b`, #528's first fix: red on both macOS legs, on a third row of #528's gap and on #509
+
+`CI` 44900714352 at `fa6619b`, attempt 1 of 1, `pull_request` (a merge into `9354e01`), created 2026-11-21T11:46:47Z and completed 12:39:47Z: `failure`.
+
+- `Test (macos-latest / lua54)` 136835865946 on `macos-26-arm64` `20261117.0516.1` (westus): 234 `running` lines each paired, 5,661 / 1 / 80, the step after the failed sweep not run. `tests/e10z_second_key_acceptance.rs`, `e10z_r2_a_line_typed_past_the_right_edge_over_a_link_reads_right_on_the_pane`, `43 passed; 1 failed` in 164.88 s, `panicked at tests/e10z_second_key_acceptance.rs:1880:5:`, `0 of 130 letters typed past the right edge went as ops; at least 120 must`, the row's own line before it reading 130 `K`. The row starts typing straight after `tui()`; while a key is unanswered the letters behind it go as keys, so a late answer to the setup Enter keeps a line typed every 60 ms over 100 ms each way on keys. On the laptop, with the Enter's answer held 900 ms, the row at `fa6619b` failed with CI's message and pattern. It is #528's gap in a row `fa6619b` did not change (commented, issuecomment-7062923655). The registry's red at `7b1efc4` above, forty keys of forty, is the same shape.
+- `Test (macos-latest / luajit)` 136835865991, on the same image (westus): 234 paired, 5,661 / 1 / 80. **#509's fourth occurrence** (commented, issuecomment-7062908908): `tests/e10r_attach_routes.rs`'s `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, `panicked at tests/e10r_attach_routes.rs:3402:5:` (E10z's merge moved the assertion ten lines down), `a slow link that moved: 10256 then 0 bytes`, the count of all three earlier occurrences, `FAILED. 88 passed; 1 failed; 0 ignored` in 168.55 s. All four occurrences are on macOS legs.
+
+The other legs paired every `running` line with `test result: ok`: `Test (crdt)` 136835865937 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 234, 5,722 passed, 0 failed, 88 ignored; `Test (ubuntu-latest / luajit)` 136835865954 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 235, 5,781 / 0 / 88; `Test (ubuntu-latest / lua54)` 136835865975 on `ubuntu-24.04` `20261116.376.1` (chilecentral), 235, 5,781 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 136835865981 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 235, 5,036 / 0 / 72. #509's row read `ok` on the lua54 macOS leg and the four Ubuntu legs, and the edge row on the other four legs that build `crdt`.
+
+Tally (pr530-ci-fa6619b): 19 = 16 + 2 + 1.
+
+Tally (pr530-ci-fa6619b-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 136835820242 | success |
+| Format | 136835820394 | success |
+| Lint (luajit) | 136835820398 | success |
+| Changed paths | 136835820555 | success |
+| Lint (lua54) | 136835820608 | success |
+| GPU Render (headless) | 136835865902 | success |
+| M4 Perf Gates | 136835865913 | success |
+| M1 Acceptance Gates | 136835865921 | success |
+| Test (crdt) | 136835865937 | success |
+| Test (macos-latest / lua54) | 136835865946 | failure |
+| Test (ubuntu-latest / luajit) | 136835865954 | success |
+| M10 Perf Gates (crdt) | 136835865957 | success |
+| Perf budgets (debug) | 136835865972 | success |
+| Test (ubuntu-latest / lua54) | 136835865975 | success |
+| M5 Perf Gates | 136835865976 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 136835865981 | success |
+| Test (macos-latest / luajit) | 136835865991 | failure |
+| M6 Perf Gates | 136835866020 | success |
+| Docs consistency | 136835867080 | skipped |
+
+Tally (pr530-ci-fa6619b-success): 16 rows of the table above with `result` = `success`.
+Tally (pr530-ci-fa6619b-failure): 2 rows of the table above with `result` = `failure`.
+Tally (pr530-ci-fa6619b-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44900714230 at `fa6619b`, attempt 1 of 1, `pull_request`, created 11:46:47Z and completed 11:47:03Z: `success`, `Grammar fuzz` 136835819919 and `Grammar fuzz (asan-strict)` 136835820058.
+
+Tally (pr530-fuzz-fa6619b): 2 = 2 + 0.
+
+#### PR #530 at `b6a4747`, the wait in `tui()`: green
+
+`CI` 44906190878 at `b6a4747`, attempt 1 of 1, `pull_request` (a merge into `9354e01`), created 2026-11-21T12:54:18Z and completed 13:47:13Z: `success`. Every test leg paired every `running` line with `test result: ok`: `Test (crdt)` 136852223610 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 234, 5,722 passed, 0 failed, 88 ignored; `Test (ubuntu-latest / lua54)` 136852223692 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 235, 5,781 / 0 / 88; `Test (macos-latest / lua54)` 136852223698 on `macos-26-arm64` `20261117.0516.1` (westus), 236, 5,722 / 0 / 80; `Test (macos-latest / luajit)` 136852223704 on `macos-26-arm64` `20261117.0516.1` (westus), 236, 5,722 / 0 / 80; `Test (ubuntu-latest / luajit)` 136852223759 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 235, 5,781 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 136852223808 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 235, 5,036 / 0 / 72. On the five legs that build `crdt` the suite read `ok. 44 passed; 0 failed`, the edge row and both r4 rows `ok`; #509's row read `ok` on all six.
+
+Tally (pr530-ci-b6a4747): 19 = 18 + 1.
+
+Tally (pr530-ci-b6a4747-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 136852167484 | success |
+| Commit attribution (D9) | 136852167685 | success |
+| Changed paths | 136852167718 | success |
+| Lint (luajit) | 136852167741 | success |
+| Lint (lua54) | 136852167770 | success |
+| GPU Render (headless) | 136852223563 | success |
+| M4 Perf Gates | 136852223569 | success |
+| Test (crdt) | 136852223610 | success |
+| M5 Perf Gates | 136852223615 | success |
+| M1 Acceptance Gates | 136852223629 | success |
+| M10 Perf Gates (crdt) | 136852223656 | success |
+| Perf budgets (debug) | 136852223664 | success |
+| M6 Perf Gates | 136852223685 | success |
+| Test (ubuntu-latest / lua54) | 136852223692 | success |
+| Test (macos-latest / lua54) | 136852223698 | success |
+| Test (macos-latest / luajit) | 136852223704 | success |
+| Test (ubuntu-latest / luajit) | 136852223759 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 136852223808 | success |
+| Docs consistency | 136852224955 | skipped |
+
+Tally (pr530-ci-b6a4747-success): 18 rows of the table above with `result` = `success`.
+Tally (pr530-ci-b6a4747-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44906190867 at `b6a4747`, attempt 1 of 1, `pull_request`, created 12:54:18Z and completed 12:54:38Z: `success`, `Grammar fuzz` 136852167525 and `Grammar fuzz (asan-strict)` 136852167783.
+
+Tally (pr530-fuzz-b6a4747): 2 = 2 + 0.
+
+#### `main` at `f1ca403`, PR #530's merge: red on one Ubuntu leg, on #509, its first Linux occurrence
+
+`CI` 44911060832 at `f1ca403`, attempt 1 of 1, `push`, created 2026-11-21T13:52:54Z and completed 14:45:42Z: `failure`. `Test (ubuntu-latest / luajit)` 136866813072 on `ubuntu-24.04` `20261116.376.1` (eastus2): 233 `running` lines each paired, 5,720 passed, 1 failed, 88 ignored, the step after the failed sweep not run. **#509's fifth occurrence and its first on a Linux leg** (commented, issuecomment-7064368554): `tests/e10r_attach_routes.rs`'s `j3_a_paste_over_a_slow_link_whose_bytes_move_says_nothing_of_the_daemon`, `panicked at tests/e10r_attach_routes.rs:3402:5:`, `a slow link that moved: 16400 then 0 bytes`, a count none of the four earlier occurrences read (each read 10,256), `FAILED. 92 passed; 1 failed; 0 ignored` in 393.65 s. The merge changes `tests/e10z_second_key_acceptance.rs` alone. Not rerun.
+
+The other legs paired every `running` line with `test result: ok`: `Test (crdt)` 136866813001 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 234, 5,722 passed, 0 failed, 88 ignored; `Test (ubuntu-latest / lua54)` 136866813032 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 235, 5,781 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 136866813044 on `ubuntu-24.04` `20261116.376.1` (westus3), 235, 5,036 / 0 / 72; `Test (macos-latest / lua54)` 136866813059 on `macos-26-arm64` `20261117.0516.1` (westus), 236, 5,722 / 0 / 80; `Test (macos-latest / luajit)` 136866813064 on `macos-26-arm64` `20261117.0516.1` (westus), 236, 5,722 / 0 / 80. #509's row read `ok` on all five; the e10z suite read `ok. 44 passed; 0 failed` on all five legs that build `crdt`, the red one among them.
+
+Tally (main-ci-f1ca403): 19 = 17 + 1 + 1.
+
+Tally (main-ci-f1ca403-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Changed paths | 136866771718 | success |
+| Format | 136866771862 | success |
+| Lint (luajit) | 136866771904 | success |
+| Lint (lua54) | 136866771913 | success |
+| Commit attribution (D9) | 136866771917 | success |
+| M1 Acceptance Gates | 136866812965 | success |
+| M4 Perf Gates | 136866812970 | success |
+| M6 Perf Gates | 136866812983 | success |
+| GPU Render (headless) | 136866812988 | success |
+| Test (crdt) | 136866813001 | success |
+| Perf budgets (debug) | 136866813024 | success |
+| Test (ubuntu-latest / lua54) | 136866813032 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 136866813044 | success |
+| M5 Perf Gates | 136866813045 | success |
+| Test (macos-latest / lua54) | 136866813059 | success |
+| Test (macos-latest / luajit) | 136866813064 | success |
+| Test (ubuntu-latest / luajit) | 136866813072 | failure |
+| M10 Perf Gates (crdt) | 136866813074 | success |
+| Docs consistency | 136866814669 | skipped |
+
+Tally (main-ci-f1ca403-success): 17 rows of the table above with `result` = `success`.
+Tally (main-ci-f1ca403-failure): 1 row of the table above with `result` = `failure`.
+Tally (main-ci-f1ca403-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 44911060827 at `f1ca403`, attempt 1 of 1, `push`, created 13:52:54Z and completed 13:53:09Z: `success`, `Grammar fuzz` 136866771786 and `Grammar fuzz (asan-strict)` 136866771595.
+
+Tally (main-fuzz-f1ca403): 2 = 2 + 0.
+
+#### Local gate samples, listed and not tallied
+
+Four runs of `scripts/gate` (the default plan; the branch changes no protocol) in `pmacs-e10o`, at `nice -n 19` and six build jobs, each with the runbook's sampler beside it, and no suspend inside any:
+
+- `20261121T110840Z-2734564` at `fa6619b`: `05-sweep` 6,169 passed, 11 failed, 88 ignored, beside other projects' work (cpu `some avg60` up to 41.57). The reds: #498's fragment on `e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot` and `review3_a_kill_whose_fallback_is_past_the_frame_leaves_no_follow_owed`; #519's shape on `e10t_r1_two_switches_in_flight_settle_on_the_last`, `e10t_r1_a_switch_and_a_wheel_turn_in_flight_settle_on_the_switch`, `e10t_r1_control_the_switch_alone_settles`, `review2_control_the_slow_switch_alone_settles` and `review2_a_killed_buffer_and_a_wheel_turn_in_flight_settle`; #304's on `pmacs-gpu`'s `caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled` and `overwide_status_runs_never_wrap_and_keep_the_suffix_pinned`; and `e10r_ii_a_frontend_stopping_in_its_target_bootstrap_holds_up_nobody` and `e10r_ii_a_frontend_stopping_in_its_all_buffer_bootstrap_holds_up_nobody`, **filed as #529**, their first occurrence. Each was commented on its issue (#519 issuecomment-7061950793, #498 issuecomment-7061950925, #304 issuecomment-7061951115).
+- `20261121T113137Z-3114906` at `fa6619b`: all passed, 243 `running` lines each paired with `test result: ok`, 6,180 / 0 / 88.
+- `20261121T125633Z-3674768` at `b6a4747`: 6,178 / 2 / 88, cpu `some avg60` at most 9.57. The reds: #304's `overwide_status_runs_never_wrap_and_keep_the_suffix_pinned` (issuecomment-7063124474) and #516's `r1_p10_the_watch_s_limit_is_the_worker_s_start_plus_the_allowance_under_any_parent`, its grown-parent half this time (issuecomment-7063124789).
+- `20261121T131434Z-3887922` at `b6a4747`: all passed, 243 paired, 6,180 / 0 / 88.
+
+So, at #528's fix: `main` is `f1ca403`, red on one Ubuntu leg on #509 and green on every other job, its CI not rerun; PR #530 merged green at `b6a4747`. #528 is closed by PR #530, at two occurrences, a different row of the suite in each of two runs, both on macOS legs; #509 is at four occurrences; #529 is filed at one. No other row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
