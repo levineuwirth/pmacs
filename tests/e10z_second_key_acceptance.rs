@@ -361,7 +361,17 @@ fn daemon() -> TestDaemon {
 /// A real `pmacs --attach` in a PTY on `socket` (the proxy's), or through
 /// the `ssh` stand-in when `remote` names one, its screen modelled, on
 /// `*scratch*` with the caret on a fresh empty last line, where a typed
-/// character is the optimistic path's.
+/// character is the optimistic path's. It returns once a frame has put the
+/// caret at the start of the line after the one `M->` left it on, and the
+/// screen has then been still for 300 ms, and fails by name, as a premise,
+/// if no frame does. Until #528 it returned on 400 ms with no byte from
+/// the TUI, whether or not the Enter's frame had come. On main's macOS
+/// luajit leg at `9354e01` a row then read the caret still on line 1 and
+/// looked a row too high; on PR #530's macOS lua54 leg at `fa6619b` a row
+/// typed before the Enter was answered and sent all 130 letters as keys,
+/// which holding the Enter's answer 900 ms gives on the laptop.
+/// [`Proxy::wait_answered`] feeds the modelled screen nothing, so it does
+/// not stand in for this wait.
 fn tui(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
     let mut tui = tui_just_started(socket, home, remote);
     tui.wait_for(PATIENCE, "the attached *scratch*", &|t| {
@@ -369,14 +379,52 @@ fn tui(socket: &Path, home: &Path, remote: Option<&Path>) -> ScreenTui {
     });
     tui.write(b"\x1b>");
     std::thread::sleep(Duration::from_millis(300));
+    // The line `M->` leaves the caret on: the buffer's last, which a
+    // second frontend's buffer may hold beyond line 1.
+    let on_the_last_line = |t: &ScreenTui| {
+        let rows = t.rows();
+        t.cursor().and_then(|c| {
+            let (n, _) = numbered(&rows[c.row as usize])?;
+            let below = rows[c.row as usize + 1..]
+                .iter()
+                .filter_map(|r| numbered(r))
+                .any(|(m, _)| m > n);
+            (!below).then_some(n)
+        })
+    };
+    let what = "premise: the caret on the buffer's last line after M->";
+    tui.wait_for(PATIENCE, what, &|t| on_the_last_line(t).is_some());
+    let last = on_the_last_line(&tui).expect("the last line");
     tui.write(b"\r");
+    let on_the_fresh_line = |t: &ScreenTui| {
+        t.cursor().is_some_and(|c| {
+            numbered(&t.rows()[c.row as usize])
+                .is_some_and(|(n, gutter)| n == last + 1 && c.col as usize == gutter)
+        })
+    };
+    let what = "premise: the caret at the start of the fresh line, after its frame";
+    tui.wait_for(PATIENCE, what, &on_the_fresh_line);
     tui.settle(
-        Duration::from_millis(400),
+        Duration::from_millis(300),
         PATIENCE,
-        "the fresh last line",
-        &|_| true,
+        what,
+        &on_the_fresh_line,
     );
     tui
+}
+
+/// The line number a pane row's gutter shows, and the gutter's width up to
+/// the line's first column; `None` for a row that shows no number (a
+/// wrapped line's continuation, a row past the buffer's end, a mode line).
+fn numbered(row: &str) -> Option<(u32, usize)> {
+    let lead = row.chars().take_while(|c| *c == ' ').count();
+    let digits: String = row
+        .chars()
+        .skip(lead)
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let n = digits.parse().ok()?;
+    Some((n, lead + digits.len() + 1))
 }
 
 /// [`tui`] as it is the moment the process is started: nothing waited for
