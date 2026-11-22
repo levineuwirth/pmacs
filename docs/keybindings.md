@@ -391,9 +391,16 @@ anything else).
   on legacy terminals. pmacs does not use `C-h` as an Emacs-style help
   prefix; a user who wants that can rebind it.
 - **Undo/redo have redundant bindings** (`C-/`, `C-_`, `C-4` for undo;
-  `C-?`, `C-S-_` for redo) because terminals encode `Ctrl+/` several
-  different ways. Kitty's keyboard protocol routes most cleanly
-  through `C-/`; the alternates keep legacy/remote terminals working.
+  `C-?`, `C-S-_` for redo) because terminals encode these keys in
+  several ways. Measured on foot with a US layout: Ctrl+/ is `C-/`
+  under the kitty keyboard protocol, and without it the byte `0x1f`,
+  which reads as `C-7`, a chord nothing binds. Ctrl+Shift+- is `C-_` (undo)
+  and Ctrl+Shift+/ is `C-?` (redo) in the GPU frontend and in the TUI
+  under the kitty protocol, where the TUI asks the terminal for the
+  shifted key; a legacy terminal sends Ctrl+Shift+- as `0x1f` too, and
+  Ctrl+Shift+/ as a sequence pmacs does not read. No US key reaches
+  `C-S-_`; it stays bound for a terminal that reports a shifted
+  character with Shift still set.
 - Kitty-protocol-only chords (e.g. distinguishing `C-i` from `TAB`)
   degrade gracefully where noted above — check the frontend's terminal
   capability negotiation if a chord seems to not fire.
