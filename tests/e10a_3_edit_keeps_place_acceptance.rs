@@ -390,6 +390,35 @@ fn e10a_3_a_caret_clear_of_the_edits_stays_where_it_is() {
     }
 }
 
+/// Review 1's `r1_p5`, a guard: a rename whose edit removes the caret's
+/// own line (line 41 whole) leaves the caret where that line was, at the
+/// start of the line that took its place, and the view's first line as
+/// it was. It passed at `8f5fe3a`.
+#[test]
+fn r1_p5_a_rename_that_removes_the_caret_line_leaves_the_caret_where_it_was() {
+    let fx = fixture("dropline");
+    let mut changes = serde_json::Map::new();
+    changes.insert(
+        uri(&fx.a),
+        serde_json::json!([{
+            "range": {
+                "start": { "line": 41, "character": 0 },
+                "end": { "line": 42, "character": 0 }
+            },
+            "newText": ""
+        }]),
+    );
+    fx.write_plan(&serde_json::json!({ "changes": changes }));
+    let mut s = fx.editor();
+    put_caret(&s, &source(), 41, 10, 30);
+    rename(&mut s);
+    assert_eq!(
+        place(&s),
+        ("a.rs".to_owned(), 41, 0, 30),
+        "the caret where its line was, the view kept"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Two buffers
 // ---------------------------------------------------------------------------
