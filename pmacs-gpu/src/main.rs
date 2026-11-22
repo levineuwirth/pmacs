@@ -1822,18 +1822,43 @@ fn press_probe_key(app: &mut App, key: &str) {
     if let Some(named) = named {
         let text = (named == NamedKey::Space).then_some(" ");
         app.apply_keyboard(&Key::Named(named), text, None);
-    } else if let Some(k) = key.strip_prefix("C-") {
-        app.modifiers = winit::keyboard::ModifiersState::CONTROL;
-        app.apply_keyboard(&Key::Character(k.into()), None, None);
-        app.modifiers = winit::keyboard::ModifiersState::empty();
-    } else if let Some(k) = key.strip_prefix("M-") {
-        // E10a: Alt held, as `M-x` and `M-g` are typed.
-        app.modifiers = winit::keyboard::ModifiersState::ALT;
-        app.apply_keyboard(&Key::Character(k.into()), None, None);
+    } else if let Some((mods, k)) = probe_chord(key) {
+        // E10a: Ctrl or Alt held, as `C-x` and `M-x` are typed, with no
+        // text. #537: `S-` holds Shift over the character a US layout
+        // gives (`M-S-?` is Alt+Shift+/, the key `?`), and with Shift
+        // alone the text is that character, as winit reports a typed one.
+        app.modifiers = mods;
+        let text = (!mods.control_key() && !mods.alt_key()).then_some(k);
+        app.apply_keyboard(&Key::Character(k.into()), text, None);
         app.modifiers = winit::keyboard::ModifiersState::empty();
     } else {
         app.apply_keyboard(&Key::Character(key.into()), Some(key), None);
     }
+}
+
+/// A probe key's held modifiers and its character: any run of `C-`, `M-`
+/// and `S-` before a non-empty key (`C-x`, `M-S-?`, `S-^`), else `None`.
+fn probe_chord(key: &str) -> Option<(winit::keyboard::ModifiersState, &str)> {
+    use winit::keyboard::ModifiersState;
+    let mut mods = ModifiersState::empty();
+    let mut rest = key;
+    loop {
+        let held = if let Some(r) = rest.strip_prefix("C-") {
+            (ModifiersState::CONTROL, r)
+        } else if let Some(r) = rest.strip_prefix("M-") {
+            (ModifiersState::ALT, r)
+        } else if let Some(r) = rest.strip_prefix("S-") {
+            (ModifiersState::SHIFT, r)
+        } else {
+            break;
+        };
+        if held.1.is_empty() {
+            break;
+        }
+        mods |= held.0;
+        rest = held.1;
+    }
+    (!mods.is_empty()).then_some((mods, rest))
 }
 
 /// E10a.4 --- the completion dropdown as the next frame paints it, under
@@ -10353,6 +10378,158 @@ mod input_routing_tests {
             matches!(step.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
                 if k.key == ProtocolKey::Char('€') && k.mods == Modifiers::NONE),
             "AltGr-e must leave as the plain €: {:?}",
+            step.outbound
+        );
+    }
+
+    /// #537 --- a character key leaves without the Shift that produced
+    /// it, as winit reports each physical chord on a standard US layout
+    /// (the logical key and the text the layout's shifted character, the
+    /// unmodified key the unshifted one). Every documented chord on a
+    /// shifted character, and the prefix rows whose second key is one
+    /// (`C-x ^`, `C-c @ C-c`: a prefix pending, so `dispatch_idle` is
+    /// false), read off the wire. At `176a143` each left with `S-`
+    /// (`M-S-?`, `C-S-_`, `S-^` after `C-x`), which `Chord::new` keeps on
+    /// a non-letter, so no binding was found.
+    #[test]
+    fn e10a_f2_a_shifted_character_leaves_without_its_shift() {
+        let shift = ModifiersState::SHIFT;
+        let (alt, ctrl) = (ModifiersState::ALT | shift, ModifiersState::CONTROL | shift);
+        let (pa, pc, pn) = (Modifiers::ALT, Modifiers::CTRL, Modifiers::NONE);
+        let rows: [(&str, ModifiersState, &str, &str, bool, Modifiers); 15] = [
+            ("M-?", alt, "?", "/", true, pa),
+            ("M-<", alt, "<", ",", true, pa),
+            ("M->", alt, ">", ".", true, pa),
+            ("M-%", alt, "%", "5", true, pa),
+            ("M-!", alt, "!", "1", true, pa),
+            ("M-^", alt, "^", "6", true, pa),
+            ("M-{", alt, "{", "[", true, pa),
+            ("M-}", alt, "}", "]", true, pa),
+            ("C-_", ctrl, "_", "-", true, pc),
+            ("C-?", ctrl, "?", "/", true, pc),
+            ("C-+", ctrl, "+", "=", true, pc),
+            ("C-x ^", shift, "^", "6", false, pn),
+            ("C-x C-^", ctrl, "^", "6", false, pc),
+            ("C-c @", shift, "@", "2", false, pn),
+            // dired's `^`: no prefix, and a generated buffer has no
+            // CRDT document to type into optimistically, so the key
+            // round-trips, as it does here.
+            ("dired ^", shift, "^", "6", true, pn),
+        ];
+        let mut wrong = Vec::new();
+        for (chord, mods, logical, own, idle, want) in rows {
+            let mut h = EffectHarness::new();
+            h.app.state.as_mut().expect("harness state").dispatch_idle = idle;
+            h.app.modifiers = mods;
+            let step = h.feed_keyboard_from(
+                &Key::Character(logical.into()),
+                Some(logical),
+                Some(&Key::Character(own.into())),
+            );
+            let want_key = ProtocolKey::Char(logical.chars().next().expect("a character"));
+            let right = matches!(step.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == want_key && k.mods == want);
+            if !right {
+                wrong.push(format!("{chord}: {:?}", step.outbound));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "each chord leaves as the layout's character without Shift: {wrong:#?}"
+        );
+    }
+
+    /// #537's guards: what a dropped Shift must not change. A Ctrl+Shift
+    /// letter is the chord `C-A` either way (`Chord::new` strips Shift
+    /// from a letter); `S-<left>` and `BackTab` keep their Shift; a typed
+    /// `?` or `^` is the character, no chord; `AltGr`-e is the plain `€`;
+    /// and `C-M-%` (Ctrl+Alt+Shift+5) is taken for `AltGr` layout text by
+    /// the E7b.3 rule and leaves as the character `%`, not the chord, as
+    /// it did at `176a143`: #538, not fixed here.
+    #[test]
+    fn e10a_f2_named_keys_keep_shift_and_text_and_altgr_are_unchanged() {
+        let shift = ModifiersState::SHIFT;
+        let only = |step: &Step| match step.outbound.as_slice() {
+            [pmacs_protocol::FrontendEvent::Key(k)] => Some((k.key, k.mods)),
+            _ => None,
+        };
+
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | shift;
+        let step = h.feed_keyboard_from(
+            &Key::Character("A".into()),
+            Some("A"),
+            Some(&Key::Character("a".into())),
+        );
+        assert!(
+            matches!(only(&step), Some((ProtocolKey::Char('A'), m))
+                if m.contains(Modifiers::CTRL) && !m.contains(Modifiers::ALT)),
+            "Ctrl+Shift+a is C-A: {:?}",
+            step.outbound
+        );
+
+        for (named, want) in [
+            (NamedKey::ArrowLeft, ProtocolKey::Left),
+            (NamedKey::Tab, ProtocolKey::BackTab),
+        ] {
+            let mut h = EffectHarness::new();
+            h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+            h.app.modifiers = shift;
+            let step = h.feed_keyboard_from(&Key::Named(named), None, None);
+            assert_eq!(
+                only(&step),
+                Some((want, Modifiers::SHIFT)),
+                "Shift+{named:?} keeps its Shift: {:?}",
+                step.outbound
+            );
+        }
+
+        for (typed, own) in [("?", "/"), ("^", "6")] {
+            let mut h = EffectHarness::new();
+            h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+            h.app.modifiers = shift;
+            let step = h.feed_keyboard_from(
+                &Key::Character(typed.into()),
+                Some(typed),
+                Some(&Key::Character(own.into())),
+            );
+            let want = ProtocolKey::Char(typed.chars().next().expect("a character"));
+            assert!(
+                matches!(only(&step), Some((k, m)) if k == want
+                    && !m.contains(Modifiers::CTRL) && !m.contains(Modifiers::ALT)),
+                "a typed {typed} is the character: {:?}",
+                step.outbound
+            );
+        }
+
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | ModifiersState::ALT;
+        let step = h.feed_keyboard_from(
+            &Key::Character("€".into()),
+            Some("€"),
+            Some(&Key::Character("e".into())),
+        );
+        assert_eq!(
+            only(&step),
+            Some((ProtocolKey::Char('€'), Modifiers::NONE)),
+            "AltGr-e is the plain €: {:?}",
+            step.outbound
+        );
+
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | ModifiersState::ALT | shift;
+        let step = h.feed_keyboard_from(
+            &Key::Character("%".into()),
+            Some("%"),
+            Some(&Key::Character("5".into())),
+        );
+        assert!(
+            matches!(only(&step), Some((ProtocolKey::Char('%'), m))
+                if !m.contains(Modifiers::CTRL) && !m.contains(Modifiers::ALT)),
+            "C-M-% leaves as the text %, as at 176a143 (#538): {:?}",
             step.outbound
         );
     }
@@ -21501,7 +21678,23 @@ fn translate_key(
             // computed offset.
             named => named_function_key(*named).map(ProtocolKey::F)?,
         },
-        Key::Character(s) => ProtocolKey::Char(s.chars().next()?),
+        // #537 --- a character is the one the layout already produced, so
+        // the Shift that produced it is spent: Alt+Shift+/ on a US layout
+        // is `?` with Alt, `M-?`, as a terminal and Emacs read it, and not
+        // `M-S-?`, which nothing binds; a `^` typed after `C-x` is `^`,
+        // not `S-^`. `Chord::new` strips Shift from letters alone, having
+        // no layout to know which other characters it made. Named keys
+        // keep it (`S-<left>`, BackTab above). A Super chord keeps it too:
+        // it belongs to the OS, and on macOS Cmd-Shift-Z must not become
+        // one of the six Cmd chords `translate_cmd_chord` turns into Ctrl.
+        Key::Character(s) => {
+            let ch = s.chars().next()?;
+            if !pmods.contains(Modifiers::META) {
+                let spent = Modifiers::from_bits_truncate(pmods.bits() & !Modifiers::SHIFT.bits());
+                return Some((ProtocolKey::Char(ch), spent));
+            }
+            ProtocolKey::Char(ch)
+        }
         _ => return None,
     };
     Some((pkey, pmods))
