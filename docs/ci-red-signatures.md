@@ -20008,6 +20008,92 @@ Eighteen runs of `scripts/gate` (the default plan; the branch changes no protoco
 
 So, at E10a's checkpoint: `main` is `e10d427`. PR #534 is open at `8f5fe3a`, red on one macOS leg on #295's first fragment, not rerun. By the letter #295 stays at one occurrence; if its second fragment is struck as #432's was, this is its second. #532 is filed at one local sample and no CI occurrence. No other row's count moves here.
 
+### E10a fix round 1: `main` green at `da13cee`; PR #534 green at `176a143`; #295 at two by the owner's ruling
+
+Recorded 2026-11-22 by the E10a fix-round session. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, every `running` line paired with its own result line; each run id and the gate log was searched for in this file first, and none was here.
+
+#### `main` at `da13cee`, the record above: green
+
+`CI` 45040416776 at `da13cee`, attempt 1 of 1, `push`, created 2026-11-22T15:49:27Z and completed 15:51:37Z: `success`, the registry-push shape.
+
+Tally (main-ci-da13cee): 15 = 6 + 9.
+
+Tally (main-ci-da13cee-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 137263381131 | success |
+| Changed paths | 137263381258 | success |
+| Commit attribution (D9) | 137263381356 | success |
+| Lint (lua54) | 137263381364 | success |
+| Format | 137263381412 | success |
+| Docs consistency | 137263454070 | success |
+| M4 Perf Gates | 137263455019 | skipped |
+| Test (crdt) | 137263455331 | skipped |
+| Perf budgets (debug) | 137263455375 | skipped |
+| M1 Acceptance Gates | 137263455381 | skipped |
+| M10 Perf Gates (crdt) | 137263455477 | skipped |
+| Test ((matrix) | 137263455641 | skipped |
+| GPU Render (headless) | 137263455741 | skipped |
+| M6 Perf Gates | 137263455749 | skipped |
+| M5 Perf Gates | 137263455797 | skipped |
+
+Tally (main-ci-da13cee-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-da13cee-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45040416716 at `da13cee`, attempt 1 of 1, `push`, created 15:49:27Z and completed 15:49:47Z: `success`, both arms.
+
+Tally (main-fuzz-da13cee): 2 = 2 + 0.
+
+#### #295: its second fragment struck, and PR #534's red at `8f5fe3a` its second occurrence
+
+The owner ruled on 2026-11-22 (issuecomment-7081726733) that `CI` 45034869399's red at `8f5fe3a`, `Test (macos-latest / lua54)` 137246420110, recorded above as matching #295's selector and first fragment and not its second, is #295's second occurrence, its first since `4ad9f3e`. The issue's second fragment, `2 passed; 3 failed; 2 ignored`, is struck in its body as #432's was: it recorded the company of the one sample and can match only a repeat of that company. Any of the three selectors failing at the `wait_warm` precondition with `the label reads exactly ready for two seconds` is the signature. So #295 is at two occurrences on CI, `4ad9f3e` and `8f5fe3a`. Not rerun.
+
+#### PR #534 at `176a143`, review 1's fix round: green
+
+`CI` 45052293939 at `176a143`, attempt 1 of 1, `pull_request` (a merge into `da13cee`, `215d3f7`), created 2026-11-22T17:57:14Z and completed 18:51:00Z: `success`. Every test leg paired every `running` line with `test result: ok`: `Test (macos-latest / luajit)` 137299939961 and `Test (macos-latest / lua54)` 137299939958 on `macos-26-arm64` `20261117.0516.1` (westus), 244 each, 5,818 passed, 0 failed, 80 ignored; `Test (ubuntu-latest / luajit)` 137299939990 (centralus) and `Test (ubuntu-latest / lua54)` 137299940005 (northcentralus) on `ubuntu-24.04` `20261116.376.1`, 243 each, 5,877 / 0 / 88; `Test (crdt)` 137299939918 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 242, 5,818 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 137299939972 on `ubuntu-24.04` `20261116.133.1` (us-west-2), 243, 5,126 / 0 / 72. The round's new rows ran `ok` on every leg that compiles them; its GPU row ran on both macOS legs and on `Test (crdt)`, and recorded a skip on the two Ubuntu matrix legs, which have no adapter, as every GPU probe row does there.
+
+Tally (pr534-ci-176a143): 19 = 18 + 1.
+
+Tally (pr534-ci-176a143-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (lua54) | 137299878376 | success |
+| Commit attribution (D9) | 137299878592 | success |
+| Format | 137299878648 | success |
+| Changed paths | 137299878671 | success |
+| Lint (luajit) | 137299878675 | success |
+| Test (crdt) | 137299939918 | success |
+| M1 Acceptance Gates | 137299939919 | success |
+| M4 Perf Gates | 137299939946 | success |
+| Test (macos-latest / lua54) | 137299939958 | success |
+| Test (macos-latest / luajit) | 137299939961 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 137299939972 | success |
+| GPU Render (headless) | 137299939983 | success |
+| M5 Perf Gates | 137299939984 | success |
+| M10 Perf Gates (crdt) | 137299939987 | success |
+| Test (ubuntu-latest / luajit) | 137299939990 | success |
+| M6 Perf Gates | 137299939993 | success |
+| Test (ubuntu-latest / lua54) | 137299940005 | success |
+| Perf budgets (debug) | 137299940129 | success |
+| Docs consistency | 137299941626 | skipped |
+
+Tally (pr534-ci-176a143-success): 18 rows of the table above with `result` = `success`.
+Tally (pr534-ci-176a143-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45052293896 at `176a143`, attempt 1 of 1, `pull_request`, created 17:57:14Z and completed 17:57:34Z: `success`, `Grammar fuzz` 137299878401 and `Grammar fuzz (asan-strict)` 137299878754.
+
+Tally (pr534-fuzz-176a143): 2 = 2 + 0.
+
+#### Local gate samples, listed and not tallied
+
+One run of `scripts/gate` (the default plan) in `pmacs-e10o`, at `nice -n 19` and six build jobs, the runbook's sampler beside it (cpu `some avg60` at most 12.1), no suspend inside it:
+
+- `20261122T173543Z-2876699` at `176a143`: all passed, 251 `test result` lines each paired, 6,276 / 0 / 88.
+
+So, after E10a's fix round 1: `main` is `da13cee`, green. PR #534 is open at `176a143`, green on every job, not rerun. #295 is at two occurrences by the owner's ruling. No other row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
