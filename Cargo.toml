@@ -4,7 +4,7 @@
 # the GPU/GUI frontend binary — wgpu/winit/cosmic-text/glyphon — with
 # hello-world rendering. Protocol consumption arrives in session 3.
 # See `docs/pmacs-gpu-design.md`.
-members = [".", "pmacs-protocol", "pmacs-gpu", "pmacs-syntax", "pmacs-parse-unit"]
+members = [".", "pmacs-protocol", "pmacs-attach-client", "pmacs-gpu", "pmacs-syntax", "pmacs-parse-unit"]
 # Grammar crates carried in-repo under D36 as amended (E7h): built through
 # `[patch.crates-io]` below, never workspace members, so the workspace's
 # fmt, clippy and tests do not reach into their published code.

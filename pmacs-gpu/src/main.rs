@@ -61,7 +61,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::attach::{AttachClient, AttachEvent, InitialTargetPaths};
+use crate::attach::{AttachClient, AttachEvent, InitialTargetPaths, instance_message_label};
 use crate::terminal::{TerminalPaintPlan, TerminalPalette};
 
 /// Bundled font (SIL Open Font License 1.1 — see `fonts/OFL.txt`).
@@ -3128,6 +3128,7 @@ fn run_latency_probe(socket: &Path, report: &Path, text: &str) -> i32 {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
             attach::connect_with_target_and_sink(
                 socket,
+                "pmacs-gpu",
                 attach::InitialTargetPaths { cwd, path },
                 move |event| tx.send(event).is_ok(),
             )
@@ -8884,7 +8885,10 @@ impl EffectHarness {
                 pmacs_protocol::read_message(&mut daemon).expect("read bootstrap");
             daemon
         });
-        let client = crate::attach::connect_stream_for_test(client_stream, |_| true)
+        let client =
+            crate::attach::connect_stream_with_sink(client_stream, "pmacs-gpu", None, None, |_| {
+                true
+            })
             .expect("attach over socketpair");
         let daemon = handshake.join().expect("handshake thread");
         daemon
@@ -21158,45 +21162,6 @@ fn debug_frame() -> bool {
 fn debug_apply() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_APPLY").is_some())
-}
-
-fn instance_message_label(msg: &InstanceMessage) -> &'static str {
-    match msg {
-        InstanceMessage::CellDelta { .. } => "CellDelta",
-        InstanceMessage::LineWrapFacts { .. } => "LineWrapFacts",
-        InstanceMessage::Cursor(_) => "Cursor",
-        InstanceMessage::ModeLine(_) => "ModeLine",
-        InstanceMessage::Signal(_) => "Signal",
-        InstanceMessage::Goodbye(_) => "Goodbye",
-        InstanceMessage::CrdtOp { .. } => "CrdtOp",
-        InstanceMessage::PresenceUpdate { .. } => "PresenceUpdate",
-        InstanceMessage::BufferSnapshot { .. } => "BufferSnapshot",
-        InstanceMessage::CursorByte { .. } => "CursorByte",
-        InstanceMessage::StyleSpans { .. } => "StyleSpans",
-        InstanceMessage::Decorations { .. } => "Decorations",
-        InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
-        InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
-        InstanceMessage::StatusFacts { .. } => "StatusFacts",
-        InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
-        InstanceMessage::MenuPrompt { .. } => "MenuPrompt",
-        InstanceMessage::MinibufferPrompt { .. } => "MinibufferPrompt",
-        InstanceMessage::MinibufferPromptRows { .. } => "MinibufferPromptRows",
-        InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
-        InstanceMessage::FoldState { .. } => "FoldState",
-        InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
-        InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
-        InstanceMessage::LineNumbers { .. } => "LineNumbers",
-        InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
-        InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
-        InstanceMessage::FontFacts { .. } => "FontFacts",
-        InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
-        InstanceMessage::TerminalFrame(_) => "TerminalFrame",
-        InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
-        InstanceMessage::PanelFrame(_) => "PanelFrame",
-        InstanceMessage::Popup(_) => "Popup",
-        InstanceMessage::SessionToken(_) => "SessionToken",
-        InstanceMessage::InputHandled { .. } => "InputHandled",
-    }
 }
 
 /// The reason a daemon gave in its `Goodbye`, in words (E2.3).
