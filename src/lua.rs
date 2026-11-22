@@ -120,6 +120,31 @@ pub struct ErrorLog {
     records: Vec<LuaErrorRecord>,
     /// Records appended since the `*errors*` buffer was last shown.
     unread: usize,
+    /// What the echo line still owes the newest record (E10a.7).
+    echo: ErrorEcho,
+}
+
+/// The echo line's account with the newest error (E10a.7). An error is
+/// a message like any other on that line: shown until the next key,
+/// and not again. It is owed one showing, since the diagnostic at the
+/// caret outranks it and may hold the line when it is reported; once
+/// it has been shown, the next key spends it. A command's own text
+/// outranks it too, and is the next message: a key that clears such a
+/// text spends the error with it, shown or not, which is also what
+/// keeps a failure reported on both channels (a server that did not
+/// start) from being said twice. Until E10a.7 the line fell back to the newest error for
+/// as long as it was unread, so one refused request came back after
+/// every unrelated key for the rest of the session. What persists is
+/// the mode line's unread mark and the `*errors*` buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ErrorEcho {
+    /// Nothing to show: no error yet, or the last one had its showing.
+    #[default]
+    Spent,
+    /// Reported and not yet on the echo line.
+    Owed,
+    /// On the echo line since the last key; the next key spends it.
+    Shown,
 }
 
 impl ErrorLog {
@@ -137,6 +162,27 @@ impl ErrorLog {
     /// The `*errors*` buffer is on screen: nothing is unread.
     pub fn mark_read(&mut self) {
         self.unread = 0;
+        self.echo = ErrorEcho::Spent;
+    }
+
+    /// Whether the echo line shows the newest error now, noting that it
+    /// has (E10a.7). The painters ask only when nothing outranks the
+    /// error, so asking is showing.
+    fn show_echo(&mut self) -> bool {
+        if self.unread == 0 || self.echo == ErrorEcho::Spent {
+            return false;
+        }
+        self.echo = ErrorEcho::Shown;
+        true
+    }
+
+    /// A key arrived: an error the echo line has shown is spent, and
+    /// so is one a command's text held the line over, `superseded`
+    /// (E10a.7). One not shown for any other reason stays owed.
+    fn note_user_input(&mut self, superseded: bool) {
+        if self.echo == ErrorEcho::Shown || (superseded && self.echo == ErrorEcho::Owed) {
+            self.echo = ErrorEcho::Spent;
+        }
     }
 }
 
@@ -172,6 +218,7 @@ pub fn report_error(lua: &Lua, label: &str, message: &str) {
         let mut log = log.borrow_mut();
         log.records.push(record);
         log.unread = log.unread.saturating_add(1);
+        log.echo = ErrorEcho::Owed;
     }
 }
 
@@ -573,15 +620,18 @@ impl LuaHost {
         self.error_log.borrow_mut().mark_read();
     }
 
-    /// The shared unread-error status resolution both frontends read:
-    /// the last error as `lua: <first line>` while it is unread, `None`
-    /// once the log has been read. The grid's fallback and the semantic
-    /// `StatusFacts` producer both call this, so the GPU receives the
-    /// same transient message the TUI shows; clearing is shared because
-    /// both painters acknowledge presented errors before reading.
+    /// The shared error echo both frontends read: the last error as
+    /// `lua: <first line>` from its report until the first key after
+    /// the echo line has shown it, and `None` from then on, or once the
+    /// log has been read (E10a.7; before it, for as long as the error
+    /// was unread). The grid's fallback and the semantic `StatusFacts`
+    /// producer both call this, and only when nothing outranks the
+    /// error, so a call is a showing and is noted as one; the GPU
+    /// receives the same transient message the TUI shows, and both stop
+    /// together at [`Self::note_user_input`].
     #[must_use]
     pub fn unread_error_status_message(&self) -> Option<String> {
-        if self.unread_errors() == 0 {
+        if !self.error_log.borrow_mut().show_echo() {
             return None;
         }
         let err = self.last_error()?;
@@ -603,12 +653,20 @@ impl LuaHost {
         report_error(&self.lua, label, message);
     }
 
+    /// A key arrived, where the echo line's transient text is cleared:
+    /// an error it has shown is not shown again, nor one that text was
+    /// shown over, `status_was_set` (E10a.7).
+    pub fn note_user_input(&self, status_was_set: bool) {
+        self.error_log.borrow_mut().note_user_input(status_was_set);
+    }
+
     /// Discard the captured error log and its unread count. The
     /// `*errors*` buffer keeps its text.
     pub fn clear_errors(&mut self) {
         let mut log = self.error_log.borrow_mut();
         log.records.clear();
         log.unread = 0;
+        log.echo = ErrorEcho::Spent;
     }
 
     /// Mark the init phase complete.

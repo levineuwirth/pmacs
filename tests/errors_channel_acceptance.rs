@@ -10,7 +10,8 @@
 //! writer behind all of them and `pmacs.error` is its Lua name.
 //!
 //! What is pinned here: the channel's four surfaces (the buffer, the
-//! log, the status line while unread, the mode-line mark), the fact
+//! log, the status line until the next key (E10a.7; while unread
+//! before it), the mode-line mark), the fact
 //! that showing `*errors*` reads it, five of the seven Rust writers by
 //! provocation, and the runtime sites that need no other suite's
 //! fixture --- the five in `async.lua`, the three hook sites in
@@ -153,7 +154,7 @@ fn pmacs_error_reaches_the_buffer_the_log_and_the_unread_count() {
 
 #[test]
 fn an_unread_error_shows_on_the_status_line_and_the_mode_line_until_shown() {
-    let state = editor();
+    let mut state = editor();
     let quiet = paint(&state, 24, 80);
     assert!(
         !row_text(&quiet, 80, 22).contains('!'),
@@ -174,11 +175,31 @@ fn an_unread_error_shows_on_the_status_line_and_the_mode_line_until_shown() {
         status.contains("lua: second"),
         "the status line shows the last error while it is unread: {status:?}"
     );
-    // A keystroke clears `core.status`; the trace persists through the
-    // fallback because the errors are still unread.
-    state.core.borrow_mut().status.clear();
+    // On every frame until a key: painting again is not a key.
     let again = paint(&state, 24, 80);
     assert!(row_text(&again, 80, 23).contains("lua: second"));
+    // E10a.7: a key spends the trace the status line has shown; until
+    // then E5.1 kept it there for as long as the errors were unread, so
+    // it came back after every key. The mode line's mark stays.
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('n'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    let after_key = paint(&state, 24, 80);
+    assert_eq!(
+        row_text(&after_key, 80, 23).trim(),
+        "",
+        "a key spends the trace: {:?}",
+        row_text(&after_key, 80, 23)
+    );
+    assert!(
+        row_text(&after_key, 80, 22).contains("!2"),
+        "the mark stays: {:?}",
+        row_text(&after_key, 80, 22)
+    );
 
     // Showing *errors* reads it: the mark and the trace go on the frame
     // the buffer appears in, and the records stay.

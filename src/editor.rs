@@ -1941,6 +1941,9 @@ impl EditorState {
         let chord = key_event_to_chord(key);
         {
             let mut core = self.core.borrow_mut();
+            // E10a.7: the error the echo line has shown goes with the
+            // rest of its transient text.
+            self.lua_host.note_user_input(!core.status.is_empty());
             core.status.clear();
             core.active_frontend = frontend_id;
             if core.completion_popup_is_open()
@@ -7596,9 +7599,10 @@ pub(crate) fn diagnostic_at_point(
 /// (`core.status`), the diagnostic at point (E7d.2, `at_point`),
 /// captured Lua errors, and the in-flight key prefix when a
 /// multi-chord sequence is open. A command's text outranks the
-/// diagnostic, which outranks an unread error: the caret's diagnostic
-/// is what the user is looking at, and the error returns when the
-/// caret leaves it.
+/// diagnostic, which outranks an error: the caret's diagnostic
+/// is what the user is looking at, and an error that has not had its
+/// showing gets it when the caret leaves. An error is shown until the
+/// next key and not again (E10a.7).
 ///
 /// When all are empty, the returned string is empty and the row renders
 /// as blanks.
@@ -7615,10 +7619,11 @@ fn build_status_line(
     } else if let Some(diagnostic) = at_point {
         line.push_str(&sanitize_single_line(diagnostic));
     } else if let Some(msg) = lua_host.unread_error_status_message() {
-        // E5.1: the last error shows while it is unread, and stops once
-        // a window has shown `*errors*` --- a transient trace, where it
-        // used to nag on every idle frame until the next error. Shared
-        // with the semantic `StatusFacts` producer through
+        // E5.1, as E10a.7 narrowed it: the last error shows until the
+        // next key after this line has shown it, or until a window has
+        // shown `*errors*`. E5.1 kept it for as long as it was unread,
+        // so it came back whenever this line was otherwise empty.
+        // Shared with the semantic `StatusFacts` producer through
         // `LuaHost::unread_error_status_message`, so both frontends see
         // the same text and clear together.
         line.push_str(&msg);
@@ -9061,6 +9066,84 @@ mod tests {
         );
         assert!(!line.contains('\n'), "status line leaked newline: {line:?}");
         assert!(line.contains("lua: "), "status line: {line}");
+    }
+
+    /// E10a.7: an error is on the echo line until the next key, and
+    /// not again; the unread count the mode line marks stays.
+    #[test]
+    fn an_error_the_echo_line_has_shown_is_not_shown_after_the_next_key() {
+        let mut s = fresh_with(b"one\ntwo\n");
+        let echo = |s: &EditorState| {
+            build_status_line(
+                &s.core.borrow(),
+                &s.lua_host,
+                &KeyDispatcher::new(),
+                None,
+                200,
+            )
+        };
+        let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+        assert!(echo(&s).contains("kapow"), "shown: {}", echo(&s));
+        assert!(echo(&s).contains("kapow"), "and on every frame until a key");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert_eq!(echo(&s), "", "an unrelated key, and the line is clear");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('f'));
+        assert_eq!(echo(&s), "", "and stays clear");
+        assert_eq!(s.lua_host.unread_errors(), 1, "the unread mark stays");
+        let _ = s.lua_host.eval(Some("usercfg"), "error('again')");
+        assert!(echo(&s).contains("again"), "a new error is a new message");
+    }
+
+    /// E10a.7: an error reported while something outranks it is owed
+    /// its showing. Keys pressed before the echo line has shown it do
+    /// not spend it; the first key after it has, does.
+    #[test]
+    fn an_error_outranked_when_reported_is_shown_once_the_line_is_free() {
+        let mut s = fresh_with(b"one\ntwo\n");
+        let echo = |s: &EditorState, at_point: Option<&str>| {
+            build_status_line(
+                &s.core.borrow(),
+                &s.lua_host,
+                &KeyDispatcher::new(),
+                at_point,
+                200,
+            )
+        };
+        let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+        let diagnostic = Some("error: a diagnostic at the caret");
+        assert!(!echo(&s, diagnostic).contains("kapow"), "outranked");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert!(!echo(&s, diagnostic).contains("kapow"), "still outranked");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert!(
+            echo(&s, None).contains("kapow"),
+            "the caret left the diagnostic: the error has its showing"
+        );
+        s.dispatch_key(FrontendId::LOCAL, ctrl('p'));
+        assert_eq!(echo(&s, None), "", "and is not shown again");
+    }
+
+    /// E10a.7: a command's text over an error is the next message. The
+    /// key that clears the text spends the error with it, so a failure
+    /// said on both channels is not said a second time.
+    #[test]
+    fn an_error_a_commands_text_was_shown_over_goes_with_that_text() {
+        let mut s = fresh_with(b"one\ntwo\n");
+        let echo = |s: &EditorState| {
+            build_status_line(
+                &s.core.borrow(),
+                &s.lua_host,
+                &KeyDispatcher::new(),
+                None,
+                200,
+            )
+        };
+        let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+        s.core.borrow_mut().status = "the server did not start".into();
+        assert_eq!(echo(&s), "the server did not start");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert_eq!(echo(&s), "", "the text and the error went together");
+        assert_eq!(s.lua_host.unread_errors(), 1, "the unread mark stays");
     }
 
     #[test]
