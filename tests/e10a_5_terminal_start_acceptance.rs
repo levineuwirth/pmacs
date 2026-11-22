@@ -160,6 +160,31 @@ fn e10a_5_a_terminal_opened_from_a_project_file_starts_in_the_project_root() {
     );
 }
 
+/// Review 1's `r1_p6`, a guard: a project whose root's path holds a
+/// space; the shell starts in that root. It passed at `8f5fe3a`. The
+/// directory is the shell's own word (`basename "$PWD"` inside markers),
+/// so the typed line's echo is never taken for it.
+#[test]
+fn r1_p6_a_terminal_starts_in_a_project_root_whose_path_holds_a_space() {
+    let fx = fixture("space");
+    let proj = fx.root.join("my proj-r1");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::write(proj.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    std::fs::write(proj.join("src/lib.rs"), "// lib\n").unwrap();
+    let mut tui = tui_with_terminal(&fx, Some(&proj.join("src/lib.rs")));
+    tui.write(b"echo \"at[$(basename \"$PWD\")]\"\r");
+    tui.wait_for(LIMIT, "the shell's directory", &|t| {
+        t.rows()
+            .iter()
+            .any(|r| r.trim_end().starts_with("at[") && r.trim_end().ends_with(']'))
+    });
+    assert!(
+        row_reads(&tui, "at[my proj-r1]"),
+        "the shell started in the project's root; {}",
+        tui.describe()
+    );
+}
+
 /// Opened from a file that is in no project, the shell starts in the
 /// file's directory.
 #[test]
