@@ -245,9 +245,9 @@ today:
 |---|---|---|
 | `*git-status*` (`git.status`) | `d` | `git.diff-file` — the diff for the file under the cursor, into `*git-diff*` |
 
-`git.status` gets **no global chord**: an opening key is a
-command-surface decision the Stage 1 framing did not make, so the entry
-point is `M-x git.status`.
+`git.status` is on `C-x g` (`builtin/keymaps/default.lua`), as the
+global table lists; Stage 1 shipped it with `M-x git.status` as its one
+entry point, and E1 gave it the key.
 
 `*buffer-list*` (`editor.list-buffers`, `C-x C-b`) is a listview
 panel opened in place (`builtin/commands/default.lua`): the primitive's

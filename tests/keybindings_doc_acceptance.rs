@@ -180,6 +180,89 @@ fn every_chord_the_readme_advertises_is_bound() {
     );
 }
 
+/// The words a hand-written passage uses to say a command has no key.
+const DENIALS: [&str; 6] = [
+    "no global chord",
+    "no chord",
+    "no binding",
+    "no key",
+    "not bound",
+    "unbound",
+];
+
+/// The hand-written passages of `text` that deny a chord to a command
+/// the global keymap binds: `(the passage's first line, command,
+/// chord)`. A passage is a paragraph outside the generated block; it
+/// denies when it holds one of [`DENIALS`], emphasis marks and line
+/// breaks aside, and it names a command by putting it in backticks.
+fn denied_but_bound(
+    text: &str,
+    rows: &[(String, String, String)],
+) -> Vec<(String, String, String)> {
+    let generated = block_of(text);
+    let prose = text.replace(&generated, "");
+    let mut found = Vec::new();
+    for passage in prose.split("\n\n") {
+        let plain = passage
+            .replace('*', "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if !DENIALS.iter().any(|denial| plain.contains(denial)) {
+            continue;
+        }
+        for named in passage.split('`').skip(1).step_by(2) {
+            for (scope, sequence, command) in rows {
+                if scope == "global" && command == named {
+                    let first = passage.trim().lines().next().unwrap_or_default();
+                    found.push((first.to_owned(), command.clone(), sequence.clone()));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// E10a.9: the hand-written prose may not deny a chord the keymap
+/// binds. The generated tables cannot catch this: until E10a.9 the
+/// document's own table listed `C-x g` for `git.status` while a
+/// sentence below it said the command "gets no global chord", and
+/// every row of this suite passed.
+#[test]
+fn the_prose_denies_no_chord_the_keymap_binds() {
+    let rows = bindings();
+    let current = std::fs::read_to_string(doc_path()).expect("read docs/keybindings.md");
+    let found = denied_but_bound(&current, &rows);
+    assert!(
+        found.is_empty(),
+        "docs/keybindings.md says a command has no chord while the global keymap binds it \
+         (passage, command, chord): {found:?}"
+    );
+}
+
+/// The reader above is not vacuous: given the sentence the document
+/// carried, in the document's own frame, it names the command and the
+/// chord; and a passage that denies nothing is not reported.
+#[test]
+fn the_prose_reader_reports_the_sentence_the_document_carried() {
+    let rows = bindings();
+    let carried = format!(
+        "# Keys\n\n{BEGIN}\n| `C-x g` | `git.status` |\n{END}\n\n\
+         `git.status` gets **no global chord**: an opening key is a\n\
+         command-surface decision the Stage 1 framing did not make.\n\n\
+         `git.status` opens the panel; `dired` is on `C-x d`.\n"
+    );
+    assert_eq!(
+        denied_but_bound(&carried, &rows),
+        [(
+            "`git.status` gets **no global chord**: an opening key is a".to_owned(),
+            "git.status".to_owned(),
+            "C-x g".to_owned()
+        )]
+    );
+}
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua`.
