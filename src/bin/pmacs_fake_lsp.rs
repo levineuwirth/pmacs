@@ -168,6 +168,9 @@
 //!   shape, 1.2 s on a CI runner), so a client that resends a save on a
 //!   clock is told apart from one that resends behind its own
 //!   `didChange` (E7c fix round 3).
+//! * If `PMACS_FAKE_LSP_POSITION_ENCODING` is set (any mode): the
+//!   position encoding the server negotiates, `utf-8` as rust-analyzer
+//!   does; unset, a mode's own choice or the spec's UTF-16 (E10a.3).
 //! * If `PMACS_FAKE_LSP_INIT_SINK` names a file (any mode): the
 //!   `initializationOptions` the client sent, as JSON (E7c.2).
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
@@ -365,6 +368,14 @@ fn main() {
                         "serverInfo": { "name": "pmacs-fake-lsp", "version": "0.1.0" }
                     }
                 });
+                // E10a.3: `PMACS_FAKE_LSP_POSITION_ENCODING` names the
+                // encoding to negotiate in any mode (`utf-8`, as
+                // rust-analyzer does); the mode-specific settings below
+                // still override it.
+                if let Ok(encoding) = std::env::var("PMACS_FAKE_LSP_POSITION_ENCODING") {
+                    resp["result"]["capabilities"]["positionEncoding"] =
+                        serde_json::Value::from(encoding);
+                }
                 // T M4.5 Option B: `posecho` negotiates UTF-16 and
                 // echoes request positions back (see definition arm)
                 // so a test can prove the byte↔UTF-16 round-trip.

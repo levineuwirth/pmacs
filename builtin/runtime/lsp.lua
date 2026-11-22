@@ -2093,11 +2093,39 @@ local function byte_offset_for(text, line, col)
   return pos + col
 end
 
+-- Where a caret at byte `pos` stands once `resolved` has been applied
+-- (E10a.3). The edits are ranges of the text the caret was read in and
+-- do not overlap. One that ends at or before the caret moves it by what
+-- the edit added or took, an insertion at the caret itself included, so
+-- the caret follows its text as it does behind a typed letter. One that
+-- holds the caret inside it --- a rename of the symbol the caret is on
+-- --- keeps the caret's offset into the replacement, as far as the
+-- replacement reaches. One that begins at the caret or after it leaves
+-- it where it is.
+local function carried_caret(pos, resolved)
+  local at, shift = pos, 0
+  for _, e in ipairs(resolved) do
+    if e.stop <= pos then
+      shift = shift + #e.text - (e.stop - e.start)
+    elseif e.start < pos then
+      at = e.start + math.min(pos - e.start, #e.text)
+    end
+  end
+  return at + shift
+end
+
 local function apply_text_edits(edits)
   if not edits or #edits == 0 then return 0 end
   local buf = pmacs.window.buffer()
   if not buf then return 0 end
   local text = active_buffer_text()
+  -- E10a.3: the caret of the window these edits are made in, and the
+  -- row of that window it is on. A buffer edit moves no window's caret
+  -- (the core clamps it to the buffer and no more), so without this an
+  -- edit above the caret left it on other text: by the length of every
+  -- edit before it after a format, and at the top after a rename.
+  local caret = pmacs.editor.cursor()
+  local row = math.max(0, pmacs.editor.cursor_line() - pmacs.editor.view_top())
   -- Resolve every edit against the *original* text, then sort by start
   -- byte descending so each replacement leaves earlier offsets valid.
   local resolved = {}
@@ -2108,6 +2136,7 @@ local function apply_text_edits(edits)
       text  = e.new_text,
     })
   end
+  local landed = carried_caret(caret, resolved)
   table.sort(resolved, function(a, b) return a.start > b.start end)
   for _, e in ipairs(resolved) do
     if e.start == e.stop then
@@ -2118,6 +2147,10 @@ local function apply_text_edits(edits)
       buf:replace(e.start, e.stop, e.text)
     end
   end
+  -- The caret on its text, and on the row of the window it was on, so
+  -- lines an edit added or took above it do not move what is read.
+  pmacs.editor.goto_byte(landed)
+  pmacs.editor.set_view_top(math.max(0, pmacs.editor.cursor_line() - row))
   return #resolved
 end
 
@@ -2301,6 +2334,29 @@ local function apply_workspace_edit(ops)
   -- still resolve -- a batch that deletes and then recreates it -- the
   -- fallback silently opens a file the user asked to delete.
   local origin_buf = pmacs.window.buffer()
+  -- E10a.3: the caret's place in the window the edit was asked from.
+  -- Every edit item below goes through `find_or_open`, which switches
+  -- the window to the item's buffer, and a switch puts the caret and
+  -- the view at the top even when the window already shows that
+  -- buffer (`switch_active_buffer_for`); `restore_origin` switches
+  -- again. So a rename left the caret at L1:C1 whichever file it
+  -- edited. The place is carried here instead: seated again after each
+  -- switch to the origin's buffer, moved by `apply_text_edits` across
+  -- the edits made to that buffer, and read back.
+  local origin_key = origin_buf and tostring(origin_buf)
+  local origin = origin_buf and {
+    caret = pmacs.editor.cursor(),
+    row = math.max(0, pmacs.editor.cursor_line() - pmacs.editor.view_top()),
+  }
+  local function shows_origin()
+    local now = pmacs.window.buffer()
+    return origin ~= nil and now ~= nil and tostring(now) == origin_key
+  end
+  local function seat_origin_caret()
+    if not shows_origin() then return end
+    pmacs.editor.goto_byte(origin.caret)
+    pmacs.editor.set_view_top(math.max(0, pmacs.editor.cursor_line() - origin.row))
+  end
   local edit_total, files, res_ops = 0, 0, 0
   -- Plan items fully applied before a failure. Q#RD3 permits partial
   -- application, so this is what stops a caller claiming "nothing was
@@ -2319,13 +2375,17 @@ local function apply_workspace_edit(ops)
   local function restore_origin()
     if not origin_buf then return end
     pcall(pmacs.window.switch_buffer, origin_buf)
+    pcall(seat_origin_caret)
   end
   for _, item in ipairs(plan) do
     local ok, err
     if item.kind == "edit" then
       ok, err = pcall(function()
         pmacs.buffer.find_or_open(item.path)
+        local in_origin = shows_origin()
+        if in_origin then seat_origin_caret() end
         edit_total = edit_total + apply_text_edits(item.edits)
+        if in_origin then origin.caret = pmacs.editor.cursor() end
         files = files + 1
       end)
     else
