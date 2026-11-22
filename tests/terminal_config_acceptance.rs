@@ -147,10 +147,15 @@ fn open_cat_terminal(state: &EditorState, lua_spec: &str) -> pmacs::buffer::Buff
 /// probing for it could never pass. `-v` renders it as the printable
 /// two-character `^X`, which is what makes "the configured chord reached
 /// the child" observable at all.
+///
+/// The child sets the PTY raw first (E10a.5: a terminal starts
+/// canonical). Without that these rows would still pass, on the line
+/// discipline's echo of the key and not on `cat`'s, and a literal
+/// `Ctrl-C` would end `cat` by a signal instead of reaching it.
 const CAT_PROFILE: &str = r#"
 pmacs.terminal.profiles.echo = {
   command = "/bin/sh",
-  args = { "-c", "printf 'READY\r\n'; exec cat -v" },
+  args = { "-c", "stty raw -echo; printf 'READY\r\n'; exec cat -v" },
 }
 "#;
 

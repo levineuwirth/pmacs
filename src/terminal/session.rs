@@ -34,7 +34,10 @@ pub struct TerminalSpec {
     pub command: String,
     /// Child arguments, excluding argv0.
     pub args: Vec<String>,
-    /// Working directory, or the editor process directory when absent.
+    /// Working directory. Absent, or naming no directory, the child
+    /// starts in `$HOME`, which is `portable-pty`'s rule; `terminal.open`
+    /// supplies the project's root or the file's directory first
+    /// (E10a.5).
     pub cwd: Option<PathBuf>,
     /// Environment overrides inherited by the child. `TERM` defaults to
     /// `xterm-256color` when the caller does not provide it.
@@ -326,10 +329,18 @@ impl TerminalManager {
                 .env
                 .push(("TERM".into(), "xterm-256color".into()));
         }
+        // E10a.5: the line discipline a terminal emulator gives a shell,
+        // which is the kernel's own for a fresh PTY: canonical input,
+        // echo, `onlcr`, signals from the keys. Until then this was
+        // `TerminalMode::Raw`, the REPL's mode, where the editor does
+        // the line editing: a shell that keeps the modes it is given
+        // (`/bin/sh`) echoed nothing typed and staircased its output,
+        // and only one that sets its own (fish, zsh, bash with
+        // readline) read right. Those still set their own.
         process_spec.mode = ProcessMode::Pty {
             rows: spec.rows,
             cols: spec.cols,
-            mode: TerminalMode::Raw,
+            mode: TerminalMode::Canonical,
         };
         process_spec.restart = RestartPolicy::Never;
         process_spec.ansi_events = true;

@@ -101,7 +101,7 @@ const FILL_PROFILE: &str = r#"
 pmacs.terminal.profiles.fill = {
   command = "/bin/sh",
   args = { "-c",
-    "printf 'NEEDLE-IN-SCROLLBACK\r\n'; i=1; while [ $i -le 200 ]; do printf 'LINE%03d\r\n' $i; i=$((i+1)); done; printf 'DONE\r\n'; exec cat" },
+    "stty raw -echo; printf 'NEEDLE-IN-SCROLLBACK\r\n'; i=1; while [ $i -le 200 ]; do printf 'LINE%03d\r\n' $i; i=$((i+1)); done; printf 'DONE\r\n'; exec cat" },
 }
 "#;
 
@@ -144,7 +144,9 @@ fn focus_terminal(state: &EditorState, buffer: pmacs::buffer::BufferId) -> Termi
 
 /// Make the child produce NEW output, so a refresh has something to find.
 ///
-/// The child is `exec cat`, so typing into the focused terminal echoes
+/// The child is `exec cat` on a PTY it set raw itself (E10a.5: a
+/// terminal starts canonical, where the echo would be the line
+/// discipline's), so typing into the focused terminal echoes
 /// back. Without this, "refresh" tests compare a quiet terminal against
 /// itself and pass with the render replaced by a no-op — the defect review
 /// round 1 found in acceptance 18 and 19.
