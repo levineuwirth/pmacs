@@ -122,20 +122,31 @@ pub struct ErrorLog {
     unread: usize,
     /// What the echo line still owes the newest record (E10a.7).
     echo: ErrorEcho,
+    /// Keys taken so far, counted where the echo line's text is
+    /// cleared, so a command's text can be told from a later key's
+    /// (E10a.7 fix round 1).
+    keys: u64,
+    /// `keys` when the newest record was reported.
+    reported_at: u64,
 }
 
 /// The echo line's account with the newest error (E10a.7). An error is
 /// a message like any other on that line: shown until the next key,
-/// and not again. It is owed one showing, since the diagnostic at the
-/// caret outranks it and may hold the line when it is reported; once
-/// it has been shown, the next key spends it. A command's own text
-/// outranks it too, and is the next message: a key that clears such a
-/// text spends the error with it, shown or not, which is also what
-/// keeps a failure reported on both channels (a server that did not
-/// start) from being said twice. Until E10a.7 the line fell back to the newest error for
-/// as long as it was unread, so one refused request came back after
-/// every unrelated key for the rest of the session. What persists is
-/// the mode line's unread mark and the `*errors*` buffer.
+/// and not again. It is owed one showing, since something may hold the
+/// line when it is reported: the diagnostic at the caret, which
+/// outranks it, or an open prompt or isearch, which the row is painted
+/// with instead; once it has been shown, the next key spends it. A
+/// command's own text outranks it too. Text set before the next key
+/// after the report is the same event's, or the next message, and a
+/// key that clears it spends the error with it, shown or not, which is
+/// what keeps a failure reported on both channels (a server that did
+/// not start) from being said twice. Text a later key set (`C-g`'s
+/// `Quit` over an error raised under the prompt it closed) is that
+/// key's answer, and the error stays owed past it (fix round 1). Until
+/// E10a.7 the line fell back to the newest error for as long as it was
+/// unread, so one refused request came back after every unrelated key
+/// for the rest of the session. What persists is the mode line's
+/// unread mark and the `*errors*` buffer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ErrorEcho {
     /// Nothing to show: no error yet, or the last one had its showing.
@@ -167,7 +178,8 @@ impl ErrorLog {
 
     /// Whether the echo line shows the newest error now, noting that it
     /// has (E10a.7). The painters ask only when nothing outranks the
-    /// error, so asking is showing.
+    /// error and no prompt or isearch holds the row
+    /// (`EditorCore::echo_row_holds_a_prompt`), so asking is showing.
     fn show_echo(&mut self) -> bool {
         if self.unread == 0 || self.echo == ErrorEcho::Spent {
             return false;
@@ -177,12 +189,17 @@ impl ErrorLog {
     }
 
     /// A key arrived: an error the echo line has shown is spent, and
-    /// so is one a command's text held the line over, `superseded`
-    /// (E10a.7). One not shown for any other reason stays owed.
+    /// so is one a command's text held the line over, `superseded`,
+    /// when no key came between the report and this one (E10a.7). One
+    /// not shown for any other reason stays owed.
     fn note_user_input(&mut self, superseded: bool) {
-        if self.echo == ErrorEcho::Shown || (superseded && self.echo == ErrorEcho::Owed) {
+        let same_event = self.reported_at == self.keys;
+        if self.echo == ErrorEcho::Shown
+            || (superseded && same_event && self.echo == ErrorEcho::Owed)
+        {
             self.echo = ErrorEcho::Spent;
         }
+        self.keys = self.keys.wrapping_add(1);
     }
 }
 
@@ -219,6 +236,7 @@ pub fn report_error(lua: &Lua, label: &str, message: &str) {
         log.records.push(record);
         log.unread = log.unread.saturating_add(1);
         log.echo = ErrorEcho::Owed;
+        log.reported_at = log.keys;
     }
 }
 
@@ -626,9 +644,14 @@ impl LuaHost {
     /// log has been read (E10a.7; before it, for as long as the error
     /// was unread). The grid's fallback and the semantic `StatusFacts`
     /// producer both call this, and only when nothing outranks the
-    /// error, so a call is a showing and is noted as one; the GPU
-    /// receives the same transient message the TUI shows, and both stop
-    /// together at [`Self::note_user_input`].
+    /// error and no prompt or isearch holds the row it would be painted
+    /// on (`EditorCore::echo_row_holds_a_prompt`, fix round 1: until it
+    /// the grid asked before painting a prompt over the row, and the
+    /// GPU draws its prompt where the band's message goes, so an error
+    /// raised under a prompt was noted shown and never seen), so a call
+    /// is a showing and is noted as one; the GPU receives the same
+    /// transient message the TUI shows, and both stop together at
+    /// [`Self::note_user_input`].
     #[must_use]
     pub fn unread_error_status_message(&self) -> Option<String> {
         if !self.error_log.borrow_mut().show_echo() {

@@ -2444,18 +2444,24 @@ impl SemanticRenderState {
             // E7d.2: between the two, the diagnostic under this
             // frontend's own document caret, in the grid's order
             // (`build_status_line`), so leaving its range clears it.
-            let (status, at_point) = {
+            //
+            // E10a.7 fix round 1: the error is not asked for while a
+            // prompt or isearch is open, since the frontend draws that
+            // where the message goes and asking counts as showing.
+            let (status, at_point, covered) = {
                 let core = state.core.borrow();
                 let status = (!core.status.is_empty()).then(|| core.status.clone());
                 let store = state.lsp_manager.borrow().diag_store();
                 let at_point = core
                     .primary_document_window(self.frontend_id)
                     .and_then(|win| crate::editor::diagnostic_at_point(&core, &store, win));
-                (status, at_point)
+                (status, at_point, core.echo_row_holds_a_prompt())
             };
-            let message = status
-                .or(at_point)
-                .or_else(|| state.lua_host.unread_error_status_message());
+            let message = status.or(at_point).or_else(|| {
+                (!covered)
+                    .then(|| state.lua_host.unread_error_status_message())
+                    .flatten()
+            });
             let core = state.core.borrow();
             let registry = core.registry.clone();
             let reg = registry.borrow();

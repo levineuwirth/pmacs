@@ -7638,14 +7638,18 @@ fn build_status_line(
         line.push_str(&sanitize_single_line(&core.status));
     } else if let Some(diagnostic) = at_point {
         line.push_str(&sanitize_single_line(diagnostic));
-    } else if let Some(msg) = lua_host.unread_error_status_message() {
+    } else if !core.echo_row_holds_a_prompt()
+        && let Some(msg) = lua_host.unread_error_status_message()
+    {
         // E5.1, as E10a.7 narrowed it: the last error shows until the
         // next key after this line has shown it, or until a window has
         // shown `*errors*`. E5.1 kept it for as long as it was unread,
         // so it came back whenever this line was otherwise empty.
         // Shared with the semantic `StatusFacts` producer through
         // `LuaHost::unread_error_status_message`, so both frontends see
-        // the same text and clear together.
+        // the same text and clear together. Not asked while a prompt or
+        // isearch holds the row: `paint_frame` paints that over this
+        // line, and asking counts as showing (E10a.7 fix round 1).
         line.push_str(&msg);
     }
     if !dispatcher.pending().is_empty() {
@@ -9141,6 +9145,60 @@ mod tests {
         );
         s.dispatch_key(FrontendId::LOCAL, ctrl('p'));
         assert_eq!(echo(&s, None), "", "and is not shown again");
+    }
+
+    /// E10a.7 fix round 1: an error reported while a prompt or isearch
+    /// holds the echo row is owed its showing, since the row is painted
+    /// with the prompt; neither the key that closes the prompt nor the
+    /// key that clears that key's own text (`C-g`'s `Quit`) spends it,
+    /// and the next free line shows it once. Before the fix the line
+    /// was asked under the prompt, which counted as showing, and the
+    /// error never reached the screen.
+    #[test]
+    fn an_error_reported_under_a_prompt_is_shown_once_the_prompt_is_gone() {
+        for (opener, what) in [(alt('x'), "the M-x prompt"), (ctrl('s'), "isearch")] {
+            let mut s = fresh_with(b"one\ntwo\n");
+            let echo = |s: &EditorState| {
+                build_status_line(
+                    &s.core.borrow(),
+                    &s.lua_host,
+                    &KeyDispatcher::new(),
+                    None,
+                    200,
+                )
+            };
+            s.dispatch_key(FrontendId::LOCAL, opener);
+            assert!(
+                s.core.borrow().echo_row_holds_a_prompt(),
+                "premise: {what} holds the row"
+            );
+            let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+            assert!(
+                !echo(&s).contains("kapow"),
+                "{what}: the row is the prompt's: {}",
+                echo(&s)
+            );
+            s.dispatch_key(FrontendId::LOCAL, ctrl('g'));
+            assert!(
+                !s.core.borrow().echo_row_holds_a_prompt(),
+                "premise: C-g closed {what}"
+            );
+            if !s.core.borrow().status.is_empty() {
+                assert!(
+                    !echo(&s).contains("kapow"),
+                    "{what}: C-g's own text holds the line first: {}",
+                    echo(&s)
+                );
+            }
+            s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+            assert!(
+                echo(&s).contains("kapow"),
+                "{what}: the line is free, and the error has its showing: {:?}",
+                echo(&s)
+            );
+            s.dispatch_key(FrontendId::LOCAL, ctrl('p'));
+            assert_eq!(echo(&s), "", "{what}: and is not shown again");
+        }
     }
 
     /// E10a.7: a command's text over an error is the next message. The

@@ -1661,6 +1661,16 @@ impl EditorCore {
         self.search.is_some()
     }
 
+    /// `true` while an isearch or a minibuffer prompt holds the echo
+    /// row: the grid paints its prompt there over the status line, and
+    /// a semantic frontend draws it where the band's message goes. The
+    /// error echo is asked for, and so counted shown, only when this is
+    /// `false` (E10a.7 fix round 1).
+    #[must_use]
+    pub fn echo_row_holds_a_prompt(&self) -> bool {
+        self.search_active() || self.minibuffer.is_active()
+    }
+
     /// The current isearch query (empty when no search is running).
     #[must_use]
     pub fn search_query(&self) -> &str {

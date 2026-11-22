@@ -1902,6 +1902,21 @@ fn place_probe_facts(state: &State, label: &str, out: &mut String) {
         "{label}.prompt={:?}",
         state.minibuffer.as_ref().map_or("", |m| m.prompt.as_str())
     );
+    // E10a.7 fix round 1: the providers' segments on the band's right,
+    // the unread error mark (`!N`) among them, so a row can tell that
+    // an error was raised while the message slot showed something else.
+    let _ = writeln!(
+        out,
+        "{label}.right={:?}",
+        state
+            .current_statusline_segments()
+            .map_or_else(String::new, |s| s
+                .right
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "))
+    );
     // E10a.6: the panel band's retained frame, whether it has the focus
     // and the text of its cells. `name` above is the document's even
     // while a panel has the keys.
