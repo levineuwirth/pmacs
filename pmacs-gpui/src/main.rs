@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod document;
+mod input;
+mod palette;
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -9,13 +11,15 @@ use std::process::ExitCode;
 use async_channel::Receiver;
 use document::Document;
 use gpui::{
-    Application, Bounds, Context, Render, SharedString, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size, uniform_list,
+    Application, Bounds, Context, Div, FocusHandle, KeyDownEvent, Render, ScrollStrategy,
+    SharedString, UniformListScrollHandle, Window, WindowBounds, WindowOptions, canvas, div, fill,
+    point, prelude::*, px, rgb, size, uniform_list,
 };
+use palette::Prompt;
 use pmacs_attach_client::{
     AttachClient, AttachEvent, InitialTargetPaths, connect_with_target_and_sink,
 };
-use pmacs_protocol::{BufferId, InstanceMessage};
+use pmacs_protocol::{BufferId, ByteRange, InstanceMessage, MinibufferRow};
 
 const SOURCE_FONT: &[u8] = include_bytes!("../../pmacs-gpu/fonts/JetBrainsMono-Regular.ttf");
 const USAGE: &str = "Usage: pmacs-gpui --attach SOCKET FILE";
@@ -27,6 +31,14 @@ struct FileView {
     notice: Option<String>,
     document: Document,
     client: Option<AttachClient>,
+    focus: FocusHandle,
+    cursor: Option<u64>,
+    reveal_cursor: bool,
+    source_scroll: UniformListScrollHandle,
+    viewport: Option<ByteRange>,
+    prompt: Option<Prompt>,
+    prompt_scroll: UniformListScrollHandle,
+    status: Option<String>,
 }
 
 impl FileView {
@@ -39,16 +51,83 @@ impl FileView {
                 buffer_id,
                 name,
                 modified,
+                message,
                 ..
             } if buffer_id == self.id => {
+                if self.name.as_ref() == name && self.modified == modified && self.status == message
+                {
+                    return Ok(false);
+                }
+                self.status = message;
                 self.name = name.into();
                 self.modified = modified;
             }
             InstanceMessage::BufferSnapshot {
                 buffer_id,
                 crdt_snapshot,
-            } if buffer_id == self.id => {
+            } => {
                 self.document = Document::from_snapshot(&crdt_snapshot)?;
+                if buffer_id != self.id {
+                    self.id = buffer_id;
+                    self.name = "".into();
+                    self.status = None;
+                    self.modified = false;
+                    self.source_scroll = UniformListScrollHandle::new();
+                }
+                self.viewport = None;
+                self.cursor = None;
+            }
+            InstanceMessage::CursorByte {
+                buffer_id,
+                byte_pos,
+            } if self.id == buffer_id => {
+                if self.cursor == Some(byte_pos) {
+                    return Ok(false);
+                }
+                self.cursor = Some(byte_pos);
+                self.reveal_cursor = true;
+            }
+            InstanceMessage::MinibufferPromptRows {
+                prompt,
+                input,
+                cursor,
+                rows,
+                selected,
+                total,
+            } => {
+                self.set_prompt(prompt.map(|label| Prompt {
+                    label: label.into(),
+                    input: input.into(),
+                    cursor,
+                    rows,
+                    selected,
+                    total,
+                }));
+            }
+            InstanceMessage::MinibufferPrompt {
+                prompt,
+                input,
+                cursor,
+                candidates,
+                selected,
+                total,
+            } => {
+                self.set_prompt(prompt.map(|label| {
+                    Prompt {
+                        label: label.into(),
+                        input: input.into(),
+                        cursor,
+                        selected,
+                        total,
+                        rows: candidates
+                            .into_iter()
+                            .map(|label| MinibufferRow {
+                                label,
+                                detail: None,
+                            })
+                            .collect(),
+                    }
+                }));
             }
             InstanceMessage::Goodbye(reason) => {
                 self.notice = Some(format!("Daemon disconnected · {reason:?}"));
@@ -56,6 +135,33 @@ impl FileView {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    fn set_prompt(&mut self, prompt: Option<Prompt>) {
+        if self.prompt.is_none() {
+            self.prompt_scroll = UniformListScrollHandle::new();
+        }
+        if let Some(p) = &prompt {
+            p.reveal_selected(&self.prompt_scroll);
+        }
+        self.prompt = prompt;
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.notice.is_some() {
+            return;
+        }
+        let Some(input) = input::translate(&event.keystroke) else {
+            return;
+        };
+        window.prevent_default();
+        cx.stop_propagation();
+        if let Some(client) = &self.client
+            && let Err(error) = input.send(client)
+        {
+            self.notice = Some(format!("Could not send input · {error}"));
+            cx.notify();
+        }
     }
 
     fn listen(&self, events: Receiver<AttachEvent>, cx: &Context<Self>) {
@@ -90,6 +196,44 @@ impl FileView {
     }
 }
 
+/// The list reports the rows actually laid out, including scroll and resize.
+/// The daemon needs a document viewport before it emits minibuffer and status facts.
+struct SourceViewport(gpui::Entity<FileView>);
+
+impl gpui::UniformListDecoration for SourceViewport {
+    fn compute(
+        &self,
+        rows: std::ops::Range<usize>,
+        _: Bounds<gpui::Pixels>,
+        _: gpui::Point<gpui::Pixels>,
+        _: gpui::Pixels,
+        _: usize,
+        _: &mut Window,
+        cx: &mut gpui::App,
+    ) -> gpui::AnyElement {
+        self.0.update(cx, |view, cx| {
+            let visible = view.document.with_lines(|r| ByteRange {
+                start: r.line_to_byte(rows.start.min(r.len_lines())) as u64,
+                end: r.line_to_byte(rows.end.min(r.len_lines())) as u64,
+            });
+            if view.viewport != Some(visible)
+                && view.notice.is_none()
+                && let Some(client) = &view.client
+            {
+                match client.send_viewport(view.id, visible, 0) {
+                    Ok(()) => view.viewport = Some(visible),
+                    Err(error) => {
+                        view.notice =
+                            Some(format!("Could not declare the document viewport · {error}"));
+                        cx.notify();
+                    }
+                }
+            }
+        });
+        div().into_any_element()
+    }
+}
+
 impl Drop for FileView {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
@@ -99,8 +243,23 @@ impl Drop for FileView {
 }
 
 impl Render for FileView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = self.document.with_lines(|r| r.len_lines());
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (count, caret) = self.document.with_lines(|rope| {
+            let caret = self.cursor.and_then(|byte| {
+                let byte = usize::try_from(byte).ok()?;
+                let row = rope.try_byte_to_line(byte).ok()?;
+                Some((row, byte - rope.line_to_byte(row)))
+            });
+            (rope.len_lines(), caret)
+        });
+        if let Some((row, _)) = caret
+            && self.reveal_cursor
+        {
+            self.source_scroll
+                .scroll_to_item(row, ScrollStrategy::Center);
+            self.reveal_cursor = false;
+        }
+        let caret = caret.filter(|_| self.prompt.is_none() && window.is_window_active());
         let header = div()
             .flex()
             .items_center()
@@ -118,12 +277,16 @@ impl Render for FileView {
         let rows = uniform_list(
             "source",
             count,
-            cx.processor(|this, range: std::ops::Range<usize>, _, _| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
                 this.document.with_lines(|rope| {
                     range
                         .map(|index| {
-                            let line = rope.line(index).to_string();
+                            let cursor =
+                                caret.filter(|(row, _)| *row == index).map(|(_, byte)| byte);
+                            let (line, cursor) =
+                                document::display_line(rope.line(index).to_string(), cursor);
                             div()
+                                .w_full()
                                 .h(px(22.))
                                 .flex()
                                 .items_center()
@@ -138,15 +301,20 @@ impl Render for FileView {
                                         .text_color(rgb(0x827f79))
                                         .child((index + 1).to_string()),
                                 )
-                                .child(line.trim_end_matches(['\n', '\r']).to_owned())
+                                .child(text_with_caret(line.into(), cursor).flex_1().min_w_0())
                         })
                         .collect::<Vec<_>>()
                 })
             }),
         )
+        .with_decoration(SourceViewport(cx.entity()))
+        .track_scroll(self.source_scroll.clone())
         .flex_1()
         .min_h_0();
         div()
+            .relative()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
             .size_full()
             .flex()
             .flex_col()
@@ -156,17 +324,63 @@ impl Render for FileView {
             .font_family("JetBrains Mono")
             .child(header)
             .child(rows)
-            .when_some(self.notice.clone(), |root, text| {
-                root.child(
-                    div()
-                        .px_4()
-                        .py_1()
-                        .text_sm()
-                        .text_color(rgb(0xffc48a))
-                        .child(text),
-                )
+            .when_some(
+                self.notice.clone().or_else(|| self.status.clone()),
+                |root, text| {
+                    root.child(
+                        div()
+                            .px_4()
+                            .py_1()
+                            .text_sm()
+                            .text_color(rgb(0xffc48a))
+                            .child(text),
+                    )
+                },
+            )
+            .when_some(self.prompt.as_ref(), |root, prompt| {
+                root.child(prompt.show(window, &self.prompt_scroll, cx))
             })
     }
+}
+
+/// GPUI shapes the whole active line once so ligatures, combining characters and
+/// the caret use the same advances. An offscreen caret brings its suffix into view.
+fn text_with_caret(text: SharedString, cursor: Option<usize>) -> Div {
+    let row = div()
+        .h(px(22.))
+        .line_height(px(22.))
+        .overflow_hidden()
+        .whitespace_nowrap();
+    let Some(cursor) = cursor else {
+        return row.child(text);
+    };
+    row.child(
+        canvas(
+            move |bounds, window, _| {
+                let style = window.text_style();
+                let font_size = style.font_size.to_pixels(window.rem_size());
+                let run = style.to_run(text.len());
+                let line = window
+                    .text_system()
+                    .shape_line(text, font_size, &[run], None);
+                let x = line.x_for_index(cursor);
+                let shift = (x + px(2.) - bounds.size.width).max(px(0.));
+                (line, x, shift)
+            },
+            |bounds, (line, x, shift), window, cx| {
+                let origin = point(bounds.left() - shift, bounds.top());
+                let _ = line.paint(origin, bounds.size.height, window, cx);
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(origin.x + x, origin.y + px(2.)),
+                        size(px(1.5), bounds.size.height - px(4.)),
+                    ),
+                    rgb(0xf6dba2),
+                ));
+            },
+        )
+        .size_full(),
+    )
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -231,8 +445,19 @@ fn run() -> Result<(), Box<dyn Error>> {
                 ..Default::default()
             },
             |window, cx| {
-                window.set_window_title(&format!("{name} — pmacs"));
+                window.set_window_title("pmacs — GPUI");
                 cx.new(|cx| {
+                    let focus = cx.focus_handle();
+                    focus.focus(window);
+                    cx.observe_window_activation(window, |view: &mut FileView, w, cx| {
+                        if let Some(client) = &view.client
+                            && let Err(error) = client.send_focus(w.is_window_active())
+                        {
+                            view.notice = Some(format!("Could not send focus · {error}"));
+                        }
+                        cx.notify();
+                    })
+                    .detach();
                     let view = FileView {
                         id: buffer_id,
                         name: name.into(),
@@ -240,6 +465,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                         notice: None,
                         document,
                         client: Some(client),
+                        focus,
+                        cursor: None,
+                        reveal_cursor: false,
+                        source_scroll: UniformListScrollHandle::new(),
+                        viewport: None,
+                        prompt: None,
+                        prompt_scroll: UniformListScrollHandle::new(),
+                        status: None,
                     };
                     view.listen(rx, cx);
                     view
