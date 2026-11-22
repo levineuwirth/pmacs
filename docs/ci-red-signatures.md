@@ -19900,6 +19900,114 @@ Tally (main-fuzz-e80530a): 2 = 2 + 0.
 
 So, at #509's fix: `main` is `e80530a`, red on one Ubuntu leg on #400 and green on every other job, its CI not rerun. #509 is closed by PR #531 at five occurrences, merged green on the rerun of its one red job. #519 moves to one occurrence on CI and #400 to two. No other row's count moves here.
 
+### E10a: PR #534 red at `d404370` on seven of its own rows on macOS, fixed at `8f5fe3a`; red there on one leg on #295's first fragment
+
+Recorded 2026-11-22 by the E10a implementation session. Each run below was read from the jobs endpoint by conclusion and each test leg from its own log, every `running` line paired with its own result line; each run id and gate log was searched for in this file first, and none was here.
+
+#### PR #534 at `d404370`: red on the branch's own rows on both macOS legs, three legs cancelled by the next push
+
+`CI` 45031165915 at `d404370`, attempt 1 of 1, `pull_request` (a merge into `e10d427`), created 2026-11-22T14:08:18Z and completed 14:49:23Z: `cancelled`. `Test (macos-latest / luajit)` 137234936458 and `Test (macos-latest / lua54)` 137234936737, both on `macos-26-arm64` `20261117.0516.1` (westus), each paired 242 `running` lines, 5,745 passed, 7 failed, 80 ignored, on the same seven rows of the PR's own new suites: `e10a_2_a_location_that_names_no_file_says_so_and_opens_no_buffer` (`the window still shows the source`, `/var/folders/…` against `/private/var/folders/…`) and six of `tests/e10a_3_edit_keeps_place_acceptance.rs` (`the edit landed`, the rename in a second buffer). The rows' fixtures resolved paths that the editor does not, and macOS's temporary directory is under the `/var` symlink; reproduced on Linux with `TMPDIR` behind a symlink and fixed in the PR's `8f5fe3a`. These are the PR's defects in its own tests, not an intermittent, and no issue was filed. `Test (ubuntu-latest / luajit, no crdt)` 137234936425 on `ubuntu-24.04` `20261116.376.1` (centralus) paired 243 with `test result: ok`, 5,121 / 0 / 72. `Test (crdt)` 137234936364, `Test (ubuntu-latest / luajit)` 137234936469 and `Test (ubuntu-latest / lua54)` 137234936557 were cancelled at 14:49:20Z to 14:49:23Z by the push of `8f5fe3a`, `ci.yml`'s `cancel-in-progress` for a pull request.
+
+Tally (pr534-ci-d404370): 19 = 13 + 2 + 3 + 1.
+
+Tally (pr534-ci-d404370-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 137234863291 | success |
+| Lint (lua54) | 137234863524 | success |
+| Changed paths | 137234863536 | success |
+| Commit attribution (D9) | 137234863581 | success |
+| Lint (luajit) | 137234863739 | success |
+| Test (crdt) | 137234936364 | cancelled |
+| M5 Perf Gates | 137234936372 | success |
+| M4 Perf Gates | 137234936400 | success |
+| GPU Render (headless) | 137234936402 | success |
+| M10 Perf Gates (crdt) | 137234936404 | success |
+| M6 Perf Gates | 137234936413 | success |
+| M1 Acceptance Gates | 137234936418 | success |
+| Perf budgets (debug) | 137234936424 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 137234936425 | success |
+| Test (macos-latest / luajit) | 137234936458 | failure |
+| Test (ubuntu-latest / luajit) | 137234936469 | cancelled |
+| Test (ubuntu-latest / lua54) | 137234936557 | cancelled |
+| Test (macos-latest / lua54) | 137234936737 | failure |
+| Docs consistency | 137234938364 | skipped |
+
+Tally (pr534-ci-d404370-success): 13 rows of the table above with `result` = `success`.
+Tally (pr534-ci-d404370-failure): 2 rows of the table above with `result` = `failure`.
+Tally (pr534-ci-d404370-cancelled): 3 rows of the table above with `result` = `cancelled`.
+Tally (pr534-ci-d404370-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45031165930 at `d404370`, attempt 1 of 1, `pull_request`, created 14:08:18Z and completed 14:08:39Z: `success`, `Grammar fuzz` 137234863499 and `Grammar fuzz (asan-strict)` 137234863159.
+
+Tally (pr534-fuzz-d404370): 2 = 2 + 0.
+
+#### PR #534 at `8f5fe3a`: red on one leg, #295's selector and first fragment, and not its second
+
+`CI` 45034869399 at `8f5fe3a`, attempt 1 of 1, `pull_request` (a merge into `e10d427`), created 2026-11-22T14:49:05Z and completed 15:44:54Z: `failure`. `Test (macos-latest / lua54)` 137246420110 on `macos-26-arm64` `20261117.0516.1` (westus): 242 `running` lines each paired, 5,751 passed, 1 failed, 80 ignored. **#295's selector and first fragment, and not its second:** `e7b_review_wire_acceptance::a_rename_on_whitespace_leaves_the_label_ready_and_reports_to_errors` ran past 60 s and failed at `tests/e7b_review_wire_acceptance.rs:1142:5` with `the label reads exactly ready for two seconds`, the `wait_warm` precondition before the rename; the suite's line read `test result: FAILED. 4 passed; 1 failed; 2 ignored` in 60.56 s, where the issue's second fragment reads `2 passed; 3 failed; 2 ignored`, the company of its one sample, as #432's struck fragment was. So by the letter it does not match; it is commented there, saying so (7081551069). The suite has no diff in the PR.
+
+The other legs paired every `running` line with `test result: ok`: `Test (macos-latest / luajit)` 137246420030 on `macos-26-arm64` `20261117.0516.1` (westus), 244, 5,812 / 0 / 80; `Test (ubuntu-latest / luajit)` 137246420032 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 243, 5,871 / 0 / 88; `Test (ubuntu-latest / lua54)` 137246420042 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 243, 5,871 / 0 / 88; `Test (crdt)` 137246420071 on `ubuntu-24.04` `20261116.376.1` (westcentralus), 242, 5,812 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 137246420005 on `ubuntu-24.04` `20261116.133.1` (us-east-1), 243, 5,121 / 0 / 72.
+
+Tally (pr534-ci-8f5fe3a): 19 = 17 + 1 + 1.
+
+Tally (pr534-ci-8f5fe3a-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Lint (luajit) | 137246345669 | success |
+| Commit attribution (D9) | 137246345984 | success |
+| Changed paths | 137246346003 | success |
+| Lint (lua54) | 137246346004 | success |
+| Format | 137246346008 | success |
+| M4 Perf Gates | 137246419945 | success |
+| M10 Perf Gates (crdt) | 137246419970 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 137246420005 | success |
+| M5 Perf Gates | 137246420006 | success |
+| M6 Perf Gates | 137246420007 | success |
+| Perf budgets (debug) | 137246420022 | success |
+| Test (macos-latest / luajit) | 137246420030 | success |
+| Test (ubuntu-latest / luajit) | 137246420032 | success |
+| Test (ubuntu-latest / lua54) | 137246420042 | success |
+| M1 Acceptance Gates | 137246420044 | success |
+| GPU Render (headless) | 137246420058 | success |
+| Test (crdt) | 137246420071 | success |
+| Test (macos-latest / lua54) | 137246420110 | failure |
+| Docs consistency | 137246421528 | skipped |
+
+Tally (pr534-ci-8f5fe3a-success): 17 rows of the table above with `result` = `success`.
+Tally (pr534-ci-8f5fe3a-failure): 1 row of the table above with `result` = `failure`.
+Tally (pr534-ci-8f5fe3a-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45034869383 at `8f5fe3a`, attempt 1 of 1, `pull_request`, created 14:49:05Z and completed 14:49:19Z: `success`, `Grammar fuzz` 137246262864 and `Grammar fuzz (asan-strict)` 137246262676.
+
+Tally (pr534-fuzz-8f5fe3a): 2 = 2 + 0.
+
+#### Local gate samples, listed and not tallied
+
+Eighteen runs of `scripts/gate` (the default plan; the branch changes no protocol) in `pmacs-e10o` on `e10a/joints`, at `nice -n 19` and six build jobs, the runbook's sampler beside each. Each red was run again at the same commit until it read `all gates passed`; the samples are commented on their issues.
+
+- `20261121T203538Z-2051325` at `e3aa5d8`: all passed, 244 results, 6,193 / 0 / 88.
+- `20261121T235121Z-2535125` at `045e35a`: 6,203 / 2 / 88, `journey_step9_the_offered_command_builds_the_project` and its isolated copy, `error: Current directory is invalid: No such file or directory (os error 2)` from the nested cargo's `rustc` probe: **#532, filed** at this sample.
+- `20261122T001430Z-2706496` at `045e35a`: all passed, 245, 6,204 / 0 / 88.
+- `20261122T003926Z-2860791` at `bbc55f9`: 6,216 / 1 / 88, #304's `overwide_status_runs_never_wrap_and_keep_the_suffix_pinned`.
+- `20261122T090649Z-3691564` at `bbc55f9`: all passed, 246, 6,217 / 0 / 88.
+- `20261122T092812Z-3913556` at `30432d2`: 6,227 / 1 / 88, #304's overwide row; a suspend fell in its `doc` stage, before the sweep.
+- `20261122T100522Z-4139290` at `30432d2`: all passed, 247, 6,228 / 0 / 88.
+- `20261122T102744Z-97065` at `e5752d5`: 6,237 / 1 / 88, #304's overwide row.
+- `20261122T104627Z-336220` at `e5752d5`: 6,232 / 6 / 88, six rows of `tests/e10t_gpu_window_settles.rs`, its control among them, beside a cpu `some avg10` of 63.20 and across a suspend inside the sweep (lid closed 10:52:16Z, opened 11:03:13Z); not evidence, and no issue was commented.
+- `20261122T111226Z-532251` at `e5752d5`: all passed, 248, 6,238 / 0 / 88.
+- `20261122T113624Z-792339` at `61ddc12`: 6,247 / 1 / 88, #432's row, `the report did not reach the expected state in 30s; last:` with nothing after it.
+- `20261122T115722Z-997665` at `61ddc12`: 6,247 / 1 / 88, #516's row, the small parent's half, 1,073,152 bytes over.
+- `20261122T121237Z-1154426` at `61ddc12`: all passed, 249, 6,248 / 0 / 88.
+- `20261122T123536Z-1372686` at `d41efca`: 6,258 / 1 / 88, #304's `caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled`.
+- `20261122T125537Z-1671493` at `d41efca`: all passed, 250, 6,259 / 0 / 88.
+- `20261122T131450Z-1832196` at `30e68f5`: all passed, 251, 6,268 / 0 / 88.
+- `20261122T133401Z-2001767` at `d404370`: all passed, 251, 6,270 / 0 / 88.
+- `20261122T144923Z-2326779` at `8f5fe3a`: all passed, 251, 6,270 / 0 / 88.
+
+So, at E10a's checkpoint: `main` is `e10d427`. PR #534 is open at `8f5fe3a`, red on one macOS leg on #295's first fragment, not rerun. By the letter #295 stays at one occurrence; if its second fragment is struck as #432's was, this is its second. #532 is filed at one local sample and no CI occurrence. No other row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
