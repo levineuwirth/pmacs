@@ -2736,6 +2736,7 @@ fn quit_action_truncation_is_iterative_and_bounded() {
             view_top: 0,
             goal_col: None,
             selection: None,
+            from_panel: false,
             then: Box::new(action),
         };
         action.truncate_to(MAX_PANEL_QUIT_DEPTH);

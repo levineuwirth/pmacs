@@ -267,10 +267,10 @@ lands, and only the drop, `sweep()` and `recover-file` wait (`settle`).
   against a fixture that emits hundreds of frames, so assert upper bounds
   over a fixed window against a child that produces nothing, and have
   the child self-report with fresh distinct markers.
-- `TerminalMode::Raw` has no `ICRNL`, so `sh -c 'read -r'` fixtures wait
-  forever; use `exec cat`. A PTY in default mode does not translate LF to
-  CRLF, so `echo` fixtures staircase and clip to blanks; emit `\r\n` and
-  guard every text comparison with a non-empty assertion.
+- A terminal's PTY starts canonical (echo, `onlcr`, signals); a fixture
+  standing for a program that reads raw keys runs `stty raw -echo` first.
+  A REPL's is `TerminalMode::Raw`: no `ICRNL`, so `read -r` waits forever,
+  and LF is not CRLF, so emit `\r\n`; guard text comparisons as non-empty.
 - A `Drop` body runs before its fields: if it waits on anything, check
   what the waited-on party needs that only a field drop releases, and
   move that release into the body.

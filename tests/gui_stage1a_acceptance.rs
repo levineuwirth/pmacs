@@ -257,8 +257,12 @@ fn a8_a_terminal_receives_raw_utf8_with_bracketed_paste_enabled() {
     let mut s = EditorState::new_with_roots(&crate::iso::roots());
 
     // The child turns bracketed paste ON, then copies its stdin to a
-    // file so the test can read exactly what arrived on the PTY.
-    let script = format!("printf '\\033[?2004h'; exec cat > {sink_disp}");
+    // file so the test can read exactly what arrived on the PTY. It
+    // stands for a program that reads keys as they come, so it sets the
+    // PTY raw itself, as such a program does: since E10a.5 a terminal
+    // starts canonical, where `cat` would be handed nothing until a
+    // newline.
+    let script = format!("stty raw -echo; printf '\\033[?2004h'; exec cat > {sink_disp}");
     let mut spec = TerminalSpec::new("/bin/sh");
     spec.args = vec!["-c".into(), script];
     spec.rows = 24;

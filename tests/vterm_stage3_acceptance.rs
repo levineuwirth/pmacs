@@ -1193,11 +1193,13 @@ pmacs.command.define {
   description = "Open a terminal child that copies stdin to stdout.",
   fn = function()
     -- Stage 3 opt-out: input must round-trip through a frame rendered
-    -- over the document window this test measures.
+    -- over the document window this test measures. The child sets the
+    -- PTY raw (E10a.5: a terminal starts canonical), so what comes back
+    -- is `cat`'s copy and not the line discipline's echo.
     return pmacs.terminal.open {
       command = "/bin/sh",
       display = "current",
-      args = { "-c", "printf 'READY\r\n'; exec cat" },
+      args = { "-c", "stty raw -echo; printf 'READY\r\n'; exec cat" },
     }
   end,
 }

@@ -907,15 +907,33 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                             cc.borrow_mut().focus_window(fid, focus);
                         }
                     }
-                    QuitOutcome::Restored { target, .. } => {
+                    QuitOutcome::Restored {
+                        target, from_panel, ..
+                    } => {
                         // Restoring is an ordinary presentation change:
                         // fire the switch hook so store-backed overlays
                         // reattach to the reinstated buffer.
                         cc.borrow_mut().focus_window(fid, target);
                         run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
                         reconcile_panel_layout(lua, &cc, fid);
-                        if visible(&cc, fid, target) {
-                            cc.borrow_mut().focus_window(fid, target);
+                        // E10a.6: the focus goes back to where the closed
+                        // presentation was opened from. Opened from the
+                        // panel, that is the panel and what it shows
+                        // again. Opened from a document, it is the
+                        // document window the `Delete` form returns to
+                        // (Q#BP11a: the one the panel was last entered
+                        // from, else the first). Until then the panel
+                        // kept the focus either way, so closing a result
+                        // list over a terminal handed every key after it
+                        // to the shell; the terminal stays in the panel's
+                        // history and is reached deliberately.
+                        let focus = if from_panel {
+                            Some(target)
+                        } else {
+                            cc.borrow().non_side_target(fid).ok()
+                        };
+                        if let Some(focus) = focus.filter(|w| visible(&cc, fid, *w)) {
+                            cc.borrow_mut().focus_window(fid, focus);
                         }
                     }
                 }

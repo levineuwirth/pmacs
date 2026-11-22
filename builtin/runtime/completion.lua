@@ -66,6 +66,22 @@ local function close_popup()
   if pmacs.completion.popup_visible() then pmacs.completion.popup_hide() end
 end
 
+-- E10a.4: the character this edit typed, when the active server names
+-- it a trigger: one byte typed at the cursor (the Q#C9 signature, and a
+-- self-insert, so an accepted candidate whose text ends in one is not
+-- taken for it) with no word before the cursor. nil otherwise.
+local function typed_trigger(buf, key, cursor, prev_key, prev_cursor)
+  if key ~= prev_key or not prev_cursor or cursor - prev_cursor ~= 1 then return nil end
+  if pmacs.editor.this_command() ~= "buffer.self-insert" then return nil end
+  if #word_prefix_before(buf, cursor) ~= 0 then return nil end
+  local ch = char_before(buf, cursor)
+  local rec = pmacs.lsp.active_attachment()
+  if not (ch and rec) then return nil end
+  local ok, fires = pcall(pmacs.completion.should_fire, rec.server, ch)
+  if ok and fires then return ch end
+  return nil
+end
+
 -- Collect through the framework, drop non-matches (collect keeps
 -- negative-score rows, merely sorted last --- Q#C1), cap, and shape
 -- rows for popup_show. Returns the rows plus the uncapped match count.
@@ -103,6 +119,10 @@ local function collect_rows(buf, prefix, trigger, trigger_char)
           edits_uri = c.edits_uri,
           edits_base = c.edits_base,
           edits_unresolved = c.edits_unresolved,
+          -- E10a.1: and the range of its own textEdit, whose newText
+          -- is already `insert_text`.
+          text_edit = c.text_edit,
+          text_edit_unresolved = c.text_edit_unresolved,
         }
       end
     end
@@ -181,8 +201,11 @@ pmacs.hook.add("buffer.after-edit", function()
     -- validation, or a modal). Drop the mirror and do NOT reopen off
     -- this same edit --- this is what stops an accept's own
     -- after-edit from instantly re-raising the popup it just closed.
+    -- E10a.4: unless the edit is a trigger character the user typed,
+    -- which asks for a new list at a new place; that goes on to the
+    -- trigger branch below.
     session = nil
-    return
+    if not typed_trigger(buf, key, cursor, prev_key, prev_cursor) then return end
   end
 
   if visible and session then
@@ -197,20 +220,26 @@ pmacs.hook.add("buffer.after-edit", function()
     local prefix = word_prefix_before(buf, cursor)
     if cursor < session.anchor or cursor - #prefix ~= session.anchor then
       close_popup()
+      -- E10a.4: the word died at a `.`, say. Until here that was the
+      -- end of it: this branch returned, the trigger branch below was
+      -- never reached, and `self.` showed nothing until a second
+      -- letter reopened the popup by the word rule. A typed trigger
+      -- character goes on to ask for its list.
+      if not typed_trigger(buf, key, cursor, prev_key, prev_cursor) then return end
+    else
+      if publish(buf, session.anchor, prefix, "incomplete", nil) then
+        -- isIncomplete contract: a partial server response must be
+        -- re-queried as the user keeps typing, not merely re-filtered.
+        local rec = pmacs.lsp.active_attachment()
+        if rec then
+          local ok, incomplete = pcall(pmacs.completion.is_incomplete, rec.server, rec.uri)
+          if ok and incomplete then request_lsp_then_refresh() end
+        end
+      else
+        session = nil -- narrowed to nothing: the session is over
+      end
       return
     end
-    if publish(buf, session.anchor, prefix, "incomplete", nil) then
-      -- isIncomplete contract: a partial server response must be
-      -- re-queried as the user keeps typing, not merely re-filtered.
-      local rec = pmacs.lsp.active_attachment()
-      if rec then
-        local ok, incomplete = pcall(pmacs.completion.is_incomplete, rec.server, rec.uri)
-        if ok and incomplete then request_lsp_then_refresh() end
-      end
-    else
-      session = nil -- narrowed to nothing: the session is over
-    end
-    return
   end
 
   -- Popup closed: the Q#C9 auto-open policy. Same buffer, cursor
@@ -236,6 +265,12 @@ pmacs.hook.add("buffer.after-edit", function()
     if not (ch and rec) then return end
     local ok, fires = pcall(pmacs.completion.should_fire, rec.server, ch)
     if not (ok and fires) then return end
+    -- E10a.4: what the store holds is the server's answer for another
+    -- place, the word before this character as a rule, and with no
+    -- prefix to narrow it every row of it would show here until the
+    -- answer for this place lands. Dropped, so the list that opens is
+    -- the one asked for.
+    pcall(pmacs.completion.clear, rec.server, rec.uri)
     if not publish(buf, cursor, "", "char", ch) then
       session = { key = key, anchor = cursor, pending = true }
     end

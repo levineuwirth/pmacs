@@ -21,6 +21,16 @@ whole. Under one cap a growing register squeezes the rules.
   degradation was accepted. Removed when the daemon carries a session
   identity of its own; until then the acceptance asserts equality only
   where the credential exists, and prints both colors where it does not.
+- **Recenter.** `C-l` (`window.recenter`) moves the daemon's window so
+  that the caret's line is mid-view, and the grid, which paints that
+  window, follows it. The GPU frontend owns its viewport and keeps the
+  caret in view by its own rule; no message tells it to scroll, so
+  `C-l` there changes nothing on screen. Read at E10a.4 (2026-11-22)
+  through the headless probe: the view's first line was 14 before the
+  key and after it, twice. A recenter the frontend made for itself would
+  be a key it answers without the daemon, a dispatch shadow, and was not
+  taken. Removed when the daemon can move a semantic frontend's view,
+  which is E11's `WindowViewport`.
 - **Popup scrolling.** The hover and signature popup (E8) carries the
   server's whole text up to the wire's bound on both frontends, and
   both show at most a fraction of the window and say how many lines a

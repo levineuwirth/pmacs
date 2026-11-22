@@ -178,7 +178,7 @@ pub struct CompletionEditsCarry {
     /// The edits as the server sent them (LSP positions).
     pub raw: Vec<crate::formatting::TextEdit>,
     /// The edits resolved to bytes of the answered-for text; empty
-    /// until [`CompletionResponse::resolve_additional_edits`] runs.
+    /// until [`CompletionResponse::resolve_edits`] runs.
     pub edits: Vec<AdditionalEdit>,
     /// The document the edits address.
     pub uri: Option<std::sync::Arc<str>>,
@@ -188,6 +188,57 @@ pub struct CompletionEditsCarry {
     /// `edits` is not the whole of `raw`; the accept applies nothing
     /// and says so rather than apply a part.
     pub unresolved: bool,
+    /// The item's own `textEdit` as the server sent it (E10a.1): its
+    /// `newText` is what the accept inserts, and its range what the
+    /// accept replaces. An `InsertReplaceEdit`, which this client never
+    /// asks for, is read by its `insert` range.
+    pub raw_main: Option<crate::formatting::TextEdit>,
+    /// `raw_main`'s range resolved to bytes of the answered-for text;
+    /// `None` until [`CompletionResponse::resolve_edits`] runs, and for
+    /// an item without a `textEdit`.
+    pub main: Option<(u64, u64)>,
+    /// Where the caret stood in the answered-for text when the request
+    /// went out. The accept uses `main` only inside the word the
+    /// request was made in: an answer for the word before a `.` stays
+    /// in the store until the next one lands, and its range, carried
+    /// across the `.` typed at its end, would take that word with it.
+    pub requested_at: Option<u64>,
+    /// The item has a `textEdit` whose range lies outside the
+    /// answered-for text: the accept replaces the typed word instead
+    /// and says so.
+    pub main_unresolved: bool,
+}
+
+impl CompletionEditsCarry {
+    /// Whether the item came with a `textEdit` of its own, placed or
+    /// not (E10a.1).
+    #[must_use]
+    pub fn has_main(&self) -> bool {
+        self.raw_main.is_some() || self.main.is_some() || self.main_unresolved
+    }
+
+    /// Whether there is anything for an accept to place: a `textEdit`
+    /// or `additionalTextEdits`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.has_main() && self.edits.is_empty() && !self.unresolved
+    }
+}
+
+/// A completion item's `textEdit` (E10a.1): a `TextEdit`, or the
+/// `insert` range of an `InsertReplaceEdit`. The specification lets a
+/// server send the second only to a client that declared
+/// `insertReplaceSupport`, which this one does not; one sent anyway is
+/// read as an insertion, the range that ends at the request's position.
+fn parse_main_edit(v: &Value) -> Option<crate::formatting::TextEdit> {
+    if let Some(edit) = crate::formatting::TextEdit::from_lsp_value(v) {
+        return Some(edit);
+    }
+    let insert = v.get("insert")?;
+    crate::formatting::TextEdit::from_lsp_value(&serde_json::json!({
+        "range": insert,
+        "newText": v.get("newText")?,
+    }))
 }
 
 /// One completion candidate, parsed from `textDocument/completion`.
@@ -239,6 +290,7 @@ impl CompletionItem {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let raw_main = v.get("textEdit").and_then(parse_main_edit);
         Some(Self {
             label,
             kind,
@@ -249,15 +301,21 @@ impl CompletionItem {
             filter_text,
             carry: CompletionEditsCarry {
                 raw,
+                raw_main,
                 ..CompletionEditsCarry::default()
             },
         })
     }
 
     /// What gets typed into the buffer when the user accepts this
-    /// item. Falls back to `label` per the LSP spec.
+    /// item: its `textEdit`'s `newText` when it has one ("When an edit
+    /// is provided the value of `insertText` is ignored", the
+    /// specification's words), else `insertText`, else the label.
     #[must_use]
     pub fn effective_insert_text(&self) -> &str {
+        if let Some(edit) = &self.carry.raw_main {
+            return &edit.new_text;
+        }
         self.insert_text.as_deref().unwrap_or(&self.label)
     }
 }
@@ -328,22 +386,25 @@ impl CompletionResponse {
 }
 
 impl CompletionResponse {
-    /// Resolve every item's raw `additionalTextEdits` to bytes of the
-    /// text the server answered for, through `resolve` (the manager's
-    /// position codec against that text), and stamp each item with the
-    /// document and the edit number `base` that text was current at
-    /// (E7.4). An edit `resolve` cannot place marks the item
-    /// `unresolved` and leaves its `edits` short, which the accept
-    /// treats as "apply nothing and say so".
-    pub fn resolve_additional_edits(
+    /// Resolve every item's raw `additionalTextEdits` (E7.4) and its
+    /// own `textEdit` (E10a.1) to bytes of the text the server answered
+    /// for, through `resolve` (the manager's position codec against
+    /// that text), and stamp each item with the document, the edit
+    /// number `base` that text was current at and `requested_at`, the
+    /// request's position in it. An additional edit
+    /// `resolve` cannot place marks the item `unresolved` and leaves
+    /// its `edits` short, which the accept treats as "apply nothing and
+    /// say so"; a `textEdit` it cannot place marks it `main_unresolved`.
+    pub fn resolve_edits(
         &mut self,
         uri: &str,
         base: u64,
+        requested_at: Option<u64>,
         resolve: impl Fn(&crate::formatting::TextEdit) -> Option<(u64, u64)>,
     ) {
         let uri: std::sync::Arc<str> = std::sync::Arc::from(uri);
         for item in &mut self.items {
-            if item.carry.raw.is_empty() {
+            if item.carry.raw.is_empty() && item.carry.raw_main.is_none() {
                 continue;
             }
             let mut edits = Vec::with_capacity(item.carry.raw.len());
@@ -358,6 +419,9 @@ impl CompletionResponse {
                     None => unresolved = true,
                 }
             }
+            item.carry.main = item.carry.raw_main.as_ref().and_then(&resolve);
+            item.carry.main_unresolved = item.carry.raw_main.is_some() && item.carry.main.is_none();
+            item.carry.requested_at = requested_at;
             item.carry.edits = edits;
             item.carry.uri = Some(std::sync::Arc::clone(&uri));
             item.carry.base = base;

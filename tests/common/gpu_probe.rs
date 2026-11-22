@@ -65,3 +65,59 @@ pub fn fact<'a>(facts: &'a HashMap<String, String>, key: &str) -> &'a str {
         String::as_str,
     )
 }
+
+/// How long a scripted probe may run before it is killed from here: a
+/// probe's own limit was not always read (E10t.3).
+const SCRIPT_OUTSIDE: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// `pmacs-gpu --headless-probe` under its scripted action (`popup`)
+/// against the daemon at `socket`, attaching with no target and running
+/// `steps` through the production `App`; its report as facts. `None`
+/// when skipped (no `pmacs-gpu` built, or no wgpu adapter), which panics
+/// under `PMACS_REQUIRE_GPU`. Extracted at E10a (D37) for the rows that
+/// read where a window is after a jump, a rename or a closed panel
+/// (`place:<label>`); `tests/e10t_gpu_window_settles.rs` carries the
+/// form this follows.
+pub fn run_script_probe(
+    socket: &Path,
+    label: &str,
+    steps: &str,
+) -> Option<HashMap<String, String>> {
+    let binary = gpu_probe_binary()?;
+    let dir = socket.parent().expect("socket parent");
+    let report = dir.join(format!("{label}.report"));
+    let stderr_path = dir.join(format!("{label}.stderr"));
+    let started = std::time::Instant::now();
+    let mut child = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(socket)
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_TYPE_TEXT", steps)
+        .env("PMACS_GPU_PROBE_ACTION", "popup")
+        .env("PMACS_GPU_PROBE_DEADLINE_MS", "30000")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&stderr_path).expect("probe stderr"))
+        .spawn()
+        .expect("spawn the headless GPU probe");
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the probe") {
+            break status;
+        }
+        if started.elapsed() > SCRIPT_OUTSIDE {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "{label}: the probe was still running at the outside bound, {SCRIPT_OUTSIDE:?}, \
+                 and was killed; its stderr: {:?}",
+                std::fs::read_to_string(&stderr_path).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let output = std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: std::fs::read(&stderr_path).unwrap_or_default(),
+    };
+    probe_facts(&output, &report, label)
+}

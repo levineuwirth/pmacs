@@ -154,6 +154,24 @@ local function merge_env(profile_env, explicit_env)
   return merged
 end
 
+-- E10a.5: where a terminal starts when neither the caller nor the
+-- profile names a directory. In order: the project root of the buffer
+-- the terminal is opened from; that buffer's file's directory, when it
+-- has a file and no project is detected; `$HOME`. Until then the child
+-- always started in `$HOME`, so the first command in a project was a
+-- `cd`.
+local function default_cwd()
+  local buf = pmacs.window.buffer()
+  local ok, path = pcall(function() return buf and buf:path() end)
+  if ok and type(path) == "string" and path ~= "" then
+    local found, proj = pcall(pmacs.project.detect, path)
+    if found and proj and type(proj.root) == "string" then return proj.root end
+    local dir = path:match("^(.+)/[^/]*$")
+    if dir then return dir end
+  end
+  return os.getenv("HOME")
+end
+
 function terminal.open(spec)
   spec = spec or {}
   local resolved = {}
@@ -177,6 +195,9 @@ function terminal.open(spec)
   end
   if resolved.command == nil then
     resolved.command = os.getenv("SHELL") or "/bin/sh"
+  end
+  if resolved.cwd == nil then
+    resolved.cwd = default_cwd()
   end
 
   local buffer = raw_open(resolved)

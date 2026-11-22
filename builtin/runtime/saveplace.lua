@@ -76,6 +76,20 @@ local function restore_active()
   pmacs.editor.set_view_top(e.view_top)
 end
 
+-- E10a.8: the active file's saved place, for the one open the hook
+-- below cannot serve. `pmacs FILE` loads its file while the editor is
+-- being constructed, before the state directory is installed, so
+-- `buffer.after-load` ran with `pmacs.state.available()` false and the
+-- file opened at the top, where `C-x C-f` on the same file opened at
+-- its place. The editor calls this once state is readable
+-- (`install_state_dirs`). Only a caret still where a load leaves it is
+-- moved: an `init.lua` that opened the file and went somewhere keeps
+-- where it went.
+function pmacs.saveplace.restore()
+  if pmacs.editor.cursor() ~= 0 then return end
+  pcall(restore_active)
+end
+
 -- Record on save and on quit; restore on open. before-save /
 -- before-quit are short-circuit hooks — returning nil never vetoes.
 pmacs.hook.add("buffer.before-save", function()

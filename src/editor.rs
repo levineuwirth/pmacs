@@ -1384,7 +1384,9 @@ impl EditorState {
         // `pmacs.state.read` at module load returns nothing every time.
         // `saveplace` and `recentf` never meet that because both read
         // lazily inside functions; zoom must apply with no user action,
-        // which makes it the first eager state consumer.
+        // which makes it the first eager state consumer. (E10a.8: both
+        // did meet it, for the one file opened during construction; see
+        // the end of this function.)
         //
         // Inside `install_state_dirs` rather than beside its two call
         // sites (`prepare_startup` and the daemon) because this is by
@@ -1412,6 +1414,24 @@ impl EditorState {
             .exec()
         {
             eprintln!("pmacs: could not restore the theme: {error}");
+        }
+        // E10a.8: the saved place of a file named on the command line,
+        // and its entry in the recent-files list. `prepare_startup`
+        // opens it during construction, so its `buffer.after-load` ran
+        // before this function and `saveplace` and `recentf` found no
+        // state; here state is readable, for the same reason as the
+        // two above. A session with no file active, the
+        // daemon's among them, has nothing to restore.
+        if let Err(error) = self
+            .lua_host
+            .lua()
+            .load(
+                "if pmacs.saveplace and pmacs.saveplace.restore then pmacs.saveplace.restore() end \
+                 if pmacs.recentf and pmacs.recentf.note_active then pmacs.recentf.note_active() end",
+            )
+            .exec()
+        {
+            eprintln!("pmacs: could not restore the saved place or note the file: {error}");
         }
     }
 
@@ -1941,6 +1961,9 @@ impl EditorState {
         let chord = key_event_to_chord(key);
         {
             let mut core = self.core.borrow_mut();
+            // E10a.7: the error the echo line has shown goes with the
+            // rest of its transient text.
+            self.lua_host.note_user_input(!core.status.is_empty());
             core.status.clear();
             core.active_frontend = frontend_id;
             if core.completion_popup_is_open()
@@ -4053,9 +4076,17 @@ impl EditorState {
                     (core.active_frontend, core.active_buffer_id())
                 };
                 self.core.borrow_mut().command_group_begin(fid, buffer_id);
-                let accepted = self.core.borrow_mut().completion_popup_accept_edits();
+                let main = self.place_completion_main_edit();
+                let accepted = self.core.borrow_mut().completion_popup_accept_edits(main);
                 if let Some(accepted) = accepted {
                     self.apply_completion_additional_edits(&accepted);
+                    // After the extra edits, whose own refusal would
+                    // otherwise be the only thing said.
+                    if accepted.carry.has_main() && !accepted.main_placed {
+                        "completion: the server's range for this item could not be placed at \
+                         the caret, so the typed word was replaced"
+                            .clone_into(&mut self.core.borrow_mut().status);
+                    }
                 }
                 self.core.borrow_mut().command_group_collapse(buffer_id);
                 if pre_revision != self.active_buffer_revision() {
@@ -4064,6 +4095,31 @@ impl EditorState {
                 }
             }
         }
+    }
+
+    /// E10a.1: where the highlighted candidate's own `textEdit` lies in
+    /// the current text. Its range is bytes of the text the server
+    /// answered for, carried across every edit recorded since through
+    /// the semantic-token store's log, as its `additionalTextEdits` are
+    /// (E7.4), with what was typed at the range's start kept inside it,
+    /// and the request's own position carried beside it. `None` for a
+    /// candidate without a `textEdit`, and for a range the log cannot
+    /// place; the accept then replaces the typed word, and the
+    /// dispatcher says so for the second.
+    fn place_completion_main_edit(&self) -> Option<crate::editor_core::PlacedCompletionEdit> {
+        let carry = self.core.borrow().completion_popup_selected_carry()?;
+        let (start, end) = carry.main?;
+        let at = carry.requested_at?;
+        let uri = carry.uri.as_deref()?;
+        let store = self.lsp_manager.borrow().semantic_token_store();
+        let guard = store.lock().expect("semantic token store mutex poisoned");
+        let (start, end, requested_at) =
+            guard.translate_region_since(uri, carry.base, start, end, at)?;
+        Some(crate::editor_core::PlacedCompletionEdit {
+            start,
+            end,
+            requested_at,
+        })
     }
 
     /// E7.4: apply an accepted candidate's `additionalTextEdits` --- an
@@ -7563,9 +7619,10 @@ pub(crate) fn diagnostic_at_point(
 /// (`core.status`), the diagnostic at point (E7d.2, `at_point`),
 /// captured Lua errors, and the in-flight key prefix when a
 /// multi-chord sequence is open. A command's text outranks the
-/// diagnostic, which outranks an unread error: the caret's diagnostic
-/// is what the user is looking at, and the error returns when the
-/// caret leaves it.
+/// diagnostic, which outranks an error: the caret's diagnostic
+/// is what the user is looking at, and an error that has not had its
+/// showing gets it when the caret leaves. An error is shown until the
+/// next key and not again (E10a.7).
 ///
 /// When all are empty, the returned string is empty and the row renders
 /// as blanks.
@@ -7581,13 +7638,18 @@ fn build_status_line(
         line.push_str(&sanitize_single_line(&core.status));
     } else if let Some(diagnostic) = at_point {
         line.push_str(&sanitize_single_line(diagnostic));
-    } else if let Some(msg) = lua_host.unread_error_status_message() {
-        // E5.1: the last error shows while it is unread, and stops once
-        // a window has shown `*errors*` --- a transient trace, where it
-        // used to nag on every idle frame until the next error. Shared
-        // with the semantic `StatusFacts` producer through
+    } else if !core.echo_row_holds_a_prompt()
+        && let Some(msg) = lua_host.unread_error_status_message()
+    {
+        // E5.1, as E10a.7 narrowed it: the last error shows until the
+        // next key after this line has shown it, or until a window has
+        // shown `*errors*`. E5.1 kept it for as long as it was unread,
+        // so it came back whenever this line was otherwise empty.
+        // Shared with the semantic `StatusFacts` producer through
         // `LuaHost::unread_error_status_message`, so both frontends see
-        // the same text and clear together.
+        // the same text and clear together. Not asked while a prompt or
+        // isearch holds the row: `paint_frame` paints that over this
+        // line, and asking counts as showing (E10a.7 fix round 1).
         line.push_str(&msg);
     }
     if !dispatcher.pending().is_empty() {
@@ -9028,6 +9090,138 @@ mod tests {
         );
         assert!(!line.contains('\n'), "status line leaked newline: {line:?}");
         assert!(line.contains("lua: "), "status line: {line}");
+    }
+
+    /// E10a.7: an error is on the echo line until the next key, and
+    /// not again; the unread count the mode line marks stays.
+    #[test]
+    fn an_error_the_echo_line_has_shown_is_not_shown_after_the_next_key() {
+        let mut s = fresh_with(b"one\ntwo\n");
+        let echo = |s: &EditorState| {
+            build_status_line(
+                &s.core.borrow(),
+                &s.lua_host,
+                &KeyDispatcher::new(),
+                None,
+                200,
+            )
+        };
+        let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+        assert!(echo(&s).contains("kapow"), "shown: {}", echo(&s));
+        assert!(echo(&s).contains("kapow"), "and on every frame until a key");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert_eq!(echo(&s), "", "an unrelated key, and the line is clear");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('f'));
+        assert_eq!(echo(&s), "", "and stays clear");
+        assert_eq!(s.lua_host.unread_errors(), 1, "the unread mark stays");
+        let _ = s.lua_host.eval(Some("usercfg"), "error('again')");
+        assert!(echo(&s).contains("again"), "a new error is a new message");
+    }
+
+    /// E10a.7: an error reported while something outranks it is owed
+    /// its showing. Keys pressed before the echo line has shown it do
+    /// not spend it; the first key after it has, does.
+    #[test]
+    fn an_error_outranked_when_reported_is_shown_once_the_line_is_free() {
+        let mut s = fresh_with(b"one\ntwo\n");
+        let echo = |s: &EditorState, at_point: Option<&str>| {
+            build_status_line(
+                &s.core.borrow(),
+                &s.lua_host,
+                &KeyDispatcher::new(),
+                at_point,
+                200,
+            )
+        };
+        let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+        let diagnostic = Some("error: a diagnostic at the caret");
+        assert!(!echo(&s, diagnostic).contains("kapow"), "outranked");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert!(!echo(&s, diagnostic).contains("kapow"), "still outranked");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert!(
+            echo(&s, None).contains("kapow"),
+            "the caret left the diagnostic: the error has its showing"
+        );
+        s.dispatch_key(FrontendId::LOCAL, ctrl('p'));
+        assert_eq!(echo(&s, None), "", "and is not shown again");
+    }
+
+    /// E10a.7 fix round 1: an error reported while a prompt or isearch
+    /// holds the echo row is owed its showing, since the row is painted
+    /// with the prompt; neither the key that closes the prompt nor the
+    /// key that clears that key's own text (`C-g`'s `Quit`) spends it,
+    /// and the next free line shows it once. Before the fix the line
+    /// was asked under the prompt, which counted as showing, and the
+    /// error never reached the screen.
+    #[test]
+    fn an_error_reported_under_a_prompt_is_shown_once_the_prompt_is_gone() {
+        for (opener, what) in [(alt('x'), "the M-x prompt"), (ctrl('s'), "isearch")] {
+            let mut s = fresh_with(b"one\ntwo\n");
+            let echo = |s: &EditorState| {
+                build_status_line(
+                    &s.core.borrow(),
+                    &s.lua_host,
+                    &KeyDispatcher::new(),
+                    None,
+                    200,
+                )
+            };
+            s.dispatch_key(FrontendId::LOCAL, opener);
+            assert!(
+                s.core.borrow().echo_row_holds_a_prompt(),
+                "premise: {what} holds the row"
+            );
+            let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+            assert!(
+                !echo(&s).contains("kapow"),
+                "{what}: the row is the prompt's: {}",
+                echo(&s)
+            );
+            s.dispatch_key(FrontendId::LOCAL, ctrl('g'));
+            assert!(
+                !s.core.borrow().echo_row_holds_a_prompt(),
+                "premise: C-g closed {what}"
+            );
+            if !s.core.borrow().status.is_empty() {
+                assert!(
+                    !echo(&s).contains("kapow"),
+                    "{what}: C-g's own text holds the line first: {}",
+                    echo(&s)
+                );
+            }
+            s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+            assert!(
+                echo(&s).contains("kapow"),
+                "{what}: the line is free, and the error has its showing: {:?}",
+                echo(&s)
+            );
+            s.dispatch_key(FrontendId::LOCAL, ctrl('p'));
+            assert_eq!(echo(&s), "", "{what}: and is not shown again");
+        }
+    }
+
+    /// E10a.7: a command's text over an error is the next message. The
+    /// key that clears the text spends the error with it, so a failure
+    /// said on both channels is not said a second time.
+    #[test]
+    fn an_error_a_commands_text_was_shown_over_goes_with_that_text() {
+        let mut s = fresh_with(b"one\ntwo\n");
+        let echo = |s: &EditorState| {
+            build_status_line(
+                &s.core.borrow(),
+                &s.lua_host,
+                &KeyDispatcher::new(),
+                None,
+                200,
+            )
+        };
+        let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
+        s.core.borrow_mut().status = "the server did not start".into();
+        assert_eq!(echo(&s), "the server did not start");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('n'));
+        assert_eq!(echo(&s), "", "the text and the error went together");
+        assert_eq!(s.lua_host.unread_errors(), 1, "the unread mark stays");
     }
 
     #[test]

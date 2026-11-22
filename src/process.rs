@@ -114,8 +114,11 @@ pub enum TerminalMode {
     /// itself want this default.
     Raw,
     /// Kernel default: line-buffered input, kernel echo on, signal
-    /// characters interpreted (`Ctrl-C` raises `SIGINT`, etc.).
-    /// Useful for line-oriented filters.
+    /// characters interpreted (`Ctrl-C` raises `SIGINT`, etc.), LF
+    /// written as CRLF. Useful for line-oriented filters, and what a
+    /// terminal session starts in (E10a.5): a shell or a full-screen
+    /// program that wants other modes sets them itself, as it does
+    /// under any terminal emulator.
     Canonical,
 }
 

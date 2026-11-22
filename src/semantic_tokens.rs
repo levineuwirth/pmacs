@@ -295,6 +295,30 @@ impl DocumentEdit {
         }
     }
 
+    /// Map a pre-edit position that begins a region typed text joins
+    /// (E10a.1: the start of a completion item's `textEdit` range). An
+    /// insert at the position itself leaves it where it is, so a range
+    /// that was empty at the caret when the request went out grows over
+    /// what is typed there afterwards; [`Self::translate_start`] would
+    /// move it past that text and leave the typed word beside the
+    /// completion. A position inside a replaced range snaps to where
+    /// the replacement begins.
+    pub(crate) fn translate_region_start(self, pos: u64) -> u64 {
+        if self.old_end == self.start {
+            if pos > self.start {
+                pos.saturating_add(self.inserted_len)
+            } else {
+                pos
+            }
+        } else if pos <= self.start {
+            pos
+        } else if pos >= self.old_end {
+            self.shift(pos)
+        } else {
+            self.start
+        }
+    }
+
     fn shift(self, pos: u64) -> u64 {
         pos.saturating_sub(self.old_end - self.start)
             .saturating_add(self.inserted_len)
@@ -877,6 +901,38 @@ impl SemanticTokenStore {
             }
         }
         Some((start, end.max(start)))
+    }
+
+    /// Carry the range of a completion item's own `textEdit`, and the
+    /// position `at` its request was made at, from the text at edit
+    /// number `base` to the current text (E10a.1). As
+    /// [`Self::translate_range_since`], with one difference: an insert
+    /// at the range's start, or at `at`, stays after it
+    /// ([`DocumentEdit::translate_region_start`]), since what is typed
+    /// at the caret after the request is the word the edit replaces.
+    /// `None` on the same conditions.
+    #[must_use]
+    pub fn translate_region_since(
+        &self,
+        uri: &str,
+        base: u64,
+        start: u64,
+        end: u64,
+        at: u64,
+    ) -> Option<(u64, u64, u64)> {
+        let log = self.logs.get(uri)?;
+        if log.dropped_below > base {
+            return None;
+        }
+        let (mut start, mut end, mut at) = (start, end, at);
+        for (seq, edit, _) in &log.edits {
+            if *seq >= base {
+                start = edit.translate_region_start(start);
+                end = edit.translate_end(end);
+                at = edit.translate_region_start(at);
+            }
+        }
+        Some((start, end.max(start), at))
     }
 
     /// Carry a byte range as [`Self::translate_range_since`] does, but

@@ -83,12 +83,26 @@ pmacs.compile.rules = {
   -- framing's spelling), NOT `[^:%s]+` — paths may contain spaces
   -- (PR #113 round-1 finding 3).
   { pattern = "%-%->%s+([^:]+):(%d+):(%d+)", file = 1, line = 2, col = 3 },
-  -- gcc/clang/grep-format: "file:line:col:" (also matches most Unix tools)
-  { pattern = "([^%s:][^:]*):(%d+):(%d+):", file = 1, line = 2, col = 3 },
+  -- A Rust panic's place (E10a.2): "thread 'main' panicked at
+  -- src/a.rs:29:5:", and with the thread's id, which Rust now
+  -- prints, "thread 'm::t' (1491614) panicked at src/a.rs:29:5:".
+  -- Keyed on "panicked at ", so it reads both. Ahead of the generic
+  -- rules: the path follows prose on its line.
+  { pattern = "panicked at ([^:]+):(%d+):(%d+)", file = 1, line = 2, col = 3, severity = "error" },
+  -- gcc/clang/grep-format: "file:line:col:" (also matches most Unix
+  -- tools). Two rules, since E10a.2. A path may hold spaces only when
+  -- it begins its line, as gcc and grep print one, and then it holds
+  -- no quote; anywhere else on a line a path ends at a space. The one
+  -- rule these replace allowed spaces anywhere, so on a panic's line
+  -- it took the path from the test's name on: "t' (1491614) panicked
+  -- at src/a.rs" was opened as a new file.
+  { pattern = "^%s*([^%s:'\"][^:'\"]*):(%d+):(%d+):", file = 1, line = 2, col = 3 },
+  { pattern = "([^%s:]+):(%d+):(%d+):", file = 1, line = 2, col = 3 },
   -- Python tracebacks: 'File "foo.py", line 12'
   { pattern = 'File "([^"]+)", line (%d+)', file = 1, line = 2 },
-  -- generic two-part: "file:line:"
-  { pattern = "([^%s:][^:]*):(%d+):", file = 1, line = 2 },
+  -- generic two-part: "file:line:", by the same two rules.
+  { pattern = "^%s*([^%s:'\"][^:'\"]*):(%d+):", file = 1, line = 2 },
+  { pattern = "([^%s:]+):(%d+):", file = 1, line = 2 },
 }
 
 -- A capture index must be a positive, FINITE integer. Fractional
@@ -986,6 +1000,16 @@ local function visit_error(slot, idx)
   local e = slot.errors[idx]
   if not e then return end
   local path = resolve_error_path(slot, e.file)
+  -- E10a.2: a location that names no file opens nothing and says so.
+  -- `display_file` makes a new buffer for a path that does not exist,
+  -- which is right for find-file and never for a compiler's message:
+  -- the file it read exists. The walk still steps past the entry, or
+  -- `M-g n` would stop at it for good.
+  if not pmacs.fs.canonicalize(path) then
+    slot.err_index = idx
+    pmacs.editor.set_status(slot.label .. ": no such file: " .. path)
+    return
+  end
   pmacs.editor.push_jump()
   -- Bottom-panel arc (Q#BP11b): RET from a compilation PANEL opens the
   -- source in the document target, leaving the panel where it is.

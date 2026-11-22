@@ -4846,7 +4846,9 @@ fn handle_remote_crdt_op(
         // path routes plain typing here instead, and since v15 ships
         // `core.status` over `StatusFacts`, a stale "12 references"
         // would otherwise stay wedged in a semantic frontend's band
-        // through ordinary typing.
+        // through ordinary typing. E10a.7: and with it the error the
+        // band has shown.
+        editor.lua_host.note_user_input(!core.status.is_empty());
         core.status.clear();
         let post_edit_cursor = edit.range.start + edit.inserted_len;
 

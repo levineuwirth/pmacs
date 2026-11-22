@@ -250,6 +250,11 @@ pub enum QuitAction {
         goal_col: Option<u32>,
         /// Saved region, if one was active.
         selection: Option<Selection>,
+        /// Whether the presentation that replaced this one was opened
+        /// with the focus already in the panel (E10a.6). Quitting that
+        /// presentation returns the focus to where it was opened from:
+        /// the panel when this is set, a document window otherwise.
+        from_panel: bool,
         /// The action that was in force *before* this presentation
         /// replaced its predecessor.
         then: Box<QuitAction>,

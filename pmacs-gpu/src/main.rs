@@ -1809,15 +1809,173 @@ fn pump_probe_events(
 /// Press one key through the production dispatch: `<k>` a character,
 /// `C-<k>` with Control held, `ret` Enter.
 fn press_probe_key(app: &mut App, key: &str) {
-    if key == "ret" {
-        app.apply_keyboard(&Key::Named(NamedKey::Enter), None, None);
-    } else if let Some(k) = key.strip_prefix("C-") {
-        app.modifiers = winit::keyboard::ModifiersState::CONTROL;
-        app.apply_keyboard(&Key::Character(k.into()), None, None);
+    let named = match key {
+        "ret" => Some(NamedKey::Enter),
+        // E10a: the keys a walk of the working day presses besides
+        // letters and `C-` chords.
+        "esc" => Some(NamedKey::Escape),
+        "tab" => Some(NamedKey::Tab),
+        "bs" => Some(NamedKey::Backspace),
+        "spc" => Some(NamedKey::Space),
+        _ => None,
+    };
+    if let Some(named) = named {
+        let text = (named == NamedKey::Space).then_some(" ");
+        app.apply_keyboard(&Key::Named(named), text, None);
+    } else if let Some((mods, k)) = probe_chord(key) {
+        // E10a: Ctrl or Alt held, as `C-x` and `M-x` are typed, with no
+        // text. #537: `S-` holds Shift over the character a US layout
+        // gives (`M-S-?` is Alt+Shift+/, the key `?`), and with Shift
+        // alone the text is that character, as winit reports a typed one.
+        app.modifiers = mods;
+        let text = (!mods.control_key() && !mods.alt_key()).then_some(k);
+        app.apply_keyboard(&Key::Character(k.into()), text, None);
         app.modifiers = winit::keyboard::ModifiersState::empty();
     } else {
         app.apply_keyboard(&Key::Character(key.into()), Some(key), None);
     }
+}
+
+/// A probe key's held modifiers and its character: any run of `C-`, `M-`
+/// and `S-` before a non-empty key (`C-x`, `M-S-?`, `S-^`), else `None`.
+fn probe_chord(key: &str) -> Option<(winit::keyboard::ModifiersState, &str)> {
+    use winit::keyboard::ModifiersState;
+    let mut mods = ModifiersState::empty();
+    let mut rest = key;
+    loop {
+        let held = if let Some(r) = rest.strip_prefix("C-") {
+            (ModifiersState::CONTROL, r)
+        } else if let Some(r) = rest.strip_prefix("M-") {
+            (ModifiersState::ALT, r)
+        } else if let Some(r) = rest.strip_prefix("S-") {
+            (ModifiersState::SHIFT, r)
+        } else {
+            break;
+        };
+        if held.1.is_empty() {
+            break;
+        }
+        mods |= held.0;
+        rest = held.1;
+    }
+    (!mods.is_empty()).then_some((mods, rest))
+}
+
+/// E10a.4 --- the completion dropdown as the next frame paints it, under
+/// `label`: whether the daemon's popup is open for the buffer shown, its
+/// rows and the first row's label, the document area's top and bottom,
+/// and, when the dropdown is paintable, its box, the rows it shows and
+/// the top and height of the row its anchor is on, all in the window's
+/// logical pixels. An acceptance places
+/// the box against the caret's row; the probe asserts nothing.
+fn dropdown_probe_facts(state: &mut State, label: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let open = state.completion_open_for_current_buffer();
+    let _ = writeln!(out, "{label}.open={open}");
+    let rows = state.completion.as_ref().map_or(0, |c| c.rows.len());
+    let _ = writeln!(out, "{label}.rows={rows}");
+    let first = state
+        .completion
+        .as_ref()
+        .and_then(|c| c.rows.first())
+        .map_or("", |row| row.label.as_str());
+    let _ = writeln!(out, "{label}.first={first}");
+    state.refresh_completion_buffer();
+    let band_top = document_text_bottom(state.layout.height, state.fm, state.band_inset());
+    let _ = writeln!(out, "{label}.area={TEXT_TOP},{band_top}");
+    let anchor = state.completion_anchor_px();
+    let layout = state
+        .completion_dropdown_layout()
+        .zip(state.completion_dropdown_rect());
+    let Some(((_first, count, _ax, _top), (x, y, w))) = layout else {
+        let _ = writeln!(out, "{label}.box=none");
+        return;
+    };
+    let h = count as f32 * state.fm.mb_drop_row_height();
+    let _ = writeln!(out, "{label}.box={x},{y},{w},{h}");
+    let _ = writeln!(out, "{label}.shown={count}");
+    if let Some((_x, top, line_height)) = anchor {
+        let _ = writeln!(out, "{label}.anchor_row={top},{line_height}");
+    }
+}
+
+/// E10a --- where the window is, under `label`: the band's name for the
+/// buffer it shows, how many bytes of it the window holds, its own
+/// caret as a byte and as the 1-based line and column of that text
+/// (`none` while the daemon has named no caret in this buffer), the
+/// first line of its view, and the band's message. What a person reads off the window after a jump, a rename
+/// or a closed panel, for an acceptance to compare; the probe asserts
+/// nothing.
+fn place_probe_facts(state: &State, label: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let facts = state.status_facts.as_ref();
+    let _ = writeln!(
+        out,
+        "{label}.name={}",
+        facts.map_or("", |f| f.name.as_str())
+    );
+    let _ = writeln!(
+        out,
+        "{label}.status={:?}",
+        facts.and_then(|f| f.message.as_deref()).unwrap_or_default()
+    );
+    // E10a.6: the open minibuffer's prompt, empty when none is open, so
+    // a walk can tell a key that reached the editor from one that went
+    // to a terminal's child.
+    let _ = writeln!(
+        out,
+        "{label}.prompt={:?}",
+        state.minibuffer.as_ref().map_or("", |m| m.prompt.as_str())
+    );
+    // E10a.7 fix round 1: the providers' segments on the band's right,
+    // the unread error mark (`!N`) among them, so a row can tell that
+    // an error was raised while the message slot showed something else.
+    let _ = writeln!(
+        out,
+        "{label}.right={:?}",
+        state
+            .current_statusline_segments()
+            .map_or_else(String::new, |s| s
+                .right
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "))
+    );
+    // E10a.6: the panel band's retained frame, whether it has the focus
+    // and the text of its cells. `name` above is the document's even
+    // while a panel has the keys.
+    let panel = state.panel.frame.as_ref();
+    let _ = writeln!(
+        out,
+        "{label}.panel={}",
+        panel.map_or("absent", |frame| if frame.focused {
+            "focused"
+        } else {
+            "unfocused"
+        })
+    );
+    let _ = writeln!(
+        out,
+        "{label}.panel_text={:?}",
+        panel.map_or_else(String::new, |frame| grid_probe_text(&frame.cells))
+    );
+    let _ = writeln!(out, "{label}.scroll_top={}", state.scroll_top);
+    let _ = writeln!(out, "{label}.text_len={}", state.current_text.len());
+    let caret = state
+        .own_cursor
+        .filter(|own| state.current_buffer_id == Some(own.buffer_id))
+        .and_then(|own| usize::try_from(own.byte).ok())
+        .and_then(|byte| state.current_text.get(..byte).map(|before| (byte, before)));
+    let Some((byte, before)) = caret else {
+        let _ = writeln!(out, "{label}.caret=none");
+        return;
+    };
+    let line = before.matches('\n').count() + 1;
+    let col = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
+    let _ = writeln!(out, "{label}.caret={byte}");
+    let _ = writeln!(out, "{label}.line={line}");
+    let _ = writeln!(out, "{label}.col={col}");
 }
 
 /// E10y.2 --- how long the popup probe's `face:<name>` step waits for
@@ -1984,6 +2142,12 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// for it and the time since attach (E10t); `answer:<label>` writes how
 /// many of the session's events the daemon has said it handled, as the
 /// window holds it (E10z.1), and whether the minibuffer is open (E10z.2);
+/// `dropdown:<label>` writes the completion dropdown as it would be
+/// painted ([`dropdown_probe_facts`], E10a.4);
+/// `place:<label>` writes where the window is ([`place_probe_facts`]),
+/// `shows:<name>` waits up to five seconds for the band to name that
+/// buffer with the window's caret in it, and `type:<text>` types `text`
+/// a key at a time, `_` for a space (E10a);
 /// `frame:<label>` writes the composited frame,
 /// through the window's own render path, beside the report as
 /// `<report>.<label>.ppm` and the window's title as `<label>.title` (E10c.6, for a person to look at). A step that
@@ -2183,6 +2347,53 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                     let _ = writeln!(out, "{arg}.at_ms={}", started.elapsed().as_millis());
                 }
                 Ok(true)
+            }
+            "dropdown" => {
+                // E10a.4: the completion dropdown as it would be painted.
+                if let Some(state) = app.state.as_mut() {
+                    dropdown_probe_facts(state, arg, &mut out);
+                }
+                Ok(true)
+            }
+            "place" => {
+                // E10a: where the window is.
+                if let Some(state) = app.state.as_ref() {
+                    place_probe_facts(state, arg, &mut out);
+                }
+                Ok(true)
+            }
+            "shows" => {
+                // E10a: wait up to five seconds for the band to name the
+                // buffer `arg`, with a caret of the window's own in it: a
+                // visit's buffer arrives a frame or more after its key.
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                pump_probe_events(&mut app, &rx, until, |app| {
+                    app.state.as_ref().is_some_and(|s| {
+                        s.status_facts.as_ref().is_some_and(|f| f.name == arg)
+                            && s.own_cursor
+                                .is_some_and(|own| s.current_buffer_id == Some(own.buffer_id))
+                    })
+                })
+            }
+            "type" => {
+                // E10a: `arg` typed a key at a time, each settled as
+                // `key:` settles one, `_` standing for a space (a step
+                // holds none).
+                let mut typed = Ok(true);
+                for ch in arg.chars() {
+                    let key = if ch == '_' {
+                        "spc".to_owned()
+                    } else {
+                        ch.to_string()
+                    };
+                    press_probe_key(&mut app, &key);
+                    let until = std::time::Instant::now() + std::time::Duration::from_millis(60);
+                    typed = pump_probe_events(&mut app, &rx, until, |_| false).map(|_| true);
+                    if typed.is_err() {
+                        break;
+                    }
+                }
+                typed
             }
             "answer" => {
                 // E10z.1: the count of this session's events the daemon
@@ -10167,6 +10378,158 @@ mod input_routing_tests {
             matches!(step.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
                 if k.key == ProtocolKey::Char('€') && k.mods == Modifiers::NONE),
             "AltGr-e must leave as the plain €: {:?}",
+            step.outbound
+        );
+    }
+
+    /// #537 --- a character key leaves without the Shift that produced
+    /// it, as winit reports each physical chord on a standard US layout
+    /// (the logical key and the text the layout's shifted character, the
+    /// unmodified key the unshifted one). Every documented chord on a
+    /// shifted character, and the prefix rows whose second key is one
+    /// (`C-x ^`, `C-c @ C-c`: a prefix pending, so `dispatch_idle` is
+    /// false), read off the wire. At `176a143` each left with `S-`
+    /// (`M-S-?`, `C-S-_`, `S-^` after `C-x`), which `Chord::new` keeps on
+    /// a non-letter, so no binding was found.
+    #[test]
+    fn e10a_f2_a_shifted_character_leaves_without_its_shift() {
+        let shift = ModifiersState::SHIFT;
+        let (alt, ctrl) = (ModifiersState::ALT | shift, ModifiersState::CONTROL | shift);
+        let (pa, pc, pn) = (Modifiers::ALT, Modifiers::CTRL, Modifiers::NONE);
+        let rows: [(&str, ModifiersState, &str, &str, bool, Modifiers); 15] = [
+            ("M-?", alt, "?", "/", true, pa),
+            ("M-<", alt, "<", ",", true, pa),
+            ("M->", alt, ">", ".", true, pa),
+            ("M-%", alt, "%", "5", true, pa),
+            ("M-!", alt, "!", "1", true, pa),
+            ("M-^", alt, "^", "6", true, pa),
+            ("M-{", alt, "{", "[", true, pa),
+            ("M-}", alt, "}", "]", true, pa),
+            ("C-_", ctrl, "_", "-", true, pc),
+            ("C-?", ctrl, "?", "/", true, pc),
+            ("C-+", ctrl, "+", "=", true, pc),
+            ("C-x ^", shift, "^", "6", false, pn),
+            ("C-x C-^", ctrl, "^", "6", false, pc),
+            ("C-c @", shift, "@", "2", false, pn),
+            // dired's `^`: no prefix, and a generated buffer has no
+            // CRDT document to type into optimistically, so the key
+            // round-trips, as it does here.
+            ("dired ^", shift, "^", "6", true, pn),
+        ];
+        let mut wrong = Vec::new();
+        for (chord, mods, logical, own, idle, want) in rows {
+            let mut h = EffectHarness::new();
+            h.app.state.as_mut().expect("harness state").dispatch_idle = idle;
+            h.app.modifiers = mods;
+            let step = h.feed_keyboard_from(
+                &Key::Character(logical.into()),
+                Some(logical),
+                Some(&Key::Character(own.into())),
+            );
+            let want_key = ProtocolKey::Char(logical.chars().next().expect("a character"));
+            let right = matches!(step.outbound.as_slice(), [pmacs_protocol::FrontendEvent::Key(k)]
+                if k.key == want_key && k.mods == want);
+            if !right {
+                wrong.push(format!("{chord}: {:?}", step.outbound));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "each chord leaves as the layout's character without Shift: {wrong:#?}"
+        );
+    }
+
+    /// #537's guards: what a dropped Shift must not change. A Ctrl+Shift
+    /// letter is the chord `C-A` either way (`Chord::new` strips Shift
+    /// from a letter); `S-<left>` and `BackTab` keep their Shift; a typed
+    /// `?` or `^` is the character, no chord; `AltGr`-e is the plain `€`;
+    /// and `C-M-%` (Ctrl+Alt+Shift+5) is taken for `AltGr` layout text by
+    /// the E7b.3 rule and leaves as the character `%`, not the chord, as
+    /// it did at `176a143`: #538, not fixed here.
+    #[test]
+    fn e10a_f2_named_keys_keep_shift_and_text_and_altgr_are_unchanged() {
+        let shift = ModifiersState::SHIFT;
+        let only = |step: &Step| match step.outbound.as_slice() {
+            [pmacs_protocol::FrontendEvent::Key(k)] => Some((k.key, k.mods)),
+            _ => None,
+        };
+
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | shift;
+        let step = h.feed_keyboard_from(
+            &Key::Character("A".into()),
+            Some("A"),
+            Some(&Key::Character("a".into())),
+        );
+        assert!(
+            matches!(only(&step), Some((ProtocolKey::Char('A'), m))
+                if m.contains(Modifiers::CTRL) && !m.contains(Modifiers::ALT)),
+            "Ctrl+Shift+a is C-A: {:?}",
+            step.outbound
+        );
+
+        for (named, want) in [
+            (NamedKey::ArrowLeft, ProtocolKey::Left),
+            (NamedKey::Tab, ProtocolKey::BackTab),
+        ] {
+            let mut h = EffectHarness::new();
+            h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+            h.app.modifiers = shift;
+            let step = h.feed_keyboard_from(&Key::Named(named), None, None);
+            assert_eq!(
+                only(&step),
+                Some((want, Modifiers::SHIFT)),
+                "Shift+{named:?} keeps its Shift: {:?}",
+                step.outbound
+            );
+        }
+
+        for (typed, own) in [("?", "/"), ("^", "6")] {
+            let mut h = EffectHarness::new();
+            h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+            h.app.modifiers = shift;
+            let step = h.feed_keyboard_from(
+                &Key::Character(typed.into()),
+                Some(typed),
+                Some(&Key::Character(own.into())),
+            );
+            let want = ProtocolKey::Char(typed.chars().next().expect("a character"));
+            assert!(
+                matches!(only(&step), Some((k, m)) if k == want
+                    && !m.contains(Modifiers::CTRL) && !m.contains(Modifiers::ALT)),
+                "a typed {typed} is the character: {:?}",
+                step.outbound
+            );
+        }
+
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | ModifiersState::ALT;
+        let step = h.feed_keyboard_from(
+            &Key::Character("€".into()),
+            Some("€"),
+            Some(&Key::Character("e".into())),
+        );
+        assert_eq!(
+            only(&step),
+            Some((ProtocolKey::Char('€'), Modifiers::NONE)),
+            "AltGr-e is the plain €: {:?}",
+            step.outbound
+        );
+
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        h.app.modifiers = ModifiersState::CONTROL | ModifiersState::ALT | shift;
+        let step = h.feed_keyboard_from(
+            &Key::Character("%".into()),
+            Some("%"),
+            Some(&Key::Character("5".into())),
+        );
+        assert!(
+            matches!(only(&step), Some((ProtocolKey::Char('%'), m))
+                if !m.contains(Modifiers::CTRL) && !m.contains(Modifiers::ALT)),
+            "C-M-% leaves as the text %, as at 176a143 (#538): {:?}",
             step.outbound
         );
     }
@@ -21315,7 +21678,23 @@ fn translate_key(
             // computed offset.
             named => named_function_key(*named).map(ProtocolKey::F)?,
         },
-        Key::Character(s) => ProtocolKey::Char(s.chars().next()?),
+        // #537 --- a character is the one the layout already produced, so
+        // the Shift that produced it is spent: Alt+Shift+/ on a US layout
+        // is `?` with Alt, `M-?`, as a terminal and Emacs read it, and not
+        // `M-S-?`, which nothing binds; a `^` typed after `C-x` is `^`,
+        // not `S-^`. `Chord::new` strips Shift from letters alone, having
+        // no layout to know which other characters it made. Named keys
+        // keep it (`S-<left>`, BackTab above). A Super chord keeps it too:
+        // it belongs to the OS, and on macOS Cmd-Shift-Z must not become
+        // one of the six Cmd chords `translate_cmd_chord` turns into Ctrl.
+        Key::Character(s) => {
+            let ch = s.chars().next()?;
+            if !pmods.contains(Modifiers::META) {
+                let spent = Modifiers::from_bits_truncate(pmods.bits() & !Modifiers::SHIFT.bits());
+                return Some((ProtocolKey::Char(ch), spent));
+            }
+            ProtocolKey::Char(ch)
+        }
         _ => return None,
     };
     Some((pkey, pmods))

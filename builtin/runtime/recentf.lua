@@ -49,6 +49,15 @@ local function record_active()
   pcall(record, pmacs.editor.file_path())
 end
 
+-- E10a.8: the active file, for the open the hooks below cannot serve.
+-- `pmacs FILE` loads its file before the state directory is installed,
+-- so `buffer.after-load` found no state and the file never entered the
+-- list; the editor calls this once state is readable, beside
+-- `pmacs.saveplace.restore` (`install_state_dirs`).
+function pmacs.recentf.note_active()
+  record_active()
+end
+
 -- First open and every re-visit of an already-open file refresh MRU.
 pmacs.hook.add("buffer.after-load", record_active)
 pmacs.hook.add("buffer.after-switch", record_active)

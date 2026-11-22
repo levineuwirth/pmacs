@@ -245,10 +245,11 @@ impl Frontend {
         // terminal does. Letting the terminal apply layout-aware shift
         // translation is correct; receiving the post-shift character
         // is what every typing-driven path (self-insert, minibuffer,
-        // search) expects. `DISAMBIGUATE_ESCAPE_CODES` alone still
-        // gives us the C-i/Tab and C-m/Enter disambiguation we want.
-        let kitty_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
-        if queue!(me.out, PushKeyboardEnhancementFlags(kitty_flags)).is_ok() {
+        // search) expects. `DISAMBIGUATE_ESCAPE_CODES` gives us the
+        // C-i/Tab and C-m/Enter disambiguation we want; with it a chord
+        // is sent as its unshifted key, and `REPORT_ALTERNATE_KEYS` adds
+        // the shifted one (#537, [`kitty_flags`]).
+        if queue!(me.out, PushKeyboardEnhancementFlags(kitty_flags())).is_ok() {
             me.keyboard_enhancement = true;
         }
 
@@ -909,7 +910,7 @@ impl Frontend {
             queue!(
                 self.out,
                 PopKeyboardEnhancementFlags,
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+                PushKeyboardEnhancementFlags(kitty_flags()),
             )?;
         }
         self.out.flush()
@@ -1238,6 +1239,22 @@ impl PaintLedger {
 /// E10g.5: write a frame for a terminal showing `depth` colors: at 16,
 /// reduced to the sixteen first ([`crate::color_depth::reduce_spans_to_16`]);
 /// otherwise as sent.
+/// The kitty keyboard protocol's flags the TUI asks for, at start and when it
+/// takes the terminal back from a shell (`retake_terminal`); `lend_terminal`
+/// and `teardown` pop them.
+///
+/// `DISAMBIGUATE_ESCAPE_CODES` sends a chord as its unshifted key with Shift
+/// set: Alt+Shift+/ on a US layout is `CSI 47;4u`, which crossterm reads as
+/// `/` with Alt and Shift, so the keymap saw `M-S-/` where a legacy terminal
+/// sends `ESC ?`, `M-?`. `REPORT_ALTERNATE_KEYS` adds the shifted key
+/// (`CSI 47:63;4u`), which crossterm takes in its place, clearing Shift (#537;
+/// foot 1.28 measured under both). A letter is the same chord either way
+/// (`C-A`), and a key typed with Shift alone is still sent as its text.
+fn kitty_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+}
+
 fn write_frame<W: Write>(
     w: &mut W,
     spans: &[DiffSpan],
