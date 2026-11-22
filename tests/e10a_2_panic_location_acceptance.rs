@@ -457,7 +457,13 @@ fn e10a_2_a_location_that_names_no_file_says_so_and_opens_no_buffer() {
 
     next_error(&mut s);
     assert_eq!(buffer_names(&s), before, "no buffer is opened");
-    assert_eq!(place(&s).0, lib, "the window still shows the source");
+    // Compared resolved: the source was opened by the path as given, and
+    // on macOS the temporary directory is under the `/var` symlink.
+    assert_eq!(
+        canonical(Path::new(&place(&s).0)),
+        lib,
+        "the window still shows the source"
+    );
     assert!(
         status(&s).contains("no such file") && status(&s).contains("gone/never.rs"),
         "the echo line says which file is missing: {:?}",

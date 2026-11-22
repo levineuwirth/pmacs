@@ -195,8 +195,14 @@ fn edits_in_other() -> serde_json::Value {
     serde_json::json!([edit(1, 9, 14), edit(1, 30, 35)])
 }
 
+/// The file's URI as the editor spells it to the server: the path as
+/// the editor opened it, not resolved. A server answers an open document
+/// by the URI the client gave it, so the fake's plan does too. Resolved,
+/// as it was first written, the plan named `/private/var/…` on macOS,
+/// whose temporary directory is under the `/var` symlink, and the edit
+/// went to a second buffer for that spelling.
 fn uri(path: &Path) -> String {
-    format!("file://{}", std::fs::canonicalize(path).unwrap().display())
+    format!("file://{}", path.display())
 }
 
 /// `a.rs` and `b.rs` in a fresh directory, and the plan file the fake
