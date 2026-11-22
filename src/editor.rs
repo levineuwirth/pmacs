@@ -1384,7 +1384,9 @@ impl EditorState {
         // `pmacs.state.read` at module load returns nothing every time.
         // `saveplace` and `recentf` never meet that because both read
         // lazily inside functions; zoom must apply with no user action,
-        // which makes it the first eager state consumer.
+        // which makes it the first eager state consumer. (E10a.8: both
+        // did meet it, for the one file opened during construction; see
+        // the end of this function.)
         //
         // Inside `install_state_dirs` rather than beside its two call
         // sites (`prepare_startup` and the daemon) because this is by
@@ -1412,6 +1414,24 @@ impl EditorState {
             .exec()
         {
             eprintln!("pmacs: could not restore the theme: {error}");
+        }
+        // E10a.8: the saved place of a file named on the command line,
+        // and its entry in the recent-files list. `prepare_startup`
+        // opens it during construction, so its `buffer.after-load` ran
+        // before this function and `saveplace` and `recentf` found no
+        // state; here state is readable, for the same reason as the
+        // two above. A session with no file active, the
+        // daemon's among them, has nothing to restore.
+        if let Err(error) = self
+            .lua_host
+            .lua()
+            .load(
+                "if pmacs.saveplace and pmacs.saveplace.restore then pmacs.saveplace.restore() end \
+                 if pmacs.recentf and pmacs.recentf.note_active then pmacs.recentf.note_active() end",
+            )
+            .exec()
+        {
+            eprintln!("pmacs: could not restore the saved place or note the file: {error}");
         }
     }
 
