@@ -1894,6 +1894,32 @@ fn place_probe_facts(state: &State, label: &str, out: &mut String) {
         "{label}.status={:?}",
         facts.and_then(|f| f.message.as_deref()).unwrap_or_default()
     );
+    // E10a.6: the open minibuffer's prompt, empty when none is open, so
+    // a walk can tell a key that reached the editor from one that went
+    // to a terminal's child.
+    let _ = writeln!(
+        out,
+        "{label}.prompt={:?}",
+        state.minibuffer.as_ref().map_or("", |m| m.prompt.as_str())
+    );
+    // E10a.6: the panel band's retained frame, whether it has the focus
+    // and the text of its cells. `name` above is the document's even
+    // while a panel has the keys.
+    let panel = state.panel.frame.as_ref();
+    let _ = writeln!(
+        out,
+        "{label}.panel={}",
+        panel.map_or("absent", |frame| if frame.focused {
+            "focused"
+        } else {
+            "unfocused"
+        })
+    );
+    let _ = writeln!(
+        out,
+        "{label}.panel_text={:?}",
+        panel.map_or_else(String::new, |frame| grid_probe_text(&frame.cells))
+    );
     let _ = writeln!(out, "{label}.scroll_top={}", state.scroll_top);
     let _ = writeln!(out, "{label}.text_len={}", state.current_text.len());
     let caret = state

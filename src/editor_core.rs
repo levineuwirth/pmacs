@@ -422,6 +422,11 @@ pub enum QuitOutcome {
         target: WindowId,
         /// The buffer now displayed there.
         buffer_id: BufferId,
+        /// Whether the presentation just closed was opened from the
+        /// panel itself ([`QuitAction::Restore`]'s `from_panel`,
+        /// E10a.6): the focus stays in the panel when it was, and goes
+        /// back to a document window when it was not.
+        from_panel: bool,
     },
 }
 
@@ -3957,6 +3962,7 @@ impl EditorCore {
                 view_top,
                 goal_col,
                 selection,
+                from_panel,
                 then,
             } => {
                 self.install_buffer_in_window(target, buffer_id)?;
@@ -3980,7 +3986,11 @@ impl EditorCore {
                 window.view_top = view_top;
                 window.goal_col = goal_col;
                 window.selection = selection.filter(|sel| sel.anchor <= len);
-                Ok(QuitOutcome::Restored { target, buffer_id })
+                Ok(QuitOutcome::Restored {
+                    target,
+                    buffer_id,
+                    from_panel,
+                })
             }
         }
     }
@@ -4987,7 +4997,13 @@ impl EditorCore {
         }
 
         // Reusing the existing slot. Capture the outgoing presentation
-        // BEFORE the install resets the window's view state.
+        // BEFORE the install resets the window's view state. E10a.6:
+        // and where the focus is as the new one opens, which is still
+        // where the user asked for it from; selecting it is Phase 2's.
+        let from_panel = self
+            .views
+            .get(&fid)
+            .is_some_and(|view| view.active == placement.target);
         let prior = {
             let window = self
                 .windows
@@ -5001,6 +5017,7 @@ impl EditorCore {
                 view_top: window.view_top,
                 goal_col: window.goal_col,
                 selection: window.selection,
+                from_panel,
                 then: Box::new(
                     window
                         .params
