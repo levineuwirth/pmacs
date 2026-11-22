@@ -1836,6 +1836,44 @@ fn press_probe_key(app: &mut App, key: &str) {
     }
 }
 
+/// E10a.4 --- the completion dropdown as the next frame paints it, under
+/// `label`: whether the daemon's popup is open for the buffer shown, its
+/// rows and the first row's label, the document area's top and bottom,
+/// and, when the dropdown is paintable, its box, the rows it shows and
+/// the top and height of the row its anchor is on, all in the window's
+/// logical pixels. An acceptance places
+/// the box against the caret's row; the probe asserts nothing.
+fn dropdown_probe_facts(state: &mut State, label: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let open = state.completion_open_for_current_buffer();
+    let _ = writeln!(out, "{label}.open={open}");
+    let rows = state.completion.as_ref().map_or(0, |c| c.rows.len());
+    let _ = writeln!(out, "{label}.rows={rows}");
+    let first = state
+        .completion
+        .as_ref()
+        .and_then(|c| c.rows.first())
+        .map_or("", |row| row.label.as_str());
+    let _ = writeln!(out, "{label}.first={first}");
+    state.refresh_completion_buffer();
+    let band_top = document_text_bottom(state.layout.height, state.fm, state.band_inset());
+    let _ = writeln!(out, "{label}.area={TEXT_TOP},{band_top}");
+    let anchor = state.completion_anchor_px();
+    let layout = state
+        .completion_dropdown_layout()
+        .zip(state.completion_dropdown_rect());
+    let Some(((_first, count, _ax, _top), (x, y, w))) = layout else {
+        let _ = writeln!(out, "{label}.box=none");
+        return;
+    };
+    let h = count as f32 * state.fm.mb_drop_row_height();
+    let _ = writeln!(out, "{label}.box={x},{y},{w},{h}");
+    let _ = writeln!(out, "{label}.shown={count}");
+    if let Some((_x, top, line_height)) = anchor {
+        let _ = writeln!(out, "{label}.anchor_row={top},{line_height}");
+    }
+}
+
 /// E10a --- where the window is, under `label`: the band's name for the
 /// buffer it shows, how many bytes of it the window holds, its own
 /// caret as a byte and as the 1-based line and column of that text
@@ -2038,6 +2076,8 @@ fn popup_probe_facts(state: &mut State, label: &str, out: &mut String) {
 /// for it and the time since attach (E10t); `answer:<label>` writes how
 /// many of the session's events the daemon has said it handled, as the
 /// window holds it (E10z.1), and whether the minibuffer is open (E10z.2);
+/// `dropdown:<label>` writes the completion dropdown as it would be
+/// painted ([`dropdown_probe_facts`], E10a.4);
 /// `place:<label>` writes where the window is ([`place_probe_facts`]),
 /// `shows:<name>` waits up to five seconds for the band to name that
 /// buffer with the window's caret in it, and `type:<text>` types `text`
@@ -2239,6 +2279,13 @@ fn run_popup_probe(socket: &Path, report: &Path, script: &str) -> i32 {
                         state.status_facts.as_ref().map_or("", |f| f.name.as_str())
                     );
                     let _ = writeln!(out, "{arg}.at_ms={}", started.elapsed().as_millis());
+                }
+                Ok(true)
+            }
+            "dropdown" => {
+                // E10a.4: the completion dropdown as it would be painted.
+                if let Some(state) = app.state.as_mut() {
+                    dropdown_probe_facts(state, arg, &mut out);
                 }
                 Ok(true)
             }

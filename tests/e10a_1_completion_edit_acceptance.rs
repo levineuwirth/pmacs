@@ -656,16 +656,19 @@ fn e10a_1_a_range_that_does_not_hold_the_caret_replaces_the_typed_word_and_says_
 }
 
 /// The store keeps an answer until the next one lands. The user types a
-/// word the server's items do not match, so no popup shows, then a `.`:
-/// the popup opens at once on what the store holds, the answer for the
-/// word, while the request made at the `.` is unanswered. That answer's
-/// range is the word, and a range's end follows text typed at it, so
-/// carried to now it reads `entries.` and holds the caret. Accepted in
-/// that moment, the item must not take the word and the dot with it:
-/// its request was made before the place this session completes, so
-/// its range is not used, and the echo line says so.
+/// word the server's items do not match, so no popup shows, then a
+/// space and the start of another word: the popup opens at once on what
+/// the store holds, the answer for the first word, while the request
+/// made for the second is unanswered. That answer's range is the first
+/// word, and a range's end follows text typed at it, so carried to now
+/// it reads `entries en` and holds the caret. Accepted in that moment,
+/// the item must not take the first word with it: its request was made
+/// before the place this session completes, so its range is not used,
+/// and the echo line says so. (Until E10a.4 this row typed a `.` where
+/// it types a space; a trigger character now drops the stored answer
+/// before it opens the popup.)
 #[test]
-fn e10a_1_an_answer_for_the_word_before_the_dot_does_not_take_that_word() {
+fn e10a_1_an_answer_for_the_word_before_does_not_take_that_word() {
     let dir = temp_dir("stale");
     let line = "        self.entri";
     let plan = one_item(&serde_json::json!({
@@ -691,18 +694,19 @@ fn e10a_1_an_answer_for_the_word_before_the_dot_does_not_take_that_word() {
         !popup_visible(&s),
         "positive control: the item does not match the word, so nothing shows"
     );
-    // The dot, and no tick: the request it sends is unanswered.
-    type_str(&mut s, ".");
+    // A space and two letters, and no tick: the request the second
+    // word sends is unanswered.
+    type_str(&mut s, " en");
     assert_eq!(
         selected_label(&s).as_deref(),
         Some("entrance"),
-        "positive control: the popup shows the earlier answer at the dot"
+        "positive control: the popup shows the earlier answer at the new word"
     );
     press(&mut s, KeyCode::Enter);
     assert_eq!(
         buffer_text(&s),
-        whole("        self.entries.entrance"),
-        "the word and the dot are as typed; the item's text is at the caret"
+        whole("        self.entries entrance"),
+        "the first word is as typed; the item's text replaces the second"
     );
     assert!(
         status(&s).starts_with("completion: the server's range for this item could not be placed"),
