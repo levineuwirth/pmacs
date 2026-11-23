@@ -2806,6 +2806,73 @@ impl From<loro::LoroEncodeError> for BufferError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E10v.7: the daemon's edits inside an edit group, which close every
+    /// other open group, are one undo step together, and undoing it hands
+    /// back the place the group was opened with. A frontend's undo takes
+    /// the daemon's newest group (the recency pick), as it takes a
+    /// language server's rename applied in an answer's callback.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn e10v_7_daemon_edits_in_an_edit_group_are_one_undo_with_its_place() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*group*", b"one two three");
+        b.upgrade_to_crdt(7).expect("upgrade");
+        let place = UndoPlace {
+            caret: 5,
+            view_top: 0,
+        };
+        b.edit_group_begin(UndoSource::Daemon, Some(place));
+        b.apply_edit(EditOp::Insert {
+            pos: 13,
+            bytes: b"!",
+        })
+        .unwrap();
+        b.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"> ",
+        })
+        .unwrap();
+        b.edit_group_end();
+        assert_eq!(rope_string(&b), "> one two three!");
+        let frontend = UndoSource::Frontend(crate::protocol::FrontendId::LOCAL);
+        b.undo_for(frontend).expect("undo");
+        assert_eq!(
+            rope_string(&b),
+            "one two three",
+            "one undo takes both edits"
+        );
+        assert_eq!(b.take_undone_place(), Some(place));
+    }
+
+    /// E10v.7, v0.1 mode: the entries an edit group pushed collapse into
+    /// one, which carries the place.
+    #[test]
+    fn e10v_7_an_edit_group_is_one_v01_undo_with_its_place() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "*group*", b"one two three");
+        let place = UndoPlace {
+            caret: 4,
+            view_top: 2,
+        };
+        b.edit_group_begin(UndoSource::Daemon, Some(place));
+        b.apply_edit(EditOp::Insert {
+            pos: 13,
+            bytes: b"!",
+        })
+        .unwrap();
+        b.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"> ",
+        })
+        .unwrap();
+        b.edit_group_end();
+        b.undo().expect("undo");
+        assert_eq!(
+            rope_string(&b),
+            "one two three",
+            "one undo takes both edits"
+        );
+        assert_eq!(b.take_undone_place(), Some(place));
+    }
     use crate::view::View;
     use std::sync::Mutex;
 
