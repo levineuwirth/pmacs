@@ -773,3 +773,90 @@ fn r1_p9_lsp_restart_from_the_second_buffer_reopens_both() {
     );
     assert_eq!(ao[0]["text"].as_str(), Some(a_text.as_str()));
 }
+
+// ---------------------------------------------------------------------------
+// E10v.3: the order against a request from a coroutine
+// ---------------------------------------------------------------------------
+
+/// Low 3, E10v.3's ordering witness. A coroutine asks a hover on every
+/// tick; coroutines resume in `tick_async` ahead of the LSP event drain
+/// (the wrapper of `pmacs._async.tick` in `builtin/runtime/lsp.lua` runs
+/// the prior tick, then the drain), which is where the `restarting` and
+/// `initialized` events are read. The reopen is sent on `restarting`,
+/// while the new process is starting, so the manager holds it and sends
+/// it right after `initialized`, before it will send any request: the
+/// replacement receives the document before the coroutine's hover. With
+/// the reopen moved into the `initialized` handler (the handoff's own
+/// plant, which its suite did not bite) the hover reaches it first.
+#[test]
+fn r1_p6_a_restarted_server_gets_its_document_before_a_coroutines_request() {
+    let d = dir("order");
+    let a = d.join("a.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let sink = d.join("messages.jsonl");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!(
+            "PMACS_FAKE_LSP_MODE = 'crashonmarker', PMACS_FAKE_LSP_ABORT_ONCE = '{}', \
+             PMACS_FAKE_LSP_MESSAGE_SINK = '{}'",
+            d.join("once").display(),
+            sink.display()
+        ),
+    );
+    open(&s, &a);
+    assert!(pump_until(&mut s, 10, initialized), "premise: initialized");
+    exec(
+        &s,
+        "r1_asked = 0
+         pmacs.async(function()
+           while true do
+             local rec = pmacs.lsp.active_attachment()
+             if rec then
+               local ok = pcall(pmacs.lsp.request_hover, rec.server, rec.uri, 0, 3)
+               if ok then r1_asked = r1_asked + 1 end
+             end
+             pmacs.async.yield_to_next_tick()
+           end
+         end)",
+    );
+    settle(&mut s, 200);
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    exec(&s, "pmacs.editor.clipboard_set('// PMACS-CRASH-NOW\\n')");
+    press(&mut s, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    let served = pump_until(&mut s, 15, |_| {
+        let msgs = messages(&sink);
+        let pids = pids_in_order(&msgs);
+        pids.len() >= 2
+            && msgs
+                .iter()
+                .any(|m| m["pid"].as_u64() == Some(pids[1]) && m["method"] == "textDocument/hover")
+    });
+    let msgs = messages(&sink);
+    let pids = pids_in_order(&msgs);
+    let asked: i64 = eval(&s, "return r1_asked");
+    assert!(
+        served,
+        "premise: the coroutine asked the replacement a hover; processes {pids:?}; asked \
+         {asked}; servers {:?}",
+        servers(&s)
+    );
+    let second: Vec<&Value> = msgs
+        .iter()
+        .filter(|m| m["pid"].as_u64() == Some(pids[1]))
+        .collect();
+    let seq = shown(&second);
+    eprintln!("R1P6 the replacement received {seq:?}; the coroutine asked {asked}");
+    let open_at = second
+        .iter()
+        .position(|m| m["method"] == "textDocument/didOpen")
+        .unwrap_or(usize::MAX);
+    let first_request = second
+        .iter()
+        .position(|m| !m["id"].is_null() && m["uri"].is_string())
+        .expect("premise: a document request");
+    assert!(
+        open_at < first_request,
+        "the document before the first request about it; the replacement received {seq:?}"
+    );
+}
