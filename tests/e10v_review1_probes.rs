@@ -231,6 +231,109 @@ fn r1_p1_a_server_that_answers_only_errors_and_exits_is_not_restarted_for_ever()
     );
 }
 
+/// Low 1, a witness. The stop sentence said the server is "not
+/// restarted until its file is opened again", but any file of the same
+/// language under the same root renews the bound: here `b.rs`, never
+/// attached to the stopped server, starts it again under a new id. Fix
+/// round 1 keeps the renewal (every door is the user's act, and none is
+/// a loop) and makes the sentence say it: a file of its project, or
+/// `M-x lsp.restart`. Fails at `8bbb338` on the sentence.
+#[test]
+fn r1_p2_after_the_stop_the_sentence_says_what_starts_the_server_again() {
+    let d = dir("renew");
+    let a = d.join("a.rs");
+    let b = d.join("b.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    std::fs::write(&b, "fn b() {}\n").unwrap();
+    let pids = d.join("pids.txt");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!(
+            "PMACS_FAKE_LSP_MODE = 'crash', PMACS_FAKE_LSP_PID_SINK = '{}'",
+            pids.display()
+        ),
+    );
+    open(&s, &a);
+    assert!(
+        pump_until(&mut s, 15, |s| servers(s)
+            .iter()
+            .any(|r| r.ends_with(":true"))),
+        "premise: the bound stopped the server; {:?}",
+        servers(&s)
+    );
+    settle(&mut s, 500);
+    assert_eq!(lines(&pids), 3, "premise: stopped after three");
+    let said = s.lua_host.errors_buffer_text();
+    open(&s, &b);
+    settle(&mut s, 1500);
+    eprintln!(
+        "R1P2 after opening b.rs: {} processes; servers {:?}; said {said:?}",
+        lines(&pids),
+        servers(&s)
+    );
+    assert!(
+        said.contains(
+            "not restarted until a file of its project is opened again, or M-x lsp.restart"
+        ),
+        "the stop sentence names what starts the server again; *errors* {said:?}"
+    );
+    assert!(
+        lines(&pids) > 3,
+        "premise of the sentence: another file of the project starts the server again; \
+         servers {:?}",
+        servers(&s)
+    );
+}
+
+/// Low 1's other door, a guard: after the stop, `M-x revert-buffer` on
+/// the stopped server's unmodified file does not renew the bound (the
+/// handoff's "a revert renews" was wrong at `8bbb338`, and is now): no
+/// process starts and the server stays stopped.
+#[test]
+fn r1_p15_after_the_stop_a_revert_does_not_start_the_server_again() {
+    let d = dir("revert");
+    let a = d.join("a.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let pids = d.join("pids.txt");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!(
+            "PMACS_FAKE_LSP_MODE = 'crash', PMACS_FAKE_LSP_PID_SINK = '{}'",
+            pids.display()
+        ),
+    );
+    open(&s, &a);
+    assert!(
+        pump_until(&mut s, 15, |s| servers(s)
+            .iter()
+            .any(|r| r.ends_with(":true"))),
+        "premise: the bound stopped the server; {:?}",
+        servers(&s)
+    );
+    settle(&mut s, 500);
+    assert_eq!(lines(&pids), 3, "premise: three processes");
+    exec(&s, "pmacs.command.invoke('revert-buffer')");
+    let said = status(&s);
+    settle(&mut s, 8000);
+    eprintln!(
+        "R1P15 after revert-buffer: {} processes; status at the revert {said:?}; servers {:?}",
+        lines(&pids),
+        servers(&s)
+    );
+    assert!(
+        said.starts_with("reverted"),
+        "premise: the revert ran; status {said:?}"
+    );
+    assert!(
+        lines(&pids) == 3 && servers(&s).iter().any(|r| r.ends_with(":true")),
+        "a revert starts no process and the server stays stopped; {} processes; servers {:?}",
+        lines(&pids),
+        servers(&s)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // E10v.1: a late publish from before a reopen
 // ---------------------------------------------------------------------------

@@ -722,7 +722,7 @@ local function note_dead_server(sid, kind, reason)
     -- is per attempt, and a stopped server makes no further attempt).
     msg = string.format(
       "LSP: %s crashed%s, %d times in a row, each within %d s of its start; " ..
-      "not restarted until its file is opened again",
+      "not restarted until a file of its project is opened again, or M-x lsp.restart",
       label, reason and (": " .. tostring(reason)) or "", crashes,
       math.floor(pmacs.lsp.crash_count_window_ms / 1000))
   elseif kind == "crashed" then
@@ -1407,7 +1407,10 @@ end
 -- it again under the same id) or stopped (`crash_stopped`: it crashed
 -- three times in a row, each soon after its start). A held server
 -- is not replaced under a new id by a command, which would start its
--- count again; only a buffer opened again renews it (`attach_buffer`).
+-- count again. What renews it is the user's act: a file of its project
+-- (its language, under its root) opened, by any route that loads one
+-- (`attach_buffer` with `renew`; E10v review 1's Low 1), or
+-- `M-x lsp.restart`; a revert does not.
 local function held_info(sid)
   if not sid then return nil end
   local ok, rows = pcall(pmacs.lsp.list)
@@ -1435,7 +1438,8 @@ local function no_server_status()
   local info = rec and held_info(rec.server)
   if info and info.crash_stopped then
     return string.format(
-      "LSP: %s stopped after %d crashes in a row; open the file again to restart it",
+      "LSP: %s stopped after %d crashes in a row; open a file of its project, " ..
+        "or M-x lsp.restart, to start it again",
       info.label or tostring(info.id), info.crashes or 0)
   elseif info then
     return string.format("LSP: %s crashed; restarting", info.label or tostring(info.id))

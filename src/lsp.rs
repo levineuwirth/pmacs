@@ -3822,7 +3822,8 @@ impl LspManager {
     /// E10v.2: a crashed server its restart policy would restart, not
     /// restarted because it crashed [`MAX_CRASHES`] times in a row, each
     /// within [`CRASH_COUNT_WINDOW`] of its start. It stays so until the editor
-    /// replaces it for a buffer opened again (`builtin/runtime/lsp.lua`).
+    /// replaces it for a file of its project opened again, or the user
+    /// restarts it (`lsp.restart`; `builtin/runtime/lsp.lua`).
     ///
     /// [`MAX_CRASHES`]: crate::parse_isolation::MAX_CRASHES
     /// [`CRASH_COUNT_WINDOW`]: crate::parse_isolation::CRASH_COUNT_WINDOW

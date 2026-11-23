@@ -160,7 +160,8 @@ fn errors(s: &EditorState) -> String {
     s.lua_host.errors_buffer_text()
 }
 
-const STOP_SENTENCE: &str = "not restarted until its file is opened again";
+const STOP_SENTENCE: &str =
+    "not restarted until a file of its project is opened again, or M-x lsp.restart";
 
 /// A server that crashes on every start, having answered `initialize`
 /// and nothing else (the fake's `crash` mode), is started three times,
@@ -288,7 +289,9 @@ fn e10v_2_a_command_during_the_back_off_or_after_the_stop_starts_no_server_under
     exec(&s, "pmacs.command.invoke('lsp.hover')");
     let status = s.core.borrow().status.clone();
     assert!(
-        status.contains("stopped after 3 crashes in a row; open the file again"),
+        status.contains(
+            "stopped after 3 crashes in a row; open a file of its project, or M-x lsp.restart"
+        ),
         "the command says why it asked nothing: {status:?}"
     );
 }
