@@ -2199,6 +2199,20 @@ local function carried_caret(pos, resolved)
   return at + shift
 end
 
+-- Apply `resolved` (byte ranges of one text, sorted by start descending)
+-- to `buf`, last first, so each leaves the offsets before it valid.
+local function apply_resolved(buf, resolved)
+  for _, e in ipairs(resolved) do
+    if e.start == e.stop then
+      buf:insert(e.start, e.text)
+    elseif e.text == "" then
+      buf:delete(e.start, e.stop)
+    else
+      buf:replace(e.start, e.stop, e.text)
+    end
+  end
+end
+
 -- E10v.6 (#535): `target`, when given, is the buffer the edits were
 -- asked for. Shown in the window, it is edited there and the caret
 -- carried as below; not shown, it is edited where it is and no window's
@@ -2220,15 +2234,8 @@ local function apply_text_edits(edits, target)
       })
     end
     table.sort(resolved, function(a, b) return a.start > b.start end)
-    for _, e in ipairs(resolved) do
-      if e.start == e.stop then
-        buf:insert(e.start, e.text)
-      elseif e.text == "" then
-        buf:delete(e.start, e.stop)
-      else
-        buf:replace(e.start, e.stop, e.text)
-      end
-    end
+    -- E10v.7 (#536): one undo takes back all of them.
+    buf:edit_group(function() apply_resolved(buf, resolved) end)
     return #resolved
   end
   local text = active_buffer_text()
@@ -2251,15 +2258,10 @@ local function apply_text_edits(edits, target)
   end
   local landed = carried_caret(caret, resolved)
   table.sort(resolved, function(a, b) return a.start > b.start end)
-  for _, e in ipairs(resolved) do
-    if e.start == e.stop then
-      buf:insert(e.start, e.text)
-    elseif e.text == "" then
-      buf:delete(e.start, e.stop)
-    else
-      buf:replace(e.start, e.stop, e.text)
-    end
-  end
+  -- E10v.7 (#536): one undo takes back all of this buffer's edits, and
+  -- puts the caret and the view back where they were before them.
+  buf:edit_group(function() apply_resolved(buf, resolved) end,
+    caret, pmacs.editor.view_top())
   -- The caret on its text, and on the row of the window it was on, so
   -- lines an edit added or took above it do not move what is read.
   pmacs.editor.goto_byte(landed)

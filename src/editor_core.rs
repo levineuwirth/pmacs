@@ -3213,10 +3213,12 @@ impl EditorCore {
             let Ok(buffer) = reg.get_mut(buffer_id) else {
                 return;
             };
-            buffer.undo_for(source)
+            buffer
+                .undo_for(source)
+                .map(|edit| (edit, buffer.take_undone_place()))
         };
         match edit {
-            Ok(edit) => {
+            Ok((edit, place)) => {
                 // E8d.2: a history edit moves bytes like any other edit,
                 // so every window on the buffer hears it the way a
                 // forward edit is heard --- the text view, every overlay,
@@ -3228,6 +3230,13 @@ impl EditorCore {
                 // and a selection past the new end where the undone
                 // edit had put them.
                 self.notify_buffer_edit(buffer_id, &edit);
+                // E10v.7: undoing an edit group (a language server's
+                // workspace edit) puts the caret and the view back where
+                // the group was asked from; the text is that text again.
+                if let Some(place) = place {
+                    self.set_cursor_byte(place.caret);
+                    self.set_view_top(place.view_top);
+                }
                 // Post-audit-round-5 F27: undo on a CRDT-backed
                 // buffer produces a crdt_op that must broadcast to
                 // every replica frontend (including the one whose

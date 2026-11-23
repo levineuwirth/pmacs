@@ -218,6 +218,8 @@ impl RecordedOps {
 struct SourceGroup {
     spans: Vec<RecordedSpan>,
     seqno: u64,
+    /// E10v.7: the place an edit group was asked from ([`UndoPlace`]).
+    place: Option<UndoPlace>,
 }
 
 #[cfg(feature = "crdt")]
@@ -232,6 +234,7 @@ impl SourceGroup {
                 })
                 .collect(),
             seqno: 0,
+            place: None,
         }
     }
 
@@ -311,6 +314,21 @@ struct UndoEntry {
     /// insert a hook or a script made between two keystrokes is never
     /// swallowed into their group.
     typed: bool,
+    /// E10v.7: where the caret and the view were before the edit group
+    /// this entry closed ([`Buffer::edit_group_end`]), for undo to put
+    /// them back.
+    place: Option<UndoPlace>,
+}
+
+/// E10v.7: the caret's byte and the view's first line in the window that
+/// asked for an edit group, before it ran: what undoing the group puts
+/// back (`EditorCore::undo`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UndoPlace {
+    /// The caret's byte offset.
+    pub caret: u64,
+    /// The view's first line.
+    pub view_top: usize,
 }
 
 /// A reduced [`Edit`] descriptor used by the undo stack.
@@ -408,6 +426,12 @@ pub struct Buffer {
     /// entry when the keystroke is noted. The arbiter has the same
     /// rule through its open group, and the two histories agree.
     typed_floor: Option<usize>,
+    /// E10v.7: an open edit group ([`Self::edit_group_begin`]): its
+    /// source, the v0.1 undo depth it began at, and its place.
+    edit_group: Option<(UndoSource, usize, Option<UndoPlace>)>,
+    /// E10v.7: the place of the group the last undo took back, for the
+    /// core to put the caret and the view at ([`Self::take_undone_place`]).
+    undone_place: Option<UndoPlace>,
     /// Cross-peer undo arbiter record (E6c, CRDT mode): per-source
     /// group stacks plus one open group each. Replaces E6.4's single
     /// global loro `UndoManager` group. Every forward edit is recorded
@@ -506,6 +530,8 @@ impl Buffer {
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             typed_floor: None,
+            edit_group: None,
+            undone_place: None,
             #[cfg(feature = "crdt")]
             arbiter: HashMap::new(),
             #[cfg(feature = "crdt")]
@@ -1695,6 +1721,7 @@ impl Buffer {
                     inserted_len,
                 },
                 typed: false,
+                place: None,
             });
             self.redo.clear();
         }
@@ -1794,7 +1821,57 @@ impl Buffer {
                 inserted_len,
             },
             typed: false,
+            place: None,
         });
+    }
+
+    /// E10v.7: open one undo group for every edit `source` makes on this
+    /// buffer until [`Self::edit_group_end`], whatever runs between: a
+    /// language server's workspace edit, applied edit by edit in an
+    /// answer's callback where no command is in scope, so each edit was a
+    /// daemon group of its own and one undo took back one edit. `place` is
+    /// what undoing the group puts back. In CRDT mode the source's open
+    /// group is this one, and the daemon's edits, which close every open
+    /// group, do not close it; in v0.1 mode the entries pushed between
+    /// begin and end collapse into one.
+    pub fn edit_group_begin(&mut self, source: UndoSource, place: Option<UndoPlace>) {
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            self.arbiter_close(source);
+            self.arbiter.entry(source).or_default().open = Some(SourceGroup {
+                place,
+                ..SourceGroup::default()
+            });
+        }
+        self.typed_floor = Some(self.undo.len());
+        self.edit_group = Some((source, self.undo.len(), place));
+    }
+
+    /// E10v.7: close the group [`Self::edit_group_begin`] opened. A group
+    /// that took no edit leaves nothing.
+    pub fn edit_group_end(&mut self) {
+        let Some((source, floor, place)) = self.edit_group.take() else {
+            return;
+        };
+        #[cfg(feature = "crdt")]
+        if self.crdt.is_some() {
+            self.typed_floor = None;
+            self.arbiter_close(source);
+            return;
+        }
+        let _ = source;
+        self.collapse_typed_command();
+        if self.undo.len() > floor
+            && let Some(top) = self.undo.back_mut()
+        {
+            top.place = place;
+        }
+    }
+
+    /// E10v.7: the place of the group the last undo took back, if it was
+    /// an edit group that had one; taken, so it is read once.
+    pub fn take_undone_place(&mut self) -> Option<UndoPlace> {
+        self.undone_place.take()
     }
 
     /// Open (or continue) `source`'s amalgamation run (E6c; E6.4's
@@ -1943,9 +2020,14 @@ impl Buffer {
             }
         }
         if source == UndoSource::Daemon {
+            let held = self.edit_group.map(|(held, _, _)| held);
             let sources: Vec<UndoSource> = self.arbiter.keys().copied().collect();
             for open_source in sources {
-                self.arbiter_close(open_source);
+                // E10v.7: the daemon's own open edit group gathers the
+                // daemon's edits until it is ended.
+                if Some(open_source) != held {
+                    self.arbiter_close(open_source);
+                }
             }
         }
         let stacks = self.arbiter.entry(source).or_default();
@@ -2010,6 +2092,7 @@ impl Buffer {
     /// onto the redo stack.
     fn undo_v01(&mut self) -> Result<Edit, BufferError> {
         let entry = self.undo.pop_back().ok_or(BufferError::NothingToUndo)?;
+        self.undone_place = entry.place;
 
         // The pre-edit rope held in `entry.rope` becomes current. The
         // inverse edit affects the post-state's range
@@ -2031,6 +2114,7 @@ impl Buffer {
                 inserted_len: inverse_inserted_len,
             },
             typed: false,
+            place: None,
         });
         self.is_modified = !self.undo.is_empty();
         self.revision = self.revision.wrapping_add(1);
@@ -2080,6 +2164,7 @@ impl Buffer {
                 inserted_len: inverse_inserted_len,
             },
             typed: false,
+            place: None,
         });
         self.is_modified = true;
         self.revision = self.revision.wrapping_add(1);
@@ -2263,6 +2348,10 @@ impl Buffer {
                     HistoryStep::Undo => BufferError::NothingToUndo,
                     HistoryStep::Redo => BufferError::NothingToRedo,
                 })?;
+            self.undone_place = match step {
+                HistoryStep::Undo => group.place,
+                HistoryStep::Redo => None,
+            };
             let (carried, change) = crdt.capture(|| {
                 let mut carry = crate::crdt::ChangeBase::default();
                 for recorded in group.spans.into_iter().rev() {

@@ -1418,6 +1418,32 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
             Ok(())
         })
     });
+    // E10v.7: `buf:edit_group(fn [, caret, view_top])` runs `fn` and makes
+    // every edit it makes to this buffer one undo step, whatever source
+    // the edits are attributed to (a language server's workspace edit,
+    // applied in an answer's callback, is the daemon's). Given the caret's
+    // byte and the view's first line from before, undoing the step puts
+    // them back. Returns what `fn` returns; an error in `fn` still ends the
+    // group, then propagates.
+    methods.add_method(
+        "edit_group",
+        |lua, this, (f, caret, top): (mlua::Function, Option<u64>, Option<usize>)| {
+            let source = lua_edit_source(lua);
+            let place = caret
+                .zip(top)
+                .map(|(caret, view_top)| crate::buffer::UndoPlace { caret, view_top });
+            with_registry_mut(lua, |r| {
+                resolve_mut(r, this.0)?.edit_group_begin(source, place);
+                Ok(())
+            })?;
+            let result = f.call::<mlua::MultiValue>(());
+            with_registry_mut(lua, |r| {
+                resolve_mut(r, this.0)?.edit_group_end();
+                Ok(())
+            })?;
+            result
+        },
+    );
 }
 
 fn parse_bypass_intercept(opts: Option<&Table>) -> mlua::Result<bool> {
