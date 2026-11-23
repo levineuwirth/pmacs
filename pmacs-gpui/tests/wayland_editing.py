@@ -3,6 +3,7 @@
 import argparse
 from contextlib import ExitStack
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -57,6 +58,18 @@ def exercise(args, runtime, processes):
     def first_socket(pattern):
         return next((path for path in runtime.glob(pattern) if path.is_socket()), None)
 
+    config_dir = Path(env["XDG_CONFIG_HOME"]) / "pmacs"
+    config_dir.mkdir()
+    (config_dir / "init.lua").write_text("pmacs.lsp.config = {}\n")
+
+    if args.build_baseline:
+        for name in ("Cargo.toml", "Cargo.lock"):
+            shutil.copyfile(args.build_baseline / "proj/tally" / name, runtime / name)
+        shutil.copytree(args.build_baseline / "proj/tally/src", runtime / "src")
+        toolchain = subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
+        env["PATH"] = f"{toolchain}/bin:{env['PATH']}"
+        env["CARGO_NET_OFFLINE"] = "true"
+
     config = runtime / "sway.conf"
     config.write_text("default_border none\nfocus_follows_mouse no\n"
                       "output HEADLESS-1 resolution 1280x800 scale 1\n")
@@ -67,9 +80,12 @@ def exercise(args, runtime, processes):
     # attach and while each subsequent wtype invocation sends its keys.
     launch("keyboard", "wtype", "-s", "120000")
 
-    path = runtime / "ledger.rs"
-    original = args.fixture.read_bytes() if args.fixture else b"// Ledger entries\nfn main() {}\n"
-    path.write_bytes(original)
+    if args.build_baseline:
+        path = runtime / "src/ledger_tests.rs"
+    else:
+        path = runtime / "ledger.rs"
+        path.write_bytes(args.fixture.read_bytes() if args.fixture else b"// Ledger entries\nfn main() {}\n")
+    original = path.read_bytes()
     first_line = original.decode().splitlines()[0]
     socket = runtime / "editor.sock"
     launch("daemon", args.pmacs, "--daemon", "--socket", socket)
@@ -89,7 +105,7 @@ def exercise(args, runtime, processes):
     run(*tm, "send-keys", "-t", "watch", "C-x", "C-f")
     wait_for(lambda: "file" in pane().lower(), "find-file prompt")
     run(*tm, "send-keys", "-t", "watch", "End")
-    run(*tm, "send-keys", "-t", "watch", "-l", path.name)
+    run(*tm, "send-keys", "-t", "watch", "-l", str(path.relative_to(runtime)))
     run(*tm, "send-keys", "-t", "watch", "Enter")
 
     def source(name, prefix):
@@ -162,6 +178,11 @@ def exercise(args, runtime, processes):
     source("10-command-undo", "")
     capture("10-command-undo", lambda im: body(im) == body(initial))
     assert path.read_bytes() == original, "editing saved the disk fixture"
+    if args.build_baseline:
+        from wayland_build import build_panel
+        build_panel(path, out, run, key, shot, pane, args.ocr_language,
+                    args.build_baseline.resolve() / "rig/vpointer.py", wait_for)
+
     run("swaymsg", '[app_id="pmacs-gpui"]', "kill")
     assert window.wait(timeout=8) == 0
     print(f"PASS: two clients, two edits, keyboard selection and cancel, two undos. Captures in {out}")
@@ -171,7 +192,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pmacs", type=Path, required=True)
     parser.add_argument("--gpui", type=Path, required=True)
-    parser.add_argument("--fixture", type=Path, help="optional Rust source to copy into the private session")
+    fixtures = parser.add_mutually_exclusive_group()
+    fixtures.add_argument("--build-baseline", type=Path, help="also exercise the build panel using proj/tally and rig/vpointer.py from this baseline directory")
+    parser.add_argument("--ocr-language", default="eng", help="installed Tesseract language for build output")
+    fixtures.add_argument("--fixture", type=Path, help="optional Rust source to copy into the private session")
     parser.add_argument("--output", type=Path, required=True, help="new directory for captures and logs")
     args = parser.parse_args()
     args.pmacs, args.gpui, args.output = (p.resolve() for p in (args.pmacs, args.gpui, args.output))

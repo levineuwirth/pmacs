@@ -3,6 +3,7 @@
 mod document;
 mod input;
 mod palette;
+mod panel;
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -36,6 +37,7 @@ struct FileView {
     reveal_cursor: bool,
     source_scroll: UniformListScrollHandle,
     viewport: Option<ByteRange>,
+    panel: panel::Panel,
     prompt: Option<Prompt>,
     prompt_scroll: UniformListScrollHandle,
     status: Option<String>,
@@ -128,6 +130,9 @@ impl FileView {
                             .collect(),
                     }
                 }));
+            }
+            InstanceMessage::PanelFrame(payload) => {
+                return Ok(self.panel.apply(payload));
             }
             InstanceMessage::Goodbye(reason) => {
                 self.notice = Some(format!("Daemon disconnected · {reason:?}"));
@@ -244,6 +249,12 @@ impl Drop for FileView {
 
 impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.notice.is_none()
+            && let Some(client) = &self.client
+            && let Err(error) = self.panel.declare(window, client)
+        {
+            self.notice = Some(format!("Could not declare panel geometry · {error}"));
+        }
         let (count, caret) = self.document.with_lines(|rope| {
             let caret = self.cursor.and_then(|byte| {
                 let byte = usize::try_from(byte).ok()?;
@@ -259,7 +270,9 @@ impl Render for FileView {
                 .scroll_to_item(row, ScrollStrategy::Center);
             self.reveal_cursor = false;
         }
-        let caret = caret.filter(|_| self.prompt.is_none() && window.is_window_active());
+        let caret = caret.filter(|_| {
+            self.prompt.is_none() && !self.panel.focused() && window.is_window_active()
+        });
         let header = div()
             .flex()
             .items_center()
@@ -311,6 +324,7 @@ impl Render for FileView {
         .track_scroll(self.source_scroll.clone())
         .flex_1()
         .min_h_0();
+        let status = self.notice.clone().or_else(|| self.status.clone());
         div()
             .relative()
             .track_focus(&self.focus)
@@ -324,13 +338,20 @@ impl Render for FileView {
             .font_family("JetBrains Mono")
             .child(header)
             .child(rows)
+            .children(
+                self.panel
+                    .show(self.prompt.is_none() && window.is_window_active(), cx),
+            )
             .when_some(
-                self.notice.clone().or_else(|| self.status.clone()),
+                status.or_else(|| self.panel.is_visible().then(String::new)),
                 |root, text| {
                     root.child(
                         div()
                             .px_4()
-                            .py_1()
+                            .h(px(24.))
+                            .line_height(px(24.))
+                            .flex_shrink_0()
+                            .truncate()
                             .text_sm()
                             .text_color(rgb(0xffc48a))
                             .child(text),
@@ -458,6 +479,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         cx.notify();
                     })
                     .detach();
+                    let client_version = client.session_protocol_version();
                     let view = FileView {
                         id: buffer_id,
                         name: name.into(),
@@ -470,6 +492,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         reveal_cursor: false,
                         source_scroll: UniformListScrollHandle::new(),
                         viewport: None,
+                        panel: panel::Panel::new(client_version),
                         prompt: None,
                         prompt_scroll: UniformListScrollHandle::new(),
                         status: None,

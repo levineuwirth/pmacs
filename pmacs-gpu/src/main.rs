@@ -26,7 +26,7 @@ mod attach;
 mod geometry;
 mod math_layout;
 mod math_parse;
-mod terminal;
+use pmacs_attach_client::cell_grid as terminal;
 
 use std::collections::HashMap;
 use std::ffi::OsString;

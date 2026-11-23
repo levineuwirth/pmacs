@@ -2,7 +2,7 @@
 
 An experimental native frontend for a running pmacs daemon. It displays and
 edits a source buffer, follows remote edits and shows the daemon's command
-palette. The daemon handles keybindings, buffer contents, command selection
+palette and bottom output panel. The daemon handles keybindings, buffer contents, command selection
 and undo. Use a release build when comparing scrolling or input response.
 
 From the repository root, build the independent trial with the pinned Rust toolchain.
@@ -33,8 +33,19 @@ descriptions beside names. Narrow windows place them below.
 To try the two-client check, visit the same file in a TUI started with
 `pmacs --attach --socket /path/to/editor.sock`. Type in GPUI, open and cancel
 the palette, then type again. `Ctrl-/` undoes the second edit in both windows.
-Closing GPUI leaves the daemon and TUI running. The trial currently targets
-keyboard editing in one document and the minibuffer.
+Closing GPUI leaves the daemon and TUI running.
+
+In a Rust project, run `Alt-x compile.run Enter` and replace the proposed
+command with `cargo test`. The output appears below the source. Click an output
+line to focus the panel, or press `Ctrl-x` followed by `o` to switch focus.
+Use the arrow keys or wheel to read the output. From the panel, the command
+`cursor.buffer-end` jumps to the final test summary. Press `Ctrl-x o` again
+to edit the source. Save with `Ctrl-x Ctrl-s` and run `compile.recompile`.
+
+The panel paints the daemon’s cell frame, including its line numbers and mode
+line. On the baseline daemon, a click in a numbered output row can place the
+caret to the right by the gutter width. For precise positioning there, toggle
+the focused panel’s line numbers with `Ctrl-x l`.
 
 The Linux native-window regression uses Sway, grim, wtype, tmux and Python
 with Pillow. It starts a private compositor, daemon and TUI. Supply built
@@ -44,3 +55,10 @@ executables and a new directory for its screenshots and logs.
 python3 pmacs-gpui/tests/wayland_editing.py --pmacs /path/to/pmacs \
   --gpui /path/to/pmacs-gpui --output /tmp/pmacs-edit-captures
 ```
+
+To exercise a real failing build, add `--build-baseline /path/to/pmacs-baseline`.
+The check copies the baseline’s `proj/tally` to its private session and uses
+`rig/vpointer.py` for native clicks. It also needs Rust and Tesseract. Select
+an installed OCR language with `--ocr-language` (the default is `eng`).
+It checks the failure, resizes and clicks the panel, corrects the assertion
+in the source, reruns the tests, and undoes the correction.

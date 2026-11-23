@@ -3,6 +3,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cell_grid;
+
 use std::collections::VecDeque;
 use std::io;
 use std::os::unix::ffi::OsStrExt;

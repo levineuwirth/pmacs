@@ -8,8 +8,7 @@ pub enum Input<'a> {
     Text(&'a str),
 }
 
-pub fn translate(stroke: &Keystroke) -> Option<Input<'_>> {
-    let m = stroke.modifiers;
+pub fn modifiers(m: gpui::Modifiers) -> Modifiers {
     let mut mods = Modifiers::NONE;
     if m.control {
         mods |= Modifiers::CTRL;
@@ -23,6 +22,12 @@ pub fn translate(stroke: &Keystroke) -> Option<Input<'_>> {
     if m.shift {
         mods |= Modifiers::SHIFT;
     }
+    mods
+}
+
+pub fn translate(stroke: &Keystroke) -> Option<Input<'_>> {
+    let m = stroke.modifiers;
+    let mods = modifiers(m);
     let named = match stroke.key.as_str() {
         "enter" | "return" => Key::Enter,
         "escape" => Key::Escape,
