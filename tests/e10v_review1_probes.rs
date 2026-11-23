@@ -11,8 +11,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;
+use pmacs::protocol::FrontendId;
+use serde_json::{Value, json};
 
 mod common;
 #[path = "support/mod.rs"]
@@ -26,6 +29,18 @@ use editor::{eval, exec};
 
 fn fake_lsp_path() -> String {
     env!("CARGO_BIN_EXE_pmacs_fake_lsp").to_owned()
+}
+
+fn press(s: &mut EditorState, code: KeyCode, mods: KeyModifiers) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        },
+    );
 }
 
 fn tick(s: &mut EditorState) {
@@ -44,6 +59,14 @@ fn pump_until(s: &mut EditorState, secs: u64, mut done: impl FnMut(&EditorState)
         if Instant::now() >= deadline {
             return false;
         }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn settle(s: &mut EditorState, ms: u64) {
+    let until = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < until {
+        tick(s);
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -88,6 +111,36 @@ fn open(s: &EditorState, path: &Path) {
 
 fn lines(path: &Path) -> usize {
     std::fs::read_to_string(path).map_or(0, |t| t.lines().count())
+}
+
+fn initialized(s: &EditorState) -> bool {
+    eval(
+        s,
+        "for _, r in ipairs(pmacs.lsp.list()) do \
+           if r.state and r.state.kind == 'initialized' then return true end \
+         end return false",
+    )
+}
+
+/// The messages each server process received, in order (the fake's
+/// `PMACS_FAKE_LSP_MESSAGE_SINK`).
+fn messages(sink: &Path) -> Vec<Value> {
+    std::fs::read_to_string(sink)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+fn pids_in_order(msgs: &[Value]) -> Vec<u64> {
+    let mut pids = Vec::new();
+    for m in msgs {
+        let pid = m["pid"].as_u64().unwrap();
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 /// Every server the manager holds: `id:kind:crashes:pending:stopped`.
@@ -175,5 +228,267 @@ fn r1_p1_a_server_that_answers_only_errors_and_exits_is_not_restarted_for_ever()
         failed.is_empty(),
         "a server that answered nothing but errors is stopped by the bound after three \
          crashes; {failed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E10v.1: a late publish from before a reopen
+// ---------------------------------------------------------------------------
+
+const RECORDER: &str = r"
+e10v_publishes = {}
+pmacs.lsp.on_notification('textDocument/publishDiagnostics', function(_sid, p)
+  local v = p.version
+  local label = 'v' .. (type(v) == 'number' and tostring(math.floor(v)) or '-')
+    .. ':' .. tostring(#(p.diagnostics or {}))
+  e10v_publishes[#e10v_publishes + 1] = { uri = p.uri, label = label }
+end)
+";
+
+fn stored(s: &EditorState) -> Vec<String> {
+    let rows: Vec<mlua::Table> = eval(
+        s,
+        "local rec = pmacs.lsp.active_attachment()
+         if not rec then return {} end
+         return pmacs.diag.list(rec.uri)",
+    );
+    rows.into_iter()
+        .map(|d| {
+            let m: String = d.get("message").unwrap();
+            m.lines().next().unwrap_or("").trim().to_owned()
+        })
+        .collect()
+}
+
+fn received(s: &EditorState) -> Vec<String> {
+    eval(
+        s,
+        "local rec = pmacs.lsp.active_attachment()
+         local out = {}
+         for _, p in ipairs(e10v_publishes) do
+           if rec and p.uri == rec.uri then out[#out + 1] = p.label end
+         end
+         return out",
+    )
+}
+
+fn diag(line: u32, message: &str) -> Value {
+    json!({
+        "range": { "start": { "line": line, "character": 0 },
+                   "end": { "line": line, "character": 3 } },
+        "severity": 1, "source": "e10v", "message": message
+    })
+}
+
+/// Medium 2, a witness. A publish the server computed for the document
+/// before the buffer was killed (version 24), arriving after the reopen's
+/// `didOpen`, held the reopened document's diagnostics at `8bbb338`: the
+/// highest version was reset at `didOpen` and the reopened document was
+/// numbered from 1, so the old 24 stood and the reopened document's own
+/// publishes, at 1 and then 2, were dropped. Under the owner's ruling the
+/// reopened document is numbered past 24, so its publishes stand. The
+/// fake publishes the reopened document's at the version it was sent
+/// (`"received"`), as a server does; the review's stand-in plan wrote 1
+/// and 2, the numbers the reviewed head sent.
+#[test]
+fn r1_p3_a_late_publish_from_before_a_reopen_does_not_hold_the_reopened_document() {
+    let d = dir("reopen");
+    let file = d.join("a.rs");
+    std::fs::write(&file, "let first = 1;\nlet second = 2;\n").unwrap();
+    let plan = d.join("plan.json");
+    std::fs::write(
+        &plan,
+        json!([
+            { "method": "textDocument/didOpen",
+              "publish": [{ "version": 24, "diagnostics": [diag(1, "r1: the old document's error")] }] },
+            { "method": "textDocument/didOpen",
+              "publish": [
+                { "version": 24, "diagnostics": [diag(1, "r1: the old document's error")] },
+                { "version": "received", "diagnostics": [diag(0, "r1: the reopened document's error")] }
+              ] },
+            { "method": "textDocument/didChange",
+              "publish": [{ "version": "received", "diagnostics": [diag(0, "r1: after a key")] }] },
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!("PMACS_FAKE_LSP_PUBLISH_PLAN = '{}'", plan.display()),
+    );
+    exec(&s, RECORDER);
+    open(&s, &file);
+    assert!(
+        pump_until(&mut s, 10, |s| received(s).len() == 1),
+        "premise: the first publish; {:?}",
+        received(&s)
+    );
+    exec(&s, "pmacs.buffer.kill(pmacs.window.buffer())");
+    open(&s, &file);
+    assert!(
+        pump_until(&mut s, 10, |s| received(s).len() == 3),
+        "premise: the late publish and the reopened document's arrived; {:?}",
+        received(&s)
+    );
+    settle(&mut s, 300);
+    let after_reopen = stored(&s);
+    // One key: a didChange, and the server's publish for it.
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    press(&mut s, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(
+        pump_until(&mut s, 10, |s| received(s).len() == 4),
+        "premise: the publish after the key arrived; {:?}",
+        received(&s)
+    );
+    settle(&mut s, 300);
+    let after_key = stored(&s);
+    eprintln!(
+        "R1P3 received {:?}; after the reopen {after_reopen:?}; after a key {after_key:?}",
+        received(&s)
+    );
+    assert_eq!(
+        after_reopen,
+        ["r1: the reopened document's error"],
+        "the reopened document's own publish stands over one computed before the reopen; \
+         received {:?}",
+        received(&s)
+    );
+    assert_eq!(
+        after_key,
+        ["r1: after a key"],
+        "the publish for the key after the reopen stands; received {:?}",
+        received(&s)
+    );
+    assert_eq!(
+        received(&s),
+        ["v24:1", "v24:1", "v25:1", "v26:1"],
+        "the reopened document is numbered past version 24"
+    );
+}
+
+/// The versions sent to a server's processes, in order, `method@version`
+/// for each `didOpen` and `didChange` of `uri`, with the process's index.
+fn sent_versions(sink: &Path, uri_tail: &str) -> Vec<(usize, String, i64)> {
+    let msgs = messages(sink);
+    let pids = pids_in_order(&msgs);
+    msgs.iter()
+        .filter(|m| {
+            m["uri"].as_str().is_some_and(|u| u.ends_with(uri_tail)) && m["version"].is_i64()
+        })
+        .map(|m| {
+            (
+                pids.iter()
+                    .position(|p| Some(*p) == m["pid"].as_u64())
+                    .unwrap(),
+                m["method"].as_str().unwrap_or("").to_owned(),
+                m["version"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Medium 2 through `lsp.restart`: the replacement is sent the document
+/// past every version the first process was sent, so no version repeats
+/// for the URI on the server. At `8bbb338` the reopen sent version 1.
+#[test]
+fn r1_p3_lsp_restart_numbers_the_reopened_document_past_what_was_sent() {
+    let d = dir("restartver");
+    let a = d.join("a.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let sink = d.join("messages.jsonl");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!("PMACS_FAKE_LSP_MESSAGE_SINK = '{}'", sink.display()),
+    );
+    open(&s, &a);
+    assert!(pump_until(&mut s, 10, initialized), "premise: initialized");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    for c in ['x', 'y', 'z'] {
+        press(&mut s, KeyCode::Char(c), KeyModifiers::NONE);
+        settle(&mut s, 150);
+    }
+    assert!(
+        pump_until(&mut s, 5, |_| sent_versions(&sink, "/a.rs")
+            .iter()
+            .any(|(_, m, _)| m == "textDocument/didChange")),
+        "premise: the keys reached the server; sent {:?}",
+        sent_versions(&sink, "/a.rs")
+    );
+    let before = sent_versions(&sink, "/a.rs");
+    let highest = before.iter().map(|(_, _, v)| *v).max().unwrap();
+    exec(&s, "pmacs.command.invoke('lsp.restart')");
+    assert!(
+        pump_until(&mut s, 10, |_| sent_versions(&sink, "/a.rs")
+            .iter()
+            .any(|(p, m, _)| *p == 1 && m == "textDocument/didOpen")),
+        "premise: the replacement was sent the document; sent {:?}",
+        sent_versions(&sink, "/a.rs")
+    );
+    let reopened = sent_versions(&sink, "/a.rs")
+        .into_iter()
+        .find(|(p, m, _)| *p == 1 && m == "textDocument/didOpen")
+        .unwrap()
+        .2;
+    assert!(
+        reopened > highest,
+        "the replacement's didOpen is numbered past version {highest}, the highest the \
+         first process was sent; it carried {reopened}; sent {:?}",
+        sent_versions(&sink, "/a.rs")
+    );
+}
+
+/// Medium 2 through E10v.3's re-sent documents: after a crash, the
+/// replacement's `didOpen` is numbered past the change that carried the
+/// crash's marker. At `8bbb338` it carried version 1.
+#[test]
+fn r1_p3_a_restarted_generation_is_sent_its_document_past_what_was_sent() {
+    let d = dir("crashver");
+    let a = d.join("a.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let sink = d.join("messages.jsonl");
+    let mut s = editor_with(
+        &d,
+        &fake_lsp_path(),
+        &format!(
+            "PMACS_FAKE_LSP_MODE = 'crashonmarker', PMACS_FAKE_LSP_ABORT_ONCE = '{}', \
+             PMACS_FAKE_LSP_MESSAGE_SINK = '{}'",
+            d.join("once").display(),
+            sink.display()
+        ),
+    );
+    open(&s, &a);
+    assert!(pump_until(&mut s, 10, initialized), "premise: initialized");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    press(&mut s, KeyCode::Char('q'), KeyModifiers::NONE);
+    settle(&mut s, 500);
+    let highest = sent_versions(&sink, "/a.rs")
+        .iter()
+        .map(|(_, _, v)| *v)
+        .max()
+        .unwrap();
+    // The marker's didChange is not recorded (the fake exits on it), so
+    // the version it carried is at least one past the highest recorded.
+    exec(&s, "pmacs.editor.clipboard_set('// PMACS-CRASH-NOW\\n')");
+    press(&mut s, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert!(
+        pump_until(&mut s, 15, |_| sent_versions(&sink, "/a.rs")
+            .iter()
+            .any(|(p, m, _)| *p == 1 && m == "textDocument/didOpen")),
+        "premise: the replacement was sent the document; sent {:?}",
+        sent_versions(&sink, "/a.rs")
+    );
+    let reopened = sent_versions(&sink, "/a.rs")
+        .into_iter()
+        .find(|(p, m, _)| *p == 1 && m == "textDocument/didOpen")
+        .unwrap()
+        .2;
+    assert!(
+        reopened > highest + 1,
+        "the replacement's didOpen is numbered past the marker's change (past {}); it \
+         carried {reopened}; sent {:?}",
+        highest + 1,
+        sent_versions(&sink, "/a.rs")
     );
 }

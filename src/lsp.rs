@@ -1043,10 +1043,22 @@ pub struct LspManager {
     /// carried for each `(server, uri)`. A publish below it was computed
     /// for text older than one the server has already reported on, and
     /// is dropped; one at it replaces; one with no version takes effect
-    /// and leaves this as it was. Reset at `did_open`, and dropped with
-    /// the documents wherever a generation's documents go, since a new
-    /// process numbers nothing it has not been sent.
+    /// and leaves this as it was. Kept across a `did_open` (the owner's
+    /// ruling of 2026-11-23: a reopened document is numbered past it, see
+    /// [`Self::version_floor`]), and dropped with the documents wherever
+    /// a generation's documents go, since a new process publishes nothing
+    /// for a version it was not sent.
     published_versions: HashMap<(LspServerId, String), i64>,
+    /// E10v fix round 1 (review 1's Medium 2, the owner's ruling of
+    /// 2026-11-23): the highest version the client has sent (`didOpen`,
+    /// `didChange`) or the server has published for each `(server,
+    /// uri)`, kept for the server's life in this daemon: across a buffer
+    /// killed and the file opened again, a `didClose`, a crash and a
+    /// restart. A document opened again is numbered past it, so versions
+    /// never repeat for one URI on one server, and a publish computed
+    /// before the reopen is always below the reopened document's.
+    /// Dropped only when the server is forgotten (ids are never reused).
+    version_floor: HashMap<(LspServerId, String), i64>,
     /// T M4.9: `(project_root, language_id)` → server id. Drives the
     /// "LSP runs per-project, not per-buffer" invariant. Roots are
     /// stored as [`PathBuf`] so callers don't have to canonicalise
@@ -1319,6 +1331,7 @@ impl LspManager {
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             forgotten_documents: std::collections::HashSet::new(),
             published_versions: HashMap::new(),
+            version_floor: HashMap::new(),
             project_servers: HashMap::new(),
         }
     }
@@ -3566,6 +3579,7 @@ impl LspManager {
             {
                 return;
             }
+            self.note_version(sid, &uri, version);
             self.published_versions.insert(key, version);
         }
         // E7c.3: each diagnostic is placed against the text it was
@@ -3845,6 +3859,7 @@ impl LspManager {
         self.documents.retain(|(s, _), _| *s != sid);
         self.disk_documents.retain(|(s, _), _| *s != sid);
         self.published_versions.retain(|(s, _), _| *s != sid);
+        self.version_floor.retain(|(s, _), _| *s != sid);
         // dired Stage 2a §5 — terminal removal drops every tombstone
         // this server owned; other servers' pairs are retained.
         self.forgotten_documents.retain(|(s, _)| *s != sid);
@@ -4084,14 +4099,28 @@ impl LspManager {
         self.forgotten_documents.len()
     }
 
-    /// Convenience: send `textDocument/didOpen` to `sid`.
+    /// E10v fix round 1: raise `(sid, uri)`'s version floor to `version`.
+    fn note_version(&mut self, sid: LspServerId, uri: &str, version: i64) {
+        let floor = self
+            .version_floor
+            .entry((sid, uri.to_owned()))
+            .or_insert(version);
+        *floor = (*floor).max(version);
+    }
+
+    /// Convenience: send `textDocument/didOpen` to `sid`, and return the
+    /// version it carried: `version`, or one past the highest this
+    /// server has been sent or has published for `uri`, whichever is
+    /// greater (E10v fix round 1, the owner's ruling of 2026-11-23), so a
+    /// document opened again never repeats a version the server has seen.
+    /// The caller numbers its `didChange`s on from what this returns.
     pub fn did_open(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         version: i64,
         text: impl Into<String>,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let language_id = self
             .clients
             .get(&sid)
@@ -4105,8 +4134,14 @@ impl LspManager {
         // must be admitted; another server's tombstone for the same URI
         // is untouched.
         self.forgotten_documents.remove(&(sid, uri.clone()));
-        // E10v.1: an opened document's versions start over.
-        self.published_versions.remove(&(sid, uri.clone()));
+        // E10v fix round 1: numbered past every version seen for it, and
+        // the highest published kept, so a publish for the document as it
+        // was before is below the reopened one's and dropped.
+        let version = self
+            .version_floor
+            .get(&(sid, uri.clone()))
+            .map_or(version, |&floor| version.max(floor.saturating_add(1)));
+        self.note_version(sid, &uri, version);
         // T M4.5 Option B: mirror the document so the position codec
         // can convert per-line between the server's `character` units
         // and pmacs byte offsets.
@@ -4125,7 +4160,8 @@ impl LspManager {
                 "text": text,
             }
         });
-        self.send_notification(sid, "textDocument/didOpen", params)
+        self.send_notification(sid, "textDocument/didOpen", params)?;
+        Ok(version)
     }
 
     /// Send `textDocument/didChange` to `sid` with full text
@@ -4145,6 +4181,7 @@ impl LspManager {
             .insert((sid, uri.clone()), std::sync::Arc::from(text.as_str()));
         self.note_document_synced(&uri);
         self.mark_document_stale(sid, &uri);
+        self.note_version(sid, &uri, version);
         let params = json!({
             "textDocument": {
                 "uri": uri,
@@ -4345,6 +4382,7 @@ impl LspManager {
             .insert((sid, uri.clone()), std::sync::Arc::from(mirror.as_str()));
         self.note_document_synced(&uri);
         self.mark_document_stale(sid, &uri);
+        self.note_version(sid, &uri, version);
         let params = json!({
             "textDocument": {
                 "uri": uri,

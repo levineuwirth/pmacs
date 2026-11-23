@@ -1684,8 +1684,12 @@ local function attach_buffer(buf, renew)
   -- below sees only as "the revision moved".
   pcall(pmacs.lsp._track_edits, buf, uri)
   -- did_open is a notification; the manager queues it cleanly even
-  -- while the server is in `starting` / `initializing`.
-  pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
+  -- while the server is in `starting` / `initializing`. It answers the
+  -- version it sent: a file opened again on the same server is numbered
+  -- past every version that server has seen for it (E10v fix round 1),
+  -- and this buffer's changes are numbered on from there.
+  local ok_open, opened = pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
+  if ok_open and type(opened) == "number" then rec.version = opened end
   -- E7c.3: `did_open` keeps the text it sent as the file's text, which
   -- a check reports against; a buffer already modified when its server
   -- attached (a re-attach after a crash, a file typed into before the
@@ -2572,8 +2576,10 @@ local function reopen_attachments(sid)
       if ok_t and type(text) == "string" then
         -- The didOpen carries the whole text; changes not yet sent are in it.
         pending_did_change[key] = nil
-        rec.version = 1
-        pcall(pmacs.lsp.did_open, sid, rec.uri, rec.version, text)
+        -- Numbered past the versions the server's earlier generations
+        -- were sent (E10v fix round 1), the number the manager answers.
+        local ok_open, opened = pcall(pmacs.lsp.did_open, sid, rec.uri, 1, text)
+        if ok_open and type(opened) == "number" then rec.version = opened end
         local ok_mod, modified = pcall(function() return rec.buffer:is_modified() end)
         if ok_mod and modified then
           pcall(pmacs.lsp._document_off_disk, sid, rec.uri)
@@ -5165,8 +5171,9 @@ pmacs.hook.add("resource.renamed", function(old_path, new_path)
         -- at each edit, so it already writes to the new URI; opening the
         -- log here makes the didOpen below its edit zero.
         sink:step("track edits for " .. new_uri, pmacs.lsp._track_edits, rec.buffer, new_uri)
-        sink:step("didOpen " .. new_uri, pmacs.lsp.did_open,
+        local ok_open, opened = sink:step("didOpen " .. new_uri, pmacs.lsp.did_open,
           sid, new_uri, rec.version, ok_text and text or "")
+        if ok_open and type(opened) == "number" then rec.version = opened end
         -- 6. Re-root the diagnostic overlays. `DiagnosticView.uri` is
         --    set once at construction and is private, so this is the
         --    only way to move it — and the sweep reaches PASSIVE

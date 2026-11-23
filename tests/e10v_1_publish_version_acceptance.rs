@@ -369,11 +369,16 @@ fn e10v_1_an_unversioned_publish_clears_and_keeps_the_highest_version() {
     );
 }
 
-/// A document opened again starts over: after `v24:error`, the buffer is
-/// killed and the file opened again, and the server's first publish for
-/// the new document, at version 1, stands.
+/// A document opened again is numbered past every version its server
+/// has seen for it (the owner's ruling of 2026-11-23, at E10v review 1's
+/// Medium 2, in place of "reset at `didOpen`"): after `v24:error`, the
+/// buffer is killed and the file opened again, the `didOpen` carries
+/// version 25, and the server's publish for it (at the version it was
+/// sent, as a server publishes) stands. Until fix round 1 this row read
+/// "starts over", its plan publishing a fixed version 1 for the reopened
+/// document, which the client numbered 1.
 #[test]
-fn e10v_1_a_reopened_document_starts_over() {
+fn e10v_1_a_reopened_document_is_numbered_past_and_its_publish_stands() {
     let fx = fixture(
         "reopen",
         "a.rs",
@@ -382,7 +387,8 @@ fn e10v_1_a_reopened_document_starts_over() {
             { "method": "textDocument/didOpen",
               "publish": [publish(Some(24), vec![error(1, 4, 10, "e10v: before the reopen")])] },
             { "method": "textDocument/didOpen",
-              "publish": [publish(Some(1), vec![error(0, 4, 9, "e10v: after the reopen")])] },
+              "publish": [{ "version": "received",
+                            "diagnostics": [error(0, 4, 9, "e10v: after the reopen")] }] },
         ]),
     );
     let mut s = fx.editor("rust");
@@ -391,15 +397,20 @@ fn e10v_1_a_reopened_document_starts_over() {
     exec(&s, "local b = pmacs.window.buffer(); pmacs.buffer.kill(b)");
     fx.open(&s);
     assert!(
-        pump_until(&mut s, 10, |s| received(s).iter().any(|p| p == "v1:1")),
+        pump_until(&mut s, 10, |s| received(s).len() == 2),
         "premise: the reopened document's publish arrived; received {:?}",
         received(&s)
     );
     settle(&mut s, 200);
+    assert_eq!(
+        received(&s),
+        ["v24:1", "v25:1"],
+        "the reopen is numbered past version 24, and the server published for it"
+    );
     let row = status_at(&mut s, TEXT.find("first").unwrap() + 1);
     assert!(
         row.contains("e10v: after the reopen"),
-        "the reopened document's version-1 publish stands; status row {row:?}; store {:?}",
+        "the reopened document's publish stands; status row {row:?}; store {:?}",
         stored(&s)
     );
 }

@@ -11119,11 +11119,13 @@ pub fn install_lsp(
         lsp_mod.set(
             "did_open",
             lua.create_function(
+                // E10v fix round 1: returns the version the `didOpen`
+                // carried, which may be past `version` for a document
+                // opened again; the caller numbers its changes from it.
                 move |_, (id, uri, version, text): (LspServerIdLua, String, i64, String)| {
                     m.borrow_mut()
                         .did_open(id.0, uri, version, text)
-                        .map_err(mlua::Error::external)?;
-                    Ok(())
+                        .map_err(mlua::Error::external)
                 },
             )?,
         )?;
