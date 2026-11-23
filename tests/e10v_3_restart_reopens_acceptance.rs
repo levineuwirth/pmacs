@@ -206,6 +206,7 @@ fn e10v_3_a_restarted_server_is_sent_each_document_once_with_its_text_before_any
     );
     let served = pump_until(&mut s, 15, |s| {
         exec(s, "pmacs.command.invoke('lsp.hover')");
+        exec(s, "pmacs.command.invoke('lsp.find-references')");
         let msgs = messages(&sink);
         let pids = pids_in_order(&msgs);
         pids.len() >= 2
@@ -237,6 +238,7 @@ fn e10v_3_a_restarted_server_is_sent_each_document_once_with_its_text_before_any
             )
         })
         .collect();
+    eprintln!("E10V3 the restarted server received {shown:?}");
     let opens = |u: &str| -> Vec<(usize, &Value)> {
         second
             .iter()
