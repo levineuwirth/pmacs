@@ -295,11 +295,11 @@ fn respawn_failed(evs: &[LspEvent]) -> bool {
 
 /// A server whose executable is gone loops `Restarting`/`Crashed` every
 /// backoff (E8d.1's chosen behavior, "bounded only by the user stopping
-/// the server"). The row drives that exit: `pmacs.lsp.stop` on the
-/// looping server. `McpManager::stop` on a `Crashed` client disarms the
-/// restart and leaves the client terminal, so `forget` can take it; this
-/// row asks the LSP copy for the same, and measures the loop's event
-/// rate at the default backoff on the way.
+/// the server"; since E10v.2 also by the restart bound, three crashes in
+/// a row). The row drives the user's exit: `pmacs.lsp.stop` on the
+/// looping server while a restart is armed. `McpManager::stop` on a
+/// `Crashed` client disarms the restart and leaves the client terminal,
+/// so `forget` can take it; this row asks the LSP copy for the same.
 #[test]
 fn p4_stopping_a_server_whose_respawn_failed_reaches_a_terminal_state() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -333,17 +333,13 @@ fn p4_stopping_a_server_whose_respawn_failed_reaches_a_terminal_state() {
         ),
         "premise: the respawn fails and is told (E8d.1's row)"
     );
-    let before = seen.len();
-    let _ = drain_lsp_until(&sup, &mgr, sid, &mut seen, Duration::from_secs(3), |_| {
-        false
-    });
-    let during = seen.len() - before;
-    eprintln!(
-        "P4 measured: {during} events in 3 s at the default backoff while the executable is gone"
-    );
+    // E10v.2: the loop is bounded now, so its premise is that a restart
+    // is armed when the user stops it (the second crash in a row, the
+    // failed respawn, re-arms; the third would stop it), not an event
+    // rate at the default backoff, which measured the unbounded loop.
     assert!(
-        during >= 4,
-        "premise: the loop is live at the default backoff ({during} events in 3 s)"
+        mgr.borrow().restart_pending(sid),
+        "premise: the loop is live, a restart armed after the failed respawn"
     );
 
     // The exit the fix names.

@@ -17,8 +17,9 @@ here gone stale covers the shape next to the defect.
   `inlaybounds`, `inlayrefresh`, `semantictokensrefresh`,
   `applyeditplan`, `resourceops`, `posecho`, `defenv`, `wsconfig`,
   `rooturi`, `leanprogress`.
-- Failure shapes: `crash`, `abortonopen`, `error`, `contentmodified`,
-  `clientfault`, `garbage`, `silent`, `stopanswering`.
+- Failure shapes: `crash`, `crashafteranswer`, `abortonopen`, `error`,
+  `contentmodified`, `clientfault`, `garbage`, `silent`,
+  `stopanswering`.
 - Watchers: `filewatch` (`RelativePattern` `**/*.txt`), `filewatchabs`
   (absolute glob), `filewatchflat` (no `**/`), `filewatchbare` (bare
   relative), `filewatchrereg` (one id twice), `filewatchjoin`,

@@ -45,6 +45,10 @@
 //! * If launched with `PMACS_FAKE_LSP_MODE=crash`: replies to
 //!   `initialize`, then exits with code 7 immediately, so the
 //!   client can verify crash + restart handling.
+//! * If launched with `PMACS_FAKE_LSP_MODE=crashafteranswer` (E10v.2):
+//!   an ordinary server until it has answered one request other than
+//!   `initialize`, then it exits with code 7, every generation: a server
+//!   that crashes after serving, which a restart bound keeps restarting.
 //! * If launched with `PMACS_FAKE_LSP_MODE=abortonopen` (E8c): the
 //!   first generation to receive a `didOpen` aborts (`SIGABRT`). That
 //!   models the crash #299's quit met and its report, not its trigger:
@@ -358,6 +362,7 @@ fn main() {
                 continue;
             }
         }
+        let had_id = id.is_some();
         match (method.as_str(), id) {
             ("initialize", Some(idv)) => {
                 let mut resp = serde_json::json!({
@@ -2040,6 +2045,12 @@ fn main() {
         if crashed_after_init {
             // Honour the test's request to die after the first
             // useful exchange.
+            std::process::exit(7);
+        }
+        // E10v.2: `crashafteranswer` serves one request of the user's
+        // work, then dies, every generation.
+        if mode == "crashafteranswer" && had_id && method != "initialize" && method != "shutdown" {
+            let _ = stdout.flush();
             std::process::exit(7);
         }
     }

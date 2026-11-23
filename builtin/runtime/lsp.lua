@@ -690,13 +690,15 @@ local dead_servers = {}
 local function note_dead_server(sid, kind, reason)
   if not sid then return end
   local skey = tostring(sid)
-  local label, attempt = skey, 0
+  local label, attempt, stopped, crashes = skey, 0, false, 0
   local ok, rows = pcall(pmacs.lsp.list)
   if ok and rows then
     for _, info in ipairs(rows) do
       if tostring(info.id) == skey then
         label = info.label or label
         attempt = info.attempt or 0
+        stopped = info.crash_stopped == true
+        crashes = info.crashes or 0
         if reason == nil and info.state and info.state.reason then
           reason = info.state.reason
         end
@@ -715,7 +717,14 @@ local function note_dead_server(sid, kind, reason)
     at = pmacs.editor.monotonic_ms(),
   }
   local msg
-  if kind == "crashed" then
+  if kind == "crashed" and stopped then
+    -- E10v.2: the crash that ends the restarts, said once (this latch
+    -- is per attempt, and a stopped server makes no further attempt).
+    msg = string.format(
+      "LSP: %s crashed%s, %d times in a row with nothing answered between; " ..
+      "not restarted until its file is opened again",
+      label, reason and (": " .. tostring(reason)) or "", crashes)
+  elseif kind == "crashed" then
     msg = string.format("LSP: %s crashed%s", label,
       reason and (": " .. tostring(reason)) or "")
   else
@@ -1251,7 +1260,7 @@ function pmacs.lsp.spawn_failures()
   return out
 end
 
-local function ensure_server(language, path)
+local function ensure_server(language, path, renew)
   local cfg = pmacs.lsp.config[language]
   if not cfg or not cfg.command then return nil end
   -- Reuse an existing same-language server *serving the same root*.
@@ -1293,9 +1302,23 @@ local function ensure_server(language, path)
         clear_failure(affinity_key(language, key_uri))
         return info.id
       end
-      -- E5.3: a dead server for this key is reported, not skipped in
-      -- silence; a replacement is spawned below.
-      note_dead_server(info.id, kind)
+      -- E10v.2: a server backing off comes back under its own id, so a
+      -- buffer attaches to it; one the bound stopped is replaced only
+      -- for a buffer opened again (`renew`), so its count cannot be
+      -- started over by a command, a switch or a second buffer's
+      -- request.
+      if kind == "crashed" and info.restart_pending then
+        return info.id
+      end
+      if kind == "crashed" and info.crash_stopped then
+        if not renew then return nil end
+        pcall(pmacs.lsp.forget, info.id)
+        clear_dead_server(info.id)
+      else
+        -- E5.3: a dead server for this key is reported, not skipped in
+        -- silence; a replacement is spawned below.
+        note_dead_server(info.id, kind)
+      end
     end
   end
   -- E7c.2: `init_options` may be a function of the project root, so
@@ -1366,6 +1389,44 @@ end
 local function server_is_live(sid)
   local kind = server_state_kind(sid)
   return kind ~= nil and kind ~= "crashed" and kind ~= "stopped"
+end
+
+-- E10v.2: the list row of a crashed server the restart bound holds,
+-- else nil. Held is backing off (`restart_pending`: the manager starts
+-- it again under the same id) or stopped (`crash_stopped`: it crashed
+-- three times in a row with nothing served between them). A held server
+-- is not replaced under a new id by a command, which would start its
+-- count again; only a buffer opened again renews it (`attach_buffer`).
+local function held_info(sid)
+  if not sid then return nil end
+  local ok, rows = pcall(pmacs.lsp.list)
+  if not ok or not rows then return nil end
+  for _, info in ipairs(rows) do
+    if tostring(info.id) == tostring(sid) then
+      if info.state and info.state.kind == "crashed"
+          and (info.restart_pending or info.crash_stopped) then
+        return info
+      end
+      return nil
+    end
+  end
+  return nil
+end
+
+-- What a command says when the active buffer has no server to ask: the
+-- bound's state when its server is held (E10v.2), else that it has none.
+local function no_server_status()
+  local buf = pmacs.window.buffer()
+  local rec = buf and attachments[tostring(buf)]
+  local info = rec and held_info(rec.server)
+  if info and info.crash_stopped then
+    return string.format(
+      "LSP: %s stopped after %d crashes in a row; open the file again to restart it",
+      info.label or tostring(info.id), info.crashes or 0)
+  elseif info then
+    return string.format("LSP: %s crashed; restarting", info.label or tostring(info.id))
+  end
+  return "LSP: no server for active buffer"
 end
 
 local function server_is_initialized(sid)
@@ -1542,11 +1603,15 @@ local styled_buffers = {}
 -- so the after-load path must gate itself.
 local diag_viewed_buffers = {}
 
-local function attach_buffer(buf)
+local function attach_buffer(buf, renew)
   if not buf then return nil end
   local key = tostring(buf)
   local existing = attachments[key]
   if existing and server_is_live(existing.server) then return existing end
+  -- E10v.2: a held server keeps its attachment and is not replaced; a
+  -- command finds no server to ask and says why (`no_server_status`).
+  local held = existing and held_info(existing.server)
+  if held and (held.restart_pending or not renew) then return nil end
   if existing then
     local kind = server_state_kind(existing.server)
     if kind == "crashed" or kind == "stopped" then
@@ -1575,7 +1640,7 @@ local function attach_buffer(buf)
   -- Path resolved before spawn so the server's `rootUri` can be
   -- derived from the file's project (see `project_root_for`).
   local path = active_buffer_path()
-  local sid, failure_key = ensure_server(language, path)
+  local sid, failure_key = ensure_server(language, path, renew)
   if not sid then
     -- Journey Stage 1b-2: remember WHY there is no attachment, so the
     -- modeline can say "failed" instead of rendering nothing — which is
@@ -1799,7 +1864,9 @@ end
 -- Hooks --------------------------------------------------------------------
 
 pmacs.hook.add("buffer.after-load", function()
-  pcall(attach_buffer, pmacs.window.buffer())
+  -- E10v.2: a buffer opened (or read again) renews a server the restart
+  -- bound stopped: the user asked for the file again.
+  pcall(attach_buffer, pmacs.window.buffer(), true)
 end)
 
 pmacs.hook.add("buffer.after-switch", function()
@@ -3462,7 +3529,7 @@ end
 function pmacs.lsp.go_to_definition()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   local line = pmacs.editor.cursor_line()
@@ -3571,7 +3638,7 @@ end
 function pmacs.lsp.find_references()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   local line = pmacs.editor.cursor_line()
@@ -3617,7 +3684,7 @@ end
 function pmacs.lsp.document_symbols()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   pmacs.document_symbol.clear(rec.server, rec.uri)
@@ -3706,7 +3773,7 @@ end
 function pmacs.lsp.workspace_symbols(query)
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   if type(query) ~= "string" then
@@ -3772,7 +3839,7 @@ end
 function pmacs.lsp.inlay_hints()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   -- Whole-document range: (0,0) .. exact document end. Some servers,
@@ -3821,7 +3888,7 @@ end
 function pmacs.lsp.semantic_tokens()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   -- Don't clear: a delta splices against the retained raw stream.
@@ -3881,7 +3948,7 @@ end
 function pmacs.lsp.format_buffer()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   pmacs.formatting.clear(rec.server, rec.uri)
@@ -3953,7 +4020,7 @@ end
 function pmacs.lsp.rename()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   local line = pmacs.editor.cursor_line()
@@ -4086,7 +4153,7 @@ end
 function pmacs.lsp.code_actions()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   local line = pmacs.editor.cursor_line()
@@ -4208,7 +4275,7 @@ end
 function pmacs.lsp.hover_at_cursor()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   hover_popup(rec, false)
@@ -4224,7 +4291,7 @@ end
 function pmacs.lsp.hover_doc()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   local window = pmacs.window.current()
@@ -4277,7 +4344,7 @@ end
 function pmacs.lsp.signature_help_at_cursor()
   local rec = attached_for_active()
   if not rec then
-    pmacs.editor.set_status("LSP: no server for active buffer")
+    pmacs.editor.set_status(no_server_status())
     return
   end
   flush_did_change_for(rec)

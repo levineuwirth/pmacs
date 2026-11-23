@@ -11743,6 +11743,12 @@ pub fn install_lsp(
                     if let Some(attempt) = mgr.attempt(*id) {
                         row.set("attempt", attempt)?;
                     }
+                    // E10v.2: the restart bound's state.
+                    if let Some(crashes) = mgr.crashes(*id) {
+                        row.set("crashes", crashes)?;
+                    }
+                    row.set("restart_pending", mgr.restart_pending(*id))?;
+                    row.set("crash_stopped", mgr.crash_stopped(*id))?;
                     out.set(i + 1, row)?;
                 }
                 Ok(out)
