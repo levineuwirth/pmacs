@@ -20330,6 +20330,91 @@ Two runs of `scripts/gate` (the default plan) and one of `--docs`, in `pmacs-e10
 
 So, at E10v's close: `main` is `cece7cb`, green, and `040b9c1` was green. PR #540 is open at `8bbb338`, green on every job, not rerun. No row's count moves here.
 
+### E10v fix round 1: `main` green at `3050d90`; PR #540 green at `3a92af5`
+
+Recorded 2026-11-23 by the E10v fix round 1 session. Each run below was read from the run's jobs by conclusion and each test leg from its own log (fetched with escape sequences and stripped), every `running` line paired with its own result line; each run id, gate log and comment id was searched for in this file first, and none was here. `3050d90`'s runs were owed since that record was pushed.
+
+#### `main` at `3050d90`, E10v's registry record: green
+
+`CI` 45215243770 at `3050d90`, attempt 1 of 1, `push`, created 2026-11-23T16:19:43Z and completed 2026-11-23T16:22:23Z: `success`, the registry-push shape.
+
+Tally (main-ci-3050d90): 15 = 6 + 9.
+
+Tally (main-ci-3050d90-jobs): 15 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Format | 137834516198 | success |
+| Lint (lua54) | 137834516804 | success |
+| Commit attribution (D9) | 137834516810 | success |
+| Lint (luajit) | 137834516945 | success |
+| Changed paths | 137834517001 | success |
+| Docs consistency | 137834667270 | success |
+| M1 Acceptance Gates | 137834669490 | skipped |
+| Test (matrix) | 137834669533 | skipped |
+| M10 Perf Gates (crdt) | 137834669766 | skipped |
+| Test (crdt) | 137834669890 | skipped |
+| Perf budgets (debug) | 137834670001 | skipped |
+| M5 Perf Gates | 137834670155 | skipped |
+| M6 Perf Gates | 137834670595 | skipped |
+| M4 Perf Gates | 137834670739 | skipped |
+| GPU Render (headless) | 137834671621 | skipped |
+
+Tally (main-ci-3050d90-success): 6 rows of the table above with `result` = `success`.
+Tally (main-ci-3050d90-skipped): 9 rows of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45215243761 at `3050d90`, attempt 1 of 1, `push`, created 2026-11-23T16:19:43Z and completed 2026-11-23T16:20:07Z: `success`, `Grammar fuzz` 137834515779, `Grammar fuzz (asan-strict)` 137834516394.
+
+Tally (main-fuzz-3050d90): 2 = 2 + 0.
+
+#### PR #540 at `3a92af5`, E10v fix round 1: green
+
+`CI` 45243474826 at `3a92af5`, attempt 1 of 1, `pull_request` (the merge `30ec88f` into `3050d90`), created 2026-11-23T18:55:27Z and completed 2026-11-23T19:54:36Z: `success`. Every test leg paired every `running` line with `test result: ok`: `Test (ubuntu-latest / luajit)` 137934161159 and `Test (ubuntu-latest / lua54)` 137934160990 on `ubuntu-24.04` `20261116.376.1`, 252 each, 5,972 passed, 0 failed, 88 ignored; `Test (macos-latest / luajit)` 137934161104 and `Test (macos-latest / lua54)` 137934160977 on `macos-26-arm64` `20261117.0516.1`, 253 each, 5,913 / 0 / 80; `Test (crdt)` 137934160759 on `ubuntu-24.04` `20261116.133.1`, 251, 5,913 / 0 / 88; `Test (ubuntu-latest / luajit, no crdt)` 137934161300 on `ubuntu-24.04` `20261116.133.1`, 252, 5,215 / 0 / 72. One `running` line more on each leg than at `8bbb338`, the round's new suite `e10v_review1_probes`, 20 of 20 on each leg that builds `crdt` and 16 of 16 without it.
+
+Tally (pr540-ci-3a92af5): 19 = 18 + 1.
+
+Tally (pr540-ci-3a92af5-jobs): 19 rows in the table below.
+
+| job | id | result |
+|---|---|---|
+| Commit attribution (D9) | 137933997342 | success |
+| Lint (lua54) | 137933997694 | success |
+| Changed paths | 137933997824 | success |
+| Lint (luajit) | 137933997829 | success |
+| Format | 137933997927 | success |
+| M1 Acceptance Gates | 137934160667 | success |
+| Test (crdt) | 137934160759 | success |
+| GPU Render (headless) | 137934160761 | success |
+| M4 Perf Gates | 137934160774 | success |
+| M10 Perf Gates (crdt) | 137934160860 | success |
+| Perf budgets (debug) | 137934160889 | success |
+| M6 Perf Gates | 137934160902 | success |
+| Test (macos-latest / lua54) | 137934160977 | success |
+| Test (ubuntu-latest / lua54) | 137934160990 | success |
+| Test (macos-latest / luajit) | 137934161104 | success |
+| Test (ubuntu-latest / luajit) | 137934161159 | success |
+| M5 Perf Gates | 137934161244 | success |
+| Test (ubuntu-latest / luajit, no crdt) | 137934161300 | success |
+| Docs consistency | 137934164712 | skipped |
+
+Tally (pr540-ci-3a92af5-success): 18 rows of the table above with `result` = `success`.
+Tally (pr540-ci-3a92af5-skipped): 1 row of the table above with `result` = `skipped`.
+
+`Grammar fuzz` 45243474663 at `3a92af5`, attempt 1 of 1, `pull_request`, created 2026-11-23T18:55:27Z and completed 2026-11-23T18:55:47Z: `success`, `Grammar fuzz (asan-strict)` 137933995518, `Grammar fuzz` 137933995840.
+
+Tally (pr540-fuzz-3a92af5): 2 = 2 + 0.
+
+#### Local gate samples, listed and not tallied
+
+Review 1's two runs of `scripts/gate` (the default plan) at `8bbb338`, in `pmacs-e10o` at `nice -n 19` with six build jobs, the runbook's sampler beside each, each with every stage ok but `05-sweep`, 6,351 / 1 / 88 at 259 pairs, the failure `e10t_r2_an_oversize_window_bootstraps_on_the_fallback_s_one_snapshot`, `timed out waiting for the SessionToken; the daemon wrote []` at `tests/common/wire.rs:372:13`, #498's first fragment: `20261123T162707Z-3189495` (load 7.96 to 21.03) and `20261123T164941Z-3351926` (load 5.64 to 11.86); samples on #498 (issuecomment-7108517126). That selector alone, 30 runs at `cece7cb` and 30 at `8bbb338` alternating, passed 30 of 30 on each, the fragment in none (load 3.64 to 4.87; issuecomment-7109447029).
+
+Fix round 1's, in `pmacs-e10o` at `nice -n 19` with six build jobs:
+
+- `20261123T183427Z-3694709` at `3a92af5`, the default plan: all passed, no daemon survived, 260 pairs, 6,373 / 0 / 88 (load 3.40 to 19.81).
+- `20261123T185447Z-3832555` at `3a92af5`, `--docs`: all passed.
+
+So, after E10v's fix round 1: `main` is `3050d90`, green. PR #540 is open at `3a92af5`, green on every job, not rerun. No row's count moves here.
+
 ### R3 — live-leader EPERM with an unobservable group
 
 | field | value |
