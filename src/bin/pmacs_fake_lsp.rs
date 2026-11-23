@@ -82,7 +82,9 @@
 //!   `PMACS-STOP-ANSWERING`, the command. From then on it reads and
 //!   writes nothing and stays alive, after writing `stopped` to the
 //!   file `PMACS_FAKE_LSP_STOP_SINK` names: an initialized server that
-//!   has stopped answering, `shutdown` included.
+//!   has stopped answering, `shutdown` included. With
+//!   `PMACS_FAKE_LSP_ABORT_ONCE` naming a file, only the first generation
+//!   to see the command stops (E10v.4b).
 //! * If `PMACS_FAKE_LSP_PID_SINK` names a file (any mode): each
 //!   generation appends its process id as one line when it starts, so
 //!   a test can check that none outlives the editor (E8c).
@@ -307,7 +309,19 @@ fn main() {
             let _ = std::fs::write(&once, std::process::id().to_string());
             std::process::exit(7);
         }
-        if mode == "stopanswering" && carries_stop_command(&method, &params) {
+        // E10v.4b: with `PMACS_FAKE_LSP_ABORT_ONCE`, only the first
+        // generation to see the command stops; the one restarted after it
+        // serves, the command in its document and all.
+        if mode == "stopanswering"
+            && carries_stop_command(&method, &params)
+            && std::env::var("PMACS_FAKE_LSP_ABORT_ONCE").map_or(true, |once| {
+                let first = !std::path::Path::new(&once).exists();
+                if first {
+                    let _ = std::fs::write(&once, std::process::id().to_string());
+                }
+                first
+            })
+        {
             if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_STOP_SINK") {
                 let _ = std::fs::write(&sink, "stopped");
             }

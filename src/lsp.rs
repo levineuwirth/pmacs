@@ -829,6 +829,10 @@ pub struct LspClient {
     /// Whether the current generation has answered a request other than
     /// `initialize` or `shutdown`, with a result or an error.
     served: bool,
+    /// E10v.4b: the user asked for a restart (`lsp.restart`); the exit
+    /// that follows is not a crash, and the next generation starts at once
+    /// with its crash count new.
+    restart_requested: bool,
     /// T M4.5: request ids we sent `$/cancelRequest` for after every
     /// awaiter abandoned them. A server may still answer a cancelled
     /// request (the cancel/response race); a late response whose id
@@ -865,6 +869,7 @@ impl LspClient {
             next_restart_at: None,
             crashes: 0,
             served: false,
+            restart_requested: false,
             cancelled_rids: HashSet::new(),
             deferred_notifications: Vec::new(),
             position_encoding: PositionEncoding::default(),
@@ -2853,7 +2858,8 @@ impl LspManager {
             let Some(client) = self.clients.get_mut(&sid) else {
                 return;
             };
-            let was_shutdown = matches!(client.state, LspClientState::ShuttingDown { .. });
+            let was_shutdown = matches!(client.state, LspClientState::ShuttingDown { .. })
+                || client.restart_requested;
             if was_shutdown {
                 client.state = LspClientState::Stopped { ended: at };
             } else {
@@ -2867,6 +2873,13 @@ impl LspManager {
             if let Some(pid) = client.process.take() {
                 self.process_to_server.remove(&pid);
                 let _ = self.supervisor.borrow_mut().forget(pid);
+            }
+            // E10v.4b: a restart the user asked for starts at once, its count
+            // new; the exit it ends is not a crash.
+            if client.restart_requested {
+                client.crashes = 0;
+                client.served = false;
+                client.next_restart_at = Some(at);
             }
             // E10v.2: a crash after a generation served starts a new run.
             if !was_shutdown {
@@ -3632,9 +3645,12 @@ impl LspManager {
             let Some(client) = self.clients.get(&sid) else {
                 return;
             };
-            let LspClientState::Crashed { .. } = &client.state else {
+            let crashed = matches!(client.state, LspClientState::Crashed { .. });
+            let requested =
+                client.restart_requested && matches!(client.state, LspClientState::Stopped { .. });
+            if !crashed && !requested {
                 return;
-            };
+            }
             match client.next_restart_at {
                 Some(at) => at <= now,
                 None => false,
@@ -3654,6 +3670,7 @@ impl LspManager {
         // also borrows `self.process_to_server`) doesn't conflict
         // with the `clients.get_mut` borrow.
         let mut client = self.clients.remove(&sid).expect("checked existence above");
+        client.restart_requested = false;
         // E8d.1: a respawn that cannot spawn (the executable gone, an
         // invalid cwd) is a crash of its own, as `McpManager::maybe_restart`
         // already treats it. `start_generation` has set the client to
@@ -3746,6 +3763,35 @@ impl LspManager {
     #[must_use]
     pub fn attempt(&self, sid: LspServerId) -> Option<u32> {
         self.clients.get(&sid).map(|c| c.attempt)
+    }
+
+    /// E10v.4b: restart `sid` at the user's word (`lsp.restart`): a
+    /// running server is terminated and started again at once under the
+    /// same id when its exit is seen; one already gone (crashed, stopped by
+    /// the restart bound) is started at the next tick. Either way the crash
+    /// count is new, and the `Restarting` event the restart emits has the
+    /// editor send the new generation its documents (E10v.3). A server
+    /// stopped by `stop` or `shutdown_all` (a restart disarmed) is
+    /// restarted too: the user asked.
+    pub fn restart(&mut self, sid: LspServerId) -> Result<(), String> {
+        let Some(client) = self.clients.get_mut(&sid) else {
+            return Err(format!("unknown server: {sid}"));
+        };
+        client.restart_requested = true;
+        client.crashes = 0;
+        if let Some(pid) = client.process {
+            let _ = self.supervisor.borrow_mut().terminate(pid);
+            return Ok(());
+        }
+        if !matches!(
+            client.state,
+            LspClientState::Crashed { .. } | LspClientState::Stopped { .. }
+        ) {
+            client.restart_requested = false;
+            return Err(format!("server {sid} has no process to restart"));
+        }
+        client.next_restart_at = Some(Instant::now());
+        Ok(())
     }
 
     /// E10v.2: crashes in a row with nothing served between them.

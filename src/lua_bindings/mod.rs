@@ -11792,6 +11792,17 @@ pub fn install_lsp(
     }
 
     {
+        // E10v.4b: `pmacs.lsp.restart(id)`, the user's restart.
+        let m = manager.clone();
+        lsp_mod.set(
+            "restart",
+            lua.create_function(move |_, id: LspServerIdLua| {
+                m.borrow_mut().restart(id.0).map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+
+    {
         let m = manager.clone();
         lsp_mod.set(
             "forget",

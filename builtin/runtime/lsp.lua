@@ -1317,7 +1317,7 @@ local function ensure_server(language, path, renew)
       -- for a buffer opened again (`renew`), so its count cannot be
       -- started over by a command, a switch or a second buffer's
       -- request.
-      if kind == "crashed" and info.restart_pending then
+      if (kind == "crashed" or kind == "stopped") and info.restart_pending then
         return info.id
       end
       if kind == "crashed" and info.crash_stopped then
@@ -1413,8 +1413,11 @@ local function held_info(sid)
   if not ok or not rows then return nil end
   for _, info in ipairs(rows) do
     if tostring(info.id) == tostring(sid) then
-      if info.state and info.state.kind == "crashed"
-          and (info.restart_pending or info.crash_stopped) then
+      local kind = info.state and info.state.kind
+      -- A restart the user asked for (`lsp.restart`) passes through
+      -- `stopped` with its restart armed.
+      if (kind == "crashed" and (info.restart_pending or info.crash_stopped))
+          or (kind == "stopped" and info.restart_pending) then
         return info
       end
       return nil
@@ -4811,6 +4814,37 @@ pmacs.command.define {
   name = "lsp.go-to-definition",
   description = "Jump to the definition of the symbol under the cursor (LSP).",
   fn = pmacs.lsp.go_to_definition,
+}
+
+-- E10v.4b (#480): restart the active buffer's server at the user's word.
+-- A server that holds the right text and publishes nothing (HLS 2.4.0.0
+-- after a burst typed during its setup) came back only when its process
+-- was killed, 21 of 21 in E10v.4's table; a save and a close and reopen
+-- never did. The restart reopens every document attached to it (E10v.3)
+-- and starts its crash count over, as opening a file again does.
+function pmacs.lsp.restart_server()
+  local buf = pmacs.window.buffer()
+  local rec = buf and attachments[tostring(buf)]
+  if not rec then
+    pmacs.editor.set_status(no_server_status())
+    return
+  end
+  local label = tostring(rec.server)
+  for _, info in ipairs(pmacs.lsp.list()) do
+    if tostring(info.id) == tostring(rec.server) then label = info.label or label end
+  end
+  local ok, err = pcall(pmacs.lsp.restart, rec.server)
+  if ok then
+    pmacs.editor.set_status("LSP: restarting " .. label)
+  else
+    pmacs.editor.set_status("LSP: " .. tostring(err))
+  end
+end
+
+pmacs.command.define {
+  name = "lsp.restart",
+  description = "Restart the active buffer's language server, sending it the open documents again.",
+  fn = pmacs.lsp.restart_server,
 }
 
 pmacs.command.define {
